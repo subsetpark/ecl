@@ -52,3 +52,15 @@ fn invalid_utf8_source_is_a_parse_error() {
     assert!(stderr.contains("'kind 'parse"), "{stderr}");
     assert!(stderr.contains("not valid UTF-8"), "{stderr}");
 }
+
+#[test]
+fn isolated_let_does_not_leak_into_the_session() {
+    let output = ecl()
+        .args(["-e", "[1 2 3] (dup 'k let k *) each pop k"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("'kind 'undefined-word"), "{stderr}");
+    assert!(stderr.contains("'word 'k"), "{stderr}");
+}

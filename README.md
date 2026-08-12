@@ -12,6 +12,7 @@ Build and try it:
 cargo run -- '3 4 +'
 cargo run -- '[1 2 3] (dup *) each'
 cargo run -- examples/tour.ecl
+cargo run -- examples/modules.ecl
 ```
 
 With an installed binary, the cold calculator form is simply:
@@ -42,8 +43,24 @@ calculator and stdin modes print the final stack.
   stack, and tail calls through words, `call`, and `if` reuse their trace/eval
   frame.
 - Stack-transactional units. A failure restores the entry stack, while earlier
-  definitions and IO remain visible.
-- Late-bound `def` versus non-executing `let`, plus `body`, `parse`, and `str`.
+  writes to surviving environments, module-registry writes, and IO remain
+  visible.
+- Chained environments with a core root, a persistent session scope, and a
+  disposable child scope for every isolated quotation application. `each`,
+  `each2`, `for`, `fold`, `scan`, `dict-of`, and `attempt` cannot leak a
+  temporary `def` or `let` into their caller; inline applications keep the
+  current scope.
+- Late-bound `def` versus non-executing `let`, private `defp`/`letp` inside
+  modules, plus `body`, `parse`, and `str`.
+- A per-session module registry. `'name (body) module` constructs a module in
+  a fresh environment rooted at core; `def`/`let` export while `defp`/`letp`
+  remain internal. Qualified words, scoped `use`, and registry `alias` are
+  implemented.
+- Module words carry their home module name and resolve through the current
+  registry generation. Callers cannot shadow module internals, used modules
+  follow reloads, aliases follow reloads, and a failed replacement leaves the
+  previous generation registered. Fetching a word with `body` still returns a
+  plain quotation, so applying it elsewhere intentionally loses module context.
 - Pervasive numeric arithmetic/comparison with checked int64 overflow,
   float64 division, leading-axis broadcasting, ragged descent, dict value
   pervasion, and Unicode char arithmetic.
@@ -66,11 +83,12 @@ word raised.
 
 ## Deliberately not in the skeleton
 
-Modules/privacy/loading, concurrency, `flip`/`reshape`/`group`, private
-definitions, reflection tooling beyond `body`/`words`, `exit`, and the deferred
-`seal` layer are not implemented yet. Lists use immutable `Arc` slices but do
-not yet have typed leaf buffers or copy-on-write uniqueness optimization. The
-CLI has no `ECL_PATH` module search yet.
+Module file transport and automatic `ECL_PATH` loading, concurrency,
+`flip`/`reshape`/`group`, reflection tooling beyond `body`/`words`, `exit`, and
+the deferred `seal` layer are not implemented yet. In particular, `use`
+currently requires an already registered module. Lists use immutable `Arc`
+slices but do not yet have typed leaf buffers or copy-on-write uniqueness
+optimization.
 
 These omissions are boundaries, not alternate semantics. Unsupported words
 fail as `'undefined-word`; the implemented behavior is covered by unit and CLI

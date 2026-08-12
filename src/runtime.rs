@@ -1,16 +1,118 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::error::{EclError, ErrorKind};
 use crate::reader::Reader;
 use crate::value::{Value, ValueKind, rectangular_shape};
 
+type EnvRef = Arc<RwLock<Environment>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Visibility {
+    Public,
+    Private,
+}
+
 #[derive(Clone, Debug)]
-enum Binding {
+enum BindingKind {
     Word(Arc<[Value]>),
     Value(Value),
+}
+
+#[derive(Clone, Debug)]
+struct Binding {
+    name: Arc<str>,
+    kind: BindingKind,
+    visibility: Visibility,
+    /// Registry key rather than an environment pointer: calls resolve the
+    /// current module generation and therefore hot-reload by construction.
+    home: Option<Arc<str>>,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedBinding {
+    binding: Binding,
+    env: EnvRef,
+}
+
+impl Binding {
+    fn word(
+        name: Arc<str>,
+        body: Arc<[Value]>,
+        visibility: Visibility,
+        home: Option<Arc<str>>,
+    ) -> Self {
+        Self {
+            name,
+            kind: BindingKind::Word(body),
+            visibility,
+            home,
+        }
+    }
+
+    fn value(name: Arc<str>, value: Value, visibility: Visibility, home: Option<Arc<str>>) -> Self {
+        Self {
+            name,
+            kind: BindingKind::Value(value),
+            visibility,
+            home,
+        }
+    }
+
+    fn trace_name(&self) -> Arc<str> {
+        self.home.as_ref().map_or_else(
+            || self.name.clone(),
+            |home| Arc::from(format!("{home}.{}", self.name)),
+        )
+    }
+}
+
+#[derive(Debug)]
+struct Environment {
+    bindings: HashMap<Arc<str>, Binding>,
+    /// Canonical registry names in use order. Resolution walks in reverse, so
+    /// later uses shadow earlier uses while direct bindings shadow all uses.
+    uses: Vec<Arc<str>>,
+    parent: Option<EnvRef>,
+    /// Set on a module's internal root. Child scopes discover module context
+    /// by following parents, which keeps private definitions properly scoped.
+    module: Option<Arc<str>>,
+}
+
+impl Environment {
+    fn root() -> EnvRef {
+        Arc::new(RwLock::new(Self {
+            bindings: HashMap::new(),
+            uses: Vec::new(),
+            parent: None,
+            module: None,
+        }))
+    }
+
+    fn child(parent: EnvRef) -> EnvRef {
+        Arc::new(RwLock::new(Self {
+            bindings: HashMap::new(),
+            uses: Vec::new(),
+            parent: Some(parent),
+            module: None,
+        }))
+    }
+
+    fn module(name: Arc<str>, core: EnvRef) -> EnvRef {
+        Arc::new(RwLock::new(Self {
+            bindings: HashMap::new(),
+            uses: Vec::new(),
+            parent: Some(core),
+            module: Some(name),
+        }))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Module {
+    env: EnvRef,
 }
 
 /// A persistent ecl session: data stack, late-bound dictionary, and CLI args.
@@ -18,7 +120,10 @@ enum Binding {
 /// IO effects intentionally survive a failed unit, as required by decision 7.
 pub struct Runtime {
     stack: Vec<Value>,
-    bindings: HashMap<Arc<str>, Binding>,
+    core: EnvRef,
+    session: EnvRef,
+    registry: HashMap<Arc<str>, Module>,
+    aliases: HashMap<Arc<str>, Arc<str>>,
     arguments: Vec<Arc<str>>,
 }
 
@@ -30,9 +135,14 @@ impl Default for Runtime {
 
 impl Runtime {
     pub fn new() -> Self {
+        let core = Environment::root();
+        let session = Environment::child(core.clone());
         let mut runtime = Self {
             stack: Vec::new(),
-            bindings: HashMap::new(),
+            core,
+            session,
+            registry: HashMap::new(),
+            aliases: HashMap::new(),
             arguments: Vec::new(),
         };
         runtime.install_prelude();
@@ -70,7 +180,8 @@ impl Runtime {
 
     pub fn run_forms(&mut self, forms: Vec<Value>) -> Result<(), EclError> {
         let checkpoint = self.stack.clone();
-        let result = Machine::new(self).run(Arc::from(forms));
+        let session = self.session.clone();
+        let result = Machine::new(self).run(Arc::from(forms), session);
         if result.is_err() {
             self.stack = checkpoint;
         }
@@ -115,7 +226,15 @@ impl Runtime {
                     _ => None,
                 })
                 .expect("built-in prelude entry must be one quotation");
-            self.bindings.insert(Arc::from(*name), Binding::Word(body));
+            let name: Arc<str> = Arc::from(*name);
+            self.core
+                .write()
+                .expect("environment lock is not poisoned")
+                .bindings
+                .insert(
+                    name.clone(),
+                    Binding::word(name, body, Visibility::Public, None),
+                );
         }
     }
 }
@@ -126,6 +245,7 @@ enum Frame {
         code: Arc<[Value]>,
         next: usize,
         traced_word: Option<Arc<str>>,
+        env: EnvRef,
     },
     Restore(Value),
     TraceEnd,
@@ -133,10 +253,12 @@ enum Frame {
         condition: Arc<[Value]>,
         body: Arc<[Value]>,
         base: usize,
+        env: EnvRef,
     },
     WhileAfterBody {
         condition: Arc<[Value]>,
         body: Arc<[Value]>,
+        env: EnvRef,
     },
     DictAfter {
         outer: Vec<Value>,
@@ -147,6 +269,7 @@ enum Frame {
         quotation: Arc<[Value]>,
         index: usize,
         results: Vec<Value>,
+        env: EnvRef,
     },
     Each2After {
         outer: Vec<Value>,
@@ -155,12 +278,14 @@ enum Frame {
         quotation: Arc<[Value]>,
         index: usize,
         results: Vec<Value>,
+        env: EnvRef,
     },
     ForAfter {
         outer: Vec<Value>,
         items: Arc<[Value]>,
         quotation: Arc<[Value]>,
         index: usize,
+        env: EnvRef,
     },
     FoldAfter {
         outer: Vec<Value>,
@@ -168,10 +293,16 @@ enum Frame {
         quotation: Arc<[Value]>,
         index: usize,
         scan_results: Option<Vec<Value>>,
+        env: EnvRef,
     },
     AttemptAfter {
         outer: Vec<Value>,
         trace_depth: usize,
+    },
+    ModuleAfter {
+        outer: Vec<Value>,
+        name: Arc<str>,
+        env: EnvRef,
     },
 }
 
@@ -190,8 +321,8 @@ impl<'runtime> Machine<'runtime> {
         }
     }
 
-    fn run(mut self, code: Arc<[Value]>) -> Result<(), EclError> {
-        self.schedule(code, None);
+    fn run(mut self, code: Arc<[Value]>, env: EnvRef) -> Result<(), EclError> {
+        self.schedule(code, None, env);
         while let Some(frame) = self.frames.pop() {
             let result = self.step(frame);
             if let Err(mut error) = result {
@@ -213,6 +344,7 @@ impl<'runtime> Machine<'runtime> {
                 code,
                 next,
                 traced_word,
+                env,
             } => {
                 if next == code.len() {
                     if traced_word.is_some() {
@@ -227,15 +359,18 @@ impl<'runtime> Machine<'runtime> {
                         code,
                         next: next + 1,
                         traced_word,
+                        env: env.clone(),
                     });
-                    return self.execute(form);
+                    return self.execute(form, env);
                 }
 
                 let owns_trace = traced_word.is_some();
                 let inherits_tail_trace =
                     !owns_trace && matches!(self.frames.last(), Some(Frame::TraceEnd));
                 let calls_word = form.as_word().is_some_and(|word| {
-                    matches!(self.runtime.bindings.get(word), Some(Binding::Word(_)))
+                    self.resolve_binding(&env, word).is_some_and(|resolved| {
+                        matches!(resolved.binding.kind, BindingKind::Word(_))
+                    })
                 });
 
                 if calls_word && (owns_trace || inherits_tail_trace) {
@@ -243,12 +378,12 @@ impl<'runtime> Machine<'runtime> {
                         self.frames.pop();
                     }
                     self.trace.pop();
-                    return self.execute(form);
+                    return self.execute(form, env);
                 }
 
                 if owns_trace {
                     let frame_base = self.frames.len();
-                    let result = self.execute(form);
+                    let result = self.execute(form, env);
                     if result.is_ok() {
                         if self.frames.len() == frame_base {
                             self.trace.pop();
@@ -258,7 +393,7 @@ impl<'runtime> Machine<'runtime> {
                     }
                     result
                 } else {
-                    self.execute(form)
+                    self.execute(form, env)
                 }
             }
             Frame::Restore(value) => {
@@ -273,6 +408,7 @@ impl<'runtime> Machine<'runtime> {
                 condition,
                 body,
                 base,
+                env,
             } => {
                 if self.runtime.stack.len() != base + 1 {
                     return Err(contract_error(
@@ -287,19 +423,25 @@ impl<'runtime> Machine<'runtime> {
                     self.frames.push(Frame::WhileAfterBody {
                         condition,
                         body: body.clone(),
+                        env: env.clone(),
                     });
-                    self.schedule(body, None);
+                    self.schedule(body, None, env);
                 }
                 Ok(())
             }
-            Frame::WhileAfterBody { condition, body } => {
+            Frame::WhileAfterBody {
+                condition,
+                body,
+                env,
+            } => {
                 let base = self.runtime.stack.len();
                 self.frames.push(Frame::WhileAfterCond {
                     condition: condition.clone(),
                     body,
                     base,
+                    env: env.clone(),
                 });
-                self.schedule(condition, None);
+                self.schedule(condition, None, env);
                 Ok(())
             }
             Frame::DictAfter { outer } => self.finish_dict(outer),
@@ -309,7 +451,8 @@ impl<'runtime> Machine<'runtime> {
                 quotation,
                 index,
                 results,
-            } => self.finish_each(outer, items, quotation, index, results),
+                env,
+            } => self.finish_each(outer, items, quotation, index, results, env),
             Frame::Each2After {
                 outer,
                 left,
@@ -317,38 +460,146 @@ impl<'runtime> Machine<'runtime> {
                 quotation,
                 index,
                 results,
-            } => self.finish_each2(outer, left, right, quotation, index, results),
+                env,
+            } => self.finish_each2(outer, (left, right), quotation, index, results, env),
             Frame::ForAfter {
                 outer,
                 items,
                 quotation,
                 index,
-            } => self.finish_for(outer, items, quotation, index),
+                env,
+            } => self.finish_for(outer, items, quotation, index, env),
             Frame::FoldAfter {
                 outer,
                 items,
                 quotation,
                 index,
                 scan_results,
-            } => self.finish_fold(outer, items, quotation, index, scan_results),
+                env,
+            } => self.finish_fold(outer, items, quotation, index, scan_results, env),
             Frame::AttemptAfter { outer, .. } => {
                 let results = std::mem::take(&mut self.runtime.stack);
                 self.runtime.stack = outer;
                 self.runtime.stack.push(ok_outcome(results));
                 Ok(())
             }
+            Frame::ModuleAfter { outer, name, env } => self.finish_module(outer, name, env),
         }
     }
 
-    fn schedule(&mut self, code: Arc<[Value]>, traced_word: Option<Arc<str>>) {
+    fn schedule(&mut self, code: Arc<[Value]>, traced_word: Option<Arc<str>>, env: EnvRef) {
         self.frames.push(Frame::Eval {
             code,
             next: 0,
             traced_word,
+            env,
         });
     }
 
-    fn execute(&mut self, form: Value) -> Result<(), EclError> {
+    fn resolve_binding(&self, env: &EnvRef, word: &str) -> Option<ResolvedBinding> {
+        if word.contains('.') {
+            return self.resolve_qualified(word);
+        }
+
+        let mut scope = Some(env.clone());
+        while let Some(current) = scope {
+            let (direct, uses, parent) = {
+                let environment = current.read().expect("environment lock is not poisoned");
+                (
+                    environment.bindings.get(word).cloned(),
+                    environment.uses.clone(),
+                    environment.parent.clone(),
+                )
+            };
+            if let Some(binding) = direct {
+                let resolution_env = binding
+                    .home
+                    .as_ref()
+                    .and_then(|home| self.module_root_in_chain(env, home))
+                    .unwrap_or_else(|| env.clone());
+                return Some(ResolvedBinding {
+                    binding,
+                    env: resolution_env,
+                });
+            }
+            for module in uses.iter().rev() {
+                if let Some(resolved) = self.module_public_binding(module, word) {
+                    return Some(resolved);
+                }
+            }
+            scope = parent;
+        }
+        None
+    }
+
+    fn resolve_qualified(&self, word: &str) -> Option<ResolvedBinding> {
+        let (module, export) = word.rsplit_once('.')?;
+        let canonical = self.canonical_module_name(module)?;
+        self.module_public_binding(&canonical, export)
+    }
+
+    fn canonical_module_name(&self, name: &str) -> Option<Arc<str>> {
+        self.runtime
+            .registry
+            .get_key_value(name)
+            .map(|(name, _)| name.clone())
+            .or_else(|| {
+                self.runtime.aliases.get(name).and_then(|canonical| {
+                    self.runtime
+                        .registry
+                        .contains_key(canonical)
+                        .then(|| canonical.clone())
+                })
+            })
+    }
+
+    fn module_public_binding(&self, module: &str, name: &str) -> Option<ResolvedBinding> {
+        let module = self.runtime.registry.get(module)?;
+        let binding = module
+            .env
+            .read()
+            .expect("environment lock is not poisoned")
+            .bindings
+            .get(name)
+            .filter(|binding| binding.visibility == Visibility::Public)
+            .cloned()?;
+        Some(ResolvedBinding {
+            binding,
+            env: module.env.clone(),
+        })
+    }
+
+    fn module_root_in_chain(&self, env: &EnvRef, home: &str) -> Option<EnvRef> {
+        let mut scope = Some(env.clone());
+        while let Some(current) = scope {
+            let (module, parent) = {
+                let environment = current.read().expect("environment lock is not poisoned");
+                (environment.module.clone(), environment.parent.clone())
+            };
+            if module.as_deref() == Some(home) {
+                return Some(current);
+            }
+            scope = parent;
+        }
+        None
+    }
+
+    fn module_context(&self, env: &EnvRef) -> Option<Arc<str>> {
+        let mut scope = Some(env.clone());
+        while let Some(current) = scope {
+            let (module, parent) = {
+                let environment = current.read().expect("environment lock is not poisoned");
+                (environment.module.clone(), environment.parent.clone())
+            };
+            if module.is_some() {
+                return module;
+            }
+            scope = parent;
+        }
+        None
+    }
+
+    fn execute(&mut self, form: Value, env: EnvRef) -> Result<(), EclError> {
         let ValueKind::Word(word) = &form.kind else {
             self.runtime.stack.push(form);
             return Ok(());
@@ -356,19 +607,21 @@ impl<'runtime> Machine<'runtime> {
         let word = word.clone();
         let span = form.span.clone();
 
-        if let Some(binding) = self.runtime.bindings.get(&word).cloned() {
-            match binding {
-                Binding::Value(value) => self.runtime.stack.push(value),
-                Binding::Word(body) => {
-                    self.trace.push(word.clone());
-                    self.schedule(body, Some(word));
+        if let Some(resolved) = self.resolve_binding(&env, &word) {
+            let binding = resolved.binding;
+            match binding.kind.clone() {
+                BindingKind::Value(value) => self.runtime.stack.push(value),
+                BindingKind::Word(body) => {
+                    let trace_name = binding.trace_name();
+                    self.trace.push(trace_name.clone());
+                    self.schedule(body, Some(trace_name), resolved.env);
                 }
             }
             return Ok(());
         }
 
         self.trace.push(word.clone());
-        let mut result = self.primitive(&word);
+        let mut result = self.primitive(&word, &env);
         if let Err(error) = &mut result {
             error.attach_context(&self.trace, span);
         }
@@ -376,22 +629,27 @@ impl<'runtime> Machine<'runtime> {
         result
     }
 
-    fn primitive(&mut self, word: &str) -> Result<(), EclError> {
+    fn primitive(&mut self, word: &str, env: &EnvRef) -> Result<(), EclError> {
         match word {
             "dup" => self.dup(),
             "swap" => self.swap(),
             "pop" => self.pop_word(),
             "over" => self.over(),
-            "dip" => self.dip(),
-            "call" => self.call(),
+            "dip" => self.dip(env),
+            "call" => self.call(env),
             "cons" => self.cons(),
             "compose" => self.compose(),
-            "if" => self.if_word(),
-            "while" => self.while_word(),
-            "def" => self.define(true),
-            "let" => self.define(false),
-            "body" => self.body(),
-            "words" => self.words(),
+            "if" => self.if_word(env),
+            "while" => self.while_word(env),
+            "def" => self.define(env, true, Visibility::Public, "def"),
+            "defp" => self.define(env, true, Visibility::Private, "defp"),
+            "let" => self.define(env, false, Visibility::Public, "let"),
+            "letp" => self.define(env, false, Visibility::Private, "letp"),
+            "body" => self.body(env),
+            "words" => self.words(env),
+            "module" => self.module_word(),
+            "use" => self.use_module(env),
+            "alias" => self.alias_module(),
             "to-word" => self.coerce_word(),
             "to-symbol" => self.coerce_symbol(),
             "parse" => self.parse(),
@@ -436,23 +694,23 @@ impl<'runtime> Machine<'runtime> {
             "range" => self.range(),
             "grade" => self.grade(),
             "distinct" => self.distinct(),
-            "dict-of" => self.dict_of(),
+            "dict-of" => self.dict_of(env),
             "keys" => self.keys(),
             "vals" => self.vals(),
             "put" => self.put(),
             "del" => self.del(),
             "merge" => self.merge(),
             "has?" => self.has(),
-            "each" => self.each(),
-            "each2" => self.each2(),
-            "for" => self.for_word(),
-            "fold" => self.fold(false),
-            "scan" => self.fold(true),
+            "each" => self.each(env),
+            "each2" => self.each2(env),
+            "for" => self.for_word(env),
+            "fold" => self.fold(env, false),
+            "scan" => self.fold(env, true),
             "split" => self.split(),
             "join" => self.join(),
             "format" => self.format(),
             "raise" => self.raise(),
-            "attempt" => self.attempt(),
+            "attempt" => self.attempt(env),
             "ok?" => self.ok(),
             "ok!" => self.ok_bang(),
             "or-else" => self.or_else(),
@@ -583,16 +841,16 @@ impl<'runtime> Machine<'runtime> {
         Ok(())
     }
 
-    fn dip(&mut self) -> Result<(), EclError> {
+    fn dip(&mut self, env: &EnvRef) -> Result<(), EclError> {
         self.require(2, "dip")?;
         let quotation = self.pop_list("dip")?;
         let protected = self.pop("dip")?;
         self.frames.push(Frame::Restore(protected));
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, env.clone());
         Ok(())
     }
 
-    fn call(&mut self) -> Result<(), EclError> {
+    fn call(&mut self, env: &EnvRef) -> Result<(), EclError> {
         // Vector ⊂ Quotation, literally: any list-like value applies. A data
         // list unstacks its elements; a string pushes its chars.
         let value = self.pop("call")?;
@@ -601,7 +859,7 @@ impl<'runtime> Machine<'runtime> {
             ValueKind::String(_) => Arc::from(try_sequence(&value).expect("string sequences")),
             _ => return Err(type_error("call", "list", &value)),
         };
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, env.clone());
         Ok(())
     }
 
@@ -651,16 +909,16 @@ impl<'runtime> Machine<'runtime> {
         Ok(())
     }
 
-    fn if_word(&mut self) -> Result<(), EclError> {
+    fn if_word(&mut self, env: &EnvRef) -> Result<(), EclError> {
         self.require(3, "if")?;
         let otherwise = self.pop_list("if")?;
         let then = self.pop_list("if")?;
         let predicate = self.pop_bool("if")?;
-        self.schedule(if predicate { then } else { otherwise }, None);
+        self.schedule(if predicate { then } else { otherwise }, None, env.clone());
         Ok(())
     }
 
-    fn while_word(&mut self) -> Result<(), EclError> {
+    fn while_word(&mut self, env: &EnvRef) -> Result<(), EclError> {
         self.require(2, "while")?;
         let body = self.pop_list("while")?;
         let condition = self.pop_list("while")?;
@@ -669,36 +927,70 @@ impl<'runtime> Machine<'runtime> {
             condition: condition.clone(),
             body,
             base,
+            env: env.clone(),
         });
-        self.schedule(condition, None);
+        self.schedule(condition, None, env.clone());
         Ok(())
     }
 
-    fn define(&mut self, word_binding: bool) -> Result<(), EclError> {
-        let operation = if word_binding { "def" } else { "let" };
+    fn define(
+        &mut self,
+        env: &EnvRef,
+        word_binding: bool,
+        visibility: Visibility,
+        operation: &str,
+    ) -> Result<(), EclError> {
         self.require(2, operation)?;
         let name = self.pop_symbol(operation)?;
+        if name.contains('.') {
+            return Err(EclError::new(
+                ErrorKind::Domain,
+                format!("{operation} requires an unqualified name, got '{name}"),
+            ));
+        }
+        let module_context = self.module_context(env);
+        if visibility == Visibility::Private && module_context.is_none() {
+            return Err(EclError::new(
+                ErrorKind::Domain,
+                format!("{operation} is legal only inside a module"),
+            ));
+        }
+        // Only bindings written into the module's internal root are exports
+        // (or root privates) and receive registry-indirected module context.
+        // A temporary definition in an isolated child remains dynamically
+        // scoped to that child and disappears with it.
+        let home = env
+            .read()
+            .expect("environment lock is not poisoned")
+            .module
+            .clone();
         let value = self.pop(operation)?;
         let binding = if word_binding {
             let ValueKind::List(body) = value.kind else {
                 return Err(type_error(operation, "list body", &value));
             };
-            Binding::Word(body)
+            Binding::word(name.clone(), body, visibility, home)
         } else {
-            Binding::Value(value)
+            Binding::value(name.clone(), value, visibility, home)
         };
-        self.runtime.bindings.insert(name, binding);
+        env.write()
+            .expect("environment lock is not poisoned")
+            .bindings
+            .insert(name, binding);
         Ok(())
     }
 
-    fn body(&mut self) -> Result<(), EclError> {
+    fn body(&mut self, env: &EnvRef) -> Result<(), EclError> {
         let name = self.pop_symbol("body")?;
-        match self.runtime.bindings.get(&name) {
-            Some(Binding::Word(body)) => {
+        match self
+            .resolve_binding(env, &name)
+            .map(|resolved| resolved.binding.kind)
+        {
+            Some(BindingKind::Word(body)) => {
                 self.runtime.stack.push(Value::list(body.to_vec()));
                 Ok(())
             }
-            Some(Binding::Value(_)) => Err(EclError::new(
+            Some(BindingKind::Value(_)) => Err(EclError::new(
                 ErrorKind::Type,
                 format!("'{name} is a value binding, not a word"),
             )),
@@ -709,16 +1001,120 @@ impl<'runtime> Machine<'runtime> {
         }
     }
 
-    fn words(&mut self) -> Result<(), EclError> {
+    fn words(&mut self, env: &EnvRef) -> Result<(), EclError> {
         let mut names = core_words()
             .iter()
             .map(|name| (*name).to_owned())
-            .chain(self.runtime.bindings.keys().map(ToString::to_string))
             .collect::<Vec<_>>();
+        let mut scope = Some(env.clone());
+        while let Some(current) = scope {
+            let (bindings, uses, parent) = {
+                let environment = current.read().expect("environment lock is not poisoned");
+                (
+                    environment
+                        .bindings
+                        .keys()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                    environment.uses.clone(),
+                    environment.parent.clone(),
+                )
+            };
+            names.extend(bindings);
+            for module_name in uses {
+                if let Some(module) = self.runtime.registry.get(&module_name) {
+                    names.extend(
+                        module
+                            .env
+                            .read()
+                            .expect("environment lock is not poisoned")
+                            .bindings
+                            .values()
+                            .filter(|binding| binding.visibility == Visibility::Public)
+                            .map(|binding| binding.name.to_string()),
+                    );
+                }
+            }
+            scope = parent;
+        }
         names.sort();
         names.dedup();
         let rendered = names.join(" ");
         writeln!(io::stdout(), "{rendered}").map_err(io_error)
+    }
+
+    fn module_word(&mut self) -> Result<(), EclError> {
+        self.require(2, "module")?;
+        let body = self.pop_list("module")?;
+        let name = self.pop_symbol("module")?;
+        if self.runtime.aliases.contains_key(&name) {
+            return Err(EclError::new(
+                ErrorKind::Domain,
+                format!("module name '{name} is already an alias"),
+            ));
+        }
+        let env = Environment::module(name.clone(), self.runtime.core.clone());
+        let outer = std::mem::take(&mut self.runtime.stack);
+        self.frames.push(Frame::ModuleAfter {
+            outer,
+            name,
+            env: env.clone(),
+        });
+        self.schedule(body, None, env);
+        Ok(())
+    }
+
+    fn finish_module(
+        &mut self,
+        outer: Vec<Value>,
+        name: Arc<str>,
+        env: EnvRef,
+    ) -> Result<(), EclError> {
+        if !self.runtime.stack.is_empty() {
+            return Err(contract_error(
+                "module body",
+                "( -- )",
+                0,
+                self.runtime.stack.len(),
+            ));
+        }
+        self.runtime.stack = outer;
+        self.runtime.registry.insert(name, Module { env });
+        Ok(())
+    }
+
+    fn use_module(&mut self, env: &EnvRef) -> Result<(), EclError> {
+        let requested = self.pop_symbol("use")?;
+        let canonical = self
+            .canonical_module_name(&requested)
+            .ok_or_else(|| undefined_module(&requested))?;
+        let mut environment = env.write().expect("environment lock is not poisoned");
+        environment.uses.retain(|name| name != &canonical);
+        environment.uses.push(canonical);
+        Ok(())
+    }
+
+    fn alias_module(&mut self) -> Result<(), EclError> {
+        self.require(2, "alias")?;
+        let requested = self.pop_symbol("alias")?;
+        let short = self.pop_symbol("alias")?;
+        if short.contains('.') {
+            return Err(EclError::new(
+                ErrorKind::Domain,
+                format!("alias requires an unqualified short name, got '{short}"),
+            ));
+        }
+        if self.runtime.registry.contains_key(&short) {
+            return Err(EclError::new(
+                ErrorKind::Domain,
+                format!("alias '{short} conflicts with a registered module"),
+            ));
+        }
+        let canonical = self
+            .canonical_module_name(&requested)
+            .ok_or_else(|| undefined_module(&requested))?;
+        self.runtime.aliases.insert(short, canonical);
+        Ok(())
     }
 
     fn parse(&mut self) -> Result<(), EclError> {
@@ -995,11 +1391,11 @@ impl<'runtime> Machine<'runtime> {
         Ok(())
     }
 
-    fn dict_of(&mut self) -> Result<(), EclError> {
+    fn dict_of(&mut self, env: &EnvRef) -> Result<(), EclError> {
         let quotation = self.pop_list("dict-of")?;
         let outer = std::mem::take(&mut self.runtime.stack);
         self.frames.push(Frame::DictAfter { outer });
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, Environment::child(env.clone()));
         Ok(())
     }
 
@@ -1129,7 +1525,7 @@ impl<'runtime> Machine<'runtime> {
         Ok(())
     }
 
-    fn each(&mut self) -> Result<(), EclError> {
+    fn each(&mut self, env: &EnvRef) -> Result<(), EclError> {
         self.require(2, "each")?;
         let quotation = self.pop_list("each")?;
         let value = self.pop("each")?;
@@ -1147,8 +1543,9 @@ impl<'runtime> Machine<'runtime> {
             quotation: quotation.clone(),
             index: 0,
             results: Vec::new(),
+            env: env.clone(),
         });
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, Environment::child(env.clone()));
         Ok(())
     }
 
@@ -1159,6 +1556,7 @@ impl<'runtime> Machine<'runtime> {
         quotation: Arc<[Value]>,
         index: usize,
         mut results: Vec<Value>,
+        env: EnvRef,
     ) -> Result<(), EclError> {
         if self.runtime.stack.len() != 1 {
             return Err(contract_error(
@@ -1182,12 +1580,13 @@ impl<'runtime> Machine<'runtime> {
             quotation: quotation.clone(),
             index: next,
             results,
+            env: env.clone(),
         });
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, Environment::child(env));
         Ok(())
     }
 
-    fn each2(&mut self) -> Result<(), EclError> {
+    fn each2(&mut self, env: &EnvRef) -> Result<(), EclError> {
         self.require(3, "each2")?;
         let quotation = self.pop_list("each2")?;
         let right_value = self.pop("each2")?;
@@ -1237,20 +1636,22 @@ impl<'runtime> Machine<'runtime> {
             quotation: quotation.clone(),
             index: 0,
             results: Vec::new(),
+            env: env.clone(),
         });
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, Environment::child(env.clone()));
         Ok(())
     }
 
     fn finish_each2(
         &mut self,
         outer: Vec<Value>,
-        left: Arc<[Value]>,
-        right: Arc<[Value]>,
+        inputs: (Arc<[Value]>, Arc<[Value]>),
         quotation: Arc<[Value]>,
         index: usize,
         mut results: Vec<Value>,
+        env: EnvRef,
     ) -> Result<(), EclError> {
+        let (left, right) = inputs;
         if self.runtime.stack.len() != 1 {
             return Err(contract_error(
                 &format!("each2 quotation at element {index}"),
@@ -1275,12 +1676,13 @@ impl<'runtime> Machine<'runtime> {
             quotation: quotation.clone(),
             index: next,
             results,
+            env: env.clone(),
         });
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, Environment::child(env));
         Ok(())
     }
 
-    fn for_word(&mut self) -> Result<(), EclError> {
+    fn for_word(&mut self, env: &EnvRef) -> Result<(), EclError> {
         self.require(2, "for")?;
         let quotation = self.pop_list("for")?;
         let value = self.pop("for")?;
@@ -1296,8 +1698,9 @@ impl<'runtime> Machine<'runtime> {
             items,
             quotation: quotation.clone(),
             index: 0,
+            env: env.clone(),
         });
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, Environment::child(env.clone()));
         Ok(())
     }
 
@@ -1307,6 +1710,7 @@ impl<'runtime> Machine<'runtime> {
         items: Arc<[Value]>,
         quotation: Arc<[Value]>,
         index: usize,
+        env: EnvRef,
     ) -> Result<(), EclError> {
         if !self.runtime.stack.is_empty() {
             return Err(contract_error(
@@ -1327,12 +1731,13 @@ impl<'runtime> Machine<'runtime> {
             items,
             quotation: quotation.clone(),
             index: next,
+            env: env.clone(),
         });
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, Environment::child(env));
         Ok(())
     }
 
-    fn fold(&mut self, scan: bool) -> Result<(), EclError> {
+    fn fold(&mut self, env: &EnvRef, scan: bool) -> Result<(), EclError> {
         let word = if scan { "scan" } else { "fold" };
         self.require(3, word)?;
         let quotation = self.pop_list(word)?;
@@ -1357,8 +1762,9 @@ impl<'runtime> Machine<'runtime> {
             quotation: quotation.clone(),
             index: 0,
             scan_results: scan.then(Vec::new),
+            env: env.clone(),
         });
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, Environment::child(env.clone()));
         Ok(())
     }
 
@@ -1369,6 +1775,7 @@ impl<'runtime> Machine<'runtime> {
         quotation: Arc<[Value]>,
         index: usize,
         mut scan_results: Option<Vec<Value>>,
+        env: EnvRef,
     ) -> Result<(), EclError> {
         if self.runtime.stack.len() != 1 {
             return Err(contract_error(
@@ -1399,8 +1806,9 @@ impl<'runtime> Machine<'runtime> {
             quotation: quotation.clone(),
             index: next,
             scan_results,
+            env: env.clone(),
         });
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, Environment::child(env));
         Ok(())
     }
 
@@ -1449,14 +1857,14 @@ impl<'runtime> Machine<'runtime> {
         Err(EclError::raised(&value)?)
     }
 
-    fn attempt(&mut self) -> Result<(), EclError> {
+    fn attempt(&mut self, env: &EnvRef) -> Result<(), EclError> {
         let quotation = self.pop_list("attempt")?;
         let outer = std::mem::take(&mut self.runtime.stack);
         self.frames.push(Frame::AttemptAfter {
             outer,
             trace_depth: self.trace.len().saturating_sub(1),
         });
-        self.schedule(quotation, None);
+        self.schedule(quotation, None, Environment::child(env.clone()));
         Ok(())
     }
 
@@ -2183,6 +2591,14 @@ fn domain_error(message: impl Into<String>) -> EclError {
     EclError::new(ErrorKind::Domain, message)
 }
 
+fn undefined_module(name: &str) -> EclError {
+    EclError::new(
+        ErrorKind::UndefinedWord,
+        format!("module '{name} is not registered"),
+    )
+    .with_data("module", Value::symbol(Arc::from(name)))
+}
+
 fn conform_error(left: usize, right: usize) -> EclError {
     EclError::new(
         ErrorKind::Conform,
@@ -2220,9 +2636,14 @@ fn core_words() -> &'static [&'static str] {
         "if",
         "while",
         "def",
+        "defp",
         "let",
+        "letp",
         "body",
         "words",
+        "module",
+        "use",
+        "alias",
         "to-word",
         "to-symbol",
         "parse",
@@ -2325,6 +2746,147 @@ mod tests {
         let mut runtime = Runtime::new();
         let error = runtime.run("test", "[1] (dup) each").unwrap_err();
         assert_eq!(error.kind, ErrorKind::Contract);
+    }
+
+    #[test]
+    fn isolated_applications_discard_their_child_environments() {
+        let mut runtime = Runtime::new();
+        let error = runtime
+            .run("test", "[1 2 3] (dup 'k let k *) each pop k")
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UndefinedWord);
+        assert_eq!(error.word.as_deref(), Some("k"));
+        assert_eq!(runtime.stack_display(), "");
+
+        let error = runtime
+            .run("test", "(1 'temporary let) attempt pop temporary")
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UndefinedWord);
+
+        assert_eq!(
+            run("[1 2] (pop (seen) attempt ok? 1 'seen let) each").stack_display(),
+            "[0 0]"
+        );
+    }
+
+    #[test]
+    fn every_isolated_combinator_writes_only_to_its_child_scope() {
+        for source in [
+            "[1] [2] (dup 'k let +) each2 pop k",
+            "[1] (dup 'k let pop) for k",
+            "[1] 0 (dup 'k let +) fold pop k",
+            "[1] 0 (dup 'k let +) scan pop k",
+            "(1 'k let) dict-of pop k",
+        ] {
+            let mut runtime = Runtime::new();
+            let error = runtime.run("test", source).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::UndefinedWord, "{source}");
+            assert_eq!(error.word.as_deref(), Some("k"), "{source}");
+        }
+    }
+
+    #[test]
+    fn modules_expose_publics_while_public_words_reach_privates() {
+        let mut runtime = Runtime::new();
+        runtime
+            .run(
+                "test",
+                "'stats (40 'secret letp (secret 2 +) 'answer def (secret) 'hidden defp) module stats.answer",
+            )
+            .unwrap();
+        assert_eq!(runtime.stack_display(), "42");
+
+        let error = runtime.run("test", "stats.hidden").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UndefinedWord);
+        assert_eq!(runtime.stack_display(), "42");
+
+        let error = runtime.run("test", "1 'nope letp").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Domain);
+    }
+
+    #[test]
+    fn use_alias_and_scope_shadowing_follow_decision_18_order() {
+        let runtime = run("'one (1 'x let) module \
+             'two (2 'x let) module \
+             'one use x \
+             'two use x \
+             3 'x let x \
+             'short 'one alias short.x \
+             'one (4 'x let) module short.x x");
+        assert_eq!(runtime.stack_display(), "1 2 3 1 4 3");
+    }
+
+    #[test]
+    fn use_in_an_isolated_child_does_not_import_into_its_parent() {
+        let mut runtime = Runtime::new();
+        runtime.run("test", "'m (1 'x let) module").unwrap();
+        let error = runtime.run("test", "('m use) attempt pop x").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UndefinedWord);
+    }
+
+    #[test]
+    fn module_words_use_their_home_not_the_callers_environment() {
+        let runtime = run("'stats (10 'x let (x) 'get def) module \
+             99 'x let stats.get 'stats.get body call");
+        assert_eq!(runtime.stack_display(), "10 99");
+    }
+
+    #[test]
+    fn module_calls_and_imports_follow_registry_hot_reload() {
+        let runtime = run("'source (1 'x let) module \
+             'client ('source use (x) 'get def) module \
+             'client use get source.x \
+             'source (2 'x let) module \
+             get client.get source.x");
+        assert_eq!(runtime.stack_display(), "1 1 2 2 2");
+    }
+
+    #[test]
+    fn failed_replacement_keeps_the_previous_module_generation() {
+        let runtime = run("'m (1 'x let) module \
+             ('m (missing) module) attempt pop \
+             m.x");
+        assert_eq!(runtime.stack_display(), "1");
+    }
+
+    #[test]
+    fn completed_registry_writes_survive_a_later_unit_failure() {
+        let mut runtime = Runtime::new();
+        let error = runtime
+            .run("test", "'m (1 'x let) module missing")
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UndefinedWord);
+        runtime.run("test", "m.x").unwrap();
+        assert_eq!(runtime.stack_display(), "1");
+    }
+
+    #[test]
+    fn a_module_body_can_call_its_in_flight_definitions() {
+        let runtime = run("'m ((1) 'one def one pop 2 'value let (value) 'get def) module m.get");
+        assert_eq!(runtime.stack_display(), "2");
+    }
+
+    #[test]
+    fn temporary_module_child_definitions_are_dynamic_and_not_exported() {
+        let mut runtime = Runtime::new();
+        runtime
+            .run(
+                "test",
+                "'m ([1] (dup 'x let (x) 'temporary def temporary pop pop) for) module",
+            )
+            .unwrap();
+        let error = runtime.run("test", "m.temporary").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UndefinedWord);
+    }
+
+    #[test]
+    fn module_traces_are_qualified() {
+        let mut runtime = Runtime::new();
+        let error = runtime
+            .run("test", "'m ((missing) 'go def) module m.go")
+            .unwrap_err();
+        assert_eq!(error.trace.first().map(AsRef::as_ref), Some("missing"));
+        assert_eq!(error.trace.get(1).map(AsRef::as_ref), Some("m.go"));
     }
 
     #[test]
