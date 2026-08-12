@@ -115,9 +115,8 @@ architecture panel; full groundings in
 
 ### Milestone 1: value-core
 
-**Status**: implemented — gameplan at `gameplans/value-core.json`
-(35 tests; Debug, ReleaseSafe, Linux TSan, formatting, and blocking ZLint
-validated).
+**Status**: implemented (35 tests; Debug, ReleaseSafe, Linux TSan,
+formatting, and blocking ZLint validated).
 
 **Definition of Done**:
 A Zig project exists at the repo root (`build.zig`, `src/`, pinned
