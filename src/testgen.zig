@@ -83,10 +83,7 @@ pub fn generateDict(
         pair[1] = try generateValue(allocator, random, depth, .allowed);
         initialized += 1;
     }
-    return dict.fromPairs(allocator, pairs) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.DuplicateKey => unreachable,
-    };
+    return dict.fromUniquePairs(allocator, pairs);
 }
 
 pub fn randomCodepoint(random: std.Random) u32 {

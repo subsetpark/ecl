@@ -189,10 +189,7 @@ pub const EclErr = struct {
             data_pairs[data_len] = .{ .{ .symbol = col_key }, .{ .int = located.span.col } };
             data_len += 1;
         }
-        const data_value = dict.fromPairs(allocator, data_pairs[0..data_len]) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.DuplicateKey => unreachable,
-        };
+        const data_value = try dict.fromUniquePairs(allocator, data_pairs[0..data_len]);
         defer heap.releaseValue(allocator, data_value);
 
         var pairs: [5]dict.Pair = undefined;
@@ -209,10 +206,7 @@ pub const EclErr = struct {
         count += 1;
         pairs[count] = .{ .{ .symbol = data_key }, data_value };
         count += 1;
-        return dict.fromPairs(allocator, pairs[0..count]) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.DuplicateKey => unreachable,
-        };
+        return dict.fromUniquePairs(allocator, pairs[0..count]);
     }
 
     /// Preserves every user field while completing the d.19 envelope from
@@ -296,10 +290,7 @@ pub const EclErr = struct {
             count += 1;
         }
         std.debug.assert(count == pairs.len);
-        return dict.fromPairs(allocator, pairs) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.DuplicateKey => unreachable,
-        };
+        return dict.fromUniquePairs(allocator, pairs);
     }
 };
 
@@ -363,10 +354,7 @@ fn completeRaisedData(
         }
     }
     std.debug.assert(count == pairs.len);
-    return dict.fromPairs(allocator, pairs) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.DuplicateKey => unreachable,
-    };
+    return try dict.fromUniquePairs(allocator, pairs);
 }
 
 pub fn stringValue(
@@ -976,10 +964,7 @@ fn outcomeDict(
 ) error{OutOfMemory}!Value {
     defer heap.releaseValue(allocator, payload);
     const key = try intern.intern(name);
-    return dict.fromPairs(allocator, &.{.{ .{ .symbol = key }, payload }}) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.DuplicateKey => unreachable,
-    };
+    return dict.fromUniquePairs(allocator, &.{.{ .{ .symbol = key }, payload }});
 }
 
 fn handleFailure(self: *Machine) error{OutOfMemory}!bool {

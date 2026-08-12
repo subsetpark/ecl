@@ -74,6 +74,17 @@ pub fn fromPairs(
     return .{ .dict = header };
 }
 
+/// `fromPairs` for call sites whose keys are distinct by construction.
+pub fn fromUniquePairs(
+    allocator: std.mem.Allocator,
+    pairs: []const Pair,
+) error{OutOfMemory}!Value {
+    return fromPairs(allocator, pairs) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.DuplicateKey => unreachable,
+    };
+}
+
 /// Returns a borrowed value. The dict continues to own heap children.
 ///
 /// This convenience wrapper is for tests and small tools that do not own an
@@ -119,10 +130,7 @@ pub fn put(
     } else {
         pairs[old_len] = .{ key, new_value };
     }
-    const replacement = fromPairs(allocator, pairs) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.DuplicateKey => unreachable,
-    };
+    const replacement = try fromUniquePairs(allocator, pairs);
     return installReplacement(allocator, dictionary, replacement);
 }
 
@@ -143,10 +151,7 @@ pub fn del(
         pairs[dest] = .{ keyAt(header, index), valueAt(header, index) };
         dest += 1;
     }
-    const replacement = fromPairs(allocator, pairs) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.DuplicateKey => unreachable,
-    };
+    const replacement = try fromUniquePairs(allocator, pairs);
     return installReplacement(allocator, dictionary, replacement);
 }
 
@@ -183,10 +188,7 @@ pub fn merge(
             count += 1;
         }
     }
-    const replacement = fromPairs(allocator, pairs[0..count]) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.DuplicateKey => unreachable,
-    };
+    const replacement = try fromUniquePairs(allocator, pairs[0..count]);
     return installReplacement(allocator, left, replacement);
 }
 
