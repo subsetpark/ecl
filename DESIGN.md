@@ -77,8 +77,9 @@ are preserved. Nothing below is constrained by compatibility.
    `curry`/splice producing a new plain list (`3 (+) curry` → `(3 +)`).
    Locals are definition-site sugar that desugars to point-free code before
    storage; head-position only; not permitted across quotation boundaries in
-   v1 (error suggests `curry`). The locals sugar shares no vocabulary with
-   `let` — they are unrelated mechanisms.
+   v1 (error suggests `curry`). Spelling: `(|lo hi| …)`, Rust/Ruby-style —
+   see GRAMMAR.md. The locals sugar shares no vocabulary with `let` — they
+   are unrelated mechanisms.
 
 7. **Errors: crash-only, observed as data at unit boundaries.** No
    try/catch, no handler quotations. Errors propagate; the failing unit of
@@ -189,7 +190,7 @@ are preserved. Nothing below is constrained by compatibility.
     needs Unicode tables): grapheme segmentation, normalization, non-ASCII
     case mapping, locale collation — codepoint semantics documented
     honestly (composed vs decomposed "café" is 4 vs 5 chars). Char literal
-    syntax is a grammar detail, TBD.
+    syntax: `\a` / `\space` / `\u{...}`, Clojure-style (see GRAMMAR.md).
 
 16. **Printing exposes representation.** A list prints with `[...]` when
     specialized (homogeneous flat leaf, or rectangular nesting of
@@ -418,14 +419,14 @@ a BQN competitor; wrong one for this language).
 
 - **All naming.** Word names (dup/swap/dip/primrec...) are ec inheritance,
   not commitments.
-- **Grammar.** Specced fresh: delimiter matching, string/char/number
-  literals, comments, provenance.
+- **Grammar.** Settled — see GRAMMAR.md (companion spec: tokens, forms,
+  units, round-trip).
 
 ## Open questions
 
 None. Everything is settled above or explicitly deferred with its
 constraints pre-written: the seal layer and module–seal interaction
 (decision 9), pdict (decision 1), channels (decision 20), exactness
-(decision 4), and the grammar/naming items under Reopened. Host choice
-is deliberately absent: the Runtime section specifies what any
+(decision 4), and the naming item under Reopened. Host choice is
+deliberately absent: the Runtime section specifies what any
 implementation must deliver, and nothing more.
