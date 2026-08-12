@@ -673,12 +673,17 @@ script in CI.
   - **Traces to**: Milestone 9 — embedded stdlib registration (mechanism Milestone 4).
 
 - **DoD-25 — line budget**
-  - **Assert**: core (excluding kernels and tests) ≤ 5,500 lines;
-    kernels ≤ 5,500 (10% grace over the d.23 budget).
-  - **Verify by** `cmd`: `zig build loc-audit` (a cloc-based CI check
-    with the directory split).
-  - **Expected**: exit 0 with both counts printed.
-  - **Traces to**: Milestone 10 — the audit job (budget: d.23).
+  - **Assert**: core (excluding kernels, stdlib, and tests) ≤ 9,500
+    lines and every component inside its ARCHITECTURE.md row; kernels
+    ≤ 5,500; stdlib ≤ 2,200 (10% grace over the re-derived d.23
+    budget). Core excludes `test` blocks wherever they appear and
+    excludes test-only sources (`*_test.zig`, `testgen.zig`).
+  - **Verify by** `cmd`: `zig build test` (the embedded audit in
+    `src/value_test.zig` prints the split and fails the build when a
+    component exceeds its row).
+  - **Expected**: exit 0 with the per-component counts printed.
+  - **Traces to**: Milestone 10 — the audit test (budget: d.23,
+    re-derived for the Zig host 2026-08-12).
 
 - **DoD-26 — module effect declarations (d.9)**
   - **Assert**: a module `def` without an effect declaration fails

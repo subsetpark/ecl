@@ -548,8 +548,22 @@ implementation matter, not a design matter.
       run fully serially or chunked; a program whose elements must run
       concurrently to progress is already broken. This licenses a
       chunking [P] override of the prelude definition.
-    - **Line budget:** interpreter core ≤ ~5k lines excluding kernels;
-      kernels ≤ ~5k. Additions displace.
+    - **Line budget (re-derived 2026-08-12 for the Zig host):**
+      interpreter core ≤ ~9.5k lines excluding kernels, stdlib, and
+      tests; kernels ≤ ~5k; stdlib modules ≤ ~2k. Budgeted per component
+      so the ceiling binds where sprawl would appear — see
+      ARCHITECTURE.md's table. Additions still displace within a
+      component. The superseded ~5k figure was derived from the Rust
+      skeleton's 4.6k, a baseline that does not transfer: different host
+      (Zig costs lines for explicit allocators, error unions, and `zig
+      fmt`), different data structures (the skeleton's boxed lists,
+      uninterned symbols, and assoc-vector dicts are exactly what
+      ARCHITECTURE.md disqualifies — flat leaves, interning, and precise
+      atomic RC cost 3.8x on the value layer *by design*), and half the
+      feature set (no concurrency, kernels, scheduler, modules-on-cells,
+      or stdlib). The budget's real invariant is d.21's: coarse
+      primitives, a few dozen kernels, no sprawling VM, never machine
+      code. Lines are the proxy, not the point.
     - **The differential harness is a named v1 deliverable:** every
       kernel and idiom tested against the generic path for value
       equality, representation parity (d.16 makes brackets observable),

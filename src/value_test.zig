@@ -119,44 +119,78 @@ fn countLines(source: []const u8) usize {
     return lines;
 }
 
+/// Interpreter lines only: every top-level `test` block is skipped wherever it
+/// sits. `zig fmt` is a blocking gate, so a top-level block always closes with
+/// `}` in column zero -- brace counting would misread the ecl source literals
+/// inside test bodies.
 fn countCoreLines(source: []const u8) usize {
-    const tests_start = std.mem.indexOf(u8, source, "\ntest \"") orelse source.len;
-    return countLines(source[0..tests_start]);
+    var lines: usize = 0;
+    var rest = source;
+    while (rest.len > 0) {
+        const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+        const line = rest[0..end];
+        rest = rest[@min(end + 1, rest.len)..];
+        if (std.mem.startsWith(u8, line, "test \"") or std.mem.startsWith(u8, line, "test {")) {
+            while (rest.len > 0) {
+                const stop = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+                const inner = rest[0..stop];
+                rest = rest[@min(stop + 1, rest.len)..];
+                if (std.mem.eql(u8, inner, "}")) break;
+            }
+            if (std.mem.startsWith(u8, rest, "\n")) rest = rest[1..];
+            continue;
+        }
+        lines += 1;
+    }
+    return lines;
 }
 
-test "frame machine stays inside the decision-23 core budget" {
-    const sources = .{
-        @embedFile("value.zig"),
-        @embedFile("heap.zig"),
-        @embedFile("intern.zig"),
-        @embedFile("list.zig"),
-        @embedFile("equal.zig"),
-        @embedFile("dict.zig"),
-        @embedFile("print.zig"),
-        @embedFile("lexer.zig"),
-        @embedFile("binder.zig"),
-        @embedFile("reader.zig"),
-        @embedFile("testgen.zig"),
-        @embedFile("reader_test.zig"),
-        @embedFile("env.zig"),
-        @embedFile("machine.zig"),
-        @embedFile("spans.zig"),
-        @embedFile("prims.zig"),
-        @embedFile("session.zig"),
-        @embedFile("main.zig"),
-        @embedFile("machine_test.zig"),
+test "components stay inside the decision-23 line budgets" {
+    const Component = struct {
+        name: []const u8,
+        budget: usize,
+        sources: []const []const u8,
     };
+    const components = [_]Component{
+        .{ .name = "values+RC", .budget = 1950, .sources = &.{
+            @embedFile("value.zig"),  @embedFile("heap.zig"),
+            @embedFile("intern.zig"), @embedFile("list.zig"),
+            @embedFile("equal.zig"),  @embedFile("dict.zig"),
+            @embedFile("print.zig"),
+        } },
+        .{ .name = "reader", .budget = 1250, .sources = &.{
+            @embedFile("lexer.zig"), @embedFile("binder.zig"), @embedFile("reader.zig"),
+        } },
+        .{ .name = "machine", .budget = 2300, .sources = &.{
+            @embedFile("env.zig"),     @embedFile("machine.zig"),
+            @embedFile("spans.zig"),   @embedFile("prims.zig"),
+            @embedFile("session.zig"), @embedFile("main.zig"),
+            @embedFile("root.zig"),
+        } },
+    };
+    // Test-only sources are excluded from core entirely; test blocks inside
+    // interpreter sources are excluded by countCoreLines.
+    const test_sources = [_][]const u8{
+        @embedFile("testgen.zig"),      @embedFile("reader_test.zig"),
+        @embedFile("machine_test.zig"), @embedFile("value_test.zig"),
+    };
+
     var core_lines: usize = 0;
-    var total_lines: usize = countLines(@embedFile("root.zig")) +
-        countLines(@embedFile("value_test.zig"));
-    inline for (sources) |source| {
-        core_lines += countCoreLines(source);
-        total_lines += countLines(source);
+    inline for (components) |component| {
+        var component_lines: usize = 0;
+        inline for (component.sources) |source| component_lines += countCoreLines(source);
+        std.log.info("{s}: {d}/{d} core lines", .{ component.name, component_lines, component.budget });
+        core_lines += component_lines;
+        try std.testing.expect(component_lines <= component.budget);
     }
+    var test_lines: usize = 0;
+    inline for (components) |component| {
+        inline for (component.sources) |source| test_lines += countLines(source) - countCoreLines(source);
+    }
+    inline for (test_sources) |source| test_lines += countLines(source);
     std.log.info(
-        "frame-machine line budget: {d} core, {d} total including tests",
-        .{ core_lines, total_lines },
+        "line budget: {d}/9500 core, {d} test lines, {d} total",
+        .{ core_lines, test_lines, core_lines + test_lines },
     );
-    try std.testing.expect(core_lines < 5300);
-    try std.testing.expect(total_lines < 7000);
+    try std.testing.expect(core_lines <= 9500);
 }
