@@ -7,12 +7,25 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const dict = @import("dict.zig");
 const intern = @import("intern.zig");
+const printer = @import("print.zig");
 
 const Value = value.Value;
 
 fn field(allocator: std.mem.Allocator, dictionary: Value, name: []const u8) !Value {
     const key = try intern.intern(name);
     return (try dict.symbolField(allocator, dictionary, key)).?;
+}
+
+fn execute(runtime: *session.Session, source: []const u8) !?Value {
+    return switch (try runtime.runUnit("fixture.ecl", source)) {
+        .ok => null,
+        .incomplete => error.TestUnexpectedResult,
+        .err => |failure| failure,
+    };
+}
+
+fn errorKind(allocator: std.mem.Allocator, error_value: Value) ![]const u8 {
+    return intern.get((try field(allocator, error_value, "kind")).symbol);
 }
 
 test "twenty-thousand-deep named recursion remains flat" {
@@ -101,4 +114,200 @@ test "machine_test: late binding redefinition heals existing callers" {
         "pop (1 +) 'quoted let quoted",
     )) == .ok);
     try std.testing.expect(runtime.stack.items[0] == .list);
+}
+
+test "provisional scalar primitives enforce the d.22 regime" {
+    const allocator = std.testing.allocator;
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+
+    const overflow = (try execute(&runtime, "9223372036854775806 2 +")).?;
+    defer heap.releaseValue(allocator, overflow);
+    try std.testing.expectEqualStrings("overflow", try errorKind(allocator, overflow));
+    try std.testing.expect((try execute(&runtime, "inf 1 +")) == null);
+    try std.testing.expect(std.math.isPositiveInf(runtime.stack.items[0].float));
+    const domain = (try execute(&runtime, "inf inf -")).?;
+    defer heap.releaseValue(allocator, domain);
+    try std.testing.expectEqualStrings("domain", try errorKind(allocator, domain));
+}
+
+test "division and comparison remain exact across 2^53" {
+    const allocator = std.testing.allocator;
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+    try std.testing.expect((try execute(&runtime, "1 2 /")) == null);
+    try std.testing.expectEqual(@as(f64, 0.5), runtime.stack.items[0].float);
+    try std.testing.expect((try execute(&runtime, "9007199254740993 9007199254740992.0 >")) == null);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stack.items[1].int);
+}
+
+test "attempt reifies failure and def rejects scalar bodies" {
+    const allocator = std.testing.allocator;
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+    try std.testing.expect((try execute(&runtime, "7 (1 0 /) attempt")) == null);
+    try std.testing.expectEqual(@as(i64, 7), runtime.stack.items[0].int);
+    const err_key = try intern.intern("err");
+    try std.testing.expect((try dict.symbolField(
+        allocator,
+        runtime.stack.items[1],
+        err_key,
+    )) != null);
+    try std.testing.expect((try execute(&runtime, "pop (pop) attempt")) == null);
+    try std.testing.expectEqual(@as(i64, 7), runtime.stack.items[0].int);
+    const isolated_error = (try dict.symbolField(
+        allocator,
+        runtime.stack.items[1],
+        err_key,
+    )).?;
+    try std.testing.expectEqualStrings("underflow", try errorKind(allocator, isolated_error));
+    try std.testing.expect((try execute(&runtime, "(2 3 +) attempt")) == null);
+    const ok_key = try intern.intern("ok");
+    const ok_results = (try dict.symbolField(
+        allocator,
+        runtime.stack.items[2],
+        ok_key,
+    )).?;
+    try std.testing.expectEqual(@as(i64, 5), list.atUnchecked(ok_results, 0).int);
+    const failure = (try execute(&runtime, "1 'x def")).?;
+    defer heap.releaseValue(allocator, failure);
+    try std.testing.expectEqualStrings("type", try errorKind(allocator, failure));
+}
+
+test "raise preserves valid user dicts and validates optional fields" {
+    const allocator = std.testing.allocator;
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+    const raised = (try execute(&runtime, "{'kind 'custom 'msg \"hello\"} raise")).?;
+    defer heap.releaseValue(allocator, raised);
+    const rendered = try printer.toOwnedString(allocator, raised);
+    defer allocator.free(rendered);
+    try std.testing.expectEqualStrings(
+        "{'kind 'custom 'msg \"hello\" 'word 'raise 'trace ['raise] " ++
+            "'data {'source \"fixture.ecl\" 'line 1 'col 30}}",
+        rendered,
+    );
+
+    const defaulted = (try execute(&runtime, "{'kind 'custom} raise")).?;
+    defer heap.releaseValue(allocator, defaulted);
+    const defaulted_rendered = try printer.toOwnedString(allocator, defaulted);
+    defer allocator.free(defaulted_rendered);
+    try std.testing.expectEqualStrings(
+        "{'kind 'custom 'msg \"raised 'custom\" 'word 'raise 'trace ['raise] " ++
+            "'data {'source \"fixture.ecl\" 'line 1 'col 17}}",
+        defaulted_rendered,
+    );
+
+    const merged = (try execute(&runtime, "{'kind 'custom 'data {'detail 7}} raise")).?;
+    defer heap.releaseValue(allocator, merged);
+    try std.testing.expectEqualStrings(
+        "raise",
+        intern.get((try field(allocator, merged, "word")).symbol),
+    );
+    const merged_trace = try field(allocator, merged, "trace");
+    try std.testing.expectEqual(@as(u64, 1), merged_trace.list.len);
+    try std.testing.expectEqualStrings(
+        "raise",
+        intern.get(list.atUnchecked(merged_trace, 0).symbol),
+    );
+    const merged_data = try field(allocator, merged, "data");
+    try std.testing.expectEqual(@as(i64, 7), (try field(allocator, merged_data, "detail")).int);
+    _ = try field(allocator, merged_data, "source");
+    _ = try field(allocator, merged_data, "line");
+    _ = try field(allocator, merged_data, "col");
+
+    const complete = (try execute(
+        &runtime,
+        "{'kind 'custom 'msg \"old\" 'word 'origin 'trace ['origin] " ++
+            "'data {'source \"old.ecl\" 'line 9 'col 8} 'detail 7} raise",
+    )).?;
+    defer heap.releaseValue(allocator, complete);
+    const complete_rendered = try printer.toOwnedString(allocator, complete);
+    defer allocator.free(complete_rendered);
+    try std.testing.expectEqualStrings(
+        "{'kind 'custom 'msg \"old\" 'word 'origin 'trace ['origin] " ++
+            "'data {'source \"old.ecl\" 'line 9 'col 8} 'detail 7}",
+        complete_rendered,
+    );
+
+    const malformed = (try execute(&runtime, "{'kind 1} raise")).?;
+    defer heap.releaseValue(allocator, malformed);
+    try std.testing.expectEqualStrings("type", try errorKind(allocator, malformed));
+}
+
+test "over compose and at have exact stack effects" {
+    const allocator = std.testing.allocator;
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+
+    try std.testing.expect((try execute(&runtime, "1 2 over")) == null);
+    try std.testing.expectEqualSlices(
+        Value,
+        &.{ .{ .int = 1 }, .{ .int = 2 }, .{ .int = 1 } },
+        runtime.stack.items,
+    );
+    try std.testing.expect((try execute(&runtime, "pop pop pop (1 2) (3 4) compose")) == null);
+    const composed = runtime.stack.items[0];
+    try std.testing.expect(composed == .list);
+    try std.testing.expectEqual(@as(i64, 1), list.atUnchecked(composed, 0).int);
+    try std.testing.expectEqual(@as(i64, 2), list.atUnchecked(composed, 1).int);
+    try std.testing.expectEqual(@as(i64, 3), list.atUnchecked(composed, 2).int);
+    try std.testing.expectEqual(@as(i64, 4), list.atUnchecked(composed, 3).int);
+    try std.testing.expect((try execute(&runtime, "pop [10 20] 1 at")) == null);
+    try std.testing.expectEqual(@as(i64, 20), runtime.stack.items[0].int);
+}
+
+test "pp and prin write through and writer failures become io errors" {
+    const allocator = std.testing.allocator;
+    var captured: std.Io.Writer.Allocating = .init(allocator);
+    defer captured.deinit();
+    var runtime = try session.Session.initWithOutput(allocator, &.{}, &captured.writer);
+    defer runtime.deinit();
+    try std.testing.expect((try execute(&runtime, "\"hi\" prin 'visible pp")) == null);
+    try std.testing.expectEqualStrings("hi'visible\n", captured.written());
+
+    var failing: std.Io.Writer = .failing;
+    var broken = try session.Session.initWithOutput(allocator, &.{}, &failing);
+    defer broken.deinit();
+    const failure = (try execute(&broken, "'broken pp")).?;
+    defer heap.releaseValue(allocator, failure);
+    try std.testing.expectEqualStrings("io", try errorKind(allocator, failure));
+}
+
+test "inline control and reader-lowered binders execute" {
+    const allocator = std.testing.allocator;
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+    try std.testing.expect((try execute(&runtime, "1 (2 +) call")) == null);
+    try std.testing.expectEqual(@as(i64, 3), runtime.stack.items[0].int);
+    try std.testing.expect((try execute(&runtime, "pop 1 9 (2 +) dip")) == null);
+    try std.testing.expectEqual(@as(i64, 3), runtime.stack.items[0].int);
+    try std.testing.expectEqual(@as(i64, 9), runtime.stack.items[1].int);
+    try std.testing.expect((try execute(&runtime, "pop pop 3 (|x| x x *) call")) == null);
+    try std.testing.expectEqual(@as(i64, 9), runtime.stack.items[0].int);
+    try std.testing.expect((try execute(&runtime, "pop 3 (dup 0 >) (1 -) while pop")) == null);
+    try std.testing.expectEqual(@as(usize, 0), runtime.stack.items.len);
+    const invalid_branch = (try execute(&runtime, "1 (2) 3 if")).?;
+    defer heap.releaseValue(allocator, invalid_branch);
+    try std.testing.expectEqualStrings("type", try errorKind(allocator, invalid_branch));
+}
+
+fn primitiveFailureProbe(allocator: std.mem.Allocator) !void {
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+    if (try execute(
+        &runtime,
+        "(3 4 +) 'sum def sum (1 0 /) attempt (5 6 +) attempt " ++
+            "({'kind 'custom 'data {'detail 7}} raise) attempt",
+    )) |failure| {
+        heap.releaseValue(allocator, failure);
+    }
+}
+
+test "primitive execution propagates every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        primitiveFailureProbe,
+        .{},
+    );
 }
