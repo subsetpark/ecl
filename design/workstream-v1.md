@@ -115,8 +115,15 @@ architecture panel; full groundings in
 
 ### Milestone 1: value-core
 
-**Status**: implemented (35 tests; Debug, ReleaseSafe, Linux TSan,
-formatting, and blocking ZLint validated).
+**Status**: executed (35 tests; Debug, ReleaseSafe, Linux TSan,
+formatting, and blocking ZLint validated). Landed at commit `8295fd5`;
+CI green at builds.sr.ht job 1859694 with *instrumented* Linux TSan —
+the manifest gained `linux-headers`, since Zig builds its TSan runtime
+from source. Review fixes before landing included exact int/float
+comparison beyond 2^53, which also patched the poc oracle
+(`compare_int_float`, covering ordering comparisons — a fix beyond the
+original milestone sketch). ZLint was promoted from advisory to
+blocking after the milestone landed clean under it.
 
 **Definition of Done**:
 A Zig project exists at the repo root (`build.zig`, `src/`, pinned
@@ -149,6 +156,11 @@ leaf-tag enum and the 16-byte cell.
 ---
 
 ### Milestone 2: reader
+
+**Status**: planned — gameplan at `gameplans/reader.json` (validated,
+adversarially audited; 5 INFRA patches, two-track DAG; no open
+questions; the round-trip law is scoped to dict-free values with dict
+desugar-shape assertions, full dict closure at M3).
 
 **Definition of Done**:
 The full GRAMMAR.md reader over the new value layer: tokens
@@ -478,7 +490,8 @@ script in CI.
   - **Verify by** `cmd`: `ecl 'inf 1 +'`; `ecl 'inf inf -'`;
     `ecl '0.0 -0.0 match'`.
   - **Expected**: `inf`; exit ≠ 0 with `'kind 'domain`; `1`.
-  - **Traces to**: Milestone 2 — inf literal; Milestone 5 — float_result kernels.
+  - **Traces to**: Milestone 2 — `src/lexer.zig` (inf/-inf float
+    literals); Milestone 5 — float_result kernels.
 
 - **DoD-7 — contract violation names the element**
   - **Assert**: an arity-violating quotation under `each` errors
@@ -552,7 +565,8 @@ script in CI.
   - **Verify by** `cmd`: `ecl '[1 2 3)'` and `ecl '(1) (x) 'x defp'`.
   - **Expected**: exit ≠ 0 with `'kind 'parse`; exit ≠ 0 with
     `'kind 'domain`.
-  - **Traces to**: Milestone 2 — reader; Milestone 4 — defp legality.
+  - **Traces to**: Milestone 2 — `src/reader.zig` (matched-pair
+    enforcement); Milestone 4 — defp legality.
 
 - **DoD-16 — UTF-8 codepoint semantics**
   - **Assert**: `"café" len` is 4; `\a 1 +` is `\b`.
