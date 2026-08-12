@@ -456,7 +456,7 @@ script in CI.
   - **Verify by** `cmd`: `ecl '3 4 +'`; thread probe via the platform's
     process inspector in the same test.
   - **Expected**: stdout `7`, exit 0, thread count 1.
-  - **Traces to**: Milestone 3 — the dispatch loop + CLI (`src/main.zig`); lazy pool guard Milestone 7.
+  - **Traces to**: Milestone 3 — the dispatch loop (`src/machine.zig`) + CLI (`src/main.zig`); lazy pool guard Milestone 7.
 
 - **DoD-2 — unified value printing**
   - **Assert**: `(1 2 3)` and `[1 2 3]` are the same value and print
@@ -560,7 +560,7 @@ script in CI.
     then `inspect`; then `[1 2 3] (dup 'k let k *) each pop k`.
   - **Expected**: after the error the stack shows `10`; the final line
     errors `'undefined-word` for `k`.
-  - **Traces to**: Milestone 3 — unit rollback; Milestone 4 — child-env isolation.
+  - **Traces to**: Milestone 3 — unit rollback (`src/session.zig`); Milestone 4 — child-env isolation.
 
 - **DoD-15 — grammar negatives**
   - **Assert**: mismatched delimiters and top-level `defp` are errors.

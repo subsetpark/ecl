@@ -1,0 +1,394 @@
+{
+  "projectName": "frame-machine-first-light",
+  "owner": "~subsetpark",
+  "repo": "ecl",
+  "specFile": null,
+  "workstream": {
+    "name": "ecl v1 — the real interpreter (design/workstream-v1.md)",
+    "milestone": "frame-machine-first-light",
+    "priorMilestones": ["value-core", "reader"],
+    "unlocks": "Every remaining milestone extends a running binary: M4 environments/modules, M5 kernels, and M6 combinators all land against an executable calculator; the workstream's 'always a working calculator' doctrine becomes literal."
+  },
+  "problemStatement": "The value layer (M1, executed) and the reader (M2, landed at 68ab81e) can represent and parse every ecl value, but nothing executes: there is no evaluator, no environment, no error dicts, no binary. The soul test — `ecl '3 4 +'` printing `7` — is the workstream's first acceptance assertion (DoD-1) and cannot run. Until a frame machine exists, every later milestone would be building against a library instead of a language.",
+  "solutionSummary": "Build the defunctionalized-CEK frame machine per ARCHITECTURE.md §Frame machine and §Dispatch, in six patches: a minimal two-scope environment (frozen core with fn-pointer primitive bindings, session table with late-bound def/let); the machine core (unit struct with fuel counter and cancel flag, ≤48-byte comptime-asserted frames, the single switch-dispatch loop with ip/code/env in locals, TCO as frame overwrite, base-index boundary frames with O(1) truncation); d.19 error dicts with lazy traces built by walking frames at unwind and resolving spans through the reader's tables; the minimal primitive set (stack words, provisional exact scalar arithmetic and ordering with the full d.22 float regime, pp/prin, if/call/while/dip inline, def/let, attempt/raise, exit/args); the session and CLI (persistent stack with base-index unit rollback, retained span tables so def'd word bodies keep provenance, -e/file/stdin/REPL modes with script-prints-nothing); and end-to-end tests porting the poc CLI battery including the 20k-deep TCO recursion proof.",
+  "currentStateAnalysis": "Verified against HEAD (68ab81e): src/ holds the complete M1+M2 stack — reader.read producing Parsed{forms, spans: SpanTable keyed by *Header with per-element Span slices, source_name} and ReadResult Complete/Incomplete (src/reader.zig:72-140); lexer.Diag allocation-free diagnostics; value/heap/list/dict/print/equal all landed with the review fixes (exact intFloatEqual is PRIVATE in src/equal.zig — M3 needs public scalar ORDERING, absent everywhere in Zig; the porting source is poc/rust/src/value.rs compare_int_float, public, used by both equality and compare_scalars). There is no evaluator, environment, error-dict construction, session, or binary: build.zig defines only a module and test steps (no addExecutable), src/main.zig does not exist, and no word is executable. The poc predecessors are runtime.rs (Machine/Frame/step/execute, attempt via AttemptAfter + catch_attempt, define, while frames, contract checks), error.rs (EclError→dict with attach-if-absent context and absence-is-absence), and main.rs (CLI modes, REPL continuation loop, script-vs-eval printing split). CI: six blocking gates incl. instrumented Linux TSan and ZLint --deny-warnings.",
+  "operationalConsiderations": {
+    "externalSystemAccess": "Not applicable: no new external dependency. The CI manifest is unchanged; the new binary is built by the existing zig build graph (Patch 5 adds the exe target and wires e2e tests to it).",
+    "crossRuntimeContracts": "Two intra-project forward contracts are created. (1) The env seam for M4: Patch 1's Binding union (word body | value | primitive fn-pointer) and the two-scope chain are explicitly the M4 substrate — M4 replaces the session table's interior with cells/generations/visibility/registry without changing the lookup signature the machine calls. (2) The kernel seam for M5: Patch 4's scalar arithmetic is documented as the provisional path that M5's (op × leaf-tag) kernels replace; it lives behind one dispatch site (the primitive fn table) so the replacement is a binding swap, not a machine change. Both seams are named in code comments and in this gameplan; changing their shapes later is a design event.",
+    "failureBehavior": "Language errors follow d.7/d.19 exactly: any failure inside a unit unwinds that unit's frames wholesale (O(1) truncation to the boundary), the data stack truncates to the unit base, and the error surfaces as a d.19 dict — printed to stderr with exit 1 for scripts/-e/stdin, printed and swallowed (stack restored, session alive) for REPL lines, reified as {'err dict} for attempt. Host OOM is NOT a language error and is deliberately outside the d.19 closed kind set: the binary catches error.OutOfMemory at the top level, prints 'ecl: out of memory' to stderr, and exits 2 (explicit opinion below); library code continues to propagate it. Parse diagnostics from the reader become 'kind 'parse error dicts at the session boundary, matching poc's shape. Fuel/cancel are present and polled in the dispatch loop from day one but nothing sets the cancel flag until M7 — the poll is a branch on a local, costing nothing measurable.",
+    "concurrencyAndIdempotency": "Single-threaded by construction in this milestone: one session, one unit executing at a time, no scheduler. The only shared-mutable touch remains the M1 intern table (TSan-covered). The unit/fuel/cancel structure is built scheduler-shaped (a Unit is a self-contained struct; suspension is 'stop stepping') so M7 adds workers without reshaping the machine — but no concurrent path exists to specify yet.",
+    "rollbackStrategy": "Not applicable in the persistent-state sense: no migrations, no external writes. The language-level rollback story IS this milestone's deliverable — base-index truncation of stack and frames at unit boundaries — and is covered by acceptance tests (a failing REPL line restores the stack while prior defs survive, d.7's stack-only guarantee)."
+  },
+  "mergabilityStrategy": {
+    "featureFlagStrategy": "Ungated (option 3: no flag). This milestone creates the first observable surface (the ecl binary); there is nothing to migrate from, no existing users, and no flag infrastructure. The binary simply begins to exist.",
+    "featureFlags": [],
+    "patchOrderingStrategy": "Sequential chain 1→6 (env → machine core → error dicts/traces → primitives → session/CLI → e2e tests): each layer consumes the previous, and every patch appends exports to src/root.zig (the shared frame). All patches leave `zig build test` green; the binary exists from Patch 5."
+  },
+  "requiredChanges": [
+    { "file": "src/env.zig", "line": null, "description": "Minimal two-scope environment: frozen core (primitive fn-pointer bindings, built once) chained to a session table; late-bound def/let; lookup by interned u32 id. The M4 substrate seam.", "signature": "pub fn lookup(self: *const Env, id: u32) ?Binding  //  Binding = union(enum) { word: *value.Header, value: value.Value, primitive: *const fn (*Machine) MachineError!void }" },
+    { "file": "src/machine.zig", "line": null, "description": "Unit (frame stack, data stack, env, fuel, cancel flag), ≤48-byte Frame with comptime size assert, the dispatch loop (ip/code/env in locals; frames touched only at calls/suspensions/returns), TCO frame overwrite, boundary frames with saved stack/frame depths, base-index underflow checks.", "signature": "pub fn run(unit: *Unit, code: *value.Header) MachineError!void" },
+    { "file": "src/machine.zig", "line": null, "description": "d.19 error construction: EclErr (total kind enum over the closed 11-member set, message buffer, word id, data pairs; carried as a Unit field since Zig errors have no payload) converted to a real ecl dict via dict.fromPairs at the surfacing boundary; lazy trace by walking frames innermost-first (unqualified word symbols until M4); absence-is-absence (word/position keys omitted when unknown).", "signature": "pub fn toDict(self: *const EclErr, allocator: std.mem.Allocator, unit: *const Unit, archive: *const spans.SpanArchive) error{OutOfMemory}!value.Value" },
+    { "file": "src/spans.zig", "line": null, "description": "SpanArchive absorbing Parsed span tables (entry move) with forList lookup across all absorbed tables; created in Patch 3 so error construction compiles before the session exists.", "signature": "pub fn forList(self: *const SpanArchive, header: *const value.Header) ?[]const lexer.Span" },
+    { "file": "src/equal.zig", "line": null, "description": "Add the public exact scalar ordering M3's comparisons need (ports poc compare_int_float; int/int, float/float, char/char, mixed exact — never rounds the integer).", "signature": "pub fn compareScalars(a: Value, b: Value) error{NotComparable}!std.math.Order" },
+    { "file": "src/prims.zig", "line": null, "description": "The M3 word set as core-env bindings: dup swap pop over dip; + - * / with d.22 semantics (checked int overflow, division-by-zero 'domain, inf propagation, NaN-producing ops 'domain); = <> < > <= >= via compareScalars; match; pp prin; def let; if call while (inline); attempt (boundary frame + {'ok}/{'err} outcomes); raise; exit; args.", "signature": "pub fn install(core: *env.Env) error{OutOfMemory}!void" },
+    { "file": "src/session.zig", "line": null, "description": "Persistent session: env chain, persistent data stack, an owned spans.SpanArchive (absorbs each executed unit's SpanTable so def'd word bodies keep provenance), unit execution with base-index rollback, parse-diagnostic→error-dict conversion.", "signature": "pub fn runUnit(self: *Session, source_name: []const u8, source: []const u8) error{OutOfMemory}!UnitOutcome  //  UnitOutcome = union(enum) { ok, incomplete, err: value.Value }" },
+    { "file": "src/main.zig", "line": null, "description": "CLI: -e/--eval, script file, stdin (-), source-as-first-arg, bare-stdin REPL with continuation prompt; script prints only explicitly while -e/stdin/calculator print the final stack (d.22); -h/-V; OOM exit 2.", "signature": "pub fn main() u8" },
+    { "file": "build.zig", "line": null, "description": "Add the ecl executable (root src/main.zig importing the ecl module) with install step; wire the e2e test runner to depend on the installed binary.", "signature": null },
+    { "file": "src/machine_test.zig", "line": null, "description": "Cross-layer tests Patch 6 owns: the 20k countdown TCO proof and redefine-and-heal; error-dict, scalar, attempt, and rollback suites live with Patches 3-5 in their own files.", "signature": null },
+    { "file": "src/value_test.zig", "line": null, "description": "Extend the embedded line-budget audit (the @embedFile list and thresholds at value_test.zig:138-163) to the M3 sources.", "signature": null },
+    { "file": "test/e2e.zig", "line": null, "description": "End-to-end battery spawning the installed binary via std.process.Child: ported poc CLI tests (calculator prints, script errors as dicts on stderr with exit 1, piped stdin one unit) plus the printed soul test.", "signature": null }
+  ],
+  "functionalChanges": [
+    { "id": "FC-1", "description": "The ecl binary exists: `ecl '3 4 +'` prints `7` and exits 0 — evaluation is pushing, end to end (the soul test, DoD-1's core).", "ownedBy": 5 },
+    { "id": "FC-2", "description": "Words execute by late-bound lookup: `def` binds a list body (non-list errors, pointing at let), `let` binds any value including quotations-as-data, redefinition heals callers on next execution, and referencing an unknown word raises 'undefined-word (d.5 semantics, live).", "ownedBy": 1 },
+    { "id": "FC-3", "description": "Deep recursion is safe: tail calls reuse frames, so a 20,000-deep named countdown completes without host-stack growth, and while/if/call run inline on the current stack per VOCABULARY contracts.", "ownedBy": 2 },
+    { "id": "FC-4", "description": "Failures are d.19 error dicts with lazy traces: 'kind from the closed set, message, innermost word, frame-walked trace, and source position resolved through reader span tables — with word/position simply absent when unknown; the happy path maintains no trace state.", "ownedBy": 3 },
+    { "id": "FC-5", "description": "Scalar arithmetic and comparison behave per d.4/d.22 ahead of the kernels: int overflow errors, division by zero is 'domain, inf propagates while NaN-producing operations error, comparisons are exact past 2^53, and `match` is available whole-value.", "ownedBy": 4 },
+    { "id": "FC-6", "description": "`attempt` reifies isolated execution as {'ok (results)} or {'err dict} with the unit's substack discarded on failure; `raise` throws a user dict (d.7 crash-only surface, live).", "ownedBy": 4 },
+    { "id": "FC-7", "description": "Units roll back: a failing REPL line restores the data stack to its entry depth while prior definitions and session state survive (d.7's stack-only guarantee, observable interactively).", "ownedBy": 5 },
+    { "id": "FC-8", "description": "CLI modes match the d.22 printing split: script files print only explicitly (pp/prin); -e, stdin, and calculator invocations print the final stack; parse errors and runtime errors reach stderr as printed error dicts with exit 1; the REPL continues incomplete lines with a continuation prompt.", "ownedBy": 5 }
+  ],
+  "contextResources": [
+    {
+      "id": "arch-machine",
+      "kind": "reference-doc",
+      "paths": ["design/ARCHITECTURE.md"],
+      "why": "§The frame machine and §Code representation and dispatch are the normative design: unit-as-movable-struct, ≤48-byte frames, base-index isolation, boundary-frame chain, lazy traces, TCO as frame overwrite, dispatch loop discipline (frames touched only at calls/returns/suspensions), fuel safe points, and the one-design-pass-then-frozen budget rule.",
+      "consumedBy": [1, 2, 3, 4]
+    },
+    {
+      "id": "ledger-machine-rulings",
+      "kind": "contract",
+      "paths": ["design/DESIGN.md"],
+      "why": "Binding contracts: d.5 (def/let, late binding), d.7 (crash-only, attempt outcomes, stack-only rollback), d.14 (inline vs isolated application), d.19 (error dict schema, closed kinds, absence-is-absence), d.22 (float regime, printing split, floor of the closed kind set), d.23 (traces show the non-tail spine; happy path pays nothing).",
+      "consumedBy": [2, 3, 4, 5]
+    },
+    {
+      "id": "poc-machine",
+      "kind": "predecessor",
+      "paths": ["poc/rust/src/runtime.rs", "poc/rust/src/error.rs"],
+      "why": "The proven semantics being re-expressed with better data structures: execute/step dispatch, define (list-body check, error pointing at let), while's two-frame pattern with stack-depth contract, attempt/catch_attempt outcome protocol, EclError→dict with attach-if-absent and absence-is-absence. Its eager traces, fat frames, and mem::take isolation are explicitly NOT to be imitated (ARCHITECTURE's skeleton disposition).",
+      "consumedBy": [2, 3, 4]
+    },
+    {
+      "id": "poc-cli",
+      "kind": "predecessor",
+      "paths": ["poc/rust/src/main.rs", "poc/rust/tests/cli.rs"],
+      "why": "CLI behavior parity source: mode dispatch (-e, file, stdin, source-arg, tty REPL), the script-prints-nothing vs eval-prints-stack split, REPL continuation via read status, error dicts on stderr with nonzero exit. tests/cli.rs is the porting source for the e2e battery.",
+      "consumedBy": [5, 6]
+    },
+    {
+      "id": "m2-reader-handoff",
+      "kind": "existing-implementation",
+      "paths": ["src/reader.zig", "src/lexer.zig"],
+      "why": "The M3 handoff exactly as M2's gameplan specified it: Parsed{forms, spans, source_name} with SpanTable.forList keyed by list identity, ReadResult Complete/Incomplete for the REPL loop, lexer.Diag for parse diagnostics. The session consumes these shapes verbatim; the SpanArchive design exists because Parsed's identity-keyed spans must outlive the unit for def'd bodies.",
+      "consumedBy": [3, 5]
+    },
+    {
+      "id": "m1-value-api",
+      "kind": "existing-implementation",
+      "paths": ["src/value.zig", "src/heap.zig", "src/list.zig", "src/dict.zig", "src/equal.zig", "src/print.zig"],
+      "why": "The substrate: Value/Header shapes, heap ownership discipline (retainValue/releaseValue, documented functional-update contract), list.at/len for quotation walking, dict.fromPairs for error dicts and outcomes, equal.match plus the PRIVATE intFloatEqual that Patch 4's public compareScalars generalizes, print for pp/stack rendering.",
+      "consumedBy": [1, 2, 3, 4, 5, 6]
+    },
+    {
+      "id": "poc-exact-compare",
+      "kind": "existing-implementation",
+      "paths": ["poc/rust/src/value.rs"],
+      "why": "compare_int_float (pub(crate), post-review): the exact mixed int/float ORDERING algorithm — NaN → not comparable; float below/above i64 range orders as greater/less against the integer; in-range truncation compare with fractional tiebreak. Patch 4's compareScalars ports this exactly so ordering never rounds the integer (the ordering half of the 2^53 review finding).",
+      "consumedBy": [4]
+    }
+  ],
+  "acceptanceCriteria": [
+    "All six CI gates pass (toolchain, fmt, Debug, ReleaseSafe, instrumented Linux TSan, ZLint --deny-warnings) with the new binary built in the same graph.",
+    "`ecl '3 4 +'` prints `7` and exits 0 (the soul test, run as an e2e test against the installed binary); `ecl` with a script file prints nothing implicitly and only pp/prin output appears.",
+    "A 20,000-deep named tail recursion (`(dup 0 > (1 - countdown) (pop) if) 'countdown def 20000 countdown`) completes with an empty final stack — TCO as frame overwrite, proven at the same depth as the poc test.",
+    "Frame size is comptime-asserted ≤ 48 bytes; the dispatch loop touches the frame stack only at word calls, boundary operations, and returns (no per-token frame traffic — reviewed structurally, not just tested).",
+    "Error dicts match d.19: `ecl '1 0 /'` exits 1 with a dict containing 'kind 'domain and 'word '/; `ecl 'missing'` yields 'kind 'undefined-word; a failing word defined from source carries a trace (innermost first) and the failing token's line/col from the span archive; parse errors surface as 'kind 'parse dicts; absent word/position keys are omitted, never null.",
+    "The d.22 scalar regime holds ahead of kernels: `9223372036854775806 2 +` errors 'overflow; `inf 1 +` prints inf; `inf inf -` errors 'domain; `1 2 /` prints 0.5; comparisons are exact past 2^53 (compareScalars fixtures mirror the M1 equality boundary tests).",
+    "`attempt` produces {'ok (results)} / {'err dict} with the substack discarded on failure and the outer stack untouched (printed-form fixtures match poc: `7 (1 0 /) attempt` shows `7 {'err ...`).",
+    "REPL rollback: driving the session with (10), (20 + missing), (inspect-equivalent) leaves the stack showing 10 after the error, and a def made before a failing line still executes after it — while `use`-less M3 sessions keep all d.5 late-binding behavior (redefine-and-heal fixture).",
+    "The REPL continues incomplete input (`1 (2` → continuation prompt) and recovers from parse errors without exiting; piped stdin is one unit (poc cli.rs parity).",
+    "checkAllAllocationFailures sweeps unit execution end-to-end (parse → execute → error-dict construction) with zero leaks, and the whole suite runs under the leak-detecting allocator.",
+    "Cold start spawns zero threads (no scheduler code exists; asserted by review, enforced by M7's lazy-pool test later); fuel decrements and the cancel flag are polled in the loop (smoke-tested via a test hook).",
+    "The embedded line-budget audit extends to the new sources and stays inside d.23 (core interpreter excluding kernels ≤ ~5k; this milestone's core additions target ≤ 1.5k)."
+  ],
+  "reachabilityTraces": [
+    {
+      "observable": "`ecl '3 4 +'` prints 7 and exits 0 (DoD-1, the soul test)",
+      "tracesTo": "FC-1",
+      "ownedBy": 5,
+      "path": [
+        { "file": "src/main.zig", "symbol": "main", "status": "created" },
+        { "file": "src/session.zig", "symbol": "Session.runUnit", "status": "created" },
+        { "file": "src/reader.zig", "symbol": "read", "status": "existing" },
+        { "file": "src/machine.zig", "symbol": "run", "status": "created" },
+        { "file": "src/prims.zig", "symbol": "install (binding for `+`)", "status": "created" },
+        { "file": "src/print.zig", "symbol": "toOwnedString", "status": "existing" }
+      ],
+      "testPath": [
+        { "file": "src/session.zig", "symbol": "session: the soul test through runUnit", "status": "created" }
+      ],
+      "runtimeReachabilityNote": "Not framework-routed: a plain argv dispatch in main.zig. Patch 5's session-level soul test proves the library path; Patch 6's e2e battery re-proves it against the installed binary itself."
+    },
+    {
+      "observable": "A failing REPL line restores the stack while prior defs survive (DoD-14's M3 half)",
+      "tracesTo": "FC-7",
+      "ownedBy": 5,
+      "path": [
+        { "file": "src/main.zig", "symbol": "repl loop", "status": "created" },
+        { "file": "src/session.zig", "symbol": "Session.runUnit (base-index rollback)", "status": "created" },
+        { "file": "src/machine.zig", "symbol": "boundary truncation", "status": "created" }
+      ],
+      "testPath": [
+        { "file": "src/session.zig", "symbol": "session: runUnit rollback and def survival", "status": "created" }
+      ],
+      "runtimeReachabilityNote": null
+    }
+  ],
+  "openQuestions": [],
+  "explicitOpinions": [
+    {
+      "opinion": "The session retains every executed unit's span table in a SpanArchive (entries moved out of Parsed after execution; the Parsed shell is freed).",
+      "rationale": "def'd word bodies are reader-built lists whose headers outlive their unit; lazy traces (d.23) resolve spans by list identity at unwind, so the identity-keyed spans must live as long as any binding might reference the body. Archiving tables per session bounds memory by total source read — the same order as the interned source itself — and keeps Parsed's lifetime simple."
+    },
+    {
+      "opinion": "Host OOM is outside the language: the binary prints 'ecl: out of memory' to stderr and exits 2; it is never a d.19 error dict.",
+      "rationale": "d.19's kind set is closed and deliberately excludes OOM — allocation failure is a host condition, not a program-observable ecl error, and building an error dict requires allocation anyway. Library code keeps propagating error.OutOfMemory (M1 policy); only main.zig terminates."
+    },
+    {
+      "opinion": "M3's arithmetic/comparison is an explicitly-marked provisional scalar seam, replaced by M5's kernels via binding swap.",
+      "rationale": "The workstream sequences kernels after the machine so the machine has something to execute first. Keeping the scalar path behind the primitive fn table means M5 replaces implementations without touching dispatch — and the d.22 semantics fixtures written now become the kernel regression suite then."
+    },
+    {
+      "opinion": "The M3 word set is the workstream DoD list plus scalar comparisons and `match`; prelude words ([E]) wait for M6.",
+      "rationale": "if/while are unusable without comparisons, so `= <> < > <= >=` and `match` join the minimal set (compareScalars makes them exact). Everything else the DoD names ships; nothing speculative does — outcome-inspection ergonomics (ok?/ok!) arrive with their vocabulary milestone, and attempt outcomes are meanwhile observable via printing."
+    },
+    {
+      "opinion": "The REPL is bare-stdin with a continuation prompt; line editing is M8 by workstream design.",
+      "rationale": "Milestone boundaries are the workstream's; duplicating M8 early would spend this milestone's budget on UX while the machine is the deliverable."
+    },
+    {
+      "opinion": "e2e tests spawn the installed binary via std.process.Child from a dedicated test/e2e.zig wired into the build graph after install.",
+      "rationale": "Ports poc's tests/cli.rs discipline: the printed-output and exit-code contracts are properties of the real artifact, not the library — the soul test must execute the same binary a user runs."
+    },
+    {
+      "opinion": "Sequential 1→6 dependency chain; no parallel patches.",
+      "rationale": "Same reasoning as M1/M2: every patch appends to src/root.zig and consumes the prior layer; the collision-free chain costs nothing at this scale."
+    }
+  ],
+  "patches": [
+    {
+      "number": 1,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "Minimal environment: frozen core, session table, late-bound def/let",
+      "files": [
+        { "path": "src/env.zig", "action": "create", "description": "Binding = union(enum){ word: *Header (retained body list), value: Value (retained) } — the primitive arm is added in Patch 2 alongside machine.zig, because its fn-pointer type references Machine/MachineError which do not exist yet and every patch must build green standalone; Env = { core: std.AutoHashMapUnmanaged(u32, Binding) (frozen after install), session: std.AutoHashMapUnmanaged(u32, Binding) }; lookup(id) checks session then core; define(id, binding) inserts/replaces in session, releasing any displaced binding's retained values; deinit releases all session bindings. Doc comment names this the M4 substrate seam (cells/generations/visibility/registry replace the session interior; lookup signature is stable)." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export env module; test aggregation." }
+      ],
+      "changes": [
+        "Late binding is structural: lookup returns the CURRENT binding at each call; nothing caches resolutions (the d.23 iron law — any future cache holds cells, and cells arrive in M4).",
+        "def/let ownership follows the M1 documented contract: binding a value retains it; rebinding releases the old; a word binding retains the body list header.",
+        "Core is populated once by prims.install (Patch 4) and never written again — the freeze is asserted in Debug via a sealed flag.",
+        "Tests: define/lookup/redefine lifecycle under the leak allocator; displaced-binding release; unknown id returns null; checkAllAllocationFailures over define.",
+        "This patch ships only the word/value arms; Patch 2 adds the primitive arm when machine.zig exists (mutual env↔machine imports are legal in Zig; only the intermediate state would break)."
+      ],
+      "requiredContext": ["arch-machine", "m1-value-api"],
+      "testStubsIntroduced": ["env: define, lookup, redefine lifecycle", "env: displaced bindings release their values", "env: checkAllAllocationFailures over define"],
+      "testStubsImplemented": ["env: define, lookup, redefine lifecycle", "env: displaced bindings release their values", "env: checkAllAllocationFailures over define"],
+      "spec": "module FRAME_MACHINE_FIRST_LIGHT_PATCH_1.\n\n> Late binding as data: a name resolves to whatever the environment\n> holds at the moment of each execution (d.5).\n\nEnv.\nId.\nBinding.\nlookup e: Env, i: Id => Binding.\ndefine e: Env, i: Id, b: Binding => Env.\n---\n> Definition is last-writer-wins and immediately visible.\nall e: Env, i: Id, b: Binding | lookup (define e i b) i = b.",
+      "precedents": null
+    },
+    {
+      "number": 2,
+      "classification": "INFRA",
+      "complexity": 3,
+      "title": "Machine core: unit, small frames, dispatch loop, TCO, boundaries",
+      "files": [
+        { "path": "src/machine.zig", "action": "create", "description": "Unit { frames: std.ArrayList(Frame), stack: std.ArrayList(Value), env: *env.Env, fuel: u32, cancelled: *const std.atomic.Value(bool) or equivalent flag hook }; Frame = small tagged struct with comptime @sizeOf(Frame) <= 48 assert — variants: eval { code: *Header (borrowed via retained binding/unit), ip: u32, env: *env.Env (per-frame env ref per ARCHITECTURE.md's frame record — one chain in M3, load-bearing for M4 modules), traced_word: u32 or sentinel }, while_cond/while_body { condition/body headers, base: u32 }, boundary { kind: attempt/unit, stack_base: u32, frame_base: u32, trace_word: sentinel }; run(unit, code): the single switch loop with code/ip/env in locals, executing values by push and words by env lookup (value bindings push, word bindings either overwrite the current in-register frame when in tail position — TCO — or push an eval frame), primitives called through the fn pointer; fuel decremented per dispatch step with the cancel poll at zero; base-index underflow checks against the innermost boundary." },
+        { "path": "src/env.zig", "action": "modify", "description": "Add the primitive arm to Binding — *const fn (*Machine) MachineError!void — now that machine.zig exists (deferred from Patch 1 for standalone-green builds); core-freeze assert unchanged." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export machine module; test aggregation." }
+      ],
+      "changes": [
+        "Dispatch discipline per ARCHITECTURE §Dispatch: one switch loop; the frame stack is touched only at word calls (push), tail calls (overwrite in-register state), returns (pop), and boundary operations — never per token. The loop body reads the current code list via list.atUnchecked over the retained header.",
+        "TCO: when the fetched form is a word-binding call and ip has reached the end of the current code, replace the in-register (code, ip, traced_word) instead of pushing — Clinger frame-reuse; the 20k countdown test (Patch 6) is the proof.",
+        "Boundary frames record saved stack depth and frame index and form the innermost-boundary chain via a machine-local register (index), giving O(1) unwind targeting (no rposition scan — the poc defect the architecture retires).",
+        "if/call/dip semantics as machine operations invoked from primitives: schedule a quotation inline (same stack, no isolation) per VOCABULARY's inline contract; while as the two-frame iterative pattern with the base-depth contract check ported from poc.",
+        "Inline scheduling is tail-aware: when a primitive schedules a quotation (if branch, call, dip continuation) and the current frame is exhausted, the quotation REPLACES the frame instead of pushing — without this the named countdown fixture grows one frame per iteration through if's branch quotation and the flat-frame-count test fails.",
+        "Fuel: u32 decremented each loop iteration; at zero, poll the cancel flag (no-op consumer in M3) and refill — the BEAM-shaped safe point exists from the first commit so M7 never retrofits it.",
+        "Tests: value pushing, word call/return, tail-position overwrite (frame count stays flat across a tail chain), boundary truncation restores exact depths, underflow at a boundary is caught, frame-size comptime assert, fuel wraps and polls (via a test hook counting polls)."
+      ],
+      "requiredContext": ["arch-machine", "ledger-machine-rulings", "poc-machine", "m1-value-api"],
+      "testStubsIntroduced": ["machine: push and call basics", "machine: tail calls reuse the frame", "machine: boundary truncation is exact", "machine: fuel polls at zero", "machine: frame size stays within 48 bytes"],
+      "testStubsImplemented": ["machine: push and call basics", "machine: tail calls reuse the frame", "machine: boundary truncation is exact", "machine: fuel polls at zero", "machine: frame size stays within 48 bytes"],
+      "spec": "module FRAME_MACHINE_FIRST_LIGHT_PATCH_2.\n\n> The defunctionalized-CEK machine: evaluation is pushing; control is\n> a flat frame stack; tail position reuses the frame (d.10, d.23).\n\nUnit.\nFrame.\nCode.\nDepth.\nframes u: Unit => [Frame].\nstack-depth u: Unit => Depth.\ncurrent u: Unit => Code.\ntail-call? c: Code => Bool.\nstep u: Unit => Unit.\nframe-count u: Unit => Nat0.\nboundary-base u: Unit => Depth.\n---\n> Tail calls do not grow the continuation.\nall u: Unit, tail-call? (current u) | frame-count (step u) = frame-count u.",
+      "precedents": [
+        {
+          "kind": "paper",
+          "name": "Clinger — Proper Tail Recursion and Space Efficiency (PLDI 1998)",
+          "url": "https://dl.acm.org/doi/10.1145/277650.277652",
+          "whyApplicable": "The space guarantee decision 10 makes: TCO implemented as frame reuse (overwrite the in-register code/ip instead of pushing) is exactly the properly-tail-recursive discipline this paper formalizes; the 20k-depth test is its observable."
+        },
+        {
+          "kind": "documentation",
+          "name": "Erlang/BEAM reduction counting (theBeamBook, scheduling)",
+          "url": "https://github.com/happi/theBeamBook/blob/master/chapters/scheduling.asciidoc",
+          "whyApplicable": "The fuel counter decremented per dispatch step with a poll at zero is BEAM's reduction mechanism transplanted; built now (as a no-op consumer) so M7's scheduler never retrofits safe points."
+        }
+      ]
+    },
+    {
+      "number": 3,
+      "classification": "INFRA",
+      "complexity": 3,
+      "title": "Error dicts and lazy traces (d.19 with code-plane provenance)",
+      "files": [
+        { "path": "src/machine.zig", "action": "modify", "description": "EclErr accumulator: kind enum total over d.19's closed 11-member set ('underflow 'undefined-word 'type 'shape 'conform 'overflow 'domain 'contract 'parse 'io 'user — frozen now with else-less switches, HeapKind discipline; 'shape/'conform have no M3 construction sites), fixed message buffer, optional word id, optional span, small data pairs array. Zig error sets carry no payload, so the pending EclErr lives as a Unit field and MachineError signals its presence — the workstream's ruled mechanism (error union + out-param dict) and M2's Diag precedent. unwind(unit, boundary) walks frames innermost-first collecting traced word ids (non-tail spine only, d.23) and resolves the failing (code, ip) to a span via spans.SpanArchive; toDict builds the real ecl dict (dict.fromPairs, symbol keys, absence-is-absence: word/source/line/col present only when known)." },
+        { "path": "src/spans.zig", "action": "create", "description": "SpanArchive: absorbs Parsed span tables (entry move; the caller frees the Parsed shell) and serves forList lookups across all absorbed tables. Defined in this patch — not in session.zig (Patch 5) — so toDict compiles standalone; the session owns an instance." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export spans; test aggregation update." }
+      ],
+      "changes": [
+        "The happy path maintains no trace state: frames already carry code+ip+traced_word; the trace exists only when unwind runs (CPython zero-cost model, the workstream precedent).",
+        "The kind enum is the complete closed d.19 set from day one — 'underflow 'undefined-word 'type 'shape 'conform 'overflow 'domain 'contract 'parse 'io 'user — so M5/M6 add construction sites, never enum members; each site names its kind; no catch-all.",
+        "'trace entries are unqualified word symbols in M3: d.19 promises qualified names, but qualification requires modules (M4) — fixtures assert the unqualified form with a comment naming the M4 upgrade.",
+        "Span resolution: the failing frame's (code header, ip) looks up the archive; misses (runtime-built code) omit position keys — the absence probe is a fixture.",
+        "raise validation ports poc error.rs raised(): dict with 'kind symbol required, optional 'msg string, optional 'word symbol, optional 'trace of symbols, optional 'data dict with source/line/col extraction — attach-if-absent discipline preserved.",
+        "Tests: dict shape fixtures for each M3-reachable kind; trace order innermost-first; span present for source-defined failure and absent for runtime-assembled code; raise round-trips a user dict unchanged."
+      ],
+      "requiredContext": ["arch-machine", "ledger-machine-rulings", "poc-machine", "m2-reader-handoff", "m1-value-api"],
+      "testStubsIntroduced": ["errors: dict shapes per kind", "errors: lazy trace is innermost-first non-tail spine", "errors: span present from source, absent from runtime code", "errors: raise preserves user dicts"],
+      "testStubsImplemented": ["errors: dict shapes per kind", "errors: lazy trace is innermost-first non-tail spine", "errors: span present from source, absent from runtime code", "errors: raise preserves user dicts"],
+      "spec": "module FRAME_MACHINE_FIRST_LIGHT_PATCH_3.\n\n> Errors are data (d.19); traces are produced at unwind, never\n> maintained (d.23); absence is absence (d.22).\n\nErr.\nKind.\nDict.\nSpanInfo.\nkind-of e: Err => Kind.\nto-dict e: Err => Dict.\nhas-word? d: Dict => Bool.\nword-known? e: Err => Bool.\nhas-position? d: Dict => Bool.\nposition-known? e: Err => Bool.\n---\n> The dict carries word and position exactly when they are known.\nall e: Err | has-word? (to-dict e) = word-known? e.\nall e: Err | has-position? (to-dict e) = position-known? e.",
+      "precedents": [
+        {
+          "kind": "documentation",
+          "name": "CPython zero-cost exception handling + PEP 657 position side tables",
+          "url": "https://peps.python.org/pep-0657/",
+          "whyApplicable": "The exact lazy-trace shape being implemented: no live trace vector; the unwind walks frames and consults the code-plane span tables only when an error is actually surfacing. The workstream-level precedent lands in code in this patch."
+        }
+      ]
+    },
+    {
+      "number": 4,
+      "classification": "INFRA",
+      "complexity": 3,
+      "title": "The minimal primitive set with the exact d.22 scalar regime",
+      "files": [
+        { "path": "src/prims.zig", "action": "create", "description": "install(core) binding every M3 word to a primitive fn: dup/swap/pop/over (base-checked); dip/call/if (inline scheduling); while (two-frame pattern); + - * / with checked int arithmetic, float propagation rules (float_result semantics: NaN → 'domain, non-finite from finite → 'overflow, division by zero → 'domain, inf operands propagate); = <> < > <= >= over compareScalars; match; pp/prin (print module; prin type-checks strings); def/let (list-body check for def with the error naming let); attempt (boundary frame push; on catch, {'err dict}; on completion, {'ok (results)} from the substack) and raise; exit (process exit with popped int status) and args (session argv as a list of strings)." },
+        { "path": "src/equal.zig", "action": "modify", "description": "Add pub fn compareScalars porting poc compare_int_float exactly: int/int, float/float (NaN unreachable in values), char/char by codepoint, mixed int/float without rounding the integer (range clamp then truncation compare with fractional tiebreak); returns error.NotComparable for non-scalar or cross-kind pairs." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export prims; test aggregation." }
+      ],
+      "changes": [
+        "The scalar arithmetic is the documented M5 seam: one comment block names it provisional and points at the kernel milestone; the d.22 fixtures written here are the future kernel regression suite.",
+        "attempt implements the boundary protocol from Patch 2: push boundary frame recording depths; the machine's unwind stops at the innermost attempt boundary, truncates, and the primitive completion path packages {'ok (…)}/{'err dict} — poc's outcome fixtures are ported verbatim (`7 (1 0 /) attempt` prints `7 {'err …`).",
+        "compareScalars fixtures mirror M1's intFloatEqual boundary tests from the ordering side (2^53±1 against 2^53; minInt exact; maxInt vs 2^63) so the ordering half of the review finding is pinned in Zig, not just in the oracle.",
+        "Contract/underflow errors carry the word name ('kind 'underflow with 'word) via the EclErr accumulator — poc message-shape parity where fixtures assert text.",
+        "checkAllAllocationFailures over a unit that exercises arithmetic, attempt success and failure, and def/let."
+      ],
+      "requiredContext": ["arch-machine", "ledger-machine-rulings", "poc-machine", "poc-exact-compare", "m1-value-api"],
+      "testStubsIntroduced": ["prims: d.22 scalar regime fixtures", "prims: compareScalars exact ordering boundaries", "prims: attempt outcome protocol", "prims: def requires a list body", "prims: checkAllAllocationFailures over execution"],
+      "testStubsImplemented": ["prims: d.22 scalar regime fixtures", "prims: compareScalars exact ordering boundaries", "prims: attempt outcome protocol", "prims: def requires a list body", "prims: checkAllAllocationFailures over execution"],
+      "spec": "module FRAME_MACHINE_FIRST_LIGHT_PATCH_4.\n\n> The d.22 float regime, live: NaN never exists; inf propagates from\n> non-finite operands; silent overflow is banned.\n\nValue.\nOp.\nOutcome.\nok-v v: Value => Outcome.\nerr-overflow => Outcome.\nerr-domain => Outcome.\napply o: Op, a: Value, b: Value => Outcome.\nfinite? v: Value => Bool.\nwould-be-nan? o: Op, a: Value, b: Value => Bool.\nnonfinite-from-finite? o: Op, a: Value, b: Value => Bool.\n---\n> NaN-producing applications are domain errors.\nall o: Op, a: Value, b: Value, would-be-nan? o a b | apply o a b = err-domain.\n\n> Non-finite results from finite operands are overflow errors.\nall o: Op, a: Value, b: Value, nonfinite-from-finite? o a b | apply o a b = err-overflow.",
+      "precedents": null
+    },
+    {
+      "number": 5,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "Session, span archive, CLI, and the REPL",
+      "files": [
+        { "path": "src/session.zig", "action": "create", "description": "Session { env, persistent stack, spans.SpanArchive (the Patch 3 type — this patch instantiates and feeds it, never redefines it), argv }; runUnit(source_name, source): read → on incomplete return it → on parse error convert Diag to a 'kind 'parse dict → archive the unit's spans → execute forms on the persistent stack behind a unit boundary at current depth → on machine error, unwind produced the dict; rollback truncates to the entry depth. stackDisplay for the eval/REPL printing modes." },
+        { "path": "src/main.zig", "action": "create", "description": "argv dispatch ported from poc main.rs: -h/-V, -e/--eval SOURCE [ARGS], '-' stdin, existing-file path, .ecl-missing-file error, fallback source-as-arg; REPL on tty stdin with `ecl> `/`.. ` prompts, error dicts printed to stderr without exiting, EOF handling; script mode prints nothing implicitly; -e/stdin/calculator print the final stack; OOM caught at top level → 'ecl: out of memory' → exit 2; language errors printed as dicts → exit 1." },
+        { "path": "build.zig", "action": "modify", "description": "addExecutable 'ecl' (root_module importing the ecl library module), b.installArtifact; expose the artifact path to the e2e test via build options; keep all existing steps unchanged." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export session; test aggregation." }
+      ],
+      "changes": [
+        "The REPL loop is poc main.rs's shape: accumulate pending input while ReadResult is incomplete; complete → runUnit → print stack or error dict; parse failure clears pending; the unit is the logical line (GRAMMAR units).",
+        "Script mode: the whole file is one unit (grammar); a failing script prints the dict to stderr and exits 1 — crash-only for processes.",
+        "The session keeps Parsed span tables alive in the archive BEFORE execution (a def during the unit must not race the archive), satisfying the trace-resolution contract from Patch 3.",
+        "stdout discipline: pp/prin write directly; the final-stack print renders each value via print.zig joined by spaces (poc stack_display parity)."
+      ],
+      "requiredContext": ["poc-cli", "m2-reader-handoff", "ledger-machine-rulings", "m1-value-api"],
+      "testStubsIntroduced": ["session: the soul test through runUnit", "session: runUnit rollback and def survival", "session: parse diagnostics become 'parse dicts", "session: span archive outlives units"],
+      "testStubsImplemented": ["session: the soul test through runUnit", "session: runUnit rollback and def survival", "session: parse diagnostics become 'parse dicts", "session: span archive outlives units"],
+      "spec": "module FRAME_MACHINE_FIRST_LIGHT_PATCH_5.\n\n> Crash-only units on a persistent session (d.7): a failed unit leaves\n> the stack exactly as it was; environment writes survive.\n\nSession.\nUnit.\nDepth.\ndepth s: Session => Depth.\nrun s: Session, u: Unit => Session.\nfails? s: Session, u: Unit => Bool.\ndefs s: Session => Nat0.\n---\n> Stack-only rollback: failure preserves depth; definitions made\n> before the failure survive (d.7's honest guarantee).\nall s: Session, u: Unit, fails? s u | depth (run s u) = depth s.\nall s: Session, u: Unit, fails? s u | defs (run s u) >= defs s.",
+      "precedents": null
+    },
+    {
+      "number": 6,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "End-to-end battery: soul test, TCO proof, poc CLI parity",
+      "files": [
+        { "path": "src/machine_test.zig", "action": "create", "description": "Only the cross-layer tests this patch owns: the 20k countdown TCO proof (byte-for-byte the poc fixture) and redefine-and-heal. The soul test, rollback, attempt, error-dict, scalar, and OOM-sweep suites are owned by Patches 3-5 in their own files (see testMap) — do NOT re-implement them here." },
+        { "path": "src/value_test.zig", "action": "modify", "description": "Extend the @embedFile line-budget audit (value_test.zig:138-163) to env.zig, machine.zig, spans.zig, prims.zig, session.zig, main.zig, and machine_test.zig; keep the d.23 thresholds (core < 3500 raised only if the audit demands it, total < 5000 extended proportionally)." },
+        { "path": "test/e2e.zig", "action": "create", "description": "Spawns the installed binary (path via build option) with std.process.Child: `ecl '3 4 +'` → stdout '7\\n' exit 0; `ecl '1 0 /'` → stderr contains 'kind 'domain and 'word '/, exit 1; piped stdin `5 range…`-free M3 variant (arith-only unit) prints final stack; script file prints only pp output; missing .ecl file errors; -V prints the version." },
+        { "path": "build.zig", "action": "modify", "description": "Add the e2e test step depending on the installed artifact; wire into `zig build test` so CI's existing tasks run it with no manifest change." },
+        { "path": "src/root.zig", "action": "modify", "description": "Test aggregation for machine_test.zig." }
+      ],
+      "changes": [
+        "Port poc/rust/tests/cli.rs cases that are meaningful pre-kernels (calculator print, error-to-stderr with exit 1, piped stdin as one unit, invalid-UTF-8 source as 'parse) — cases needing M4+ vocabulary are deferred to their milestones with a comment naming the owner.",
+        "The countdown fixture is byte-for-byte poc's: `(dup 0 > (1 - countdown) (pop) if) 'countdown def 20000 countdown` ending with an empty stack.",
+        "The rollback e2e uses stdin piping where possible and session-level tests where a tty would be required (pty-driven REPL assertions are M8/M10 territory per the workstream suite)."
+      ],
+      "requiredContext": ["poc-cli", "m1-value-api"],
+      "testStubsIntroduced": ["e2e: soul test against the installed binary", "e2e: error dicts on stderr with exit 1", "e2e: stdin is one unit; scripts print only explicitly", "machine_test: 20k countdown completes flat"],
+      "testStubsImplemented": ["e2e: soul test against the installed binary", "e2e: error dicts on stderr with exit 1", "e2e: stdin is one unit; scripts print only explicitly", "machine_test: 20k countdown completes flat"],
+      "spec": "module FRAME_MACHINE_FIRST_LIGHT_PATCH_6.\n\n> No new semantics: the patch locks Patches 1-5's contracts behind\n> executable end-to-end assertions against the real artifact.\n\nAssertion.\nsoul-test => Assertion.\ntco-depth => Assertion.\nrollback => Assertion.\nerror-dicts => Assertion.\nprinting-split => Assertion.\nverified? a: Assertion => Bool.\n---\nall a: Assertion | verified? a.",
+      "precedents": null
+    }
+  ],
+  "testMap": [
+    { "testName": "env: define, lookup, redefine lifecycle", "file": "src/env.zig", "stubPatch": 1, "implPatch": 1 },
+    { "testName": "env: displaced bindings release their values", "file": "src/env.zig", "stubPatch": 1, "implPatch": 1 },
+    { "testName": "env: checkAllAllocationFailures over define", "file": "src/env.zig", "stubPatch": 1, "implPatch": 1 },
+    { "testName": "machine: push and call basics", "file": "src/machine.zig", "stubPatch": 2, "implPatch": 2 },
+    { "testName": "machine: tail calls reuse the frame", "file": "src/machine.zig", "stubPatch": 2, "implPatch": 2 },
+    { "testName": "machine: boundary truncation is exact", "file": "src/machine.zig", "stubPatch": 2, "implPatch": 2 },
+    { "testName": "machine: fuel polls at zero", "file": "src/machine.zig", "stubPatch": 2, "implPatch": 2 },
+    { "testName": "machine: frame size stays within 48 bytes", "file": "src/machine.zig", "stubPatch": 2, "implPatch": 2 },
+    { "testName": "errors: dict shapes per kind", "file": "src/machine.zig", "stubPatch": 3, "implPatch": 3 },
+    { "testName": "errors: lazy trace is innermost-first non-tail spine", "file": "src/machine.zig", "stubPatch": 3, "implPatch": 3 },
+    { "testName": "errors: span present from source, absent from runtime code", "file": "src/machine.zig", "stubPatch": 3, "implPatch": 3 },
+    { "testName": "errors: raise preserves user dicts", "file": "src/machine.zig", "stubPatch": 3, "implPatch": 3 },
+    { "testName": "prims: d.22 scalar regime fixtures", "file": "src/prims.zig", "stubPatch": 4, "implPatch": 4 },
+    { "testName": "prims: compareScalars exact ordering boundaries", "file": "src/equal.zig", "stubPatch": 4, "implPatch": 4 },
+    { "testName": "prims: attempt outcome protocol", "file": "src/prims.zig", "stubPatch": 4, "implPatch": 4 },
+    { "testName": "prims: def requires a list body", "file": "src/prims.zig", "stubPatch": 4, "implPatch": 4 },
+    { "testName": "prims: checkAllAllocationFailures over execution", "file": "src/prims.zig", "stubPatch": 4, "implPatch": 4 },
+    { "testName": "session: the soul test through runUnit", "file": "src/session.zig", "stubPatch": 5, "implPatch": 5 },
+    { "testName": "session: runUnit rollback and def survival", "file": "src/session.zig", "stubPatch": 5, "implPatch": 5 },
+    { "testName": "session: parse diagnostics become 'parse dicts", "file": "src/session.zig", "stubPatch": 5, "implPatch": 5 },
+    { "testName": "session: span archive outlives units", "file": "src/session.zig", "stubPatch": 5, "implPatch": 5 },
+    { "testName": "e2e: soul test against the installed binary", "file": "test/e2e.zig", "stubPatch": 6, "implPatch": 6 },
+    { "testName": "e2e: error dicts on stderr with exit 1", "file": "test/e2e.zig", "stubPatch": 6, "implPatch": 6 },
+    { "testName": "e2e: stdin is one unit; scripts print only explicitly", "file": "test/e2e.zig", "stubPatch": 6, "implPatch": 6 },
+    { "testName": "machine_test: 20k countdown completes flat", "file": "src/machine_test.zig", "stubPatch": 6, "implPatch": 6 }
+  ],
+  "dependencyGraph": [
+    { "patch": 1, "classification": "INFRA", "dependsOn": [] },
+    { "patch": 2, "classification": "INFRA", "dependsOn": [1] },
+    { "patch": 3, "classification": "INFRA", "dependsOn": [2] },
+    { "patch": 4, "classification": "INFRA", "dependsOn": [3] },
+    { "patch": 5, "classification": "INFRA", "dependsOn": [4] },
+    { "patch": 6, "classification": "INFRA", "dependsOn": [5] }
+  ],
+  "mergabilityChecklist": {
+    "featureFlagStrategyDocumented": true,
+    "earlyPatchesNonFunctional": true,
+    "testStubsInInfraPatches": true,
+    "testImplsColocated": true,
+    "testMapComplete": true,
+    "testMapImplPatchMatchesCode": true,
+    "behaviorPatchesMinimal": true,
+    "dependencyGraphOrdered": true,
+    "behaviorPatchesJustified": true,
+    "functionalChangesOwnedByExactlyOnePatch": true,
+    "operationalConsiderationsSubstantive": true,
+    "observableReachabilityTraced": true,
+    "gameplanIsAtomicAndAutonomous": true
+  },
+  "mergabilityInsight": "6 of 6 patches are INFRA in the mergability sense — each lands with all gates green and no user-visible surface exists until Patch 5 creates the binary itself (a from-nothing surface with no prior behavior to regress; the workstream's first observable, so reachabilityTraces carries the soul-test and rollback paths). Sequential chain by real layering plus the shared src/root.zig frame.",
+  "finalStateSpec": "module FRAME_MACHINE_FIRST_LIGHT.\n\n> ══════════════════════════════════════════\n> THE GUARANTEE\n> ══════════════════════════════════════════\n> After this gameplan, ecl executes: evaluation is pushing on a\n> defunctionalized-CEK frame machine with guaranteed TCO, crash-only\n> units with stack-only rollback, d.19 error dicts with lazy traces and\n> code-plane provenance, the exact d.22 scalar regime, and a binary\n> whose soul test — ecl '3 4 +' printing 7 — is an executable CI\n> assertion.\n\nEnv.\nId.\nBinding.\nUnit.\nFrame.\nCode.\nDepth.\nSession.\nErr.\nKind.\nDict.\nValue.\nOp.\nOutcome.\nAssertion.\n\nlookup e: Env, i: Id => Binding.\ndefine e: Env, i: Id, b: Binding => Env.\n\ncurrent u: Unit => Code.\ntail-call? c: Code => Bool.\nstep u: Unit => Unit.\nframe-count u: Unit => Nat0.\n\nkind-of e: Err => Kind.\nto-dict e: Err => Dict.\nhas-word? d: Dict => Bool.\nword-known? e: Err => Bool.\nhas-position? d: Dict => Bool.\nposition-known? e: Err => Bool.\n\nok-v v: Value => Outcome.\nerr-overflow => Outcome.\nerr-domain => Outcome.\napply o: Op, a: Value, b: Value => Outcome.\nwould-be-nan? o: Op, a: Value, b: Value => Bool.\nnonfinite-from-finite? o: Op, a: Value, b: Value => Bool.\n\ndepth s: Session => Depth.\nrun s: Session, u: Unit => Session.\nfails? s: Session, u: Unit => Bool.\ndefs s: Session => Nat0.\n---\n> Late binding: definition is immediately visible at the next lookup.\nall e: Env, i: Id, b: Binding | lookup (define e i b) i = b.\n\n> TCO: tail calls do not grow the continuation.\nall u: Unit, tail-call? (current u) | frame-count (step u) = frame-count u.\n\n> Errors carry word and position exactly when known (absence is\n> absence).\nall e: Err | has-word? (to-dict e) = word-known? e.\nall e: Err | has-position? (to-dict e) = position-known? e.\n\n> The d.22 float regime.\nall o: Op, a: Value, b: Value, would-be-nan? o a b | apply o a b = err-domain.\nall o: Op, a: Value, b: Value, nonfinite-from-finite? o a b | apply o a b = err-overflow.\n\n> Crash-only rollback preserves depth and definitions.\nall s: Session, u: Unit, fails? s u | depth (run s u) = depth s.\nall s: Session, u: Unit, fails? s u | defs (run s u) >= defs s."
+}
