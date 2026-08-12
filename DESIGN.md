@@ -74,10 +74,10 @@ are preserved. Nothing below is constrained by compatibility.
    their dependencies immediately. No Thunk concept.
 
 6. **No closures, ever.** A quotation is a plain inspectable list; capture is
-   `curry`/splice producing a new plain list (`3 (+) curry` → `(3 +)`).
+   `cons`/splice producing a new plain list (`3 (+) cons` → `(3 +)`).
    Locals are definition-site sugar that desugars to point-free code before
    storage; head-position only; not permitted across quotation boundaries in
-   v1 (error suggests `curry`). Spelling: `(|lo hi| …)`, Rust/Ruby-style —
+   v1 (error suggests `cons`). Spelling: `(|lo hi| …)`, Rust/Ruby-style —
    see GRAMMAR.md. The locals sugar shares no vocabulary with `let` — they
    are unrelated mechanisms.
 
@@ -88,21 +88,21 @@ are preserved. Nothing below is constrained by compatibility.
    The guarantee is stack-only, stated honestly: env writes and IO
    performed before the failure survive. Failure is observed from outside,
    as data, at one explicit boundary word: `(q) attempt` runs a
-   self-contained quotation (effect `( -- ... )`; inputs arrive via `curry`
+   self-contained quotation (effect `( -- ... )`; inputs arrive via `cons`
    or env names, never the ambient stack — the same rule as every other
    quotation boundary) on an isolated substack, and always pushes exactly
    one outcome value: `{'ok (results)}` or `{'err <error dict>}`. Uniform
    arity is what makes reified failure safe in a stack language — the
    desync argument that killed results-on-stack does not apply, because a
    failure never shares a stack with the code observing it. Handling is
-   ordinary dict handling: `ok?`, `unwrap` (results, or re-raise),
+   ordinary dict handling: `ok?`, `ok!` (results, or re-raise),
    `or-else` (default on failure). The unit of failure is the unit of
    concurrency: `spawn` (decision 20) accepts exactly what `attempt`
    accepts and delivers the same outcome; `par-each` re-raises the
    leftmost `'err`, keeping parallel failure deterministic. The REPL is
    the implicit top-level boundary.
 
-8. **No macro layer.** Runtime quotation construction (`compose`, `curry`,
+8. **No macro layer.** Runtime quotation construction (`compose`, `cons`,
    list words) plus `def` *is* the metaprogramming system; `'word body`
    fetches a word's list for surgery, `def` rebinds. With immutability,
    build-new-then-rebind is the only way code changes (this is what makes
@@ -165,7 +165,7 @@ are preserved. Nothing below is constrained by compatibility.
       leading axis, exactly one result per element; result specializes when
       rectangular. Depth composes by nesting: `((q) each) each`.
     - `each2`: requires `( a b -- c )`; zip with broadcast conformability.
-      Each-left/right are derived via `curry`, not primitives.
+      Each-left/right are derived via `cons`, not primitives.
     - `for`: requires `( a -- )`; the ordered effect loop, collects nothing.
     - `fold`/`scan`: require `( acc a -- acc )`.
     There is no collect-all `map` (result length would be a dynamic property
@@ -181,7 +181,7 @@ are preserved. Nothing below is constrained by compatibility.
     operate on codepoints. Storage rides leaf specialization: a string leaf
     carries a width tag (1/2/4 bytes per char, per string — PEP 393 model),
     so ASCII costs 1 byte/char and indexing stays O(1). UTF-8 exists only
-    at IO boundaries (source files, read/write/say); invalid UTF-8 on input
+    at IO boundaries (source files, read/write/print); invalid UTF-8 on input
     errors. Bytes are not chars: binary IO yields int/byte vectors, never
     strings (deliberate departure from K). Char arithmetic is ordinal:
     `char int +` → char, `char char -` → int, `char char +` → error;
@@ -275,7 +275,7 @@ are preserved. Nothing below is constrained by compatibility.
     stateful servers, which ecl does not target. Four primitives;
     everything else is stdlib.
     - `spawn` `( q -- task )`: runs a self-contained quotation (`attempt`'s
-      contract — inputs via `curry`/env, never ambient stack) on its own
+      contract — inputs via `cons`/env, never ambient stack) on its own
       share-nothing substack, concurrently. Immutability makes sharing
       safe with no copying or serialization.
     - `await` `( task -- outcome )`: blocks; delivers the same
@@ -417,8 +417,10 @@ a BQN competitor; wrong one for this language).
 
 ## Reopened by the clean-slate call
 
-- **All naming.** Word names (dup/swap/dip/primrec...) are ec inheritance,
-  not commitments.
+- **All naming.** Settled — see VOCABULARY.md: Joy/Factor names for the
+  stack half, K names for the array half; `pop` (stack) vs `drop`
+  (sequence); `cons` not `curry`; `call` not `i`; Janet's `prin`/`print`
+  convention; primrec/linrec dropped from core.
 - **Grammar.** Settled — see GRAMMAR.md (companion spec: tokens, forms,
   units, round-trip).
 
@@ -427,6 +429,5 @@ a BQN competitor; wrong one for this language).
 None. Everything is settled above or explicitly deferred with its
 constraints pre-written: the seal layer and module–seal interaction
 (decision 9), pdict (decision 1), channels (decision 20), exactness
-(decision 4), and the naming item under Reopened. Host choice is
-deliberately absent: the Runtime section specifies what any
-implementation must deliver, and nothing more.
+(decision 4). Host choice is deliberately absent: the Runtime section
+specifies what any implementation must deliver, and nothing more.
