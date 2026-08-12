@@ -628,10 +628,6 @@ fn releaseForms(allocator: std.mem.Allocator, forms: []const binder.SpannedValue
     for (forms) |form| heap.releaseValue(allocator, form.value);
 }
 
-fn isCloser(codepoint: u21) bool {
-    return codepoint == ')' or codepoint == ']' or codepoint == '}';
-}
-
 fn isScalar(codepoint: u32) bool {
     return codepoint <= 0x10ffff and !(codepoint >= 0xd800 and codepoint <= 0xdfff);
 }

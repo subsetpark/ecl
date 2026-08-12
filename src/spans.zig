@@ -64,20 +64,6 @@ pub const SpanArchive = struct {
         parsed.source_name = &.{};
     }
 
-    pub fn forList(
-        self: *const SpanArchive,
-        header: *const value.Header,
-    ) ?[]const lexer.Span {
-        var index = self.entries.items.len;
-        while (index > 0) {
-            index -= 1;
-            if (self.entries.items[index].spans.forList(@constCast(header))) |found| {
-                return found;
-            }
-        }
-        return null;
-    }
-
     pub fn locate(
         self: *const SpanArchive,
         header: *const value.Header,
