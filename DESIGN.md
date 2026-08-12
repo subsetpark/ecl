@@ -253,6 +253,15 @@ are preserved. Nothing below is constrained by compatibility.
     - **Tension, stated:** REPL words resolve dynamically, module words
       against their home — the one place "what you see is what runs" needs
       tooling (`which`; `see` displays home) rather than raw text.
+    - **Addenda proven by the skeleton:** a module body has contract
+      `( -- )` and runs stack-isolated (registration produces no values);
+      `use` is idempotent and re-using a module moves it to the top of
+      the shadow order; aliases and module names may not collide in
+      either direction; a failed re-registration leaves the previous
+      generation registered (registration commits only after the body
+      succeeds — crash-only applied to the registry); temporary
+      `def`/`let` inside a module body's isolated children stay dynamic
+      and are never exported.
 
 19. **Error values.** Every error is a dict: `'kind` (symbol, dispatch
     taxonomy), `'msg` (string, preformatted), `'word` (qualified symbol of
