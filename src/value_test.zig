@@ -51,16 +51,7 @@ test "seeded specialization and cross-representation laws" {
         const spine = try list.fromValuesGeneric(allocator, items);
         defer heap.releaseValue(allocator, spine);
         if (use_chars) {
-            try std.testing.expect(switch (leaf.list.kind()) {
-                .leaf_char1, .leaf_char2, .leaf_char4 => true,
-                .generic_spine,
-                .leaf_i64,
-                .leaf_f64,
-                .leaf_symbol,
-                .dict,
-                .reserved_mask,
-                => false,
-            });
+            try std.testing.expect(leaf.isString());
         } else {
             try std.testing.expectEqual(value.HeapKind.leaf_i64, leaf.list.kind());
         }

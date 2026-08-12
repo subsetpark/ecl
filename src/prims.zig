@@ -253,7 +253,7 @@ fn arithmetic(evaluator: *Machine, operation: Arithmetic) MachineError!void {
     defer heap.releaseValue(evaluator.allocator(), right);
     const left = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), left);
-    if (!isNumber(left) or !isNumber(right)) return evaluator.typeError("two numbers");
+    if (!left.isNumber() or !right.isNumber()) return evaluator.typeError("two numbers");
 
     if (operation != .div and left == .int and right == .int) {
         const result = switch (operation) {
@@ -365,7 +365,7 @@ fn raise(evaluator: *Machine) MachineError!void {
     }
     const msg_id = try intern.intern("msg");
     if (try raisedField(evaluator, raised, msg_id)) |message| {
-        if (!isString(message)) {
+        if (!message.isString()) {
             return evaluator.typeError("an error dict with a string at 'msg");
         }
     }
@@ -406,14 +406,6 @@ fn raisedField(
     };
 }
 
-fn isString(item: Value) bool {
-    if (item != .list) return false;
-    return switch (item.list.kind()) {
-        .leaf_char1, .leaf_char2, .leaf_char4 => true,
-        .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .reserved_mask => false,
-    };
-}
-
 fn allSymbols(item: Value) bool {
     if (item != .list) return false;
     const count: usize = @intCast(item.list.len);
@@ -439,10 +431,7 @@ fn pp(evaluator: *Machine) MachineError!void {
 fn prin(evaluator: *Machine) MachineError!void {
     const item = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), item);
-    if (item != .list or switch (item.list.kind()) {
-        .leaf_char1, .leaf_char2, .leaf_char4 => false,
-        .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .reserved_mask => true,
-    }) return evaluator.typeError("a string");
+    if (!item.isString()) return evaluator.typeError("a string");
     const output = evaluator.unit.output orelse
         return evaluator.fail(.io, "standard output is unavailable");
     const count: usize = @intCast(item.list.len);
@@ -486,10 +475,6 @@ fn releaseThree(allocator: std.mem.Allocator, a: Value, b: Value, c: Value) void
     heap.releaseValue(allocator, a);
     heap.releaseValue(allocator, b);
     heap.releaseValue(allocator, c);
-}
-
-fn isNumber(item: Value) bool {
-    return item == .int or item == .float;
 }
 
 fn asFloat(item: Value) f64 {

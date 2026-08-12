@@ -78,6 +78,19 @@ pub const Value = union(Tag) {
             .dict => |header| header,
         };
     }
+
+    pub fn isNumber(self: Value) bool {
+        return self == .int or self == .float;
+    }
+
+    /// A string is a list whose representation is a width-tagged char leaf.
+    pub fn isString(self: Value) bool {
+        if (self != .list) return false;
+        return switch (self.list.kind()) {
+            .leaf_char1, .leaf_char2, .leaf_char4 => true,
+            .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .reserved_mask => false,
+        };
+    }
 };
 
 comptime {
