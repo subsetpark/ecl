@@ -30,19 +30,12 @@ pub const ErrorKind = enum {
     io,
     user,
 
+    /// d.19 freezes this set, so `else` cannot silently absorb a new kind.
+    /// A hyphenated addition would still need its own arm.
     pub fn symbol(self: ErrorKind) []const u8 {
         return switch (self) {
-            .underflow => "underflow",
             .undefined_word => "undefined-word",
-            .type => "type",
-            .shape => "shape",
-            .conform => "conform",
-            .overflow => "overflow",
-            .domain => "domain",
-            .contract => "contract",
-            .parse => "parse",
-            .io => "io",
-            .user => "user",
+            else => @tagName(self),
         };
     }
 };
@@ -58,16 +51,6 @@ const ErrorDataKey = enum {
     name,
     seeded,
     observed,
-
-    fn text(self: ErrorDataKey) []const u8 {
-        return switch (self) {
-            .needed => "needed",
-            .available => "available",
-            .name => "name",
-            .seeded => "seeded",
-            .observed => "observed",
-        };
-    }
 };
 
 const ErrorData = struct {
@@ -171,7 +154,7 @@ pub const EclErr = struct {
         var data_pairs: [8]dict.Pair = undefined;
         var data_len: usize = 0;
         for (self.data[0..self.data_len]) |entry| {
-            const key = try intern.intern(entry.key.text());
+            const key = try intern.intern(@tagName(entry.key));
             data_pairs[data_len] = .{ .{ .symbol = key }, entry.value };
             data_len += 1;
         }
