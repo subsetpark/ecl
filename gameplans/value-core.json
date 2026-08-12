@@ -1,0 +1,442 @@
+{
+  "projectName": "value-core",
+  "owner": "~subsetpark",
+  "repo": "ecl",
+  "specFile": null,
+  "workstream": {
+    "name": "ecl v1 — the real interpreter (design/workstream-v1.md)",
+    "milestone": "value-core",
+    "priorMilestones": [],
+    "unlocks": "Milestone 2 (reader) builds directly on these values; every later milestone keys off the frozen leaf-tag enum and the 16-byte Value cell. Nothing in the workstream can start before this lands."
+  },
+  "problemStatement": "The ecl v1 interpreter (Zig, per the workstream host ruling) has no code yet: the repo contains only design documents and the frozen Rust walking skeleton (poc/rust), whose value representation is disqualified for v1 by ARCHITECTURE.md's disposition table (span-on-every-Value, boxed Arc<[Value]> lists with no flat leaves, uninterned Arc<str> symbols). Every subsequent milestone — reader, frame machine, kernels, scheduler — keys off the value layer's frozen leaf-tag enum, 16-byte cell, and RC discipline, so this layer must exist first and must be built to maximum strictness from the first commit.",
+  "solutionSummary": "Bootstrap a Zig 0.16.0 project at the repo root with a strictness harness (zig fmt --check, Debug + ReleaseSafe test matrix, a ThreadSanitizer test step, leak-detecting std.testing.allocator in every test, checkAllAllocationFailures on every allocating API, and a pinned advisory ZLint job) wired into builds.sr.ht CI. Then implement ARCHITECTURE.md §Values and §Reference-counting discipline as seven sequential library patches: the 16-byte tagged Value cell and 16-byte heap Header with the frozen HeapKind enum; atomic precise RC with the single acquire-ordered uniqueness function and iterative destroy; the global append-only intern table; flat leaves (i64/f64/char×{1,2,4}/symbol) and generic spines with one-pass construction specialization and slack-capacity append; iterative structural equality and hashing that agree with each other; K-style insertion-ordered dicts with order-insensitive equality; and the canonical representation-exposing printer whose fixtures match poc/rust byte-for-byte. A final property-test patch locks the laws.",
+  "currentStateAnalysis": "Verified against HEAD (commit 160eb7c + pushed to git.sr.ht/~subsetpark/ecl): there is no Zig code anywhere in the repo (no build.zig, no *.zig); the root contains design/ (DESIGN.md with decisions 1–23, ARCHITECTURE.md, GRAMMAR.md, VOCABULARY.md, workstream-v1.md, research/) and poc/rust/ (the frozen Rust skeleton, 43 tests green, serving as the cross-implementation semantics oracle — never to be evolved). The local toolchain is Zig 0.16.0 (verified: `zig version`); the generated 0.16 scaffold idioms were grounded by running `zig init` (b.addModule with .root_source_file/.target, b.addTest with .root_module, .minimum_zig_version in build.zig.zon); std.testing.checkAllAllocationFailures exists (std/testing.zig:1115), Module option sanitize_thread exists (std/Build/Module.zig:26), std.atomic.Value exists (std/atomic.zig:9), and the non-generic std.Io.Writer interface exists (std/Io.zig:42, Io/Writer.zig). The forge repo was created this session (sourcehut, unlisted). Everything this gameplan builds is verified absent; everything it consumes is verified present.",
+  "operationalConsiderations": {
+    "externalSystemAccess": "One new external dependency: builds.sr.ht CI (the repo is hosted at git.sr.ht/~subsetpark/ecl, created this session). The CI manifest (.builds/ci.yml, owned by Patch 1) fetches the pinned Zig 0.16.0 tarball from ziglang.org/download and the pinned ZLint release binary over HTTPS at build time; no credentials beyond sourcehut's own build auth are involved, and the library code itself reaches no external system. If ziglang.org is unreachable the build fails visibly — acceptable for CI.",
+    "crossRuntimeContracts": "No runtime-boundary data formats exist yet (no persistence, no IPC, no network payloads). The load-bearing intra-project contract this gameplan freezes is the leaf-tag enum (HeapKind) and the 16-byte Value/Header layouts in src/value.zig: milestones 2–10 (reader, kernels, dispatch tables, idiom registry, printer) all key off it, and decision 23 reserves one narrow-mask tag slot. The enum is declared non-exhaustive-extension-forbidden: adding a kind is a design event per ARCHITECTURE.md §Kernels. Comptime size asserts make layout drift a compile error rather than a silent ABI break.",
+    "failureBehavior": "Allocation failure is the only runtime failure mode in this layer. Policy (explicit opinion below): every allocating API propagates error.OutOfMemory — no library code panics on OOM — which is what makes std.testing.checkAllAllocationFailures usable as an exhaustive OOM-path exerciser (each allocating API in heap.zig, list.zig, intern.zig, and dict.zig gets a checkAllAllocationFailures sweep proving no leak and no partial state on any failure point). Duplicate dict keys at construction return error.DuplicateKey (decision 17's construction-time rule at the layer boundary). There are no timeouts, retries, or external calls.",
+    "concurrencyAndIdempotency": "The atomic RC discipline IS this gameplan's concurrency contract, per decision 23: increments are monotonic (.monotonic RMW add), the decrement is .release with an .acquire fence on the 1→0 transition before destroy, and the single uniqueness function is an .acquire load compared to 1 — used identically by every future in-place mutation site. The intern table is the one deliberately shared-mutable structure: single mutex on the write path, lock-free reads via segmented append-only storage (segment pointers never move, so a published id is永readable without synchronization beyond the release-store of the segment count). Patch 3 includes a multi-threaded incRef/decRef/drop stress test and Patch 4 a concurrent intern test; both run under the ThreadSanitizer build variant in CI, which is the enforcement mechanism.",
+    "rollbackStrategy": "Not applicable beyond git: this gameplan writes no persistent state, no migrations, no external mutations — it creates a pure in-memory library plus CI manifests. Reverting the gameplan's patches restores the repo exactly; the sourcehut repo and CI manifest have no stateful residue."
+  },
+  "mergabilityStrategy": {
+    "featureFlagStrategy": "Ungated (option 3: no flag). This is a greenfield library crate with no binary entry point and no user-reachable surface until Milestone 3 wires a CLI; there is no observable behavior to gate and no existing flag infrastructure in the repo (verified: no flag system exists anywhere). Gating would be a dead toggle.",
+    "featureFlags": [],
+    "patchOrderingStrategy": "Strictly sequential foundational chain (1→9), all INFRA: scaffold → value cell/tags → heap+RC → intern → lists/leaves → equality/hash → dicts → printer → property suite. Serialization is deliberate: every patch after 1 appends its module export and test aggregation to src/root.zig (a shared frame), and each layer consumes the previous layer's types. Parallelism would buy nothing here and would create root.zig merge collisions."
+  },
+  "requiredChanges": [
+    { "file": "build.zig", "line": null, "description": "Zig 0.16 build graph: ecl module, unit-test step, ThreadSanitizer test step (module option sanitize_thread=true), grounded on the zig init 0.16 scaffold idioms.", "signature": "pub fn build(b: *std.Build) void" },
+    { "file": "build.zig.zon", "line": null, "description": "Package manifest: .name = .ecl, .version = \"0.1.0\", .minimum_zig_version = \"0.16.0\", .paths.", "signature": null },
+    { "file": ".builds/ci.yml", "line": null, "description": "builds.sr.ht manifest: fetch pinned Zig 0.16.0 tarball; tasks fmt (zig fmt --check .), test (Debug), test-safe (-Doptimize=ReleaseSafe), test-tsan (zig build test-tsan), lint-advisory (pinned ZLint, non-blocking).", "signature": null },
+    { "file": "src/root.zig", "line": null, "description": "Library root: public re-exports of value/heap/intern/list/equal/dict/print and the test aggregation block; extended by each subsequent patch.", "signature": null },
+    { "file": "src/value.zig", "line": null, "description": "The 16-byte Value cell, Tag enum, frozen HeapKind enum (generic_spine, leaf_i64, leaf_f64, leaf_char1, leaf_char2, leaf_char4, leaf_symbol, dict, reserved_mask), 16-byte Header, DictPayload layout; comptime layout asserts.", "signature": "pub const Value = union(Tag) { int: i64, float: f64, char: u32, symbol: u32, word: u32, list: *Header, dict: *Header }" },
+    { "file": "src/heap.zig", "line": null, "description": "Allocation, atomic RC, the single uniqueness function, iterative destroy, slack-capacity append support.", "signature": "pub fn isUnique(h: *const Header) bool  //  .acquire load == 1; the ONE uniqueness gate (d.23)" },
+    { "file": "src/intern.zig", "line": null, "description": "Global append-only intern table: segmented storage, mutex write path, lock-free reads, u32 ids shared by words and symbols.", "signature": "pub fn intern(bytes: []const u8) error{OutOfMemory}!u32  /  pub fn get(id: u32) []const u8" },
+    { "file": "src/list.zig", "line": null, "description": "Flat leaves + generic spines: one-pass construction specialization, char width selection/promotion, uniqueness-gated slack append, element access.", "signature": "pub fn fromValues(alloc: std.mem.Allocator, items: []const Value) error{OutOfMemory}!Value" },
+    { "file": "src/equal.zig", "line": null, "description": "Iterative structural equality and hashing: numeric cross-type, representation-invariant (leaf vs spine), order-insensitive dict arm; hash agrees with match.", "signature": "pub fn match(a: Value, b: Value) bool  /  pub fn hash(v: Value) u64" },
+    { "file": "src/dict.zig", "line": null, "description": "K-style dicts: keys+values child lists, cached entry hashes, insertion order, linear scan <16 entries then u32 open-addressed index, functional put/del/merge.", "signature": "pub fn fromPairs(alloc: std.mem.Allocator, pairs: []const [2]Value) error{ OutOfMemory, DuplicateKey }!Value" },
+    { "file": "src/print.zig", "line": null, "description": "Canonical representation-exposing printer over the non-generic 0.16 writer interface; iterative; GRAMMAR.md escapes; poc-parity fixtures.", "signature": "pub fn print(v: Value, w: *std.Io.Writer) std.Io.Writer.Error!void" },
+    { "file": "src/value_test.zig", "line": null, "description": "Cross-module property suite: specialization laws, equality laws, dict laws, print determinism, OOM sweeps.", "signature": null }
+  ],
+  "functionalChanges": [
+    { "id": "FC-1", "description": "`zig build test` exists and CI (.builds/ci.yml) gates every push on formatting (zig fmt --check), Debug tests, ReleaseSafe tests, and a ThreadSanitizer test variant, with a pinned non-blocking ZLint advisory job.", "ownedBy": 1 },
+    { "id": "FC-2", "description": "The frozen leaf-tag enum (HeapKind, including the reserved narrow-mask slot per d.23) and the 16-byte Value and Header layouts exist and are comptime-asserted, so layout drift is a compile error.", "ownedBy": 2 },
+    { "id": "FC-3", "description": "Values are reference-counted with precise atomic counts: dup/drop are thread-safe, uniqueness is a single acquire-ordered rc==1 probe, destroy walks arbitrarily deep structures without host recursion, and the leak-detecting test allocator proves zero leaks across the suite.", "ownedBy": 3 },
+    { "id": "FC-4", "description": "Symbols and words intern to stable u32 ids in one global append-only table: get(intern(s)) == s, repeated interning is idempotent, ids are readable lock-free from any thread.", "ownedBy": 4 },
+    { "id": "FC-5", "description": "Construction specializes: homogeneous lists become flat leaves (all-int→i64 leaf, all-float→f64 leaf, all-char→char leaf at minimal width — the value-IS-string doctrine, all-symbol→symbol leaf), heterogeneous lists become spines; append on a uniquely-held leaf writes into slack capacity in place, on a shared value copies first (d.1's copy-once clause observable via rc).", "ownedBy": 5 },
+    { "id": "FC-6", "description": "Structural equality and hashing hold the ledger's laws: 2 matches 2.0, 0.0 matches -0.0, a char leaf equals the equivalent spine of chars (representation invariance), and hash(a)==hash(b) whenever match(a,b).", "ownedBy": 6 },
+    { "id": "FC-7", "description": "Dicts preserve insertion order, accept any value as key, compare order-insensitively, hash commutatively (agreeing with dict equality), and reject duplicate keys at construction with error.DuplicateKey.", "ownedBy": 7 },
+    { "id": "FC-8", "description": "Canonical printing exposes representation ([...] for specialized leaves, (...) for spines, {k v} for dicts, GRAMMAR.md escapes, shortest-round-trip floats with the .0 rule, inf/-inf) and matches poc/rust byte-for-byte on the shared fixture set.", "ownedBy": 8 }
+  ],
+  "contextResources": [
+    {
+      "id": "arch-values",
+      "kind": "reference-doc",
+      "paths": ["design/ARCHITECTURE.md"],
+      "why": "Sections 'Values and memory' and 'Reference-counting discipline (Perceus-on-a-stack)' are the normative design for every structure in this gameplan: the 16-byte cell, header layout, explicit capacity (bucket allocator deferred), frozen leaf enum, K-style dict, RC orderings, the single uniqueness function, and the iterative-destroy requirement.",
+      "consumedBy": [2, 3, 4, 5, 7]
+    },
+    {
+      "id": "ledger-rulings",
+      "kind": "contract",
+      "paths": ["design/DESIGN.md"],
+      "why": "Decisions 22 and 23 are binding contracts on this layer: numeric cross-type equality, 0.0=-0.0, no NaN, absence-is-absence, precise atomic RC with acquire uniqueness, symbol leaves, reserved mask tag, order-insensitive dict equality, and the line budget.",
+      "consumedBy": [2, 3, 5, 6, 7]
+    },
+    {
+      "id": "grammar-print",
+      "kind": "contract",
+      "paths": ["design/GRAMMAR.md"],
+      "why": "The printer must emit only forms the grammar reads (round-trip closure): char literal spellings (\\a, \\space, \\u{...}), string escapes (\\\\, \\\", \\n, \\t, \\u{...}), bracket conventions, and number formats including inf/-inf.",
+      "consumedBy": [8]
+    },
+    {
+      "id": "poc-value-semantics",
+      "kind": "predecessor",
+      "paths": ["poc/rust/src/value.rs"],
+      "why": "The frozen Rust skeleton is the executable semantics oracle: its structurally_eq cases (numeric cross-type, string≡char-list bridging, order-insensitive dicts), its canonical printer outputs ('[1 2]', '(1 +)', '([1 2] [3])', '2.0', '0.125'), and its construction-specialization behavior define the observable behavior this layer must reproduce over the new representation. Its internals (Arc, spans, String variant) are explicitly NOT to be imitated.",
+      "consumedBy": [5, 6, 8, 9]
+    },
+    {
+      "id": "srht-builds",
+      "kind": "external-reference",
+      "paths": ["https://man.sr.ht/builds.sr.ht/"],
+      "why": "Authoritative manifest format for .builds/ci.yml (image, packages, sources, tasks, artifacts). The repo is hosted on sourcehut, so CI is builds.sr.ht, not GitHub Actions.",
+      "consumedBy": [1]
+    },
+    {
+      "id": "zig-strictness",
+      "kind": "test-or-static-check",
+      "paths": ["https://ziglang.org/documentation/0.16.0/", "https://github.com/DonIsaac/zlint"],
+      "why": "The strictness harness's mechanisms: std.testing.allocator (fails tests on leaks), std.testing.checkAllAllocationFailures (std/testing.zig:1115, exhaustive OOM-path exercise), Module option sanitize_thread (std/Build/Module.zig:26) for the TSan variant, zig fmt --check; ZLint pinned as the advisory linter (verified active, own semantic analyzer).",
+      "consumedBy": [1, 3]
+    }
+  ],
+  "acceptanceCriteria": [
+    "`zig build test` passes in Debug and with -Doptimize=ReleaseSafe on Zig 0.16.0 exactly (pinned by build.zig.zon minimum_zig_version and the CI tarball).",
+    "`zig build test-tsan` (ThreadSanitizer variant) passes, exercising the multi-threaded RC stress test and concurrent intern test.",
+    "`zig fmt --check .` is clean and enforced as a blocking CI task; ZLint runs as a pinned, non-blocking advisory task.",
+    "Every test in the suite uses std.testing.allocator (leak detection), and every allocating public API in heap.zig, intern.zig, list.zig, and dict.zig has a checkAllAllocationFailures sweep.",
+    "comptime asserts pin @sizeOf(Value) == 16 and @sizeOf(Header) == 16, and the HeapKind enum contains exactly the frozen set including reserved_mask (d.23).",
+    "Construction-specialization laws hold under property tests: homogeneous inputs produce the matching leaf kind (all-char → char leaf at minimal width), heterogeneous inputs produce spines, and list.at(fromValues(xs), i) matches xs[i] for all i.",
+    "Equality/hash laws hold under property tests: match is reflexive and symmetric; 2 matches 2.0; 0.0 matches -0.0; a char leaf matches the equivalent generic spine of the same chars; match(a,b) implies hash(a) == hash(b).",
+    "Dict laws hold: insertion order preserved on iteration, equality ignores insertion order, duplicate keys at construction return error.DuplicateKey, and functional put/del/merge never mutate a shared dict (rc-observed).",
+    "Printer fixtures match poc/rust byte-for-byte for the shared value-only set (at minimum: '[1 2]', '(1 +)', '([1 2] [3])', '2.0', '0.125', '\"ab\"' for the char leaf built from \\a \\b, symbol/word rendering, '{'a 1}' shape, 'inf'/'-inf').",
+    "Unique-append goes into slack (pointer-stable until capacity growth) and shared-append copies first, observed via rc and pointer identity in tests.",
+    "src/ line count is reported by `wc -l` in the P9 test log and is comfortably inside the d.23 core budget (this layer should be well under 2k lines)."
+  ],
+  "reachabilityTraces": [],
+  "openQuestions": [],
+  "explicitOpinions": [
+    {
+      "opinion": "Host repo is sourcehut (git.sr.ht/~subsetpark/ecl), created unlisted during planning; CI is builds.sr.ht via .builds/ci.yml.",
+      "rationale": "User ruling during gameplanning ('create a new repo in sourcehut'). Unlisted rather than public: clonable by URL (orchestrator-compatible) without announcing the project; flipping to public is one `hut git update --visibility public`."
+    },
+    {
+      "opinion": "No feature flag; ship ungated.",
+      "rationale": "Greenfield library with no binary and no user-reachable surface until Milestone 3; the repo has no flag infrastructure and nothing to gate. A flag here would be a dead toggle."
+    },
+    {
+      "opinion": "Maximum strictness = blocking first-party gates (fmt --check, Debug + ReleaseSafe matrix, TSan variant, leak-detecting test allocator, checkAllAllocationFailures) plus ZLint pinned as a non-blocking advisory job.",
+      "rationale": "User directive to bring maximum static analysis to bear. Zig's third-party linters are young (ZLint is the most substantial; zwanzig and ziglint are earlier-stage — verified by search 2026-08); making an immature tool a blocking gate on a pre-1.0 toolchain invites false reds, so first-party tooling blocks and the linter advises until it earns promotion."
+    },
+    {
+      "opinion": "Allocation failure propagates error.OutOfMemory from every library API; no panics in library code.",
+      "rationale": "Makes checkAllAllocationFailures usable as an exhaustive OOM-path exerciser (it requires error propagation), keeps the library embeddable, and defers the panic-vs-report policy to the binary (Milestone 3), which owns process behavior."
+    },
+    {
+      "opinion": "Strictly sequential dependency graph; no parallel patches.",
+      "rationale": "Every patch after 1 appends to src/root.zig (module export + test aggregation), a shared frame that concurrent worktrees would collide on; and each layer consumes the previous layer's types. Serializing nine INFRA patches costs little and eliminates the collision class."
+    },
+    {
+      "opinion": "Dicts are K-style (keys vector + values vector + cached hashes + optional u32 index), not CPython-compact; the DictPayload layout lives in src/value.zig (Patch 2) so equality (Patch 6) can read it without importing dict.zig.",
+      "rationale": "ARCHITECTURE.md §Values chose the K layout (insertion order for free; columns are the table story). Placing the payload layout with the other frozen layouts breaks the equal↔dict circular dependency cleanly: equal.zig reads the layout, dict.zig implements operations using equal.hash."
+    },
+    {
+      "opinion": "Tests live in-module as Zig test blocks (plus one cross-module property file), introduced and implemented in the same patch; testMap records stubPatch == implPatch.",
+      "rationale": "Zig tests referencing a module cannot compile before the module exists, so pre-landing skipped stubs is impossible for greenfield files; in-module tests are the Zig convention and keep each patch self-verifying. The test-first intent is preserved by the spec: each patch's Pantagruel contract is written here, before any implementation."
+    },
+    {
+      "opinion": "JSON null ↔ 'null, http-by-spike, Zig host, and stdlib-embedding rulings are inherited from the workstream and not re-opened here.",
+      "rationale": "Ruled during workstream planning (design/workstream-v1.md, Decisions Made) and recorded in the ledger where applicable; this milestone touches none of them directly."
+    }
+  ],
+  "patches": [
+    {
+      "number": 1,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "Zig project bootstrap with maximum-strictness CI harness",
+      "files": [
+        { "path": "build.zig", "action": "create", "description": "0.16 build graph grounded on the zig init scaffold: b.standardTargetOptions, b.standardOptimizeOption, b.addModule(\"ecl\", .{ .root_source_file = b.path(\"src/root.zig\"), .target = target }), a unit-test artifact via b.addTest(.{ .root_module = mod }) wired to a `test` step, and a second test artifact whose module sets .sanitize_thread = true wired to a `test-tsan` step." },
+        { "path": "build.zig.zon", "action": "create", "description": ".name = .ecl, .version = \"0.1.0\", .minimum_zig_version = \"0.16.0\", .paths = .{\"build.zig\", \"build.zig.zon\", \"src\"}; toolchain fills .fingerprint." },
+        { "path": "src/root.zig", "action": "create", "description": "Library root with a doc comment naming the module map, one placeholder pub decl, and a smoke test so `zig build test` runs green from this patch onward. Subsequent patches append their `pub const x = @import(\"x.zig\");` exports and `test { _ = @import(\"x.zig\"); }` aggregation here." },
+        { "path": ".builds/ci.yml", "action": "create", "description": "builds.sr.ht manifest: alpine image; task 'toolchain' downloads and verifies the pinned zig-0.16.0 tarball from ziglang.org/download and puts it on PATH; task 'fmt' runs zig fmt --check .; task 'test' runs zig build test; task 'test-safe' runs zig build test -Doptimize=ReleaseSafe; task 'test-tsan' runs zig build test-tsan; task 'lint-advisory' fetches the pinned ZLint release and runs it with failures reported but not failing the build (advisory by design)." },
+        { "path": ".gitignore", "action": "modify", "description": "Add .zig-cache/ and zig-out/ alongside the existing /poc/rust/target/ and /.claude/ entries." }
+      ],
+      "changes": [
+        "Scaffold the project exactly on the 0.16 idioms grounded from `zig init` (addModule with .root_source_file and .target; addTest with .root_module; test step depending on b.addRunArtifact of the test artifact).",
+        "Add the test-tsan step: a second addTest whose root module is created with .sanitize_thread = true (std/Build/Module.zig option), so `zig build test-tsan` runs the identical suite under ThreadSanitizer.",
+        "Write .builds/ci.yml per the builds.sr.ht manifest format with the five tasks (toolchain, fmt, test, test-safe, test-tsan) blocking and lint-advisory non-blocking; pin the Zig tarball URL and the ZLint release tag in the manifest.",
+        "Keep src/root.zig minimal: doc comment, one exported placeholder (pub const version: []const u8), one smoke test using std.testing.allocator so the leak-detection convention is established from the first green run."
+      ],
+      "requiredContext": ["srht-builds", "zig-strictness"],
+      "testStubsIntroduced": ["root: smoke test under testing.allocator"],
+      "testStubsImplemented": ["root: smoke test under testing.allocator"],
+      "spec": "module VALUE_CORE_PATCH_1.\n\n> Patch 1 establishes the build and CI substrate; it introduces no ecl\n> domain semantics. The contribution is the strictness harness itself:\n> formatting, Debug and ReleaseSafe test matrices, and a ThreadSanitizer\n> variant are blocking gates from the first commit.\n\nGate.\nfmt-gate => Gate.\ndebug-tests => Gate.\nrelease-safe-tests => Gate.\ntsan-tests => Gate.\nblocking? g: Gate => Bool.\n---\nall g: Gate | blocking? g.",
+      "precedents": null
+    },
+    {
+      "number": 2,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "The 16-byte Value cell, frozen HeapKind enum, and heap Header",
+      "files": [
+        { "path": "src/value.zig", "action": "create", "description": "Value union(Tag) with payloads i64/f64/u32-codepoint/u32-symbol-id/u32-word-id/*Header; Tag enum { int, float, char, symbol, word, list, dict }; HeapKind enum { generic_spine, leaf_i64, leaf_f64, leaf_char1, leaf_char2, leaf_char4, leaf_symbol, dict, reserved_mask }; Header struct { rc: std.atomic.Value(u32), meta: u32, len: u64 } with kind packed in meta; DictPayload layout struct { keys: *Header, vals: *Header, hashes: ?*Header }; comptime asserts @sizeOf(Value) == 16 and @sizeOf(Header) == 16; helper constructors (Value.int, Value.float, Value.char, ...) and kind accessors." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export pub const value = @import(\"value.zig\"); add test aggregation for value.zig." }
+      ],
+      "changes": [
+        "Define Tag and Value as a union(Tag) whose every payload is ≤ 8 bytes so the whole cell is 16 bytes; comptime-assert the size (drift = compile error).",
+        "Define HeapKind with exactly the frozen nine members (d.23: symbol leaves included, one reserved narrow-mask slot); pack kind + flag bits into Header.meta with accessor fns kind(h) and setKind.",
+        "Define Header {rc, meta, len} with @sizeOf == 16 comptime-asserted; rc is std.atomic.Value(u32) (std/atomic.zig).",
+        "Define the DictPayload layout here (not in dict.zig) so Patch 6's equality can read dict internals without importing the operations module: keys and vals are child list Headers, hashes an optional cached u64 leaf.",
+        "Every switch over Tag or HeapKind in this and later patches is written WITHOUT an else arm, so adding an enum member is a compile error at every dispatch site (exhaustiveness as the static-analysis regime)."
+      ],
+      "requiredContext": ["arch-values", "ledger-rulings"],
+      "testStubsIntroduced": ["value: size and layout asserts", "value: constructors round-trip payloads"],
+      "testStubsImplemented": ["value: size and layout asserts", "value: constructors round-trip payloads"],
+      "spec": "module VALUE_CORE_PATCH_2.\n\n> The frozen representation layer. Atoms live inline in a 16-byte cell;\n> heap objects carry a 16-byte header whose kind is a construction-time\n> fact (never recomputed by inspection — d.16, ARCHITECTURE §Values).\n\nValue.\nTag.\nHeapKind.\nHeader.\nint-t => Tag.\nfloat-t => Tag.\nchar-t => Tag.\nsymbol-t => Tag.\nword-t => Tag.\nlist-t => Tag.\ndict-t => Tag.\ngeneric-spine => HeapKind.\nleaf-i64 => HeapKind.\nleaf-f64 => HeapKind.\nleaf-char1 => HeapKind.\nleaf-char2 => HeapKind.\nleaf-char4 => HeapKind.\nleaf-symbol => HeapKind.\ndict-k => HeapKind.\nreserved-mask => HeapKind.\ntag v: Value => Tag.\nkind h: Header => HeapKind.\nvalue-size => Nat.\nheader-size => Nat.\n---\nvalue-size = 16.\nheader-size = 16.",
+      "precedents": null
+    },
+    {
+      "number": 3,
+      "classification": "INFRA",
+      "complexity": 3,
+      "title": "Atomic reference counting, the single uniqueness gate, iterative destroy",
+      "files": [
+        { "path": "src/heap.zig", "action": "create", "description": "allocHeader(alloc, kind, len, capacity) and payload accessors; incRef (monotonic add), decRef(alloc, h) (release sub; on transition to zero: acquire fence, then iterative destroy); isUnique(h) = rc.load(.acquire) == 1 — the ONE uniqueness function; capacity stored explicitly (bucket-class derivation deferred per ARCHITECTURE); destroy uses an explicit worklist over spine/dict children (no host recursion), releasing every child exactly once." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export heap module; add test aggregation." }
+      ],
+      "changes": [
+        "Implement RC with the d.23 orderings exactly: incRef = rc.fetchAdd(1, .monotonic); decRef = rc.fetchSub(1, .release) and, when the previous value was 1, rc.fence(.acquire) (or an acquire load) before destroy — the standard Boost/libc++/Arc discipline.",
+        "isUnique is the sole uniqueness probe in the codebase: rc.load(.acquire) == 1. Every future in-place-mutation site (Patch 5's append, dict put, kernels in M5) must call it; no other rc reads exist outside inc/dec.",
+        "destroy(alloc, h) drains an explicit ArrayList worklist: pop a header, decRef each child value it owns (pushing children whose rc hit zero), free its buffers — never recursing, so arbitrarily deep nests cannot overflow the host stack (mirrors the ledger's no-host-recursion doctrine at the value layer).",
+        "All allocation goes through the injected std.mem.Allocator and propagates error.OutOfMemory; on any mid-construction failure the partially built object is fully released (checkAllAllocationFailures proves this on every path).",
+        "Tests: leak-free lifecycle under std.testing.allocator; deep-nest destroy (10^5-deep spine) without stack growth; multi-threaded stress (N threads × M iterations of incRef/decRef on a shared value, final rc exact) — this test is the TSan target; checkAllAllocationFailures sweep over allocHeader and destroy paths."
+      ],
+      "requiredContext": ["arch-values", "ledger-rulings", "zig-strictness"],
+      "testStubsIntroduced": ["heap: rc lifecycle is leak-free", "heap: deep-nest destroy is iterative", "heap: threaded inc/dec stress (tsan)", "heap: checkAllAllocationFailures sweep"],
+      "testStubsImplemented": ["heap: rc lifecycle is leak-free", "heap: deep-nest destroy is iterative", "heap: threaded inc/dec stress (tsan)", "heap: checkAllAllocationFailures sweep"],
+      "spec": "module VALUE_CORE_PATCH_3.\n\n> Precise atomic reference counting per decision 23. The uniqueness\n> probe is a single function; rc==1 observed by the only holder is\n> stable and gates every future in-place mutation.\n\nValue.\nHeader.\nheader v: Value => Header.\nrc h: Header => Nat0.\nunique? h: Header => Bool.\nfreed? h: Header => Bool.\n---\nall h: Header | unique? h = (rc h = 1).\n\n> A header is freed exactly when its count reaches zero; freed headers\n> are never read again (no resurrection).\nall h: Header, freed? h | rc h = 0.",
+      "precedents": [
+        {
+          "kind": "paper",
+          "name": "Perceus: Garbage-Free Reference Counting with Reuse (Reinking, Xie, de Moura, Leijen, PLDI 2021)",
+          "url": "https://dl.acm.org/doi/10.1145/3453483.3454032",
+          "whyApplicable": "The precise-RC-with-reuse discipline this layer implements: exact counts (not conservative bits), rc==1 as the reuse trigger, and the ownership-passing convention the stack machine will adopt in Milestone 3. Informs why isUnique must be exact and why there is no cycle collector (cycle-free heap ⇒ RC is complete)."
+        },
+        {
+          "kind": "pattern",
+          "name": "Swift copy-on-write uniqueness check (isKnownUniquelyReferenced) with acquire-ordered count read",
+          "url": null,
+          "whyApplicable": "The production CoW protocol: mutate in place iff an acquire load of the strong count reads 1; the acquire pairs with the release decrement of concurrent drops so the buffer's prior reads are visible. isUnique implements exactly this; the release/acquire pairing in decRef follows the same discipline (also used by Rust Arc::get_mut)."
+        }
+      ]
+    },
+    {
+      "number": 4,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "Global append-only intern table with lock-free reads",
+      "files": [
+        { "path": "src/intern.zig", "action": "create", "description": "Process-global table: fixed-size byte segments allocated on demand (pointers never move), a std.StringHashMapUnmanaged behind a std.Thread.Mutex for dedup on the write path, an atomic count published with .release; get(id) computes segment/offset arithmetically and reads without locking. Words and symbols share the id space (the Value tag distinguishes them; to-word/to-symbol in M6 are tag flips)." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export intern module; add test aggregation." }
+      ],
+      "changes": [
+        "intern(bytes) under the mutex: hash-map lookup, on miss copy bytes into the current segment (allocating a new segment when full), record {offset, len}, publish the new count with a .release store, return the u32 id.",
+        "get(id) with no lock: .acquire load of the count (bounds check), then pure pointer arithmetic into the stable segments — safe because segments are append-only and never reallocated.",
+        "ids are session-scoped and never freed (Erlang atom-table ruling from ARCHITECTURE, hazard documented in a doc comment: unbounded runtime interning grows the table).",
+        "Tests: get∘intern == id round-trip; idempotence (intern twice → same id); concurrent interning from N threads of overlapping string sets produces consistent unique ids (TSan target); checkAllAllocationFailures on the intern write path."
+      ],
+      "requiredContext": ["arch-values"],
+      "testStubsIntroduced": ["intern: get after intern round-trips", "intern: idempotent ids", "intern: concurrent interning is consistent (tsan)"],
+      "testStubsImplemented": ["intern: get after intern round-trips", "intern: idempotent ids", "intern: concurrent interning is consistent (tsan)"],
+      "spec": "module VALUE_CORE_PATCH_4.\n\n> One global, append-only intern table; a symbol IS its u32 id.\n\nStr.\nId.\nintern s: Str => Id.\nget i: Id => Str.\n---\n> Interning round-trips and is idempotent; ids are stable.\nall s: Str | get (intern s) = s.\nall s: Str | intern s = intern s.\n\n> Distinct strings intern to distinct ids (injectivity).\nall s1: Str, s2: Str, intern s1 = intern s2 | s1 = s2.",
+      "precedents": null
+    },
+    {
+      "number": 5,
+      "classification": "INFRA",
+      "complexity": 3,
+      "title": "Flat leaves, generic spines, construction specialization, slack append",
+      "files": [
+        { "path": "src/list.zig", "action": "create", "description": "fromValues (one-pass specialization: element-type profile → leaf kind or spine; char width = minimal covering width 1/2/4 per PEP 393), leaf constructors from native slices (fromI64Slice, fromF64Slice, fromCodepoints, fromSymbolIds), at(v, i) materializing an atom from any representation, len, append(alloc, v, item) with the uniqueness-gated slack fast path, width promotion on char append, generalization to spine on type mismatch, and empty-list handling (empty stays a zero-len spine — no element type to specialize on)." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export list module; add test aggregation." }
+      ],
+      "changes": [
+        "fromValues scans once, classifying the element profile: all-int → leaf_i64; all-float → leaf_f64; all-char → leaf_char{1|2|4} at the minimal width covering the max codepoint (≤0xFF → 1, ≤0xFFFF → 2, else 4 — PEP 393); all-symbol → leaf_symbol; anything mixed (including any heap value) → generic_spine of 16-byte cells, incRef'ing stored children.",
+        "append(alloc, v, item): if isUnique(header) and same-kind and len < capacity → write into slack, len += 1, return same value (pointer-stable); if unique but full → grow into a larger allocation (geometric); if shared → copy the buffer first (rc of the copy == 1), then append — the copy-once clause of d.1; if the item breaks the leaf's type → build the widened char leaf (char width promotion) or generalize to a spine, whichever applies.",
+        "at(v, i) is total over in-bounds indices for every representation and materializes leaf elements as inline atoms (no allocation); out-of-bounds is a checked error in this layer's API (error.IndexOutOfBounds) — the language-level 'domain error dict belongs to M3's machine, not here.",
+        "All switches over HeapKind are else-less; reserved_mask and dict arms are explicit compile-visible unreachable-by-construction branches (list APIs reject dict headers with a typed error rather than UB).",
+        "Tests: specialization laws per profile including the all-char→char-leaf doctrine ('ab' as a value IS the char leaf); at/fromValues round-trip property; slack append pointer stability while unique; shared-append copies (old value unchanged, rc observed); width promotion 1→2→4; generalization on mixed append; checkAllAllocationFailures over fromValues and append."
+      ],
+      "requiredContext": ["arch-values", "ledger-rulings", "poc-value-semantics"],
+      "testStubsIntroduced": ["list: specialization laws by element profile", "list: at round-trips fromValues", "list: unique append is in-place, shared append copies", "list: char width promotion", "list: checkAllAllocationFailures sweep"],
+      "testStubsImplemented": ["list: specialization laws by element profile", "list: at round-trips fromValues", "list: unique append is in-place, shared append copies", "list: char width promotion", "list: checkAllAllocationFailures sweep"],
+      "spec": "module VALUE_CORE_PATCH_5.\n\n> Construction-time specialization (d.2): representation is a header\n> fact chosen when a list is built; semantics never depend on it.\n\nValue.\nHeapKind.\nElemProfile.\nall-int => ElemProfile.\nall-float => ElemProfile.\nall-char => ElemProfile.\nall-symbol => ElemProfile.\nmixed => ElemProfile.\nprofile vs: [Value] => ElemProfile.\nbuild vs: [Value] => Value.\nkind-of v: Value => HeapKind.\nat v: Value, i: Nat0 => Value.\nnth vs: [Value], i: Nat0 => Value.\nlen v: Value => Nat0.\ngeneric-spine => HeapKind.\nleaf-i64 => HeapKind.\nleaf-f64 => HeapKind.\nleaf-char1 => HeapKind.\nleaf-char2 => HeapKind.\nleaf-char4 => HeapKind.\nleaf-symbol => HeapKind.\nchar-leaf? k: HeapKind => Bool.\n---\n> Specialization is total over the element profile.\nall vs: [Value], profile vs = all-int | kind-of (build vs) = leaf-i64.\nall vs: [Value], profile vs = all-float | kind-of (build vs) = leaf-f64.\nall vs: [Value], profile vs = all-char | char-leaf? (kind-of (build vs)).\nall vs: [Value], profile vs = all-symbol | kind-of (build vs) = leaf-symbol.\nall vs: [Value], profile vs = mixed | kind-of (build vs) = generic-spine.\n\n> Construction round-trips: reading back yields the same elements.\nall vs: [Value], i: Nat0, i < len (build vs) | at (build vs) i = nth vs i.",
+      "precedents": [
+        {
+          "kind": "rfc-spec",
+          "name": "PEP 393 — Flexible String Representation",
+          "url": "https://peps.python.org/pep-0393/",
+          "whyApplicable": "The char-leaf width model implemented here verbatim: per-list width tag of 1/2/4 bytes chosen by the widest codepoint at construction, giving O(1) indexing and 1-byte ASCII; append of a wider codepoint promotes by copying up, exactly PEP 393's kind-widening."
+        }
+      ]
+    },
+    {
+      "number": 6,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "Structural equality and hashing (iterative, representation-invariant)",
+      "files": [
+        { "path": "src/equal.zig", "action": "create", "description": "match(a, b) via an explicit pair-worklist (no host recursion): numeric cross-type (int/float compare numerically; 0.0 == -0.0 per d.22), chars by codepoint independent of leaf width, symbols/words by id with tag distinction (word ≠ symbol, d.22), lists element-wise regardless of leaf-vs-spine representation, dicts order-insensitively (multiset compare using cached/computed entry hashes, then verification probes). hash(v) iterative, agreeing with match: integral floats and ints hash identically (numeric-image hashing), char sequences hash by codepoints, dict hash is a commutative wrapping-sum of entry hashes." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export equal module; add test aggregation." }
+      ],
+      "changes": [
+        "Implement match with a worklist of value pairs; every Tag×Tag combination is covered by an else-less switch (cross-type numeric arms explicit; everything else structurally by tag).",
+        "Float equality is numeric everywhere (d.22): 0.0 == -0.0; NaN cannot exist in values by decision 22, so no NaN arm is needed — assert this in a doc comment referencing the ledger.",
+        "Representation invariance: a leaf and a spine holding the same elements match; the worklist compares logical elements via list.at, with leaf-leaf fast paths (memcmp for same-kind same-width leaves, i64-vs-f64 numeric loop for mixed numeric leaves).",
+        "hash: FNV-1a or Wyhash over a canonical element stream (std.hash.Wyhash is in-tree); numbers hash by their numeric image (an integral f64 hashes as its i64 image so hash agrees with cross-type match — CPython's number-hash unification); dict hash = wrapping-sum of per-entry hash(key)^hash(value), commutative to agree with order-insensitive equality (d.22).",
+        "Tests: reflexivity/symmetry properties over generated values; the ledger fixtures (2 vs 2.0, 0.0 vs -0.0, char-leaf vs char-spine, '(dup) first vs 'dup NOT matching — word≠symbol); hash-agreement property: match(a,b) ⇒ hash(a)==hash(b) over generated pairs including cross-representation ones."
+      ],
+      "requiredContext": ["ledger-rulings", "poc-value-semantics"],
+      "testStubsIntroduced": ["equal: ledger equality fixtures", "equal: match is reflexive and symmetric (property)", "equal: hash agrees with match (property)"],
+      "testStubsImplemented": ["equal: ledger equality fixtures", "equal: match is reflexive and symmetric (property)", "equal: hash agrees with match (property)"],
+      "spec": "module VALUE_CORE_PATCH_6.\n\n> Whole-value structural equality (the language's `match`, d.22) and a\n> hash that agrees with it.\n\nValue.\nmatch? a: Value, b: Value => Bool.\nhash v: Value => Nat0.\nnumeric? v: Value => Bool.\nnum v: Value => Real.\n---\n> Equivalence properties.\nall a: Value | match? a a.\nall a: Value, b: Value | match? a b = match? b a.\n\n> Numeric cross-type equality: numbers compare by numeric value.\nall a: Value, b: Value, numeric? a and numeric? b | match? a b = (num a = num b).\n\n> Hash agreement: equal values hash equally.\nall a: Value, b: Value, match? a b | hash a = hash b.",
+      "precedents": [
+        {
+          "kind": "pattern",
+          "name": "CPython numeric hash unification (hash(2) == hash(2.0))",
+          "url": null,
+          "whyApplicable": "The hash-agrees-with-equality obligation under cross-type numeric equality: hash numbers by numeric image, not by representation, exactly as CPython unifies int/float/complex hashing so dict lookup respects ==."
+        }
+      ]
+    },
+    {
+      "number": 7,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "K-style dicts: insertion order, any-value keys, functional updates",
+      "files": [
+        { "path": "src/dict.zig", "action": "create", "description": "Construction and operations over the DictPayload layout frozen in value.zig: fromPairs (rejects duplicate keys with error.DuplicateKey), get(d, k) (linear scan below 16 entries via equal.match; above, probe the u32 open-addressed index by equal.hash then verify with match), put/del/merge as functional updates (uniqueness-gated in-place when rc==1, copy-first when shared, per the heap discipline), keysOf/valsOf accessors returning the child lists, iteration in insertion order." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export dict module; add test aggregation." }
+      ],
+      "changes": [
+        "fromPairs builds the keys child list, vals child list, and cached entry-hash u64 leaf in one pass, checking each new key against prior entries (by hash then match) and returning error.DuplicateKey on collision — decision 17's construction rule enforced at the layer boundary.",
+        "The index blob (present only when len >= 16) is a u32 open-addressed table over cached hashes, rebuilt on functional copy; below the threshold, get is a linear scan (small-dict dominance).",
+        "put/del/merge follow the single heap discipline: isUnique on the dict header AND the touched child lists gates in-place mutation; any shared node copies first. merge is right-biased (right wins), matching VOCABULARY.md's merge contract.",
+        "Order-insensitive equality and the commutative dict hash are Patch 6's arms (already reading DictPayload); this patch's tests exercise them through real dict values.",
+        "Tests: insertion-order iteration; duplicate-key construction error; get/put/del/merge semantics including any-value keys (a list key, a dict key); order-insensitive equality of differently-ordered dicts; functional update never mutates a shared dict (rc + pointer identity observed); checkAllAllocationFailures over fromPairs and put."
+      ],
+      "requiredContext": ["arch-values", "ledger-rulings"],
+      "testStubsIntroduced": ["dict: insertion order preserved", "dict: duplicate keys rejected at construction", "dict: order-insensitive equality", "dict: functional updates respect sharing", "dict: checkAllAllocationFailures sweep"],
+      "testStubsImplemented": ["dict: insertion order preserved", "dict: duplicate keys rejected at construction", "dict: order-insensitive equality", "dict: functional updates respect sharing", "dict: checkAllAllocationFailures sweep"],
+      "spec": "module VALUE_CORE_PATCH_7.\n\n> Dicts: insertion-ordered storage, order-insensitive identity (d.22),\n> duplicate keys rejected at construction (d.17).\n\nValue.\nDict.\nPair.\nBuildOutcome.\nbuilt => BuildOutcome.\ndup-key => BuildOutcome.\nfrom-pairs ps: [Pair] => BuildOutcome.\nhas-dup? ps: [Pair] => Bool.\nlookup d: Dict, k: Value => Value.\nput d: Dict, k: Value, v: Value => Dict.\ndel d: Dict, k: Value => Dict.\nmerge a: Dict, b: Dict => Dict.\ndict-eq? a: Dict, b: Dict => Bool.\nentries d: Dict => [Pair].\nsame-entries? a: Dict, b: Dict => Bool.\n---\n> Construction is total over its input: duplicate keys yield DupKey,\n> everything else builds.\nall ps: [Pair], has-dup? ps | from-pairs ps = dup-key.\nall ps: [Pair], ~(has-dup? ps) | from-pairs ps = built.\n\n> Equality ignores insertion order: dicts with the same entry multiset\n> are equal.\nall a: Dict, b: Dict, same-entries? a b | dict-eq? a b.\n\n> put then lookup round-trips; del removes.\nall d: Dict, k: Value, v: Value | lookup (put d k v) k = v.",
+      "precedents": null
+    },
+    {
+      "number": 8,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "Canonical representation-exposing printer",
+      "files": [
+        { "path": "src/print.zig", "action": "create", "description": "print(v, w: *std.Io.Writer) — iterative worklist rendering: atoms (ints; floats via std.fmt shortest-round-trip with the trailing-.0 rule and inf/-inf spellings; chars as \\x / \\space / \\tab / \\newline / \\u{...}; symbols as 'name via intern.get; words bare); char leaves render as double-quoted strings with GRAMMAR.md escapes; other leaves and rectangular content render [...] vs generic (...) by reading the header kind (never rescanning); dicts as {k v ...} in insertion order. toOwnedString convenience for tests." },
+        { "path": "src/root.zig", "action": "modify", "description": "Export print module; add test aggregation." }
+      ],
+      "changes": [
+        "Brackets come from the header: any flat leaf prints [...] (char leaves print as \"...\" — the string spelling of the same value); generic spines print (...); this is d.16's representation-exposing rule read from the construction-time fact, replacing poc's O(n) is_specialized rescans.",
+        "Floats: format with std.fmt's shortest-round-trip float printing, then append .0 when the rendering contains no '.', 'e', or 'E' (poc rule, value.rs write_float); non-finite values print inf/-inf (legitimate literals per d.22); NaN is unreachable in values (defensive arm prints nan with a doc comment, matching poc).",
+        "Char and string escapes exactly per GRAMMAR.md: chars \\a, named \\space/\\tab/\\newline, control-or-reserved via \\u{hex}; string escapes \\\\, \\\", \\n, \\t, and \\u{hex} for other control characters.",
+        "The worklist renderer never recurses on the host stack (deep-nest print test at 10^5 depth).",
+        "Fixture tests assert byte-for-byte parity with poc/rust's canonical outputs, copied as string literals from poc/rust/src/value.rs tests and battle-tested session outputs: [1 2], (1 +), ([1 2] [3]), 2.0, 0.125, inf, -inf, 'sym vs bare word, {'a 1 'b 2}, and the char-leaf/string spelling \"ab\"."
+      ],
+      "requiredContext": ["grammar-print", "poc-value-semantics"],
+      "testStubsIntroduced": ["print: poc parity fixtures", "print: float formatting rules", "print: deep-nest print is iterative"],
+      "testStubsImplemented": ["print: poc parity fixtures", "print: float formatting rules", "print: deep-nest print is iterative"],
+      "spec": "module VALUE_CORE_PATCH_8.\n\n> Canonical printing exposes representation (d.16) and emits only forms\n> GRAMMAR.md reads (round-trip closure is completed by the M2 reader).\n\nValue.\nStr.\nHeapKind.\nprint v: Value => Str.\nkind-of v: Value => HeapKind.\nspecialized? k: HeapKind => Bool.\nbracketed-square? s: Str => Bool.\nleaf-i64 => HeapKind.\ngeneric-spine => HeapKind.\n---\n> Printing is deterministic (a function), and specialized leaves print\n> with square-bracket (or string) spellings while spines print parens.\nall v: Value | print v = print v.\nall v: Value, kind-of v = leaf-i64 | bracketed-square? (print v).\nall v: Value, kind-of v = generic-spine | ~(bracketed-square? (print v)).",
+      "precedents": [
+        {
+          "kind": "paper",
+          "name": "Ryū: fast float-to-string conversion (Adams, PLDI 2018)",
+          "url": "https://dl.acm.org/doi/10.1145/3192366.3192369",
+          "whyApplicable": "Shortest-round-trip float printing is what makes the printed form re-read to the identical f64 (the d.16 round-trip guarantee for floats). Zig's std.fmt implements this class of algorithm — rely on it rather than hand-formatting, and add only the trailing-.0 normalization on top."
+        }
+      ]
+    },
+    {
+      "number": 9,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "Cross-module property suite and layer-wide invariant lock",
+      "files": [
+        { "path": "src/value_test.zig", "action": "create", "description": "Seeded-random property suite (std.Random.DefaultPrng with fixed seeds for reproducibility) generating arbitrary values to depth 4: specialization laws, equality laws (reflexive/symmetric, numeric cross-type, representation invariance via deliberate leaf-vs-spine construction of equal content), hash agreement, dict order-insensitivity under shuffles, print determinism, append/sharing laws (unique in-place vs shared copy), and a whole-suite leak check (std.testing.allocator throughout). Logs `wc -l src/*.zig` equivalent via a build note for the d.23 budget audit." },
+        { "path": "src/root.zig", "action": "modify", "description": "Add test aggregation for value_test.zig." }
+      ],
+      "changes": [
+        "Value generator: recursive-by-depth random construction over all atom kinds and both container kinds, biased to produce homogeneous runs (so leaf paths are exercised) and deliberately mixed runs (spine paths), with symbols drawn through the real intern table.",
+        "Each law from Patches 5–8's specs becomes a property test over ≥1000 generated cases per fixed seed; failures print the canonical form of the counterexample via print.zig (the printer debugging the layer that hosts it).",
+        "Cross-representation equality property: for a random homogeneous value list, build once via fromValues (leaf) and once as a forced generic spine (constructing with a poisoned-then-restored profile helper exposed under test), assert match and hash agreement.",
+        "The suite is the M1 slice of the workstream's differential-harness doctrine: poc parity here is fixture-level (print strings, equality verdicts); full cross-binary differential testing arrives with the M2 reader and M5/M6 harness."
+      ],
+      "requiredContext": ["poc-value-semantics"],
+      "testStubsIntroduced": ["value_test: property suite (specialization, equality, hash, dict, print, sharing)"],
+      "testStubsImplemented": ["value_test: property suite (specialization, equality, hash, dict, print, sharing)"],
+      "spec": "module VALUE_CORE_PATCH_9.\n\n> No new semantics: this patch locks Patches 2–8's laws under seeded\n> property testing. The contribution is enforcement, not behavior.\n\nLaw.\nspecialization-laws => Law.\nequality-laws => Law.\nhash-agreement => Law.\ndict-laws => Law.\nprint-determinism => Law.\nsharing-laws => Law.\nproperty-tested? l: Law => Bool.\n---\nall l: Law | property-tested? l.",
+      "precedents": [
+        {
+          "kind": "pattern",
+          "name": "Property-based testing (QuickCheck lineage) with fixed seeds for reproducibility",
+          "url": null,
+          "whyApplicable": "The laws in Patches 5–8 are universally quantified propositions — exactly what generative testing checks. Fixed PRNG seeds keep CI deterministic while covering the input space far beyond hand fixtures."
+        }
+      ]
+    }
+  ],
+  "testMap": [
+    { "testName": "root: smoke test under testing.allocator", "file": "src/root.zig", "stubPatch": 1, "implPatch": 1 },
+    { "testName": "value: size and layout asserts", "file": "src/value.zig", "stubPatch": 2, "implPatch": 2 },
+    { "testName": "value: constructors round-trip payloads", "file": "src/value.zig", "stubPatch": 2, "implPatch": 2 },
+    { "testName": "heap: rc lifecycle is leak-free", "file": "src/heap.zig", "stubPatch": 3, "implPatch": 3 },
+    { "testName": "heap: deep-nest destroy is iterative", "file": "src/heap.zig", "stubPatch": 3, "implPatch": 3 },
+    { "testName": "heap: threaded inc/dec stress (tsan)", "file": "src/heap.zig", "stubPatch": 3, "implPatch": 3 },
+    { "testName": "heap: checkAllAllocationFailures sweep", "file": "src/heap.zig", "stubPatch": 3, "implPatch": 3 },
+    { "testName": "intern: get after intern round-trips", "file": "src/intern.zig", "stubPatch": 4, "implPatch": 4 },
+    { "testName": "intern: idempotent ids", "file": "src/intern.zig", "stubPatch": 4, "implPatch": 4 },
+    { "testName": "intern: concurrent interning is consistent (tsan)", "file": "src/intern.zig", "stubPatch": 4, "implPatch": 4 },
+    { "testName": "list: specialization laws by element profile", "file": "src/list.zig", "stubPatch": 5, "implPatch": 5 },
+    { "testName": "list: at round-trips fromValues", "file": "src/list.zig", "stubPatch": 5, "implPatch": 5 },
+    { "testName": "list: unique append is in-place, shared append copies", "file": "src/list.zig", "stubPatch": 5, "implPatch": 5 },
+    { "testName": "list: char width promotion", "file": "src/list.zig", "stubPatch": 5, "implPatch": 5 },
+    { "testName": "list: checkAllAllocationFailures sweep", "file": "src/list.zig", "stubPatch": 5, "implPatch": 5 },
+    { "testName": "equal: ledger equality fixtures", "file": "src/equal.zig", "stubPatch": 6, "implPatch": 6 },
+    { "testName": "equal: match is reflexive and symmetric (property)", "file": "src/equal.zig", "stubPatch": 6, "implPatch": 6 },
+    { "testName": "equal: hash agrees with match (property)", "file": "src/equal.zig", "stubPatch": 6, "implPatch": 6 },
+    { "testName": "dict: insertion order preserved", "file": "src/dict.zig", "stubPatch": 7, "implPatch": 7 },
+    { "testName": "dict: duplicate keys rejected at construction", "file": "src/dict.zig", "stubPatch": 7, "implPatch": 7 },
+    { "testName": "dict: order-insensitive equality", "file": "src/dict.zig", "stubPatch": 7, "implPatch": 7 },
+    { "testName": "dict: functional updates respect sharing", "file": "src/dict.zig", "stubPatch": 7, "implPatch": 7 },
+    { "testName": "dict: checkAllAllocationFailures sweep", "file": "src/dict.zig", "stubPatch": 7, "implPatch": 7 },
+    { "testName": "print: poc parity fixtures", "file": "src/print.zig", "stubPatch": 8, "implPatch": 8 },
+    { "testName": "print: float formatting rules", "file": "src/print.zig", "stubPatch": 8, "implPatch": 8 },
+    { "testName": "print: deep-nest print is iterative", "file": "src/print.zig", "stubPatch": 8, "implPatch": 8 },
+    { "testName": "value_test: property suite (specialization, equality, hash, dict, print, sharing)", "file": "src/value_test.zig", "stubPatch": 9, "implPatch": 9 }
+  ],
+  "dependencyGraph": [
+    { "patch": 1, "classification": "INFRA", "dependsOn": [] },
+    { "patch": 2, "classification": "INFRA", "dependsOn": [1] },
+    { "patch": 3, "classification": "INFRA", "dependsOn": [2] },
+    { "patch": 4, "classification": "INFRA", "dependsOn": [3] },
+    { "patch": 5, "classification": "INFRA", "dependsOn": [4] },
+    { "patch": 6, "classification": "INFRA", "dependsOn": [5] },
+    { "patch": 7, "classification": "INFRA", "dependsOn": [6] },
+    { "patch": 8, "classification": "INFRA", "dependsOn": [7] },
+    { "patch": 9, "classification": "INFRA", "dependsOn": [8] }
+  ],
+  "mergabilityChecklist": {
+    "featureFlagStrategyDocumented": true,
+    "earlyPatchesNonFunctional": true,
+    "testStubsInInfraPatches": true,
+    "testImplsColocated": true,
+    "testMapComplete": true,
+    "testMapImplPatchMatchesCode": true,
+    "behaviorPatchesMinimal": true,
+    "dependencyGraphOrdered": true,
+    "behaviorPatchesJustified": true,
+    "functionalChangesOwnedByExactlyOnePatch": true,
+    "operationalConsiderationsSubstantive": true,
+    "observableReachabilityTraced": true,
+    "gameplanIsAtomicAndAutonomous": true
+  },
+  "mergabilityInsight": "9 of 9 patches are INFRA: this gameplan builds a pure library with no runtime-observable surface (no binary exists until Milestone 3), so reachabilityTraces is empty by the pure-INFRA rule and every patch is safe to merge at any point — each leaves `zig build test` green. The graph is deliberately a chain (each patch extends src/root.zig and consumes the prior layer's types), trading useless parallelism for zero merge-collision risk.",
+  "finalStateSpec": "module VALUE_CORE.\n\n> ══════════════════════════════════════════\n> THE GUARANTEE\n> ══════════════════════════════════════════\n> After this gameplan, the ecl value layer exists in Zig 0.16 under a\n> maximum-strictness harness: 16-byte cells, frozen leaf tags, precise\n> atomic RC with a single acquire-ordered uniqueness gate, interned\n> symbols, construction-time specialization, representation-invariant\n> equality with an agreeing hash, insertion-ordered/order-insensitive\n> dicts, and a canonical printer matching the poc oracle byte-for-byte.\n\nValue.\nTag.\nHeapKind.\nHeader.\nStr.\nId.\nDict.\nPair.\nElemProfile.\n\ntag v: Value => Tag.\nkind h: Header => HeapKind.\nheader v: Value => Header.\nvalue-size => Nat.\nheader-size => Nat.\n\nrc h: Header => Nat0.\nunique? h: Header => Bool.\n\nintern s: Str => Id.\nget i: Id => Str.\n\nprofile vs: [Value] => ElemProfile.\nbuild vs: [Value] => Value.\nat v: Value, i: Nat0 => Value.\nnth vs: [Value], i: Nat0 => Value.\nlen v: Value => Nat0.\nall-char => ElemProfile.\nmixed => ElemProfile.\ngeneric-spine => HeapKind.\nkind-of v: Value => HeapKind.\nchar-leaf? k: HeapKind => Bool.\n\nmatch? a: Value, b: Value => Bool.\nhash v: Value => Nat0.\nnumeric? v: Value => Bool.\nnum v: Value => Real.\n\nBuildOutcome.\nbuilt => BuildOutcome.\ndup-key => BuildOutcome.\nfrom-pairs ps: [Pair] => BuildOutcome.\nhas-dup? ps: [Pair] => Bool.\ndict-eq? a: Dict, b: Dict => Bool.\nsame-entries? a: Dict, b: Dict => Bool.\n\nprint v: Value => Str.\n---\n> Layout is frozen and enforced at compile time.\nvalue-size = 16.\nheader-size = 16.\n\n> Uniqueness is exactly rc = 1 (the CoW gate, d.23).\nall h: Header | unique? h = (rc h = 1).\n\n> Interning round-trips.\nall s: Str | get (intern s) = s.\n\n> The value-is-string doctrine at the representation level: all-char\n> lists specialize to char leaves; mixed lists are spines.\nall vs: [Value], profile vs = all-char | char-leaf? (kind-of (build vs)).\nall vs: [Value], profile vs = mixed | kind-of (build vs) = generic-spine.\nall vs: [Value], i: Nat0, i < len (build vs) | at (build vs) i = nth vs i.\n\n> Equality: equivalence, numeric cross-type, hash agreement.\nall a: Value | match? a a.\nall a: Value, b: Value | match? a b = match? b a.\nall a: Value, b: Value, numeric? a and numeric? b | match? a b = (num a = num b).\nall a: Value, b: Value, match? a b | hash a = hash b.\n\n> Dicts: total construction (dup keys rejected), order-insensitive\n> identity.\nall ps: [Pair], has-dup? ps | from-pairs ps = dup-key.\nall ps: [Pair], ~(has-dup? ps) | from-pairs ps = built.\nall a: Dict, b: Dict, same-entries? a b | dict-eq? a b.\n\n> Printing is deterministic and representation-exposing.\nall v: Value | print v = print v."
+}
