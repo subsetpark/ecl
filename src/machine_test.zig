@@ -12,7 +12,7 @@ const Value = value.Value;
 
 fn field(allocator: std.mem.Allocator, dictionary: Value, name: []const u8) !Value {
     const key = try intern.intern(name);
-    return (try dict.getWithAllocator(allocator, dictionary, .{ .symbol = key })).?;
+    return (try dict.symbolField(allocator, dictionary, key)).?;
 }
 
 test "twenty-thousand-deep named recursion remains flat" {

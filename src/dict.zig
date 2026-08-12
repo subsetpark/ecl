@@ -109,6 +109,19 @@ pub fn getWithAllocator(
     return valueAt(header, found);
 }
 
+/// `getWithAllocator` for call sites that have already proved dict-ness.
+/// The returned value is borrowed.
+pub fn symbolField(
+    allocator: std.mem.Allocator,
+    dictionary: Value,
+    key: u32,
+) error{OutOfMemory}!?Value {
+    return getWithAllocator(allocator, dictionary, .{ .symbol = key }) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.NotADict => unreachable,
+    };
+}
+
 /// Functional-update ownership contract: inputs remain owned by their callers.
 /// If the result has the same header as `dictionary`, ownership is unchanged;
 /// if it has a different header, the caller owns that additional result.

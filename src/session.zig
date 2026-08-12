@@ -198,7 +198,7 @@ fn dictSymbol(
     const intern = @import("intern.zig");
     const dict = @import("dict.zig");
     const key = try intern.intern(name);
-    const found = (try dict.getWithAllocator(allocator, dictionary, .{ .symbol = key })).?;
+    const found = (try dict.symbolField(allocator, dictionary, key)).?;
     return intern.get(found.symbol);
 }
 

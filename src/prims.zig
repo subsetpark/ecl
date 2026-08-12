@@ -357,53 +357,38 @@ fn raise(evaluator: *Machine) MachineError!void {
         return evaluator.typeError("an error dict");
     }
     const kind_id = try intern.intern("kind");
-    const kind = try raisedField(evaluator, raised, kind_id) orelse {
+    const kind = try dict.symbolField(evaluator.allocator(), raised, kind_id) orelse {
         return evaluator.typeError("an error dict containing a symbol at 'kind");
     };
     if (kind != .symbol) {
         return evaluator.typeError("an error dict containing a symbol at 'kind");
     }
     const msg_id = try intern.intern("msg");
-    if (try raisedField(evaluator, raised, msg_id)) |message| {
+    if (try dict.symbolField(evaluator.allocator(), raised, msg_id)) |message| {
         if (!message.isString()) {
             return evaluator.typeError("an error dict with a string at 'msg");
         }
     }
     const word_id = try intern.intern("word");
-    if (try raisedField(evaluator, raised, word_id)) |word| {
+    if (try dict.symbolField(evaluator.allocator(), raised, word_id)) |word| {
         if (word != .symbol) {
             return evaluator.typeError("an error dict with a symbol at 'word");
         }
     }
     const trace_id = try intern.intern("trace");
-    if (try raisedField(evaluator, raised, trace_id)) |trace| {
+    if (try dict.symbolField(evaluator.allocator(), raised, trace_id)) |trace| {
         if (trace != .list or !allSymbols(trace)) {
             return evaluator.typeError("an error dict with symbols at 'trace");
         }
     }
     const data_id = try intern.intern("data");
-    if (try raisedField(evaluator, raised, data_id)) |data| {
+    if (try dict.symbolField(evaluator.allocator(), raised, data_id)) |data| {
         if (data != .dict) {
             return evaluator.typeError("an error dict with a dict at 'data");
         }
     }
     raised_owned = false;
     return evaluator.raiseOwned(raised);
-}
-
-fn raisedField(
-    evaluator: *Machine,
-    raised: Value,
-    key: u32,
-) MachineError!?Value {
-    return dict.getWithAllocator(
-        evaluator.allocator(),
-        raised,
-        .{ .symbol = key },
-    ) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.NotADict => unreachable,
-    };
 }
 
 fn allSymbols(item: Value) bool {
@@ -574,7 +559,7 @@ fn namedField(
     name: []const u8,
 ) !Value {
     const key = try intern.intern(name);
-    return (try dict.getWithAllocator(allocator, dictionary, .{ .symbol = key })).?;
+    return (try dict.symbolField(allocator, dictionary, key)).?;
 }
 
 test "provisional scalar primitives enforce the d.22 regime" {

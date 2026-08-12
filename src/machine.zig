@@ -207,11 +207,11 @@ pub const EclErr = struct {
         const trace_key = try intern.intern("trace");
         const data_key = try intern.intern("data");
 
-        const kind = (try dictField(allocator, raised, kind_key)).?;
-        const old_message = try dictField(allocator, raised, msg_key);
-        const old_word = try dictField(allocator, raised, word_key);
-        const old_trace = try dictField(allocator, raised, trace_key);
-        const old_data = try dictField(allocator, raised, data_key);
+        const kind = (try dict.symbolField(allocator, raised, kind_key)).?;
+        const old_message = try dict.symbolField(allocator, raised, msg_key);
+        const old_word = try dict.symbolField(allocator, raised, word_key);
+        const old_trace = try dict.symbolField(allocator, raised, trace_key);
+        const old_data = try dict.symbolField(allocator, raised, data_key);
 
         var message_value: ?Value = null;
         defer if (message_value) |item| heap.releaseValue(allocator, item);
@@ -277,17 +277,6 @@ pub const EclErr = struct {
     }
 };
 
-fn dictField(
-    allocator: std.mem.Allocator,
-    dictionary: Value,
-    key: u32,
-) error{OutOfMemory}!?Value {
-    return dict.getWithAllocator(allocator, dictionary, .{ .symbol = key }) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.NotADict => unreachable,
-    };
-}
-
 /// Returns an owned replacement only when `data` is absent or provenance
 /// fields must be appended. Existing user payload and positions are retained.
 fn completeRaisedData(
@@ -298,9 +287,9 @@ fn completeRaisedData(
     const source_key = try intern.intern("source");
     const line_key = try intern.intern("line");
     const col_key = try intern.intern("col");
-    const has_source = if (data) |item| (try dictField(allocator, item, source_key)) != null else false;
-    const has_line = if (data) |item| (try dictField(allocator, item, line_key)) != null else false;
-    const has_col = if (data) |item| (try dictField(allocator, item, col_key)) != null else false;
+    const has_source = if (data) |item| (try dict.symbolField(allocator, item, source_key)) != null else false;
+    const has_line = if (data) |item| (try dict.symbolField(allocator, item, line_key)) != null else false;
+    const has_col = if (data) |item| (try dict.symbolField(allocator, item, col_key)) != null else false;
     if (data != null and (location == null or has_source and has_line and has_col)) return null;
 
     const old_count: usize = if (data) |item| @intCast(item.dict.len) else 0;
