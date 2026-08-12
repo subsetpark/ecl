@@ -2,6 +2,9 @@ image: alpine/latest
 packages:
   - curl
   - xz
+  # Zig builds libtsan/libcxx from source for -fsanitize=thread; that
+  # compilation requires the Linux UAPI headers (linux/futex.h et al.).
+  - linux-headers
 sources:
   - https://git.sr.ht/~subsetpark/ecl
 tasks:
