@@ -157,6 +157,6 @@ test "frame machine stays inside the decision-23 core budget" {
         "frame-machine line budget: {d} core, {d} total including tests",
         .{ core_lines, total_lines },
     );
-    try std.testing.expect(core_lines < 5500);
-    try std.testing.expect(total_lines < 7250);
+    try std.testing.expect(core_lines < 5300);
+    try std.testing.expect(total_lines < 7000);
 }
