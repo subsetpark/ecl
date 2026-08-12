@@ -1,5 +1,5 @@
-//! A small, end-to-end implementation of the language specified in
-//! `DESIGN.md`, `GRAMMAR.md`, and `VOCABULARY.md`.
+//! A small, end-to-end implementation of the language specified by the
+//! documents in the repository's `design/` directory.
 //!
 //! This crate is deliberately a walking skeleton rather than the complete
 //! v1 runtime. See `README.md` for the implemented surface.
