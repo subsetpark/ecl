@@ -1,5 +1,5 @@
-//! ecl's value core: tagged values, heap ownership, interning, containers,
-//! structural identity, and canonical rendering.
+//! ecl's value core and reader: tagged values, ownership, interning,
+//! containers, structural identity, canonical rendering, and source forms.
 
 const std = @import("std");
 
@@ -11,6 +11,9 @@ pub const list = @import("list.zig");
 pub const equal = @import("equal.zig");
 pub const dict = @import("dict.zig");
 pub const print = @import("print.zig");
+pub const lexer = @import("lexer.zig");
+pub const binder = @import("binder.zig");
+pub const reader = @import("reader.zig");
 
 test "value-core smoke test uses the leak-detecting allocator" {
     const bytes = try std.testing.allocator.dupe(u8, version);
@@ -26,5 +29,9 @@ test {
     _ = equal;
     _ = dict;
     _ = print;
+    _ = lexer;
+    _ = binder;
+    _ = reader;
     _ = @import("value_test.zig");
+    _ = @import("reader_test.zig");
 }

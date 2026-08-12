@@ -157,10 +157,12 @@ leaf-tag enum and the 16-byte cell.
 
 ### Milestone 2: reader
 
-**Status**: planned — gameplan at `gameplans/reader.json` (validated,
-adversarially audited; 5 INFRA patches, two-track DAG; no open
-questions; the round-trip law is scoped to dict-free values with dict
-desugar-shape assertions, full dict closure at M3).
+**Status**: executed (55 tests; Debug, ReleaseSafe, Linux TSan,
+formatting, and blocking ZLint validated). The reader runs 1,000 seeded
+dict-free parse-after-print cases, 500 seeded dict desugar-shape cases,
+and an exhaustive allocation-failure sweep. Full structural dict
+round-trip remains intentionally deferred to M3, where `dict-of` can
+execute.
 
 **Definition of Done**:
 The full GRAMMAR.md reader over the new value layer: tokens
@@ -170,7 +172,7 @@ and `|`), forms (matched pairs, dict-literal desugar to `dict-of`,
 binder lowering to point-free code with the boundary-crossing error),
 REPL incomplete-input detection, and **code-plane provenance**: spans in
 side tables keyed by list identity + token index, never on values
-(d.23). A print∘parse round-trip fuzz test runs in CI. The skeleton's
+(d.23). A parse∘print round-trip fuzz test runs in CI. The skeleton's
 reader tests are ported as fixtures.
 
 **Why this is a safe pause point**: Reader + values form a parse/print
