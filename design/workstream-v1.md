@@ -115,9 +115,13 @@ architecture panel; full groundings in
 
 ### Milestone 1: value-core
 
+**Status**: planned — gameplan at `gameplans/value-core.json`
+(validated; 9 sequential INFRA patches; no open questions).
+
 **Definition of Done**:
 A Zig project exists at the repo root (`build.zig`, `src/`, pinned
-toolchain in `build.zig.zon`, CI running `zig build test`). The value
+toolchain in `build.zig.zon`, CI = builds.sr.ht `.builds/ci.yml` with
+blocking fmt/Debug/ReleaseSafe/TSan tasks and an advisory ZLint task). The value
 layer implements ARCHITECTURE.md §Values: the 16-byte tagged value (all
 atoms inline; NaN-boxing rejected), the 16-byte heap header with atomic
 refcount, flat leaves (i64, f64, char×{1,2,4}, symbol-u32) + generic
@@ -374,8 +378,6 @@ K ceiling, exactness revisit) starts from a proven baseline.
    no C dependency, maturity risk) or a libcurl binding (battle-tested,
    complicates the static single binary). Resolved by the M9 spike per
    the agreed criteria in Decisions Made. Owner: M9 gameplan.
-2. **Zig toolchain version.** Pin at M1 to the newest release the
-   stdlib-http spike supports; revisit only at milestone boundaries.
 
 ## Decisions Made
 
@@ -406,6 +408,25 @@ K ceiling, exactness revisit) starts from a proven baseline.
   session): at M9 planning, `std.http` wins if it handles TLS 1.3
   against 5 real-world hosts including redirects and chunked encoding;
   otherwise bind libcurl.
+- **Toolchain pinned: Zig 0.16.0** (resolved at M1 planning, closing the
+  former open question). Pinned in `build.zig.zon`
+  (`minimum_zig_version`) and by the CI tarball; revisited only at
+  milestone boundaries and at the M9 http spike.
+- **Forge and CI: sourcehut** (M1 planning ruling). The repo is
+  `git.sr.ht/~subsetpark/ecl` (unlisted; flip with
+  `hut git update --visibility public`); CI is builds.sr.ht via
+  `.builds/ci.yml`. Every milestone's CI additions land in that
+  manifest — the workstream's earlier generic "CI" references mean
+  builds.sr.ht.
+- **Strictness posture, workstream-wide** (user directive at M1
+  planning): blocking first-party gates — `zig fmt --check`, Debug +
+  ReleaseSafe test matrix, a ThreadSanitizer test variant,
+  leak-detecting `std.testing.allocator` in every test,
+  `checkAllAllocationFailures` on every allocating API, comptime layout
+  asserts, else-less switches over frozen enums — plus ZLint pinned as
+  a non-blocking advisory job (Zig's third-party linters are young;
+  promotion to blocking when the tool earns it). Later milestones
+  inherit this harness rather than re-deciding it.
 
 ## Definition of Done (Acceptance Suite)
 
@@ -426,7 +447,8 @@ script in CI.
     specialized.
   - **Verify by** `cmd`: `ecl '(1 2 3)'` and `ecl '(1 2 3) [1 2 3] match'`.
   - **Expected**: `[1 2 3]` and `1`.
-  - **Traces to**: Milestone 1 — construction-time specialization + printer.
+  - **Traces to**: Milestone 1 — `src/list.zig` (construction
+    specialization) + `src/print.zig` (representation-exposing printer).
 
 - **DoD-3 — ragged pervasion**
   - **Assert**: pervasive `*` recurses through ragged nesting.
@@ -438,7 +460,8 @@ script in CI.
   - **Assert**: `=` is pervasive, `match` is whole-value.
   - **Verify by** `cmd`: `ecl '[1 2] [1 2] ='` and `ecl '[1 2] [1 2] match'`.
   - **Expected**: `[1 1]` and `1`.
-  - **Traces to**: Milestone 5 — comparison kernels; Milestone 1 — structural equality.
+  - **Traces to**: Milestone 5 — comparison kernels; Milestone 1 —
+    `src/equal.zig` (structural `match` and hash).
 
 - **DoD-5 — overflow is an error with element identification**
   - **Assert**: int overflow inside a leaf kernel raises `'overflow`
@@ -533,7 +556,9 @@ script in CI.
   - **Assert**: `"café" len` is 4; `\a 1 +` is `\b`.
   - **Verify by** `cmd`: both one-liners.
   - **Expected**: `4`; `\b`.
-  - **Traces to**: Milestone 1 — char leaves; Milestone 5 — char arithmetic.
+  - **Traces to**: Milestone 1 — `src/list.zig` (PEP 393 width-tagged
+    char leaves, O(1) codepoint indexing); Milestone 5 — char
+    arithmetic kernels.
 
 - **DoD-17 — new array words**
   - **Assert**: `flip`, `reshape`, `group`, `grade` work per
