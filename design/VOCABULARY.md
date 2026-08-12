@@ -46,8 +46,8 @@ proof that the language can build itself).
 
 | | word | effect | |
 |---|---|---|---|
-| [P] | `def`    | `( body 'name -- )` | bind word (public in modules) — d.5, d.18 |
-| [P] | `defp`   | `( body 'name -- )` | bind private word; top-level error |
+| [P] | `def`    | `( body 'name -- )`; module: `( body fx 'name -- )` | bind word (public in modules, with mandatory effect declaration) — d.5, d.9, d.18 |
+| [P] | `defp`   | `( body fx 'name -- )` | bind private word with declared effect; top-level error — d.9 |
 | [P] | `let`    | `( x 'name -- )` | bind value |
 | [P] | `letp`   | `( x 'name -- )` | bind private value; top-level error |
 | [P] | `body`   | `( 'name -- q )` | a word's stored list |

@@ -184,6 +184,15 @@ library with green tests; no evaluator yet.
 
 ### Milestone 3: frame-machine-first-light
 
+**Status**: executed (83 tests across library and real-binary suites;
+Debug, ReleaseSafe, ReleaseFast, instrumented Linux TSan, formatting,
+and blocking ZLint validated). The 20,000-deep countdown keeps a flat
+continuation, and the source audit reports 5,129 core lines under the
+5,500-line ceiling. One implementation correction is recorded: exact
+top-level rollback retains the immutable entry cells, because a saved
+depth cannot recover a pre-existing value consumed before failure;
+attempt/dict isolation remains base-index truncation.
+
 **Definition of Done**:
 The soul test passes end-to-end: `ecl '3 4 +'` prints `7`. Implements
 ARCHITECTURE.md §Frame machine and §Dispatch: unit struct (frame stack,
@@ -221,8 +230,14 @@ swap protocol. Reflection: `body`, `words`, `which`, `see`. **New over
 the skeleton**: `load` (file as one unit) and `ECL_PATH` auto-load on
 unregistered `use`, and the native-builtin-module mechanism (modules
 pre-registered at startup whose bindings are primitive-backed — the
-substrate M9 needs). The skeleton's d.18 test battery is ported and
-green.
+substrate M9 needs). **New over the skeleton (d.9, re-ruled
+2026-08-12)**: module `def`/`defp` are 3-ary — `( body ) ( a b -- c )
+'name def` — with the effect quotation shape-validated at registration
+(exactly one `--`, word elements), stored in the cell's effect slot,
+enforced dynamically through the d.14 contract machinery, and displayed
+by `see`/`which`; a module def without a declaration is a registration
+error, and top-level `def` stays 2-ary. The skeleton's d.18 test
+battery is ported and green (its module fixtures gain declarations).
 
 **Why this is a safe pause point**: The binary is a calculator with a
 complete module system; kernels/combinators still run the provisional
@@ -371,8 +386,9 @@ kernels ≤ ~5k). A `v1.0` tag exists.
 **Why this is a safe pause point**: It is the end; the tag is the
 pause.
 
-**Unlocks**: Post-v1 work (seal layer, performance evolution toward the
-K ceiling, exactness revisit) starts from a proven baseline.
+**Unlocks**: Post-v1 work (the static effect checker bundle, d.9;
+performance evolution toward the K ceiling; exactness revisit) starts
+from a proven baseline.
 
 ## Dependency Graph
 
@@ -658,3 +674,16 @@ script in CI.
     with the directory split).
   - **Expected**: exit 0 with both counts printed.
   - **Traces to**: Milestone 10 — the audit job (budget: d.23).
+
+- **DoD-26 — module effect declarations (d.9)**
+  - **Assert**: a module `def` without an effect declaration fails
+    registration; a declared effect is enforced dynamically at
+    application; the declaration is visible via `see`.
+  - **Verify by** `cmd`: `ecl "'m ( (dup +) 'bad def ) module"`;
+    `ecl "'m ( (dup +) ( a -- b c ) 'lies def ) module 1 m.lies"`;
+    `ecl "'m ( (dup +) ( a -- b ) 'dbl def ) module 'm.dbl see"`.
+  - **Expected**: exit ≠ 0 with `'kind 'domain` (missing declaration);
+    exit ≠ 0 with `'kind 'contract` (observed `( a -- b )` ≠ declared
+    `( a -- b c )`); `see` output includes `( a -- b )`.
+  - **Traces to**: Milestone 4 — module `def`/`defp` declaration
+    validation + the d.14 dynamic enforcement hook.

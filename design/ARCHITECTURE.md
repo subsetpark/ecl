@@ -26,7 +26,8 @@ Decision 21's doctrine becomes two enforced rules:
 Deliberately declined, with the evidence trail in the research file:
 NaN-boxing, computed goto, musttail dispatch, Ertl stack caching,
 superinstructions, quickening/inline caches (v1), a cached execution
-view (v1 — it is the seal layer's compiled form, built there or never),
+view (v1 — it is d.9's cached compiled form for module words, built
+there or never),
 a custom bucket allocator (v1), biased reference counting, per-unit
 heaps with copy-on-send, cycle collection, and all machine-code
 generation (permanently, per decision 21).
@@ -107,8 +108,9 @@ generation (permanently, per decision 21).
   lock-free envs, walking the plain list is a load + match per token,
   which the doctrine says is enough. The derived, memoized execution
   view (pre-classified tokens, constant indices, call-site slots) is
-  precisely the seal layer's "cached compiled form" (d.9/d.21d); it is
-  built there, later, or never.
+  precisely d.9's "cached compiled form" for module words (d.9/d.21d);
+  the intra-module binding license permits it, and it is built there,
+  later, or never.
 - **One switch-dispatch inner loop:** ip/code/env in host locals; the
   frame stack is touched only at word calls, combinator suspensions,
   returns, and unit boundaries. Tail calls overwrite the in-register
@@ -116,7 +118,7 @@ generation (permanently, per decision 21).
   the skeleton's traced_word/TraceEnd machinery is deleted outright.
 - **Primitives are ordinary core-env bindings** carrying a primitive
   id/fn pointer; core is the outermost env. This kills string-match
-  dispatch, makes shadowing uniform, and gives the seal layer one
+  dispatch, makes shadowing uniform, and gives d.9's module hardening one
   representation to bind against. Each word resolves exactly once per
   execution.
 
@@ -136,8 +138,8 @@ generation (permanently, per decision 21).
 - **Registry:** name → atomically swapped `{env, generation}`;
   re-registration bumps the generation; commit only after the module
   body succeeds (skeleton-proven). The generation counter doubles as the
-  ledger's "binding writes are observable events" and the seal layer's
-  guard. **Module words pin one generation for a whole body** — no
+  ledger's "binding writes are observable events" and the d.9 checker
+  layer's guard. **Module words pin one generation for a whole body** — no
   mixed-generation execution mid-word (Erlang whole-version rule).
 - **Single-writer rule (d.23):** only the session thread writes
   session-visible envs; unit bodies write only their disposable child
@@ -315,16 +317,18 @@ This is the cheapest guard on the entire "fast paths are unobservable"
 doctrine — most soundness holes the adversarial review found would have
 been caught by it.
 
-## What the seal layer needs from v1 (the substrate contract)
+## What the d.9 hardening layer needs from v1 (the substrate contract)
 
 Exactly two things, replacing five speculative hooks: (1) the binding
-struct's reserved slots (doc, effect, compiled-form cache — present,
-unused); (2) observable binding writes as generation counters (per-env
-shape generation + per-module registry generation), already required.
-The seal layer's "cached compiled form" is the deferred execution view:
-pre-resolved threaded arrays, guard-free because sealing freezes
-dependencies. Nothing in v1 is throwaway and nothing anticipates beyond
-these two.
+struct's reserved slots (doc; effect — populated in v1 by M4's
+mandatory module declarations; compiled-form cache — present, unused);
+(2) observable binding writes as generation counters (per-env shape
+generation + per-module registry generation), already required. The
+"cached compiled form" is the deferred execution view: pre-resolved
+threaded arrays, guard-free for intra-module references because module
+envs are write-once (d.9's binding license), generation-guarded at
+`use`/core edges. Nothing in v1 is throwaway and nothing anticipates
+beyond these two.
 
 ## Skeleton disposition
 

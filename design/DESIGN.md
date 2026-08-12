@@ -12,10 +12,11 @@ are preserved. Nothing below is constrained by compatibility.
   Code on the stack is a transparent sequence you build, inspect, `each`
   over, and name with the same vocabulary you use on data.
 - **Grow, then harden.** The core is dynamic, late-bound, zero-ceremony: a
-  calculator you open cold and type `2 3 +` into. A per-word `seal` boundary
-  (deferred layer, decision 9) adds effect checking, early binding,
-  compilation, and full parallel determinism — when a word matters, you
-  harden it without rewriting it.
+  calculator you open cold and type `2 3 +` into. The module boundary is
+  the hardening boundary (decision 9): module words carry mandatory effect
+  declarations — enforced dynamically in v1, statically post-v1 — plus
+  early binding and compiled forms. When code matters, you harden it by
+  moving it into a module.
 - **Positioning (final, decision 21):** the awk/sed/REPL slot — scripting,
   one-off CLI invocations, an interactive calculator. Words, not glyphs.
   Interpreted, permanently; K-order performance is the ceiling the
@@ -70,8 +71,10 @@ are preserved. Nothing below is constrained by compatibility.
    including quotations-as-data. One namespace, entries tagged word|value.
    `def` requires a list body (else error pointing at `let`); a data list as
    body is legal and yields a multi-value constant word. Everything is
-   late-bound until sealed: unsealed words see re-`def`s and re-`let`s of
-   their dependencies immediately. No Thunk concept.
+   late-bound: words see re-`def`s and re-`let`s of their dependencies
+   immediately — module words via registry indirection (18); decision 9's
+   intra-module early-binding license is observably equivalent, never
+   semantic. No Thunk concept.
 
 6. **No closures, ever.** A quotation is a plain inspectable list; capture is
    `cons`/splice producing a new plain list (`3 (+) cons` → `(3 +)`).
@@ -109,22 +112,57 @@ are preserved. Nothing below is constrained by compatibility.
    cache invalidation tractable). Parse-time words are capped at a handful
    (locals sugar, literal readers) and the cap is policy.
 
-9. **`seal` is a deferred layer, by construction.** The grow-then-harden
-   boundary (`'name ( effect ) seal`: declared effect checked against the
-   stored body, callees early-bound, compiled form cached, parallel
-   eligibility) is a *strict extension* of a completely dynamic substrate:
-   a program that never calls `seal` never observes it, and adding it later
-   changes no existing program's meaning. All seal design questions —
-   dependency-rebinding friction, declaration grammar, checker scope
-   (row polymorphism; equality-only shapes), cache policy — are deferred as
-   a bundle. v1 correctness rests entirely on decision 14's dynamic
-   contracts; seal buys earlier errors, speed, and `par-each`'s upgrade
-   to full observational equivalence with `each` (decision 11).
-   The substrate invariants that keep the layer possible (each settled
-   independently, now also load-bearing for this): quotations are plain
-   lists (6, 8); code changes only via `def`/`let` rebinding (1, 5);
-   combinator contracts define the effect vocabulary (14); the env is
-   enumerable.
+9. **Hardening is structural: the module boundary, not a per-word act.**
+   (Re-ruled 2026-08-12; supersedes the deferred per-word `seal` — no
+   `seal` word exists or ever will.) Module `def`/`defp` take a
+   **mandatory effect declaration**: a plain quotation of words with one
+   `--` separator, `( a b -- c )`, shape-validated at registration. Zero
+   grammar change — the declaration is ordinary quotation data,
+   homoiconic and inspectable. Spelling: `( body ) ( a b -- c ) 'name
+   def` — module `def`/`defp` are 3-ary; top-level `def` stays 2-ary
+   (context-dependent arity, precedented by `defp`'s top-level error).
+   Declarations live in the binding cell's effect slot and are shown by
+   `see`/`which`. The architecture is gradual checking: dynamic top
+   level, declared modules, contract-guarded boundaries.
+   - **v1 enforcement is dynamic:** decision 14's machinery checks the
+     observed effect against the declaration at application. Declarations
+     are live contracts from day one, not comments awaiting a checker.
+   - **The deferred layer is now the static checker** (post-v1): verify
+     bodies against declarations at registration — Factor-style; inline
+     quotation literals inferred; dynamic `call` inside checked code
+     requires a declared-effect variant. Checker scope (row polymorphism,
+     purity marks) stays deferred as a bundle. Its arrival is a
+     *principled break*, accepted on the record: a module whose
+     declaration is wrong-but-unexecuted starts failing at registration.
+     The old strict-extension promise is amended to: the checker rejects
+     only code already violating its own stated contract (success-typing
+     discipline; the Dialyzer model).
+   - **Binding license:** only occurrences resolving to the module's own
+     internal env may be early-bound, at commit time — sound because
+     module envs are write-once, registration commits after success, and
+     generations are pinned (18), so it is observably equivalent to late
+     resolution. References through `use`s and to core stay late through
+     the pinned generation: a re-registered use may newly export a name
+     that shadows core, so early-binding past the internal env would
+     break d.18 hot-heal. Stored bodies and escaping quotations remain
+     plain unresolved lists everywhere (6, 8, 18); compiled forms live
+     only in the cell.
+   - **What module residence does NOT confer:** `par-each` observational
+     equivalence — purity is per-word and stays deferred (11) — and
+     static coverage of metaprogramming: cons/compose-built quotations
+     applied mid-body resolve dynamically forever (8); every module
+     keeps a dynamic path.
+   - **Top-level words permanently forgo hardening.** Anything
+     long-lived belongs in a module (Erlang positioning, ruled
+     deliberately; hardening-by-relocation preferred over
+     hardening-by-keyword).
+   - Prior art: Typed Racket's boundary discipline (checked modules,
+     dynamic contracts at untyped boundaries), Factor's mandatory stack
+     effects, Dialyzer success typing, Erlang's local/external call
+     split. The substrate invariants that keep the checker layer
+     possible: quotations are plain lists (6, 8); code changes only via
+     `def`/`let` rebinding (1, 5); combinator contracts define the
+     effect vocabulary (14); the env is enumerable.
 
 10. **Evaluator: one explicit frame machine.** Guaranteed TCO through words,
     `if`, and combinator tail positions; recursion combinators
@@ -136,8 +174,9 @@ are preserved. Nothing below is constrained by compatibility.
 11. **Effects/IO: plain impure words.** Sequential combinators guarantee
     left-to-right order, so IO inside `each`/`for` is well-defined.
     `par-each` is stdlib over `spawn`/`await` (decision 20): result order
-    and leftmost-error are deterministic today; the deferred seal layer's
-    purity checking later *upgrades* it to full observational equivalence
+    and leftmost-error are deterministic today; the deferred static
+    checker's purity checking (decision 9) later *upgrades* it to full
+    observational equivalence
     with `each` (no cross-task IO interleaving possible). Purity checking
     remains scoped to where it pays. No effect monads.
 
@@ -158,9 +197,12 @@ are preserved. Nothing below is constrained by compatibility.
 
 14. **Combinator contracts; `each` replaces `map`.** Every quotation-taking
     combinator states the stack effect it requires of its quotation
-    argument. Unsealed quotations are checked dynamically at each
-    application (violation = immediate error naming the element and the
-    observed effect); sealed quotations are checked once, statically.
+    argument. Quotations are checked dynamically at each application
+    (violation = immediate error naming the element and the observed
+    effect); module words are additionally checked against their declared
+    effects (decision 9). Under the post-v1 static checker, statically
+    *verified* applications may skip the dynamic check — verification
+    licenses the skip, never module residence alone.
     - `each` (K `'`): requires `( a -- b )`; applies one level down the
       leading axis, exactly one result per element; result specializes when
       rectangular. Depth composes by nesting: `((q) each) each`.
@@ -332,7 +374,7 @@ are preserved. Nothing below is constrained by compatibility.
       (c) coarse primitives — pervasion, `each`/`fold`/`scan`,
       `where`/`at`/`raze` execute as single runtime loops over leaves, so
       optimization concentrates in a few dozen kernels and per-token
-      dispatch never needs to be fast; (d) the seal layer's "compiled
+      dispatch never needs to be fast; (d) decision 9's cached "compiled
       form" means internal threaded/opcode arrays at most, never native
       code.
     - Exactness (decision 4) stays deferred-not-rejected; this positioning
@@ -377,8 +419,8 @@ implementation matter, not a design matter.
 
 - **Environment + registry.** Chained tables symbol → binding; a binding
   carries kind (word|value), visibility (public|private), body/value,
-  doc, home module, and a reserved effect-declaration slot (seal layer,
-  d.9). Envs are enumerable and reifiable (d.18: module construction,
+  doc, home module, and an effect-declaration slot (mandatory for module
+  words, d.9). Envs are enumerable and reifiable (d.18: module construction,
   `which`, completion). Per-session module registry name → module;
   module-word execution resolves through registry indirection (hot
   reload). Binding writes are observable events (future cache
@@ -536,7 +578,7 @@ a BQN competitor; wrong one for this language).
 ## Open questions
 
 None. Everything is settled above or explicitly deferred with its
-constraints pre-written: the seal layer and module–seal interaction
-(decision 9), pdict (decision 1), channels (decision 20), exactness
+constraints pre-written: the static effect checker bundle (decision 9),
+pdict (decision 1), channels (decision 20), exactness
 (decision 4). Host choice is deliberately absent: the Runtime section
 specifies what any implementation must deliver, and nothing more.
