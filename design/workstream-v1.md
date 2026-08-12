@@ -115,8 +115,9 @@ architecture panel; full groundings in
 
 ### Milestone 1: value-core
 
-**Status**: planned — gameplan at `gameplans/value-core.json`
-(validated; 9 sequential INFRA patches; no open questions).
+**Status**: implemented — gameplan at `gameplans/value-core.json`
+(35 tests; Debug, ReleaseSafe, Linux TSan, formatting, and advisory ZLint
+validated).
 
 **Definition of Done**:
 A Zig project exists at the repo root (`build.zig`, `src/`, pinned
@@ -283,7 +284,9 @@ wait-for-quiescence at scope close, cancelled outcomes as
 await-any await-for cancel tasks` [P] and `par-each` [E] (with the
 chunking license, d.23). The determinism suite runs the full test
 corpus at 1 worker and N workers asserting identical outcomes. The soul
-test still spawns zero threads.
+test still spawns zero threads. Before parallel parsing is enabled, the
+M1 intern table's tryLock spin loop is replaced with a blocking mutex so
+contending intern writers do not burn worker cores.
 
 **Why this is a safe pause point**: The language surface of DESIGN.md
 is complete; only scope-ruled stdlib and REPL polish remain.

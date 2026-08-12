@@ -1,18 +1,29 @@
 # ecl
 
-ecl is a clean-slate homoiconic concatenative array language. The repository
-keeps the language design separate from the executable proof of concept so the
-eventual application can evolve independently of the skeleton.
+ecl is a clean-slate homoiconic concatenative array language. The real
+interpreter is being built in Zig at the repository root; the earlier Rust
+walking skeleton remains a frozen executable semantics oracle.
 
 ## Repository map
 
 - [`design/`](design/) contains the settled design ledger, grammar, and
   vocabulary.
+- [`src/`](src/) contains the Zig implementation. The current milestone is the
+  value core: reference-counted values, specialized leaves, interning, dicts,
+  structural identity, and canonical printing.
 - [`poc/rust/`](poc/rust/) contains the Rust walking-skeleton interpreter and
-  its examples and tests. It is a standalone Cargo project, not the eventual
-  application.
+  its examples and tests. It is a standalone Cargo project and is not evolved
+  with the real interpreter.
 
-To exercise the skeleton:
+To test the Zig implementation with the pinned Zig 0.16 toolchain:
+
+```sh
+zig build test
+zig build test -Doptimize=ReleaseSafe
+zig build test-tsan
+```
+
+To exercise the Rust semantics oracle:
 
 ```sh
 cd poc/rust

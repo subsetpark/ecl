@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::error::{EclError, ErrorKind};
 use crate::reader::Reader;
-use crate::value::{Value, ValueKind, rectangular_shape};
+use crate::value::{Value, ValueKind, compare_int_float, rectangular_shape};
 
 type EnvRef = Arc<RwLock<Environment>>;
 
@@ -2327,11 +2327,10 @@ fn numeric_binary(
 fn compare_scalars(left: &Value, right: &Value) -> Result<Ordering, EclError> {
     match (&left.kind, &right.kind) {
         (ValueKind::Int(left), ValueKind::Int(right)) => Ok(left.cmp(right)),
-        (ValueKind::Int(left), ValueKind::Float(right)) => (*left as f64)
-            .partial_cmp(right)
+        (ValueKind::Int(left), ValueKind::Float(right)) => compare_int_float(*left, *right)
             .ok_or_else(|| domain_error("numbers are not comparable")),
-        (ValueKind::Float(left), ValueKind::Int(right)) => left
-            .partial_cmp(&(*right as f64))
+        (ValueKind::Float(left), ValueKind::Int(right)) => compare_int_float(*right, *left)
+            .map(Ordering::reverse)
             .ok_or_else(|| domain_error("numbers are not comparable")),
         (ValueKind::Float(left), ValueKind::Float(right)) => left
             .partial_cmp(right)
@@ -2958,6 +2957,15 @@ mod tests {
         assert_eq!(run("-inf").stack_display(), "-inf");
         assert_eq!(run("2.7 floor 2.2 ceil 2.5 round").stack_display(), "2 3 3");
         assert_eq!(run("0.0 -0.0 match").stack_display(), "1");
+        assert_eq!(
+            run("9007199254740993 9007199254740992.0 match \
+                 9007199254740993 9007199254740992.0 = \
+                 9007199254740993 9007199254740992.0 > \
+                 9007199254740992.0 9007199254740993 = \
+                 9007199254740992.0 9007199254740993 <")
+            .stack_display(),
+            "0 0 1 0 1"
+        );
 
         let mut runtime = Runtime::new();
         let nan = runtime.run("test", "inf inf -").unwrap_err();

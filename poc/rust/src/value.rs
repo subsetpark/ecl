@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::fmt;
 use std::sync::Arc;
 
@@ -160,7 +161,7 @@ impl Value {
             // exist (non-finite results from finite inputs are errors).
             (ValueKind::Float(a), ValueKind::Float(b)) => a == b,
             (ValueKind::Int(a), ValueKind::Float(b)) | (ValueKind::Float(b), ValueKind::Int(a)) => {
-                (*a as f64) == *b
+                compare_int_float(*a, *b) == Some(Ordering::Equal)
             }
             (ValueKind::Char(a), ValueKind::Char(b)) => a == b,
             (ValueKind::Symbol(a), ValueKind::Symbol(b)) => a == b,
@@ -241,6 +242,33 @@ impl Value {
             }
         }
     }
+}
+
+/// Exact mixed numeric comparison without first rounding the integer to f64.
+/// The float-to-int conversion is performed only inside its defined range.
+pub(crate) fn compare_int_float(integer: i64, floating: f64) -> Option<Ordering> {
+    const I64_MIN_F64: f64 = -9_223_372_036_854_775_808.0;
+    const I64_MAX_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0;
+
+    if floating.is_nan() {
+        return None;
+    }
+    if floating < I64_MIN_F64 {
+        return Some(Ordering::Greater);
+    }
+    if floating >= I64_MAX_EXCLUSIVE_F64 {
+        return Some(Ordering::Less);
+    }
+
+    let truncated = floating as i64;
+    Some(match integer.cmp(&truncated) {
+        Ordering::Equal => match floating.fract().partial_cmp(&0.0)? {
+            Ordering::Equal => Ordering::Equal,
+            Ordering::Greater => Ordering::Less,
+            Ordering::Less => Ordering::Greater,
+        },
+        ordering => ordering,
+    })
 }
 
 impl fmt::Display for Value {
@@ -436,5 +464,17 @@ mod tests {
                 (Value::symbol("a"), Value::int(1)),
             ]))
         );
+    }
+
+    #[test]
+    fn mixed_numeric_match_is_exact_beyond_f64_integer_precision() {
+        const TWO_TO_53: i64 = 1_i64 << 53;
+
+        assert!(Value::int(TWO_TO_53).structurally_eq(&Value::float(TWO_TO_53 as f64)));
+        assert!(!Value::int(TWO_TO_53 + 1).structurally_eq(&Value::float(TWO_TO_53 as f64)));
+        assert!(!Value::float(TWO_TO_53 as f64).structurally_eq(&Value::int(TWO_TO_53 + 1)));
+        assert!(Value::int(i64::MIN).structurally_eq(&Value::float(i64::MIN as f64)));
+        assert!(!Value::int(i64::MAX).structurally_eq(&Value::float(i64::MAX as f64)));
+        assert!(!Value::int(2).structurally_eq(&Value::float(2.5)));
     }
 }

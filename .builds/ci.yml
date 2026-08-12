@@ -1,0 +1,37 @@
+image: alpine/latest
+packages:
+  - curl
+  - xz
+sources:
+  - https://git.sr.ht/~subsetpark/ecl
+tasks:
+  - toolchain: |
+      curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+      echo '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz' | sha256sum -c -
+      mkdir -p "$HOME/.local"
+      tar -C "$HOME/.local" -xf /tmp/zig.tar.xz
+      echo 'export PATH="$HOME/.local/zig-x86_64-linux-0.16.0:$PATH"' >> "$HOME/.buildenv"
+  - fmt: |
+      cd ecl
+      zig fmt --check .
+  - test: |
+      cd ecl
+      zig build test
+      wc -l src/*.zig
+  - test-safe: |
+      cd ecl
+      zig build test -Doptimize=ReleaseSafe
+  - test-tsan: |
+      cd ecl
+      zig build test-tsan
+  - lint-advisory: |
+      if curl -fsSLo /tmp/zlint https://github.com/DonIsaac/zlint/releases/download/v0.9.1/zlint-linux-x86_64 &&
+         echo '3290bd511d37e4f6ccca3621b9894cd6c378195cdaac27520d0bd894058b2b9b  /tmp/zlint' | sha256sum -c -; then
+        chmod +x /tmp/zlint
+        cd ecl
+        if ! /tmp/zlint; then
+          echo 'ZLint findings are advisory for this milestone.' >&2
+        fi
+      else
+        echo 'ZLint download or verification failed; advisory check skipped.' >&2
+      fi

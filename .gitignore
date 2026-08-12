@@ -1,2 +1,4 @@
 /poc/rust/target/
 /.claude/
+/.zig-cache/
+/zig-out/
