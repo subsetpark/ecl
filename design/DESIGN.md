@@ -349,16 +349,19 @@ implementation matter, not a design matter.
 - **Values.** Immutable, reference-shared heap values. Atoms: int64,
   float64, char (codepoint), interned symbol. Lists are generic spines
   (sequences of value references) or specialized leaves (contiguous
-  homogeneous buffers: i64, f64, chars at tagged width 1/2/4);
-  specialization happens at construction and is semantically invisible
-  except through printing (d.16). Every value supports structural
-  equality, hashing, printing. Each heap value carries sharing metadata
-  (refcount or shared bit) sufficient to answer "uniquely held?" — set at
+  homogeneous buffers: i64, f64, chars at tagged width 1/2/4, and
+  interned-symbol u32 ids; one leaf-tag slot reserved for a future
+  narrow-mask representation — d.23); specialization happens at
+  construction and is semantically invisible except through printing
+  (d.16). Every value supports structural equality, hashing, printing.
+  Each heap value carries a precise atomic reference count ("or shared
+  bit" struck by d.23) sufficient to answer "uniquely held?" — set at
   the enumerable sharing points (dup-family, env binding, list
   inclusion). Uniquely-held values may be mutated in place by the runtime
-  (append into slack capacity; bucket-sized allocations; amortized O(1));
-  shared values copy first (d.1). Dicts: insertion-ordered maps, any
-  value as key. Tasks: write-once outcome cells with identity.
+  (append into slack capacity; amortized O(1)); shared values copy first
+  (d.1). Dicts: insertion-ordered maps, any value as key; dict hashing is
+  order-insensitive to agree with d.22 equality. Tasks: write-once
+  outcome cells with identity.
 
 - **Frame machine.** One explicit evaluation loop; no evaluation
   recursion on the implementation call stack, ever (d.10). A unit =
@@ -366,9 +369,11 @@ implementation matter, not a design matter.
   combinator work; tail positions reuse frames (TCO); primrec/linrec are
   iterative frames. All control effects are frame operations: error =
   unwind the unit's frames wholesale; cancel = discard at a safe point;
-  rollback = discard substack + frames. The machine maintains the
-  ecl-level trace (qualified words + provenance) for error dicts (d.19);
-  host frames never appear.
+  rollback = discard substack + frames. The machine can produce the
+  ecl-level trace (qualified words + provenance) at any unwind point for
+  error dicts (d.19) — the happy path pays nothing for traces, and
+  guaranteed TCO means a trace shows the non-tail spine (d.23); host
+  frames never appear.
 
 - **Environment + registry.** Chained tables symbol → binding; a binding
   carries kind (word|value), visibility (public|private), body/value,
@@ -384,9 +389,10 @@ implementation matter, not a design matter.
   design). spawn creates a unit; tasks are write-once cells (await
   blocks, idempotent, cached outcome; await-any; deadline timers for
   await-for). Every unit records spawned children; death or scope-end
-  cancels unawaited children (d.20). Cancellation lands at frame
-  boundaries; discarding a unit is safe because units share nothing
-  mutable.
+  cancels unawaited children (d.20). Cancellation lands at safe points —
+  frame boundaries and chunk boundaries inside kernels (kernels are
+  otherwise safe-point deserts, d.23); discarding a unit is safe because
+  units share nothing mutable.
 
 - **Kernels.** Coarse primitives — pervasive arithmetic/comparison,
   `each`/`each2`/`fold`/`scan`/`for`, `where`/`at`/`raze`,
@@ -398,8 +404,11 @@ implementation matter, not a design matter.
   per-token dispatch never needs to.
 
 - **Boundary layers.** Reader: matched-delimiter grammar → values,
-  provenance attached to every token; parse-time transforms are exactly
-  the capped set (locals desugar, `{...}` → `dict-of`). Printer:
+  provenance attached to every reader-produced token on the code plane
+  (side tables — never on runtime values; code assembled at runtime via
+  cons/compose has none, and error dicts omit position: d.22/d.23);
+  parse-time transforms are exactly the capped set (locals desugar,
+  `{...}` → `dict-of`). Printer:
   representation-exposing, round-tripping (d.16). IO: UTF-8
   encode/decode at the edge, byte IO distinct from char IO (d.15),
   ordered within a unit (d.11); every host error converts to an error
@@ -433,6 +442,66 @@ implementation matter, not a design matter.
     - **Absence is absence** (amending decision 19): error dicts carry
       `'word` and source position only when known; handlers test with
       `has?`. There is no nil.
+
+23. **Interpreter-architecture rulings** (literature panel + adversarial
+    review; the full architecture is ARCHITECTURE.md, research preserved
+    in research/).
+    - **Float folds are strictly sequential on every path.** Only exact
+      reductions (integer, min/max, boolean) may be reassociated for
+      SIMD or future kernel-internal parallelism. Fused and generic
+      paths must be bit-identical — recognition is unobservable down to
+      the last float bit. A documented `fsum` is the future escape valve
+      if float-sum throughput ever matters.
+    - **Reference counts are precise and atomic** (the Runtime section's
+      former "or shared bit" option is struck — a sticky bit never
+      recovers uniqueness, defeating decision 1's copy-once clause).
+      Uniqueness = rc==1 with acquire ordering, one shared function.
+      Push/pop perform no RC operations (the stack owns its values); the
+      dup-family is the sole evaluator increment site. Publication edges
+      (task-cell completion, binding writes, registry swaps) are
+      release/acquire. The K-order ceiling (d.21) is honestly "K minus
+      atomic-RC overhead" unless later measurement closes the gap.
+    - **No cycle collector, ever.** Immutable bottom-up construction,
+      words resolving by name (never heap pointer), and no closures make
+      the value heap a DAG. Sole exception: a task returning its own
+      handle into its outcome cell — a documented bounded leak, not
+      machinery.
+    - **Leaf set amended:** i64, f64, chars at width 1/2/4, and
+      interned-symbol leaves; one reserved tag for a future narrow-mask
+      representation. Leaf kinds are representation only, never
+      semantics.
+    - **Blockwise fault detection is licensed:** overflow/NaN checks may
+      accumulate per block with a scalar rescan identifying the failing
+      element — sound because crash-only rollback makes computation past
+      the fault unobservable. When a kernel reuses its input buffer as
+      output, the fault mask is tested before that block's stores.
+    - **Env-write scope invariant:** only the session thread writes
+      session-visible environments; unit bodies write only disposable
+      child scopes (stating what d.18's tests already prove). The module
+      registry is the one multi-writer table and takes an explicit
+      synchronized swap; module words pin one registry generation for a
+      whole body — no mixed-generation execution.
+    - **Snapshot semantics are scoped to the recognition guard only:** a
+      combinator may resolve its quotation's words once at entry to
+      choose a fused kernel; the generic path keeps full per-application
+      late binding. This deliberately does not amend decision 5. Any
+      future cache holds the binding cell and re-reads its interior
+      every execution — resolutions are never cached.
+    - **`attempt` ≡ `spawn await` is observational equivalence** — a
+      test property; `attempt` remains an in-machine boundary frame,
+      never routed through the scheduler.
+    - **par-each guarantees no cross-element rendezvous:** elements may
+      run fully serially or chunked; a program whose elements must run
+      concurrently to progress is already broken. This licenses a
+      chunking [P] override of the prelude definition.
+    - **Line budget:** interpreter core ≤ ~5k lines excluding kernels;
+      kernels ≤ ~5k. Additions displace.
+    - **The differential harness is a named v1 deliverable:** every
+      kernel and idiom tested against the generic path for value
+      equality, representation parity (d.16 makes brackets observable),
+      error kind/payload equality, and bit-identical floats; the
+      scheduler suite runs at 1 and N workers asserting identical
+      outcomes.
 
 ## Rejected
 
