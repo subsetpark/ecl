@@ -441,7 +441,10 @@ implementation matter, not a design matter.
       stays float.
     - **Absence is absence** (amending decision 19): error dicts carry
       `'word` and source position only when known; handlers test with
-      `has?`. There is no nil.
+      `has?`. There is no nil. External data models that reify null
+      (JSON) map it at the boundary to the ordinary symbol `'null` —
+      data, not language nil (`json.parse`/`json.emit` round-trip it;
+      ruled during workstream-v1 planning).
 
 23. **Interpreter-architecture rulings** (literature panel + adversarial
     review; the full architecture is ARCHITECTURE.md, research preserved
