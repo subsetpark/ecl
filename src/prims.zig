@@ -20,6 +20,16 @@ const Definition = struct {
     primitive: env.Primitive,
 };
 
+/// Specializes a multi-operand body into one `env.Primitive` per operand, so
+/// every word keeps a distinct function pointer.
+fn bind(comptime body: anytype, comptime operand: anytype) env.Primitive {
+    return struct {
+        fn run(evaluator: *Machine) MachineError!void {
+            return body(evaluator, operand);
+        }
+    }.run;
+}
+
 pub fn install(core: *env.Env) error{OutOfMemory}!void {
     const definitions = [_]Definition{
         .{ .name = "dup", .primitive = dup },
@@ -33,18 +43,18 @@ pub fn install(core: *env.Env) error{OutOfMemory}!void {
         .{ .name = "at", .primitive = at },
         .{ .name = "if", .primitive = ifWord },
         .{ .name = "while", .primitive = whileWord },
-        .{ .name = "def", .primitive = def },
-        .{ .name = "let", .primitive = let },
-        .{ .name = "+", .primitive = add },
-        .{ .name = "-", .primitive = sub },
-        .{ .name = "*", .primitive = mul },
-        .{ .name = "/", .primitive = div },
-        .{ .name = "=", .primitive = eq },
-        .{ .name = "<>", .primitive = ne },
-        .{ .name = "<", .primitive = lt },
-        .{ .name = ">", .primitive = gt },
-        .{ .name = "<=", .primitive = le },
-        .{ .name = ">=", .primitive = ge },
+        .{ .name = "def", .primitive = bind(define, true) },
+        .{ .name = "let", .primitive = bind(define, false) },
+        .{ .name = "+", .primitive = bind(arithmetic, Arithmetic.add) },
+        .{ .name = "-", .primitive = bind(arithmetic, Arithmetic.sub) },
+        .{ .name = "*", .primitive = bind(arithmetic, Arithmetic.mul) },
+        .{ .name = "/", .primitive = bind(arithmetic, Arithmetic.div) },
+        .{ .name = "=", .primitive = bind(compare, Comparison.eq) },
+        .{ .name = "<>", .primitive = bind(compare, Comparison.ne) },
+        .{ .name = "<", .primitive = bind(compare, Comparison.lt) },
+        .{ .name = ">", .primitive = bind(compare, Comparison.gt) },
+        .{ .name = "<=", .primitive = bind(compare, Comparison.le) },
+        .{ .name = ">=", .primitive = bind(compare, Comparison.ge) },
         .{ .name = "match", .primitive = match },
         .{ .name = "dict-of", .primitive = dictOf },
         .{ .name = "attempt", .primitive = attempt },
@@ -196,14 +206,6 @@ fn whileWord(evaluator: *Machine) MachineError!void {
     try evaluator.whileOwned(condition_header, body_header);
 }
 
-fn def(evaluator: *Machine) MachineError!void {
-    return define(evaluator, true);
-}
-
-fn let(evaluator: *Machine) MachineError!void {
-    return define(evaluator, false);
-}
-
 fn define(evaluator: *Machine, word_binding: bool) MachineError!void {
     try evaluator.require(2);
     const name_value = try evaluator.popOwned();
@@ -230,22 +232,6 @@ fn define(evaluator: *Machine, word_binding: bool) MachineError!void {
 }
 
 const Arithmetic = enum { add, sub, mul, div };
-
-fn add(evaluator: *Machine) MachineError!void {
-    return arithmetic(evaluator, .add);
-}
-
-fn sub(evaluator: *Machine) MachineError!void {
-    return arithmetic(evaluator, .sub);
-}
-
-fn mul(evaluator: *Machine) MachineError!void {
-    return arithmetic(evaluator, .mul);
-}
-
-fn div(evaluator: *Machine) MachineError!void {
-    return arithmetic(evaluator, .div);
-}
 
 fn arithmetic(evaluator: *Machine, operation: Arithmetic) MachineError!void {
     try evaluator.require(2);
@@ -285,30 +271,6 @@ fn arithmetic(evaluator: *Machine, operation: Arithmetic) MachineError!void {
 }
 
 const Comparison = enum { eq, ne, lt, gt, le, ge };
-
-fn eq(evaluator: *Machine) MachineError!void {
-    return compare(evaluator, .eq);
-}
-
-fn ne(evaluator: *Machine) MachineError!void {
-    return compare(evaluator, .ne);
-}
-
-fn lt(evaluator: *Machine) MachineError!void {
-    return compare(evaluator, .lt);
-}
-
-fn gt(evaluator: *Machine) MachineError!void {
-    return compare(evaluator, .gt);
-}
-
-fn le(evaluator: *Machine) MachineError!void {
-    return compare(evaluator, .le);
-}
-
-fn ge(evaluator: *Machine) MachineError!void {
-    return compare(evaluator, .ge);
-}
 
 fn compare(evaluator: *Machine, operation: Comparison) MachineError!void {
     try evaluator.require(2);
