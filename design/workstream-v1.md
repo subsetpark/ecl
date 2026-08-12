@@ -187,7 +187,7 @@ library with green tests; no evaluator yet.
 **Status**: executed (83 tests across library and real-binary suites;
 Debug, ReleaseSafe, ReleaseFast, instrumented Linux TSan, formatting,
 and blocking ZLint validated). The 20,000-deep countdown keeps a flat
-continuation, and the source audit reports 5,129 core lines under the
+continuation, and the source audit reports 5,186 core lines under the
 5,500-line ceiling. One implementation correction is recorded: exact
 top-level rollback retains the immutable entry cells, because a saved
 depth cannot recover a pre-existing value consumed before failure;
@@ -236,7 +236,9 @@ substrate M9 needs). **New over the skeleton (d.9, re-ruled
 (exactly one `--`, word elements), stored in the cell's effect slot,
 enforced dynamically through the d.14 contract machinery, and displayed
 by `see`/`which`; a module def without a declaration is a registration
-error, and top-level `def` stays 2-ary. The skeleton's d.18 test
+error, and top-level `def` stays 2-ary. The d.18 shadow notice: `use`
+prints one stderr line per session binding that shadows an incoming
+export (informational; `use` succeeds). The skeleton's d.18 test
 battery is ported and green (its module fixtures gain declarations).
 
 **Why this is a safe pause point**: The binary is a calculator with a

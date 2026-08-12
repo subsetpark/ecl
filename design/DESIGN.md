@@ -295,6 +295,15 @@ are preserved. Nothing below is constrained by compatibility.
     - **Tension, stated:** REPL words resolve dynamically, module words
       against their home — the one place "what you see is what runs" needs
       tooling (`which`; `see` displays home) rather than raw text.
+    - **Shadow notice (ruled 2026-08-12):** `use` reports on stderr each
+      session binding that shadows an incoming export ("session `mean`
+      shadows `stats.mean`"). Informational only — `use` succeeds, and
+      session-level shadowing stays legal (it is the documented way to
+      locally patch a module word). This guards the d.9 grow→harden
+      path: moving a word into a module inside a live session otherwise
+      leaves the stale session def silently winning at bare-name call
+      sites while the module runs its own version internally. Qualified
+      access and module-internal resolution are unaffected.
     - **Addenda proven by the skeleton:** a module body has contract
       `( -- )` and runs stack-isolated (registration produces no values);
       `use` is idempotent and re-using a module moves it to the top of

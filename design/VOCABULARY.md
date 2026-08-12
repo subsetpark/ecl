@@ -57,7 +57,7 @@ proof that the language can build itself).
 | [P] | `which`  | `( 'name -- )` | print resolution (module home, shadowing) |
 | [P] | `words`  | `( -- )` | list the visible dictionary |
 | [P] | `module` | `( 'name body -- )` | isolated; register module — d.18 |
-| [P] | `use`    | `( 'name -- )` | splice module exports into scope |
+| [P] | `use`    | `( 'name -- )` | splice module exports into scope; stderr notice per shadowed export — d.18 |
 | [P] | `alias`  | `( 'short 'name -- )` | short registry name |
 | [P] | `load`   | `( path -- )` | replay file as one unit — d.18, grammar |
 | [P] | `parse`  | `( string -- q )` | the reader, reified: source text → list |
