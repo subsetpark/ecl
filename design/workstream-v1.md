@@ -184,14 +184,17 @@ library with green tests; no evaluator yet.
 
 ### Milestone 3: frame-machine-first-light
 
-**Status**: executed (83 tests across library and real-binary suites;
+**Status**: executed (90 tests across library and real-binary suites;
 Debug, ReleaseSafe, ReleaseFast, instrumented Linux TSan, formatting,
 and blocking ZLint validated). The 20,000-deep countdown keeps a flat
-continuation, and the source audit reports 5,186 core lines under the
+continuation, and the source audit reports 5,412 core lines under the
 5,500-line ceiling. One implementation correction is recorded: exact
 top-level rollback retains the immutable entry cells, because a saved
 depth cannot recover a pre-existing value consumed before failure;
-attempt/dict isolation remains base-index truncation.
+attempt/dict isolation remains base-index truncation. Post-audit hardening
+also locks nested-boundary restoration, substack-relative contract data,
+recursive trace multiplicity, attach-if-absent context for `raise`, direct
+and flushed `pp`/`prin` output, and single-EOF REPL exit.
 
 **Definition of Done**:
 The soul test passes end-to-end: `ecl '3 4 +'` prints `7`. Implements

@@ -133,7 +133,7 @@ fn countCoreLines(source: []const u8) usize {
     return countLines(source[0..tests_start]);
 }
 
-test "reader source stays inside the decision-23 core budget" {
+test "frame machine stays inside the decision-23 core budget" {
     const sources = .{
         @embedFile("value.zig"),
         @embedFile("heap.zig"),
@@ -147,6 +147,13 @@ test "reader source stays inside the decision-23 core budget" {
         @embedFile("reader.zig"),
         @embedFile("testgen.zig"),
         @embedFile("reader_test.zig"),
+        @embedFile("env.zig"),
+        @embedFile("machine.zig"),
+        @embedFile("spans.zig"),
+        @embedFile("prims.zig"),
+        @embedFile("session.zig"),
+        @embedFile("main.zig"),
+        @embedFile("machine_test.zig"),
     };
     var core_lines: usize = 0;
     var total_lines: usize = countLines(@embedFile("root.zig")) +
@@ -156,9 +163,9 @@ test "reader source stays inside the decision-23 core budget" {
         total_lines += countLines(source);
     }
     std.log.info(
-        "reader line budget: {d} core, {d} total including tests",
+        "frame-machine line budget: {d} core, {d} total including tests",
         .{ core_lines, total_lines },
     );
-    try std.testing.expect(core_lines < 3500);
-    try std.testing.expect(total_lines < 5000);
+    try std.testing.expect(core_lines < 5500);
+    try std.testing.expect(total_lines < 7250);
 }

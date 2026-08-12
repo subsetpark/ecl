@@ -187,6 +187,67 @@ pub fn matchWithAllocator(
     return last;
 }
 
+/// Exact scalar ordering for the provisional M3 arithmetic seam. Mixed
+/// int/float comparisons never round the integer through f64 first.
+pub fn compareScalars(a: Value, b: Value) error{NotComparable}!std.math.Order {
+    return switch (a) {
+        .int => |a_int| switch (b) {
+            .int => |b_int| orderInt(a_int, b_int),
+            .float => |b_float| intFloatOrder(a_int, b_float) orelse
+                error.NotComparable,
+            .char, .symbol, .word, .list, .dict => error.NotComparable,
+        },
+        .float => |a_float| switch (b) {
+            .int => |b_int| reverseOrder(intFloatOrder(b_int, a_float) orelse
+                return error.NotComparable),
+            .float => |b_float| {
+                if (std.math.isNan(a_float) or std.math.isNan(b_float)) {
+                    return error.NotComparable;
+                }
+                return orderFloat(a_float, b_float);
+            },
+            .char, .symbol, .word, .list, .dict => error.NotComparable,
+        },
+        .char => |a_char| switch (b) {
+            .char => |b_char| orderInt(a_char, b_char),
+            .int, .float, .symbol, .word, .list, .dict => error.NotComparable,
+        },
+        .symbol, .word, .list, .dict => error.NotComparable,
+    };
+}
+
+fn intFloatOrder(integer: i64, floating: f64) ?std.math.Order {
+    const i64_min_f64: f64 = -9_223_372_036_854_775_808.0;
+    const i64_max_exclusive_f64: f64 = 9_223_372_036_854_775_808.0;
+    if (std.math.isNan(floating)) return null;
+    if (floating < i64_min_f64) return .gt;
+    if (floating >= i64_max_exclusive_f64) return .lt;
+
+    const truncated: i64 = @intFromFloat(floating);
+    const integer_order = orderInt(integer, truncated);
+    if (integer_order != .eq) return integer_order;
+    const fraction = floating - @trunc(floating);
+    if (fraction > 0.0) return .lt;
+    if (fraction < 0.0) return .gt;
+    return .eq;
+}
+
+fn orderInt(a: anytype, b: @TypeOf(a)) std.math.Order {
+    return if (a < b) .lt else if (a > b) .gt else .eq;
+}
+
+fn orderFloat(a: f64, b: f64) std.math.Order {
+    return if (a < b) .lt else if (a > b) .gt else .eq;
+}
+
+fn reverseOrder(order: std.math.Order) std.math.Order {
+    return switch (order) {
+        .lt => .gt,
+        .eq => .eq,
+        .gt => .lt,
+    };
+}
+
 const HashAction = union(enum) {
     visit: Value,
     finish_list: usize,
@@ -385,6 +446,46 @@ test "mixed numeric equality is exact beyond f64 integer precision" {
     try std.testing.expectEqual(
         hash(.{ .int = two_to_53 }),
         hash(.{ .float = @floatFromInt(two_to_53) }),
+    );
+}
+
+test "scalar ordering is exact beyond f64 integer precision" {
+    const two_to_53: i64 = 9_007_199_254_740_992;
+    try std.testing.expectEqual(
+        std.math.Order.gt,
+        try compareScalars(.{ .int = two_to_53 + 1 }, .{ .float = 9_007_199_254_740_992.0 }),
+    );
+    try std.testing.expectEqual(
+        std.math.Order.lt,
+        try compareScalars(.{ .float = 9_007_199_254_740_992.0 }, .{ .int = two_to_53 + 1 }),
+    );
+    try std.testing.expectEqual(
+        std.math.Order.eq,
+        try compareScalars(.{ .int = two_to_53 }, .{ .float = 9_007_199_254_740_992.0 }),
+    );
+    try std.testing.expectEqual(
+        std.math.Order.eq,
+        try compareScalars(.{ .int = std.math.minInt(i64) }, .{ .float = -9_223_372_036_854_775_808.0 }),
+    );
+    try std.testing.expectEqual(
+        std.math.Order.lt,
+        try compareScalars(.{ .int = std.math.maxInt(i64) }, .{ .float = 9_223_372_036_854_775_808.0 }),
+    );
+    try std.testing.expectEqual(
+        std.math.Order.lt,
+        try compareScalars(.{ .int = 4 }, .{ .float = 4.5 }),
+    );
+    try std.testing.expectEqual(
+        std.math.Order.gt,
+        try compareScalars(.{ .int = -4 }, .{ .float = -4.5 }),
+    );
+    try std.testing.expectEqual(
+        std.math.Order.lt,
+        try compareScalars(.{ .char = 'a' }, .{ .char = 'b' }),
+    );
+    try std.testing.expectError(
+        error.NotComparable,
+        compareScalars(.{ .word = 1 }, .{ .word = 1 }),
     );
 }
 
