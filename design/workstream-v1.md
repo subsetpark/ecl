@@ -116,13 +116,13 @@ architecture panel; full groundings in
 ### Milestone 1: value-core
 
 **Status**: implemented — gameplan at `gameplans/value-core.json`
-(35 tests; Debug, ReleaseSafe, Linux TSan, formatting, and advisory ZLint
+(35 tests; Debug, ReleaseSafe, Linux TSan, formatting, and blocking ZLint
 validated).
 
 **Definition of Done**:
 A Zig project exists at the repo root (`build.zig`, `src/`, pinned
 toolchain in `build.zig.zon`, CI = builds.sr.ht `.builds/ci.yml` with
-blocking fmt/Debug/ReleaseSafe/TSan tasks and an advisory ZLint task). The value
+blocking fmt/Debug/ReleaseSafe/TSan/ZLint tasks). The value
 layer implements ARCHITECTURE.md §Values: the 16-byte tagged value (all
 atoms inline; NaN-boxing rejected), the 16-byte heap header with atomic
 refcount, flat leaves (i64, f64, char×{1,2,4}, symbol-u32) + generic
@@ -426,10 +426,10 @@ K ceiling, exactness revisit) starts from a proven baseline.
   ReleaseSafe test matrix, a ThreadSanitizer test variant,
   leak-detecting `std.testing.allocator` in every test,
   `checkAllAllocationFailures` on every allocating API, comptime layout
-  asserts, else-less switches over frozen enums — plus ZLint pinned as
-  a non-blocking advisory job (Zig's third-party linters are young;
-  promotion to blocking when the tool earns it). Later milestones
-  inherit this harness rather than re-deciding it.
+  asserts, else-less switches over frozen enums — plus pinned ZLint
+  with `--deny-warnings`. Download, checksum, errors, and warnings all
+  fail the lint gate. Later milestones inherit this harness rather than
+  re-deciding it.
 
 ## Definition of Done (Acceptance Suite)
 

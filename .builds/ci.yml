@@ -27,14 +27,9 @@ tasks:
   - test-tsan: |
       cd ecl
       zig build test-tsan
-  - lint-advisory: |
-      if curl -fsSLo /tmp/zlint https://github.com/DonIsaac/zlint/releases/download/v0.9.1/zlint-linux-x86_64 &&
-         echo '3290bd511d37e4f6ccca3621b9894cd6c378195cdaac27520d0bd894058b2b9b  /tmp/zlint' | sha256sum -c -; then
-        chmod +x /tmp/zlint
-        cd ecl
-        if ! /tmp/zlint; then
-          echo 'ZLint findings are advisory for this milestone.' >&2
-        fi
-      else
-        echo 'ZLint download or verification failed; advisory check skipped.' >&2
-      fi
+  - lint: |
+      curl -fsSLo /tmp/zlint https://github.com/DonIsaac/zlint/releases/download/v0.9.1/zlint-linux-x86_64
+      echo '3290bd511d37e4f6ccca3621b9894cd6c378195cdaac27520d0bd894058b2b9b  /tmp/zlint' | sha256sum -c -
+      chmod +x /tmp/zlint
+      cd ecl
+      /tmp/zlint --deny-warnings

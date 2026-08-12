@@ -153,7 +153,8 @@ fn writeCodepoint(codepoint: u32, writer: *std.Io.Writer) std.Io.Writer.Error!vo
         return writer.print("u{{{x}}}", .{codepoint});
     }
     var encoded: [4]u8 = undefined;
-    const count = std.unicode.utf8Encode(@intCast(codepoint), &encoded) catch unreachable;
+    const count = std.unicode.utf8Encode(@intCast(codepoint), &encoded) catch
+        @panic("validated Unicode scalar failed UTF-8 encoding");
     try writer.writeAll(encoded[0..count]);
 }
 
