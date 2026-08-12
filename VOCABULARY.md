@@ -51,6 +51,8 @@ proof that the language can build itself).
 | [P] | `let`    | `( x 'name -- )` | bind value |
 | [P] | `letp`   | `( x 'name -- )` | bind private value; top-level error |
 | [P] | `body`   | `( 'name -- q )` | a word's stored list |
+| [P] | `to-word`   | `( x -- w )` | symbol → word (executable in code); a word passes through — d.22 |
+| [P] | `to-symbol` | `( x -- s )` | word → symbol; a symbol passes through |
 | [P] | `see`    | `( 'name -- )` | print definition (desugared truth) |
 | [P] | `which`  | `( 'name -- )` | print resolution (module home, shadowing) |
 | [P] | `words`  | `( -- )` | list the visible dictionary |
@@ -65,9 +67,14 @@ proof that the language can build itself).
 
 `+` `-` `*` `/` `( x y -- z )`; `/` is float division (d.12).
 `div` `mod` `( x y -- z )` integer division / modulo.
-`neg` `abs` `sqrt` `floor` `ceil` `round` `( x -- y )`.
-`pow` `min` `max` `( x y -- z )`.
+`neg` `abs` `sqrt` `( x -- y )`.
+`floor` `ceil` `round` `( x -- n )` — return int64; `'overflow` outside
+the range (d.22).
+`pow` `min` `max` `( x y -- z )`; `pow` returns float.
 All [P]. Integer overflow errors (d.4). Char arithmetic per d.15.
+Floats: `inf`/`-inf` are literals and propagate through arithmetic; NaN
+never exists — NaN-producing operations error `'domain`, and non-finite
+results from finite inputs error `'overflow` (d.22).
 
 ## Comparison & logic — *pervasive* except `match`
 

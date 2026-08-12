@@ -90,6 +90,18 @@ impl Runtime {
             ("mean", "(dup sum swap len /)"),
             ("print", "(prin \"\\n\" prin)"),
             ("inspect", "(dup pp)"),
+            ("keep", "(over (call) dip)"),
+            ("bi", "((keep) dip call)"),
+            ("tri", "(((keep) dip keep) dip call)"),
+            (
+                "fail",
+                "(wrap ('kind 'user 'msg) swap compose dict-of raise)",
+            ),
+            ("lines", "(slurp \"\\n\" split)"),
+            (
+                "find",
+                "((match) cons each dup where swap len swap dup len 0 = (pop) (first nip) if)",
+            ),
         ];
         for (name, source) in PRELUDE {
             let forms = Reader::new("<prelude>")
@@ -380,6 +392,8 @@ impl<'runtime> Machine<'runtime> {
             "let" => self.define(false),
             "body" => self.body(),
             "words" => self.words(),
+            "to-word" => self.coerce_word(),
+            "to-symbol" => self.coerce_symbol(),
             "parse" => self.parse(),
             "str" => self.str_word(),
             "+" => self.binary_pervasive(BinaryOp::Add, "+"),
@@ -579,18 +593,49 @@ impl<'runtime> Machine<'runtime> {
     }
 
     fn call(&mut self) -> Result<(), EclError> {
-        let quotation = self.pop_list("call")?;
+        // Vector ⊂ Quotation, literally: any list-like value applies. A data
+        // list unstacks its elements; a string pushes its chars.
+        let value = self.pop("call")?;
+        let quotation: Arc<[Value]> = match &value.kind {
+            ValueKind::List(values) => values.clone(),
+            ValueKind::String(_) => Arc::from(try_sequence(&value).expect("string sequences")),
+            _ => return Err(type_error("call", "list", &value)),
+        };
         self.schedule(quotation, None);
         Ok(())
     }
 
+    fn coerce_word(&mut self) -> Result<(), EclError> {
+        let value = self.pop("to-word")?;
+        match &value.kind {
+            ValueKind::Symbol(name) | ValueKind::Word(name) => {
+                self.runtime.stack.push(Value::word(name.clone()));
+                Ok(())
+            }
+            _ => Err(type_error("to-word", "symbol or word", &value)),
+        }
+    }
+
+    fn coerce_symbol(&mut self) -> Result<(), EclError> {
+        let value = self.pop("to-symbol")?;
+        match &value.kind {
+            ValueKind::Symbol(name) | ValueKind::Word(name) => {
+                self.runtime.stack.push(Value::symbol(name.clone()));
+                Ok(())
+            }
+            _ => Err(type_error("to-symbol", "symbol or word", &value)),
+        }
+    }
+
     fn cons(&mut self) -> Result<(), EclError> {
         self.require(2, "cons")?;
-        let list = self.pop_list("cons")?;
+        let list_value = self.pop("cons")?;
+        let list =
+            try_sequence(&list_value).ok_or_else(|| type_error("cons", "list", &list_value))?;
         let value = self.pop("cons")?;
         let mut result = Vec::with_capacity(list.len() + 1);
         result.push(value);
-        result.extend(list.iter().cloned());
+        result.extend(list);
         self.runtime.stack.push(Value::list(result));
         Ok(())
     }
@@ -1147,18 +1192,36 @@ impl<'runtime> Machine<'runtime> {
         let quotation = self.pop_list("each2")?;
         let right_value = self.pop("each2")?;
         let left_value = self.pop("each2")?;
-        let left: Arc<[Value]> = Arc::from(sequence(&left_value, "each2")?);
-        let right: Arc<[Value]> = Arc::from(sequence(&right_value, "each2")?);
-        if left.len() != right.len() {
-            return Err(EclError::new(
-                ErrorKind::Conform,
-                format!(
-                    "each2 requires equal leading lengths; got {} and {}",
-                    left.len(),
-                    right.len()
-                ),
-            ));
-        }
+        // Broadcast conformability (decisions 3, 14): an atom on either side
+        // extends to the other side's length, exactly as it would under a
+        // pervasive binary word.
+        let (left, right): (Arc<[Value]>, Arc<[Value]>) =
+            match (try_sequence(&left_value), try_sequence(&right_value)) {
+                (Some(left), Some(right)) => {
+                    if left.len() != right.len() {
+                        return Err(EclError::new(
+                            ErrorKind::Conform,
+                            format!(
+                                "each2 requires equal leading lengths; got {} and {}",
+                                left.len(),
+                                right.len()
+                            ),
+                        ));
+                    }
+                    (Arc::from(left), Arc::from(right))
+                }
+                (Some(left), None) => {
+                    let right = vec![right_value.clone(); left.len()];
+                    (Arc::from(left), Arc::from(right))
+                }
+                (None, Some(right)) => {
+                    let left = vec![left_value.clone(); right.len()];
+                    (Arc::from(left), Arc::from(right))
+                }
+                (None, None) => {
+                    return Err(type_error("each2", "at least one list", &left_value));
+                }
+            };
         let outer = std::mem::take(&mut self.runtime.stack);
         if left.is_empty() {
             self.runtime.stack = outer;
@@ -1618,7 +1681,8 @@ fn scalar_binary(left: &Value, right: &Value, operation: BinaryOp) -> Result<Val
             if divisor == 0.0 {
                 return Err(domain_error("division by zero"));
             }
-            finite_float(left.as_float() / divisor, "/")
+            let propagating = !left.as_float().is_finite() || !divisor.is_finite();
+            float_result(left.as_float() / divisor, propagating, "/")
         }
         IntDiv | Mod => {
             let (ValueKind::Int(left), ValueKind::Int(right)) = (&left.kind, &right.kind) else {
@@ -1651,7 +1715,8 @@ fn scalar_binary(left: &Value, right: &Value, operation: BinaryOp) -> Result<Val
         }
         Pow => {
             let (left, right) = numeric_pair(left, right, "pow")?;
-            finite_float(left.as_float().powf(right.as_float()), "pow")
+            let propagating = !left.as_float().is_finite() || !right.as_float().is_finite();
+            float_result(left.as_float().powf(right.as_float()), propagating, "pow")
         }
         Min | Max => {
             let ordering = compare_scalars(left, right)?;
@@ -1740,7 +1805,7 @@ fn scalar_unary(value: &Value, operation: UnaryOp) -> Result<Value, EclError> {
                 .checked_neg()
                 .map(Value::int)
                 .ok_or_else(|| overflow_error("neg")),
-            ValueKind::Float(float) => finite_float(-float, "neg"),
+            ValueKind::Float(float) => float_result(-float, !float.is_finite(), "neg"),
             _ => Err(type_error("neg", "number", value)),
         },
         Abs => match value.kind {
@@ -1748,7 +1813,7 @@ fn scalar_unary(value: &Value, operation: UnaryOp) -> Result<Value, EclError> {
                 .checked_abs()
                 .map(Value::int)
                 .ok_or_else(|| overflow_error("abs")),
-            ValueKind::Float(float) => finite_float(float.abs(), "abs"),
+            ValueKind::Float(float) => float_result(float.abs(), !float.is_finite(), "abs"),
             _ => Err(type_error("abs", "number", value)),
         },
         Sqrt => {
@@ -1756,18 +1821,45 @@ fn scalar_unary(value: &Value, operation: UnaryOp) -> Result<Value, EclError> {
             if number < 0.0 {
                 return Err(domain_error("sqrt requires a non-negative number"));
             }
-            finite_float(number.sqrt(), "sqrt")
+            float_result(number.sqrt(), !number.is_finite(), "sqrt")
         }
+        // floor/ceil/round return int64 (decision 22): their results get used
+        // as indices and mask arithmetic, and int-ness keeps integer
+        // pipelines integer.
         Floor | Ceil | Round => {
-            let number = numeric_atom(value, "rounding")?.as_float();
-            let result = match operation {
-                Floor => number.floor(),
-                Ceil => number.ceil(),
-                Round => number.round(),
+            let word = match operation {
+                Floor => "floor",
+                Ceil => "ceil",
+                Round => "round",
                 _ => unreachable!(),
             };
-            finite_float(result, "rounding")
+            match value.kind {
+                ValueKind::Int(_) => Ok(value.clone()),
+                ValueKind::Float(float) => {
+                    let result = match operation {
+                        Floor => float.floor(),
+                        Ceil => float.ceil(),
+                        Round => float.round(),
+                        _ => unreachable!(),
+                    };
+                    float_to_int(result, word)
+                }
+                _ => Err(type_error(word, "number", value)),
+            }
         }
+    }
+}
+
+fn float_to_int(value: f64, word: &str) -> Result<Value, EclError> {
+    const INT64_LOWER: f64 = -9_223_372_036_854_775_808.0;
+    const INT64_UPPER: f64 = 9_223_372_036_854_775_808.0; // 2^63, exclusive
+    if value.is_finite() && (INT64_LOWER..INT64_UPPER).contains(&value) {
+        Ok(Value::int(value as i64))
+    } else {
+        Err(EclError::new(
+            ErrorKind::Overflow,
+            format!("{word} result is outside int64"),
+        ))
     }
 }
 
@@ -1810,14 +1902,16 @@ fn numeric_binary(
             .map(Value::int)
             .ok_or_else(|| overflow_error(word)),
         (ValueKind::Int(left), ValueKind::Float(right)) => {
-            finite_float(float(*left as f64, *right), word)
+            float_result(float(*left as f64, *right), !right.is_finite(), word)
         }
         (ValueKind::Float(left), ValueKind::Int(right)) => {
-            finite_float(float(*left, *right as f64), word)
+            float_result(float(*left, *right as f64), !left.is_finite(), word)
         }
-        (ValueKind::Float(left), ValueKind::Float(right)) => {
-            finite_float(float(*left, *right), word)
-        }
+        (ValueKind::Float(left), ValueKind::Float(right)) => float_result(
+            float(*left, *right),
+            !left.is_finite() || !right.is_finite(),
+            word,
+        ),
         _ => Err(numeric_type_error(word, left, right)),
     }
 }
@@ -1866,22 +1960,31 @@ fn offset_char(character: char, offset: i64) -> Result<Value, EclError> {
     Ok(Value::char(codepoint))
 }
 
-fn finite_float(value: f64, word: &str) -> Result<Value, EclError> {
-    if value.is_finite() {
-        Ok(Value::float(value))
-    } else {
-        Err(EclError::new(
+/// Decision 22's float rule: NaN never exists (`'domain`); ±inf propagate
+/// from non-finite operands but may not be *produced* from finite inputs
+/// (`'overflow` — that would be silent overflow).
+fn float_result(value: f64, propagating: bool, word: &str) -> Result<Value, EclError> {
+    if value.is_nan() {
+        return Err(domain_error(format!("{word} produced NaN")));
+    }
+    if value.is_infinite() && !propagating {
+        return Err(EclError::new(
             ErrorKind::Overflow,
             format!("{word} produced a non-finite float"),
-        ))
+        ));
     }
+    Ok(Value::float(value))
 }
 
 fn sequence(value: &Value, word: &str) -> Result<Vec<Value>, EclError> {
+    try_sequence(value).ok_or_else(|| type_error(word, "list", value))
+}
+
+fn try_sequence(value: &Value) -> Option<Vec<Value>> {
     match &value.kind {
-        ValueKind::List(values) => Ok(values.to_vec()),
-        ValueKind::String(string) => Ok(string.chars().map(Value::char).collect()),
-        _ => Err(type_error(word, "list", value)),
+        ValueKind::List(values) => Some(values.to_vec()),
+        ValueKind::String(string) => Some(string.chars().map(Value::char).collect()),
+        _ => None,
     }
 }
 
@@ -2106,13 +2209,88 @@ fn io_error(error: io::Error) -> EclError {
 
 fn core_words() -> &'static [&'static str] {
     &[
-        "dup", "swap", "pop", "over", "dip", "call", "cons", "compose", "if", "while", "def",
-        "let", "body", "words", "parse", "str", "+", "-", "*", "/", "div", "mod", "pow", "min",
-        "max", "=", "<>", "<", ">", "<=", ">=", "and", "or", "neg", "abs", "sqrt", "floor", "ceil",
-        "round", "not", "match", "len", "shape", "first", "rest", "take", "drop", "at", "where",
-        "in", "raze", "cat", "reverse", "range", "grade", "distinct", "dict-of", "keys", "vals",
-        "put", "del", "merge", "has?", "each", "each2", "for", "fold", "scan", "split", "join",
-        "format", "raise", "attempt", "ok?", "ok!", "or-else", "prin", "pp", "slurp", "spit",
+        "dup",
+        "swap",
+        "pop",
+        "over",
+        "dip",
+        "call",
+        "cons",
+        "compose",
+        "if",
+        "while",
+        "def",
+        "let",
+        "body",
+        "words",
+        "to-word",
+        "to-symbol",
+        "parse",
+        "str",
+        "+",
+        "-",
+        "*",
+        "/",
+        "div",
+        "mod",
+        "pow",
+        "min",
+        "max",
+        "=",
+        "<>",
+        "<",
+        ">",
+        "<=",
+        ">=",
+        "and",
+        "or",
+        "neg",
+        "abs",
+        "sqrt",
+        "floor",
+        "ceil",
+        "round",
+        "not",
+        "match",
+        "len",
+        "shape",
+        "first",
+        "rest",
+        "take",
+        "drop",
+        "at",
+        "where",
+        "in",
+        "raze",
+        "cat",
+        "reverse",
+        "range",
+        "grade",
+        "distinct",
+        "dict-of",
+        "keys",
+        "vals",
+        "put",
+        "del",
+        "merge",
+        "has?",
+        "each",
+        "each2",
+        "for",
+        "fold",
+        "scan",
+        "split",
+        "join",
+        "format",
+        "raise",
+        "attempt",
+        "ok?",
+        "ok!",
+        "or-else",
+        "prin",
+        "pp",
+        "slurp",
+        "spit",
         "args",
     ]
 }
@@ -2210,6 +2388,64 @@ mod tests {
             .run("test", r"\a -9223372036854775808 -")
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Overflow);
+    }
+
+    #[test]
+    fn decision_22_float_rulings_hold() {
+        assert_eq!(run("inf 1 +").stack_display(), "inf");
+        assert_eq!(run("-inf").stack_display(), "-inf");
+        assert_eq!(run("2.7 floor 2.2 ceil 2.5 round").stack_display(), "2 3 3");
+        assert_eq!(run("0.0 -0.0 match").stack_display(), "1");
+
+        let mut runtime = Runtime::new();
+        let nan = runtime.run("test", "inf inf -").unwrap_err();
+        assert_eq!(nan.kind, ErrorKind::Domain);
+        let silent_overflow = runtime.run("test", "1.0e308 10.0 *").unwrap_err();
+        assert_eq!(silent_overflow.kind, ErrorKind::Overflow);
+    }
+
+    #[test]
+    fn each2_extends_atoms_like_broadcast() {
+        assert_eq!(
+            run("[1 2 3] 10 (pair) each2").stack_display(),
+            "[[1 10] [2 10] [3 10]]"
+        );
+        assert_eq!(
+            run("10 [1 2 3] (pair) each2").stack_display(),
+            "[[10 1] [10 2] [10 3]]"
+        );
+    }
+
+    #[test]
+    fn char_lists_specialize_to_strings_at_construction() {
+        assert_eq!(run(r#""ab" 1 +"#).stack_display(), "\"bc\"");
+        assert_eq!(run(r"[\a \b]").stack_display(), "\"ab\"");
+        assert_eq!(run(r#"["ab" "cd"] raze"#).stack_display(), "\"abcd\"");
+        assert_eq!(run(r#"\a "bc" cons"#).stack_display(), "\"abc\"");
+    }
+
+    #[test]
+    fn prelude_covers_dataflow_and_failure_words() {
+        assert_eq!(run("5 (1 +) keep").stack_display(), "6 5");
+        assert_eq!(run("5 (1 +) (2 *) bi").stack_display(), "6 10");
+        assert_eq!(run("5 (1 +) (2 *) (3 -) tri").stack_display(), "6 10 2");
+        assert_eq!(run("[10 20 30] 20 find").stack_display(), "1");
+        assert_eq!(run("[10 20 30] 99 find").stack_display(), "3");
+
+        let mut runtime = Runtime::new();
+        let error = runtime.run("test", "\"boom\" fail").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::User);
+        assert_eq!(error.message, "boom");
+    }
+
+    #[test]
+    fn words_and_symbols_convert_explicitly() {
+        assert_eq!(
+            run("'+ to-word wrap (3 4) swap compose call").stack_display(),
+            "7"
+        );
+        assert_eq!(run("(dup) first to-symbol").stack_display(), "'dup");
+        assert_eq!(run("(dup) first 'dup match").stack_display(), "0");
     }
 
     #[test]

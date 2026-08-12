@@ -397,6 +397,34 @@ implementation matter, not a design matter.
   dict at this boundary — no host exception or host frame crosses into
   the language (d.19).
 
+22. **Rulings forced by the walking skeleton.**
+    - **Words ≠ symbols.** A bare word in code and a quoted symbol are
+      distinct atoms: `(dup) first` yields the word, `'dup` the symbol,
+      and they do not `match`. Words print bare, symbols quoted.
+      `to-word`/`to-symbol` convert; `parse` remains the front door for
+      code-from-text. (This reifies ec's `:quoted?` flag and extends
+      decision 5's doctrine down to tokens.)
+    - **Floats: ±inf are values, NaN is not.** `inf`/`-inf` are float
+      literals (whole-token, like hex; the names leave the word
+      namespace). Arithmetic propagates non-finite *operands* IEEE-style;
+      producing a non-finite result from finite inputs is `'overflow`
+      (silent overflow stays banned); any NaN-producing operation is
+      `'domain`; division by zero is `'domain`. Float equality is numeric
+      everywhere — `0.0` equals `-0.0`, and `=` and `match` agree on all
+      numbers.
+    - **Dict equality ignores insertion order**; storage and printing
+      preserve it.
+    - **Printing at unit end:** script files print only explicitly
+      (`pp`/`prin`); `-e`, stdin, and calculator invocations print the
+      final stack.
+    - **`floor`/`ceil`/`round` return int64** (`'overflow` outside the
+      range): their results are indices and mask material, and int-ness
+      keeps integer pipelines integer — the efficiency tiebreak. `pow`
+      stays float.
+    - **Absence is absence** (amending decision 19): error dicts carry
+      `'word` and source position only when known; handlers test with
+      `has?`. There is no nil.
+
 ## Rejected
 
 Closures. Result-values-on-stack (an unchecked error value desynchronizes

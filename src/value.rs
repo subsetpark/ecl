@@ -85,8 +85,26 @@ impl Value {
         Self::new(ValueKind::Word(value.into()))
     }
 
+    /// Construct a list, applying construction-specialization (decision 2):
+    /// a non-empty all-char list is the same value as a string and takes the
+    /// string representation immediately.
     pub fn list(values: impl Into<Vec<Value>>) -> Self {
-        Self::new(ValueKind::List(Arc::from(values.into())))
+        let values = values.into();
+        if !values.is_empty()
+            && values
+                .iter()
+                .all(|value| matches!(value.kind, ValueKind::Char(_)))
+        {
+            let string: String = values
+                .iter()
+                .map(|value| match value.kind {
+                    ValueKind::Char(character) => character,
+                    _ => unreachable!("all elements checked to be chars"),
+                })
+                .collect();
+            return Self::new(ValueKind::String(Arc::from(string)));
+        }
+        Self::new(ValueKind::List(Arc::from(values)))
     }
 
     pub fn dict(entries: impl Into<Vec<(Value, Value)>>) -> Self {
@@ -138,7 +156,9 @@ impl Value {
     pub fn structurally_eq(&self, other: &Self) -> bool {
         match (&self.kind, &other.kind) {
             (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
-            (ValueKind::Float(a), ValueKind::Float(b)) => a.to_bits() == b.to_bits(),
+            // Numeric equality, matching `=`: 0.0 equals -0.0, and NaN cannot
+            // exist (non-finite results from finite inputs are errors).
+            (ValueKind::Float(a), ValueKind::Float(b)) => a == b,
             (ValueKind::Int(a), ValueKind::Float(b)) | (ValueKind::Float(b), ValueKind::Int(a)) => {
                 (*a as f64) == *b
             }
@@ -237,8 +257,8 @@ impl PartialEq for Value {
 
 fn write_float(value: f64, output: &mut String) {
     if !value.is_finite() {
-        // Runtime arithmetic refuses non-finite results. This is defensive and
-        // keeps debug-created values legible without claiming round-tripping.
+        // `inf`/`-inf` are literals and round-trip. NaN cannot be produced by
+        // the runtime; printing it is defensive for debug-created values.
         output.push_str(if value.is_nan() {
             "nan"
         } else if value.is_sign_negative() {

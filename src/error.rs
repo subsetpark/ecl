@@ -126,11 +126,10 @@ impl EclError {
         if let Some(word) = lookup("word") {
             match &word.kind {
                 crate::value::ValueKind::Symbol(word) => error.word = Some(word.clone()),
-                crate::value::ValueKind::List(values) if values.is_empty() => {}
                 _ => {
                     return Err(Self::new(
                         ErrorKind::Type,
-                        "raise expected 'word to be a symbol or []",
+                        "raise expected 'word to be a symbol",
                     ));
                 }
             }
@@ -196,10 +195,6 @@ impl EclError {
     }
 
     pub fn to_value(&self) -> Value {
-        let word = self.word.as_ref().map_or_else(
-            || Value::list(Vec::new()),
-            |word| Value::symbol(word.clone()),
-        );
         let trace = Value::list(
             self.trace
                 .iter()
@@ -212,13 +207,18 @@ impl EclError {
             data.push((Value::symbol("line"), Value::int(span.line as i64)));
             data.push((Value::symbol("col"), Value::int(span.column as i64)));
         }
-        Value::dict(vec![
+        let mut entries = vec![
             (Value::symbol("kind"), Value::symbol(self.kind_name.clone())),
             (Value::symbol("msg"), Value::string(self.message.clone())),
-            (Value::symbol("word"), word),
-            (Value::symbol("trace"), trace),
-            (Value::symbol("data"), Value::dict(data)),
-        ])
+        ];
+        // Absence is absence (decision 22, amending 19): errors with no
+        // raising word simply lack the key; handlers check with `has?`.
+        if let Some(word) = &self.word {
+            entries.push((Value::symbol("word"), Value::symbol(word.clone())));
+        }
+        entries.push((Value::symbol("trace"), trace));
+        entries.push((Value::symbol("data"), Value::dict(data)));
+        Value::dict(entries)
     }
 }
 

@@ -162,7 +162,11 @@ impl Parser {
         } else {
             body
         };
-        Ok(Value::at(ValueKind::List(Arc::from(body)), start))
+        // Construction-specialization (decision 2): all-char lists become
+        // strings here too, so `[\a \b]` and `"ab"` are the same value.
+        let mut value = Value::list(body);
+        value.span = Some(start);
+        Ok(value)
     }
 
     fn dict(&mut self) -> ParseResult<Vec<Value>> {
@@ -223,6 +227,7 @@ impl Parser {
                     if token.is_empty()
                         || token.contains('.')
                         || classify_number(&token).is_some()
+                        || classify_inf(&token).is_some()
                         || !valid_symbol(&token)
                     {
                         return self.fail_at(format!("invalid binder name `{token}`"), name_span);
@@ -374,6 +379,9 @@ impl Parser {
             return self.fail_at("expected a token", start);
         }
 
+        if let Some(value) = classify_inf(&token) {
+            return Ok(Value::at(ValueKind::Float(value), start));
+        }
         if looks_like_number(&token) {
             match classify_number(&token) {
                 Some(Ok(Number::Int(value))) => {
@@ -552,6 +560,16 @@ fn classify_number(token: &str) -> Option<Result<Number, String>> {
         );
     }
     None
+}
+
+/// `inf`/`+inf`/`-inf` are float literals (whole-token, like `0x` hex); the
+/// names leave the word namespace. NaN has no literal — it does not exist.
+fn classify_inf(token: &str) -> Option<f64> {
+    match token {
+        "inf" | "+inf" => Some(f64::INFINITY),
+        "-inf" => Some(f64::NEG_INFINITY),
+        _ => None,
+    }
 }
 
 fn looks_like_number(token: &str) -> bool {

@@ -32,7 +32,9 @@ non-whitespace, non-delimiter, non-reserved characters, classified
    - float64: `digits . digits`, optional exponent (`e`/`E`, optional
      sign); or `digits` + exponent. Digits required on both sides of
      `.` — `.5` and `5.` are not numbers (avoids colliding with
-     qualified symbols).
+     qualified symbols). The tokens `inf`, `+inf`, `-inf` are float
+     literals (whole-token, so the names leave the word namespace); NaN
+     has no literal — it does not exist (DESIGN decision 22).
 2. **Char** — `\` + one character (`\a`), a name (`\space`, `\tab`,
    `\newline`), or `\u{...}` hex codepoint. Clojure-style.
 3. **Quoted symbol** — `'` + symbol. `'` is reserved token-initially and

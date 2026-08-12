@@ -54,7 +54,15 @@ calculator and stdin modes print the final stack.
 
 Use `words` to print the currently available vocabulary. The implemented
 prelude includes `nip`, `when`, `wrap`, `pair`, `last`, `sort`, `sum`, `prod`,
-`mean`, `print`, and `inspect` as ordinary ecl definitions.
+`mean`, `print`, `inspect`, `keep`, `bi`, `tri`, `fail`, `lines`, and `find`
+as ordinary ecl definitions.
+
+Decision-22 rulings are implemented: words and symbols are distinct atoms
+(`to-word`/`to-symbol` convert), `inf`/`-inf` are float literals with IEEE
+propagation while NaN-producing operations error, all-char lists specialize
+to strings at construction, `each2` extends atoms like broadcast,
+`floor`/`ceil`/`round` return int64, and error dicts omit `'word` when no
+word raised.
 
 ## Deliberately not in the skeleton
 
