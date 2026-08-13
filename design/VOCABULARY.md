@@ -208,10 +208,10 @@ Indexing is **0-based** throughout (K convention): `range` counts from
 | [E] | `fail`    | `( msg -- )` | raise `{'kind 'user 'msg msg}` |
 | [P] | `attempt` | `( q -- outcome )` | isolated; `{'ok (…)}` / `{'err {…}}` |
 | [E] | `ok?`     | `( outcome -- bool )` | |
-| [E] | `ok!`     | `( outcome -- l )` | results list, or re-raise the error — asserts what `ok?` tests |
+| [E] | `or-raise` | `( outcome -- l )` | results list, or re-raise the error |
 | [E] | `or-else` | `( outcome x -- l/x )` | results, or default on failure |
 
-(`ok! call` unpacks results onto the stack — a data list applied
+(`or-raise call` unpacks results onto the stack — a data list applied
 pushes its elements.)
 
 ## Concurrency (d.20)

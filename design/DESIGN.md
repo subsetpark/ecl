@@ -101,7 +101,7 @@ are preserved. Nothing below is constrained by compatibility.
    arity is what makes reified failure safe in a stack language — the
    desync argument that killed results-on-stack does not apply, because a
    failure never shares a stack with the code observing it. Handling is
-   ordinary dict handling: `ok?`, `ok!` (results, or re-raise),
+   ordinary dict handling: `ok?`, `or-raise` (results, or re-raise),
    `or-else` (default on failure). The unit of failure is the unit of
    concurrency: `spawn` (decision 20) accepts exactly what `attempt`
    accepts and delivers the same outcome; `par-each` re-raises the

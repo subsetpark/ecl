@@ -348,7 +348,7 @@ per-application contract checks as base-depth compares; the full
 inline Control/Cleave surface finalized (`dip keep bi tri bi2 both
 when unless times cond`, `case` as prelude — the Joy/APCL capture
 ruled 2026-08-12, VOCABULARY.md correspondence note); the full
-error/outcome vocabulary (`fail ok? ok! or-else`); the prelude
+error/outcome vocabulary (`fail ok? or-raise or-else`); the prelude
 installed from embedded ecl source ([E] words including `filter`,
 `partition`, `any?`, `all?`, `both`, `bi2`, `case`, `unless`,
 `signum`, `clamp`, `empty?`, `append`, `pack` (literal-count effect
@@ -795,7 +795,7 @@ script in CI.
 - **DoD-18 — spawn/await outcome protocol**
   - **Assert**: `spawn`+`await` delivers the same outcome shape as
     `attempt`; `await` is idempotent.
-  - **Verify by** `cmd`: `ecl '(1 2 +) spawn dup await pop await ok! call'`.
+  - **Verify by** `cmd`: `ecl '(1 2 +) spawn dup await pop await or-raise call'`.
   - **Expected**: `3`.
   - **Traces to**: Milestone 7 — task cells.
 
