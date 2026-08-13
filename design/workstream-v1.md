@@ -187,8 +187,10 @@ library with green tests; no evaluator yet.
 **Status**: executed (90 tests across library and real-binary suites;
 Debug, ReleaseSafe, ReleaseFast, instrumented Linux TSan, formatting,
 and blocking ZLint validated). The 20,000-deep countdown keeps a flat
-continuation, and the source audit reports 5,412 core lines under the
-5,500-line ceiling. One implementation correction is recorded: exact
+continuation. After the Zig line budget was re-derived at `a49881c`, the
+source audit reports 5,158 core lines under the 9,500-line total ceiling,
+with the machine component at 2,185/2,300. One implementation correction
+is recorded: exact
 top-level rollback retains the immutable entry cells, because a saved
 depth cannot recover a pre-existing value consumed before failure;
 attempt/dict isolation remains base-index truncation. Post-audit hardening
@@ -221,11 +223,24 @@ against an executable.
 
 ### Milestone 4: environments-and-modules
 
+**Status**: executed (119 tests: 106 library/cross-layer and 13
+real-binary; Debug, ReleaseSafe, ReleaseFast, the named TSan suite,
+formatting, and blocking ZLint validated locally; Linux CI enables the
+TSan instrumentation). The audited result is 6,361 core lines under the
+9,500-line ceiling, with modules and registry exactly 1,100/1,100 and
+the machine at 2,289/2,300. The five-patch design and all 25 mapped proof
+names remain recorded in
+[`gameplans/environments-and-modules.json`](../gameplans/environments-and-modules.json).
+Generation and binding leases now reclaim displaced payloads after the
+last owner releases them; the multiwriter fixtures cover both repeated
+and disjoint module names.
+
 **Definition of Done**:
 ARCHITECTURE.md §Environments in full: binding cells (rebind swaps the
 interior), per-env shape generations, the single `env.bind()` funnel,
-lazy child envs, deep-binding chain resolution, core frozen after
-prelude install. The d.18 module system: `module`/`use`/`alias`, dotted
+lazy child envs shared by every isolated boundary, deep-binding chain
+resolution, core frozen after prelude install. The d.18 module system:
+`module`/`use`/`alias`, dotted
 qualified access, `defp`/`letp` (top-level error), registry as
 name → atomically swapped `{env, generation}` with commit-after-success
 and **whole-body generation pinning**, plus the multi-writer registry
@@ -237,9 +252,13 @@ substrate M9 needs). **New over the skeleton (d.9, re-ruled
 2026-08-12)**: module `def`/`defp` are 3-ary — `( body ) ( a b -- c )
 'name def` — with the effect quotation shape-validated at registration
 (exactly one `--`, word elements), stored in the cell's effect slot,
-enforced dynamically through the d.14 contract machinery, and displayed
-by `see`/`which`; a module def without a declaration is a registration
-error, and top-level `def` stays 2-ary. The d.18 shadow notice: `use`
+enforced dynamically through the d.14 contract machinery when execution
+enters a word from outside its home module, and displayed by
+`see`/`which`. Same-home calls are not bracketed, so internal and tail
+recursion stay constant-space under the pinned module activation; the
+post-v1 static checker owns internal word-to-word verification. A module
+def without a declaration is a registration error, and top-level `def`
+stays 2-ary. The d.18 shadow notice: `use`
 prints one stderr line per session binding that shadows an incoming
 export (informational; `use` succeeds). The skeleton's d.18 test
 battery is ported and green (its module fixtures gain declarations).
@@ -280,11 +299,15 @@ speed; combinators still per-element via the provisional path.
 ### Milestone 6: combinators-and-recognition
 
 **Definition of Done**:
-The d.14 combinators (`each each2 for fold scan`) with per-application
-contract checks as base-depth compares; inline words (`dip keep bi tri
-when`) finalized; the full error/outcome vocabulary (`fail ok? ok!
-or-else`); the prelude installed from embedded ecl source ([E] words,
-`body` returns the real list). **Idiom recognition** at combinator
+The d.14 combinators (`each each2 for fold scan`) plus `infra` with
+per-application contract checks as base-depth compares; the full
+inline Control/Cleave surface finalized (`dip keep bi tri bi2 both
+when unless times cond`, `case` as prelude — the Joy/APCL capture
+ruled 2026-08-12, VOCABULARY.md correspondence note); the full
+error/outcome vocabulary (`fail ok? ok! or-else`); the prelude
+installed from embedded ecl source ([E] words including `filter`,
+`partition`, `any?`, `all?`, `both`, `bi2`, `case`, `unless`; `body`
+returns the real list). **Idiom recognition** at combinator
 entry: the closed pattern table that IS the kernel registry, resolution-
 identity guards, snapshot semantics scoped to the guard (d.23), float
 folds strictly sequential on every path. **The differential harness**
@@ -319,7 +342,14 @@ chunking license, d.23). The determinism suite runs the full test
 corpus at 1 worker and N workers asserting identical outcomes. The soul
 test still spawns zero threads. Before parallel parsing is enabled, the
 M1 intern table's tryLock spin loop is replaced with a blocking mutex so
-contending intern writers do not burn worker cores.
+contending intern writers do not burn worker cores. **Snapshot
+reclamation (v1 obligation recorded at M4):** superseded environment
+shapes and registry directories are retained until teardown in the
+M4 as-built (ARCHITECTURE.md §Environments, snapshot retention); this
+milestone must make reclamation worker-safe — quiescent-point or
+epoch/lease-gated compaction of superseded shapes and directories — so
+long-lived sessions stop growing with distinct-name insertions and
+module re-registrations.
 
 **Why this is a safe pause point**: The language surface of DESIGN.md
 is complete; only scope-ruled stdlib and REPL polish remain.
@@ -385,8 +415,11 @@ emit) — the awk/sed/jq positioning made literal.
 The terminal acceptance suite below is implemented as a CI job
 (fixtures + expect scripts where interactive) and green. README rewritten
 around the real binary (install, tour, module guide). The d.23 line
-budget is audited by a CI check (core ≤ ~5k lines excluding kernels;
-kernels ≤ ~5k). A `v1.0` tag exists.
+budget is audited by a CI check (the re-derived per-component budget:
+core ≤ 9,500 excluding kernels, stdlib, and tests; kernels ≤ ~5k;
+stdlib ≤ ~2k). Snapshot retention is bounded (the M7 reclamation
+obligation): a soak fixture that defines and re-registers in a loop
+shows stable memory. A `v1.0` tag exists.
 
 **Why this is a safe pause point**: It is the end; the tag is the
 pause.
@@ -550,38 +583,52 @@ script in CI.
 - **DoD-11 — module privacy and body-extraction honesty**
   - **Assert**: privates are reachable from publics, unreachable
     qualified, and extracted bodies lose private context.
-  - **Verify by** `cmd`: fixture `modules-privacy.ecl` (the d.18
-    battery: `'m (40 's letp (s 2 +) 'f def) module m.f pp` then
-    `'m.f body call` at session).
-  - **Expected**: `42` printed; then exit ≠ 0 with
-    `'kind 'undefined-word`, `'word 's`.
+  - **Verify by** `cmd`: fixture `modules-privacy.ecl` defines
+    `'m (40 's letp (s 2 +) ( -- n ) 'f def) module`, calls `m.f`,
+    then attempts `m.s`; companion fixture `body-extraction.ecl`
+    defines the same module and runs `'m.f body call` at session scope.
+  - **Expected**: the privacy fixture prints `42`, then exits ≠ 0 with
+    `'kind 'undefined-word`, `'word 'm.s`; the extraction fixture exits
+    ≠ 0 with `'kind 'undefined-word`, `'word 's`.
   - **Traces to**: Milestone 4 — registry resolution + visibility.
 
 - **DoD-12 — hot reload heals all access paths**
   - **Assert**: re-registering a module updates qualified, `use`d, and
     aliased callers.
   - **Verify by** `cmd`: fixture `hot-reload.ecl` (ports
-    `poc/rust/examples/modules.ecl`).
+    `poc/rust/examples/modules.ecl` and adds mandatory effects to its
+    module words).
   - **Expected**: outputs `11 21 31 12 22 32` (one per line).
   - **Traces to**: Milestone 4 — registry generation swap.
 
 - **DoD-13 — ECL_PATH auto-load**
   - **Assert**: `use` of an unregistered module loads `<name>.ecl` from
     `ECL_PATH` and retries.
-  - **Verify by** `cmd`: `ECL_PATH=test/acceptance/modules ecl "'stats use [1 2 3 4] zscore pp"`
-    where `test/acceptance/modules/stats.ecl` defines and exports
-    `zscore`, and no module was registered beforehand.
-  - **Expected**: the expected z-score vector printed; exit 0.
-  - **Traces to**: Milestone 4 — module file transport.
+  - **Verify by** `cmd`:
+    `ECL_PATH=test/acceptance/modules ecl -e "'stats use answer"`,
+    where `test/acceptance/modules/stats.ecl` registers a module with
+    `42 'answer let`, and no module was registered beforehand.
+  - **Expected**: `42`; exit 0.
+  - **Traces to**: Milestone 4 — module file transport. The composite
+    `zscore` acceptance remains downstream of M5/M6 rather than making
+    M4 depend on vocabulary it does not own.
 
 - **DoD-14 — REPL crash-only rollback with env survival**
-  - **Assert**: a failing REPL line restores the stack but keeps prior
-    `def`s; a `let` inside `each` does not leak.
-  - **Verify by** `ux`: expect script — enter `10`, then `20 + missing`,
-    then `inspect`; then `[1 2 3] (dup 'k let k *) each pop k`.
-  - **Expected**: after the error the stack shows `10`; the final line
-    errors `'undefined-word` for `k`.
-  - **Traces to**: Milestone 3 — unit rollback (`src/session.zig`); Milestone 4 — child-env isolation.
+  - **Assert**: a failing REPL line restores the stack while completed
+    env writes survive; every isolated application gets a disposable
+    child scope; the eventual `each` implementation consumes that same
+    boundary API rather than recreating environment isolation.
+  - **Verify by** `ux`: enter `10`, then
+    `(99) 'kept def 20 + missing`, then `dup pp`, then `kept pp`.
+    At M4 run `(1 'k let) attempt pop k`; at M6 run the original probe
+    `[1 2 3] (dup 'k let k *) each pop k`.
+  - **Expected**: after the failed line `dup pp` prints `10` and
+    `kept pp` prints `99`; both isolation probes error
+    `'undefined-word` for `k`.
+  - **Traces to**: Milestone 3 — exact unit stack rollback; Milestone 4
+    — the shared lazy child-scope mechanism proven through `attempt`;
+    Milestone 6 — `each` adopts that mechanism and owns the terminal
+    each-specific assertion.
 
 - **DoD-15 — grammar negatives**
   - **Assert**: mismatched delimiters and top-level `defp` are errors.
@@ -687,13 +734,19 @@ script in CI.
 
 - **DoD-26 — module effect declarations (d.9)**
   - **Assert**: a module `def` without an effect declaration fails
-    registration; a declared effect is enforced dynamically at
-    application; the declaration is visible via `see`.
-  - **Verify by** `cmd`: `ecl "'m ( (dup +) 'bad def ) module"`;
-    `ecl "'m ( (dup +) ( a -- b c ) 'lies def ) module 1 m.lies"`;
-    `ecl "'m ( (dup +) ( a -- b ) 'dbl def ) module 'm.dbl see"`.
+    registration; a declared effect is enforced dynamically when a call
+    enters from outside its home module; same-home calls are unbracketed;
+    the declaration is visible via `see`.
+  - **Verify by** `cmd`: `ecl -e "'m ( (dup +) 'bad def ) module"`;
+    `ecl -e "'m ( (dup +) ( a -- b c ) 'lies def ) module 1 m.lies"`;
+    `ecl -e "'m ( (dup +) ( a -- b ) 'dbl def ) module 'm.dbl see"`;
+    and `zig build test`, whose
+    `module: effect shape cross-home contract and same-home TCO` fixture compares
+    20- and 20,000-deep module countdowns.
   - **Expected**: exit ≠ 0 with `'kind 'domain` (missing declaration);
     exit ≠ 0 with `'kind 'contract` (observed `( a -- b )` ≠ declared
-    `( a -- b c )`); `see` output includes `( a -- b )`.
+    `( a -- b c )`); `see` output includes `( a -- b )`; both countdown
+    depths have the same bounded maximum frame count, proving no
+    per-activation same-home contract checkpoint.
   - **Traces to**: Milestone 4 — module `def`/`defp` declaration
-    validation + the d.14 dynamic enforcement hook.
+    validation + the cross-home d.14 dynamic enforcement hook.

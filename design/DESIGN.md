@@ -594,7 +594,16 @@ a BQN competitor; wrong one for this language).
 - **All naming.** Settled — see VOCABULARY.md: Joy/Factor names for the
   stack half, K names for the array half; `pop` (stack) vs `drop`
   (sequence); `cons` not `curry`; `call` not `i`; Janet's `prin`/`print`
-  convention; primrec/linrec dropped from core.
+  convention; primrec/linrec dropped from core. The v1 combinator
+  surface (ruled 2026-08-12) captures Joy's zoo and APCL's adaptors
+  practically — control flow is the least intuitive element of
+  concatenative programming for infix-trained users, so the common
+  shapes get names: cleave family `bi`/`tri`/`bi2`/`both`,
+  `times`/`cond`/`case`/`unless`, `infra`, and
+  `filter`/`partition`/`any?`/`all?`. Most are [E] prelude; APCL's
+  remaining adaptors reduce to stack words (see VOCABULARY.md's
+  correspondence note). Every inline combinator is an
+  idiom-recognition site (d.23). Recursion combinators stay dropped.
 - **Grammar.** Settled — see GRAMMAR.md (companion spec: tokens, forms,
   units, round-trip).
 

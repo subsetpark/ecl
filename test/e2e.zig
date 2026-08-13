@@ -162,3 +162,120 @@ test "missing scripts and version have stable CLI behavior" {
     try expectExit(7, requested_exit.term);
     try std.testing.expectEqualStrings("", requested_exit.stdout);
 }
+
+test "e2e: module privacy acceptance" {
+    const privacy = try run(&.{ build_options.ecl_exe, "test/acceptance/modules-privacy.ecl" });
+    defer allocator.free(privacy.stdout);
+    defer allocator.free(privacy.stderr);
+    try expectExit(1, privacy.term);
+    try std.testing.expectEqualStrings("42\n", privacy.stdout);
+    try std.testing.expect(std.mem.indexOf(u8, privacy.stderr, "'word 'm.s") != null);
+}
+
+test "e2e: extracted body acceptance" {
+    const extracted = try run(&.{ build_options.ecl_exe, "test/acceptance/body-extraction.ecl" });
+    defer allocator.free(extracted.stdout);
+    defer allocator.free(extracted.stderr);
+    try expectExit(1, extracted.term);
+    try std.testing.expect(std.mem.indexOf(u8, extracted.stderr, "'word 's") != null);
+}
+
+test "e2e: hot reload all access paths acceptance" {
+    const result = try run(&.{ build_options.ecl_exe, "test/acceptance/hot-reload.ecl" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExit(0, result.term);
+    try std.testing.expectEqualStrings("11\n21\n31\n12\n22\n32\n", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
+
+test "e2e: module effect declaration acceptance" {
+    const missing = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) 'bad def) module" });
+    defer allocator.free(missing.stdout);
+    defer allocator.free(missing.stderr);
+    try expectExit(1, missing.term);
+    try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "'kind 'domain") != null);
+
+    const lying = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) ( a -- b c ) 'lies def) module 1 m.lies" });
+    defer allocator.free(lying.stdout);
+    defer allocator.free(lying.stderr);
+    try expectExit(1, lying.term);
+    try std.testing.expect(std.mem.indexOf(u8, lying.stderr, "'kind 'contract") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lying.stderr, "'word 'm.lies") != null);
+
+    const visible = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) ( a -- b ) 'dbl def) module 'm.dbl see" });
+    defer allocator.free(visible.stdout);
+    defer allocator.free(visible.stderr);
+    try expectExit(0, visible.term);
+    try std.testing.expect(std.mem.indexOf(u8, visible.stdout, "(a -- b)") != null);
+}
+
+test "e2e: use shadow notice acceptance" {
+    const result = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        "1 'mean let 2 'count let 'stats (3 'mean let 4 'count let) module 'stats use mean count",
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExit(0, result.term);
+    try std.testing.expectEqualStrings("1 2\n", result.stdout);
+    try std.testing.expectEqualStrings(
+        "session `count` shadows `stats.count`\n" ++
+            "session `mean` shadows `stats.mean`\n",
+        result.stderr,
+    );
+}
+
+test "e2e: reflection acceptance" {
+    const result = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        "'m (40 's letp (s 2 +) ( -- n ) 'f def) module 'm use 'm.f see 'f which words",
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExit(0, result.term);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "(s 2 +) (-- n) 'm.f def") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "f -> m.f def public generation 1 (-- n)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stdout, " s ") == null);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
+
+test "e2e: direct load and ECL_PATH acceptance" {
+    const direct = try run(&.{ build_options.ecl_exe, "-e", "\"test/acceptance/load-stack.ecl\" load pp" });
+    defer allocator.free(direct.stdout);
+    defer allocator.free(direct.stderr);
+    try expectExit(0, direct.term);
+    try std.testing.expectEqualStrings("42\n", direct.stdout);
+    try std.testing.expectEqualStrings("", direct.stderr);
+
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_PATH", "test/acceptance/modules");
+    const result = try std.process.run(allocator, io, .{
+        .argv = &.{ build_options.ecl_exe, "-e", "'stats use answer" },
+        .environ_map = &environment,
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExit(0, result.term);
+    try std.testing.expectEqualStrings("42\n", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var module_directory = try std.Io.Dir.cwd().openDir(io, "test/acceptance/modules", .{});
+    defer module_directory.close(io);
+    var empty_environment = std.process.Environ.Map.init(allocator);
+    defer empty_environment.deinit();
+    const no_implicit_cwd = try std.process.run(allocator, io, .{
+        .argv = &.{ exe, "-e", "'stats use" },
+        .cwd = .{ .dir = module_directory },
+        .environ_map = &empty_environment,
+    });
+    defer allocator.free(no_implicit_cwd.stdout);
+    defer allocator.free(no_implicit_cwd.stderr);
+    try expectExit(1, no_implicit_cwd.term);
+    try std.testing.expect(std.mem.indexOf(u8, no_implicit_cwd.stderr, "'kind 'undefined-word") != null);
+}

@@ -162,17 +162,21 @@ test "components stay inside the decision-23 line budgets" {
             @embedFile("lexer.zig"), @embedFile("binder.zig"), @embedFile("reader.zig"),
         } },
         .{ .name = "machine", .budget = 2300, .sources = &.{
-            @embedFile("env.zig"),     @embedFile("machine.zig"),
-            @embedFile("spans.zig"),   @embedFile("prims.zig"),
-            @embedFile("session.zig"), @embedFile("main.zig"),
+            @embedFile("machine.zig"), @embedFile("spans.zig"),
+            @embedFile("prims.zig"),   @embedFile("main.zig"),
             @embedFile("root.zig"),
+        } },
+        .{ .name = "modules and registry", .budget = 1300, .sources = &.{
+            @embedFile("env.zig"),          @embedFile("modules.zig"),
+            @embedFile("module_prims.zig"), @embedFile("session.zig"),
         } },
     };
     // Test-only sources are excluded from core entirely; test blocks inside
     // interpreter sources are excluded by countCoreLines.
     const test_sources = [_][]const u8{
         @embedFile("testgen.zig"),      @embedFile("reader_test.zig"),
-        @embedFile("machine_test.zig"), @embedFile("value_test.zig"),
+        @embedFile("machine_test.zig"), @embedFile("module_test.zig"),
+        @embedFile("value_test.zig"),
     };
 
     var core_lines: usize = 0;

@@ -26,12 +26,12 @@ Decision 21's doctrine becomes two enforced rules:
    |---|---|---|
    | values + RC (value, heap, intern, list, equal, dict, print) | 1,950 | 1,850 |
    | reader (lexer, binder, reader) | 1,250 | 1,123 |
-   | machine (env, machine, spans, prims, session, main, root) | 2,300 | 2,185 |
-   | modules and registry (M4) | 1,100 | — |
+   | machine (machine, spans, prims, main, root) | 2,300 | 2,289 |
+   | modules and registry (env, modules, module_prims, session) | 1,300 | 1,104 |
    | combinators (M6) | 900 | — |
    | concurrency (M7) | 1,300 | — |
    | tooling: line editing, completion (M8) | 700 | — |
-   | **core total** | **9,500** | **5,158** |
+   | **core total** | **9,500** | **6,361** |
 
    Kernels ≤ ~5k and stdlib modules ≤ ~2k, both unmeasured so far.
    Additions displace *within a component*.
@@ -183,6 +183,20 @@ generation (permanently, per decision 21).
   Shared structures (core, module envs, registry) publish immutable
   snapshots via atomic pointer swap (arc-swap/RCU discipline);
   unit-local scopes are unsynchronized by ownership.
+- **Snapshot retention (M4 as-built; bounded reclamation is a v1
+  obligation).** Superseded environment shapes and registry directories
+  are currently retained until session teardown — that is what lets the
+  lock-free read path dereference them without hazard pointers. Cost
+  therefore scales with distinct-name insertions, use-list edits, and
+  module commits (rebinds swap cell interiors and retain nothing).
+  Acceptable at REPL scale; unbounded for a long-lived session that
+  keeps defining names or re-registering modules. v1 must add some
+  degree of control before the acceptance milestone: quiescent-point
+  reclamation (compact superseded shapes/directories when no unit is
+  executing — trivial while single-threaded, epoch/lease-gated once M7
+  workers exist) and/or a session word that reports and compacts
+  retained snapshots. Binding-cell snapshot chains already reclaim at
+  readers==0 and need nothing.
 
 ## The frame machine
 

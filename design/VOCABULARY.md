@@ -10,11 +10,12 @@ Tiers: **[P]** primitive (requires runtime support); **[E]** prelude
 proof that the language can build itself).
 
 **Application contexts.** Two kinds of quotation application exist:
-- *Inline*: the quotation runs on the current stack (`call`, `dip`,
-  `keep`, `bi`, `tri`, `if`, `when`, `while` branches).
+- *Inline*: the quotation runs on the current stack — exactly the
+  Control and Cleave words: `call`, `dip`, `keep`, `bi`, `tri`, `bi2`,
+  `both`, `if`, `when`, `unless`, `cond`, `while`, `times`.
 - *Isolated*: the quotation runs on a fresh substack per application,
   seeded with declared inputs, its result count checked against the
-  contract (`each`, `each2`, `for`, `fold`, `scan`, `dict-of`,
+  contract (`each`, `each2`, `for`, `fold`, `scan`, `infra`, `dict-of`,
   `attempt`, `spawn`, `module`).
 
 ## Stack plumbing
@@ -30,6 +31,8 @@ proof that the language can build itself).
 | [E] | `keep` | `( x q -- … x )` | inline: run `q` on `x`, restore `x` |
 | [E] | `bi`   | `( x p q -- … )` | inline: apply `p` to x, then `q` to x |
 | [E] | `tri`  | `( x p q r -- … )` | three-way `bi` |
+| [E] | `bi2`  | `( x y p q -- … )` | inline: binary cleave — `p` and `q` each see x y (APL fork; APCL `recombine`) |
+| [E] | `both` | `( x y q -- … )` | inline: apply `q` to x, then to y (Factor `bi@`; Ψ — APCL `under`) |
 
 ## Application & control
 
@@ -40,7 +43,22 @@ proof that the language can build itself).
 | [P] | `compose` | `( q r -- qr )` | concatenate quotations |
 | [P] | `if`      | `( bool then else -- … )` | inline; branches run on current stack |
 | [E] | `when`    | `( bool then -- … )` | `() if` |
+| [E] | `unless`  | `( bool else -- … )` | `() swap if` |
 | [P] | `while`   | `( cond body -- … )` | inline; `cond` must leave one bool; TCO'd |
+| [P] | `times`   | `( n q -- … )` | inline; run `q` n times; TCO'd |
+| [P] | `cond`    | `( pairs -- … )` | inline; list of `(test) (action)` quotation pairs; the first test leaving true fires its action |
+| [E] | `case`    | `( x d -- … )` | `at call` — dict dispatch; missing key errors (d.17) |
+
+**Combinator correspondence (Joy / APCL).** The zoo is captured, not
+imported: in a concatenative substrate the applicative adaptors are
+stack words. APCL `constant`/`apply`/`flip`/`duplicate`/`left`/`right`
+are `wrap`/`call`/`swap`/`dup`/`pop`/`nip`; the fork (`recombine`,
+`f(g(…), h(…))`) is `bi`/`bi2` + the combining word; Ψ (`under`,
+`f(g(x), g(y))`) is `both` + the combining word. Joy's recursion
+combinators (`genrec`/`linrec`/`binrec`/`primrec`) stay dropped — named
+recursion with guaranteed TCO plus `times`/`while`/`fold` covers the
+practical shapes, and Joy's `x` is `dup call`. Each inline combinator
+is an idiom-recognition site (d.23).
 
 ## Binding & reflection
 
@@ -134,6 +152,11 @@ pervasive (the K `~` distinction: `[1 2] [1 2] =` is `[1 1]`,
 | [P] | `for`   | `( l q -- )` | `( a -- )`, ordered |
 | [P] | `fold`  | `( l acc q -- acc' )` | `( acc a -- acc )` |
 | [P] | `scan`  | `( l acc q -- l' )` | `( acc a -- acc )`, keeps intermediates |
+| [P] | `infra` | `( l q -- l' )` | unconstrained — `q` runs with `l`'s elements as the whole substack; the remainder is the result (Joy) |
+| [E] | `filter` | `( l q -- l' )` | `( a -- bool )` — `over swap each where at` |
+| [E] | `partition` | `( l q -- kept dropped )` | `( a -- bool )` |
+| [E] | `any?`  | `( l q -- bool )` | `( a -- bool )` |
+| [E] | `all?`  | `( l q -- bool )` | `( a -- bool )` |
 
 ## Strings (mostly free via array words)
 
@@ -193,9 +216,12 @@ pushes its elements.)
 (0 (+) fold)                  'sum     def
 (1 (*) fold)                  'prod    def
 (dup sum swap len /)          'mean    def
+(over swap each where at)     'filter  def
+(at call)                     'case    def
+(|x y q| x q call y q call)   'both    def
 ```
 
-Counts: ~70 primitives, ~15 prelude words. The kernel surface
+Counts: ~73 primitives, ~23 prelude words. The kernel surface
 (decision 21's optimization target) is the pervasive arithmetic plus
 the [P] list/dict words plus the iteration combinators — about forty
 loops.

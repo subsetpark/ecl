@@ -1,8 +1,6 @@
 const std = @import("std");
 const ecl = @import("ecl");
-
 const AppError = error{ OutOfMemory, Io };
-
 const help =
     \\ecl — a homoiconic concatenative array calculator
     \\
@@ -18,7 +16,6 @@ const help =
     \\    -V, --version              Show the version
     \\
 ;
-
 pub fn main(init: std.process.Init) void {
     const status = entry(init) catch |err| switch (err) {
         error.OutOfMemory => failure: {
@@ -34,7 +31,6 @@ pub fn main(init: std.process.Init) void {
     };
     if (status != 0) std.process.exit(status);
 }
-
 fn entry(init: std.process.Init) AppError!u8 {
     const arguments = init.minimal.args.toSlice(init.arena.allocator()) catch
         return error.OutOfMemory;
@@ -43,7 +39,6 @@ fn entry(init: std.process.Init) AppError!u8 {
         const tty = std.Io.File.stdin().isTty(init.io) catch return error.Io;
         return if (tty) repl(init) else runStdin(init, &.{});
     }
-
     const first = cli[0];
     if (std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
         try writeFile(init.io, .stdout, help);
@@ -66,7 +61,6 @@ fn entry(init: std.process.Init) AppError!u8 {
         return executeSource(init, "<command>", cli[1], cli[2..], true);
     }
     if (std.mem.eql(u8, first, "-")) return runStdin(init, cli[1..]);
-
     const is_file: bool = file: {
         std.Io.Dir.cwd().access(init.io, first, .{ .read = true }) catch |err| switch (err) {
             error.FileNotFound, error.NameTooLong, error.BadPathName => break :file false,
@@ -95,7 +89,6 @@ fn entry(init: std.process.Init) AppError!u8 {
     }
     return executeSource(init, "<command>", first, cli[1..], true);
 }
-
 fn runStdin(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
     var buffer: [8192]u8 = undefined;
     var file_reader = std.Io.File.stdin().reader(init.io, &buffer);
@@ -106,7 +99,6 @@ fn runStdin(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
     defer init.gpa.free(source);
     return executeSource(init, "<stdin>", source, arguments, true);
 }
-
 fn executeSource(
     init: std.process.Init,
     source_name: []const u8,
@@ -116,10 +108,15 @@ fn executeSource(
 ) AppError!u8 {
     var output_buffer: [4096]u8 = undefined;
     var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
-    var session = try ecl.session.Session.initWithOutput(
+    var diagnostic_buffer: [4096]u8 = undefined;
+    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
+    var session = try ecl.session.Session.initWithHost(
         init.gpa,
         arguments,
+        init.io,
         &output_writer.interface,
+        &diagnostic_writer.interface,
+        init.environ_map.get("ECL_PATH"),
     );
     defer session.deinit();
     const outcome = try session.runUnit(source_name, source);
@@ -142,14 +139,18 @@ fn executeSource(
         },
     }
 }
-
 fn repl(init: std.process.Init) AppError!u8 {
     var output_buffer: [4096]u8 = undefined;
     var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
-    var session = try ecl.session.Session.initWithOutput(
+    var diagnostic_buffer: [4096]u8 = undefined;
+    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
+    var session = try ecl.session.Session.initWithHost(
         init.gpa,
         &.{},
+        init.io,
         &output_writer.interface,
+        &diagnostic_writer.interface,
+        init.environ_map.get("ECL_PATH"),
     );
     defer session.deinit();
     var pending: std.ArrayList(u8) = .empty;
@@ -157,7 +158,6 @@ fn repl(init: std.process.Init) AppError!u8 {
     var input_buffer: [8192]u8 = undefined;
     var file_reader = std.Io.File.stdin().reader(init.io, &input_buffer);
     var continuation = false;
-
     while (true) {
         try writeFile(init.io, .stdout, if (continuation) ".. " else "ecl> ");
         var line = std.Io.Writer.Allocating.init(init.gpa);
@@ -182,7 +182,6 @@ fn repl(init: std.process.Init) AppError!u8 {
         }
         try pending.appendSlice(init.gpa, line_bytes);
         if (has_delimiter) try pending.append(init.gpa, '\n');
-
         const outcome = try session.runUnit("<repl>", pending.items);
         if (session.requested_exit) |status| return status;
         switch (outcome) {
@@ -201,7 +200,6 @@ fn repl(init: std.process.Init) AppError!u8 {
         }
     }
 }
-
 fn emitIncompleteAtEof(
     init: std.process.Init,
     session: *ecl.session.Session,
@@ -223,7 +221,6 @@ fn emitIncompleteAtEof(
         },
     };
 }
-
 fn printStack(init: std.process.Init, session: *const ecl.session.Session) AppError!void {
     const display = try session.stackDisplay();
     defer init.gpa.free(display);
@@ -231,7 +228,6 @@ fn printStack(init: std.process.Init, session: *const ecl.session.Session) AppEr
     try writeFile(init.io, .stdout, display);
     try writeFile(init.io, .stdout, "\n");
 }
-
 fn emitSyntheticError(
     init: std.process.Init,
     kind: ecl.machine.ErrorKind,
@@ -245,7 +241,6 @@ fn emitSyntheticError(
     try printError(init, error_value);
     return 1;
 }
-
 fn emitIoError(
     init: std.process.Init,
     context: []const u8,
@@ -259,16 +254,13 @@ fn emitIoError(
     ) catch context;
     return emitSyntheticError(init, .io, message, null);
 }
-
 fn printError(init: std.process.Init, error_value: ecl.value.Value) AppError!void {
     const rendered = try ecl.print.toOwnedString(init.gpa, error_value);
     defer init.gpa.free(rendered);
     try writeFile(init.io, .stderr, rendered);
     try writeFile(init.io, .stderr, "\n");
 }
-
 const Output = enum { stdout, stderr };
-
 fn writeFile(io: std.Io, output: Output, bytes: []const u8) AppError!void {
     var buffer: [4096]u8 = undefined;
     var file_writer = switch (output) {
