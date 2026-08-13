@@ -4,6 +4,7 @@ const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
+const poll = @import("poll.zig");
 
 pub const Value = value.Value;
 pub const Header = value.Header;
@@ -50,13 +51,37 @@ pub fn matchWithAllocator(
     a: Value,
     b: Value,
 ) error{OutOfMemory}!bool {
-    var actions: std.ArrayList(Action) = .empty;
-    defer actions.deinit(allocator);
-    try actions.append(allocator, .{ .compare = .{ .a = a, .b = b } });
+    return matchInternal(allocator, a, b, null) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Ecl => @panic("structural equality polled without a poller"),
+    };
+}
+
+/// Runtime structural equality. Every visited value passes through `poller`,
+/// including values reached while hashing dictionary keys.
+pub fn matchWithPolling(
+    allocator: std.mem.Allocator,
+    a: Value,
+    b: Value,
+    poller: poll.Poller,
+) poll.Error!bool {
+    return matchInternal(allocator, a, b, poller);
+}
+
+fn matchInternal(
+    allocator: std.mem.Allocator,
+    a: Value,
+    b: Value,
+    poller: ?poll.Poller,
+) poll.Error!bool {
+    var actions = poll.ChunkStack(Action).init(allocator);
+    defer actions.deinit();
+    try actions.push(.{ .compare = .{ .a = a, .b = b } });
     var last = false;
 
     while (actions.pop()) |action| switch (action) {
         .compare => |pair| {
+            try pollValue(poller);
             if (numericPair(pair.a, pair.b)) {
                 last = numberEqual(pair.a, pair.b);
                 continue;
@@ -83,13 +108,13 @@ pub fn matchWithAllocator(
                     } else if (a_len == 0) {
                         last = true;
                     } else {
-                        try actions.append(allocator, .{ .list_continue = .{
+                        try actions.push(.{ .list_continue = .{
                             .a = pair.a,
                             .b = pair.b,
                             .next = 1,
                             .len = a_len,
                         } });
-                        try actions.append(allocator, .{ .compare = .{
+                        try actions.push(.{ .compare = .{
                             .a = list.atUnchecked(pair.a, 0),
                             .b = list.atUnchecked(pair.b, 0),
                         } });
@@ -104,7 +129,7 @@ pub fn matchWithAllocator(
                     } else if (a_header.len == 0) {
                         last = true;
                     } else {
-                        try actions.append(allocator, .{ .dict_search = .{
+                        try actions.push(.{ .dict_search = .{
                             .a = a_header,
                             .b = b_header,
                             .entry = 0,
@@ -120,38 +145,38 @@ pub fn matchWithAllocator(
                 last = true;
                 continue;
             }
-            try actions.append(allocator, .{ .list_continue = .{
+            try actions.push(.{ .list_continue = .{
                 .a = continuation.a,
                 .b = continuation.b,
                 .next = continuation.next + 1,
                 .len = continuation.len,
             } });
-            try actions.append(allocator, .{ .compare = .{
+            try actions.push(.{ .compare = .{
                 .a = list.atUnchecked(continuation.a, continuation.next),
                 .b = list.atUnchecked(continuation.b, continuation.next),
             } });
         },
         .dict_search => |search| {
             const a_key = dictItem(search.a, true, search.entry);
-            const a_hash = try hashWithAllocator(allocator, a_key);
+            const a_hash = try hashInternal(allocator, a_key, poller);
             var candidate = search.candidate;
             const b_len: usize = @intCast(search.b.len);
             while (candidate < b_len) : (candidate += 1) {
                 const b_key = dictItem(search.b, true, candidate);
-                if (a_hash != try hashWithAllocator(allocator, b_key)) continue;
-                try actions.append(allocator, .{ .dict_after_key = .{
+                if (a_hash != try hashInternal(allocator, b_key, poller)) continue;
+                try actions.push(.{ .dict_after_key = .{
                     .a = search.a,
                     .b = search.b,
                     .entry = search.entry,
                     .candidate = candidate,
                 } });
-                try actions.append(allocator, .{ .compare = .{ .a = a_key, .b = b_key } });
+                try actions.push(.{ .compare = .{ .a = a_key, .b = b_key } });
                 break;
             } else last = false;
         },
         .dict_after_key => |continuation| {
             if (!last) {
-                try actions.append(allocator, .{ .dict_search = .{
+                try actions.push(.{ .dict_search = .{
                     .a = continuation.a,
                     .b = continuation.b,
                     .entry = continuation.entry,
@@ -159,12 +184,12 @@ pub fn matchWithAllocator(
                 } });
                 continue;
             }
-            try actions.append(allocator, .{ .dict_after_value = .{
+            try actions.push(.{ .dict_after_value = .{
                 .a = continuation.a,
                 .b = continuation.b,
                 .entry = continuation.entry,
             } });
-            try actions.append(allocator, .{ .compare = .{
+            try actions.push(.{ .compare = .{
                 .a = dictItem(continuation.a, false, continuation.entry),
                 .b = dictItem(continuation.b, false, continuation.candidate),
             } });
@@ -175,7 +200,7 @@ pub fn matchWithAllocator(
             if (next == continuation.a.len) {
                 last = true;
             } else {
-                try actions.append(allocator, .{ .dict_search = .{
+                try actions.push(.{ .dict_search = .{
                     .a = continuation.a,
                     .b = continuation.b,
                     .entry = next,
@@ -250,9 +275,22 @@ fn reverseOrder(order: std.math.Order) std.math.Order {
 
 const HashAction = union(enum) {
     visit: Value,
-    finish_list: usize,
-    finish_entry,
-    finish_dict: usize,
+    list_after: struct {
+        collection: Value,
+        index: usize,
+        state: u64,
+    },
+    dict_after_key: struct {
+        header: *Header,
+        index: usize,
+        state: u64,
+    },
+    dict_after_value: struct {
+        header: *Header,
+        index: usize,
+        state: u64,
+        key_hash: u64,
+    },
 };
 
 /// Convenience wrapper for tests and small tools that do not own an
@@ -267,64 +305,128 @@ pub fn hashWithAllocator(
     allocator: std.mem.Allocator,
     item: Value,
 ) error{OutOfMemory}!u64 {
-    var actions: std.ArrayList(HashAction) = .empty;
-    defer actions.deinit(allocator);
-    var results: std.ArrayList(u64) = .empty;
-    defer results.deinit(allocator);
-    try actions.append(allocator, .{ .visit = item });
+    return hashInternal(allocator, item, null) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Ecl => @panic("structural hashing polled without a poller"),
+    };
+}
+
+/// Runtime structural hash. Charges every nested value to the supplied
+/// safe-point budget rather than only the outer collection cell.
+pub fn hashWithPolling(
+    allocator: std.mem.Allocator,
+    item: Value,
+    poller: poll.Poller,
+) poll.Error!u64 {
+    return hashInternal(allocator, item, poller);
+}
+
+fn hashInternal(
+    allocator: std.mem.Allocator,
+    item: Value,
+    poller: ?poll.Poller,
+) poll.Error!u64 {
+    if (scalarHash(item)) |result| {
+        try pollValue(poller);
+        return result;
+    }
+    var actions = poll.ChunkStack(HashAction).init(allocator);
+    defer actions.deinit();
+    try actions.push(.{ .visit = item });
+    // SAFETY: every continuation is pushed below a child visit, and empty
+    // containers assign their result directly, so `last` is set before read.
+    var last: u64 = undefined;
 
     while (actions.pop()) |action| switch (action) {
-        .visit => |current| switch (current) {
-            .int => |number| try results.append(allocator, numericHash(@floatFromInt(number))),
-            .float => |number| try results.append(allocator, numericHash(number)),
-            .char => |codepoint| try results.append(allocator, mix(0x4348_4152, codepoint)),
-            .symbol => |id| try results.append(allocator, mix(0x5359_4d42, id)),
-            .word => |id| try results.append(allocator, mix(0x574f_5244, id)),
-            .list => |header| {
-                const count: usize = @intCast(header.len);
-                try actions.append(allocator, .{ .finish_list = count });
-                var index = count;
-                while (index > 0) {
-                    index -= 1;
-                    try actions.append(allocator, .{
-                        .visit = list.atUnchecked(current, index),
-                    });
-                }
-            },
-            .dict => |header| {
-                const count: usize = @intCast(header.len);
-                try actions.append(allocator, .{ .finish_dict = count });
-                var index = count;
-                while (index > 0) {
-                    index -= 1;
-                    try actions.append(allocator, .finish_entry);
-                    try actions.append(allocator, .{ .visit = dictItem(header, false, index) });
-                    try actions.append(allocator, .{ .visit = dictItem(header, true, index) });
-                }
-            },
+        .visit => |current| {
+            try pollValue(poller);
+            if (scalarHash(current)) |result| {
+                last = result;
+                continue;
+            }
+            switch (current) {
+                .list => |header| {
+                    const count: usize = @intCast(header.len);
+                    const state = mix(0x4c49_5354, count);
+                    if (count == 0) {
+                        last = state;
+                    } else {
+                        try actions.push(.{ .list_after = .{
+                            .collection = current,
+                            .index = 0,
+                            .state = state,
+                        } });
+                        try actions.push(.{ .visit = list.atUnchecked(current, 0) });
+                    }
+                },
+                .dict => |header| {
+                    const count: usize = @intCast(header.len);
+                    const state = mix(0x4449_4354, count);
+                    if (count == 0) {
+                        last = state;
+                    } else {
+                        try actions.push(.{ .dict_after_key = .{
+                            .header = header,
+                            .index = 0,
+                            .state = state,
+                        } });
+                        try actions.push(.{ .visit = dictItem(header, true, 0) });
+                    }
+                },
+                .int, .float, .char, .symbol, .word => unreachable,
+            }
         },
-        .finish_list => |count| {
-            const start = results.items.len - count;
-            var result = mix(0x4c49_5354, count);
-            for (results.items[start..]) |child_hash| result = mix(result, child_hash);
-            results.shrinkRetainingCapacity(start);
-            try results.append(allocator, result);
+        .list_after => |continuation| {
+            try pollValue(poller);
+            const state = mix(continuation.state, last);
+            const next = continuation.index + 1;
+            if (next == @as(usize, @intCast(continuation.collection.list.len))) {
+                last = state;
+            } else {
+                try actions.push(.{ .list_after = .{
+                    .collection = continuation.collection,
+                    .index = next,
+                    .state = state,
+                } });
+                try actions.push(.{
+                    .visit = list.atUnchecked(continuation.collection, next),
+                });
+            }
         },
-        .finish_entry => {
-            const value_hash = results.pop().?;
-            const key_hash = results.pop().?;
-            try results.append(allocator, mix(key_hash ^ 0x9e37_79b9, value_hash));
+        .dict_after_key => |continuation| {
+            const key_hash = last;
+            try actions.push(.{ .dict_after_value = .{
+                .header = continuation.header,
+                .index = continuation.index,
+                .state = continuation.state,
+                .key_hash = key_hash,
+            } });
+            try actions.push(.{
+                .visit = dictItem(continuation.header, false, continuation.index),
+            });
         },
-        .finish_dict => |count| {
-            const start = results.items.len - count;
-            var result = mix(0x4449_4354, count);
-            for (results.items[start..]) |entry_hash| result +%= avalanche(entry_hash);
-            results.shrinkRetainingCapacity(start);
-            try results.append(allocator, result);
+        .dict_after_value => |continuation| {
+            try pollValue(poller);
+            const entry_hash = mix(continuation.key_hash ^ 0x9e37_79b9, last);
+            const state = continuation.state +% avalanche(entry_hash);
+            const next = continuation.index + 1;
+            if (next == @as(usize, @intCast(continuation.header.len))) {
+                last = state;
+            } else {
+                try actions.push(.{ .dict_after_key = .{
+                    .header = continuation.header,
+                    .index = next,
+                    .state = state,
+                } });
+                try actions.push(.{ .visit = dictItem(continuation.header, true, next) });
+            }
         },
     };
-    std.debug.assert(results.items.len == 1);
-    return results.items[0];
+    return last;
+}
+
+fn pollValue(poller: ?poll.Poller) poll.Error!void {
+    if (poller) |active| try active.poll();
 }
 
 fn numericPair(a: Value, b: Value) bool {
@@ -375,6 +477,17 @@ fn dictItem(header: *Header, keys: bool, index: usize) Value {
 fn numericHash(number: f64) u64 {
     const normalized = if (number == 0.0) 0.0 else number;
     return mix(0x4e55_4d42, @bitCast(normalized));
+}
+
+fn scalarHash(item: Value) ?u64 {
+    return switch (item) {
+        .int => |number| numericHash(@floatFromInt(number)),
+        .float => |number| numericHash(number),
+        .char => |codepoint| mix(0x4348_4152, codepoint),
+        .symbol => |id| mix(0x5359_4d42, id),
+        .word => |id| mix(0x574f_5244, id),
+        .list, .dict => null,
+    };
 }
 
 fn mix(state: u64, input: u64) u64 {
@@ -524,6 +637,35 @@ test "deep structural identity uses explicit worklists" {
     defer heap.releaseValue(allocator, right);
     try std.testing.expect(match(left, right));
     try std.testing.expectEqual(hash(left), hash(right));
+}
+
+test "poll-aware hash and equality charge nested values" {
+    const PollCounter = struct {
+        visits: usize = 0,
+
+        fn tick(raw: *anyopaque) poll.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.visits += 1;
+        }
+    };
+    const allocator = std.testing.allocator;
+    const numbers = try allocator.alloc(i64, 70_000);
+    defer allocator.free(numbers);
+    for (numbers, 0..) |*number, index| number.* = @intCast(index);
+    const left = try list.fromI64Slice(allocator, numbers);
+    defer heap.releaseValue(allocator, left);
+    const right = try list.fromI64Slice(allocator, numbers);
+    defer heap.releaseValue(allocator, right);
+
+    var counter: PollCounter = .{};
+    const poller = poll.Poller{ .context = &counter, .poll_fn = PollCounter.tick };
+    _ = try hashWithPolling(allocator, left, poller);
+    // One root visit plus visiting and folding each child.
+    try std.testing.expectEqual(@as(usize, 140_001), counter.visits);
+
+    counter.visits = 0;
+    try std.testing.expect(try matchWithPolling(allocator, left, right, poller));
+    try std.testing.expectEqual(@as(usize, 70_001), counter.visits);
 }
 
 test "allocator-aware equality paths propagate every allocation failure" {

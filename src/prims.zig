@@ -1,4 +1,4 @@
-//! M3 primitives. Scalar arithmetic is the explicit M5 kernel seam.
+//! Stack/control primitives and the installer for the closed kernel surface.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -10,6 +10,10 @@ const printer = @import("print.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const module_prims = @import("module_prims.zig");
+const prelude = @import("prelude.zig");
+const kernels = @import("kernels.zig");
+const kernel_support = @import("kernel_support.zig");
+const kernel_storage = @import("kernel_storage.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
@@ -17,15 +21,6 @@ const Definition = struct {
     name: []const u8,
     primitive: env.Primitive,
 };
-/// Specializes a multi-operand body into one `env.Primitive` per operand, so
-/// every word keeps a distinct function pointer.
-fn bind(comptime body: anytype, comptime operand: anytype) env.Primitive {
-    return struct {
-        fn run(evaluator: *Machine) MachineError!void {
-            return body(evaluator, operand);
-        }
-    }.run;
-}
 pub fn install(core: *env.Env) error{OutOfMemory}!void {
     const definitions = [_]Definition{
         .{ .name = "dup", .primitive = dup },
@@ -36,20 +31,11 @@ pub fn install(core: *env.Env) error{OutOfMemory}!void {
         .{ .name = "call", .primitive = call },
         .{ .name = "cons", .primitive = cons },
         .{ .name = "compose", .primitive = compose },
-        .{ .name = "at", .primitive = at },
         .{ .name = "if", .primitive = ifWord },
         .{ .name = "while", .primitive = whileWord },
-        .{ .name = "+", .primitive = bind(arithmetic, Arithmetic.add) },
-        .{ .name = "-", .primitive = bind(arithmetic, Arithmetic.sub) },
-        .{ .name = "*", .primitive = bind(arithmetic, Arithmetic.mul) },
-        .{ .name = "/", .primitive = bind(arithmetic, Arithmetic.div) },
-        .{ .name = "=", .primitive = bind(compare, Comparison.eq) },
-        .{ .name = "<>", .primitive = bind(compare, Comparison.ne) },
-        .{ .name = "<", .primitive = bind(compare, Comparison.lt) },
-        .{ .name = ">", .primitive = bind(compare, Comparison.gt) },
-        .{ .name = "<=", .primitive = bind(compare, Comparison.le) },
-        .{ .name = ">=", .primitive = bind(compare, Comparison.ge) },
         .{ .name = "match", .primitive = match },
+        .{ .name = "type", .primitive = typeWord },
+        .{ .name = "str", .primitive = strWord },
         .{ .name = "dict-of", .primitive = dictOf },
         .{ .name = "attempt", .primitive = attempt },
         .{ .name = "raise", .primitive = raise },
@@ -62,7 +48,9 @@ pub fn install(core: *env.Env) error{OutOfMemory}!void {
         const id = try intern.intern(definition.name);
         try core.installCore(id, .{ .primitive = definition.primitive });
     }
+    try kernels.install(core);
     try module_prims.install(core);
+    try prelude.install(core);
     core.sealCore();
 }
 fn dup(evaluator: *Machine) MachineError!void {
@@ -126,26 +114,6 @@ fn compose(evaluator: *Machine) MachineError!void {
     for (0..right_len) |index| values[left_len + index] = list.atUnchecked(right, index);
     try evaluator.pushOwned(try list.fromValues(evaluator.allocator(), values));
 }
-fn at(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    const index_value = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), index_value);
-    const collection = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list or index_value != .int) {
-        return evaluator.typeError("a list and an integer index");
-    }
-    if (index_value.int < 0) {
-        return evaluator.fail(.domain, "list index is out of bounds");
-    }
-    const index: usize = @intCast(index_value.int);
-    const count: usize = @intCast(collection.list.len);
-    if (index >= count) {
-        return evaluator.fail(.domain, "list index is out of bounds");
-    }
-    const item = list.atUnchecked(collection, index);
-    try evaluator.pushBorrowed(item);
-}
 fn ifWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(3);
     const otherwise = try evaluator.popOwned();
@@ -189,72 +157,74 @@ fn whileWord(evaluator: *Machine) MachineError!void {
     };
     try evaluator.whileOwned(condition_header, body_header);
 }
-const Arithmetic = enum { add, sub, mul, div };
-fn arithmetic(evaluator: *Machine, operation: Arithmetic) MachineError!void {
-    try evaluator.require(2);
-    const right = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), right);
-    const left = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), left);
-    if (!left.isNumber() or !right.isNumber()) return evaluator.typeError("two numbers");
-    if (operation != .div and left == .int and right == .int) {
-        const result = switch (operation) {
-            .add => std.math.add(i64, left.int, right.int),
-            .sub => std.math.sub(i64, left.int, right.int),
-            .mul => std.math.mul(i64, left.int, right.int),
-            .div => unreachable,
-        } catch return evaluator.fail(.overflow, "integer arithmetic overflow");
-        return evaluator.pushOwned(.{ .int = result });
-    }
-    const left_float = asFloat(left);
-    const right_float = asFloat(right);
-    if (operation == .div and right_float == 0.0) {
-        return evaluator.fail(.domain, "division by zero");
-    }
-    const result = switch (operation) {
-        .add => left_float + right_float,
-        .sub => left_float - right_float,
-        .mul => left_float * right_float,
-        .div => left_float / right_float,
-    };
-    if (std.math.isNan(result)) return evaluator.fail(.domain, "operation produced NaN");
-    const propagating = !std.math.isFinite(left_float) or !std.math.isFinite(right_float);
-    if (std.math.isInf(result) and !propagating) {
-        return evaluator.fail(.overflow, "floating-point arithmetic overflow");
-    }
-    try evaluator.pushOwned(.{ .float = result });
-}
-const Comparison = enum { eq, ne, lt, gt, le, ge };
-fn compare(evaluator: *Machine, operation: Comparison) MachineError!void {
-    try evaluator.require(2);
-    const right = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), right);
-    const left = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), left);
-    const ordering = equal.compareScalars(left, right) catch
-        return evaluator.typeError("two numbers or two chars");
-    const result = switch (operation) {
-        .eq => ordering == .eq,
-        .ne => ordering != .eq,
-        .lt => ordering == .lt,
-        .gt => ordering == .gt,
-        .le => ordering != .gt,
-        .ge => ordering != .lt,
-    };
-    try evaluator.pushOwned(.{ .int = @intFromBool(result) });
-}
 fn match(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     const right = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), right);
     const left = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), left);
-    const matches = try equal.matchWithAllocator(evaluator.allocator(), left, right);
+    const matches = try equal.matchWithPolling(
+        evaluator.allocator(),
+        left,
+        right,
+        (kernel_support.Context{ .evaluator = evaluator }).structuralPoller(),
+    );
     try evaluator.pushOwned(.{ .int = @intFromBool(matches) });
 }
+fn typeWord(evaluator: *Machine) MachineError!void {
+    const item = try evaluator.popOwned();
+    defer heap.releaseValue(evaluator.allocator(), item);
+    const spelling: []const u8 = switch (item) {
+        .int => "int",
+        .float => "float",
+        .char => "char",
+        .symbol => "symbol",
+        .word => "word",
+        .list => "list",
+        .dict => "dict",
+    };
+    try evaluator.pushOwned(.{ .symbol = try intern.intern(spelling) });
+}
+fn strWord(evaluator: *Machine) MachineError!void {
+    const item = try evaluator.popOwned();
+    defer heap.releaseValue(evaluator.allocator(), item);
+    const poller = (kernel_support.Context{ .evaluator = evaluator }).structuralPoller();
+    const rendered = try printer.toOwnedStringWithPolling(evaluator.allocator(), item, poller);
+    defer evaluator.allocator().free(rendered);
+    const result = kernel_storage.fromUtf8(evaluator.allocator(), rendered, poller) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Ecl => return error.Ecl,
+        error.InvalidUtf8 => unreachable,
+    };
+    try evaluator.pushOwned(result);
+}
 fn dictOf(evaluator: *Machine) MachineError!void {
-    const quotation = try evaluator.popOwned();
-    try evaluator.dictOwned(try quotationHeader(evaluator, quotation));
+    const entries = try evaluator.popOwned();
+    defer heap.releaseValue(evaluator.allocator(), entries);
+    if (entries != .list) return evaluator.typeError("a flat key/value list");
+    const count: usize = @intCast(entries.list.len);
+    if (count % 2 != 0) {
+        return evaluator.fail(.contract, "dict-of requires an even-length key/value list");
+    }
+    const pairs = try evaluator.allocator().alloc(dict.Pair, count / 2);
+    defer evaluator.allocator().free(pairs);
+    for (pairs, 0..) |*pair, index| {
+        try evaluator.advanceKernel(2);
+        pair.* = .{
+            list.atUnchecked(entries, index * 2),
+            list.atUnchecked(entries, index * 2 + 1),
+        };
+    }
+    const dictionary = kernel_storage.fromPairs(
+        evaluator.allocator(),
+        pairs,
+        (kernel_support.Context{ .evaluator = evaluator }).structuralPoller(),
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Ecl => return error.Ecl,
+        error.DuplicateKey => return evaluator.fail(.domain, "dict-of received a duplicate key"),
+    };
+    try evaluator.pushOwned(dictionary);
 }
 fn attempt(evaluator: *Machine) MachineError!void {
     const quotation = try evaluator.popOwned();
@@ -312,8 +282,14 @@ fn pp(evaluator: *Machine) MachineError!void {
     defer heap.releaseValue(evaluator.allocator(), item);
     const output = evaluator.unit.output orelse
         return evaluator.fail(.io, "standard output is unavailable");
-    printer.printWithAllocator(evaluator.allocator(), item, output) catch |err| switch (err) {
+    printer.printWithPolling(
+        evaluator.allocator(),
+        item,
+        output,
+        (kernel_support.Context{ .evaluator = evaluator }).structuralPoller(),
+    ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Ecl => return error.Ecl,
         error.WriteFailed => return evaluator.fail(.io, "standard output write failed"),
     };
     output.writeByte('\n') catch
@@ -329,6 +305,7 @@ fn prin(evaluator: *Machine) MachineError!void {
         return evaluator.fail(.io, "standard output is unavailable");
     const count: usize = @intCast(item.list.len);
     for (0..count) |index| {
+        try evaluator.advanceKernel(1);
         var encoded: [4]u8 = undefined;
         const length = std.unicode.utf8Encode(
             @intCast(list.atUnchecked(item, index).char),
@@ -364,11 +341,4 @@ fn releaseThree(allocator: std.mem.Allocator, a: Value, b: Value, c: Value) void
     heap.releaseValue(allocator, a);
     heap.releaseValue(allocator, b);
     heap.releaseValue(allocator, c);
-}
-fn asFloat(item: Value) f64 {
-    return switch (item) {
-        .int => |integer| @floatFromInt(integer),
-        .float => |floating| floating,
-        .char, .symbol, .word, .list, .dict => unreachable,
-    };
 }

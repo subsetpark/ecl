@@ -27,6 +27,17 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
 
+    const audit_mod = b.createModule(.{
+        .root_source_file = b.path("src/source_audit.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const audit_exe = b.addExecutable(.{ .name = "ecl-source-audit", .root_module = audit_mod });
+    const run_audit = b.addRunArtifact(audit_exe);
+    const audit_step = b.step("source-audit", "Check source architecture and line budgets");
+    audit_step.dependOn(&run_audit.step);
+    test_step.dependOn(&run_audit.step);
+
     const e2e_options = b.addOptions();
     e2e_options.addOptionPath("ecl_exe", exe.getEmittedBin());
     const e2e_mod = b.createModule(.{
@@ -53,4 +64,28 @@ pub fn build(b: *std.Build) void {
     const run_tsan_tests = b.addRunArtifact(tsan_tests);
     const tsan_step = b.step("test-tsan", "Run tests under ThreadSanitizer");
     tsan_step.dependOn(&run_tsan_tests.step);
+
+    const oracle_step = b.step(
+        "oracle-differential",
+        "Compare shared M5 semantics with the frozen Rust PoC",
+    );
+    if (b.option([]const u8, "oracle-exe", "Path to the frozen Rust ecl executable")) |rust_exe| {
+        const oracle_options = b.addOptions();
+        oracle_options.addOptionPath("zig_exe", exe.getEmittedBin());
+        oracle_options.addOption([]const u8, "rust_exe", rust_exe);
+        const oracle_mod = b.createModule(.{
+            .root_source_file = b.path("test/oracle_differential.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        oracle_mod.addOptions("oracle_options", oracle_options);
+        const oracle_tests = b.addTest(.{ .root_module = oracle_mod });
+        const run_oracle_tests = b.addRunArtifact(oracle_tests);
+        oracle_step.dependOn(&run_oracle_tests.step);
+    } else {
+        const missing_oracle = b.addFail(
+            "oracle-differential requires -Doracle-exe=path/to/poc/rust/ecl",
+        );
+        oracle_step.dependOn(&missing_oracle.step);
+    }
 }

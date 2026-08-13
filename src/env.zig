@@ -2,6 +2,7 @@
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
+const poll = @import("poll.zig");
 const list = @import("list.zig");
 const machine = @import("machine.zig");
 pub const Primitive = *const fn (*machine.Machine) machine.MachineError!void;
@@ -291,12 +292,17 @@ pub const Environment = struct {
     pub fn namesOwned(
         self: *const Environment,
         allocator: std.mem.Allocator,
-    ) error{OutOfMemory}![]u32 {
+        poller: ?poll.Poller,
+    ) poll.Error![]u32 {
         const shape = self.current.load(.acquire) orelse return allocator.alloc(u32, 0);
         const result = try allocator.alloc(u32, shape.names.count());
+        errdefer allocator.free(result);
         var iterator = shape.names.keyIterator();
         var index: usize = 0;
-        while (iterator.next()) |id| : (index += 1) result[index] = id.*;
+        while (iterator.next()) |id| : (index += 1) {
+            if (poller) |active| try active.poll();
+            result[index] = id.*;
+        }
         return result;
     }
     pub fn freeze(self: *Environment) void {

@@ -1,1 +1,1 @@
-pop 7 'persist let 'loaded (8 'answer let) module "side" prin missing
+pop 7 'persist set 'loaded (8 'answer set) module "side" prin missing

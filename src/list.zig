@@ -88,6 +88,13 @@ pub fn fromCodepoints(
     return .{ .list = header };
 }
 
+pub fn emptyLike(
+    allocator: std.mem.Allocator,
+    source: Value,
+) error{ OutOfMemory, NotAList }!Value {
+    return .{ .list = try heap.allocHeader(allocator, (try listHeader(source)).kind(), 0, 0) };
+}
+
 pub fn fromSymbolIds(
     allocator: std.mem.Allocator,
     source: []const u32,

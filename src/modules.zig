@@ -2,6 +2,7 @@
 const std = @import("std");
 const env = @import("env.zig");
 const intern = @import("intern.zig");
+const poll = @import("poll.zig");
 fn validName(id: u32) bool {
     const name = intern.get(id);
     return name.len > 0 and std.mem.indexOfScalar(u8, name, '.') == null;
@@ -53,21 +54,31 @@ pub const ModuleGeneration = struct {
     pub fn publicNamesOwned(
         self: *const ModuleGeneration,
         allocator: std.mem.Allocator,
-    ) error{OutOfMemory}![]u32 {
-        const all = try self.environment.namesOwned(allocator);
+        poller: ?poll.Poller,
+    ) poll.Error![]u32 {
+        const all = try self.environment.namesOwned(allocator, poller);
         defer allocator.free(all);
-        const result = try allocator.alloc(u32, all.len);
-        errdefer allocator.free(result);
+        const visible = try allocator.alloc(u32, all.len);
+        defer allocator.free(visible);
         var count: usize = 0;
         for (all) |id| {
-            var lease = self.environment.resolveDirect(id).?;
-            defer lease.deinit(allocator);
-            if (lease.visibility == .public) {
-                result[count] = id;
-                count += 1;
-            }
+            if (poller) |active| try active.poll();
+            if (!self.isPublic(id)) continue;
+            visible[count] = id;
+            count += 1;
         }
-        return allocator.realloc(result, count);
+        const result = try allocator.alloc(u32, count);
+        errdefer allocator.free(result);
+        for (visible[0..count], result) |id, *destination| {
+            if (poller) |active| try active.poll();
+            destination.* = id;
+        }
+        return result;
+    }
+    fn isPublic(self: *const ModuleGeneration, id: u32) bool {
+        var lease = self.environment.resolveDirect(id).?;
+        defer lease.deinit(self.allocator);
+        return lease.visibility == .public;
     }
 };
 const ModuleSlot = struct {

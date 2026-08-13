@@ -64,14 +64,17 @@ are preserved. Nothing below is constrained by compatibility.
    scalar and array arithmetic behave identically (the divergence a
    promotion rule would create is why promotion is in Rejected).
 
-5. **Bindings: `def`/`let` split.** Executability is a property of the
+5. **Bindings: `def`/`set` split.** Executability is a property of the
    *binding*, not the value (forced by decision 2: with one list type there is
    nothing to dispatch on). `(body) 'name def` binds a word — reference
-   applies the body. `value 'name let` binds a value — reference pushes it,
-   including quotations-as-data. One namespace, entries tagged word|value.
-   `def` requires a list body (else error pointing at `let`); a data list as
+   applies the body. `value 'name set` associates a value with a name in the
+   current environment — reference pushes it, including quotations-as-data.
+   `set` is environment assignment, not a lexical binding form: unqualified
+   references resolve when executed. Prefer stack flow or binder locals for
+   ordinary local values. One namespace, entries tagged word|value.
+   `def` requires a list body (else error pointing at `set`); a data list as
    body is legal and yields a multi-value constant word. Everything is
-   late-bound: words see re-`def`s and re-`let`s of their dependencies
+   late-bound: words see re-`def`s and re-`set`s of their dependencies
    immediately — module words via registry indirection (18); decision 9's
    intra-module early-binding license is observably equivalent, never
    semantic. No Thunk concept.
@@ -81,8 +84,8 @@ are preserved. Nothing below is constrained by compatibility.
    Locals are definition-site sugar that desugars to point-free code before
    storage; head-position only; not permitted across quotation boundaries in
    v1 (error suggests `cons`). Spelling: `(|lo hi| …)`, Rust/Ruby-style —
-   see GRAMMAR.md. The locals sugar shares no vocabulary with `let` — they
-   are unrelated mechanisms.
+   see GRAMMAR.md. The locals sugar does not invoke `set`; they are unrelated
+   mechanisms.
 
 7. **Errors: crash-only, observed as data at unit boundaries.** No
    try/catch, no handler quotations. Errors propagate; the failing unit of
@@ -137,6 +140,13 @@ are preserved. Nothing below is constrained by compatibility.
      The old strict-extension promise is amended to: the checker rejects
      only code already violating its own stated contract (success-typing
      discipline; the Dialyzer model).
+   - **Literal-count packing is inferable; dynamic packing is an escape
+     hatch.** `pack` consumes the top `n` values, where `n` is itself the
+     top input. A nonnegative integer literal gives the checker an ordinary
+     fixed effect; a nonliteral count has unknown effect and is therefore
+     unavailable inside a statically verified body. It remains legal on the
+     dynamic top level, where deliberately state-dependent stack surgery
+     belongs.
    - **Binding license:** only occurrences resolving to the module's own
      internal env may be early-bound, at commit time — sound because
      module envs are write-once, registration commits after success, and
@@ -161,7 +171,7 @@ are preserved. Nothing below is constrained by compatibility.
      effects, Dialyzer success typing, Erlang's local/external call
      split. The substrate invariants that keep the checker layer
      possible: quotations are plain lists (6, 8); code changes only via
-     `def`/`let` rebinding (1, 5); combinator contracts define the
+     `def`/`set` rebinding (1, 5); combinator contracts define the
      effect vocabulary (14); the env is enumerable.
 
 10. **Evaluator: one explicit frame machine.** Guaranteed TCO through words,
@@ -245,22 +255,24 @@ are preserved. Nothing below is constrained by compatibility.
     pair, never per token. Specialization is therefore visible at the
     prompt, not mysterious.
 
-17. **Dict literals are sugar over `dict-of`.** Brackets quote in ecl, so
-    `{...}` does not get private evaluation semantics: it desugars at parse
-    time to `( body ) dict-of`, where `dict-of` is an ordinary word with an
-    ordinary contract — apply the quotation on a fresh substack (child
-    env), require an even number of results (else error), pair them off in
-    order, build the dict. Consequences: bodies see env names but never
-    the outer stack (a literal denotes a self-contained value; `5 {'x 1}`
-    is the same dict regardless of the 5); computed construction is free
-    (`('total 3 4 +) dict-of`); nesting desugars mechanically; `see` shows
-    the desugared truth; locals cannot reach into a dict literal (it is a
-    quotation boundary — use `let` or point-free feeding). Duplicate keys
-    error; merging is explicit (decision 13's key-aligned `+`, or a merge
-    word). Any value is a legal key (immutability makes everything
-    hashable); symbols are the idiom; insertion order is preserved (column
-    order for tables). `{}` is the empty dict; dicts print as
-    `{key value ...}` and round-trip.
+17. **Dict literals are inert key/value syntax.** `{k v ...}` constructs one
+    dict value directly: its top-level forms are paired adjacently without
+    evaluation. The form count must be even, so `{foo bar baz}` is a parse
+    error; `{foo bar}` stores the word value `bar` under the word key `foo`
+    rather than resolving either name. Duplicate keys are also parse
+    errors. `dict-of` is the corresponding runtime conversion
+    `( entries -- d )`: it accepts one flat, even-length list, pairs adjacent
+    values, and executes nothing. Computed construction therefore builds
+    the entry list explicitly, for example
+    `'total 3 4 + pair dict-of` produces `{'total 7}`. `to-dict`
+    remains the two-column constructor. Merging is explicit (decision 13's
+    key-aligned `+`, or `merge`). Any value is a legal key (immutability
+    makes everything hashable); symbols are the idiom. Key identity is
+    whole-value `match` identity. `has?` asks only whether such a key is
+    present: keys are inert, absence is false, and
+    lookup/cancellation/allocation failures are not converted to false.
+    Insertion order is preserved (column order for tables). `{}` is the
+    empty dict; dicts print as `{key value ...}` and round-trip.
 
 18. **Modules: named registry values, definition-site privacy.** A module
     is a named, registered value — not a file. A per-session registry maps
@@ -272,10 +284,10 @@ are preserved. Nothing below is constrained by compatibility.
     env, registers the result. Modules are first-class (enumerable,
     diffable, constructible programmatically by building the body
     quotation).
-    - **Privacy at the definition site:** inside a module body, `def`/`let`
-      bind public (exported), `defp`/`letp` bind private (Elixir-style).
+    - **Privacy at the definition site:** inside a module body, `def`/`set`
+      bind public (exported), `defp`/`setp` bind private (Elixir-style).
       Privacy is subtractive — privates are absent from the module's public
-      face, not access-checked. At top level `defp`/`letp` are an error
+      face, not access-checked. At top level `defp`/`setp` are an error
       (there is no module to be private to; Elixir precedent). Visibility
       is one more property of the binding, alongside decision 5's
       word|value tag.
@@ -311,7 +323,7 @@ are preserved. Nothing below is constrained by compatibility.
       either direction; a failed re-registration leaves the previous
       generation registered (registration commits only after the body
       succeeds — crash-only applied to the registry); temporary
-      `def`/`let` inside a module body's isolated children stay dynamic
+      `def`/`set` inside a module body's isolated children stay dynamic
       and are never exported.
 
 19. **Error values.** Every error is a dict: `'kind` (symbol, dispatch
@@ -458,8 +470,8 @@ implementation matter, not a design matter.
   provenance attached to every reader-produced token on the code plane
   (side tables — never on runtime values; code assembled at runtime via
   cons/compose has none, and error dicts omit position: d.22/d.23);
-  parse-time transforms are exactly the capped set (locals desugar,
-  `{...}` → `dict-of`). Printer:
+  the only code transform is locals desugaring; dict syntax constructs an
+  inert value directly. Printer:
   representation-exposing, round-tripping (d.16). IO: UTF-8
   encode/decode at the edge, byte IO distinct from char IO (d.15),
   ordered within a unit (d.11); every host error converts to an error

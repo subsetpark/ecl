@@ -5,7 +5,6 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const list = @import("list.zig");
-const dict = @import("dict.zig");
 const lexer = @import("lexer.zig");
 
 pub const Value = value.Value;
@@ -58,7 +57,7 @@ pub fn lower(
     }
 
     for (body) |form| switch (form.value) {
-        .list, .dict => if (try nestedLocalReference(allocator, form.value, name_ids)) |id| {
+        .list => if (try nestedLocalReference(allocator, form.value, name_ids)) |id| {
             diag.setFmt(
                 form.span,
                 "local `{s}` crosses a quotation boundary; capture it explicitly with `cons`",
@@ -66,7 +65,7 @@ pub fn lower(
             );
             return error.Parse;
         },
-        .int, .float, .char, .symbol, .word => {},
+        .int, .float, .char, .symbol, .word, .dict => {},
     };
 
     const words = struct {
@@ -157,15 +156,7 @@ fn nestedLocalReference(
                 try work.append(allocator, list.atUnchecked(current, index));
             }
         },
-        .dict => |header| {
-            var index: usize = @intCast(header.len);
-            while (index > 0) {
-                index -= 1;
-                try work.append(allocator, dict.valueAt(header, index));
-                try work.append(allocator, dict.keyAt(header, index));
-            }
-        },
-        .int, .float, .char, .symbol => {},
+        .int, .float, .char, .symbol, .dict => {},
     };
     return null;
 }

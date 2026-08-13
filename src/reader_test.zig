@@ -2,8 +2,6 @@
 
 const std = @import("std");
 const heap = @import("heap.zig");
-const intern = @import("intern.zig");
-const list = @import("list.zig");
 const equal = @import("equal.zig");
 const dict = @import("dict.zig");
 const printer = @import("print.zig");
@@ -32,11 +30,10 @@ test "parse-print identity for seeded dict-free values" {
     }
 }
 
-test "seeded dict literals have the specified desugared shape" {
+test "parse-print identity for seeded dict values" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(0xecc0_1002);
     const random = prng.random();
-    const dict_of = try intern.intern("dict-of");
     for (0..500) |_| {
         const count = random.uintLessThan(usize, 5);
         const pairs = try allocator.alloc(dict.Pair, count);
@@ -49,7 +46,7 @@ test "seeded dict literals have the specified desugared shape" {
         const base = random.intRangeAtMost(i64, -1_000_000, 1_000_000);
         for (pairs, 0..) |*pair, index| {
             pair[0] = .{ .int = base + @as(i64, @intCast(index)) };
-            pair[1] = try testgen.generateValue(allocator, random, 3, .excluded);
+            pair[1] = try testgen.generateValue(allocator, random, 3, .allowed);
             initialized += 1;
         }
         const original = try dict.fromPairs(allocator, pairs);
@@ -62,17 +59,13 @@ test "seeded dict literals have the specified desugared shape" {
             .incomplete => return error.TestUnexpectedResult,
         };
         defer parsed.deinit();
-        try std.testing.expectEqual(@as(usize, 2), parsed.forms.len);
-        try std.testing.expectEqual(dict_of, parsed.forms[1].word);
-        try std.testing.expectEqual(count * 2, try list.len(parsed.forms[0]));
-        for (pairs, 0..) |pair, index| {
-            try std.testing.expect(equal.match(pair[0], list.atUnchecked(parsed.forms[0], index * 2)));
-            try std.testing.expect(equal.match(pair[1], list.atUnchecked(parsed.forms[0], index * 2 + 1)));
-        }
+        try std.testing.expectEqual(@as(usize, 1), parsed.forms.len);
+        try std.testing.expect(equal.match(original, parsed.forms[0]));
+        try std.testing.expectEqual(equal.hash(original), equal.hash(parsed.forms[0]));
     }
 }
 
-test "Rust reader fixtures remain byte-for-byte anchors" {
+test "reader fixtures remain byte-for-byte anchors" {
     const allocator = std.testing.allocator;
     const Fixture = struct { source: []const u8, expected: []const []const u8 };
     const fixtures = [_]Fixture{
@@ -81,8 +74,8 @@ test "Rust reader fixtures remain byte-for-byte anchors" {
             .expected = &.{ "1", "-2", "16", "3.5", "2000.0", "(\\a 'x \"ok\")" },
         },
         .{
-            .source = "{'answer 40 2 +}",
-            .expected = &.{ "('answer 40 2 +)", "dict-of" },
+            .source = "{'answer (40 2 +) plus +}",
+            .expected = &.{"{'answer (40 2 +) plus +}"},
         },
         .{
             .source = "(|x| x x *)",

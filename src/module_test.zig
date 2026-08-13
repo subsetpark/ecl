@@ -54,7 +54,7 @@ test "env: new names and use edits bump shape and deep lookup is ordered" {
     try environment.moveUseToTop(9);
     try environment.moveUseToTop(8);
     try std.testing.expectEqualSlices(u32, &.{ 9, 8 }, environment.useOrder());
-    const names = try environment.namesOwned(std.testing.allocator);
+    const names = try environment.namesOwned(std.testing.allocator, null);
     defer std.testing.allocator.free(names);
     std.mem.sort(u32, names, {}, std.sort.asc(u32));
     try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, names);
@@ -62,30 +62,38 @@ test "env: new names and use edits bump shape and deep lookup is ordered" {
     try std.testing.expectError(error.Frozen, environment.bind(3, .{ .value = .{ .int = 3 } }));
 }
 
-test "scope: isolated attempt dict and child use do not leak" {
+test "binding: set installs and replaces values while let is absent" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "(1 'k let) attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
-    try expectErrorContains(&runtime, "((1 'k let missing) attempt pop) attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
-    try expectErrorContains(&runtime, "(1 'k let 'v 2) dict-of pop k", &.{ "'kind 'undefined-word", "'word 'k" });
-    try expectErrorContains(&runtime, "((1 'k let 'v) dict-of) attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
-    try expectOk(&runtime, "'m (7 'x let) module");
+    try expectOk(&runtime, "1 'x set x 2 'x set x");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stack.items[0].int);
+    try std.testing.expectEqual(@as(i64, 2), runtime.stack.items[1].int);
+    try expectErrorContains(&runtime, "3 'y let", &.{ "'kind 'undefined-word", "'word 'let" });
+    try expectErrorContains(&runtime, "3 'bad def", &.{ "'kind 'type", "use set for values" });
+}
+
+test "scope: isolated attempt and child use do not leak" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    try expectErrorContains(&runtime, "(1 'k set) attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
+    try expectErrorContains(&runtime, "((1 'k set missing) attempt pop) attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
+    try expectOk(&runtime, "'m (7 'x set) module");
     try expectErrorContains(&runtime, "('m use x) attempt pop x", &.{ "'kind 'undefined-word", "'word 'x" });
 }
 
 test "module: privacy module-body contract top-level private and qualified trace" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "'m (40 's letp (s 2 +) ( -- n ) 'f def) module m.f");
+    try expectOk(&runtime, "'m (40 's setp (s 2 +) ( -- n ) 'f def) module m.f");
     try std.testing.expectEqual(@as(i64, 42), runtime.stack.items[0].int);
     try expectErrorContains(&runtime, "m.s", &.{ "'kind 'undefined-word", "'word 'm.s" });
     try expectOk(&runtime, "'private-word ((41) ( -- n ) 'g defp (g 1 +) ( -- n ) 'f def) module private-word.f");
     try std.testing.expectEqual(@as(i64, 42), runtime.stack.items[1].int);
     try expectErrorContains(&runtime, "private-word.g", &.{ "'kind 'undefined-word", "'word 'private-word.g" });
-    try expectErrorContains(&runtime, "1 'x letp", &.{"'kind 'domain"});
+    try expectErrorContains(&runtime, "1 'x setp", &.{ "'kind 'domain", "defp/setp" });
     try expectErrorContains(&runtime, "'bad (1) module", &.{ "'kind 'contract", "observed 1" });
     try expectErrorContains(&runtime, "bad.x", &.{"'kind 'undefined-word"});
-    try expectOk(&runtime, "'temporary ((1 'hidden let) attempt pop) module");
+    try expectOk(&runtime, "'temporary ((1 'hidden set) attempt pop) module");
     try expectErrorContains(&runtime, "temporary.hidden", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "'trace-module ((missing) ( -- n ) 'boom def) module");
     try expectErrorContains(&runtime, "trace-module.boom", &.{ "'word 'missing", "'trace ['missing 'trace-module.boom]" });
@@ -96,7 +104,7 @@ test "module: privacy module-body contract top-level private and qualified trace
 test "module: qualified use alias ordering idempotence and collisions" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "'a (1 'x let) module 'b (2 'x let) module " ++
+    try expectOk(&runtime, "'a (1 'x set) module 'b (2 'x set) module " ++
         "'a use 'b use x 'a use x 'short 'a alias short.x");
     try std.testing.expectEqual(@as(i64, 2), runtime.stack.items[0].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stack.items[1].int);
@@ -104,19 +112,19 @@ test "module: qualified use alias ordering idempotence and collisions" {
     try expectErrorContains(&runtime, "'a 'b alias", &.{"'kind 'domain"});
     try expectOk(&runtime, "'short 'b alias short.x");
     try std.testing.expectEqual(@as(i64, 2), runtime.stack.items[3].int);
-    try expectErrorContains(&runtime, "'future 'a alias 'future (3 'x let) module", &.{"'kind 'domain"});
+    try expectErrorContains(&runtime, "'future 'a alias 'future (3 'x set) module", &.{"'kind 'domain"});
     try expectErrorContains(&runtime, "'dotted.name 'a alias", &.{"'kind 'domain"});
 }
 
 test "module: hot reload commit failure and whole-body pinning" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "'m (1 'x letp " ++
-        "('m (2 'x letp (x) ( -- n ) 'get def) module x) ( -- n ) 'probe def " ++
+    try expectOk(&runtime, "'m (1 'x setp " ++
+        "('m (2 'x setp (x) ( -- n ) 'get def) module x) ( -- n ) 'probe def " ++
         "(x) ( -- n ) 'get def) module m.probe m.get");
     try std.testing.expectEqual(@as(i64, 1), runtime.stack.items[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stack.items[1].int);
-    try expectErrorContains(&runtime, "'m (3 'x letp missing) module", &.{"'kind 'undefined-word"});
+    try expectErrorContains(&runtime, "'m (3 'x setp missing) module", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "m.get");
     try std.testing.expectEqual(@as(i64, 2), runtime.stack.items[2].int);
     try expectErrorContains(&runtime, "'kept ((9) ( -- n ) 'get def) module missing", &.{"'kind 'undefined-word"});
@@ -157,7 +165,7 @@ test "module: use shadow notices are exact and non-blocking" {
         null,
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "1 'mean let 2 'count let 'stats (3 'mean let 4 'count let 5 'other let) module 'stats use mean count");
+    try expectOk(&runtime, "1 'mean set 2 'count set 'stats (3 'mean set 4 'count set 5 'other set) module 'stats use mean count");
     try std.testing.expectEqualStrings(
         "session `count` shadows `stats.count`\n" ++
             "session `mean` shadows `stats.mean`\n",
@@ -182,8 +190,43 @@ test "module: use shadow notices are exact and non-blocking" {
         null,
     );
     defer broken.deinit();
-    try expectErrorContains(&broken, "1 'x let 'm (2 'x let 3 'y let) module 'm use", &.{"'kind 'io"});
+    try expectErrorContains(&broken, "1 'x set 'm (2 'x set 3 'y set) module 'm use", &.{"'kind 'io"});
     try expectErrorContains(&broken, "y", &.{"'kind 'undefined-word"});
+}
+
+test "module: use shadow notices stay within the cancellation bound" {
+    const allocator = std.testing.allocator;
+    const name_bytes = try allocator.alloc(u8, 70_000);
+    defer allocator.free(name_bytes);
+    @memset(name_bytes, 's');
+    const long_name = try intern.intern(name_bytes);
+    const module_name = try intern.intern("wide");
+    var output_buffer: [256]u8 = undefined;
+    var output = std.Io.Writer.Discarding.init(&output_buffer);
+    var diagnostics = std.Io.Writer.Allocating.init(allocator);
+    defer diagnostics.deinit();
+    var runtime = try session.Session.initWithHost(
+        allocator,
+        &.{},
+        std.testing.io,
+        &output.writer,
+        &diagnostics.writer,
+        null,
+    );
+    defer runtime.deinit();
+    _ = try runtime.environment.session.bind(long_name, .{ .value = .{ .int = 1 } });
+    _ = try runtime.registerNativeModule(module_name, &.{.{
+        .name = long_name,
+        .binding = .{ .value = .{ .int = 2 } },
+    }});
+    runtime.cancelled.store(true, .release);
+    const failure = (try runtime.runUnit("shadow-poll.ecl", "'wide use")).err;
+    defer heap.releaseValue(allocator, failure);
+    const rendered = try printer.toOwnedString(allocator, failure);
+    defer allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "unit cancelled") != null);
+    try std.testing.expect(runtime.last_polls >= 1);
+    try std.testing.expect(diagnostics.written().len < machine.kernel_poll_quantum);
 }
 
 test "reflection: which and see expose home shadow and effect" {
@@ -200,10 +243,11 @@ test "reflection: which and see expose home shadow and effect" {
         null,
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "'m (40 's letp (s 2 +) ( -- n ) 'f def) module 'm use " ++
-        "'m.f see 9 'f let 'f which words");
+    try expectOk(&runtime, "'m (40 's setp (s 2 +) ( -- n ) 'f def) module 'm use " ++
+        "'m.f see 9 'f set 'f which 'f see words");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(s 2 +) (-- n) 'm.f def") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f let public; shadows m.f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f set public; shadows m.f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "9 'f set") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " f ") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " s ") == null);
     try expectErrorContains(&runtime, "'m.f body call", &.{ "'kind 'undefined-word", "'word 's" });
@@ -212,7 +256,7 @@ test "reflection: which and see expose home shadow and effect" {
 test "reflection: body extraction loses home context" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "'m (40 's letp (s 2 +) ( -- n ) 'f def) module");
+    try expectOk(&runtime, "'m (40 's setp (s 2 +) ( -- n ) 'f def) module");
     try expectErrorContains(&runtime, "'m.f body call", &.{ "'kind 'undefined-word", "'word 's" });
 }
 
@@ -230,12 +274,78 @@ test "reflection: words is sorted unique and private-safe" {
         null,
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "'m (1 'hidden letp 2 'zebra let 3 'alpha let) module 'm use 4 'zebra let words");
+    try expectOk(&runtime, "'m (1 'hidden setp 2 'zebra set 3 'alpha set) module 'm use 4 'zebra set words");
     const rendered = output.written();
     try std.testing.expect(std.mem.indexOf(u8, rendered, "alpha") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "hidden") == null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "alpha").? < std.mem.indexOf(u8, rendered, "zebra").?);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "zebra"));
+}
+
+test "reflection remains cancellable across sorting and identifier output" {
+    const allocator = std.testing.allocator;
+    const first_bytes = try allocator.alloc(u8, 70_000);
+    defer allocator.free(first_bytes);
+    @memset(first_bytes, 'q');
+    first_bytes[first_bytes.len - 1] = 'a';
+    const second_bytes = try allocator.dupe(u8, first_bytes);
+    defer allocator.free(second_bytes);
+    second_bytes[second_bytes.len - 1] = 'b';
+    const first = try intern.intern(first_bytes);
+    const second = try intern.intern(second_bytes);
+
+    var discard_buffer: [256]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&discard_buffer);
+    var words_runtime = try session.Session.initWithOutput(allocator, &.{}, &discarding.writer);
+    defer words_runtime.deinit();
+    _ = try words_runtime.environment.session.bind(first, .{ .value = .{ .int = 1 } });
+    _ = try words_runtime.environment.session.bind(second, .{ .value = .{ .int = 2 } });
+    words_runtime.cancelled.store(true, .release);
+    const words_failure = (try words_runtime.runUnit("reflection-poll.ecl", "words")).err;
+    defer heap.releaseValue(allocator, words_failure);
+    const words_rendered = try printer.toOwnedString(allocator, words_failure);
+    defer allocator.free(words_rendered);
+    try std.testing.expect(std.mem.indexOf(u8, words_rendered, "unit cancelled") != null);
+    try std.testing.expect(words_runtime.last_polls >= 1);
+
+    var which_output = std.Io.Writer.Allocating.init(allocator);
+    defer which_output.deinit();
+    var which_runtime = try session.Session.initWithOutput(allocator, &.{}, &which_output.writer);
+    defer which_runtime.deinit();
+    _ = try which_runtime.environment.session.bind(first, .{ .value = .{ .int = 1 } });
+    try which_runtime.stack.append(allocator, .{ .symbol = first });
+    which_runtime.cancelled.store(true, .release);
+    const which_failure = (try which_runtime.runUnit("reflection-poll.ecl", "which")).err;
+    defer heap.releaseValue(allocator, which_failure);
+    const which_rendered = try printer.toOwnedString(allocator, which_failure);
+    defer allocator.free(which_rendered);
+    try std.testing.expect(std.mem.indexOf(u8, which_rendered, "unit cancelled") != null);
+    try std.testing.expect(which_runtime.last_polls >= 1);
+    try std.testing.expectEqual(@as(usize, 0), which_output.written().len);
+
+    const module_name = try intern.intern("poll-module");
+    const qualified_bytes = try allocator.alloc(u8, "poll-module.".len + first_bytes.len);
+    defer allocator.free(qualified_bytes);
+    @memcpy(qualified_bytes[0.."poll-module.".len], "poll-module.");
+    @memcpy(qualified_bytes["poll-module.".len..], first_bytes);
+    const qualified = try intern.intern(qualified_bytes);
+    var qualified_output = std.Io.Writer.Allocating.init(allocator);
+    defer qualified_output.deinit();
+    var qualified_runtime = try session.Session.initWithOutput(allocator, &.{}, &qualified_output.writer);
+    defer qualified_runtime.deinit();
+    _ = try qualified_runtime.registerNativeModule(module_name, &.{.{
+        .name = first,
+        .binding = .{ .value = .{ .int = 1 } },
+    }});
+    try qualified_runtime.stack.append(allocator, .{ .symbol = qualified });
+    qualified_runtime.cancelled.store(true, .release);
+    const qualified_failure = (try qualified_runtime.runUnit("reflection-poll.ecl", "which")).err;
+    defer heap.releaseValue(allocator, qualified_failure);
+    const qualified_rendered = try printer.toOwnedString(allocator, qualified_failure);
+    defer allocator.free(qualified_rendered);
+    try std.testing.expect(std.mem.indexOf(u8, qualified_rendered, "unit cancelled") != null);
+    try std.testing.expect(qualified_runtime.last_polls >= 1);
+    try std.testing.expectEqual(@as(usize, 0), qualified_output.written().len);
 }
 
 fn reflectionAllocationProbe(allocator: std.mem.Allocator) !void {
@@ -582,9 +692,9 @@ fn moduleAllocationProbe(allocator: std.mem.Allocator) !void {
     defer runtime.deinit();
     const outcome = try runtime.runUnit(
         "allocation-module.ecl",
-        "'m (1 'x letp (x) ( -- n ) 'get def) module 'm use get " ++
+        "'m (1 'x setp (x) ( -- n ) 'get def) module 'm use get " ++
             "'short 'm alias short.get " ++
-            "'m (2 'x letp (x) ( -- n ) 'get def) module get " ++
+            "'m (2 'x setp (x) ( -- n ) 'get def) module get " ++
             "('bad ((dup) 'f def) module) attempt pop",
     );
     if (outcome == .err) heap.releaseValue(allocator, outcome.err);
@@ -606,7 +716,7 @@ fn environmentAllocationProbe(allocator: std.mem.Allocator) !void {
     _ = try environment.bind(2, .{ .value = .{ .int = 3 } });
     try environment.moveUseToTop(8);
     try environment.moveUseToTop(9);
-    const names = try environment.namesOwned(allocator);
+    const names = try environment.namesOwned(allocator, null);
     allocator.free(names);
 }
 

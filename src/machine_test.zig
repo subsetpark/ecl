@@ -106,14 +106,27 @@ test "machine_test: late binding redefinition heals existing callers" {
     try std.testing.expectEqual(@as(i64, 12), runtime.stack.items[0].int);
     try std.testing.expect((try runtime.runUnit(
         "<test>",
-        "pop 40 'step let caller",
+        "pop 40 'step set caller",
     )) == .ok);
     try std.testing.expectEqual(@as(i64, 40), runtime.stack.items[0].int);
     try std.testing.expect((try runtime.runUnit(
         "<test>",
-        "pop (1 +) 'quoted let quoted",
+        "pop (1 +) 'quoted set quoted",
     )) == .ok);
     try std.testing.expect(runtime.stack.items[0] == .list);
+}
+
+test "early prelude installs source-defined wrap and pair" {
+    const allocator = std.testing.allocator;
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+    try std.testing.expect((try runtime.runUnit(
+        "<test>",
+        "1 wrap 2 3 pair 'wrap body 'pair body",
+    )) == .ok);
+    const display = try runtime.stackDisplay();
+    defer allocator.free(display);
+    try std.testing.expectEqualStrings("[1] [2 3] (() cons) (() cons cons)", display);
 }
 
 test "provisional scalar primitives enforce the d.22 regime" {

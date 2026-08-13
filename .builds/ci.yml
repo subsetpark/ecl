@@ -5,6 +5,7 @@ packages:
   # Zig builds libtsan/libcxx from source for -fsanitize=thread; that
   # compilation requires the Linux UAPI headers (linux/futex.h et al.).
   - linux-headers
+  - cargo
 sources:
   - https://git.sr.ht/~subsetpark/ecl
 tasks:
@@ -24,6 +25,12 @@ tasks:
   - test-safe: |
       cd ecl
       zig build test -Doptimize=ReleaseSafe
+  - oracle: |
+      cd ecl
+      cargo test --locked --manifest-path poc/rust/Cargo.toml
+      cargo build --locked --manifest-path poc/rust/Cargo.toml
+      git diff --exit-code -- poc/rust
+      zig build oracle-differential -Doracle-exe=poc/rust/target/debug/ecl
   - test-tsan: |
       cd ecl
       zig build test-tsan

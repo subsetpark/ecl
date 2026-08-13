@@ -1,18 +1,23 @@
-//! Append-only string interning with a locked write path and lock-free reads.
+//! Append-only string interning with fixed buckets, locked writes, and lock-free reads.
 //!
 //! Interned strings are process-lifetime atoms. Code that interns unbounded
-//! external input can therefore grow this table without bound.
+//! external input can grow this table without bound; bucket chains never rehash.
 
 const std = @import("std");
+const poll = @import("poll.zig");
 
 const entries_per_segment = 256;
 const byte_segment_size = 64 * 1024;
 const max_segments = 4096;
+const bucket_count = 16 * 1024;
+const no_entry = std.math.maxInt(u32);
 
 const Entry = struct {
+    hash: u64,
     byte_segment: u32,
     offset: u32,
     len: u32,
+    next: u32,
 };
 
 const EntrySegment = struct {
@@ -30,7 +35,7 @@ const AtomicByteSegment = std.atomic.Value(?*ByteSegment);
 pub const Table = struct {
     allocator: std.mem.Allocator,
     mutex: std.atomic.Mutex = .unlocked,
-    map: std.StringHashMapUnmanaged(u32) = .empty,
+    buckets: [bucket_count]u32 = [_]u32{no_entry} ** bucket_count,
     count: std.atomic.Value(u32) = .init(0),
     entry_segments: [max_segments]AtomicEntrySegment =
         [_]AtomicEntrySegment{AtomicEntrySegment.init(null)} ** max_segments,
@@ -43,7 +48,6 @@ pub const Table = struct {
     }
 
     pub fn deinit(self: *Table) void {
-        self.map.deinit(self.allocator);
         for (&self.entry_segments) |*slot| {
             if (slot.load(.monotonic)) |segment| self.allocator.destroy(segment);
         }
@@ -57,31 +61,86 @@ pub const Table = struct {
     }
 
     pub fn internBytes(self: *Table, bytes: []const u8) error{OutOfMemory}!u32 {
+        return self.internBytesImpl(bytes, null) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Ecl => unreachable,
+        };
+    }
+
+    pub fn internBytesPolling(
+        self: *Table,
+        bytes: []const u8,
+        poller: poll.Poller,
+    ) poll.Error!u32 {
+        return self.internBytesImpl(bytes, poller);
+    }
+
+    fn internBytesImpl(
+        self: *Table,
+        bytes: []const u8,
+        poller: ?poll.Poller,
+    ) poll.Error!u32 {
+        const hash = if (poller) |active|
+            try hashBytesPolling(bytes, active)
+        else
+            std.hash.Wyhash.hash(0, bytes);
         // Zig 0.16's atomic mutex is tryLock-only, so M1 spins on its
         // effectively uncontended writer path. Before M7 enables parallel
         // parsing, replace this with a blocking mutex to avoid burning cores.
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        while (!self.mutex.tryLock()) {
+            if (poller) |active| try active.poll();
+            std.atomic.spinLoopHint();
+        }
         defer self.mutex.unlock();
 
-        if (self.map.get(bytes)) |id| return id;
+        if (try self.findBytes(bytes, hash, poller)) |id| return id;
         if (bytes.len > std.math.maxInt(u32)) return error.OutOfMemory;
-
         const id = self.count.load(.monotonic);
         const entry_segment_index: usize = id / entries_per_segment;
         if (entry_segment_index >= max_segments) return error.OutOfMemory;
         const entry_segment = try self.ensureEntrySegment(entry_segment_index);
-        const reservation = try self.reserveBytes(bytes);
-        errdefer self.rollback(reservation);
-
-        const stable_bytes = reservation.segment.bytes[reservation.offset .. reservation.offset + bytes.len];
-        try self.map.put(self.allocator, stable_bytes, id);
+        const reservation = try self.reserveSpace(bytes.len);
+        const destination = reservation.segment.bytes[reservation.offset..][0..bytes.len];
+        if (poller) |active|
+            try copyBytesPolling(destination, bytes, active)
+        else
+            @memcpy(destination, bytes);
+        reservation.segment.used += bytes.len;
+        const bucket = bucketIndex(hash);
         entry_segment.entries[id % entries_per_segment] = .{
+            .hash = hash,
             .byte_segment = @intCast(reservation.segment_index),
             .offset = @intCast(reservation.offset),
             .len = @intCast(bytes.len),
+            .next = self.buckets[bucket],
         };
+        self.buckets[bucket] = id;
         self.count.store(id + 1, .release);
         return id;
+    }
+
+    fn findBytes(
+        self: *const Table,
+        bytes: []const u8,
+        hash: u64,
+        poller: ?poll.Poller,
+    ) poll.Error!?u32 {
+        var cursor = self.buckets[bucketIndex(hash)];
+        while (cursor != no_entry) {
+            if (poller) |active| try active.poll();
+            const segment = self.entry_segments[cursor / entries_per_segment].load(.monotonic).?;
+            const entry = segment.entries[cursor % entries_per_segment];
+            if (entry.hash == hash and entry.len == bytes.len) {
+                const stored = self.getBytes(cursor).?;
+                const equal = if (poller) |active|
+                    try equalBytesPolling(bytes, stored, active)
+                else
+                    std.mem.eql(u8, bytes, stored);
+                if (equal) return cursor;
+            }
+            cursor = entry.next;
+        }
+        return null;
     }
 
     pub fn getBytes(self: *const Table, id: u32) ?[]const u8 {
@@ -109,10 +168,9 @@ pub const Table = struct {
         segment: *ByteSegment,
         segment_index: usize,
         offset: usize,
-        previous_used: usize,
     };
 
-    fn reserveBytes(self: *Table, bytes: []const u8) error{OutOfMemory}!Reservation {
+    fn reserveSpace(self: *Table, length: usize) error{OutOfMemory}!Reservation {
         var segment_index = if (self.byte_segment_count == 0)
             0
         else
@@ -120,14 +178,14 @@ pub const Table = struct {
         const segment: *ByteSegment = blk: {
             if (self.byte_segment_count == 0 or
                 self.byte_segments[segment_index].load(.monotonic).?.bytes.len -
-                    self.byte_segments[segment_index].load(.monotonic).?.used < bytes.len)
+                    self.byte_segments[segment_index].load(.monotonic).?.used < length)
             {
                 if (self.byte_segment_count == max_segments) return error.OutOfMemory;
                 segment_index = self.byte_segment_count;
                 const created = try self.allocator.create(ByteSegment);
                 errdefer self.allocator.destroy(created);
                 created.* = .{
-                    .bytes = try self.allocator.alloc(u8, @max(byte_segment_size, bytes.len)),
+                    .bytes = try self.allocator.alloc(u8, @max(byte_segment_size, length)),
                 };
                 self.byte_segments[segment_index].store(created, .monotonic);
                 self.byte_segment_count += 1;
@@ -136,26 +194,83 @@ pub const Table = struct {
             break :blk self.byte_segments[segment_index].load(.monotonic).?;
         };
 
-        const previous_used = segment.used;
-        @memcpy(segment.bytes[previous_used..][0..bytes.len], bytes);
-        segment.used += bytes.len;
         return .{
             .segment = segment,
             .segment_index = segment_index,
-            .offset = previous_used,
-            .previous_used = previous_used,
+            .offset = segment.used,
         };
     }
-
-    fn rollback(_: *Table, reservation: Reservation) void {
-        reservation.segment.used = reservation.previous_used;
-    }
 };
+
+fn bucketIndex(hash: u64) usize {
+    return @as(usize, @truncate(hash)) & (bucket_count - 1);
+}
+
+fn hashBytesPolling(bytes: []const u8, poller: poll.Poller) poll.Error!u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    var start: usize = 0;
+    while (start < bytes.len) {
+        const end = @min(start + 256, bytes.len);
+        try poller.charge(end - start);
+        hasher.update(bytes[start..end]);
+        start = end;
+    }
+    return hasher.final();
+}
+
+fn equalBytesPolling(left: []const u8, right: []const u8, poller: poll.Poller) poll.Error!bool {
+    for (left, right) |left_byte, right_byte| {
+        try poller.poll();
+        if (left_byte != right_byte) return false;
+    }
+    return true;
+}
+
+fn copyBytesPolling(destination: []u8, source: []const u8, poller: poll.Poller) poll.Error!void {
+    var start: usize = 0;
+    while (start < source.len) {
+        const end = @min(start + 256, source.len);
+        try poller.charge(end - start);
+        @memcpy(destination[start..end], source[start..end]);
+        start = end;
+    }
+}
 
 var process_table = Table.init(std.heap.smp_allocator);
 
 pub fn intern(bytes: []const u8) error{OutOfMemory}!u32 {
     return process_table.internBytes(bytes);
+}
+
+pub fn dotIndexPolling(bytes: []const u8, poller: poll.Poller) poll.Error!?usize {
+    for (bytes, 0..) |byte, index| {
+        try poller.poll();
+        if (byte == '.') return index;
+    }
+    return null;
+}
+
+pub fn internPolling(bytes: []const u8, poller: poll.Poller) poll.Error!u32 {
+    return process_table.internBytesPolling(bytes, poller);
+}
+
+pub fn qualifiedPolling(
+    allocator: std.mem.Allocator,
+    module_name: u32,
+    word: u32,
+    poller: poll.Poller,
+) poll.Error!u32 {
+    const module_bytes = get(module_name);
+    const word_bytes = get(word);
+    const separator_end = std.math.add(usize, module_bytes.len, 1) catch return error.OutOfMemory;
+    const length = std.math.add(usize, separator_end, word_bytes.len) catch return error.OutOfMemory;
+    const bytes = try allocator.alloc(u8, length);
+    defer allocator.free(bytes);
+    try copyBytesPolling(bytes[0..module_bytes.len], module_bytes, poller);
+    try poller.poll();
+    bytes[module_bytes.len] = '.';
+    try copyBytesPolling(bytes[separator_end..], word_bytes, poller);
+    return internPolling(bytes, poller);
 }
 
 pub fn get(id: u32) []const u8 {
@@ -179,6 +294,54 @@ test "interning round-trips and is idempotent" {
     try std.testing.expect(first != other);
     try std.testing.expectEqualStrings("ecl", table.getBytes(first).?);
     try std.testing.expectEqualStrings("array", table.getBytes(other).?);
+}
+
+test "polling interning stops inside hash equality and publication copy" {
+    const PollStop = struct {
+        calls: usize = 0,
+        fail_at: usize,
+        fn tick(raw: *anyopaque) poll.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            if (self.calls == self.fail_at) return error.Ecl;
+        }
+        fn poller(self: *@This()) poll.Poller {
+            return .{ .context = self, .poll_fn = tick };
+        }
+    };
+    const allocator = std.testing.allocator;
+    const bytes = try allocator.alloc(u8, 70_000);
+    defer allocator.free(bytes);
+    @memset(bytes, 'p');
+    var table = Table.init(allocator);
+    defer table.deinit();
+
+    var hash_stop = PollStop{ .fail_at = 1024 };
+    try std.testing.expectError(error.Ecl, table.internBytesPolling(bytes, hash_stop.poller()));
+    try std.testing.expectEqual(@as(?[]const u8, null), table.getBytes(0));
+
+    var copy_stop = PollStop{ .fail_at = bytes.len + 128 };
+    try std.testing.expectError(error.Ecl, table.internBytesPolling(bytes, copy_stop.poller()));
+    try std.testing.expectEqual(@as(?[]const u8, null), table.getBytes(0));
+
+    const id = try table.internBytes(bytes);
+    try std.testing.expectEqual(@as(u32, 0), id);
+    try std.testing.expectEqualSlices(u8, bytes, table.getBytes(id).?);
+    try std.testing.expectEqual(id, try table.internBytes(bytes));
+
+    var complete = PollStop{ .fail_at = std.math.maxInt(usize) };
+    try std.testing.expectEqual(id, try table.internBytesPolling(bytes, complete.poller()));
+    try std.testing.expect(complete.calls > bytes.len * 2);
+
+    var equality_stop = PollStop{ .fail_at = bytes.len + 128 };
+    try std.testing.expectError(error.Ecl, table.internBytesPolling(bytes, equality_stop.poller()));
+    try std.testing.expectEqualSlices(u8, bytes, table.getBytes(id).?);
+    try std.testing.expectEqual(id, try table.internBytes(bytes));
+
+    const next = try table.internBytes("after-cancellation");
+    try std.testing.expectEqual(id + 1, next);
+    try std.testing.expectEqualStrings("after-cancellation", table.getBytes(next).?);
+    try std.testing.expectEqual(next, try table.internBytes("after-cancellation"));
 }
 
 test "intern write failures are leak-free and leave no partial entries" {

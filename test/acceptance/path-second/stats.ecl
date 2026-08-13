@@ -1,1 +1,1 @@
-'stats (2 'answer let) module
+'stats (2 'answer set) module

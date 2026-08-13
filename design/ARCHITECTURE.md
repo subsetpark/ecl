@@ -19,22 +19,28 @@ Decision 21's doctrine becomes two enforced rules:
    2015, the CPython 3.14 musttail numbers after Nelhage/Jin — shows
    dispatch technique is worth 1–5% even in bytecode-bound languages,
    and ecl is kernel-bound by design.)
-2. **Line budget (re-derived 2026-08-12 for Zig; supersedes the ~5k
-   figure).** Per component, excluding kernels, stdlib, and tests:
+2. **Line budget (re-derived 2026-08-12 for Zig; values row amended
+   2026-08-13 for poll-safe structural traversal).** Per component,
+   excluding kernels, stdlib, and tests:
 
    | component | budget | measured |
    |---|---|---|
-   | values + RC (value, heap, intern, list, equal, dict, print) | 1,950 | 1,850 |
+   | values + RC (value, heap, intern, list, equal, dict, print, poll) | 2,300 | 2,248 |
    | reader (lexer, binder, reader) | 1,250 | 1,123 |
-   | machine (machine, spans, prims, main, root) | 2,300 | 2,289 |
-   | modules and registry (env, modules, module_prims, session) | 1,300 | 1,104 |
+   | machine (machine, spans, prims, main, root) | 2,300 | 2,290 |
+   | modules and registry (env, modules, module_prims, reflection, session) | 1,300 | 1,300 |
+   | bootstrap prelude (prelude) | 100 | 29 |
    | combinators (M6) | 900 | — |
    | concurrency (M7) | 1,300 | — |
    | tooling: line editing, completion (M8) | 700 | — |
-   | **core total** | **9,500** | **6,361** |
+   | **core total** | **9,500** | **6,990** |
 
-   Kernels ≤ ~5k and stdlib modules ≤ ~2k, both unmeasured so far.
-   Additions displace *within a component*.
+   Kernels are separately capped at 5,500 lines (currently 3,571);
+   stdlib modules remain capped at ~2k and unmeasured so far.
+   Additions displace *within a component*. The values row's 350-line
+   amendment records the non-relocating worklists and intern index plus
+   poll-aware equality, hashing, interning, and printing required by the
+   kernel safe-point bound; the 9,500 total ceiling did not move.
 
    The original ~5k came from "the walking skeleton proved the semantics
    fit in 4.6k." That baseline does not transfer, for three independent
@@ -156,7 +162,7 @@ generation (permanently, per decision 21).
   uses → core). Shallow binding/rerooting is rejected as GIL-shaped
   (Baker 1978 requires rerooting to be globally serialized). Chains are
   structurally short because quotations capture nothing.
-- **Binding cells:** re-def/re-let swaps the cell interior atomically —
+- **Binding cells:** `def`/`set` replacement swaps the cell interior atomically —
   every holder heals by construction, so late binding needs zero
   invalidation. Shape changes (name create/delete, `uses` edits) bump a
   per-env generation. **The iron law for any future cache: hold the
@@ -175,7 +181,7 @@ generation (permanently, per decision 21).
   explicit synchronized swap (CAS-retry or write lock). Core is frozen
   after prelude installation — zero synchronization forever after.
 - **Lazy child envs:** scope = `{local: Option<EnvRef>, parent}`; the
-  child table is allocated only when a `def`/`let` actually executes in
+  child table is allocated only when a `def`/`set` actually executes in
   the scope. Quotations capture nothing and locals compile away, so
   combinator elements essentially never allocate (the skeleton paid an
   Arc+RwLock+HashMap per element).
@@ -211,7 +217,7 @@ generation (permanently, per decision 21).
   never moved-out Vecs. Isolation = base-index barrier (underflow check
   is one compare, which also implements decision 14's contract checks);
   rollback and attempt-catch = truncate-to-base, O(1).
-- **Boundary frames** (attempt/module/dict-of) record saved depths and
+- **Boundary frames** (attempt/module) record saved depths and
   form an intrusive chain with a register to the innermost — unwinding
   never scans or interprets frames (crash-only has no finally), it
   truncates.

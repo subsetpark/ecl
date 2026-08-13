@@ -214,7 +214,7 @@ test "e2e: use shadow notice acceptance" {
     const result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "1 'mean let 2 'count let 'stats (3 'mean let 4 'count let) module 'stats use mean count",
+        "1 'mean set 2 'count set 'stats (3 'mean set 4 'count set) module 'stats use mean count",
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -231,7 +231,7 @@ test "e2e: reflection acceptance" {
     const result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "'m (40 's letp (s 2 +) ( -- n ) 'f def) module 'm use 'm.f see 'f which words",
+        "'m (40 's setp (s 2 +) ( -- n ) 'f def) module 'm use 'm.f see 'f which words",
     });
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
@@ -278,4 +278,62 @@ test "e2e: direct load and ECL_PATH acceptance" {
     defer allocator.free(no_implicit_cwd.stderr);
     try expectExit(1, no_implicit_cwd.term);
     try std.testing.expect(std.mem.indexOf(u8, no_implicit_cwd.stderr, "'kind 'undefined-word") != null);
+}
+
+test "e2e: M5 ragged equality overflow float and char acceptance" {
+    const ragged = try run(&.{ build_options.ecl_exe, "-e", "[[1 2] [3]] 10 *" });
+    defer allocator.free(ragged.stdout);
+    defer allocator.free(ragged.stderr);
+    try expectExit(0, ragged.term);
+    try std.testing.expectEqualStrings("([10 20] [30])\n", ragged.stdout);
+
+    const equality = try run(&.{ build_options.ecl_exe, "-e", "[1 2] [1 2] = [1 2] [1 2] match" });
+    defer allocator.free(equality.stdout);
+    defer allocator.free(equality.stderr);
+    try expectExit(0, equality.term);
+    try std.testing.expectEqualStrings("[1 1] 1\n", equality.stdout);
+
+    const overflow = try run(&.{ build_options.ecl_exe, "-e", "9223372036854775806 [1 2] +" });
+    defer allocator.free(overflow.stdout);
+    defer allocator.free(overflow.stderr);
+    try expectExit(1, overflow.term);
+    try std.testing.expect(std.mem.indexOf(u8, overflow.stderr, "'kind 'overflow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, overflow.stderr, "'index 1") != null);
+
+    const scalar = try run(&.{ build_options.ecl_exe, "-e", "inf 1 + 9007199254740993 9007199254740992.0 = \\a 1 +" });
+    defer allocator.free(scalar.stdout);
+    defer allocator.free(scalar.stderr);
+    try expectExit(0, scalar.term);
+    try std.testing.expectEqualStrings("inf 0 \\b\n", scalar.stdout);
+}
+
+test "e2e: mask filter acceptance" {
+    const result = try run(&.{ build_options.ecl_exe, "-e", "[10 20 30 40] [1 0 1 0] where at" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExit(0, result.term);
+    try std.testing.expectEqualStrings("[10 30]\n", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
+
+test "e2e: cmp exactness and string-grade agreement" {
+    const result = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        "9007199254740993 9007199254740992.0 cmp \"apple\" \"apricot\" cmp [\"b\" \"a\"] grade",
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExit(0, result.term);
+    try std.testing.expectEqualStrings("1 -1 [1 0]\n", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
+
+test "e2e: array words fixture matches canonical output" {
+    const result = try run(&.{ build_options.ecl_exe, "test/acceptance/array-words.ecl" });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try expectExit(0, result.term);
+    try std.testing.expectEqualStrings(@embedFile("acceptance/array-words.out"), result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
 }

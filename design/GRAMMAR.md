@@ -1,9 +1,8 @@
 # ecl — grammar
 
 Companion to DESIGN.md; implements decisions 6, 8, 12, 15, 16, 17, 18.
-The reader produces values (lists, atoms) with provenance; the only
-parse-time transforms are the capped set: locals desugar and the dict
-literal (decision 8).
+The reader produces values (lists, dicts, atoms) with provenance; the only
+parse-time code transform is the capped locals desugaring (decision 6).
 
 ## Source
 
@@ -57,7 +56,7 @@ legal; words-not-glyphs is culture, not enforcement.
 program  :=  form*
 form     :=  list | dict | atom
 list     :=  "(" binder? form* ")"  |  "[" binder? form* "]"
-dict     :=  "{" form* "}"
+dict     :=  "{" (form form)* "}"
 binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 ```
 
@@ -65,8 +64,11 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
   (unevaluated) enclosed forms. Brackets quote; nothing inside runs at
   read time. The pair choice is free per pair; **pairs must match**:
   `[1 2 3)` is a parse error (decision 16).
-- `{ body }` desugars at read time to the two forms `( body ) dict-of`
-  (decision 17). `{}` is the empty dict.
+- `{ k v ... }` constructs one inert dict value at read time (decision 17).
+  Adjacent top-level forms are key/value pairs; neither form is evaluated,
+  so bare words are stored as word values. An odd form count or duplicate
+  key is a parse error. `{}` is the empty dict. Use `dict-of` with an
+  explicitly constructed flat list when entries require computation.
 - The binder is the locals sugar (decision 6), Rust/Ruby-style:
   `(|lo hi| hi lo - rand lo +)`, `(|x| x x *) each`. Legal only
   immediately after `(` or `[`; desugared to point-free code before the

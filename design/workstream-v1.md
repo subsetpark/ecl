@@ -24,25 +24,40 @@ Verified in the checkout (2026-08-12):
   ARCHITECTURE.md (literature-grounded implementation architecture with
   a staged plan, line budgets, and a skeleton disposition table), and
   `research/` (the raw architecture panel, citations verified).
-- `poc/rust/` is a **complete-for-its-scope walking skeleton** (~4.6k
-  lines, 43 tests green): full grammar, unified values with
-  construction-time specialization (chars→string only), pervasion with
+- The real Zig interpreter is implemented through M4 at commit
+  `2bf6c56`: flat values and CoW containers, the full reader, the
+  defunctionalized frame machine and real CLI, chained environments,
+  and the complete d.18 module/registry/hot-reload system. Its M4 suite
+  records 119 tests across library/cross-layer and real-binary coverage;
+  Debug, ReleaseSafe, ReleaseFast, named Linux TSan, formatting, and
+  blocking ZLint are green, including builds.sr.ht job 1859966. The
+  audited core is 6,361/9,500 lines, with machine 2,289/2,300 and
+  modules/registry 1,104/1,300.
+- `poc/rust/` remains a **frozen, complete-for-its-scope walking
+  skeleton** (~4.6k lines, 44 tests green): full grammar, unified values
+  with construction-time specialization (chars→string only), pervasion with
   leading-axis broadcast and d.22 float semantics, contract-checked
   combinators, crash-only `attempt` with outcome dicts, chained
-  environments with the full d.18 module system (registry, defp/letp,
+  environments with the full d.18 module system (registry, legacy
+  `defp`/`letp` spelling,
   qualified access, `use`/`alias`, hot reload), binder lowering, and
   error dicts. Its internals are disqualified for v1 by
   ARCHITECTURE.md's disposition table (span-on-Value, boxed `Arc<[Value]>`
   lists, no leaves, no interning, RwLock-per-lookup envs, eager traces).
-- **Verified missing from the skeleton** (grep-confirmed): all
-  concurrency (`spawn`/`await`/`await-any`/`await-for`/`cancel`/`tasks`/
-  `par-each` — zero occurrences), `flip`/`reshape`/`group`,
-  `which`/`see`, `load` + `ECL_PATH` module file transport (zero
-  occurrences), `exit`, and any stdlib modules. No line editing (bare
-  stdin REPL). No flat leaves, no interning, no scheduler, no kernels,
-  no idiom recognition, no differential harness.
-- There is **no Zig code in the repo**; the real implementation starts
-  from an empty directory.
+- The real Zig interpreter is now implemented through M5 in the working
+  tree. Its closed data plane includes pervasive leaf kernels,
+  sequence/shape/order/group operations, immutable dict updates, Unicode
+  text kernels, kind reflection, cycling/count-vector sequence operations,
+  the awk-floor transcendentals, exact whole-value `cmp`, and the separate
+  frozen-Rust differential job. M6 combinators/recognition is the next unimplemented
+  seam; M7 concurrency, M8 line editing, and M9 stdlib remain future
+  milestones.
+- The first derived core words are M5 bootstrap scaffolding:
+  `src/prelude.zig` constructs ordinary ecl bodies for `wrap` and `pair`,
+  and `src/kernel_order.zig` does the same for `sort`. They execute and
+  reflect as `.word` bindings rather than primitives, but they have no ecl
+  source unit or source spans. M6 replaces every such host-assembled body
+  with the embedded target-language prelude described below.
 
 ## Key Challenges
 
@@ -159,16 +174,14 @@ leaf-tag enum and the 16-byte cell.
 
 **Status**: executed (55 tests; Debug, ReleaseSafe, Linux TSan,
 formatting, and blocking ZLint validated). The reader runs 1,000 seeded
-dict-free parse-after-print cases, 500 seeded dict desugar-shape cases,
-and an exhaustive allocation-failure sweep. Full structural dict
-round-trip remains intentionally deferred to M3, where `dict-of` can
-execute.
+dict-free parse-after-print cases, 500 seeded structural dict round-trip
+cases, and an exhaustive allocation-failure sweep.
 
 **Definition of Done**:
 The full GRAMMAR.md reader over the new value layer: tokens
 (whole-token number classification, `inf`/`-inf`, `0x`, `_` separators,
 char literals, strings with escapes, comma-as-whitespace, reserved `;`
-and `|`), forms (matched pairs, dict-literal desugar to `dict-of`,
+and `|`), forms (matched pairs, inert even-paired dict literals,
 binder lowering to point-free code with the boundary-crossing error),
 REPL incomplete-input detection, and **code-plane provenance**: spans in
 side tables keyed by list identity + token index, never on values
@@ -208,7 +221,7 @@ base-index substack isolation, boundary frames with O(1) truncation,
 TCO as frame overwrite, lazy traces built only at unwind, and error
 dicts per d.19. Primitives are core-env bindings with fn-pointer
 payloads (a minimal set: stack words, arithmetic via a provisional
-scalar path, `pp`/`prin`, `def`/`let`, `if`/`call`/`while`, `attempt`/
+scalar path, `pp`/`prin`, `def`/`set`, `if`/`call`/`while`, `attempt`/
 `raise`, `exit`, `args`). CLI modes: `-e`, script file, stdin, bare-stdin
 REPL with continuation, script-prints-nothing-implicitly (d.22). Cold
 start spawns zero threads.
@@ -226,14 +239,12 @@ against an executable.
 **Status**: executed (119 tests: 106 library/cross-layer and 13
 real-binary; Debug, ReleaseSafe, ReleaseFast, the named TSan suite,
 formatting, and blocking ZLint validated locally; Linux CI enables the
-TSan instrumentation). The audited result is 6,361 core lines under the
-9,500-line ceiling, with modules and registry exactly 1,100/1,100 and
-the machine at 2,289/2,300. The five-patch design and all 25 mapped proof
-names remain recorded in
-[`gameplans/environments-and-modules.json`](../gameplans/environments-and-modules.json).
-Generation and binding leases now reclaim displaced payloads after the
-last owner releases them; the multiwriter fixtures cover both repeated
-and disjoint module names.
+TSan instrumentation). Landed at commit `2bf6c56`; builds.sr.ht job
+1859966 is green. The audited result is 6,361 core lines under the
+9,500-line ceiling, with modules and registry at 1,104/1,300 and the
+machine at 2,289/2,300. Generation and binding leases reclaim displaced
+payloads after the last owner releases them; the multiwriter fixtures
+cover both repeated and disjoint module names.
 
 **Definition of Done**:
 ARCHITECTURE.md §Environments in full: binding cells (rebind swaps the
@@ -241,7 +252,7 @@ interior), per-env shape generations, the single `env.bind()` funnel,
 lazy child envs shared by every isolated boundary, deep-binding chain
 resolution, core frozen after prelude install. The d.18 module system:
 `module`/`use`/`alias`, dotted
-qualified access, `defp`/`letp` (top-level error), registry as
+qualified access, `defp`/`setp` (top-level error), registry as
 name → atomically swapped `{env, generation}` with commit-after-success
 and **whole-body generation pinning**, plus the multi-writer registry
 swap protocol. Reflection: `body`, `words`, `which`, `see`. **New over
@@ -274,20 +285,53 @@ paths.
 
 ### Milestone 5: kernels-and-pervasion
 
+**Status**: executed in the working tree (source totals are reported by
+`zig build source-audit`). Debug, ReleaseSafe, ReleaseFast,
+the named TSan suite, formatting, blocking ZLint, all 44 frozen Rust
+tests, and the CLI oracle differential are green locally. The audited
+pre-kernel core is 6,990/9,500 lines (values/RC 2,248/2,300;
+machine 2,290/2,300; modules/registry 1,300/1,300; bootstrap prelude
+29/100), and the closed kernel component is 3,571/5,500 production
+lines. The seven-patch design and formal contracts
+remain recorded in
+[`gameplans/kernels-and-pervasion.json`](../gameplans/kernels-and-pervasion.json).
+
 **Definition of Done**:
 ARCHITECTURE.md §Kernels: the (op × leaf-tag) table of monomorphic
-loops generated via Zig comptime, dispatched once per array; pervasion
-as spine recursion with leaf fast paths and depth guard; scalar-operand
-broadcasts; blockwise fault masks with scalar rescan and the
-mask-before-store aliasing rule; d.22 float regime (inf propagation,
-NaN-producing ops error). Full structural/order/search vocabulary over
-leaves and spines: `at where in find raze cat take drop reverse first
-rest range shape len`, **new words** `flip`, `reshape`, `group`, plus
-`grade`/`sort` (range-adaptive counting/radix, stable, float bit-flip),
-`distinct` (hash), dict kernels (`put del merge has? keys vals` +
-key-aligned pervade), and string kernels (`split join format`). Kernel
-unit tests plus a cross-implementation differential check against
-`poc/rust` for every word both implement.
+loops generated via Zig comptime and dispatched once per flat operation,
+reusing `value.HeapKind` as the sole tag domain. Kernel entry consumes
+owned operands and returns one owned result; low-level loops take
+explicit half-open ranges and poll at most every 65,536 logical
+elements. Pervasion is guarded spine recursion with leaf fast paths,
+scalar extension, leading-axis conformability, and dict key-union/value
+alignment. Checked blocks use fault masks, scalar rescan, and the
+mask-before-store aliasing rule; d.22 float semantics reject NaN-producing
+operations and preserve exact mixed-number comparisons. Full
+numeric/logic, structural/order/search vocabulary works over leaves and
+spines: `at where in find raze cat take drop reverse first rest range
+shape len`, **new words** `flip`, `reshape`, `group`, `type`,
+canonical `str`, `to-dict`, the early source-defined `wrap`/`pair`,
+list `put` (functional element update, same word as dict
+put, CoW-in-place when unique), the awk-floor transcendentals
+`exp log sin cos atan2`, and `cmp`
+(three-way whole-value ordering, ruled 2026-08-12: −1/0/1,
+non-pervasive — `cmp` is to `<` what `match` is to `=`; numbers exact,
+chars by codepoint, strings codepoint-lexicographic, all else `'type`),
+plus stable `grade`/`sort` ordering by exactly `cmp`'s order,
+hash-backed `distinct`, dict kernels (`put del merge has? keys vals`),
+and Unicode string kernels (`split join format`). Two semantics
+rulings from the 2026-08-12 gap scan land here: `take` beyond length
+cycles the data (K), and `where` generalizes from 0/1 masks to counts
+(each index replicated count times, K).
+Kernel unit tests cover every path and allocator failure; a separate CI
+job compares every shared M5 word with the untouched `poc/rust`, while a
+real-binary fixture locks Zig-only `flip`/`reshape`/`group`/`cmp` plus the
+post-freeze supplemental vocabulary and extended `put`/`take`/`where`
+semantics.
+
+The M5 `wrap`, `pair`, and `sort` bindings are ordinary target-word bodies
+assembled by Zig as temporary bootstrap scaffolding. They are not new
+primitives; M6 moves their authoritative definitions into ecl source.
 
 **Why this is a safe pause point**: All data-plane words work at kernel
 speed; combinators still per-element via the provisional path.
@@ -306,22 +350,51 @@ when unless times cond`, `case` as prelude — the Joy/APCL capture
 ruled 2026-08-12, VOCABULARY.md correspondence note); the full
 error/outcome vocabulary (`fail ok? ok! or-else`); the prelude
 installed from embedded ecl source ([E] words including `filter`,
-`partition`, `any?`, `all?`, `both`, `bi2`, `case`, `unless`; `body`
-returns the real list). **Idiom recognition** at combinator
+`partition`, `any?`, `all?`, `both`, `bi2`, `case`, `unless`,
+`signum`, `clamp`, `empty?`, `append`, `pack` (literal-count effect
+inference per d.9), `zip`, `min-of`, `max-of`,
+`at-or`, `pairs`; `body` returns the real list).
+
+**The target-language prelude is authoritative.** `src/prelude.ecl` is
+embedded in the binary at build time; `src/prelude.zig` is only its
+bootstrap loader and contains no derived word bodies. Startup installs the
+irreducible primitives, kernels, and module primitives into the writable
+core, initializes the provenance archive, reads the embedded bytes through
+the ordinary reader, retains the parsed root and span tables, and evaluates
+the unit on an empty stack in a dedicated root scope whose writable
+environment is the core environment. Bootstrap must succeed and leave the
+stack empty before core is frozen. All M5 host-assembled words (`wrap`,
+`pair`, and `sort`) move into this source together with the remaining [E]
+vocabulary; `pack` is defined there as `() swap (cons) times` once `times`
+is installed. Calls and `body` therefore see ordinary late-bound ecl words,
+and failures in their bodies retain the embedded `prelude.ecl` provenance.
+The loader never consults the filesystem or `ECL_PATH`. Parse, evaluation,
+or stack-balance failure is an interpreter bootstrap defect, exercised by
+the build/test suite (including allocation-failure coverage), rather than a
+recoverable user-program load error.
+
+**Idiom recognition** at combinator
 entry: the closed pattern table that IS the kernel registry, resolution-
 identity guards, snapshot semantics scoped to the guard (d.23), float
 folds strictly sequential on every path. **The differential harness**
 (named v1 deliverable, d.23) runs in CI: every kernel and idiom entry
 against the generic frame-machine path for value equality,
 representation parity (brackets), error kind/payload equality, and
-bit-identical floats. The skeleton's full 43-test suite is ported and
+bit-identical floats. The skeleton's full 44-test suite is ported and
 green against the Zig binary.
 
 **Why this is a safe pause point**: ecl is feature-complete except
-concurrency and stdlib; the harness guards everything behind it.
+concurrency and stdlib; the harness guards everything behind it, and the
+derived core vocabulary now has one inspectable target-language source of
+truth rather than host-encoded bodies.
 
 **Unlocks**: M7 (par-each rides spawn), M9 (str module uses kernels +
 prelude machinery).
+
+**Established Precedents** (milestone-scoped):
+
+- **[documentation] Gforth — “Forth is written in Forth”** — https://gforth.org/manual/Forth-is-written-in-Forth.html — keep the host kernel small and express the extensible language layer in the language itself.
+- **[documentation] Julia system images** — https://docs.julialang.org/en/v1/devdocs/sysimg/ — a precompiled image can later improve startup without replacing source as the semantic authority. For ecl this remains a profile-gated post-v1 optimization, not an M6 deliverable.
 
 ---
 
@@ -386,6 +459,9 @@ builtins registered lazily via the M4 mechanism, so the single-binary
 story holds; `ECL_PATH` remains for user modules):
 - **`str`** — ecl source: `upper lower trim` (ASCII per d.15) and
   friends; the first real embedded-module consumer.
+- **`getenv`** [P] (gap scan 2026-08-12): environment variable as a
+  string; unset errors per absence-is-absence, with `attempt`/`or-else`
+  as the defaulting idiom. Lands with this milestone's IO work.
 - **`json`** — native: `json.parse` (string → value) and `json.emit`
   (value → string) per RFC 8259; integral in-range numbers → int64,
   else f64; objects → dicts (keys as strings), arrays → lists;
@@ -443,7 +519,17 @@ from a proven baseline.
 
 ## Open Questions
 
-1. **http backend (choice only; procedure is decided).** Which backend
+1. **stdin as data (gap scan 2026-08-12).** The awk positioning implies
+   line-processing of piped input, but piped stdin is currently
+   consumed as *source*. A `stdin` word must coexist with the
+   stdin-as-source CLI modes without ambiguity. Real design
+   conversation; owner: M9 gameplan at the latest.
+2. **Randomness (gap scan 2026-08-12).** No `rand`/roll/deal words
+   exist. First impure-nondeterministic vocabulary: seeding must be
+   ruled against d.20 units (per-session RNG, per-unit, or
+   explicit-seed-only) and determinism testing. Real design
+   conversation; not blocking any current milestone.
+3. **http backend (choice only; procedure is decided).** Which backend
    wins the spike — Zig `std.http.Client` + `std.crypto.tls` (pure Zig,
    no C dependency, maturity risk) or a libcurl binding (battle-tested,
    complicates the static single binary). Resolved by the M9 spike per
@@ -459,9 +545,60 @@ from a proven baseline.
   snapshots, and `Result<Box<EclError>>` becomes a Zig error union with
   an out-param error dict. ARCHITECTURE.md's mechanisms are host-
   agnostic; its Rust-specific grounding notes stay as history.
+- **Zig is the kernel; ecl source is the prelude.** Irreducible or
+  runtime-bound [P] operations live in the host, while shipped [E] core
+  words are authored in `src/prelude.ecl`, embedded into the binary, and
+  evaluated into the writable core before it is frozen. Zig owns the
+  bootstrap loader but not alternate encodings of derived bodies. The M5
+  host assembly of `wrap`, `pair`, and `sort` is explicitly temporary
+  staging. A generated system image or snapshot is permitted only as a
+  profile-justified post-v1 startup optimization; it must be reproducible
+  from the same ecl source and cannot become a second semantic authority.
 - **Fresh implementation at repo root; `poc/rust` frozen as the
-  executable semantics oracle.** Its 43 tests become cross-
+  executable semantics oracle.** Its 44 tests become cross-
   implementation fixtures (M5/M6); it is never evolved.
+- **M5 kernel boundary and ownership are frozen.** Dispatch reuses
+  `value.HeapKind` rather than translating to a second tag enum. A
+  kernel entry consumes its operands and returns one owned result;
+  unique width-compatible buffers may be adopted only after the
+  fault-mask pass succeeds. Leaf loops receive explicit half-open
+  ranges, poll after at most 65,536 elements, and data-spine recursion
+  raises `'domain` beyond 256 levels.
+- **M5 pervasion and array transforms are frozen.** Atoms extend over
+  lists, conforming list pairs descend by leading axis, and dict pairs
+  align over insertion-ordered key union while recursing only on shared
+  keys. `flip` is rank-one identity and otherwise swaps the first two
+  rectangular axes, rejecting a transpose whose leading zero would erase
+  later axes in the nested-list model. `reshape` requires a non-empty, non-negative shape,
+  checks volume, ravels row-major, cycles the source, and treats dicts as
+  atomic cells. Because values are nested lists without hidden rank
+  metadata, a zero dimension must be final; shapes such as `[0 3]` are
+  rejected instead of silently collapsing to `[0]`. Empty source is legal
+  only for those exactly representable zero-volume outputs.
+- **M5 ordering is deliberately partial.** `cmp` and `grade`/`sort`
+  share one order over numbers (including exact mixed int/float
+  comparisons), chars, and strings by codepoint-lexicographic order.
+  Symbols, words, dicts, non-string nested cells, and cross-domain pairs
+  are type errors rather than being ordered by allocation-history intern
+  ids. Every comparison, bucket, and radix path is stable; float keys
+  canonicalize both zero signs before sorting.
+- **M5 preserves the derived-word boundary where semantics allow.**
+  `sort` is installed as the stored ordinary word body `dup grade at`,
+  temporarily assembled by Zig until the M6 embedded-source bootstrap.
+  `has?` is a
+  primitive whole-value membership probe: every key is inert, only absence
+  returns false, and cancellation or allocation failure propagates rather
+  than being mistaken for absence. `find` is provisional direct primitive
+  because
+  its specified body needs M6's `each`. M5 does not preempt M6's idiom
+  table, resolution guards, or fast-vs-frame-machine harness.
+- **The Rust oracle is a separate CI obligation.** Ordinary `zig build
+  test` needs no Rust toolchain. SourceHut separately builds the frozen
+  PoC and exhaustively maps every shared M5 word; successes compare
+  canonical stdout, errors compare semantic kind/word, and Zig-only
+  `flip`/`reshape`/`group`/`cmp`, kind reflection, collection constructors,
+  canonical `str`, transcendentals, and extended `put`/`take`/`where` behavior use native
+  unit proofs plus a real-binary acceptance fixture.
 - **Benchmark baseline harness is OUT of v1** (user ruling): v1's gate
   is the differential harness, not numbers. Performance work is
   post-v1, against the invariants v1 preserved.
@@ -584,7 +721,7 @@ script in CI.
   - **Assert**: privates are reachable from publics, unreachable
     qualified, and extracted bodies lose private context.
   - **Verify by** `cmd`: fixture `modules-privacy.ecl` defines
-    `'m (40 's letp (s 2 +) ( -- n ) 'f def) module`, calls `m.f`,
+    `'m (40 's setp (s 2 +) ( -- n ) 'f def) module`, calls `m.f`,
     then attempts `m.s`; companion fixture `body-extraction.ecl`
     defines the same module and runs `'m.f body call` at session scope.
   - **Expected**: the privacy fixture prints `42`, then exits ≠ 0 with
@@ -607,7 +744,7 @@ script in CI.
   - **Verify by** `cmd`:
     `ECL_PATH=test/acceptance/modules ecl -e "'stats use answer"`,
     where `test/acceptance/modules/stats.ecl` registers a module with
-    `42 'answer let`, and no module was registered beforehand.
+    `42 'answer set`, and no module was registered beforehand.
   - **Expected**: `42`; exit 0.
   - **Traces to**: Milestone 4 — module file transport. The composite
     `zscore` acceptance remains downstream of M5/M6 rather than making
@@ -620,8 +757,8 @@ script in CI.
     boundary API rather than recreating environment isolation.
   - **Verify by** `ux`: enter `10`, then
     `(99) 'kept def 20 + missing`, then `dup pp`, then `kept pp`.
-    At M4 run `(1 'k let) attempt pop k`; at M6 run the original probe
-    `[1 2 3] (dup 'k let k *) each pop k`.
+    At M4 run `(1 'k set) attempt pop k`; at M6 run the original probe
+    `[1 2 3] (dup 'k set k *) each pop k`.
   - **Expected**: after the failed line `dup pp` prints `10` and
     `kept pp` prints `99`; both isolation probes error
     `'undefined-word` for `k`.
@@ -725,11 +862,11 @@ script in CI.
     ≤ 5,500; stdlib ≤ 2,200 (10% grace over the re-derived d.23
     budget). Core excludes `test` blocks wherever they appear and
     excludes test-only sources (`*_test.zig`, `testgen.zig`).
-  - **Verify by** `cmd`: `zig build test` (the embedded audit in
-    `src/value_test.zig` prints the split and fails the build when a
-    component exceeds its row).
+  - **Verify by** `cmd`: `zig build source-audit` (the dedicated audit in
+    `src/source_audit.zig` prints the split and fails the build when a
+    component exceeds its row); `zig build test` depends on this audit.
   - **Expected**: exit 0 with the per-component counts printed.
-  - **Traces to**: Milestone 10 — the audit test (budget: d.23,
+  - **Traces to**: Milestone 10 — the source audit (budget: d.23,
     re-derived for the Zig host 2026-08-12).
 
 - **DoD-26 — module effect declarations (d.9)**
@@ -750,3 +887,19 @@ script in CI.
     per-activation same-home contract checkpoint.
   - **Traces to**: Milestone 4 — module `def`/`defp` declaration
     validation + the cross-home d.14 dynamic enforcement hook.
+
+- **DoD-27 — embedded target-language prelude**
+  - **Assert**: the shipped [E] core vocabulary loads without filesystem
+    support, remains reflectable as ordinary ecl bodies, and includes the
+    literal-count `pack` behavior.
+  - **Verify by** `cmd`: the acceptance fixture copies only the release
+    `ecl` binary into an empty temporary directory and runs
+    `env -u ECL_PATH ./ecl -e "'wrap body 'pair body 'sort body 'pack body 1 2 3 4 4 pack"`;
+    `zig build test` additionally exercises the embedded source loader,
+    empty-stack postcondition, retained provenance, and allocation
+    failures.
+  - **Expected**:
+    `(() cons) (() cons cons) (dup grade at) (() swap (cons) times) [1 2 3 4]`;
+    tests exit 0 without reading an external prelude file.
+  - **Traces to**: Milestone 6 — `src/prelude.ecl` plus the core bootstrap
+    loader and provenance archive.

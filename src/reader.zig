@@ -5,6 +5,7 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const list = @import("list.zig");
+const dict = @import("dict.zig");
 const lexer = @import("lexer.zig");
 const binder = @import("binder.zig");
 
@@ -377,16 +378,24 @@ const Parser = struct {
         context: *Context,
         output: *std.ArrayList(binder.SpannedValue),
     ) InternalError!void {
-        const dict_of = try intern.intern("dict-of");
-        const body_list = try self.buildList(context.body.items, true);
-        try appendOwned(self.allocator, output, .{
-            .value = body_list,
-            .span = context.start,
-        });
-        try output.append(self.allocator, .{
-            .value = .{ .word = dict_of },
-            .span = context.start,
-        });
+        if (context.body.items.len % 2 != 0) return self.fail(
+            context.body.items[context.body.items.len - 1].span,
+            "dictionary literal key is missing its value",
+        );
+        const pairs = try self.allocator.alloc(dict.Pair, context.body.items.len / 2);
+        defer self.allocator.free(pairs);
+        for (pairs, 0..) |*pair, index| pair.* = .{
+            context.body.items[index * 2].value,
+            context.body.items[index * 2 + 1].value,
+        };
+        const dictionary = dict.fromPairs(self.allocator, pairs) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.DuplicateKey => return self.fail(
+                context.start,
+                "dictionary literal contains a duplicate key",
+            ),
+        };
+        try appendOwned(self.allocator, output, .{ .value = dictionary, .span = context.start });
     }
 
     fn parseString(self: *Parser, output: *std.ArrayList(binder.SpannedValue)) InternalError!void {
@@ -658,22 +667,27 @@ test "grammar form fixtures" {
     try std.testing.expectEqual(@as(u32, 0x03bb), list.atUnchecked(unicode.forms[1], 0).char);
 }
 
-test "dict literals desugar to two forms" {
+test "dict literals construct one inert value" {
     const printer = @import("print.zig");
-    var parsed = try parsedForTest("{'answer 40 2 +}");
+    var parsed = try parsedForTest("{'answer (40 2 +) plus +}");
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 2), parsed.forms.len);
-    const body = try printer.toOwnedString(std.testing.allocator, parsed.forms[0]);
-    defer std.testing.allocator.free(body);
-    try std.testing.expectEqualStrings("('answer 40 2 +)", body);
-    try std.testing.expectEqualStrings("dict-of", intern.get(parsed.forms[1].word));
+    try std.testing.expectEqual(@as(usize, 1), parsed.forms.len);
+    const rendered = try printer.toOwnedString(std.testing.allocator, parsed.forms[0]);
+    defer std.testing.allocator.free(rendered);
+    try std.testing.expectEqualStrings("{'answer (40 2 +) plus +}", rendered);
+    try std.testing.expectEqual(value.Tag.word, dict.valueAt(parsed.forms[0].dict, 1).tag());
 
-    var chars = try parsedForTest("{\\a \\b}");
-    defer chars.deinit();
-    try std.testing.expectEqual(value.HeapKind.leaf_char1, chars.forms[0].list.kind());
-    const char_body = try printer.toOwnedString(std.testing.allocator, chars.forms[0]);
-    defer std.testing.allocator.free(char_body);
-    try std.testing.expectEqualStrings("\"ab\"", char_body);
+    var diag: Diag = .{};
+    try std.testing.expectError(
+        error.Parse,
+        read(std.testing.allocator, "test", "{foo bar baz}", &diag),
+    );
+    try std.testing.expectEqualStrings("dictionary literal key is missing its value", diag.text());
+    try std.testing.expectError(
+        error.Parse,
+        read(std.testing.allocator, "test", "{1 one 1.0 two}", &diag),
+    );
+    try std.testing.expectEqualStrings("dictionary literal contains a duplicate key", diag.text());
 }
 
 test "incomplete vs error split" {
@@ -764,6 +778,9 @@ test "binder validation and nesting diagnostics are surfaced by read" {
         error.Parse,
         read(std.testing.allocator, "test", source, &diag),
     );
+
+    var inert_dict = try parsedForTest("(|x| {key (x)})");
+    defer inert_dict.deinit();
 
     var parsed = try parsedForTest("(|lo hi| hi lo)");
     defer parsed.deinit();

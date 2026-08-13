@@ -30,6 +30,7 @@ pub const Session = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
     requested_exit: ?u8 = null,
     last_max_frames: usize = 0,
+    last_polls: u64 = 0,
     pub fn init(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
@@ -151,6 +152,7 @@ pub const Session = struct {
         defer {
             self.stack = unit.takeStack();
             self.last_max_frames = unit.max_frames;
+            self.last_polls = unit.polls;
             self.requested_exit = unit.exit_status;
             unit.deinit();
         }

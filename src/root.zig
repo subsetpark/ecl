@@ -3,6 +3,7 @@
 const std = @import("std");
 pub const version = "0.1.0";
 pub const value = @import("value.zig");
+pub const poll = @import("poll.zig");
 pub const heap = @import("heap.zig");
 pub const intern = @import("intern.zig");
 pub const list = @import("list.zig");
@@ -17,6 +18,8 @@ pub const env = @import("env.zig");
 pub const modules = @import("modules.zig");
 pub const machine = @import("machine.zig");
 pub const prims = @import("prims.zig");
+pub const prelude = @import("prelude.zig");
+pub const kernels = @import("kernels.zig");
 pub const session = @import("session.zig");
 test "value-core smoke test uses the leak-detecting allocator" {
     const bytes = try std.testing.allocator.dupe(u8, version);
@@ -25,6 +28,7 @@ test "value-core smoke test uses the leak-detecting allocator" {
 }
 test {
     _ = value;
+    _ = poll;
     _ = heap;
     _ = intern;
     _ = list;
@@ -39,9 +43,15 @@ test {
     _ = modules;
     _ = machine;
     _ = prims;
+    _ = prelude;
+    _ = kernels;
     _ = session;
     _ = @import("value_test.zig");
     _ = @import("reader_test.zig");
     _ = @import("machine_test.zig");
     _ = @import("module_test.zig");
+    _ = @import("kernel_numeric_test.zig");
+    _ = @import("kernel_sequence_test.zig");
+    _ = @import("kernel_order_test.zig");
+    _ = @import("kernel_dict_text_test.zig");
 }

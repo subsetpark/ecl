@@ -12,7 +12,11 @@ walking skeleton remains a frozen executable semantics oracle.
   frame machine, chained environments, and module registry are live:
   `zig build` produces a working calculator with transactional units,
   definition-site privacy, declared module effects, hot reload, reflection,
-  direct `load`, and `ECL_PATH` auto-loading.
+  direct `load`, `ECL_PATH` auto-loading, pervasive checked arithmetic,
+  sequence/shape/order/group kernels, exact whole-value `cmp`, immutable
+  list/dict updates and construction, kind reflection, cycling take,
+  count-vector where, canonical `str`, pervasive transcendentals, and Unicode
+  split/join/format.
 - [`poc/rust/`](poc/rust/) contains the Rust walking-skeleton interpreter and
   its examples and tests. It is a standalone Cargo project and is not evolved
   with the real interpreter.
@@ -24,6 +28,7 @@ zig build test
 zig build test -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseFast
 zig build test-tsan
+zig build source-audit
 ```
 
 To run the calculator:
@@ -43,7 +48,14 @@ ECL_PATH=test/acceptance/modules \
 To exercise the Rust semantics oracle:
 
 ```sh
-cd poc/rust
-cargo test
-cargo run -- '[1 2 3] (dup *) each'
+cargo test --locked --manifest-path poc/rust/Cargo.toml
+cargo build --locked --manifest-path poc/rust/Cargo.toml
+zig build oracle-differential \
+  -Doracle-exe=poc/rust/target/debug/ecl
 ```
+
+The differential step covers every M5 word shared by the implementations.
+Normal `zig build test` remains independent of Cargo; `flip`, `reshape`,
+`group`, `cmp`, `type`, `to-dict`, the transcendental floor, and the extended
+list-`put`/cycling-`take`/count-`where` semantics are post-freeze Zig additions
+with native unit and real-binary acceptance coverage.

@@ -9,12 +9,15 @@ const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
 const reader = @import("reader.zig");
+const poll_api = @import("poll.zig");
+const reflection = @import("reflection.zig");
 pub const Value = value.Value;
 pub const Header = value.Header;
 pub const MachineError = error{ OutOfMemory, Ecl };
 const no_word = std.math.maxInt(u32);
 const no_boundary = std.math.maxInt(u32);
 const fuel_quantum: u32 = 1024;
+pub const kernel_poll_quantum: u32 = 65_536;
 pub const ErrorKind = enum {
     underflow,
     undefined_word,
@@ -47,6 +50,9 @@ const ErrorDataKey = enum {
     path,
     seeded,
     observed,
+    index,
+    left,
+    right,
 };
 const ErrorData = struct {
     key: ErrorDataKey,
@@ -345,7 +351,7 @@ const Eval = struct {
     home: ?*modules.ModuleGeneration,
     traced_word: u32,
 };
-const BoundaryKind = enum(u8) { attempt, dict_of, module };
+const BoundaryKind = enum(u8) { attempt, module };
 const Boundary = struct {
     kind: BoundaryKind,
     stack_base: u32,
@@ -436,6 +442,7 @@ pub const Unit = struct {
     arguments: Value,
     cancelled: *const std.atomic.Value(bool),
     fuel: u32 = fuel_quantum,
+    kernel_fuel: u32 = kernel_poll_quantum,
     polls: u64 = 0,
     max_frames: usize = 0,
     entry_base: usize,
@@ -646,47 +653,15 @@ pub const Machine = struct {
         self.unit.pending.?.addData(.name, .{ .symbol = name });
         return failure;
     }
-    pub fn resolveName(self: *Machine, name: u32) error{OutOfMemory}!?Resolution {
+    pub fn resolveName(self: *Machine, name: u32) MachineError!?Resolution {
         return resolveWord(self, name);
     }
-    pub fn visibleNamesOwned(self: *Machine) error{OutOfMemory}![]u32 {
-        var found: std.AutoHashMapUnmanaged(u32, void) = .empty;
-        defer found.deinit(self.unit.allocator);
-        var scope: ?*env.Scope = self.current.?.scope;
-        while (scope) |current_scope| : (scope = current_scope.parent) {
-            if (current_scope.environment) |environment| {
-                const direct = try environment.namesOwned(self.unit.allocator);
-                defer self.unit.allocator.free(direct);
-                for (direct) |name| try found.put(self.unit.allocator, name, {});
-                if (self.unit.registry) |registry| {
-                    const uses = environment.useOrder();
-                    var index = uses.len;
-                    while (index > 0) {
-                        index -= 1;
-                        var generation_lease = registry.acquire(uses[index]) orelse continue;
-                        defer generation_lease.deinit();
-                        const names = try generation_lease.generation.publicNamesOwned(self.unit.allocator);
-                        defer self.unit.allocator.free(names);
-                        for (names) |name| if (!found.contains(name)) {
-                            try found.put(self.unit.allocator, name, {});
-                        };
-                    }
-                }
-            }
-        }
-        const core_names = try self.unit.environment.core.namesOwned(self.unit.allocator);
-        defer self.unit.allocator.free(core_names);
-        for (core_names) |name| if (!found.contains(name)) try found.put(self.unit.allocator, name, {});
-        const result = try self.unit.allocator.alloc(u32, found.count());
-        var iterator = found.keyIterator();
-        var index: usize = 0;
-        while (iterator.next()) |name| : (index += 1) result[index] = name.*;
-        return result;
-    }
-    pub fn shadowTraceIdsOwned(self: *Machine, name: u32) error{OutOfMemory}![]u32 {
-        if (std.mem.indexOfScalar(u8, intern.get(name), '.') != null) return self.unit.allocator.alloc(u32, 0);
-        var result: std.ArrayList(u32) = .empty;
-        errdefer result.deinit(self.unit.allocator);
+    pub fn shadowTraceIdsOwned(self: *Machine, name: u32) MachineError![]u32 {
+        if (try intern.dotIndexPolling(intern.get(name), traversalPoller(self)) != null)
+            return self.unit.allocator.alloc(u32, 0);
+        var shadows = poll_api.ChunkStack(u32).init(self.unit.allocator);
+        defer shadows.deinit();
+        var count: usize = 0;
         var found_winner = false;
         var scope: ?*env.Scope = self.current.?.scope;
         while (scope) |current_scope| : (scope = current_scope.parent) {
@@ -695,10 +670,14 @@ pub const Machine = struct {
                     var lease = loaded;
                     defer lease.deinit(self.unit.allocator);
                     const trace_word = if (lease.home) |home|
-                        try qualifiedWordId(self.unit.allocator, home, name)
+                        try qualifiedWordId(self, home, name)
                     else
                         name;
-                    if (found_winner) try result.append(self.unit.allocator, trace_word) else found_winner = true;
+                    if (found_winner) {
+                        try self.advanceKernel(1);
+                        try shadows.push(trace_word);
+                        count = std.math.add(usize, count, 1) catch return error.OutOfMemory;
+                    } else found_winner = true;
                 }
                 if (self.unit.registry) |registry| {
                     const uses = environment.useOrder();
@@ -709,12 +688,12 @@ pub const Machine = struct {
                         defer generation_lease.deinit();
                         var lease = generation_lease.generation.resolve(name, true) orelse continue;
                         defer lease.deinit(self.unit.allocator);
-                        const trace_word = try qualifiedWordId(
-                            self.unit.allocator,
-                            generation_lease.generation.name,
-                            name,
-                        );
-                        if (found_winner) try result.append(self.unit.allocator, trace_word) else found_winner = true;
+                        const trace_word = try qualifiedWordId(self, generation_lease.generation.name, name);
+                        if (found_winner) {
+                            try self.advanceKernel(1);
+                            try shadows.push(trace_word);
+                            count = std.math.add(usize, count, 1) catch return error.OutOfMemory;
+                        } else found_winner = true;
                     }
                 }
             }
@@ -722,9 +701,21 @@ pub const Machine = struct {
         if (self.unit.environment.core.resolveDirect(name)) |loaded| {
             var lease = loaded;
             defer lease.deinit(self.unit.allocator);
-            if (found_winner) try result.append(self.unit.allocator, name);
+            if (found_winner) {
+                try self.advanceKernel(1);
+                try shadows.push(name);
+                count = std.math.add(usize, count, 1) catch return error.OutOfMemory;
+            }
         }
-        return result.toOwnedSlice(self.unit.allocator);
+        const result = try self.unit.allocator.alloc(u32, count);
+        errdefer self.unit.allocator.free(result);
+        var index = count;
+        while (shadows.pop()) |shadow| {
+            try self.advanceKernel(1);
+            index -= 1;
+            result[index] = shadow;
+        }
+        return result;
     }
     pub fn available(self: *const Machine) usize {
         return self.unit.stack.items.len - self.unit.stack_base;
@@ -789,6 +780,52 @@ pub const Machine = struct {
             "{s} expected {s}",
             .{ self.activeWordName(), expected },
         );
+    }
+    /// Raises a language error at a zero-based logical data index. Kernels
+    /// call this only after locating the first failing element.
+    pub fn failAtIndex(
+        self: *Machine,
+        kind: ErrorKind,
+        message: []const u8,
+        index: usize,
+    ) MachineError {
+        const failure = self.fail(kind, message);
+        self.unit.pending.?.addData(.index, .{ .int = @intCast(index) });
+        return failure;
+    }
+    /// Reports the two leading-axis lengths that failed to conform.
+    pub fn conformError(self: *Machine, left: usize, right: usize) MachineError {
+        const failure = self.failFmt(
+            .conform,
+            "{s} cannot conform leading axes {d} and {d}",
+            .{ self.activeWordName(), left, right },
+        );
+        self.unit.pending.?.addData(.left, .{ .int = @intCast(left) });
+        self.unit.pending.?.addData(.right, .{ .int = @intCast(right) });
+        return failure;
+    }
+    /// Kernel safe point. A flat loop calls this between bounded chunks;
+    /// kernels never create threads or make scheduling decisions themselves.
+    pub fn pollKernel(self: *Machine) MachineError!void {
+        self.unit.polls += 1;
+        if (self.unit.cancelled.load(.acquire)) {
+            return self.fail(.user, "unit cancelled");
+        }
+    }
+    /// Charges logical kernel work against one unit-wide budget. Keeping the
+    /// remainder on Unit means ragged recursion and consecutive short loops
+    /// cannot evade the 65,536-element cancellation bound by resetting a
+    /// local index. Calls are bounded to one quantum; a block that reaches
+    /// the boundary polls before executing and is charged to the fresh
+    /// interval in full.
+    pub fn advanceKernel(self: *Machine, amount: usize) MachineError!void {
+        std.debug.assert(amount <= kernel_poll_quantum);
+        if (amount == 0) return;
+        if (amount >= self.unit.kernel_fuel) {
+            try self.pollKernel();
+            self.unit.kernel_fuel = kernel_poll_quantum;
+        }
+        self.unit.kernel_fuel -= @intCast(amount);
     }
     /// Consumes a quotation header and applies it inline.
     pub fn callOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
@@ -864,9 +901,6 @@ pub const Machine = struct {
     }
     pub fn attemptOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
         return self.beginBoundaryOwned(.attempt, quotation);
-    }
-    pub fn dictOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
-        return self.beginBoundaryOwned(.dict_of, quotation);
     }
     pub fn moduleOwned(self: *Machine, name: u32, quotation: *Header) MachineError!void {
         const registry = self.unit.registry orelse {
@@ -1076,8 +1110,8 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         .word => |id| id,
         .int, .float, .char, .symbol, .list, .dict => return self.pushBorrowed(form),
     };
+    self.active_word = word;
     var resolved = (try resolveWord(self, word)) orelse {
-        self.active_word = word;
         const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(word)});
         self.unit.pending.?.addData(.name, .{ .symbol = word });
         return failure;
@@ -1117,13 +1151,13 @@ pub const Resolution = struct {
         self.* = undefined;
     }
 };
-fn resolveWord(self: *Machine, word: u32) error{OutOfMemory}!?Resolution {
+fn resolveWord(self: *Machine, word: u32) MachineError!?Resolution {
     const spelling = intern.get(word);
-    if (std.mem.indexOfScalar(u8, spelling, '.')) |dot| {
+    if (try intern.dotIndexPolling(spelling, traversalPoller(self))) |dot| {
         const registry = self.unit.registry orelse return null;
         if (dot == 0 or dot + 1 == spelling.len) return null;
-        const prefix = try intern.intern(spelling[0..dot]);
-        const export_name = try intern.intern(spelling[dot + 1 ..]);
+        const prefix = try intern.internPolling(spelling[0..dot], traversalPoller(self));
+        const export_name = try intern.internPolling(spelling[dot + 1 ..], traversalPoller(self));
         var generation_lease = registry.acquire(prefix) orelse return null;
         const generation = generation_lease.generation;
         var lease = generation.resolve(export_name, true) orelse {
@@ -1138,7 +1172,7 @@ fn resolveWord(self: *Machine, word: u32) error{OutOfMemory}!?Resolution {
             .lease = lease,
             .generation_lease = generation_lease,
             .home = generation,
-            .trace_word = try qualifiedWordId(self.unit.allocator, generation.name, export_name),
+            .trace_word = try qualifiedWordId(self, generation.name, export_name),
             .origin = .module,
         };
     }
@@ -1158,7 +1192,7 @@ fn resolveWord(self: *Machine, word: u32) error{OutOfMemory}!?Resolution {
                     .generation_lease = null,
                     .home = home,
                     .trace_word = if (home) |generation|
-                        try qualifiedWordId(self.unit.allocator, generation.name, word)
+                        try qualifiedWordId(self, generation.name, word)
                     else
                         word,
                     .origin = if (home != null) .module else .direct,
@@ -1183,7 +1217,7 @@ fn resolveWord(self: *Machine, word: u32) error{OutOfMemory}!?Resolution {
                         .lease = lease,
                         .generation_lease = generation_lease,
                         .home = generation,
-                        .trace_word = try qualifiedWordId(self.unit.allocator, generation.name, word),
+                        .trace_word = try qualifiedWordId(self, generation.name, word),
                         .origin = .used,
                     };
                 }
@@ -1195,41 +1229,50 @@ fn resolveWord(self: *Machine, word: u32) error{OutOfMemory}!?Resolution {
     }
     return null;
 }
-fn qualifiedWordId(
-    allocator: std.mem.Allocator,
-    module_name: u32,
-    word: u32,
-) error{OutOfMemory}!u32 {
-    const module_bytes = intern.get(module_name);
-    const word_bytes = intern.get(word);
-    const bytes = try allocator.alloc(u8, module_bytes.len + 1 + word_bytes.len);
-    defer allocator.free(bytes);
-    @memcpy(bytes[0..module_bytes.len], module_bytes);
-    bytes[module_bytes.len] = '.';
-    @memcpy(bytes[module_bytes.len + 1 ..], word_bytes);
-    return intern.intern(bytes);
+fn qualifiedWordId(self: *Machine, module_name: u32, word: u32) MachineError!u32 {
+    return intern.qualifiedPolling(self.unit.allocator, module_name, word, traversalPoller(self));
 }
 fn emitShadowNotices(self: *Machine, scope: *env.Scope, canonical: u32) MachineError!void {
     const output = self.unit.diagnostics orelse return;
+    const poller = traversalPoller(self);
     var generation_lease = self.unit.registry.?.acquire(canonical).?;
     defer generation_lease.deinit();
     const generation = generation_lease.generation;
-    const names = try generation.publicNamesOwned(self.unit.allocator);
+    const names = try generation.publicNamesOwned(self.unit.allocator, poller);
     defer self.unit.allocator.free(names);
-    std.mem.sort(u32, names, {}, struct {
-        fn lessThan(_: void, left: u32, right: u32) bool {
-            return std.mem.lessThan(u8, intern.get(left), intern.get(right));
-        }
-    }.lessThan);
+    try reflection.sortNames(names, poller);
     const direct = scope.environment orelse return;
     for (names) |name| {
+        try poller.poll();
         if (direct.cell(name) == null) continue;
-        output.print(
-            "session `{s}` shadows `{s}.{s}`\n",
-            .{ intern.get(name), intern.get(generation.name), intern.get(name) },
-        ) catch return self.fail(.io, "standard error write failed");
+        try writeDiagnostic(self, output, "session `", poller);
+        try writeDiagnostic(self, output, intern.get(name), poller);
+        try writeDiagnostic(self, output, "` shadows `", poller);
+        try writeDiagnostic(self, output, intern.get(generation.name), poller);
+        try writeDiagnostic(self, output, ".", poller);
+        try writeDiagnostic(self, output, intern.get(name), poller);
+        try writeDiagnostic(self, output, "`\n", poller);
     }
     output.flush() catch return self.fail(.io, "standard error flush failed");
+}
+fn traversalPoller(self: *Machine) poll_api.Poller {
+    return .{ .context = @ptrCast(self), .poll_fn = pollTraversal };
+}
+fn pollTraversal(raw: *anyopaque) poll_api.Error!void {
+    const self: *Machine = @ptrCast(@alignCast(raw));
+    try self.advanceKernel(1);
+}
+fn writeDiagnostic(
+    self: *Machine,
+    output: *std.Io.Writer,
+    bytes: []const u8,
+    poller: poll_api.Poller,
+) MachineError!void {
+    reflection.writeBytes(output, bytes, poller) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Ecl => return error.Ecl,
+        error.WriteFailed => return self.fail(.io, "standard error write failed"),
+    };
 }
 fn scheduleWord(
     self: *Machine,
@@ -1376,7 +1419,6 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             self.active_word = boundary.word;
             switch (boundary.kind) {
                 .attempt => try finishAttempt(self, boundary.stack_base),
-                .dict_of => try finishDict(self, boundary.stack_base),
                 .module => try finishModule(self, boundary),
             }
         },
@@ -1407,20 +1449,6 @@ fn finishAttempt(self: *Machine, base: u32) MachineError!void {
     truncateStack(self, start);
     const outcome = try outcomeDict(self.unit.allocator, "ok", results);
     try self.pushOwned(outcome);
-}
-fn finishDict(self: *Machine, base: u32) MachineError!void {
-    const start: usize = base;
-    const items = self.unit.stack.items[start..];
-    if (items.len % 2 != 0) {
-        return self.fail(.contract, "dict-of body must produce an even number of values");
-    }
-    const pairs: []const dict.Pair = @ptrCast(items);
-    const dictionary = dict.fromPairs(self.unit.allocator, pairs) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.DuplicateKey => return self.fail(.domain, "dict-of produced a duplicate key"),
-    };
-    truncateStack(self, start);
-    try self.pushOwned(dictionary);
 }
 fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
     const candidate = boundary.candidate.?;
@@ -1605,6 +1633,29 @@ test "fuel polls without changing execution" {
     try run(&unit, code.list);
     try std.testing.expectEqual(@as(u64, 1), unit.polls);
     try std.testing.expectEqual(@as(usize, 2), unit.stack.items.len);
+}
+test "kernel fuel charges the block that crosses a poll boundary" {
+    const allocator = std.testing.allocator;
+    var environment = env.Env.init(allocator);
+    defer environment.deinit();
+    var archive = spans.SpanArchive.init(allocator);
+    defer archive.deinit();
+    const cancelled = std.atomic.Value(bool).init(false);
+    var unit = Unit.init(allocator, .empty, &environment, &archive, null, .{ .int = 0 }, &cancelled);
+    defer unit.deinit();
+    var evaluator = Machine{ .unit = &unit, .current = null };
+
+    unit.kernel_fuel = 256;
+    try evaluator.advanceKernel(256);
+    try std.testing.expectEqual(@as(u64, 1), unit.polls);
+    try std.testing.expectEqual(kernel_poll_quantum - 256, unit.kernel_fuel);
+
+    try evaluator.advanceKernel(kernel_poll_quantum - 257);
+    try std.testing.expectEqual(@as(u64, 1), unit.polls);
+    try std.testing.expectEqual(@as(u32, 1), unit.kernel_fuel);
+    try evaluator.advanceKernel(1);
+    try std.testing.expectEqual(@as(u64, 2), unit.polls);
+    try std.testing.expectEqual(kernel_poll_quantum - 1, unit.kernel_fuel);
 }
 test "cancellation unwinds into an ordinary language error" {
     const allocator = std.testing.allocator;

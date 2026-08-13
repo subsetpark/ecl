@@ -187,13 +187,7 @@ pub fn merge(
     };
     for (0..right_len) |right_index| {
         const right_key = keyAt(right_header, right_index);
-        var found: ?usize = null;
-        for (pairs[0..count], 0..) |pair, index| {
-            if (try equal.matchWithAllocator(allocator, pair[0], right_key)) {
-                found = index;
-                break;
-            }
-        }
+        const found = try findWithAllocator(allocator, left_header, right_key);
         if (found) |index| {
             pairs[index][1] = valueAt(right_header, right_index);
         } else {
