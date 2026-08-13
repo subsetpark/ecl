@@ -54,7 +54,7 @@ pub fn main() !void {
     for (components) |component| {
         var component_lines: usize = 0;
         for (component.sources) |source| component_lines += countCoreLines(source);
-        std.debug.print("{s}: {d}/{d} core lines\n", .{ component.name, component_lines, component.budget });
+        std.log.info("{s}: {d}/{d} core lines", .{ component.name, component_lines, component.budget });
         core_lines += component_lines;
         failed = failed or component_lines > component.budget;
     }
@@ -63,7 +63,7 @@ pub fn main() !void {
         test_lines += countLines(source) - countCoreLines(source);
     };
     for (test_sources) |source| test_lines += countLines(source);
-    std.debug.print("line budget: {d}/9500 core, {d} test lines, {d} total\n", .{
+    std.log.info("line budget: {d}/9500 core, {d} test lines, {d} total", .{
         core_lines,
         test_lines,
         core_lines + test_lines,
@@ -71,7 +71,7 @@ pub fn main() !void {
     failed = failed or core_lines > 9500;
     var kernel_lines: usize = 0;
     for (kernel_sources) |source| kernel_lines += countCoreLines(source);
-    std.debug.print("kernels: {d}/5500 production lines\n", .{kernel_lines});
+    std.log.info("kernels: {d}/5500 production lines", .{kernel_lines});
     failed = failed or kernel_lines > 5500;
     failed = auditTraversalSources() or failed;
     if (failed) return error.SourceAuditFailed;
@@ -133,7 +133,7 @@ fn auditTraversalSources() bool {
 fn hasForbidden(label: []const u8, source: []const u8, forbidden: []const []const u8) bool {
     var failed = false;
     for (forbidden) |pattern| if (std.mem.indexOf(u8, source, pattern) != null) {
-        std.debug.print("{s}: forbidden source pattern `{s}`\n", .{ label, pattern });
+        std.log.err("{s}: forbidden source pattern `{s}`", .{ label, pattern });
         failed = true;
     };
     return failed;
