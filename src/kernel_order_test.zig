@@ -8,16 +8,17 @@ const helper = @import("kernel_test_support.zig");
 
 test "order: cmp and grade share exact whole-value ordering" {
     try helper.expectStack(
-        std.testing.allocator,
         "1 1 cmp 1 2 cmp 2 1 cmp " ++
             "9223372036854775807 -9223372036854775808 cmp " ++
             "9007199254740993 9007199254740992.0 cmp " ++
             "\"apple\" \"apricot\" cmp \"a\" \"aa\" cmp [\"b\" \"a\"] grade",
         "0 -1 1 1 1 -1 -1 [1 0]",
     );
-    try helper.expectError(std.testing.allocator, "'a 'b cmp", &.{ "'kind 'type", "'word 'cmp" });
-    try helper.expectError(std.testing.allocator, "1 \"x\" cmp", &.{ "'kind 'type", "'word 'cmp" });
-    try helper.expectError(std.testing.allocator, "[1] [2] cmp", &.{ "'kind 'type", "'word 'cmp" });
+    try helper.expectErrors(&.{
+        .{ .name = "symbols are unordered", .source = "'a 'b cmp", .kind = "type", .word = "cmp" },
+        .{ .name = "cross-domain values are unordered", .source = "1 \"x\" cmp", .kind = "type", .word = "cmp" },
+        .{ .name = "nested lists are unordered", .source = "[1] [2] cmp", .kind = "type", .word = "cmp" },
+    });
 }
 
 test "order: grade is stable across comparison bucket radix and float paths" {
@@ -43,7 +44,7 @@ test "order: grade is stable across comparison bucket radix and float paths" {
     const float_values = try list.fromF64Slice(allocator, &floats);
     defer heap.releaseValue(allocator, float_values);
     try std.testing.expectEqual(order.GradePath.radix, order.gradePathForTest(float_values));
-    try helper.expectStack(allocator, "[2 1 2 1] grade", "[1 3 0 2]");
+    try helper.expectStack("[2 1 2 1] grade", "[1 3 0 2]");
 }
 
 fn appendNumber(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, number: i64) !void {
@@ -86,7 +87,7 @@ test "order: bucket radix float char and generic algorithms execute" {
         try appendNumber(&expected, allocator, @intCast(bucket + offset * 4));
     };
     try expected.append(allocator, ']');
-    try helper.expectStack(allocator, source.items, expected.items);
+    try helper.expectStack(source.items, expected.items);
 
     source.clearRetainingCapacity();
     expected.clearRetainingCapacity();
@@ -97,7 +98,7 @@ test "order: bucket radix float char and generic algorithms execute" {
     }
     try source.appendSlice(allocator, "] grade");
     try appendDescendingExpectation(&expected, allocator, 40);
-    try helper.expectStack(allocator, source.items, expected.items);
+    try helper.expectStack(source.items, expected.items);
 
     source.clearRetainingCapacity();
     try source.append(allocator, '[');
@@ -107,7 +108,7 @@ test "order: bucket radix float char and generic algorithms execute" {
         try source.appendSlice(allocator, ".5");
     }
     try source.appendSlice(allocator, "] grade");
-    try helper.expectStack(allocator, source.items, expected.items);
+    try helper.expectStack(source.items, expected.items);
 
     source.clearRetainingCapacity();
     expected.clearRetainingCapacity();
@@ -124,7 +125,7 @@ test "order: bucket radix float char and generic algorithms execute" {
         try appendNumber(&expected, allocator, @intCast(index));
     }
     try expected.appendSlice(allocator, " 39]");
-    try helper.expectStack(allocator, source.items, expected.items);
+    try helper.expectStack(source.items, expected.items);
 
     source.clearRetainingCapacity();
     expected.clearRetainingCapacity();
@@ -137,7 +138,7 @@ test "order: bucket radix float char and generic algorithms execute" {
         try appendNumber(&expected, allocator, @intCast(parity + offset * 2));
     };
     try expected.append(allocator, ']');
-    try helper.expectStack(allocator, source.items, expected.items);
+    try helper.expectStack(source.items, expected.items);
 
     source.clearRetainingCapacity();
     expected.clearRetainingCapacity();
@@ -149,31 +150,29 @@ test "order: bucket radix float char and generic algorithms execute" {
     }
     try source.appendSlice(allocator, "] grade");
     try appendDescendingExpectation(&expected, allocator, 34);
-    try helper.expectStack(allocator, source.items, expected.items);
+    try helper.expectStack(source.items, expected.items);
 }
 
 test "order: sort agrees with grade then at including representation" {
     try helper.expectStack(
-        std.testing.allocator,
         "[2 1 2 1] sort [2 1 2 1] dup grade at",
         "[1 1 2 2] [1 1 2 2]",
     );
 }
 
 test "order: stored sort body remains source honest" {
-    try helper.expectStack(std.testing.allocator, "'sort body", "(dup grade at)");
+    try helper.expectStack("'sort body", "(dup grade at)");
 }
 
 test "order: distinct keeps first values across hash collisions" {
     try helper.expectStack(
-        std.testing.allocator,
         "[9007199254740993 9007199254740992.0 9007199254740993] distinct",
         "(9007199254740993 9007199254740992.0)",
     );
 }
 
 test "order: group maps first-seen keys to stable index leaves" {
-    try helper.expectStack(std.testing.allocator, "[1 2 1 3] group", "{1 [0 2] 2 [1] 3 [3]}");
+    try helper.expectStack("[1 2 1 3] group", "{1 [0 2] 2 [1] 3 [3]}");
 }
 
 test "order: distinct charges nested structural hash and equality work" {

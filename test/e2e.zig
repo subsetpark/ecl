@@ -1,11 +1,12 @@
 const std = @import("std");
 const build_options = @import("build_options");
+const cli = @import("cli_test_support.zig");
 
 const allocator = std.testing.allocator;
 const io = std.testing.io;
 
-fn run(arguments: []const []const u8) !std.process.RunResult {
-    return std.process.run(allocator, io, .{ .argv = arguments });
+fn run(arguments: []const []const u8) !cli.Result {
+    return cli.run(arguments);
 }
 
 fn absoluteExe() ![:0]u8 {
@@ -16,48 +17,40 @@ fn absoluteExe() ![:0]u8 {
     );
 }
 
-fn expectExit(expected: u8, term: std.process.Child.Term) !void {
-    switch (term) {
-        .exited => |actual| try std.testing.expectEqual(expected, actual),
-        .signal, .stopped, .unknown => return error.UnexpectedTermination,
-    }
-}
-
 test "soul test executes the installed artifact" {
-    const result = try run(&.{ build_options.ecl_exe, "3 4 +" });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    try expectExit(0, result.term);
-    try std.testing.expectEqualStrings("7\n", result.stdout);
-    try std.testing.expectEqualStrings("", result.stderr);
+    var result = try run(&.{ build_options.ecl_exe, "3 4 +" });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "7\n", .stderr = "" });
 }
 
 test "runtime errors are dicts on stderr" {
-    const result = try run(&.{ build_options.ecl_exe, "1 0 /" });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    try expectExit(1, result.term);
-    try std.testing.expectEqualStrings("", result.stdout);
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "'kind 'domain") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "'word '/") != null);
+    var result = try run(&.{ build_options.ecl_exe, "1 0 /" });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{ "'kind 'domain", "'word '/" },
+    });
 
-    const missing = try run(&.{ build_options.ecl_exe, "missing" });
-    defer allocator.free(missing.stdout);
-    defer allocator.free(missing.stderr);
-    try expectExit(1, missing.term);
-    try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "'kind 'undefined-word") != null);
-    try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "'word 'missing") != null);
-    try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "'name 'missing") != null);
+    var missing = try run(&.{ build_options.ecl_exe, "missing" });
+    defer missing.deinit();
+    try missing.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'undefined-word", "'word 'missing", "'name 'missing" },
+    });
 
-    const raised = try run(&.{ build_options.ecl_exe, "{'kind 'custom} raise" });
-    defer allocator.free(raised.stdout);
-    defer allocator.free(raised.stderr);
-    try expectExit(1, raised.term);
-    try std.testing.expect(std.mem.indexOf(u8, raised.stderr, "'kind 'custom") != null);
-    try std.testing.expect(std.mem.indexOf(u8, raised.stderr, "'msg \"raised 'custom\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, raised.stderr, "'word 'raise") != null);
-    try std.testing.expect(std.mem.indexOf(u8, raised.stderr, "'trace ['raise]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, raised.stderr, "'source \"<command>\"") != null);
+    var raised = try run(&.{ build_options.ecl_exe, "{'kind 'custom} raise" });
+    defer raised.deinit();
+    try raised.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{
+            "'kind 'custom",
+            "'msg \"raised 'custom\"",
+            "'word 'raise",
+            "'trace ['raise]",
+            "'source \"<command>\"",
+        },
+    });
 }
 
 test "piped stdin is exactly one unit" {
@@ -75,16 +68,15 @@ test "piped stdin is exactly one unit" {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_reader = child.stdout.?.reader(io, &stdout_buffer);
     const stdout = try stdout_reader.interface.allocRemaining(allocator, .unlimited);
-    defer allocator.free(stdout);
+    errdefer allocator.free(stdout);
     var stderr_buffer: [4096]u8 = undefined;
     var stderr_reader = child.stderr.?.reader(io, &stderr_buffer);
     const stderr = try stderr_reader.interface.allocRemaining(allocator, .unlimited);
-    defer allocator.free(stderr);
+    errdefer allocator.free(stderr);
     const term = try child.wait(io);
-
-    try expectExit(0, term);
-    try std.testing.expectEqualStrings("11\n", stdout);
-    try std.testing.expectEqualStrings("", stderr);
+    var result = cli.Result{ .term = term, .stdout = stdout, .stderr = stderr };
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "11\n", .stderr = "" });
 }
 
 test "scripts print only explicitly" {
@@ -93,27 +85,23 @@ test "scripts print only explicitly" {
     const exe = try absoluteExe();
     defer allocator.free(exe);
     try temporary.dir.writeFile(io, .{ .sub_path = "quiet.ecl", .data = "3 4 +" });
-    const quiet = try std.process.run(allocator, io, .{
+    var quiet = try cli.runOptions(.{
         .argv = &.{ exe, "quiet.ecl" },
         .cwd = .{ .dir = temporary.dir },
     });
-    defer allocator.free(quiet.stdout);
-    defer allocator.free(quiet.stderr);
-    try expectExit(0, quiet.term);
-    try std.testing.expectEqualStrings("", quiet.stdout);
+    defer quiet.deinit();
+    try quiet.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
 
     try temporary.dir.writeFile(io, .{
         .sub_path = "loud.ecl",
         .data = "\"hi\" prin 'visible pp",
     });
-    const loud = try std.process.run(allocator, io, .{
+    var loud = try cli.runOptions(.{
         .argv = &.{ exe, "loud.ecl" },
         .cwd = .{ .dir = temporary.dir },
     });
-    defer allocator.free(loud.stdout);
-    defer allocator.free(loud.stderr);
-    try expectExit(0, loud.term);
-    try std.testing.expectEqualStrings("hi'visible\n", loud.stdout);
+    defer loud.deinit();
+    try loud.expect(.{ .exit_code = 0, .stdout = "hi'visible\n", .stderr = "" });
 }
 
 test "invalid UTF-8 files surface parse dicts" {
@@ -125,143 +113,136 @@ test "invalid UTF-8 files surface parse dicts" {
         .sub_path = "invalid.ecl",
         .data = &.{ 0xff, 0xfe },
     });
-    const result = try std.process.run(allocator, io, .{
+    var result = try cli.runOptions(.{
         .argv = &.{ exe, "invalid.ecl" },
         .cwd = .{ .dir = temporary.dir },
     });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    try expectExit(1, result.term);
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "'kind 'parse") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stderr, "not valid UTF-8") != null);
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'parse", "not valid UTF-8" },
+    });
 }
 
 test "missing scripts and version have stable CLI behavior" {
-    const missing = try run(&.{ build_options.ecl_exe, "definitely-missing.ecl" });
-    defer allocator.free(missing.stdout);
-    defer allocator.free(missing.stderr);
-    try expectExit(1, missing.term);
-    try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "'kind 'io") != null);
-    try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "does not exist") != null);
+    var missing = try run(&.{ build_options.ecl_exe, "definitely-missing.ecl" });
+    defer missing.deinit();
+    try missing.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'io", "does not exist" },
+    });
 
-    const version = try run(&.{ build_options.ecl_exe, "-V" });
-    defer allocator.free(version.stdout);
-    defer allocator.free(version.stderr);
-    try expectExit(0, version.term);
-    try std.testing.expectEqualStrings("ecl 0.1.0\n", version.stdout);
+    var version = try run(&.{ build_options.ecl_exe, "-V" });
+    defer version.deinit();
+    try version.expect(.{ .exit_code = 0, .stdout = "ecl 0.1.0\n", .stderr = "" });
 
-    const arguments = try run(&.{ build_options.ecl_exe, "-e", "args", "alpha", "beta" });
-    defer allocator.free(arguments.stdout);
-    defer allocator.free(arguments.stderr);
-    try expectExit(0, arguments.term);
-    try std.testing.expectEqualStrings("(\"alpha\" \"beta\")\n", arguments.stdout);
+    var arguments = try run(&.{ build_options.ecl_exe, "-e", "args", "alpha", "beta" });
+    defer arguments.deinit();
+    try arguments.expect(.{
+        .exit_code = 0,
+        .stdout = "(\"alpha\" \"beta\")\n",
+        .stderr = "",
+    });
 
-    const requested_exit = try run(&.{ build_options.ecl_exe, "7 exit" });
-    defer allocator.free(requested_exit.stdout);
-    defer allocator.free(requested_exit.stderr);
-    try expectExit(7, requested_exit.term);
-    try std.testing.expectEqualStrings("", requested_exit.stdout);
+    var requested_exit = try run(&.{ build_options.ecl_exe, "7 exit" });
+    defer requested_exit.deinit();
+    try requested_exit.expect(.{ .exit_code = 7, .stdout = "", .stderr = "" });
 }
 
 test "e2e: module privacy acceptance" {
-    const privacy = try run(&.{ build_options.ecl_exe, "test/acceptance/modules-privacy.ecl" });
-    defer allocator.free(privacy.stdout);
-    defer allocator.free(privacy.stderr);
-    try expectExit(1, privacy.term);
-    try std.testing.expectEqualStrings("42\n", privacy.stdout);
-    try std.testing.expect(std.mem.indexOf(u8, privacy.stderr, "'word 'm.s") != null);
+    var privacy = try run(&.{ build_options.ecl_exe, "test/acceptance/modules-privacy.ecl" });
+    defer privacy.deinit();
+    try privacy.expect(.{
+        .exit_code = 1,
+        .stdout = "42\n",
+        .stderr_contains = &.{"'word 'm.s"},
+    });
 }
 
 test "e2e: extracted body acceptance" {
-    const extracted = try run(&.{ build_options.ecl_exe, "test/acceptance/body-extraction.ecl" });
-    defer allocator.free(extracted.stdout);
-    defer allocator.free(extracted.stderr);
-    try expectExit(1, extracted.term);
-    try std.testing.expect(std.mem.indexOf(u8, extracted.stderr, "'word 's") != null);
+    var extracted = try run(&.{ build_options.ecl_exe, "test/acceptance/body-extraction.ecl" });
+    defer extracted.deinit();
+    try extracted.expect(.{ .exit_code = 1, .stderr_contains = &.{"'word 's"} });
 }
 
 test "e2e: hot reload all access paths acceptance" {
-    const result = try run(&.{ build_options.ecl_exe, "test/acceptance/hot-reload.ecl" });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    try expectExit(0, result.term);
-    try std.testing.expectEqualStrings("11\n21\n31\n12\n22\n32\n", result.stdout);
-    try std.testing.expectEqualStrings("", result.stderr);
+    var result = try run(&.{ build_options.ecl_exe, "test/acceptance/hot-reload.ecl" });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout = "11\n21\n31\n12\n22\n32\n",
+        .stderr = "",
+    });
 }
 
 test "e2e: module effect declaration acceptance" {
-    const missing = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) 'bad def) module" });
-    defer allocator.free(missing.stdout);
-    defer allocator.free(missing.stderr);
-    try expectExit(1, missing.term);
-    try std.testing.expect(std.mem.indexOf(u8, missing.stderr, "'kind 'domain") != null);
+    var missing = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) 'bad def) module" });
+    defer missing.deinit();
+    try missing.expect(.{ .exit_code = 1, .stderr_contains = &.{"'kind 'domain"} });
 
-    const lying = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) ( a -- b c ) 'lies def) module 1 m.lies" });
-    defer allocator.free(lying.stdout);
-    defer allocator.free(lying.stderr);
-    try expectExit(1, lying.term);
-    try std.testing.expect(std.mem.indexOf(u8, lying.stderr, "'kind 'contract") != null);
-    try std.testing.expect(std.mem.indexOf(u8, lying.stderr, "'word 'm.lies") != null);
+    var lying = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) ( a -- b c ) 'lies def) module 1 m.lies" });
+    defer lying.deinit();
+    try lying.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'contract", "'word 'm.lies" },
+    });
 
-    const visible = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) ( a -- b ) 'dbl def) module 'm.dbl see" });
-    defer allocator.free(visible.stdout);
-    defer allocator.free(visible.stderr);
-    try expectExit(0, visible.term);
-    try std.testing.expect(std.mem.indexOf(u8, visible.stdout, "(a -- b)") != null);
+    var visible = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) ( a -- b ) 'dbl def) module 'm.dbl see" });
+    defer visible.deinit();
+    try visible.expect(.{
+        .exit_code = 0,
+        .stdout_contains = &.{"(a -- b)"},
+        .stderr = "",
+    });
 }
 
 test "e2e: use shadow notice acceptance" {
-    const result = try run(&.{
+    var result = try run(&.{
         build_options.ecl_exe,
         "-e",
         "1 'mean set 2 'count set 'stats (3 'mean set 4 'count set) module 'stats use mean count",
     });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    try expectExit(0, result.term);
-    try std.testing.expectEqualStrings("1 2\n", result.stdout);
-    try std.testing.expectEqualStrings(
-        "session `count` shadows `stats.count`\n" ++
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout = "1 2\n",
+        .stderr = "session `count` shadows `stats.count`\n" ++
             "session `mean` shadows `stats.mean`\n",
-        result.stderr,
-    );
+    });
 }
 
 test "e2e: reflection acceptance" {
-    const result = try run(&.{
+    var result = try run(&.{
         build_options.ecl_exe,
         "-e",
         "'m (40 's setp (s 2 +) ( -- n ) 'f def) module 'm use 'm.f see 'f which words",
     });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    try expectExit(0, result.term);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "(s 2 +) (-- n) 'm.f def") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, "f -> m.f def public generation 1 (-- n)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.stdout, " s ") == null);
-    try std.testing.expectEqualStrings("", result.stderr);
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout_contains = &.{
+            "(s 2 +) (-- n) 'm.f def",
+            "f -> m.f def public generation 1 (-- n)",
+        },
+        .stdout_excludes = &.{" s "},
+        .stderr = "",
+    });
 }
 
 test "e2e: direct load and ECL_PATH acceptance" {
-    const direct = try run(&.{ build_options.ecl_exe, "-e", "\"test/acceptance/load-stack.ecl\" load pp" });
-    defer allocator.free(direct.stdout);
-    defer allocator.free(direct.stderr);
-    try expectExit(0, direct.term);
-    try std.testing.expectEqualStrings("42\n", direct.stdout);
-    try std.testing.expectEqualStrings("", direct.stderr);
+    var direct = try run(&.{ build_options.ecl_exe, "-e", "\"test/acceptance/load-stack.ecl\" load pp" });
+    defer direct.deinit();
+    try direct.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
     var environment = std.process.Environ.Map.init(allocator);
     defer environment.deinit();
     try environment.put("ECL_PATH", "test/acceptance/modules");
-    const result = try std.process.run(allocator, io, .{
+    var result = try cli.runOptions(.{
         .argv = &.{ build_options.ecl_exe, "-e", "'stats use answer" },
         .environ_map = &environment,
     });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    try expectExit(0, result.term);
-    try std.testing.expectEqualStrings("42\n", result.stdout);
-    try std.testing.expectEqualStrings("", result.stderr);
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
     const exe = try absoluteExe();
     defer allocator.free(exe);
@@ -269,71 +250,61 @@ test "e2e: direct load and ECL_PATH acceptance" {
     defer module_directory.close(io);
     var empty_environment = std.process.Environ.Map.init(allocator);
     defer empty_environment.deinit();
-    const no_implicit_cwd = try std.process.run(allocator, io, .{
+    var no_implicit_cwd = try cli.runOptions(.{
         .argv = &.{ exe, "-e", "'stats use" },
         .cwd = .{ .dir = module_directory },
         .environ_map = &empty_environment,
     });
-    defer allocator.free(no_implicit_cwd.stdout);
-    defer allocator.free(no_implicit_cwd.stderr);
-    try expectExit(1, no_implicit_cwd.term);
-    try std.testing.expect(std.mem.indexOf(u8, no_implicit_cwd.stderr, "'kind 'undefined-word") != null);
+    defer no_implicit_cwd.deinit();
+    try no_implicit_cwd.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{"'kind 'undefined-word"},
+    });
 }
 
 test "e2e: M5 ragged equality overflow float and char acceptance" {
-    const ragged = try run(&.{ build_options.ecl_exe, "-e", "[[1 2] [3]] 10 *" });
-    defer allocator.free(ragged.stdout);
-    defer allocator.free(ragged.stderr);
-    try expectExit(0, ragged.term);
-    try std.testing.expectEqualStrings("([10 20] [30])\n", ragged.stdout);
+    var ragged = try run(&.{ build_options.ecl_exe, "-e", "[[1 2] [3]] 10 *" });
+    defer ragged.deinit();
+    try ragged.expect(.{ .exit_code = 0, .stdout = "([10 20] [30])\n", .stderr = "" });
 
-    const equality = try run(&.{ build_options.ecl_exe, "-e", "[1 2] [1 2] = [1 2] [1 2] match" });
-    defer allocator.free(equality.stdout);
-    defer allocator.free(equality.stderr);
-    try expectExit(0, equality.term);
-    try std.testing.expectEqualStrings("[1 1] 1\n", equality.stdout);
+    var equality = try run(&.{ build_options.ecl_exe, "-e", "[1 2] [1 2] = [1 2] [1 2] match" });
+    defer equality.deinit();
+    try equality.expect(.{ .exit_code = 0, .stdout = "[1 1] 1\n", .stderr = "" });
 
-    const overflow = try run(&.{ build_options.ecl_exe, "-e", "9223372036854775806 [1 2] +" });
-    defer allocator.free(overflow.stdout);
-    defer allocator.free(overflow.stderr);
-    try expectExit(1, overflow.term);
-    try std.testing.expect(std.mem.indexOf(u8, overflow.stderr, "'kind 'overflow") != null);
-    try std.testing.expect(std.mem.indexOf(u8, overflow.stderr, "'index 1") != null);
+    var overflow = try run(&.{ build_options.ecl_exe, "-e", "9223372036854775806 [1 2] +" });
+    defer overflow.deinit();
+    try overflow.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'overflow", "'index 1" },
+    });
 
-    const scalar = try run(&.{ build_options.ecl_exe, "-e", "inf 1 + 9007199254740993 9007199254740992.0 = \\a 1 +" });
-    defer allocator.free(scalar.stdout);
-    defer allocator.free(scalar.stderr);
-    try expectExit(0, scalar.term);
-    try std.testing.expectEqualStrings("inf 0 \\b\n", scalar.stdout);
+    var scalar = try run(&.{ build_options.ecl_exe, "-e", "inf 1 + 9007199254740993 9007199254740992.0 = \\a 1 +" });
+    defer scalar.deinit();
+    try scalar.expect(.{ .exit_code = 0, .stdout = "inf 0 \\b\n", .stderr = "" });
 }
 
 test "e2e: mask filter acceptance" {
-    const result = try run(&.{ build_options.ecl_exe, "-e", "[10 20 30 40] [1 0 1 0] where at" });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    try expectExit(0, result.term);
-    try std.testing.expectEqualStrings("[10 30]\n", result.stdout);
-    try std.testing.expectEqualStrings("", result.stderr);
+    var result = try run(&.{ build_options.ecl_exe, "-e", "[10 20 30 40] [1 0 1 0] where at" });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "[10 30]\n", .stderr = "" });
 }
 
 test "e2e: cmp exactness and string-grade agreement" {
-    const result = try run(&.{
+    var result = try run(&.{
         build_options.ecl_exe,
         "-e",
         "9007199254740993 9007199254740992.0 cmp \"apple\" \"apricot\" cmp [\"b\" \"a\"] grade",
     });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    try expectExit(0, result.term);
-    try std.testing.expectEqualStrings("1 -1 [1 0]\n", result.stdout);
-    try std.testing.expectEqualStrings("", result.stderr);
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "1 -1 [1 0]\n", .stderr = "" });
 }
 
 test "e2e: array words fixture matches canonical output" {
-    const result = try run(&.{ build_options.ecl_exe, "test/acceptance/array-words.ecl" });
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-    try expectExit(0, result.term);
-    try std.testing.expectEqualStrings(@embedFile("acceptance/array-words.out"), result.stdout);
-    try std.testing.expectEqualStrings("", result.stderr);
+    var result = try run(&.{ build_options.ecl_exe, "test/acceptance/array-words.ecl" });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout = @embedFile("acceptance/array-words.out"),
+        .stderr = "",
+    });
 }
