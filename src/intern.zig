@@ -12,6 +12,41 @@ const max_segments = 4096;
 const bucket_count = 16 * 1024;
 const no_entry = std.math.maxInt(u32);
 
+/// Nominal identifier accepted at namespace-publication boundaries. Raw
+/// intern ids remain useful for resolution, but cannot be passed to a binder,
+/// module registry, or environment writer without validation.
+pub const NamespaceName = enum(u32) { _ };
+
+pub fn namespaceId(name: NamespaceName) u32 {
+    return @intFromEnum(name);
+}
+
+pub const NameError = poll.Error || error{InvalidName};
+
+pub fn namespaceName(id: u32, work: poll.WorkContext) NameError!NamespaceName {
+    const bytes = process_table.getBytes(id) orelse return error.InvalidName;
+    if (bytes.len == 0 or isReservedBytes(bytes)) return error.InvalidName;
+    var cursor = work.cursor(u8, bytes);
+    while (try cursor.next()) |byte| if (byte == '.') return error.InvalidName;
+    return @enumFromInt(id);
+}
+
+pub fn internNamespace(bytes: []const u8) error{ OutOfMemory, InvalidName }!NamespaceName {
+    const id = try intern(bytes);
+    return namespaceName(id, .unlimited()) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidName => error.InvalidName,
+        error.Ecl => unreachable,
+    };
+}
+
+pub fn trustedNamespace(bytes: []const u8) error{OutOfMemory}!NamespaceName {
+    return internNamespace(bytes) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidName => unreachable,
+    };
+}
+
 const Entry = struct {
     hash: u64,
     byte_segment: u32,
@@ -208,13 +243,8 @@ fn bucketIndex(hash: u64) usize {
 
 fn hashBytesPolling(bytes: []const u8, poller: poll.Poller) poll.Error!u64 {
     var hasher = std.hash.Wyhash.init(0);
-    var start: usize = 0;
-    while (start < bytes.len) {
-        const end = @min(start + 256, bytes.len);
-        try poller.charge(end - start);
-        hasher.update(bytes[start..end]);
-        start = end;
-    }
+    var chunks = poll.WorkContext.init(poller).chunks(bytes);
+    while (try chunks.next()) |chunk| hasher.update(chunk);
     return hasher.final();
 }
 
@@ -227,12 +257,10 @@ fn equalBytesPolling(left: []const u8, right: []const u8, poller: poll.Poller) p
 }
 
 fn copyBytesPolling(destination: []u8, source: []const u8, poller: poll.Poller) poll.Error!void {
+    var chunks = poll.WorkContext.init(poller).chunks(source);
     var start: usize = 0;
-    while (start < source.len) {
-        const end = @min(start + 256, source.len);
-        try poller.charge(end - start);
-        @memcpy(destination[start..end], source[start..end]);
-        start = end;
+    while (try chunks.next()) |chunk| : (start += chunk.len) {
+        @memcpy(destination[start..][0..chunk.len], chunk);
     }
 }
 
@@ -275,6 +303,14 @@ pub fn qualifiedPolling(
 
 pub fn get(id: u32) []const u8 {
     return process_table.getBytes(id) orelse unreachable;
+}
+
+pub fn isReservedBytes(name: []const u8) bool {
+    return std.mem.eql(u8, name, "--") or std.mem.eql(u8, name, ":");
+}
+
+pub fn isReservedName(id: u32) bool {
+    return isReservedBytes(get(id));
 }
 
 fn allocationFailureProbe(allocator: std.mem.Allocator) !void {

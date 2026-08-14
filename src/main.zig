@@ -9,6 +9,7 @@ const help =
     \\    ecl -e <SOURCE> [ARGS...]  Evaluate source and print the stack
     \\    ecl <FILE> [ARGS...]       Run a UTF-8 script
     \\    ecl <SOURCE> [ARGS...]     Evaluate source and print the stack
+    \\    ecl fmt <FILE|->           Format source to standard output
     \\
     \\OPTIONS:
     \\    -e, --eval <SOURCE>        Evaluate source text
@@ -51,6 +52,7 @@ fn entry(init: std.process.Init) AppError!u8 {
         try writeFile(init.io, .stdout, version);
         return 0;
     }
+    if (std.mem.eql(u8, first, "fmt")) return formatCommand(init, cli[1..]);
     if (std.mem.eql(u8, first, "-e") or std.mem.eql(u8, first, "--eval")) {
         if (cli.len < 2) return emitSyntheticError(
             init,
@@ -98,6 +100,42 @@ fn runStdin(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
     };
     defer init.gpa.free(source);
     return executeSource(init, "<stdin>", source, arguments, true);
+}
+
+fn readFormatStdin(init: std.process.Init) AppError![]u8 {
+    var buffer: [8192]u8 = undefined;
+    var file_reader = std.Io.File.stdin().reader(init.io, &buffer);
+    return file_reader.interface.allocRemaining(init.gpa, .unlimited) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Io,
+    };
+}
+
+fn formatCommand(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
+    if (arguments.len != 1) {
+        try writeFile(init.io, .stderr, "ecl fmt: expected exactly one FILE or -\n");
+        return 1;
+    }
+    const source = if (std.mem.eql(u8, arguments[0], "-"))
+        try readFormatStdin(init)
+    else
+        std.Io.Dir.cwd().readFileAlloc(init.io, arguments[0], init.gpa, .unlimited) catch |err|
+            return emitIoError(init, "cannot read format input", err);
+    defer init.gpa.free(source);
+    const formatted = ecl.formatter.format(init.gpa, source) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidUtf8 => {
+            try writeFile(init.io, .stderr, "ecl fmt: source is not valid UTF-8\n");
+            return 1;
+        },
+        error.InvalidSource => {
+            try writeFile(init.io, .stderr, "ecl fmt: source does not parse\n");
+            return 1;
+        },
+    };
+    defer init.gpa.free(formatted);
+    try writeFile(init.io, .stdout, formatted);
+    return 0;
 }
 fn executeSource(
     init: std.process.Init,

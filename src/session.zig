@@ -9,7 +9,11 @@ const env = @import("env.zig");
 const modules = @import("modules.zig");
 const machine = @import("machine.zig");
 const prims = @import("prims.zig");
+const prelude = @import("prelude.zig");
+const idioms = @import("idioms.zig");
 const printer = @import("print.zig");
+const poll = @import("poll.zig");
+const intern = @import("intern.zig");
 pub const Value = value.Value;
 pub const UnitOutcome = union(enum) {
     ok,
@@ -31,6 +35,8 @@ pub const Session = struct {
     requested_exit: ?u8 = null,
     last_max_frames: usize = 0,
     last_polls: u64 = 0,
+    idiom_mode: machine.IdiomMode = .automatic,
+    last_idiom_hits: u64 = 0,
     pub fn init(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
@@ -65,9 +71,17 @@ pub const Session = struct {
     ) error{OutOfMemory}!Session {
         var environment = env.Env.init(allocator);
         errdefer environment.deinit();
-        try prims.install(&environment);
+        var building = environment.beginCoreBuild();
+        try prims.install(&building);
         var registry = modules.Registry.init(allocator);
         errdefer registry.deinit();
+        var archive = spans.SpanArchive.init(allocator);
+        errdefer archive.deinit();
+        var bootstrap_cancelled: std.atomic.Value(bool) = .init(false);
+        prelude.install(allocator, &building, &registry, &archive, &bootstrap_cancelled) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidPrelude => @panic("embedded prelude is invalid"),
+        };
         const owned_ecl_path = if (ecl_path) |path| try allocator.dupe(u8, path) else null;
         errdefer if (owned_ecl_path) |path| allocator.free(path);
         const argv = try argumentsValue(allocator, arguments);
@@ -75,7 +89,7 @@ pub const Session = struct {
             .allocator = allocator,
             .environment = environment,
             .registry = registry,
-            .archive = spans.SpanArchive.init(allocator),
+            .archive = archive,
             .output = output,
             .diagnostics = diagnostics,
             .host_io = host_io,
@@ -128,7 +142,10 @@ pub const Session = struct {
         var root_owned = true;
         defer if (root_owned) heap.releaseValue(self.allocator, root);
         const root_header = root.list;
-        try self.archive.absorb(parsed, root);
+        self.archive.absorb(parsed, root, poll.WorkContext.unlimited()) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Ecl => unreachable,
+        };
         root_owned = false;
         const checkpoint = try self.allocator.dupe(Value, self.stack.items);
         defer self.allocator.free(checkpoint);
@@ -148,12 +165,15 @@ pub const Session = struct {
         unit.diagnostics = self.diagnostics;
         unit.host_io = self.host_io;
         unit.ecl_path = self.ecl_path;
+        unit.idiom_mode = self.idiom_mode;
+        unit.phrase_recognizer = idioms.tryApply;
         self.stack = .empty;
         defer {
             self.stack = unit.takeStack();
             self.last_max_frames = unit.max_frames;
             self.last_polls = unit.polls;
             self.requested_exit = unit.exit_status;
+            self.last_idiom_hits = unit.idiom_hits;
             unit.deinit();
         }
         machine.run(&unit, root_header) catch |err| switch (err) {
@@ -182,10 +202,10 @@ pub const Session = struct {
     }
     pub fn registerNativeModule(
         self: *Session,
-        name: u32,
+        name: intern.NamespaceName,
         definitions: []const modules.NativeDefinition,
     ) modules.RegistryError!u64 {
-        return self.registry.registerNative(name, definitions);
+        return self.registry.registerNative(name, definitions, .unlimited());
     }
 };
 fn restoreCheckpoint(unit: *machine.Unit, checkpoint: []const Value) void {
@@ -213,7 +233,6 @@ fn dictSymbol(
     dictionary: Value,
     name: []const u8,
 ) ![]const u8 {
-    const intern = @import("intern.zig");
     const dict = @import("dict.zig");
     const key = try intern.intern(name);
     const found = (try dict.symbolField(allocator, dictionary, key)).?;
@@ -272,21 +291,4 @@ test "source-defined failures retain provenance after their unit" {
     const runtime_rendered = try printer.toOwnedString(allocator, runtime_error);
     defer allocator.free(runtime_rendered);
     try std.testing.expect(std.mem.indexOf(u8, runtime_rendered, "'source") == null);
-}
-fn allocationFailureProbe(allocator: std.mem.Allocator) !void {
-    var session = try Session.init(allocator, &.{"argument"});
-    defer session.deinit();
-    const outcome = try session.runUnit(
-        "allocation.ecl",
-        "(3 4 +) 'sum def sum (1 0 /) attempt (5 6 +) attempt " ++
-            "({'kind 'custom 'data {'detail 7}} raise) attempt args",
-    );
-    if (outcome == .err) heap.releaseValue(allocator, outcome.err);
-}
-test "session execution propagates every allocation failure" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        allocationFailureProbe,
-        .{},
-    );
 }

@@ -6,6 +6,7 @@ const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const list = @import("list.zig");
 const lexer = @import("lexer.zig");
+const poll = @import("poll.zig");
 
 pub const Value = value.Value;
 pub const Span = lexer.Span;
@@ -22,6 +23,7 @@ pub const SpannedValue = struct {
 };
 
 pub const Error = error{ OutOfMemory, Parse };
+const FormList = poll.ChunkList(SpannedValue);
 
 /// Borrows `body` and returns a newly-owned slice whose heap values each own
 /// one reference. The caller frees the slice and releases those values.
@@ -32,41 +34,64 @@ pub fn lower(
     binder_span: Span,
     diag: *Diag,
 ) Error![]SpannedValue {
+    return lowerPolling(allocator, names, body, binder_span, diag, .unlimited()) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Parse => error.Parse,
+        error.Ecl => unreachable,
+    };
+}
+
+pub fn lowerPolling(
+    allocator: std.mem.Allocator,
+    names: []const Name,
+    body: []const SpannedValue,
+    binder_span: Span,
+    diag: *Diag,
+    work: poll.WorkContext,
+) (Error || error{Ecl})![]SpannedValue {
     if (names.len == 0) {
         diag.set(binder_span, "a binder must contain at least one name");
         return error.Parse;
     }
 
-    const name_ids = try allocator.alloc(u32, names.len);
-    defer allocator.free(name_ids);
+    var locals = try poll.U32Index.init(allocator, names.len, work);
+    defer locals.deinit();
     for (names, 0..) |name, index| {
-        const classification = lexer.classify(name.bytes);
+        try work.step();
+        const classification = try lexer.classifyPolling(name.bytes, work);
         const valid_class = classification == .word;
-        if (!valid_class or !lexer.validSymbol(name.bytes) or
-            std.mem.indexOfScalar(u8, name.bytes, '.') != null)
+        var qualified = false;
+        for (name.bytes) |byte| {
+            try work.step();
+            if (byte == '.') qualified = true;
+        }
+        if (!valid_class or !try lexer.validSymbolPolling(name.bytes, work) or
+            intern.isReservedBytes(name.bytes) or qualified)
         {
             diag.setFmt(name.span, "invalid binder name `{s}`", .{name.bytes});
             return error.Parse;
         }
-        for (names[0..index]) |prior| {
-            if (!std.mem.eql(u8, prior.bytes, name.bytes)) continue;
+        const name_id = try intern.internPolling(name.bytes, work.asPoller());
+        if (!try locals.put(name_id, index, work)) {
             diag.setFmt(name.span, "duplicate binder name `{s}`", .{name.bytes});
             return error.Parse;
         }
-        name_ids[index] = try intern.intern(name.bytes);
     }
 
-    for (body) |form| switch (form.value) {
-        .list => if (try nestedLocalReference(allocator, form.value, name_ids)) |id| {
-            diag.setFmt(
-                form.span,
-                "local `{s}` crosses a quotation boundary; capture it explicitly with `cons`",
-                .{intern.get(id)},
-            );
-            return error.Parse;
-        },
-        .int, .float, .char, .symbol, .word, .dict => {},
-    };
+    for (body) |form| {
+        try work.step();
+        switch (form.value) {
+            .list => if (try nestedLocalReference(allocator, form.value, &locals, work)) |id| {
+                diag.setFmt(
+                    form.span,
+                    "local `{s}` crosses a quotation boundary; capture it explicitly with `literal` and `compose`",
+                    .{intern.get(id)},
+                );
+                return error.Parse;
+            },
+            .int, .float, .char, .symbol, .word, .dict => {},
+        }
+    }
 
     const words = struct {
         cons: u32,
@@ -84,76 +109,79 @@ pub fn lower(
         .pop = try intern.intern("pop"),
     };
 
-    var output: std.ArrayList(SpannedValue) = .empty;
+    var output = FormList.init(allocator);
+    defer output.deinit();
     errdefer {
-        for (output.items) |form| heap.releaseValue(allocator, form.value);
-        output.deinit(allocator);
+        var iterator = output.iterator();
+        while (iterator.next()) |form| heap.releaseValue(allocator, form.value);
     }
 
     // The lowering's locals accumulator is the canonical empty vector `[]`,
     // not the ordinary empty quotation `()`.
     const empty = try list.fromI64Slice(allocator, &.{});
     try appendOwned(allocator, &output, .{ .value = empty, .span = binder_span });
-    for (names) |_| try appendAtom(allocator, &output, .{ .word = words.cons }, binder_span);
+    for (names) |_| {
+        try work.step();
+        try appendAtom(&output, .{ .word = words.cons }, binder_span);
+    }
 
     for (body) |form| {
+        try work.step();
         if (form.value == .word) {
-            if (findName(name_ids, form.value.word)) |index| {
-                try appendAtom(allocator, &output, .{ .word = words.dup }, binder_span);
-                try appendAtom(allocator, &output, .{ .int = @intCast(index) }, binder_span);
-                try appendAtom(allocator, &output, .{ .word = words.at }, binder_span);
-                try appendAtom(allocator, &output, .{ .word = words.swap }, binder_span);
+            if (try locals.get(form.value.word, work)) |index| {
+                try appendAtom(&output, .{ .word = words.dup }, binder_span);
+                try appendAtom(&output, .{ .int = @intCast(index) }, binder_span);
+                try appendAtom(&output, .{ .word = words.at }, binder_span);
+                try appendAtom(&output, .{ .word = words.swap }, binder_span);
                 continue;
             }
         }
         const wrapper = try list.fromValues(allocator, &.{form.value});
         try appendOwned(allocator, &output, .{ .value = wrapper, .span = binder_span });
-        try appendAtom(allocator, &output, .{ .word = words.dip }, binder_span);
+        try appendAtom(&output, .{ .word = words.dip }, binder_span);
     }
-    try appendAtom(allocator, &output, .{ .word = words.pop }, binder_span);
-    return output.toOwnedSlice(allocator);
+    try appendAtom(&output, .{ .word = words.pop }, binder_span);
+    return output.toOwnedSlice(work);
 }
 
 fn appendOwned(
     allocator: std.mem.Allocator,
-    output: *std.ArrayList(SpannedValue),
+    output: *FormList,
     form: SpannedValue,
 ) error{OutOfMemory}!void {
-    output.append(allocator, form) catch |err| {
+    output.append(form) catch |err| {
         heap.releaseValue(allocator, form.value);
         return err;
     };
 }
 
 fn appendAtom(
-    allocator: std.mem.Allocator,
-    output: *std.ArrayList(SpannedValue),
+    output: *FormList,
     item: Value,
     span: Span,
 ) error{OutOfMemory}!void {
-    try output.append(allocator, .{ .value = item, .span = span });
-}
-
-fn findName(names: []const u32, id: u32) ?usize {
-    for (names, 0..) |name, index| if (name == id) return index;
-    return null;
+    try output.append(.{ .value = item, .span = span });
 }
 
 fn nestedLocalReference(
     allocator: std.mem.Allocator,
     root: Value,
-    names: []const u32,
-) error{OutOfMemory}!?u32 {
-    var work: std.ArrayList(Value) = .empty;
-    defer work.deinit(allocator);
-    try work.append(allocator, root);
+    locals: *const poll.U32Index,
+    work_context: poll.WorkContext,
+) (error{OutOfMemory} || error{Ecl})!?u32 {
+    var work = poll.ChunkStack(Value).init(allocator);
+    defer work.deinit();
+    try work.push(root);
     while (work.pop()) |current| switch (current) {
-        .word => |id| if (findName(names, id) != null) return id,
+        .word => |id| {
+            if (try locals.get(id, work_context) != null) return id;
+        },
         .list => |header| {
-            var index: usize = @intCast(header.len);
+            var index: usize = @intCast(header.length());
             while (index > 0) {
+                try work_context.step();
                 index -= 1;
-                try work.append(allocator, list.atUnchecked(current, index));
+                try work.push(list.atUnchecked(current, index));
             }
         },
         .int, .float, .char, .symbol, .dict => {},
@@ -234,7 +262,7 @@ test "boundary-crossing rejection" {
         &diag,
     ));
     try std.testing.expectEqualStrings(
-        "local `x` crosses a quotation boundary; capture it explicitly with `cons`",
+        "local `x` crosses a quotation boundary; capture it explicitly with `literal` and `compose`",
         diag.text(),
     );
 }

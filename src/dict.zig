@@ -56,7 +56,7 @@ pub fn fromPairs(
     defer if (index_owned) allocator.free(index.?);
 
     const header = try heap.allocHeader(allocator, .dict, pairs.len, pairs.len);
-    const storage = heap.dictStorage(header);
+    const storage = heap.initDictStorage(header);
     storage.* = .{
         .payload = .{
             .keys = keys_value.list,
@@ -71,7 +71,7 @@ pub fn fromPairs(
     vals_owned = false;
     hashes_owned = false;
     index_owned = false;
-    return .{ .dict = header };
+    return .{ .dict = heap.publish(header) };
 }
 
 /// `fromPairs` for call sites whose keys are distinct by construction.
@@ -133,7 +133,7 @@ pub fn put(
 ) error{ OutOfMemory, NotADict }!Value {
     const header = try dictHeader(dictionary);
     const found = try findWithAllocator(allocator, header, key);
-    const old_len: usize = @intCast(header.len);
+    const old_len: usize = @intCast(header.length());
     const new_len = old_len + @intFromBool(found == null);
     const pairs = try allocator.alloc(Pair, new_len);
     defer allocator.free(pairs);
@@ -155,7 +155,7 @@ pub fn del(
 ) error{ OutOfMemory, NotADict }!Value {
     const header = try dictHeader(dictionary);
     const found = try findWithAllocator(allocator, header, key) orelse return dictionary;
-    const old_len: usize = @intCast(header.len);
+    const old_len: usize = @intCast(header.length());
     const pairs = try allocator.alloc(Pair, old_len - 1);
     defer allocator.free(pairs);
     var dest: usize = 0;
@@ -176,8 +176,8 @@ pub fn merge(
 ) error{ OutOfMemory, NotADict }!Value {
     const left_header = try dictHeader(left);
     const right_header = try dictHeader(right);
-    const left_len: usize = @intCast(left_header.len);
-    const right_len: usize = @intCast(right_header.len);
+    const left_len: usize = @intCast(left_header.length());
+    const right_len: usize = @intCast(right_header.length());
     const pairs = try allocator.alloc(Pair, left_len + right_len);
     defer allocator.free(pairs);
     var count = left_len;
@@ -226,7 +226,7 @@ fn dictHeader(dictionary: Value) error{NotADict}!*Header {
 
 fn cachedHash(header: *Header, index: usize) u64 {
     const hashes = heap.dictStorageConst(header).payload.?.hashes.?;
-    return @bitCast(heap.itemsConst(i64, hashes)[index]);
+    return @bitCast(heap.i64s(hashes)[index]);
 }
 
 fn findWithAllocator(
@@ -234,7 +234,7 @@ fn findWithAllocator(
     header: *Header,
     key: Value,
 ) error{OutOfMemory}!?usize {
-    const count: usize = @intCast(header.len);
+    const count: usize = @intCast(header.length());
     const key_hash = try equal.hashWithAllocator(allocator, key);
     const storage = heap.dictStorageConst(header);
     if (count < index_threshold or storage.index == null) {
@@ -286,8 +286,9 @@ fn installReplacement(
     original: Value,
     replacement: Value,
 ) Value {
-    if (!heap.isUnique(original.dict)) return replacement;
-    heap.adoptRepresentation(allocator, original.dict, replacement.dict);
+    const destination = heap.claimUnique(original.dict) orelse return replacement;
+    const source = heap.claimUnique(replacement.dict) orelse unreachable;
+    heap.adoptRepresentation(allocator, destination, source);
     return original;
 }
 

@@ -86,7 +86,7 @@ fn printInternal(
         },
         .sequence => |continuation| {
             try pollMaybe(poller);
-            const count: usize = @intCast(continuation.collection.list.len);
+            const count: usize = @intCast(continuation.collection.list.length());
             if (continuation.index == count) {
                 try writer.writeByte(if (continuation.collection.list.kind() == .generic_spine) ')' else ']');
                 continue;
@@ -103,7 +103,7 @@ fn printInternal(
         },
         .dictionary => |continuation| {
             try pollMaybe(poller);
-            const count: usize = @intCast(continuation.header.len);
+            const count: usize = @intCast(continuation.header.length());
             if (continuation.index == count) {
                 try writer.writeByte('}');
                 continue;
@@ -199,7 +199,7 @@ fn writeString(
     poller: ?poll_api.Poller,
 ) (poll_api.Error || std.Io.Writer.Error)!void {
     try writer.writeByte('"');
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     for (0..count) |index| {
         try pollMaybe(poller);
         const codepoint = list.atUnchecked(collection, index).char;

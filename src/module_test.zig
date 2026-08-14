@@ -5,6 +5,7 @@ const intern = @import("intern.zig");
 const list = @import("list.zig");
 const machine = @import("machine.zig");
 const modules = @import("modules.zig");
+const poll = @import("poll.zig");
 const printer = @import("print.zig");
 const session = @import("session.zig");
 
@@ -40,26 +41,59 @@ fn expectErrorContains(
     for (needles) |needle| try std.testing.expect(std.mem.indexOf(u8, rendered, needle) != null);
 }
 
+fn cancelLoading(_: *anyopaque) poll.Error!void {
+    return error.Ecl;
+}
+
+fn finishLoadingWithCleanup(loading: *modules.LoadingLease, work: poll.WorkContext) poll.Error!void {
+    defer loading.deinit();
+    try loading.finish(work);
+}
+
+test "registry: cancelled loading removal retains cleanup ownership" {
+    var registry = modules.Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    const name = try intern.intern("cancelled-loading");
+    var loading = (try registry.beginLoading(name, .unlimited())).?;
+    var context: u8 = 0;
+    try std.testing.expectError(error.Ecl, finishLoadingWithCleanup(&loading, .init(.{
+        .context = &context,
+        .poll_fn = cancelLoading,
+    })));
+    var retry = (try registry.beginLoading(name, .unlimited())).?;
+    defer retry.deinit();
+}
+
 test "env: new names and use edits bump shape and deep lookup is ordered" {
     var environment = env.Environment.init(std.testing.allocator);
     defer environment.deinit();
-    _ = try environment.bind(1, .{ .value = .{ .int = 1 } });
+    const home = try intern.trustedNamespace("environment-test-home");
+    var scope = env.Scope.moduleRoot(std.testing.allocator, &environment, home);
+    defer scope.deinit();
+    const first = try intern.trustedNamespace("first-env-name");
+    const second = try intern.trustedNamespace("second-env-name");
+    _ = try scope.publishModule(first, .{ .value = .{ .item = .{ .int = 1 }, .visibility = .public } }, .unlimited());
     try std.testing.expectEqual(@as(u64, 1), environment.generation());
-    _ = try environment.bind(2, .{ .value = .{ .int = 2 } });
+    _ = try scope.publishModule(second, .{ .value = .{ .item = .{ .int = 2 }, .visibility = .public } }, .unlimited());
     try std.testing.expectEqual(@as(u64, 2), environment.generation());
-    try environment.moveUseToTop(8);
+    try scope.moveUseToTop(8, .unlimited());
     try std.testing.expectEqual(@as(u64, 3), environment.generation());
-    try environment.moveUseToTop(8);
+    try scope.moveUseToTop(8, .unlimited());
     try std.testing.expectEqual(@as(u64, 3), environment.generation());
-    try environment.moveUseToTop(9);
-    try environment.moveUseToTop(8);
+    try scope.moveUseToTop(9, .unlimited());
+    try scope.moveUseToTop(8, .unlimited());
     try std.testing.expectEqualSlices(u32, &.{ 9, 8 }, environment.useOrder());
-    const names = try environment.namesOwned(std.testing.allocator, null);
+    const names = try environment.namesOwned(std.testing.allocator, .unlimited());
     defer std.testing.allocator.free(names);
     std.mem.sort(u32, names, {}, std.sort.asc(u32));
-    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, names);
-    environment.freeze();
-    try std.testing.expectError(error.Frozen, environment.bind(3, .{ .value = .{ .int = 3 } }));
+    var expected = [_]u32{ intern.namespaceId(first), intern.namespaceId(second) };
+    std.mem.sort(u32, &expected, {}, std.sort.asc(u32));
+    try std.testing.expectEqualSlices(u32, &expected, names);
+    scope.freezeModule();
+    try std.testing.expectError(
+        error.Frozen,
+        scope.publishModule(first, .{ .value = .{ .item = .{ .int = 3 }, .visibility = .public } }, .unlimited()),
+    );
 }
 
 test "binding: set installs and replaces values while let is absent" {
@@ -199,8 +233,8 @@ test "module: use shadow notices stay within the cancellation bound" {
     const name_bytes = try allocator.alloc(u8, 70_000);
     defer allocator.free(name_bytes);
     @memset(name_bytes, 's');
-    const long_name = try intern.intern(name_bytes);
-    const module_name = try intern.intern("wide");
+    const long_name = try intern.internNamespace(name_bytes);
+    const module_name = try intern.trustedNamespace("wide");
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
@@ -214,11 +248,11 @@ test "module: use shadow notices stay within the cancellation bound" {
         null,
     );
     defer runtime.deinit();
-    _ = try runtime.environment.session.bind(long_name, .{ .value = .{ .int = 1 } });
-    _ = try runtime.registerNativeModule(module_name, &.{.{
+    try runtime.environment.define(long_name, .{ .value = .{ .int = 1 } });
+    _ = try runtime.registerNativeModule(module_name, &.{.{ .value = .{
         .name = long_name,
-        .binding = .{ .value = .{ .int = 2 } },
-    }});
+        .item = .{ .int = 2 },
+    } }});
     runtime.cancelled.store(true, .release);
     const failure = (try runtime.runUnit("shadow-poll.ecl", "'wide use")).err;
     defer heap.releaseValue(allocator, failure);
@@ -227,6 +261,15 @@ test "module: use shadow notices stay within the cancellation bound" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "unit cancelled") != null);
     try std.testing.expect(runtime.last_polls >= 1);
     try std.testing.expect(diagnostics.written().len < machine.kernel_poll_quantum);
+
+    var name_runtime = try session.Session.init(allocator, &.{});
+    defer name_runtime.deinit();
+    try name_runtime.stack.append(allocator, .{ .symbol = intern.namespaceId(long_name) });
+    try name_runtime.stack.append(allocator, try list.fromValuesGeneric(allocator, &.{}));
+    name_runtime.cancelled.store(true, .release);
+    try expectErrorContains(&name_runtime, "module", &.{"unit cancelled"});
+    try std.testing.expect(name_runtime.last_polls >= 1);
+    try std.testing.expect(name_runtime.registry.acquire(intern.namespaceId(long_name)) == null);
 }
 
 test "reflection: which and see expose home shadow and effect" {
@@ -291,15 +334,15 @@ test "reflection remains cancellable across sorting and identifier output" {
     const second_bytes = try allocator.dupe(u8, first_bytes);
     defer allocator.free(second_bytes);
     second_bytes[second_bytes.len - 1] = 'b';
-    const first = try intern.intern(first_bytes);
-    const second = try intern.intern(second_bytes);
+    const first = try intern.internNamespace(first_bytes);
+    const second = try intern.internNamespace(second_bytes);
 
     var discard_buffer: [256]u8 = undefined;
     var discarding = std.Io.Writer.Discarding.init(&discard_buffer);
     var words_runtime = try session.Session.initWithOutput(allocator, &.{}, &discarding.writer);
     defer words_runtime.deinit();
-    _ = try words_runtime.environment.session.bind(first, .{ .value = .{ .int = 1 } });
-    _ = try words_runtime.environment.session.bind(second, .{ .value = .{ .int = 2 } });
+    try words_runtime.environment.define(first, .{ .value = .{ .int = 1 } });
+    try words_runtime.environment.define(second, .{ .value = .{ .int = 2 } });
     words_runtime.cancelled.store(true, .release);
     const words_failure = (try words_runtime.runUnit("reflection-poll.ecl", "words")).err;
     defer heap.releaseValue(allocator, words_failure);
@@ -312,8 +355,8 @@ test "reflection remains cancellable across sorting and identifier output" {
     defer which_output.deinit();
     var which_runtime = try session.Session.initWithOutput(allocator, &.{}, &which_output.writer);
     defer which_runtime.deinit();
-    _ = try which_runtime.environment.session.bind(first, .{ .value = .{ .int = 1 } });
-    try which_runtime.stack.append(allocator, .{ .symbol = first });
+    try which_runtime.environment.define(first, .{ .value = .{ .int = 1 } });
+    try which_runtime.stack.append(allocator, .{ .symbol = intern.namespaceId(first) });
     which_runtime.cancelled.store(true, .release);
     const which_failure = (try which_runtime.runUnit("reflection-poll.ecl", "which")).err;
     defer heap.releaseValue(allocator, which_failure);
@@ -323,7 +366,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     try std.testing.expect(which_runtime.last_polls >= 1);
     try std.testing.expectEqual(@as(usize, 0), which_output.written().len);
 
-    const module_name = try intern.intern("poll-module");
+    const module_name = try intern.trustedNamespace("poll-module");
     const qualified_bytes = try allocator.alloc(u8, "poll-module.".len + first_bytes.len);
     defer allocator.free(qualified_bytes);
     @memcpy(qualified_bytes[0.."poll-module.".len], "poll-module.");
@@ -333,10 +376,10 @@ test "reflection remains cancellable across sorting and identifier output" {
     defer qualified_output.deinit();
     var qualified_runtime = try session.Session.initWithOutput(allocator, &.{}, &qualified_output.writer);
     defer qualified_runtime.deinit();
-    _ = try qualified_runtime.registerNativeModule(module_name, &.{.{
+    _ = try qualified_runtime.registerNativeModule(module_name, &.{.{ .value = .{
         .name = first,
-        .binding = .{ .value = .{ .int = 1 } },
-    }});
+        .item = .{ .int = 1 },
+    } }});
     try qualified_runtime.stack.append(allocator, .{ .symbol = qualified });
     qualified_runtime.cancelled.store(true, .release);
     const qualified_failure = (try qualified_runtime.runUnit("reflection-poll.ecl", "which")).err;
@@ -348,42 +391,48 @@ test "reflection remains cancellable across sorting and identifier output" {
     try std.testing.expectEqual(@as(usize, 0), qualified_output.written().len);
 }
 
-fn reflectionAllocationProbe(allocator: std.mem.Allocator) !void {
-    var output_buffer: [16384]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
-    var diagnostics_buffer: [256]u8 = undefined;
-    var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHost(
-        allocator,
-        &.{},
-        std.testing.io,
-        &output,
-        &diagnostics,
-        null,
-    );
-    defer runtime.deinit();
-    const outcome = try runtime.runUnit(
-        "reflection-allocation.ecl",
-        "'m ((1) ( -- n ) 'f def) module 'm use 'm.f body pop words 'f which 'm.f see",
-    );
-    if (outcome == .err) heap.releaseValue(allocator, outcome.err);
-}
-
-test "reflection failures and allocation cleanup are total" {
+test "reflection failures are total" {
     var no_output = try session.Session.init(std.testing.allocator, &.{});
     defer no_output.deinit();
     try expectErrorContains(&no_output, "words", &.{"'kind 'io"});
     try expectErrorContains(&no_output, "'dup body", &.{"'kind 'type"});
     try expectErrorContains(&no_output, "'missing which", &.{"'kind 'undefined-word"});
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, reflectionAllocationProbe, .{});
 }
 
-fn nativeAnswer(evaluator: *machine.Machine) machine.MachineError!void {
+fn nativeAnswer(evaluator: *machine.Machine) env.PrimitiveResult {
     try evaluator.pushOwned(.{ .int = 42 });
+    return .ok;
 }
 
-fn nativeAnswerReloaded(evaluator: *machine.Machine) machine.MachineError!void {
+fn nativeAnswerReloaded(evaluator: *machine.Machine) env.PrimitiveResult {
     try evaluator.pushOwned(.{ .int = 43 });
+    return .ok;
+}
+
+fn nativeFailure(_: *machine.Machine) env.PrimitiveResult {
+    return .{ .failure = machine.EclErr.init(.domain, "native failure payload") };
+}
+
+test "public native failures carry their payload atomically" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    const separator = try intern.intern("--");
+    const effect_value = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .word = separator }});
+    defer heap.releaseValue(std.testing.allocator, effect_value);
+    const effect = (try env.ValidatedEffect.parse(effect_value.list, separator, .unlimited())).?;
+    _ = try runtime.registerNativeModule(
+        try intern.trustedNamespace("failing-native"),
+        &.{.{ .primitive = .{
+            .name = try intern.trustedNamespace("fail"),
+            .callback = nativeFailure,
+            .effect = effect,
+        } }},
+    );
+    try expectErrorContains(&runtime, "failing-native.fail", &.{
+        "'kind 'domain",
+        "native failure payload",
+        "'word 'failing-native.fail",
+    });
 }
 
 test "registry: native modules share ordinary generations and effects" {
@@ -408,54 +457,55 @@ test "registry: native modules share ordinary generations and effects" {
         .{ .word = output_name },
     });
     defer heap.releaseValue(allocator, effect_value);
-    const module_name = try intern.intern("native");
-    const answer_name = try intern.intern("answer");
+    const effect = (try env.ValidatedEffect.parse(effect_value.list, separator, .unlimited())).?;
+    const module_name = try intern.trustedNamespace("native");
+    const answer_name = try intern.trustedNamespace("answer");
     try std.testing.expectEqual(@as(u64, 1), try runtime.registerNativeModule(module_name, &.{.{
-        .name = answer_name,
-        .binding = .{ .primitive = nativeAnswer },
-        .effect = .{ .quotation = effect_value.list, .inputs = 0, .outputs = 1 },
+        .primitive = .{ .name = answer_name, .callback = nativeAnswer, .effect = effect },
     }}));
     try expectOk(&runtime, "native.answer 'native use answer 'n 'native alias n.answer 'native.answer which 'native.answer see");
     for (runtime.stack.items) |item| try std.testing.expectEqual(@as(i64, 42), item.int);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "native.answer") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- n)") != null);
     try std.testing.expectEqual(@as(u64, 2), try runtime.registerNativeModule(module_name, &.{.{
-        .name = answer_name,
-        .binding = .{ .primitive = nativeAnswerReloaded },
-        .effect = .{ .quotation = effect_value.list, .inputs = 0, .outputs = 1 },
+        .primitive = .{ .name = answer_name, .callback = nativeAnswerReloaded, .effect = effect },
     }}));
     try expectOk(&runtime, "native.answer answer n.answer");
     for (runtime.stack.items[3..]) |item| try std.testing.expectEqual(@as(i64, 43), item.int);
-    try std.testing.expectError(error.InvalidDefinition, runtime.registerNativeModule(
-        try intern.intern("invalid.module"),
-        &.{.{
-            .name = answer_name,
-            .binding = .{ .primitive = nativeAnswer },
-            .effect = .{ .quotation = effect_value.list, .inputs = 0, .outputs = 1 },
-        }},
-    ));
-    try std.testing.expectError(error.InvalidDefinition, runtime.registerNativeModule(
-        try intern.intern("invalid-effect"),
-        &.{.{
-            .name = answer_name,
-            .binding = .{ .primitive = nativeAnswer },
-            .effect = .{ .quotation = effect_value.list, .inputs = 1, .outputs = 0 },
-        }},
-    ));
+    try std.testing.expectError(
+        error.InvalidName,
+        intern.internNamespace("invalid.module"),
+    );
+    const invalid_effect = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
+    defer heap.releaseValue(allocator, invalid_effect);
+    try std.testing.expect((try env.ValidatedEffect.parse(
+        invalid_effect.list,
+        separator,
+        .unlimited(),
+    )) == null);
 }
 
 const EnvThreadContext = struct {
+    scope: *env.Scope,
     environment: *env.Environment,
     failed: *std.atomic.Value(bool),
+    name: intern.NamespaceName,
 };
 
 fn envWorker(context: EnvThreadContext) void {
     for (0..100) |index| {
-        _ = context.environment.bind(7, .{ .value = .{ .int = @intCast(index) } }) catch {
+        _ = context.scope.publishTop(
+            context.name,
+            .{ .value = .{ .int = @intCast(index) } },
+            .unlimited(),
+        ) catch {
             context.failed.store(true, .release);
             return;
         };
-        var lease = context.environment.resolveDirect(7) orelse {
+        var lease = (context.environment.resolveDirect(
+            intern.namespaceId(context.name),
+            .unlimited(),
+        ) catch unreachable) orelse {
             context.failed.store(true, .release);
             return;
         };
@@ -467,55 +517,71 @@ fn envWorker(context: EnvThreadContext) void {
 // teardown (no hazard pointers on the read path). Bounded reclamation is a
 // recorded v1 obligation: ARCHITECTURE.md §Environments, workstream M7/M10.
 test "env: concurrent cell publication is lease-safe and TSan-clean" {
-    var environment = env.Environment.init(std.testing.allocator);
-    defer environment.deinit();
+    var container = env.Env.init(std.testing.allocator);
+    defer container.deinit();
+    var scope = container.sessionRoot(std.testing.allocator);
+    defer scope.deinit();
     var failed = std.atomic.Value(bool).init(false);
-    const context = EnvThreadContext{ .environment = &environment, .failed = &failed };
+    const context = EnvThreadContext{
+        .scope = &scope,
+        .environment = &container.session,
+        .failed = &failed,
+        .name = try intern.trustedNamespace("concurrent-env-name"),
+    };
     var threads: [4]std.Thread = undefined;
     for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, envWorker, .{context});
     for (threads) |thread| thread.join();
     try std.testing.expect(!failed.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), environment.generation());
+    try std.testing.expectEqual(@as(u64, 1), container.session.generation());
 }
 
 test "env: a replaced interior remains valid only through its binding lease" {
-    var environment = env.Environment.init(std.testing.allocator);
+    var environment = env.Env.init(std.testing.allocator);
     defer environment.deinit();
-    const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 7 }});
+    var scope = environment.sessionRoot(std.testing.allocator);
+    defer scope.deinit();
+    const separator = try intern.intern("--");
+    const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .word = separator }});
     defer heap.releaseValue(std.testing.allocator, body);
-    _ = try environment.bindDetailed(1, .{
-        .binding = .{ .word = body.list },
-        .doc = body.list,
-        .compiled = body.list,
-    });
-    var old = environment.resolveDirect(1).?;
-    _ = try environment.bind(1, .{ .value = .{ .int = 9 } });
-    try std.testing.expectEqual(@as(u32, 4), body.list.rc.load(.acquire));
+    const document = try list.fromCodepoints(std.testing.allocator, &.{ 'd', 'o', 'c' });
+    defer heap.releaseValue(std.testing.allocator, document);
+    const effect = (try env.ValidatedEffect.parse(body.list, separator, .unlimited())).?;
+    const name = try intern.trustedNamespace("leased-metadata");
+    _ = try scope.publishTop(name, .{ .word = .{
+        .body = env.quotation(body.list).?,
+        .effect = effect,
+        .doc = env.documentation(document.list).?,
+    } }, .unlimited());
+    var old = (try environment.session.resolveDirect(intern.namespaceId(name), .unlimited())).?;
+    _ = try scope.publishTop(name, .{ .value = .{ .int = 9 } }, .unlimited());
+    try std.testing.expectEqual(@as(u32, 3), heap.refCount(body.list));
     old.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 1), body.list.rc.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), heap.refCount(body.list));
 }
 
 const RegistryThreadContext = struct {
     registry: *modules.Registry,
     failed: *std.atomic.Value(bool),
+    shared: intern.NamespaceName,
+    disjoint: [4]intern.NamespaceName,
 };
 
-fn commitCandidate(context: RegistryThreadContext, name: u32) bool {
-    const candidate = context.registry.createCandidate(name) catch return false;
-    _ = context.registry.commit(candidate) catch {
-        candidate.destroy();
-        return false;
-    };
+fn commitCandidate(context: RegistryThreadContext, name: intern.NamespaceName) bool {
+    var candidate = context.registry.createCandidate(name) catch return false;
+    defer candidate.deinit();
+    _ = context.registry.commit(&candidate, .unlimited()) catch return false;
     return true;
 }
 
 fn registryWorker(context: RegistryThreadContext, worker_id: u32) void {
     for (0..50) |_| {
-        if (!commitCandidate(context, 9) or !commitCandidate(context, 10 + worker_id)) {
+        if (!commitCandidate(context, context.shared) or
+            !commitCandidate(context, context.disjoint[worker_id]))
+        {
             context.failed.store(true, .release);
             return;
         }
-        var lease = context.registry.acquire(9) orelse {
+        var lease = context.registry.acquire(intern.namespaceId(context.shared)) orelse {
             context.failed.store(true, .release);
             return;
         };
@@ -528,18 +594,28 @@ test "registry: concurrent commits are linearized without lost names" {
     var registry = modules.Registry.init(std.testing.allocator);
     defer registry.deinit();
     var failed = std.atomic.Value(bool).init(false);
-    const context = RegistryThreadContext{ .registry = &registry, .failed = &failed };
+    const context = RegistryThreadContext{
+        .registry = &registry,
+        .failed = &failed,
+        .shared = try intern.trustedNamespace("shared-module"),
+        .disjoint = .{
+            try intern.trustedNamespace("worker-module-0"),
+            try intern.trustedNamespace("worker-module-1"),
+            try intern.trustedNamespace("worker-module-2"),
+            try intern.trustedNamespace("worker-module-3"),
+        },
+    };
     var threads: [4]std.Thread = undefined;
     for (&threads, 0..) |*thread, index| {
         thread.* = try std.Thread.spawn(.{}, registryWorker, .{ context, @as(u32, @intCast(index)) });
     }
     for (threads) |thread| thread.join();
     try std.testing.expect(!failed.load(.acquire));
-    var lease = registry.acquire(9).?;
+    var lease = registry.acquire(intern.namespaceId(context.shared)).?;
     defer lease.deinit();
     try std.testing.expectEqual(@as(u64, 200), lease.generation.generation);
     for (0..4) |index| {
-        var disjoint = registry.acquire(10 + @as(u32, @intCast(index))).?;
+        var disjoint = registry.acquire(intern.namespaceId(context.disjoint[index])).?;
         defer disjoint.deinit();
         try std.testing.expectEqual(@as(u64, 50), disjoint.generation.generation);
     }
@@ -550,16 +626,23 @@ test "registry: old generation leases survive reload and reclaim after release" 
     defer registry.deinit();
     const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 7 }});
     defer heap.releaseValue(std.testing.allocator, body);
-    const first = try registry.createCandidate(1);
-    _ = try first.environment.bind(2, .{ .word = body.list });
-    _ = try registry.commit(first);
-    var old = registry.acquire(1).?;
-    const second = try registry.createCandidate(1);
-    _ = try registry.commit(second);
+    const module_name = try intern.trustedNamespace("leased-generation");
+    const value_name = try intern.trustedNamespace("leased-value");
+    var first = try registry.createCandidate(module_name);
+    defer first.deinit();
+    _ = try first.borrow().scope.publishModule(value_name, .{ .value = .{
+        .item = body,
+        .visibility = .public,
+    } }, .unlimited());
+    _ = try registry.commit(&first, .unlimited());
+    var old = registry.acquire(intern.namespaceId(module_name)).?;
+    var second = try registry.createCandidate(module_name);
+    defer second.deinit();
+    _ = try registry.commit(&second, .unlimited());
     try std.testing.expectEqual(@as(u64, 1), old.generation.generation);
-    try std.testing.expectEqual(@as(u32, 2), body.list.rc.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 2), heap.refCount(body.list));
     old.deinit();
-    try std.testing.expectEqual(@as(u32, 1), body.list.rc.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 1), heap.refCount(body.list));
 }
 
 test "loader: load is one unit and preserves file provenance" {
@@ -631,25 +714,7 @@ test "loader: ECL_PATH loads first candidate and retries use" {
     try expectErrorContains(&no_path, "'stats use", &.{ "'kind 'undefined-word", "'name 'stats" });
 }
 
-fn loaderAllocationProbe(allocator: std.mem.Allocator) !void {
-    var output_buffer: [64]u8 = undefined;
-    var output = std.Io.Writer.fixed(&output_buffer);
-    var diagnostics_buffer: [64]u8 = undefined;
-    var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHost(
-        allocator,
-        &.{},
-        std.testing.io,
-        &output,
-        &diagnostics,
-        "test/acceptance/modules",
-    );
-    defer runtime.deinit();
-    const outcome = try runtime.runUnit("loader-allocation.ecl", "'stats use answer");
-    if (outcome == .err) heap.releaseValue(allocator, outcome.err);
-}
-
-test "loader: failures cycles and OOM are total" {
+test "loader: failures and cycles are total" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -684,39 +749,29 @@ test "loader: failures cycles and OOM are total" {
     var no_host = try session.Session.init(std.testing.allocator, &.{});
     defer no_host.deinit();
     try expectErrorContains(&no_host, "\"test/acceptance/load-stack.ecl\" load", &.{"'kind 'io"});
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, loaderAllocationProbe, .{});
-}
-
-fn moduleAllocationProbe(allocator: std.mem.Allocator) !void {
-    var runtime = try session.Session.init(allocator, &.{});
-    defer runtime.deinit();
-    const outcome = try runtime.runUnit(
-        "allocation-module.ecl",
-        "'m (1 'x setp (x) ( -- n ) 'get def) module 'm use get " ++
-            "'short 'm alias short.get " ++
-            "'m (2 'x setp (x) ( -- n ) 'get def) module get " ++
-            "('bad ((dup) 'f def) module) attempt pop",
-    );
-    if (outcome == .err) heap.releaseValue(allocator, outcome.err);
-}
-
-test "module execution propagates every allocation failure" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, moduleAllocationProbe, .{});
 }
 
 fn environmentAllocationProbe(allocator: std.mem.Allocator) !void {
-    var environment = env.Environment.init(allocator);
+    var environment = env.Env.init(allocator);
     defer environment.deinit();
+    var scope = environment.sessionRoot(allocator);
+    defer scope.deinit();
     const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
     defer heap.releaseValue(allocator, body);
-    _ = try environment.bind(1, .{ .word = body.list });
-    var lease = environment.resolveDirect(1).?;
+    const first = try intern.trustedNamespace("allocation-first");
+    const second = try intern.trustedNamespace("allocation-second");
+    const after_uses = try intern.trustedNamespace("allocation-after-uses");
+    _ = try scope.publishTop(first, .{ .word = .{
+        .body = env.quotation(body.list).?,
+    } }, .unlimited());
+    var lease = (try environment.session.resolveDirect(intern.namespaceId(first), .unlimited())).?;
     defer lease.deinit(allocator);
-    _ = try environment.bind(1, .{ .value = .{ .int = 2 } });
-    _ = try environment.bind(2, .{ .value = .{ .int = 3 } });
-    try environment.moveUseToTop(8);
-    try environment.moveUseToTop(9);
-    const names = try environment.namesOwned(allocator, null);
+    _ = try scope.publishTop(first, .{ .value = .{ .int = 2 } }, .unlimited());
+    _ = try scope.publishTop(second, .{ .value = .{ .int = 3 } }, .unlimited());
+    try scope.moveUseToTop(8, .unlimited());
+    try scope.moveUseToTop(9, .unlimited());
+    _ = try scope.publishTop(after_uses, .{ .value = .{ .int = 4 } }, .unlimited());
+    const names = try environment.session.namesOwned(allocator, .unlimited());
     allocator.free(names);
 }
 
@@ -728,27 +783,36 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .{ .word = try intern.intern("n") },
     });
     defer heap.releaseValue(allocator, effect_value);
-    const effect: env.Effect = .{ .quotation = effect_value.list, .inputs = 0, .outputs = 1 };
-    const first = try registry.createCandidate(1);
-    var first_owned = true;
-    errdefer if (first_owned) first.destroy();
-    _ = try first.environment.bindDetailed(2, .{ .binding = .{ .primitive = nativeAnswer }, .home = 1, .effect = effect });
-    _ = try registry.commit(first);
-    first_owned = false;
-    try registry.alias(3, 1);
-    var lease = registry.acquire(3).?;
-    defer lease.deinit();
-    const second = try registry.createCandidate(1);
-    var second_owned = true;
-    errdefer if (second_owned) second.destroy();
-    _ = try second.environment.bindDetailed(2, .{ .binding = .{ .primitive = nativeAnswer }, .home = 1, .effect = effect });
-    _ = try registry.commit(second);
-    second_owned = false;
-    _ = try registry.registerNative(4, &.{.{
-        .name = 2,
-        .binding = .{ .primitive = nativeAnswer },
+    const separator = try intern.intern("--");
+    const effect = (try env.ValidatedEffect.parse(effect_value.list, separator, .unlimited())).?;
+    const first_name = try intern.trustedNamespace("allocation-module");
+    const alias_name = try intern.trustedNamespace("allocation-alias");
+    const second_name = try intern.trustedNamespace("allocation-native");
+    const word_name = try intern.trustedNamespace("answer");
+    var first = try registry.createCandidate(first_name);
+    defer first.deinit();
+    _ = try first.borrow().scope.publishModule(word_name, .{ .primitive = .{
+        .callback = nativeAnswer,
+        .visibility = .public,
         .effect = effect,
-    }});
+    } }, .unlimited());
+    _ = try registry.commit(&first, .unlimited());
+    try registry.alias(alias_name, first_name, .unlimited());
+    var lease = registry.acquire(intern.namespaceId(alias_name)).?;
+    defer lease.deinit();
+    var second = try registry.createCandidate(first_name);
+    defer second.deinit();
+    _ = try second.borrow().scope.publishModule(word_name, .{ .primitive = .{
+        .callback = nativeAnswer,
+        .visibility = .public,
+        .effect = effect,
+    } }, .unlimited());
+    _ = try registry.commit(&second, .unlimited());
+    _ = try registry.registerNative(second_name, &.{.{ .primitive = .{
+        .name = word_name,
+        .callback = nativeAnswer,
+        .effect = effect,
+    } }}, .unlimited());
 }
 
 test "environment and registry APIs propagate every allocation failure" {

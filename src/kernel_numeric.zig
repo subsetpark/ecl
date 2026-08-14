@@ -64,7 +64,7 @@ const unary_matrix: UnaryMatrix = blk: {
     break :blk matrix;
 };
 
-pub fn install(core: *env.Env) error{OutOfMemory}!void {
+pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(BinaryOp)) |field| {
         const operation: BinaryOp = @enumFromInt(field.value);
         try support.installPrimitive(core, operation.spelling(), bindBinary(operation));
@@ -75,7 +75,7 @@ pub fn install(core: *env.Env) error{OutOfMemory}!void {
     }
 }
 
-fn bindBinary(comptime operation: BinaryOp) env.Primitive {
+fn bindBinary(comptime operation: BinaryOp) env.PrimitiveImpl {
     return struct {
         fn run(evaluator: *Machine) MachineError!void {
             return binaryPrimitive(evaluator, operation);
@@ -83,12 +83,30 @@ fn bindBinary(comptime operation: BinaryOp) env.Primitive {
     }.run;
 }
 
-fn bindUnary(comptime operation: UnaryOp) env.Primitive {
+pub fn binaryPrimitiveFor(comptime operation: BinaryOp) env.PrimitiveImpl {
+    return bindBinary(operation);
+}
+
+fn bindUnary(comptime operation: UnaryOp) env.PrimitiveImpl {
     return struct {
         fn run(evaluator: *Machine) MachineError!void {
             return unaryPrimitive(evaluator, operation);
         }
     }.run;
+}
+
+pub fn unaryPrimitiveFor(comptime operation: UnaryOp) env.PrimitiveImpl {
+    return bindUnary(operation);
+}
+
+pub fn scalarForIdiom(operation: BinaryOp, left: Value, right: Value) ?Value {
+    if (!isAtom(left) or !isAtom(right)) return null;
+    return selectScalar(operation)(left, right) catch null;
+}
+
+pub fn scalarUnaryForIdiom(operation: UnaryOp, operand: Value) ?Value {
+    if (!isAtom(operand)) return null;
+    return selectUnary(operation)(operand) catch null;
 }
 
 fn binaryPrimitive(evaluator: *Machine, operation: BinaryOp) MachineError!void {
@@ -112,13 +130,13 @@ fn binaryPrimitive(evaluator: *Machine, operation: BinaryOp) MachineError!void {
     var result_owned = true;
     defer if (result_owned) heap.releaseValue(evaluator.allocator(), result);
 
-    if (canAdopt(left, result)) {
-        heap.adoptRepresentation(evaluator.allocator(), left.heapHeader().?, result.heapHeader().?);
+    if (adoption(left, result)) |pair| {
+        heap.adoptRepresentation(evaluator.allocator(), pair.destination, pair.source);
         result = left;
         left_owned = false;
         result_owned = false;
-    } else if (canAdopt(right, result)) {
-        heap.adoptRepresentation(evaluator.allocator(), right.heapHeader().?, result.heapHeader().?);
+    } else if (adoption(right, result)) |pair| {
+        heap.adoptRepresentation(evaluator.allocator(), pair.destination, pair.source);
         result = right;
         right_owned = false;
         result_owned = false;
@@ -149,8 +167,8 @@ fn unaryPrimitive(evaluator: *Machine, operation: UnaryOp) MachineError!void {
     var result = try pervadeUnary(.{ .evaluator = evaluator }, operation, operand, 0, null);
     var result_owned = true;
     defer if (result_owned) heap.releaseValue(evaluator.allocator(), result);
-    if (canAdopt(operand, result)) {
-        heap.adoptRepresentation(evaluator.allocator(), operand.heapHeader().?, result.heapHeader().?);
+    if (adoption(operand, result)) |pair| {
+        heap.adoptRepresentation(evaluator.allocator(), pair.destination, pair.source);
         result = operand;
         operand_owned = false;
         result_owned = false;
@@ -174,10 +192,10 @@ fn tryInPlaceBinary(
     if (left == .list and !left_flat or right == .list and !right_flat) return null;
     if (left == .dict or right == .dict) return null;
     const count: usize = if (left_flat)
-        @intCast(left.list.len)
+        @intCast(left.list.length())
     else
-        @intCast(right.list.len);
-    if (left_flat and right_flat and left.list.len != right.list.len) return null;
+        @intCast(right.list.length());
+    if (left_flat and right_flat and left.list.length() != right.list.length()) return null;
     if (count == 0) return null;
     const scalar = if (left_flat and right_flat)
         selectLeafBinary(operation, left.list.kind(), right.list.kind()) orelse return null
@@ -186,8 +204,10 @@ fn tryInPlaceBinary(
     const left_scalar = !left_flat;
     const right_scalar = !right_flat;
     const range = support.IndexRange.init(0, count);
-    var left_compatible = left_flat and heap.isUnique(left.list);
-    var right_compatible = right_flat and heap.isUnique(right.list);
+    const left_unique = if (left_flat) heap.claimUnique(left.list) else null;
+    const right_unique = if (right_flat) heap.claimUnique(right.list) else null;
+    var left_compatible = left_unique != null;
+    var right_compatible = right_unique != null;
     if (!left_compatible and !right_compatible) return null;
 
     for (range.start..range.end) |index| {
@@ -204,15 +224,15 @@ fn tryInPlaceBinary(
         .right
     else
         return null;
-    const destination = if (source == .left) left else right;
+    const destination_unique = if (source == .left) left_unique.? else right_unique.?;
     for (range.start..range.end) |index| {
         try context.poll();
         const a = if (left_scalar) left else list.atUnchecked(left, index);
         const b = if (right_scalar) right else list.atUnchecked(right, index);
         const result = scalar(a, b) catch |fault| return scalarFailure(context, fault, index);
-        writeValue(destination.list, index, result);
+        writeValue(destination_unique, index, result);
     }
-    return .{ .value = destination, .source = source };
+    return .{ .value = if (source == .left) left else right, .source = source };
 }
 
 fn tryInPlaceUnary(
@@ -220,10 +240,10 @@ fn tryInPlaceUnary(
     operation: UnaryOp,
     operand: Value,
 ) MachineError!?Value {
-    if (operand != .list or !isFlat(operand.list) or
-        !heap.isUnique(operand.list) or operand.list.len == 0) return null;
+    if (operand != .list or !isFlat(operand.list) or operand.list.length() == 0) return null;
+    const unique = heap.claimUnique(operand.list) orelse return null;
     const scalar = selectLeafUnary(operation, operand.list.kind()) orelse return null;
-    const count: usize = @intCast(operand.list.len);
+    const count: usize = @intCast(operand.list.length());
     const range = support.IndexRange.init(0, count);
     for (range.start..range.end) |index| {
         try context.poll();
@@ -235,7 +255,7 @@ fn tryInPlaceUnary(
         try context.poll();
         const result = scalar(list.atUnchecked(operand, index)) catch |fault|
             return scalarFailure(context, fault, index);
-        writeValue(operand.list, index, result);
+        writeValue(unique, index, result);
     }
     return operand;
 }
@@ -252,17 +272,9 @@ fn valueFitsKind(item: Value, kind: HeapKind) bool {
     };
 }
 
-fn writeValue(header: *value.Header, index: usize, item: Value) void {
-    std.debug.assert(valueFitsKind(item, header.kind()));
-    switch (header.kind()) {
-        .leaf_i64 => heap.items(i64, header)[index] = item.int,
-        .leaf_f64 => heap.items(f64, header)[index] = item.float,
-        .leaf_char1 => heap.items(u8, header)[index] = @intCast(item.char),
-        .leaf_char2 => heap.items(u16, header)[index] = @intCast(item.char),
-        .leaf_char4 => heap.items(u32, header)[index] = item.char,
-        .leaf_symbol => heap.items(u32, header)[index] = item.symbol,
-        .generic_spine, .dict, .reserved_mask => unreachable,
-    }
+fn writeValue(header: *heap.UniqueHeader, index: usize, item: Value) void {
+    std.debug.assert(valueFitsKind(item, heap.uniqueHeader(header).kind()));
+    heap.writeUnique(header, index, item);
 }
 
 /// Test hook matching `binaryForTest` for unary pervasion.
@@ -274,12 +286,19 @@ pub fn unaryForTest(
     return pervadeUnary(.{ .evaluator = evaluator }, operation, operand, 0, null);
 }
 
-fn canAdopt(candidate: Value, result: Value) bool {
-    const candidate_header = candidate.heapHeader() orelse return false;
-    const result_header = result.heapHeader() orelse return false;
-    return candidate_header != result_header and
-        candidate_header.kind() == result_header.kind() and
-        heap.isUnique(candidate_header) and heap.isUnique(result_header);
+const Adoption = struct {
+    destination: *heap.UniqueHeader,
+    source: *heap.UniqueHeader,
+};
+
+fn adoption(candidate: Value, result: Value) ?Adoption {
+    const candidate_header = candidate.heapHeader() orelse return null;
+    const result_header = result.heapHeader() orelse return null;
+    if (candidate_header == result_header or candidate_header.kind() != result_header.kind()) return null;
+    return .{
+        .destination = heap.claimUnique(candidate_header) orelse return null,
+        .source = heap.claimUnique(result_header) orelse return null,
+    };
 }
 
 pub fn pervadeBinary(
@@ -303,8 +322,8 @@ pub fn pervadeBinary(
     if (left == .dict) return dictScalarRight(context, operation, left, right, depth);
     if (right == .dict) return scalarLeftDict(context, operation, left, right, depth);
     if (left == .list and right == .list) {
-        const left_len: usize = @intCast(left.list.len);
-        const right_len: usize = @intCast(right.list.len);
+        const left_len: usize = @intCast(left.list.length());
+        const right_len: usize = @intCast(right.list.length());
         if (left_len != right_len) return context.evaluator.conformError(left_len, right_len);
         if (isFlat(left.list) and isFlat(right.list)) {
             return flatBinary(context, operation, left, right, left_len);
@@ -338,7 +357,7 @@ pub fn pervadeUnary(
     }
     if (operand == .list) {
         if (isFlat(operand.list)) return flatUnary(context, operation, operand);
-        const count: usize = @intCast(operand.list.len);
+        const count: usize = @intCast(operand.list.length());
         const results = try context.allocator().alloc(Value, count);
         defer context.allocator().free(results);
         var initialized: usize = 0;
@@ -357,7 +376,7 @@ pub fn pervadeUnary(
         return storage.fromValues(context.allocator(), results, context.structuralPoller());
     }
     if (operand == .dict) {
-        const count: usize = @intCast(operand.dict.len);
+        const count: usize = @intCast(operand.dict.length());
         const pairs = try context.allocator().alloc(dict.Pair, count);
         defer context.allocator().free(pairs);
         var initialized: usize = 0;
@@ -406,7 +425,7 @@ fn flatScalarRight(
     left: Value,
     right: Value,
 ) MachineError!Value {
-    const count: usize = @intCast(left.list.len);
+    const count: usize = @intCast(left.list.length());
     const scalar = selectScalar(operation);
     if (count > 0 and !supports(operation, list.atUnchecked(left, 0), right)) {
         return scalarFailure(context, error.Type, 0);
@@ -428,7 +447,7 @@ fn scalarLeftFlat(
     left: Value,
     right: Value,
 ) MachineError!Value {
-    const count: usize = @intCast(right.list.len);
+    const count: usize = @intCast(right.list.length());
     const scalar = selectScalar(operation);
     if (count > 0 and !supports(operation, left, list.atUnchecked(right, 0))) {
         return scalarFailure(context, error.Type, 0);
@@ -488,7 +507,7 @@ fn runFlatBinary(
 }
 
 fn flatUnary(context: support.Context, operation: UnaryOp, operand: Value) MachineError!Value {
-    const count: usize = @intCast(operand.list.len);
+    const count: usize = @intCast(operand.list.length());
     if (count == 0) return storage.fromValues(context.allocator(), &.{}, context.structuralPoller());
     const scalar = selectLeafUnary(operation, operand.list.kind()) orelse
         return scalarFailure(context, error.Type, 0);
@@ -540,7 +559,7 @@ fn listBinary(
     right: Value,
     depth: usize,
 ) MachineError!Value {
-    const count: usize = @intCast(left.list.len);
+    const count: usize = @intCast(left.list.length());
     const results = try context.allocator().alloc(Value, count);
     defer context.allocator().free(results);
     var initialized: usize = 0;
@@ -567,7 +586,7 @@ fn listScalarRight(
     right: Value,
     depth: usize,
 ) MachineError!Value {
-    const count: usize = @intCast(left.list.len);
+    const count: usize = @intCast(left.list.length());
     const results = try context.allocator().alloc(Value, count);
     defer context.allocator().free(results);
     var initialized: usize = 0;
@@ -594,7 +613,7 @@ fn scalarLeftList(
     right: Value,
     depth: usize,
 ) MachineError!Value {
-    const count: usize = @intCast(right.list.len);
+    const count: usize = @intCast(right.list.length());
     const results = try context.allocator().alloc(Value, count);
     defer context.allocator().free(results);
     var initialized: usize = 0;
@@ -621,8 +640,8 @@ fn dictBinary(
     right: Value,
     depth: usize,
 ) MachineError!Value {
-    const left_count: usize = @intCast(left.dict.len);
-    const right_count: usize = @intCast(right.dict.len);
+    const left_count: usize = @intCast(left.dict.length());
+    const right_count: usize = @intCast(right.dict.length());
     const pairs = try context.allocator().alloc(dict.Pair, left_count + right_count);
     defer context.allocator().free(pairs);
     const owned = try context.allocator().alloc(bool, left_count + right_count);
@@ -700,7 +719,7 @@ fn scalarLeftDict(
     dictionary: Value,
     depth: usize,
 ) MachineError!Value {
-    const count: usize = @intCast(dictionary.dict.len);
+    const count: usize = @intCast(dictionary.dict.length());
     const pairs = try context.allocator().alloc(dict.Pair, count);
     defer context.allocator().free(pairs);
     var initialized: usize = 0;
@@ -735,7 +754,7 @@ fn mapDict(
     other: Value,
     depth: usize,
 ) MachineError!Value {
-    const count: usize = @intCast(dictionary.dict.len);
+    const count: usize = @intCast(dictionary.dict.length());
     const pairs = try context.allocator().alloc(dict.Pair, count);
     defer context.allocator().free(pairs);
     var initialized: usize = 0;

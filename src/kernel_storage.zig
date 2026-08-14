@@ -31,18 +31,26 @@ pub fn fromValues(
     };
 }
 
+pub fn fromValuesGeneric(
+    allocator: std.mem.Allocator,
+    source: []const Value,
+    poller: Poller,
+) poll.Error!Value {
+    return genericValues(allocator, source, poller);
+}
+
 pub fn fromI64Slice(
     allocator: std.mem.Allocator,
     source: []const i64,
     poller: Poller,
 ) poll.Error!Value {
     const header = try heap.allocHeader(allocator, .leaf_i64, source.len, initialCapacity(source.len));
-    errdefer heap.decRef(allocator, header);
+    errdefer heap.decRef(allocator, heap.publish(header));
     for (source, 0..) |item, index| {
         try poller.poll();
-        heap.items(i64, header)[index] = item;
+        heap.initI64s(header)[index] = item;
     }
-    return .{ .list = header };
+    return .{ .list = heap.publish(header) };
 }
 
 pub fn fromCodepoints(
@@ -105,6 +113,40 @@ pub fn fromUtf8(
     return fromCodepoints(allocator, codepoints, poller);
 }
 
+pub fn toUtf8Owned(
+    allocator: std.mem.Allocator,
+    string: Value,
+    poller: Poller,
+) (poll.Error || error{InvalidCodepoint})![]u8 {
+    std.debug.assert(string.isString());
+    const count: usize = @intCast(string.list.length());
+    var byte_count: usize = 0;
+    for (0..count) |index| {
+        try poller.poll();
+        var encoded: [4]u8 = undefined;
+        const length = std.unicode.utf8Encode(
+            @intCast(@import("list.zig").atUnchecked(string, index).char),
+            &encoded,
+        ) catch return error.InvalidCodepoint;
+        byte_count = std.math.add(usize, byte_count, length) catch return error.OutOfMemory;
+    }
+    const bytes = try allocator.alloc(u8, byte_count);
+    errdefer allocator.free(bytes);
+    var cursor: usize = 0;
+    for (0..count) |index| {
+        try poller.poll();
+        var encoded: [4]u8 = undefined;
+        const length = std.unicode.utf8Encode(
+            @intCast(@import("list.zig").atUnchecked(string, index).char),
+            &encoded,
+        ) catch return error.InvalidCodepoint;
+        @memcpy(bytes[cursor..][0..length], encoded[0..length]);
+        cursor += length;
+    }
+    std.debug.assert(cursor == bytes.len);
+    return bytes;
+}
+
 fn decodeUtf8Codepoint(bytes: []const u8, index: *usize) error{InvalidUtf8}!u32 {
     const length = std.unicode.utf8ByteSequenceLength(bytes[index.*]) catch
         return error.InvalidUtf8;
@@ -148,18 +190,19 @@ fn typedValues(
     source: []const Value,
     poller: Poller,
 ) poll.Error!Value {
+    _ = T;
     const header = try heap.allocHeader(allocator, kind, source.len, initialCapacity(source.len));
-    errdefer heap.decRef(allocator, header);
+    errdefer heap.decRef(allocator, heap.publish(header));
     for (source, 0..) |item, index| {
         try poller.poll();
-        heap.items(T, header)[index] = switch (kind) {
-            .leaf_i64 => item.int,
-            .leaf_f64 => item.float,
-            .leaf_symbol => item.symbol,
+        switch (kind) {
+            .leaf_i64 => heap.initI64s(header)[index] = item.int,
+            .leaf_f64 => heap.initF64s(header)[index] = item.float,
+            .leaf_symbol => heap.initSymbols(header)[index] = item.symbol,
             else => unreachable,
-        };
+        }
     }
-    return .{ .list = header };
+    return .{ .list = heap.publish(header) };
 }
 
 fn charValues(
@@ -184,13 +227,19 @@ fn charValuesOf(
     source: []const Value,
     poller: Poller,
 ) poll.Error!Value {
+    _ = T;
     const header = try heap.allocHeader(allocator, kind, source.len, initialCapacity(source.len));
-    errdefer heap.decRef(allocator, header);
+    errdefer heap.decRef(allocator, heap.publish(header));
     for (source, 0..) |item, index| {
         try poller.poll();
-        heap.items(T, header)[index] = @intCast(item.char);
+        switch (kind) {
+            .leaf_char1 => heap.initChars8(header)[index] = @intCast(item.char),
+            .leaf_char2 => heap.initChars16(header)[index] = @intCast(item.char),
+            .leaf_char4 => heap.initChars32(header)[index] = item.char,
+            else => unreachable,
+        }
     }
-    return .{ .list = header };
+    return .{ .list = heap.publish(header) };
 }
 
 fn codepointValuesOf(
@@ -200,13 +249,19 @@ fn codepointValuesOf(
     source: []const u32,
     poller: Poller,
 ) poll.Error!Value {
+    _ = T;
     const header = try heap.allocHeader(allocator, kind, source.len, initialCapacity(source.len));
-    errdefer heap.decRef(allocator, header);
+    errdefer heap.decRef(allocator, heap.publish(header));
     for (source, 0..) |codepoint, index| {
         try poller.poll();
-        heap.items(T, header)[index] = @intCast(codepoint);
+        switch (kind) {
+            .leaf_char1 => heap.initChars8(header)[index] = @intCast(codepoint),
+            .leaf_char2 => heap.initChars16(header)[index] = @intCast(codepoint),
+            .leaf_char4 => heap.initChars32(header)[index] = codepoint,
+            else => unreachable,
+        }
     }
-    return .{ .list = header };
+    return .{ .list = heap.publish(header) };
 }
 
 fn genericValues(
@@ -220,15 +275,15 @@ fn genericValues(
         source.len,
         initialCapacity(source.len),
     );
-    header.len = 0;
-    errdefer heap.decRef(allocator, header);
+    heap.setInitializingLength(header, 0);
+    errdefer heap.decRef(allocator, heap.publish(header));
     for (source, 0..) |item, index| {
         try poller.poll();
         heap.retainValue(item);
-        heap.values(header)[index] = item;
-        header.len = index + 1;
+        heap.initValues(header)[index] = item;
+        heap.setInitializingLength(header, index + 1);
     }
-    return .{ .list = header };
+    return .{ .list = heap.publish(header) };
 }
 
 pub fn fromPairs(
@@ -296,7 +351,7 @@ fn pairsValue(
     var index_owned = index != null;
     defer if (index_owned) allocator.free(index.?);
     const header = try heap.allocHeader(allocator, .dict, pairs.len, pairs.len);
-    heap.dictStorage(header).* = .{
+    heap.initDictStorage(header).* = .{
         .payload = .{
             .keys = keys_value.list,
             .vals = vals_value.list,
@@ -310,7 +365,7 @@ fn pairsValue(
     vals_owned = false;
     hashes_owned = false;
     index_owned = false;
-    return .{ .dict = header };
+    return .{ .dict = heap.publish(header) };
 }
 
 pub fn get(
@@ -343,7 +398,7 @@ pub fn put(
 ) error{ OutOfMemory, Ecl, NotADict }!Value {
     const header = try dictHeader(dictionary);
     const found = try find(allocator, header, key, poller);
-    const old_len: usize = @intCast(header.len);
+    const old_len: usize = @intCast(header.length());
     const pairs = try allocator.alloc(dict.Pair, old_len + @intFromBool(found == null));
     defer allocator.free(pairs);
     for (0..old_len) |index| {
@@ -362,7 +417,7 @@ pub fn del(
 ) error{ OutOfMemory, Ecl, NotADict }!Value {
     const header = try dictHeader(dictionary);
     const found = try find(allocator, header, key, poller) orelse return dictionary;
-    const old_len: usize = @intCast(header.len);
+    const old_len: usize = @intCast(header.length());
     const pairs = try allocator.alloc(dict.Pair, old_len - 1);
     defer allocator.free(pairs);
     var dest: usize = 0;
@@ -383,8 +438,8 @@ pub fn merge(
 ) error{ OutOfMemory, Ecl, NotADict }!Value {
     const left_header = try dictHeader(left);
     const right_header = try dictHeader(right);
-    const left_len: usize = @intCast(left_header.len);
-    const right_len: usize = @intCast(right_header.len);
+    const left_len: usize = @intCast(left_header.length());
+    const right_len: usize = @intCast(right_header.length());
     const pairs = try allocator.alloc(dict.Pair, left_len + right_len);
     defer allocator.free(pairs);
     var count = left_len;
@@ -415,7 +470,7 @@ fn find(
     key: Value,
     poller: Poller,
 ) poll.Error!?usize {
-    const count: usize = @intCast(header.len);
+    const count: usize = @intCast(header.length());
     const key_hash = try equal.hashWithPolling(allocator, key, poller);
     const storage = heap.dictStorageConst(header);
     if (count < index_threshold or storage.index == null) {
@@ -473,7 +528,7 @@ fn buildIndex(
 
 fn cachedHash(header: *Header, index: usize) u64 {
     const hashes = heap.dictStorageConst(header).payload.?.hashes.?;
-    return @bitCast(heap.itemsConst(i64, hashes)[index]);
+    return @bitCast(heap.i64s(hashes)[index]);
 }
 
 fn dictHeader(dictionary: Value) error{NotADict}!*Header {
@@ -484,8 +539,9 @@ fn dictHeader(dictionary: Value) error{NotADict}!*Header {
 }
 
 fn installReplacement(allocator: std.mem.Allocator, original: Value, replacement: Value) Value {
-    if (!heap.isUnique(original.dict)) return replacement;
-    heap.adoptRepresentation(allocator, original.dict, replacement.dict);
+    const destination = heap.claimUnique(original.dict) orelse return replacement;
+    const source = heap.claimUnique(replacement.dict) orelse unreachable;
+    heap.adoptRepresentation(allocator, destination, source);
     return original;
 }
 

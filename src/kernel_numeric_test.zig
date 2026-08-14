@@ -167,20 +167,6 @@ test "numeric: short kernel loops share the unit poll budget" {
     try std.testing.expect(runtime.last_polls >= 1);
 }
 
-fn allocationProbe(allocator: std.mem.Allocator) !void {
-    var runtime = try session.Session.init(allocator, &.{});
-    defer runtime.deinit();
-    const outcome = try runtime.runUnit(
-        "<allocation>",
-        "[[1 2] [3]] 10 * pop [0 1] exp pop [0 1] [1 1] atan2",
-    );
-    if (outcome == .err) heap.releaseValue(allocator, outcome.err);
-}
-
-test "numeric: allocation failures release every operand and result" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationProbe, .{});
-}
-
 test "numeric test module references the frozen value tags" {
     try std.testing.expectEqual(@as(usize, 9), @typeInfo(value.HeapKind).@"enum".fields.len);
 }

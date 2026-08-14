@@ -84,10 +84,45 @@ test "errors: lazy trace is innermost-first and retains recursive activations" {
     const failure = (try runtime.runUnit("recursive.ecl", source)).err;
     defer heap.releaseValue(allocator, failure);
     const trace = try field(allocator, failure, "trace");
-    try std.testing.expectEqual(@as(u64, 3), trace.list.len);
+    try std.testing.expectEqual(@as(u64, 3), trace.list.length());
     try std.testing.expectEqualStrings("missing", intern.get(list.atUnchecked(trace, 0).symbol));
     try std.testing.expectEqualStrings("f", intern.get(list.atUnchecked(trace, 1).symbol));
     try std.testing.expectEqualStrings("f", intern.get(list.atUnchecked(trace, 2).symbol));
+}
+
+test "errors: tail-position application continuations retain their enclosing word" {
+    const allocator = std.testing.allocator;
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+    const failure = (try runtime.runUnit(
+        "application-trace.ecl",
+        "((missing) () while) 'f def f",
+    )).err;
+    defer heap.releaseValue(allocator, failure);
+    const trace = try field(allocator, failure, "trace");
+    try std.testing.expectEqual(@as(u64, 2), trace.list.length());
+    try std.testing.expectEqualStrings("missing", intern.get(list.atUnchecked(trace, 0).symbol));
+    try std.testing.expectEqualStrings("f", intern.get(list.atUnchecked(trace, 1).symbol));
+
+    const callback_failure = (try runtime.runUnit(
+        "application-callback-trace.ecl",
+        "((2) () while) 'g def g",
+    )).err;
+    defer heap.releaseValue(allocator, callback_failure);
+    const callback_trace = try field(allocator, callback_failure, "trace");
+    try std.testing.expectEqual(@as(u64, 2), callback_trace.list.length());
+    try std.testing.expectEqualStrings("while", intern.get(list.atUnchecked(callback_trace, 0).symbol));
+    try std.testing.expectEqualStrings("g", intern.get(list.atUnchecked(callback_trace, 1).symbol));
+
+    const contract_failure = (try runtime.runUnit(
+        "application-contract-trace.ecl",
+        "([1] (dup) each) 'h def h",
+    )).err;
+    defer heap.releaseValue(allocator, contract_failure);
+    const contract_trace = try field(allocator, contract_failure, "trace");
+    try std.testing.expectEqual(@as(u64, 2), contract_trace.list.length());
+    try std.testing.expectEqualStrings("each", intern.get(list.atUnchecked(contract_trace, 0).symbol));
+    try std.testing.expectEqualStrings("h", intern.get(list.atUnchecked(contract_trace, 1).symbol));
 }
 
 test "machine_test: late binding redefinition heals existing callers" {
@@ -218,7 +253,7 @@ test "raise preserves valid user dicts and validates optional fields" {
         intern.get((try field(allocator, merged, "word")).symbol),
     );
     const merged_trace = try field(allocator, merged, "trace");
-    try std.testing.expectEqual(@as(u64, 1), merged_trace.list.len);
+    try std.testing.expectEqual(@as(u64, 1), merged_trace.list.length());
     try std.testing.expectEqualStrings(
         "raise",
         intern.get(list.atUnchecked(merged_trace, 0).symbol),
@@ -305,22 +340,83 @@ test "inline control and reader-lowered binders execute" {
     try std.testing.expectEqualStrings("type", try errorKind(allocator, invalid_branch));
 }
 
-fn primitiveFailureProbe(allocator: std.mem.Allocator) !void {
+test "public parse reifies forms without execution and retains provenance" {
+    const allocator = std.testing.allocator;
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
-    if (try execute(
-        &runtime,
-        "(3 4 +) 'sum def sum (1 0 /) attempt (5 6 +) attempt " ++
-            "({'kind 'custom 'data {'detail 7}} raise) attempt",
-    )) |failure| {
-        heap.releaseValue(allocator, failure);
-    }
+    try std.testing.expect((try execute(&runtime, "\"42 missing\" parse")) == null);
+    const display = try runtime.stackDisplay();
+    defer allocator.free(display);
+    try std.testing.expectEqualStrings("(42 missing)", display);
+
+    const failure = (try execute(&runtime, "pop \"(missing)\" parse first call")).?;
+    defer heap.releaseValue(allocator, failure);
+    try std.testing.expectEqualStrings("undefined-word", try errorKind(allocator, failure));
+    const data = try field(allocator, failure, "data");
+    const source = try field(allocator, data, "source");
+    const rendered_source = try printer.toOwnedString(allocator, source);
+    defer allocator.free(rendered_source);
+    try std.testing.expectEqualStrings("\"<parse>\"", rendered_source);
 }
 
-test "primitive execution propagates every allocation failure" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        primitiveFailureProbe,
-        .{},
-    );
+test "public parse maps malformed incomplete and type inputs to language errors" {
+    try @import("kernel_test_support.zig").expectErrors(&.{
+        .{ .name = "malformed", .source = "\"[1)\" parse", .kind = "parse", .word = "parse" },
+        .{ .name = "incomplete", .source = "\"(1\" parse", .kind = "parse", .word = "parse" },
+        .{ .name = "type", .source = "1 parse", .kind = "type", .word = "parse" },
+    });
+}
+
+test "public parse cancellation reaches UTF-8 materialization" {
+    const allocator = std.testing.allocator;
+    const text_len = 40_000;
+    const source = try allocator.alloc(u8, text_len + 2);
+    defer allocator.free(source);
+    source[0] = '"';
+    @memset(source[1 .. text_len + 1], 'a');
+    source[text_len + 1] = '"';
+
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+    try std.testing.expect((try runtime.runUnit("<parse-encoding-setup>", source)) == .ok);
+    try std.testing.expectEqual(@as(usize, 1), runtime.stack.items.len);
+    runtime.cancelled.store(true, .release);
+    const failure = switch (try runtime.runUnit("<parse-encoding-cancel>", "parse")) {
+        .err => |item| item,
+        .ok, .incomplete => return error.TestUnexpectedResult,
+    };
+    defer heap.releaseValue(allocator, failure);
+    try std.testing.expectEqualStrings("user", try errorKind(allocator, failure));
+    const rendered = try printer.toOwnedString(allocator, failure);
+    defer allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "unit cancelled") != null);
+    try std.testing.expect(runtime.last_polls >= 1);
+    try std.testing.expectEqual(@as(usize, 1), runtime.stack.items.len);
+    try std.testing.expectEqual(@as(u32, text_len), runtime.stack.items[0].list.length());
+}
+
+test "public parse cancellation reaches ignored-source scanning" {
+    const allocator = std.testing.allocator;
+    const comment_len = 20_000;
+    const suffix = "\" parse";
+    const command = try allocator.alloc(u8, 2 + comment_len + suffix.len);
+    defer allocator.free(command);
+    command[0] = '"';
+    command[1] = '#';
+    @memset(command[2 .. 2 + comment_len], 'a');
+    @memcpy(command[2 + comment_len ..], suffix);
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+    runtime.cancelled.store(true, .release);
+    const failure = switch (try runtime.runUnit("<parse-cancel-test>", command)) {
+        .err => |item| item,
+        .ok, .incomplete => return error.TestUnexpectedResult,
+    };
+    defer heap.releaseValue(allocator, failure);
+    try std.testing.expectEqualStrings("user", try errorKind(allocator, failure));
+    const rendered = try printer.toOwnedString(allocator, failure);
+    defer allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "unit cancelled") != null);
+    try std.testing.expect(runtime.last_polls >= 1);
+    try std.testing.expectEqual(@as(usize, 0), runtime.stack.items.len);
 }

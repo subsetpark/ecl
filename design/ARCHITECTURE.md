@@ -19,28 +19,37 @@ Decision 21's doctrine becomes two enforced rules:
    2015, the CPython 3.14 musttail numbers after Nelhage/Jin — shows
    dispatch technique is worth 1–5% even in bytecode-bound languages,
    and ecl is kernel-bound by design.)
-2. **Line budget (re-derived 2026-08-12 for Zig; values row amended
-   2026-08-13 for poll-safe structural traversal).** Per component,
-   excluding kernels, stdlib, and tests:
+2. **Zig line budget (recalibrated 2026-08-14 for structural type boundaries).**
+   Every classified production Zig file, including kernels and build/source-audit
+   tooling, is counted. Tests and all target-language ECL source are excluded:
 
    | component | budget | measured |
    |---|---|---|
-   | values + RC (value, heap, intern, list, equal, dict, print, poll) | 2,300 | 2,248 |
-   | reader (lexer, binder, reader) | 1,250 | 1,123 |
-   | machine (machine, spans, prims, main, root) | 2,300 | 2,290 |
-   | modules and registry (env, modules, module_prims, reflection, session) | 1,300 | 1,300 |
-   | bootstrap prelude (prelude) | 100 | 29 |
-   | combinators (M6) | 900 | — |
-   | concurrency (M7) | 1,300 | — |
-   | tooling: line editing, completion (M8) | 700 | — |
-   | **core total** | **9,500** | **6,990** |
+   | values + RC (value, heap, intern, list, equal, dict, print, poll) | 3,500 | 2,828 |
+   | reader (lexer, binder, reader) | 1,900 | 1,433 |
+   | machine (machine, spans, prims, root) | 3,000 | 2,246 |
+   | modules and registry (env, modules, module_prims, reflection, session) | 2,600 | 1,680 |
+   | bootstrap prelude loader | 150 | 80 |
+   | combinators | 1,200 | 703 |
+   | definition annotations and doc normalization | 1,000 | 602 |
+   | CLI and source formatter | 1,900 | 1,374 |
+   | kernels and idioms | 5,500 | 4,069 |
+   | source-audit tooling | 1,400 | 520 |
+   | **production Zig total** | **22,000** | **15,535** |
 
-   Kernels are separately capped at 5,500 lines (currently 3,571);
-   stdlib modules remain capped at ~2k and unmeasured so far.
-   Additions displace *within a component*. The values row's 350-line
-   amendment records the non-relocating worklists and intern index plus
-   poll-aware equality, hashing, interning, and printing required by the
-   kernel safe-point bound; the 9,500 total ceiling did not move.
+   These ceilings were raised specifically so nominal IDs, opaque heap
+   capabilities, validated publication types, tagged application/scope modes,
+   typestate, mandatory work cursors, and AST-aware enforcement can remain
+   explicit. A limit must not incentivize weakening a type boundary. The audit
+   enumerates `src/*.zig` and requires every file to belong to exactly one
+   production component or test/tool input; adding an unclassified file fails.
+   `src/prelude.ecl` and other ECL code are intentionally not line-counted.
+
+   The same dedicated source audit lexes `src/prelude.ecl` well enough to
+   distinguish comments from multiline strings. It requires each top-level
+   definition to be a `### def <name>` / attached comments / body / annotation / matching quoted
+   name / `def` block. This source-layout rule deliberately lives in build
+   tooling, not a runtime test that searches implementation text.
 
    The original ~5k came from "the walking skeleton proved the semantics
    fit in 4.6k." That baseline does not transfer, for three independent
@@ -67,6 +76,12 @@ heaps with copy-on-send, cycle collection, and all machine-code
 generation (permanently, per decision 21).
 
 ## Values and memory
+
+- **Mutation is capability-gated.** `Header` is opaque. Allocation yields an
+  `InitializingHeader`, uniqueness checking yields a `UniqueHeader`, and only
+  those capabilities expose their respective kind-checked mutation operations.
+  Immutable readers are representation-specific; there is no public generic
+  mutable payload cast or debug-only uniqueness gate.
 
 - **Value = 16-byte two-word tagged cell.** Word 0: payload (i64 / f64 /
   char codepoint / u32 symbol id / u32 word id / heap pointer). Word 1:
@@ -106,6 +121,69 @@ generation (permanently, per decision 21).
   carry none (the skeleton's span-on-every-Value made an int ~56 bytes);
   code assembled at runtime via cons/compose has no spans and error
   dicts omit position — absence-is-absence (d.22/d.23).
+
+## Bounded work
+
+- **User-sized traversal carries a `WorkContext`.** Cancellable entry points
+  create it from the unit's structural poller; bootstrap, cleanup, and other
+  deliberately non-cancellable callers use the explicit no-op context. A
+  context does not own a fresh counter: every cursor made from it charges the
+  same unit-wide kernel budget, including repeated normalization passes.
+- **Iteration and bulk access are coupled to charging.** Index and slice
+  cursors charge before returning each logical item. Byte chunks charge every
+  byte before exposing at most 256 bytes to hashing, copying, or output, so a
+  standard-library bulk operation never hides unbounded work behind one poll.
+  The old pre-charge-whole-traversal operation does not exist.
+- **Construction has two approved shapes.** A known-size result is allocated
+  exactly once and initialized through a work cursor. An unknown-size result
+  uses linked fixed chunks, then materializes exactly once through a work
+  cursor. Reader forms, binder output, string provenance, span tables, and the
+  session span archive use this substrate; none grows by relocating accumulated
+  state or by automatic hash-table rehashing.
+- **Bounded probes are lazy.** Formatter group lookahead uses a fixed-capacity
+  command stack and expands concatenations one child at a time. Its step and
+  stack ceilings apply before child expansion, and width scans stop once the
+  remaining line width is exceeded.
+- **The build audit enforces the boundary from parsed Zig syntax.** It rejects
+  relocating/rehashing provenance storage, whole-traversal charging, optional
+  polling helpers in migrated paths, unbounded identifier scans, and allocator-
+  backed formatter lookahead. Because the audit examines parsed tokens and
+  function spans, comments and string literals cannot evade or spuriously trip
+  a rule. Behavioral tests separately prove cancellation through public paths.
+
+Work cursors keep their position explicitly. M7 can therefore lift a long
+cursor into a resumable machine work frame without changing traversal
+semantics; the current milestone requires cancellation bounds, not scheduler
+yielding between quanta.
+
+## Typed publication and control state
+
+- Namespace publication accepts `NamespaceName`, produced by the polled
+  validator, rather than a raw intern id. Top-level and module publications are
+  different tagged types; module callables require `ValidatedEffect`, values
+  cannot carry one, and the module-root scope supplies the single coherent home.
+- An unpublished module generation is held by an opaque, consumable
+  `OwnedCandidate`. Registry publication consumes that capability; rollback
+  destroys it. Attempt and module boundaries are distinct tagged-union states,
+  so candidate ownership no longer depends on nullable pointers or side-band
+  booleans.
+- Auto-loading likewise owns a consumable `LoadingLease`. Cancellable removal
+  consumes it only after success; unwinding retains the capability and performs
+  non-cancellable cleanup. Environment and module-resolution probes require a
+  `WorkContext` in their public signatures, including shadow and visibility
+  checks, so runtime lookup cannot silently select an unlimited traversal.
+- Public native callbacks return `PrimitiveOutcome`, which atomically carries
+  either success or the complete language-failure payload. Trusted builtins use
+  a separate callback variant, so public registration cannot return a detached
+  `error.Ecl` and crash the dispatcher.
+- Core construction is a `BuildingEnv` typestate capability consumed by
+  `finish`. Session, core-build, module-root, lazy-local, and owned-local scope
+  storage are a tagged union rather than correlated environment/ownership flags.
+- Quotation applications use a validated `StackWindow` and tagged in-place or
+  isolated mode. The continuation frame owns its trace and immutable driver;
+  callbacks return only the next `ApplicationStep`, so they cannot substitute a
+  context or destructor. The stronger frame is 80 bytes (formerly 48), an
+  intentional ceiling increase for representational safety.
 
 ## Reference-counting discipline (Perceus-on-a-stack)
 
@@ -162,8 +240,11 @@ generation (permanently, per decision 21).
   uses → core). Shallow binding/rerooting is rejected as GIL-shaped
   (Baker 1978 requires rerooting to be globally serialized). Chains are
   structurally short because quotations capture nothing.
-- **Binding cells:** `def`/`set` replacement swaps the cell interior atomically —
-  every holder heals by construction, so late binding needs zero
+- **Binding cells:** `def`/`set` replacement publishes one complete immutable
+  snapshot atomically: binding, visibility, home, effect, documentation, and
+  compiled form. Omitting metadata clears it in the new snapshot; extant
+  leases retain the old snapshot's body and metadata until release. Every
+  future resolution heals by construction, so late binding needs zero
   invalidation. Shape changes (name create/delete, `uses` edits) bump a
   per-env generation. **The iron law for any future cache: hold the
   cell, re-read the interior every execution; never cache a resolution**
@@ -204,6 +285,38 @@ generation (permanently, per decision 21).
   retained snapshots. Binding-cell snapshot chains already reclaim at
   readers==0 and need nothing.
 
+- **Definition annotations:** `definition_prims.zig` recognizes only direct
+  top-level word markers in the candidate quotation, validates the entire
+  combined effect/doc shape with bounded polling, constructs owned effect
+  metadata, and calls the single binding publication funnel only after every
+  check and allocation succeeds. Top-level effect metadata does not schedule
+  contract frames. Module home transitions still trigger the existing effect
+  frame, while same-home tail calls remain frame-neutral. `doc`, `which`, and
+  `see` resolve through ordinary leased bindings; canonical `see` rendering is
+  poll-aware and combines effect and documentation back into one quotation.
+  `doc.zig` normalizes documentation with an exact-size two-pass traversal and
+  the machine's structural poller before publication, so formatter-introduced
+  physical wrapping never leaks into reflection.
+
+- **Source formatter:** `formatter.zig` is deliberately separate from the
+  value reader. Its first layer is a formatter-only CST retaining every trivia,
+  comment, delimiter, atom, and complete string slice in source order; the
+  ordinary reader validates the unit, but no code is scheduled. CST assembly
+  and document lowering are iterative/postorder, matching the reader's full
+  nesting bound without consuming the host stack. The second
+  layer lowers that CST to a Wadler/Oppen-style document IR (`text`, concat,
+  soft/hard lines, groups, alignment, and prose fill). The renderer keeps one
+  command stack and performs bounded, remaining-width lookahead at each group;
+  it never materializes both flat and broken renderings. Generic containers
+  align at the column immediately after their opening delimiter. Local nested
+  groups pack each space-separated structural run, so a hard break in one
+  child cannot explode its surrounding phrase into one-item lines. Existing
+  source line boundaries remain hard. Only binders and structurally recognized
+  definition annotations receive syntax-specific layout; doc paragraphs use
+  fill rather than one all-or-nothing group. Literal
+  `def`/`defp` blocks also receive canonical `### def <name>` section comments,
+  separated from preceding material by one empty line.
+
 ## The frame machine
 
 - **A unit is a movable heap struct** `{frame stack, data stack, env
@@ -211,8 +324,10 @@ generation (permanently, per decision 21).
   made units green; suspension is "stop stepping." This identity between
   the frame machine and the scheduler is the load-bearing synergy of the
   whole design.
-- **Frames are ≤48-byte uniform records** (code ref, ip, env ref, kind
-  tag, one or two payload words). Combinator state is indices; saved
+- **Frames are ≤80-byte uniform records** (code ref, ip, env ref, kind
+  tag, and typed payload). The ceiling was raised from 48 bytes for the
+  tagged application mode, immutable continuation driver, and trace ownership.
+  Combinator state is indices; saved
   stacks are **base indices into the unit's one contiguous data stack**,
   never moved-out Vecs. Isolation = base-index barrier (underflow check
   is one compare, which also implements decision 14's contract checks);
@@ -364,6 +479,19 @@ Built before the second kernel exists:
 This is the cheapest guard on the entire "fast paths are unobservable"
 doctrine — most soundness holes the adversarial review found would have
 been caught by it.
+
+## Allocation-failure test topology
+
+Focused constructors and other low-level allocation paths use exhaustive
+failure injection in the ordinary `zig build test` suite. Initialized-Session
+coverage is one consolidated probe in the separate ReleaseSafe
+`zig build test-oom` gate. That probe crosses kernels, primitives, session
+services, reflection, loading, modules, and definition replacement in one
+deterministic lifetime, so each injected failure index pays for the embedded
+prelude bootstrap once. `checkAllAllocationFailures` supplies exact
+allocated/freed accounting over the standard backing allocator; the debug
+test allocator is deliberately not nested underneath this already exhaustive
+wrapper.
 
 ## What the d.9 hardening layer needs from v1 (the substrate contract)
 

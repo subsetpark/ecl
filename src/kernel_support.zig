@@ -141,12 +141,13 @@ fn pollMachine(raw: *anyopaque) poll_api.Error!void {
 }
 
 pub fn installPrimitive(
-    core: *env.Env,
-    name: []const u8,
-    primitive: env.Primitive,
+    core: *env.BuildingEnv,
+    comptime name: []const u8,
+    primitive: env.PrimitiveImpl,
 ) error{OutOfMemory}!void {
-    const id = try intern.intern(name);
-    try core.installCore(id, .{ .primitive = primitive });
+    comptime env.assertStaticNamespace(name);
+    const id = try intern.trustedNamespace(name);
+    try core.installCore(id, .{ .builtin = primitive });
 }
 
 test "kernel constants freeze bounded work contracts" {

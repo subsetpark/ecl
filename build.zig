@@ -27,6 +27,22 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
 
+    const oom_mod = b.createModule(.{
+        .root_source_file = b.path("src/oom_root.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    const oom_tests = b.addTest(.{
+        .root_module = oom_mod,
+        .filters = &.{"oom:"},
+    });
+    const run_oom_tests = b.addRunArtifact(oom_tests);
+    const oom_step = b.step(
+        "test-oom",
+        "Exhaust full-session allocation failures (ReleaseSafe)",
+    );
+    oom_step.dependOn(&run_oom_tests.step);
+
     const audit_mod = b.createModule(.{
         .root_source_file = b.path("src/source_audit.zig"),
         .target = b.graph.host,
@@ -37,6 +53,7 @@ pub fn build(b: *std.Build) void {
     const audit_step = b.step("source-audit", "Check source architecture and line budgets");
     audit_step.dependOn(&run_audit.step);
     test_step.dependOn(&run_audit.step);
+    oom_step.dependOn(&run_audit.step);
 
     const e2e_options = b.addOptions();
     e2e_options.addOptionPath("ecl_exe", exe.getEmittedBin());
@@ -65,9 +82,20 @@ pub fn build(b: *std.Build) void {
     const tsan_step = b.step("test-tsan", "Run tests under ThreadSanitizer");
     tsan_step.dependOn(&run_tsan_tests.step);
 
+    const differential_mod = b.createModule(.{
+        .root_source_file = b.path("test/idiom_differential.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    differential_mod.addImport("ecl", mod);
+    const differential_tests = b.addTest(.{ .root_module = differential_mod });
+    const run_differential = b.addRunArtifact(differential_tests);
+    const differential_step = b.step("differential", "Compare automatic and generic idiom execution");
+    differential_step.dependOn(&run_differential.step);
+
     const oracle_step = b.step(
         "oracle-differential",
-        "Compare shared M5 semantics with the frozen Rust PoC",
+        "Compare shared semantics with the frozen Rust PoC",
     );
     if (b.option([]const u8, "oracle-exe", "Path to the frozen Rust ecl executable")) |rust_exe| {
         const oracle_options = b.addOptions();

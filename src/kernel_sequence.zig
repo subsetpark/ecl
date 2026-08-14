@@ -16,7 +16,6 @@ const Op = enum {
     at,
     where,
     in_word,
-    find,
     raze,
     cat,
     take,
@@ -35,7 +34,6 @@ const Op = enum {
             .at => "at",
             .where => "where",
             .in_word => "in",
-            .find => "find",
             .raze => "raze",
             .cat => "cat",
             .take => "take",
@@ -52,14 +50,14 @@ const Op = enum {
     }
 };
 
-pub fn install(core: *env.Env) error{OutOfMemory}!void {
+pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(Op)) |field| {
         const operation: Op = @enumFromInt(field.value);
         try support.installPrimitive(core, operation.spelling(), bind(operation));
     }
 }
 
-fn bind(comptime operation: Op) env.Primitive {
+fn bind(comptime operation: Op) env.PrimitiveImpl {
     return struct {
         fn run(evaluator: *Machine) MachineError!void {
             return primitive(evaluator, operation);
@@ -72,7 +70,6 @@ fn primitive(evaluator: *Machine, operation: Op) MachineError!void {
         .at => atPrimitive(evaluator),
         .where => wherePrimitive(evaluator),
         .in_word => inPrimitive(evaluator),
-        .find => findPrimitive(evaluator),
         .raze => razePrimitive(evaluator),
         .cat => catPrimitive(evaluator),
         .take => takePrimitive(evaluator),
@@ -96,6 +93,14 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
     defer heap.releaseValue(evaluator.allocator(), collection);
     const result = try indexValue(.{ .evaluator = evaluator }, collection, index, 0);
     try evaluator.pushOwned(result);
+}
+
+pub fn atPrimitiveForIdiom() env.PrimitiveImpl {
+    return bind(.at);
+}
+
+pub fn atForIdiom(evaluator: *Machine) MachineError!void {
+    return atPrimitive(evaluator);
 }
 
 fn indexValue(
@@ -123,7 +128,7 @@ fn indexValue(
     }
     if (collection != .list) return context.evaluator.typeError("a list or dict");
     if (index == .list) {
-        const count: usize = @intCast(index.list.len);
+        const count: usize = @intCast(index.list.length());
         const results = try context.allocator().alloc(Value, count);
         defer context.allocator().free(results);
         var initialized: usize = 0;
@@ -148,7 +153,7 @@ fn indexValue(
     if (index.int < 0) return context.evaluator.fail(.domain, "at index is negative");
     const position = std.math.cast(usize, index.int) orelse
         return context.evaluator.fail(.domain, "at index is out of bounds");
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     if (position >= count) return context.evaluator.fail(.domain, "at index is out of bounds");
     const result = list.atUnchecked(collection, position);
     heap.retainValue(result);
@@ -159,7 +164,7 @@ fn wherePrimitive(evaluator: *Machine) MachineError!void {
     const counts = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), counts);
     if (counts != .list) return evaluator.typeError("a non-negative integer count list");
-    const count: usize = @intCast(counts.list.len);
+    const count: usize = @intCast(counts.list.length());
     var total: usize = 0;
     for (0..count) |index| {
         try evaluator.advanceKernel(1);
@@ -216,7 +221,7 @@ fn membership(
         return context.evaluator.fail(.domain, "membership nesting exceeds 256 levels");
     }
     if (needle == .list) {
-        const count: usize = @intCast(needle.list.len);
+        const count: usize = @intCast(needle.list.length());
         const results = try context.allocator().alloc(Value, count);
         defer context.allocator().free(results);
         var initialized: usize = 0;
@@ -233,7 +238,7 @@ fn membership(
         }
         return storage.fromValues(context.allocator(), results, context.structuralPoller());
     }
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     for (0..count) |index| {
         try context.poll();
         if (try equal.matchWithPolling(
@@ -246,36 +251,16 @@ fn membership(
     return .{ .int = 0 };
 }
 
-fn findPrimitive(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    const needle = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), needle);
-    const collection = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a list haystack");
-    const count: usize = @intCast(collection.list.len);
-    for (0..count) |index| {
-        try evaluator.advanceKernel(1);
-        if (try equal.matchWithPolling(
-            evaluator.allocator(),
-            needle,
-            list.atUnchecked(collection, index),
-            (support.Context{ .evaluator = evaluator }).structuralPoller(),
-        )) return evaluator.pushOwned(.{ .int = @intCast(index) });
-    }
-    try evaluator.pushOwned(.{ .int = @intCast(count) });
-}
-
 fn razePrimitive(evaluator: *Machine) MachineError!void {
     const collection = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a list");
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     var total: usize = 0;
     for (0..count) |index| {
         try evaluator.advanceKernel(1);
         const item = list.atUnchecked(collection, index);
-        const contribution: usize = if (item == .list) @intCast(item.list.len) else 1;
+        const contribution: usize = if (item == .list) @intCast(item.list.length()) else 1;
         total = std.math.add(usize, total, contribution) catch
             return evaluator.fail(.overflow, "raze result is too large");
     }
@@ -290,7 +275,7 @@ fn razePrimitive(evaluator: *Machine) MachineError!void {
             destination += 1;
             continue;
         }
-        const child_count: usize = @intCast(item.list.len);
+        const child_count: usize = @intCast(item.list.length());
         for (0..child_count) |child_index| {
             try evaluator.advanceKernel(1);
             values[destination] = list.atUnchecked(item, child_index);
@@ -312,8 +297,8 @@ fn catPrimitive(evaluator: *Machine) MachineError!void {
     const left = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), left);
     if (left != .list or right != .list) return evaluator.typeError("two lists");
-    const left_count: usize = @intCast(left.list.len);
-    const right_count: usize = @intCast(right.list.len);
+    const left_count: usize = @intCast(left.list.length());
+    const right_count: usize = @intCast(right.list.length());
     if (left_count == 0 and right_count == 0 and (left.isString() or right.isString())) {
         return evaluator.pushOwned(try emptyLike(
             evaluator.allocator(),
@@ -341,7 +326,7 @@ fn firstPrimitive(evaluator: *Machine) MachineError!void {
     const collection = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a list");
-    if (collection.list.len == 0) return evaluator.fail(.domain, "first requires a non-empty list");
+    if (collection.list.length() == 0) return evaluator.fail(.domain, "first requires a non-empty list");
     try evaluator.pushBorrowed(list.atUnchecked(collection, 0));
 }
 
@@ -349,7 +334,7 @@ fn restPrimitive(evaluator: *Machine) MachineError!void {
     const collection = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a list");
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     if (count == 0) return evaluator.fail(.domain, "rest requires a non-empty list");
     try evaluator.pushOwned(try copyRange(evaluator, collection, 1, count, false));
 }
@@ -363,7 +348,7 @@ fn takePrimitive(evaluator: *Machine) MachineError!void {
     if (collection != .list or count_value != .int) {
         return evaluator.typeError("a list and an integer count");
     }
-    const source_count: usize = @intCast(collection.list.len);
+    const source_count: usize = @intCast(collection.list.length());
     const result_count = std.math.cast(usize, unsignedMagnitude(count_value.int)) orelse
         return evaluator.fail(.overflow, "take length exceeds addressable size");
     if (result_count == 0) {
@@ -401,7 +386,7 @@ fn dropPrimitive(evaluator: *Machine) MachineError!void {
     if (collection != .list or count_value != .int) {
         return evaluator.typeError("a list and an integer count");
     }
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     const magnitude: usize = @intCast(@min(unsignedMagnitude(count_value.int), count));
     const bounds: struct { start: usize, end: usize } = if (count_value.int >= 0)
         .{ .start = magnitude, .end = count }
@@ -424,7 +409,7 @@ fn reversePrimitive(evaluator: *Machine) MachineError!void {
         evaluator,
         collection,
         0,
-        @intCast(collection.list.len),
+        @intCast(collection.list.length()),
         true,
     ));
 }
@@ -483,7 +468,7 @@ fn lenPrimitive(evaluator: *Machine) MachineError!void {
     const collection = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a list");
-    try evaluator.pushOwned(.{ .int = @intCast(collection.list.len) });
+    try evaluator.pushOwned(.{ .int = @intCast(collection.list.length()) });
 }
 
 const ShapeError = error{ OutOfMemory, Ecl, Ragged, TooDeep };
@@ -519,7 +504,7 @@ fn rectangularShape(
 ) ShapeError![]usize {
     if (depth >= support.max_depth) return error.TooDeep;
     std.debug.assert(collection == .list);
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     if (count == 0) {
         const result = try context.allocator().alloc(usize, 1);
         result[0] = 0;
@@ -609,7 +594,7 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
     if (collection != .list or shape_value != .list) {
         return evaluator.typeError("a list and a non-empty integer shape");
     }
-    const rank: usize = @intCast(shape_value.list.len);
+    const rank: usize = @intCast(shape_value.list.length());
     if (rank == 0) return evaluator.fail(.shape, "reshape requires a non-empty shape");
     if (rank > support.max_depth) return evaluator.fail(.shape, "reshape rank exceeds 256");
     const dimensions = try evaluator.allocator().alloc(usize, rank);
@@ -661,7 +646,7 @@ fn ravelCount(
     }
     if (item != .list) return 1;
     var total: usize = 0;
-    const count: usize = @intCast(item.list.len);
+    const count: usize = @intCast(item.list.length());
     for (0..count) |index| {
         try evaluator.advanceKernel(1);
         const child_count = try ravelCount(
@@ -688,7 +673,7 @@ fn ravelInto(
         destination.* += 1;
         return;
     }
-    const count: usize = @intCast(item.list.len);
+    const count: usize = @intCast(item.list.length());
     for (0..count) |index| {
         try evaluator.advanceKernel(1);
         try ravelInto(

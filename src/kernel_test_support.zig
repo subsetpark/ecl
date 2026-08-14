@@ -160,7 +160,7 @@ fn stringBytes(item: value.Value) ![]u8 {
     if (!item.isString()) return error.TestUnexpectedResult;
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
-    const length: usize = @intCast(item.list.len);
+    const length: usize = @intCast(item.list.length());
     for (0..length) |index| {
         const codepoint = list.atUnchecked(item, index).char;
         var encoded: [4]u8 = undefined;

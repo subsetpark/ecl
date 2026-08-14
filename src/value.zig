@@ -26,27 +26,16 @@ pub const HeapKind = enum(u8) {
     reserved_mask,
 };
 
-pub const Header = extern struct {
-    rc: std.atomic.Value(u32),
-    meta: u32,
-    len: u64,
-
-    const kind_mask: u32 = 0xff;
-
-    pub fn init(kind_value: HeapKind, len: u64) Header {
-        return .{
-            .rc = .init(1),
-            .meta = @intFromEnum(kind_value),
-            .len = len,
-        };
-    }
-
+/// The heap representation is deliberately opaque outside heap.zig. Values
+/// expose only identity plus read-only metadata; construction and mutation
+/// require heap-issued capabilities.
+pub const Header = opaque {
     pub fn kind(self: *const Header) HeapKind {
-        return @enumFromInt(self.meta & kind_mask);
+        return @import("heap.zig").kind(self);
     }
 
-    pub fn setKind(self: *Header, new_kind: HeapKind) void {
-        self.meta = (self.meta & ~kind_mask) | @intFromEnum(new_kind);
+    pub fn length(self: *const Header) u64 {
+        return @import("heap.zig").length(self);
     }
 };
 
@@ -95,12 +84,10 @@ pub const Value = union(Tag) {
 
 comptime {
     if (@sizeOf(Value) != 16) @compileError("Value must remain exactly 16 bytes");
-    if (@sizeOf(Header) != 16) @compileError("Header must remain exactly 16 bytes");
 }
 
 test "value and header layouts are frozen" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Value));
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(Header));
     try std.testing.expectEqual(@as(usize, 9), @typeInfo(HeapKind).@"enum".fields.len);
 }
 

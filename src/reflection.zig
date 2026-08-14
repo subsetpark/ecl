@@ -2,11 +2,7 @@
 const std = @import("std");
 const intern = @import("intern.zig");
 const poll = @import("poll.zig");
-
-pub fn sortNames(
-    names: []u32,
-    poller: poll.Poller,
-) poll.Error!void {
+pub fn sortNames(names: []u32, poller: poll.Poller) poll.Error!void {
     if (names.len < 2) return;
     var start = names.len / 2;
     while (start > 0) {
@@ -21,7 +17,6 @@ pub fn sortNames(
         try siftDown(names, 0, end, poller);
     }
 }
-
 fn siftDown(names: []u32, start: usize, end: usize, poller: poll.Poller) poll.Error!void {
     var root = start;
     while (root * 2 + 1 < end) {
@@ -37,7 +32,6 @@ fn siftDown(names: []u32, start: usize, end: usize, poller: poll.Poller) poll.Er
         root = selected;
     }
 }
-
 fn compareNames(left: u32, right: u32, poller: poll.Poller) poll.Error!std.math.Order {
     if (left == right) {
         try poller.poll();
@@ -53,17 +47,11 @@ fn compareNames(left: u32, right: u32, poller: poll.Poller) poll.Error!std.math.
     try poller.poll();
     return std.math.order(left_bytes.len, right_bytes.len);
 }
-
 pub fn writeBytes(
     writer: *std.Io.Writer,
     bytes: []const u8,
     poller: poll.Poller,
 ) (poll.Error || std.Io.Writer.Error)!void {
-    var start: usize = 0;
-    while (start < bytes.len) {
-        const end = @min(start + 256, bytes.len);
-        try poller.charge(end - start);
-        try writer.writeAll(bytes[start..end]);
-        start = end;
-    }
+    var chunks = poll.WorkContext.init(poller).chunks(bytes);
+    while (try chunks.next()) |chunk| try writer.writeAll(chunk);
 }

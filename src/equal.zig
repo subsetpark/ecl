@@ -101,8 +101,8 @@ fn matchInternal(
                         last = true;
                         continue;
                     }
-                    const a_len: usize = @intCast(a_header.len);
-                    const b_len: usize = @intCast(b_header.len);
+                    const a_len: usize = @intCast(a_header.length());
+                    const b_len: usize = @intCast(b_header.length());
                     if (a_len != b_len) {
                         last = false;
                     } else if (a_len == 0) {
@@ -124,9 +124,9 @@ fn matchInternal(
                     const b_header = pair.b.dict;
                     if (a_header == b_header) {
                         last = true;
-                    } else if (a_header.len != b_header.len) {
+                    } else if (a_header.length() != b_header.length()) {
                         last = false;
-                    } else if (a_header.len == 0) {
+                    } else if (a_header.length() == 0) {
                         last = true;
                     } else {
                         try actions.push(.{ .dict_search = .{
@@ -160,7 +160,7 @@ fn matchInternal(
             const a_key = dictItem(search.a, true, search.entry);
             const a_hash = try hashInternal(allocator, a_key, poller);
             var candidate = search.candidate;
-            const b_len: usize = @intCast(search.b.len);
+            const b_len: usize = @intCast(search.b.length());
             while (candidate < b_len) : (candidate += 1) {
                 const b_key = dictItem(search.b, true, candidate);
                 if (a_hash != try hashInternal(allocator, b_key, poller)) continue;
@@ -197,7 +197,7 @@ fn matchInternal(
         .dict_after_value => |continuation| {
             if (!last) continue;
             const next = continuation.entry + 1;
-            if (next == continuation.a.len) {
+            if (next == continuation.a.length()) {
                 last = true;
             } else {
                 try actions.push(.{ .dict_search = .{
@@ -346,7 +346,7 @@ fn hashInternal(
             }
             switch (current) {
                 .list => |header| {
-                    const count: usize = @intCast(header.len);
+                    const count: usize = @intCast(header.length());
                     const state = mix(0x4c49_5354, count);
                     if (count == 0) {
                         last = state;
@@ -360,7 +360,7 @@ fn hashInternal(
                     }
                 },
                 .dict => |header| {
-                    const count: usize = @intCast(header.len);
+                    const count: usize = @intCast(header.length());
                     const state = mix(0x4449_4354, count);
                     if (count == 0) {
                         last = state;
@@ -380,7 +380,7 @@ fn hashInternal(
             try pollValue(poller);
             const state = mix(continuation.state, last);
             const next = continuation.index + 1;
-            if (next == @as(usize, @intCast(continuation.collection.list.len))) {
+            if (next == @as(usize, @intCast(continuation.collection.list.length()))) {
                 last = state;
             } else {
                 try actions.push(.{ .list_after = .{
@@ -410,7 +410,7 @@ fn hashInternal(
             const entry_hash = mix(continuation.key_hash ^ 0x9e37_79b9, last);
             const state = continuation.state +% avalanche(entry_hash);
             const next = continuation.index + 1;
-            if (next == @as(usize, @intCast(continuation.header.len))) {
+            if (next == @as(usize, @intCast(continuation.header.length()))) {
                 last = state;
             } else {
                 try actions.push(.{ .dict_after_key = .{

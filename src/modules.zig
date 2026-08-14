@@ -1,22 +1,20 @@
-//! Per-session module registry with atomic generation publication.
+//! Per-session module registry with typed names and atomic generation publication.
 const std = @import("std");
 const env = @import("env.zig");
 const intern = @import("intern.zig");
 const poll = @import("poll.zig");
-fn validName(id: u32) bool {
-    const name = intern.get(id);
-    return name.len > 0 and std.mem.indexOfScalar(u8, name, '.') == null;
-}
+
 pub const ModuleGeneration = struct {
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(u32) = .init(1),
-    name: u32,
+    name: intern.NamespaceName,
     generation: u64 = 0,
     environment: env.Environment,
     scope: env.Scope,
+
     pub fn create(
         allocator: std.mem.Allocator,
-        name: u32,
+        name: intern.NamespaceName,
     ) error{OutOfMemory}!*ModuleGeneration {
         const result = try allocator.create(ModuleGeneration);
         result.allocator = allocator;
@@ -24,13 +22,15 @@ pub const ModuleGeneration = struct {
         result.name = name;
         result.generation = 0;
         result.environment = env.Environment.init(allocator);
-        result.scope = env.Scope.direct(allocator, &result.environment, null, .module_root);
+        result.scope = env.Scope.moduleRoot(allocator, &result.environment, name);
         return result;
     }
+
     pub fn retain(self: *ModuleGeneration) void {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
     }
+
     pub fn release(self: *ModuleGeneration) void {
         const old = self.refs.fetchSub(1, .release);
         std.debug.assert(old != 0);
@@ -39,90 +39,112 @@ pub const ModuleGeneration = struct {
         self.environment.deinit();
         self.allocator.destroy(self);
     }
+
     pub fn destroy(self: *ModuleGeneration) void {
         std.debug.assert(self.refs.load(.acquire) == 1);
         self.release();
     }
-    pub fn resolve(self: *const ModuleGeneration, id: u32, public_only: bool) ?env.BindingLease {
-        var lease = self.environment.resolveDirect(id) orelse return null;
+
+    pub fn resolve(
+        self: *const ModuleGeneration,
+        id: u32,
+        public_only: bool,
+        work: poll.WorkContext,
+    ) poll.Error!?env.BindingLease {
+        var lease = try self.environment.resolveDirect(id, work) orelse return null;
         if (public_only and lease.visibility == .private) {
             lease.deinit(self.allocator);
             return null;
         }
         return lease;
     }
+
     pub fn publicNamesOwned(
         self: *const ModuleGeneration,
         allocator: std.mem.Allocator,
-        poller: ?poll.Poller,
+        work: poll.WorkContext,
     ) poll.Error![]u32 {
-        const all = try self.environment.namesOwned(allocator, poller);
+        const all = try self.environment.namesOwned(allocator, work);
         defer allocator.free(all);
         const visible = try allocator.alloc(u32, all.len);
         defer allocator.free(visible);
         var count: usize = 0;
-        for (all) |id| {
-            if (poller) |active| try active.poll();
-            if (!self.isPublic(id)) continue;
+        var all_cursor = work.cursor(u32, all);
+        while (try all_cursor.next()) |id| {
+            if (!try self.isPublic(id, work)) continue;
             visible[count] = id;
             count += 1;
         }
         const result = try allocator.alloc(u32, count);
         errdefer allocator.free(result);
-        for (visible[0..count], result) |id, *destination| {
-            if (poller) |active| try active.poll();
-            destination.* = id;
-        }
+        var source_cursor = work.cursor(u32, visible[0..count]);
+        var result_index: usize = 0;
+        while (try source_cursor.next()) |id| : (result_index += 1) result[result_index] = id;
         return result;
     }
-    fn isPublic(self: *const ModuleGeneration, id: u32) bool {
-        var lease = self.environment.resolveDirect(id).?;
+
+    fn isPublic(self: *const ModuleGeneration, id: u32, work: poll.WorkContext) poll.Error!bool {
+        var lease = (try self.environment.resolveDirect(id, work)).?;
         defer lease.deinit(self.allocator);
         return lease.visibility == .public;
     }
 };
+
 const ModuleSlot = struct {
     current: std.atomic.Value(?*ModuleGeneration) = .init(null),
     readers: std.atomic.Value(u32) = .init(0),
+
     fn destroy(self: *ModuleSlot, allocator: std.mem.Allocator) void {
         if (self.current.load(.acquire)) |generation| generation.release();
         allocator.destroy(self);
     }
 };
+
 const Directory = struct {
-    modules: std.AutoHashMapUnmanaged(u32, *ModuleSlot) = .empty,
-    aliases: std.AutoHashMapUnmanaged(u32, u32) = .empty,
-    previous: ?*Directory = null,
-    fn destroy(self: *Directory, allocator: std.mem.Allocator) void {
-        self.modules.deinit(allocator);
-        self.aliases.deinit(allocator);
-        allocator.destroy(self);
-    }
+    const ModuleMap = poll.U32Map(*ModuleSlot);
+    const AliasMap = poll.U32Map(u32);
+
+    modules: ModuleMap,
+    aliases: AliasMap,
+    previous: ?*Directory,
+
     fn clone(
         allocator: std.mem.Allocator,
         old: ?*Directory,
         extra_modules: usize,
         extra_aliases: usize,
-    ) error{OutOfMemory}!*Directory {
-        const result = try allocator.create(Directory);
-        result.* = .{ .previous = old };
-        errdefer result.destroy(allocator);
+        work: poll.WorkContext,
+    ) poll.Error!*Directory {
         const module_count = if (old) |directory| directory.modules.count() else 0;
         const alias_count = if (old) |directory| directory.aliases.count() else 0;
-        try result.modules.ensureTotalCapacity(allocator, @intCast(module_count + extra_modules));
-        try result.aliases.ensureTotalCapacity(allocator, @intCast(alias_count + extra_aliases));
-        if (old) |directory| {
-            var modules_iterator = directory.modules.iterator();
-            while (modules_iterator.next()) |entry| {
-                result.modules.putAssumeCapacityNoClobber(entry.key_ptr.*, entry.value_ptr.*);
-            }
-            var aliases_iterator = directory.aliases.iterator();
-            while (aliases_iterator.next()) |entry| {
-                result.aliases.putAssumeCapacityNoClobber(entry.key_ptr.*, entry.value_ptr.*);
-            }
+        const modules = if (old) |directory|
+            try directory.modules.cloneGrow(extra_modules, work)
+        else
+            try ModuleMap.init(allocator, extra_modules, work);
+        errdefer {
+            var owned = modules;
+            owned.deinit();
         }
+        const aliases = if (old) |directory|
+            try directory.aliases.cloneGrow(extra_aliases, work)
+        else
+            try AliasMap.init(allocator, alias_count + extra_aliases, work);
+        errdefer {
+            var owned = aliases;
+            owned.deinit();
+        }
+        const result = try allocator.create(Directory);
+        result.* = .{ .modules = modules, .aliases = aliases, .previous = old };
+        _ = module_count;
         return result;
     }
+
+    fn destroy(self: *Directory, allocator: std.mem.Allocator) void {
+        self.modules.deinit();
+        self.aliases.deinit();
+        allocator.destroy(self);
+    }
+
     fn destroyChain(first: ?*Directory, allocator: std.mem.Allocator) void {
         var cursor = first;
         while (cursor) |directory| {
@@ -131,6 +153,7 @@ const Directory = struct {
         }
     }
 };
+
 /// Owns one generation reference; callers must call `deinit`.
 pub const GenerationLease = struct {
     generation: *ModuleGeneration,
@@ -139,161 +162,360 @@ pub const GenerationLease = struct {
         self.* = undefined;
     }
 };
-pub const RegistryError = error{ OutOfMemory, NameConflict, MissingModule, InvalidDefinition };
-pub const NativeDefinition = struct {
-    name: u32,
-    binding: env.Binding,
-    visibility: env.Visibility = .public,
-    effect: ?env.Effect = null,
+
+/// Unique ownership of an unpublished module generation. Publication consumes
+/// the capability; every other exit calls `deinit` without ownership flags.
+pub const OwnedCandidate = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn init(generation: *ModuleGeneration) OwnedCandidate {
+        return @enumFromInt(@intFromPtr(generation));
+    }
+    pub fn borrow(self: *const OwnedCandidate) *ModuleGeneration {
+        std.debug.assert(self.* != .consumed);
+        return @ptrFromInt(@intFromEnum(self.*));
+    }
+    pub fn move(self: *OwnedCandidate) OwnedCandidate {
+        const result = self.*;
+        std.debug.assert(result != .consumed);
+        self.* = .consumed;
+        return result;
+    }
+    pub fn deinit(self: *OwnedCandidate) void {
+        if (self.* == .consumed) return;
+        self.borrow().destroy();
+        self.* = .consumed;
+    }
+    fn publish(self: *OwnedCandidate) *ModuleGeneration {
+        const generation = self.borrow();
+        self.* = .consumed;
+        return generation;
+    }
 };
+
+pub const NativePrimitive = struct {
+    name: intern.NamespaceName,
+    callback: env.Primitive,
+    effect: env.ValidatedEffect,
+    visibility: env.Visibility = .public,
+};
+pub const NativeWord = struct {
+    name: intern.NamespaceName,
+    body: *env.Quotation,
+    effect: env.ValidatedEffect,
+    visibility: env.Visibility = .public,
+};
+pub const NativeValue = struct {
+    name: intern.NamespaceName,
+    item: @import("value.zig").Value,
+    visibility: env.Visibility = .public,
+};
+
+/// The tag makes metadata compatibility structural: callable definitions must
+/// carry an effect and values have no effect field to misuse.
+pub const NativeDefinition = union(enum) {
+    primitive: NativePrimitive,
+    word: NativeWord,
+    value: NativeValue,
+};
+
+pub const RegistryError = error{ OutOfMemory, Ecl, NameConflict, MissingModule, InvalidDefinition };
+
+const LoadingNode = struct {
+    registry: *Registry,
+    name: u32,
+    next: ?*LoadingNode,
+};
+pub const LoadingLease = enum(usize) {
+    finished = 0,
+    _,
+
+    fn init(loading: *LoadingNode) LoadingLease {
+        return @enumFromInt(@intFromPtr(loading));
+    }
+    fn node(self: LoadingLease) *LoadingNode {
+        std.debug.assert(self != .finished);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    pub fn move(self: *LoadingLease) LoadingLease {
+        const result = self.*;
+        std.debug.assert(result != .finished);
+        self.* = .finished;
+        return result;
+    }
+    pub fn finish(self: *LoadingLease, work: poll.WorkContext) poll.Error!void {
+        const loading = self.node();
+        try loading.registry.endLoading(loading, work);
+        self.* = .finished;
+    }
+    pub fn deinit(self: *LoadingLease) void {
+        if (self.* == .finished) return;
+        const loading = self.node();
+        loading.registry.endLoading(loading, .unlimited()) catch unreachable;
+        self.* = .finished;
+    }
+};
+const RetiredGeneration = struct {
+    slot: *ModuleSlot,
+    generation: ?*ModuleGeneration,
+};
+
 pub const Registry = struct {
     allocator: std.mem.Allocator,
     writer: std.atomic.Mutex = .unlocked,
     directory: std.atomic.Value(?*Directory) = .init(null),
-    slots: std.ArrayList(*ModuleSlot) = .empty,
-    loading: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    slots: poll.ChunkList(*ModuleSlot),
+    retired: poll.ChunkList(RetiredGeneration),
+    loading: ?*LoadingNode = null,
+
     pub fn init(allocator: std.mem.Allocator) Registry {
-        return .{ .allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .slots = .init(allocator),
+            .retired = .init(allocator),
+        };
     }
+
     pub fn deinit(self: *Registry) void {
         Directory.destroyChain(self.directory.load(.acquire), self.allocator);
-        for (self.slots.items) |slot| slot.destroy(self.allocator);
-        self.slots.deinit(self.allocator);
-        self.loading.deinit(self.allocator);
+        var slots = self.slots.iterator();
+        while (slots.next()) |slot| slot.*.destroy(self.allocator);
+        self.slots.deinit();
+        var retired = self.retired.iterator();
+        while (retired.next()) |entry| if (entry.generation) |generation| generation.release();
+        self.retired.deinit();
+        var loading = self.loading;
+        while (loading) |node| {
+            loading = node.next;
+            self.allocator.destroy(node);
+        }
         self.* = undefined;
     }
-    fn lock(self: *Registry) void {
-        while (!self.writer.tryLock()) std.atomic.spinLoopHint();
+
+    fn lock(self: *Registry, work: poll.WorkContext) poll.Error!void {
+        while (!self.writer.tryLock()) {
+            try work.step();
+            std.atomic.spinLoopHint();
+        }
     }
+
     fn unlock(self: *Registry) void {
         self.writer.unlock();
     }
+
+    fn reclaimRetired(self: *Registry, work: poll.WorkContext) poll.Error!void {
+        var entries = self.retired.workIterator(work);
+        while (try entries.next()) |entry_const| {
+            const entry = @constCast(entry_const);
+            const generation = entry.generation orelse continue;
+            if (entry.slot.readers.load(.seq_cst) != 0) continue;
+            entry.generation = null;
+            generation.release();
+        }
+    }
+
     pub fn createCandidate(
         self: *Registry,
-        name: u32,
-    ) error{OutOfMemory}!*ModuleGeneration {
-        return ModuleGeneration.create(self.allocator, name);
+        name: intern.NamespaceName,
+    ) error{OutOfMemory}!OwnedCandidate {
+        return .init(try ModuleGeneration.create(self.allocator, name));
     }
-    /// Consumes a fully built candidate only after successful publication.
+
+    /// Consumes a fully built, typed candidate only after successful publication.
     pub fn commit(
         self: *Registry,
-        candidate: *ModuleGeneration,
+        owned: *OwnedCandidate,
+        work: poll.WorkContext,
     ) RegistryError!u64 {
-        if (!validName(candidate.name)) return error.InvalidDefinition;
-        self.lock();
+        const candidate = owned.borrow();
+        try self.lock(work);
         defer self.unlock();
+        try self.reclaimRetired(work);
+        const name = intern.namespaceId(candidate.name);
         const old = self.directory.load(.acquire);
-        if (old) |directory| if (directory.aliases.contains(candidate.name)) {
+        if (old) |directory| if (try directory.aliases.get(name, work) != null)
             return error.NameConflict;
-        };
-        if (old) |directory| if (directory.modules.get(candidate.name)) |slot| {
+        if (old) |directory| if (try directory.modules.get(name, work)) |slot| {
             const prior = slot.current.load(.acquire).?;
+            // Transfer the slot's old generation reference to stable retired
+            // storage before publication. Readers may safely finish retaining
+            // it; publication has no cancellable or allocating tail.
+            const retired = try self.retired.appendPtr(.{ .slot = slot, .generation = prior });
             candidate.generation = prior.generation + 1;
-            candidate.environment.freeze();
-            slot.current.store(candidate, .seq_cst);
-            while (slot.readers.load(.seq_cst) != 0) std.atomic.spinLoopHint();
-            prior.release();
+            candidate.scope.freezeModule();
+            slot.current.store(owned.publish(), .seq_cst);
+            if (slot.readers.load(.seq_cst) == 0) {
+                retired.generation = null;
+                prior.release();
+            }
             return candidate.generation;
         };
         const slot = try self.allocator.create(ModuleSlot);
         errdefer self.allocator.destroy(slot);
         slot.* = .{};
-        try self.slots.ensureUnusedCapacity(self.allocator, 1);
-        const next = try Directory.clone(self.allocator, old, 1, 0);
+        const next = try Directory.clone(self.allocator, old, 1, 0, work);
         errdefer next.destroy(self.allocator);
-        next.modules.putAssumeCapacityNoClobber(candidate.name, slot);
+        _ = try next.modules.put(name, slot, work);
         candidate.generation = 1;
-        candidate.environment.freeze();
-        slot.current.store(candidate, .seq_cst);
-        self.slots.appendAssumeCapacity(slot);
+        candidate.scope.freezeModule();
+        try self.slots.append(slot);
+        slot.current.store(owned.publish(), .seq_cst);
         self.directory.store(next, .release);
         return 1;
     }
+
     pub fn canonical(self: *const Registry, name: u32) ?u32 {
-        const directory = self.directory.load(.acquire) orelse return null;
-        if (directory.modules.contains(name)) return name;
-        return directory.aliases.get(name);
+        return self.canonicalWork(name, .unlimited()) catch unreachable;
     }
-    pub fn acquire(self: *const Registry, name: u32) ?GenerationLease {
+
+    pub fn canonicalWork(
+        self: *const Registry,
+        name: u32,
+        work: poll.WorkContext,
+    ) poll.Error!?u32 {
         const directory = self.directory.load(.acquire) orelse return null;
-        const canonical_name = if (directory.modules.contains(name))
+        if (try directory.modules.get(name, work) != null) return name;
+        return directory.aliases.get(name, work);
+    }
+
+    pub fn acquire(self: *const Registry, name: u32) ?GenerationLease {
+        return self.acquireWork(name, .unlimited()) catch unreachable;
+    }
+
+    pub fn acquireWork(
+        self: *const Registry,
+        name: u32,
+        work: poll.WorkContext,
+    ) poll.Error!?GenerationLease {
+        const directory = self.directory.load(.acquire) orelse return null;
+        const canonical_name = if (try directory.modules.get(name, work) != null)
             name
         else
-            directory.aliases.get(name) orelse return null;
-        const slot = directory.modules.get(canonical_name).?;
+            try directory.aliases.get(name, work) orelse return null;
+        const slot = (try directory.modules.get(canonical_name, work)).?;
         _ = slot.readers.fetchAdd(1, .seq_cst);
         const generation = slot.current.load(.seq_cst);
         if (generation) |present| present.retain();
         _ = slot.readers.fetchSub(1, .seq_cst);
         return .{ .generation = generation orelse return null };
     }
-    pub fn alias(self: *Registry, short: u32, target: u32) RegistryError!void {
-        if (!validName(short) or !validName(target)) return error.InvalidDefinition;
-        self.lock();
+
+    pub fn alias(
+        self: *Registry,
+        short: intern.NamespaceName,
+        target: intern.NamespaceName,
+        work: poll.WorkContext,
+    ) RegistryError!void {
+        try self.lock(work);
         defer self.unlock();
+        const short_id = intern.namespaceId(short);
+        const target_id = intern.namespaceId(target);
         const old = self.directory.load(.acquire) orelse return error.MissingModule;
-        if (old.modules.contains(short)) return error.NameConflict;
-        const canonical_target = if (old.modules.contains(target))
-            target
+        if (try old.modules.get(short_id, work) != null) return error.NameConflict;
+        const canonical_target = if (try old.modules.get(target_id, work) != null)
+            target_id
         else
-            old.aliases.get(target) orelse return error.MissingModule;
-        if (old.aliases.get(short)) |existing| if (existing == canonical_target) return;
-        const extra: usize = @intFromBool(!old.aliases.contains(short));
-        const next = try Directory.clone(self.allocator, old, 0, extra);
+            try old.aliases.get(target_id, work) orelse return error.MissingModule;
+        if (try old.aliases.get(short_id, work)) |existing|
+            if (existing == canonical_target) return;
+        const extra: usize = @intFromBool(try old.aliases.get(short_id, work) == null);
+        const next = try Directory.clone(self.allocator, old, 0, extra, work);
         errdefer next.destroy(self.allocator);
-        next.aliases.putAssumeCapacity(short, canonical_target);
+        _ = try next.aliases.put(short_id, canonical_target, work);
         self.directory.store(next, .release);
     }
+
     pub fn registerNative(
         self: *Registry,
-        name: u32,
+        name: intern.NamespaceName,
         definitions: []const NativeDefinition,
+        work: poll.WorkContext,
     ) RegistryError!u64 {
-        const candidate = try self.createCandidate(name);
-        errdefer candidate.destroy();
-        const separator = try intern.intern("--");
-        for (definitions) |definition| {
-            if (!validName(definition.name)) return error.InvalidDefinition;
-            switch (definition.binding) {
-                .word, .primitive => if (definition.effect == null) return error.InvalidDefinition,
-                .value => if (definition.effect != null) return error.InvalidDefinition,
-            }
-            if (definition.effect) |effect| if (!effect.isValid(separator)) return error.InvalidDefinition;
-            _ = candidate.environment.bindDetailed(definition.name, .{
-                .binding = definition.binding,
-                .visibility = definition.visibility,
-                .home = name,
-                .effect = definition.effect,
-            }) catch |err| switch (err) {
+        var candidate = try self.createCandidate(name);
+        errdefer candidate.deinit();
+        var definitions_cursor = work.cursor(NativeDefinition, definitions);
+        while (try definitions_cursor.next()) |definition| {
+            const publication: env.ModulePublication, const definition_name = switch (definition) {
+                .primitive => |primitive| .{ .{
+                    .primitive = .{
+                        .callback = primitive.callback,
+                        .visibility = primitive.visibility,
+                        .effect = primitive.effect,
+                    },
+                }, primitive.name },
+                .word => |word| .{ .{
+                    .word = .{
+                        .body = word.body,
+                        .visibility = word.visibility,
+                        .effect = word.effect,
+                    },
+                }, word.name },
+                .value => |item| .{ .{
+                    .value = .{
+                        .item = item.item,
+                        .visibility = item.visibility,
+                    },
+                }, item.name },
+            };
+            _ = candidate.borrow().scope.publishModule(definition_name, publication, work) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
+                error.Ecl => return error.Ecl,
                 error.Frozen => unreachable,
             };
         }
-        return self.commit(candidate);
+        return self.commit(&candidate, work);
     }
-    pub fn beginLoading(self: *Registry, name: u32) error{OutOfMemory}!bool {
-        self.lock();
+
+    pub fn beginLoading(
+        self: *Registry,
+        name: u32,
+        work: poll.WorkContext,
+    ) poll.Error!?LoadingLease {
+        try self.lock(work);
         defer self.unlock();
-        const entry = try self.loading.getOrPut(self.allocator, name);
-        return !entry.found_existing;
+        var cursor = self.loading;
+        while (cursor) |node| : (cursor = node.next) {
+            try work.step();
+            if (node.name == name) return null;
+        }
+        const node = try self.allocator.create(LoadingNode);
+        node.* = .{ .registry = self, .name = name, .next = self.loading };
+        self.loading = node;
+        return .init(node);
     }
-    pub fn endLoading(self: *Registry, name: u32) void {
-        self.lock();
+
+    fn endLoading(self: *Registry, target: *LoadingNode, work: poll.WorkContext) poll.Error!void {
+        try self.lock(work);
         defer self.unlock();
-        std.debug.assert(self.loading.remove(name));
+        var link = &self.loading;
+        while (link.*) |node| {
+            try work.step();
+            if (node == target) {
+                link.* = node.next;
+                self.allocator.destroy(node);
+                return;
+            }
+            link = &node.next;
+        }
+        unreachable;
     }
 };
+
 test "registry replacement is monotone and old generations survive" {
     var registry = Registry.init(std.testing.allocator);
     defer registry.deinit();
-    const first = try registry.createCandidate(1);
-    try std.testing.expectEqual(@as(u64, 1), try registry.commit(first));
-    var old = registry.acquire(1).?;
+    const name = try intern.trustedNamespace("test-module");
+    var first = try registry.createCandidate(name);
+    defer first.deinit();
+    try std.testing.expectEqual(@as(u64, 1), try registry.commit(&first, .unlimited()));
+    var old = registry.acquire(intern.namespaceId(name)).?;
     defer old.deinit();
-    const second = try registry.createCandidate(1);
-    try std.testing.expectEqual(@as(u64, 2), try registry.commit(second));
+    var second = try registry.createCandidate(name);
+    defer second.deinit();
+    try std.testing.expectEqual(@as(u64, 2), try registry.commit(&second, .unlimited()));
     try std.testing.expectEqual(@as(u64, 1), old.generation.generation);
-    var current = registry.acquire(1).?;
+    var current = registry.acquire(intern.namespaceId(name)).?;
     defer current.deinit();
     try std.testing.expectEqual(@as(u64, 2), current.generation.generation);
 }

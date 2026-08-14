@@ -44,20 +44,18 @@ Verified in the checkout (2026-08-12):
   error dicts. Its internals are disqualified for v1 by
   ARCHITECTURE.md's disposition table (span-on-Value, boxed `Arc<[Value]>`
   lists, no leaves, no interning, RwLock-per-lookup envs, eager traces).
-- The real Zig interpreter is now implemented through M5 in the working
+- The real Zig interpreter is now implemented through M6 in the working
   tree. Its closed data plane includes pervasive leaf kernels,
   sequence/shape/order/group operations, immutable dict updates, Unicode
   text kernels, kind reflection, cycling/count-vector sequence operations,
   the awk-floor transcendentals, exact whole-value `cmp`, and the separate
-  frozen-Rust differential job. M6 combinators/recognition is the next unimplemented
-  seam; M7 concurrency, M8 line editing, and M9 stdlib remain future
+  frozen-Rust differential job, isolated and inline combinators, guarded
+  phrase recognition, and the documented embedded target-language prelude.
+  M7 concurrency, M8 line editing, and M9 stdlib remain future
   milestones.
-- The first derived core words are M5 bootstrap scaffolding:
-  `src/prelude.zig` constructs ordinary ecl bodies for `wrap` and `pair`,
-  and `src/kernel_order.zig` does the same for `sort`. They execute and
-  reflect as `.word` bindings rather than primitives, but they have no ecl
-  source unit or source spans. M6 replaces every such host-assembled body
-  with the embedded target-language prelude described below.
+- All derived core words now live in `src/prelude.ecl`; the loader embeds and
+  evaluates that ordinary source with retained provenance before freezing the
+  core. Every definition is a documented `### def <name>` block.
 
 ## Key Challenges
 
@@ -72,10 +70,11 @@ Verified in the checkout (2026-08-12):
   Mitigations: pin the toolchain (`build.zig.zon` + CI), keep the http
   backend decision open until its milestone (see Open Questions).
 - **Idiom recognition soundness under late binding** — the guard
-  discipline (resolve at combinator entry, snapshot scoped to the guard,
-  cache cells never resolutions) is specified (d.23) but easy to erode
-  in code. The differential harness is the enforcement mechanism, which
-  is why it lands in the same milestone as recognition.
+  discipline (match at each application boundary, resolve every referenced
+  word in the generic path's scope/home, require the expected core primitive
+  identities, and retain no resolution cache) is specified (d.23) but easy
+  to erode in code. The differential harness is the enforcement mechanism,
+  which is why it lands in the same milestone as recognition.
 - **Scheduler correctness** — wake tokens (no double-enqueue),
   kill-on-arrival, quiescence at scope close, kernel chunk polls. The
   adversarial review found races in the *paper* design; the code must
@@ -216,7 +215,8 @@ The soul test passes end-to-end: `ecl '3 4 +'` prints `7`. Implements
 ARCHITECTURE.md §Frame machine and §Dispatch: unit struct (frame stack,
 data stack, env ref, control block with fuel counter and cancel flag —
 present now, polled even before the scheduler exists), the single
-switch-dispatch loop with ip/code/env in locals, ≤48-byte frames,
+switch-dispatch loop with ip/code/env in locals, ≤80-byte frames (raised from
+48 for typed application modes and immutable continuation drivers),
 base-index substack isolation, boundary frames with O(1) truncation,
 TCO as frame overwrite, lazy traces built only at unwind, and error
 dicts per d.19. Primitives are core-env bindings with fn-pointer
@@ -255,21 +255,24 @@ resolution, core frozen after prelude install. The d.18 module system:
 qualified access, `defp`/`setp` (top-level error), registry as
 name → atomically swapped `{env, generation}` with commit-after-success
 and **whole-body generation pinning**, plus the multi-writer registry
-swap protocol. Reflection: `body`, `words`, `which`, `see`. **New over
+swap protocol. Reflection: `body`, `doc`, `words`, `which`, `see`. **New over
 the skeleton**: `load` (file as one unit) and `ECL_PATH` auto-load on
 unregistered `use`, and the native-builtin-module mechanism (modules
 pre-registered at startup whose bindings are primitive-backed — the
 substrate M9 needs). **New over the skeleton (d.9, re-ruled
-2026-08-12)**: module `def`/`defp` are 3-ary — `( body ) ( a b -- c )
-'name def` — with the effect quotation shape-validated at registration
-(exactly one `--`, word elements), stored in the cell's effect slot,
+2026-08-12, supplemented after M6)**: module `def`/`defp` consume a body
+plus a unified annotation whose effect portion is mandatory —
+`( body ) ( a b -- c : "Documentation." ) 'name def`. The annotation is
+shape-validated before registration and its effect/doc portions are stored in
+the binding snapshot,
 enforced dynamically through the d.14 contract machinery when execution
 enters a word from outside its home module, and displayed by
 `see`/`which`. Same-home calls are not bracketed, so internal and tail
 recursion stay constant-space under the pinned module activation; the
 post-v1 static checker owns internal word-to-word verification. A module
-def without a declaration is a registration error, and top-level `def`
-stays 2-ary. The d.18 shadow notice: `use`
+def without an effect is a registration error. Top-level `def` permits no
+annotation, effect only, documentation only, or both; its effects are
+reflective metadata rather than dynamic call frames. The d.18 shadow notice: `use`
 prints one stderr line per session binding that shadows an incoming
 export (informational; `use` succeeds). The skeleton's d.18 test
 battery is ported and green (its module fixtures gain declarations).
@@ -353,7 +356,21 @@ installed from embedded ecl source ([E] words including `filter`,
 `partition`, `any?`, `all?`, `both`, `bi2`, `case`, `unless`,
 `signum`, `clamp`, `empty?`, `append`, `pack` (literal-count effect
 inference per d.9), `zip`, `min-of`, `max-of`,
-`at-or`, `pairs`; `body` returns the real list).
+`at-or`, `pairs`; `body` returns the real list); and pure reader
+reification through `parse` [P].
+
+**Conditional clauses use one flat, exhaustive shape.** `cond` consumes a
+nonempty `2n+1` list of quotations: alternating test/action slots followed
+by a mandatory else quotation. It prevalidates the entire list before
+running a test; each test must leave exactly one 0/1 boolean, the first true
+test selects its adjacent action, and `[()] cond` is the no-op-else case.
+`case` uses the parallel shape `( subject [key action ... else] -- …)`, but
+its left slots are inert Values rather than predicate quotations. It
+prevalidates every action/else quotation, compares keys left-to-right with
+whole-value `match`, permits duplicate keys with the first match winning,
+and executes exactly the selected action or else after consuming the
+subject and clause list. Word-, quotation-, list-, dict-, and numeric-valued
+keys are never resolved or called merely because they occupy a key slot.
 
 **The target-language prelude is authoritative.** `src/prelude.ecl` is
 embedded in the binary at build time; `src/prelude.zig` is only its
@@ -370,18 +387,63 @@ is installed. Calls and `body` therefore see ordinary late-bound ecl words,
 and failures in their bodies retain the embedded `prelude.ecl` provenance.
 The loader never consults the filesystem or `ECL_PATH`. Parse, evaluation,
 or stack-balance failure is an interpreter bootstrap defect, exercised by
-the build/test suite (including allocation-failure coverage), rather than a
-recoverable user-program load error.
+the build/test suite (including the named exhaustive `test-oom` gate), rather
+than a recoverable user-program load error.
 
-**Idiom recognition** at combinator
-entry: the closed pattern table that IS the kernel registry, resolution-
-identity guards, snapshot semantics scoped to the guard (d.23), float
-folds strictly sequential on every path. **The differential harness**
-(named v1 deliverable, d.23) runs in CI: every kernel and idiom entry
-against the generic frame-machine path for value equality,
-representation parity (brackets), error kind/payload equality, and
-bit-identical floats. The skeleton's full 44-test suite is ported and
-green against the Zig binary.
+**Definition metadata is one ordinary annotation.** The supplementary M6
+patch unifies effects and documentation as `(before -- after : "doc")`
+quotation data immediately beneath the name. A direct top-level `--` or `:`
+recognizes a candidate; nested markers and `'--`/`':` remain inert. Validation
+is complete before binding publication, including allocation and bounded
+polling. Top-level definitions may carry either portion independently; module
+`def`/`defp` still require an effect and may add documentation. `set`/`setp`
+remain data-only. The immutable binding snapshot owns body, effect, and doc so
+replacement clears omitted metadata while old leases remain valid. `doc`
+uses normal qualified/shadowing resolution, and `see` emits one canonical
+re-readable combined annotation. The exact names `--` and `:` are reserved on
+every namespace-introduction path (including locals and native registration)
+without preventing their use as ordinary word values.
+
+Every prelude definition begins with the exact section header
+`### def <name>`, followed by attached comments, its body, documented annotation, matching quoted
+name, and `def`. Fixed successful effects are declared; quotation- or
+count-dependent definitions use documentation-only annotations. A dedicated
+build source audit scans comments, quotations, and multiline strings to
+enforce this layout without turning source substrings into runtime tests.
+
+Exhaustive failure injection is stratified by cost. Focused low-level probes
+remain in `zig build test`; initialized-Session paths share one ReleaseSafe
+probe under `zig build test-oom`, preserving kernel, primitive, reflection,
+loader, module, and metadata-publication coverage without independently
+replaying the embedded prelude for each surface.
+
+**`parse` is the pure reader boundary.** `( string -- q )` UTF-8-encodes the
+character vector, invokes the ordinary reader with source name `<parse>`,
+and returns all top-level forms in order as one unevaluated generic
+quotation. The returned root and nested span tables move into the Session
+provenance archive, so a later `call` reports `<parse>`. Non-string input is
+`'type`; malformed and incomplete source are `'parse`; cancellation and OOM
+leave no partial result. Encoding, lexer/parser scans, binder lowering, and
+result/span materialization poll inside their actual traversals. This adds
+no host capability: `slurp`, `spit`, `getenv`, and the source-defined
+`lines` remain absent until M9.
+
+**Idiom recognition** uses one context-parameterized exact-phrase matcher,
+not a combinator-only switch plus special cases. Phrase shape may be
+arbitrarily longer than one word, while the initial closed registry covers
+the direct, `each`, `each2`, `fold`, and `scan` contexts; direct application
+of `(dup grade at)` is the motivating source-body case. At application time
+every referenced word resolves in exactly the scope/home the generic path
+would use and must be the expected core primitive identity. The matcher
+retains no cache: any structural mismatch, shadow, redefinition, or
+ineligible context falls through to the untouched late-bound frame-machine
+path. Float folds remain strictly sequential on every path (d.23).
+**The differential harness** (named v1 deliverable, d.23) runs in CI: every
+kernel and idiom entry against the generic frame-machine path for value
+equality, representation parity (brackets), complete error-dict equality,
+and bit-identical floats, with a required fast-path hit so fallback cannot
+pass vacuously. The skeleton's full 44-test suite is ported and green
+against the Zig binary.
 
 **Why this is a safe pause point**: ecl is feature-complete except
 concurrency and stdlib; the harness guards everything behind it, and the
@@ -456,12 +518,17 @@ touched.
 **Definition of Done**:
 Three stdlib modules ship inside the binary (embedded sources / native
 builtins registered lazily via the M4 mechanism, so the single-binary
-story holds; `ECL_PATH` remains for user modules):
+story holds; `ECL_PATH` remains for user modules). The same milestone owns
+the explicit host scripting words needed by that layer:
 - **`str`** — ecl source: `upper lower trim` (ASCII per d.15) and
   friends; the first real embedded-module consumer.
-- **`getenv`** [P] (gap scan 2026-08-12): environment variable as a
-  string; unset errors per absence-is-absence, with `attempt`/`or-else`
-  as the defaulting idiom. Lands with this milestone's IO work.
+- **Host scripting words** — `slurp` [P] `( path -- string )` reads one
+  UTF-8 file, `spit` [P] `( string path -- )` writes one file, and `getenv`
+  [P] `( name -- string )` reads an environment variable. Unset variables
+  error per absence-is-absence, with `attempt`/`or-else` as the defaulting
+  idiom. `lines` [E] `( path -- list )` lands here, not M6, as the ordinary
+  source body `(slurp "\n" split)`. These are explicit capabilities and do
+  not alter the pure M6 `parse` contract.
 - **`json`** — native: `json.parse` (string → value) and `json.emit`
   (value → string) per RFC 8259; integral in-range numbers → int64,
   else f64; objects → dicts (keys as strings), arrays → lists;
@@ -474,7 +541,8 @@ story holds; `ECL_PATH` remains for user modules):
   runs on the unit's worker thread (v1-acceptable per ARCHITECTURE.md
   §Scheduler). Backend per the resolved Open Question.
 
-**Why this is a safe pause point**: Modules are additive; core
+**Why this is a safe pause point**: Modules and the three explicit host
+scripting primitives are additive; evaluator and value semantics are
 untouched.
 
 **Unlocks**: Real scripting workloads (fetch → parse → array-crunch →
@@ -491,9 +559,9 @@ emit) — the awk/sed/jq positioning made literal.
 The terminal acceptance suite below is implemented as a CI job
 (fixtures + expect scripts where interactive) and green. README rewritten
 around the real binary (install, tour, module guide). The d.23 line
-budget is audited by a CI check (the re-derived per-component budget:
-core ≤ 9,500 excluding kernels, stdlib, and tests; kernels ≤ ~5k;
-stdlib ≤ ~2k). Snapshot retention is bounded (the M7 reclamation
+budget is audited by a CI check (the recalibrated per-component budget:
+classified production Zig ≤ 22,000 including kernels and source tooling but
+excluding tests and target-language ECL source; kernels ≤ 5,500). Snapshot retention is bounded (the M7 reclamation
 obligation): a soak fixture that defines and re-registers in a loop
 shows stable memory. A `v1.0` tag exists.
 
@@ -857,10 +925,10 @@ script in CI.
   - **Traces to**: Milestone 9 — embedded stdlib registration (mechanism Milestone 4).
 
 - **DoD-25 — line budget**
-  - **Assert**: core (excluding kernels, stdlib, and tests) ≤ 9,500
+  - **Assert**: classified production Zig (including kernels and source tooling,
+    excluding tests and all target-language ECL source) ≤ 22,000
     lines and every component inside its ARCHITECTURE.md row; kernels
-    ≤ 5,500; stdlib ≤ 2,200 (10% grace over the re-derived d.23
-    budget). Core excludes `test` blocks wherever they appear and
+    ≤ 5,500. Core excludes `test` blocks wherever they appear and
     excludes test-only sources (`*_test.zig`, `testgen.zig`).
   - **Verify by** `cmd`: `zig build source-audit` (the dedicated audit in
     `src/source_audit.zig` prints the split and fails the build when a
@@ -873,16 +941,18 @@ script in CI.
   - **Assert**: a module `def` without an effect declaration fails
     registration; a declared effect is enforced dynamically when a call
     enters from outside its home module; same-home calls are unbracketed;
-    the declaration is visible via `see`.
+    optional documentation shares the same annotation and is visible via
+    `doc`/`see`.
   - **Verify by** `cmd`: `ecl -e "'m ( (dup +) 'bad def ) module"`;
     `ecl -e "'m ( (dup +) ( a -- b c ) 'lies def ) module 1 m.lies"`;
-    `ecl -e "'m ( (dup +) ( a -- b ) 'dbl def ) module 'm.dbl see"`;
+    `ecl -e "'m ( (dup +) ( a -- b : \"Double.\" ) 'dbl def ) module 'm.dbl see 'm.dbl doc"`;
     and `zig build test`, whose
     `module: effect shape cross-home contract and same-home TCO` fixture compares
     20- and 20,000-deep module countdowns.
   - **Expected**: exit ≠ 0 with `'kind 'domain` (missing declaration);
     exit ≠ 0 with `'kind 'contract` (observed `( a -- b )` ≠ declared
-    `( a -- b c )`); `see` output includes `( a -- b )`; both countdown
+    `( a -- b c )`); `see` output includes
+    `(a -- b : "Double.")` and `doc` returns `"Double."`; both countdown
     depths have the same bounded maximum frame count, proving no
     per-activation same-home contract checkpoint.
   - **Traces to**: Milestone 4 — module `def`/`defp` declaration
@@ -890,14 +960,15 @@ script in CI.
 
 - **DoD-27 — embedded target-language prelude**
   - **Assert**: the shipped [E] core vocabulary loads without filesystem
-    support, remains reflectable as ordinary ecl bodies, and includes the
-    literal-count `pack` behavior.
+    support, remains reflectable as ordinary ecl bodies, exposes nonempty
+    documentation for every word, follows the audited `### def <name>` block
+    convention, and includes the literal-count `pack` behavior.
   - **Verify by** `cmd`: the acceptance fixture copies only the release
     `ecl` binary into an empty temporary directory and runs
     `env -u ECL_PATH ./ecl -e "'wrap body 'pair body 'sort body 'pack body 1 2 3 4 4 pack"`;
     `zig build test` additionally exercises the embedded source loader,
-    empty-stack postcondition, retained provenance, and allocation
-    failures.
+    empty-stack postcondition, and retained provenance; `zig build test-oom`
+    exhausts allocation failures across the initialized runtime surfaces.
   - **Expected**:
     `(() cons) (() cons cons) (dup grade at) (() swap (cons) times) [1 2 3 4]`;
     tests exit 0 without reading an external prelude file.

@@ -7,6 +7,7 @@ const io = std.testing.io;
 const Case = struct {
     word: []const u8,
     source: []const u8,
+    rust_source: ?[]const u8 = null,
 };
 
 // Zig-only post-freeze vocabulary is intentionally outside this differential:
@@ -14,14 +15,17 @@ const Case = struct {
 // list put, count-vector where, and cycling take beyond the shared overlap.
 
 const shared_words = [_][]const u8{
-    "str",   "+",      "-",       "*",     "/",     "div",   "mod",
-    "pow",   "min",    "max",     "=",     "<>",    "<",     ">",
-    "<=",    ">=",     "and",     "or",    "neg",   "abs",   "sqrt",
-    "floor", "ceil",   "round",   "not",   "len",   "shape", "first",
-    "rest",  "take",   "drop",    "at",    "where", "in",    "find",
-    "raze",  "cat",    "reverse", "range", "grade", "sort",  "distinct",
-    "keys",  "vals",   "put",     "del",   "merge", "has?",  "split",
-    "join",  "format",
+    "str",   "+",      "-",        "*",       "/",     "div",   "mod",
+    "pow",   "min",    "max",      "=",       "<>",    "<",     ">",
+    "<=",    ">=",     "and",      "or",      "neg",   "abs",   "sqrt",
+    "floor", "ceil",   "round",    "not",     "len",   "shape", "first",
+    "rest",  "take",   "drop",     "at",      "where", "in",    "find",
+    "raze",  "cat",    "reverse",  "range",   "grade", "sort",  "distinct",
+    "keys",  "vals",   "put",      "del",     "merge", "has?",  "split",
+    "join",  "format", "parse",    "each",    "each2", "for",   "fold",
+    "scan",  "nip",    "when",     "wrap",    "pair",  "last",  "sum",
+    "prod",  "mean",   "print",    "inspect", "keep",  "bi",    "tri",
+    "fail",  "ok?",    "or-raise", "or-else",
 };
 
 const cases = [_]Case{
@@ -78,9 +82,32 @@ const cases = [_]Case{
     .{ .word = "split", .source = "\"a—b—\" \"—\" split first" },
     .{ .word = "join", .source = "[\"a\" 2] \"-\" join" },
     .{ .word = "format", .source = "[3.14 2] \"pi={} n={}\" format" },
+    .{ .word = "parse", .source = "\"42\" parse first" },
+    .{ .word = "each", .source = "[1 2 3] (dup *) each" },
+    .{ .word = "each2", .source = "[1 2] [3 4] (+) each2" },
+    .{ .word = "for", .source = "[1 2] (pp) for" },
+    .{ .word = "fold", .source = "[1 2 3] 0 (+) fold" },
+    .{ .word = "scan", .source = "[1 2 3] 0 (+) scan" },
+    .{ .word = "nip", .source = "1 2 nip" },
+    .{ .word = "when", .source = "1 (7) when" },
+    .{ .word = "wrap", .source = "1 wrap" },
+    .{ .word = "pair", .source = "1 2 pair" },
+    .{ .word = "last", .source = "[1 2 3] last" },
+    .{ .word = "sum", .source = "[1 2 3] sum" },
+    .{ .word = "prod", .source = "[1 2 3] prod" },
+    .{ .word = "mean", .source = "[1 2 3] mean" },
+    .{ .word = "print", .source = "\"hi\" print" },
+    .{ .word = "inspect", .source = "7 inspect" },
+    .{ .word = "keep", .source = "2 (1 +) keep" },
+    .{ .word = "bi", .source = "2 (1 +) (3 *) bi" },
+    .{ .word = "tri", .source = "2 (1 +) (3 *) (4 -) tri" },
+    .{ .word = "fail", .source = "\"bad\" fail" },
+    .{ .word = "ok?", .source = "(2 3 +) attempt ok?" },
+    .{ .word = "or-raise", .source = "(2 3 +) attempt or-raise", .rust_source = "(2 3 +) attempt ok!" },
+    .{ .word = "or-else", .source = "(2 3 +) attempt 9 or-else" },
 };
 
-test "oracle: every shared M5 word has a differential case" {
+test "oracle: every shared M5 and M6 word has a differential case" {
     try std.testing.expectEqual(shared_words.len, cases.len);
     for (shared_words) |word| {
         var count: usize = 0;
@@ -89,12 +116,12 @@ test "oracle: every shared M5 word has a differential case" {
     }
 }
 
-test "oracle: Zig and Rust agree on shared M5 success and error semantics" {
+test "oracle: Zig and Rust agree on shared M5 and M6 semantics" {
     for (cases) |case| {
         const zig_result = try run(build_options.zig_exe, case.source);
         defer allocator.free(zig_result.stdout);
         defer allocator.free(zig_result.stderr);
-        const rust_result = try run(build_options.rust_exe, case.source);
+        const rust_result = try run(build_options.rust_exe, case.rust_source orelse case.source);
         defer allocator.free(rust_result.stdout);
         defer allocator.free(rust_result.stderr);
         const zig_exit = try exitCode(zig_result.term);

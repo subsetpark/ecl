@@ -8,6 +8,8 @@ const list = @import("list.zig");
 const dict = @import("dict.zig");
 const lexer = @import("lexer.zig");
 const binder = @import("binder.zig");
+const poll = @import("poll.zig");
+const storage = @import("kernel_storage.zig");
 
 pub const Value = value.Value;
 pub const Header = value.Header;
@@ -15,8 +17,12 @@ pub const Span = lexer.Span;
 pub const Diag = lexer.Diag;
 
 pub const Error = error{ OutOfMemory, Parse };
-const InternalError = Error || error{Incomplete};
+const InternalError = Error || error{ Incomplete, Ecl };
 const max_nesting_depth = 10_000;
+const FormList = poll.ChunkList(binder.SpannedValue);
+const NameList = poll.ChunkList(binder.Name);
+const CodepointList = poll.ChunkList(u32);
+const SpanList = poll.ChunkList(Span);
 
 pub const Incomplete = struct {
     message: []const u8,
@@ -26,19 +32,41 @@ pub const Incomplete = struct {
 /// Provenance is keyed by the identity of reader-built code lists. Runtime-
 /// built or CoW-copied lists are naturally absent (decision 23).
 pub const SpanTable = struct {
-    lists: std.AutoHashMapUnmanaged(*Header, []Span) = .empty,
+    const bucket_count = 4096;
+    pub const Entry = struct {
+        header: *Header,
+        spans: []Span,
+        next_bucket: ?*Entry = null,
+    };
+    pub const EntryList = poll.ChunkList(Entry);
+    entries: EntryList,
+    buckets: []?*Entry = &.{},
     top: []Span = &.{},
 
-    pub fn forList(self: *const SpanTable, header: *Header) ?[]const Span {
-        return self.lists.get(header);
+    pub fn init(allocator: std.mem.Allocator) SpanTable {
+        return .{ .entries = .init(allocator) };
+    }
+    pub fn forList(
+        self: *const SpanTable,
+        header: *Header,
+        work: poll.WorkContext,
+    ) poll.Error!?[]const Span {
+        if (self.buckets.len == 0) return null;
+        var entry = self.buckets[bucket(header)];
+        while (entry) |current| : (entry = current.next_bucket) {
+            try work.step();
+            if (current.header == header) return current.spans;
+        }
+        return null;
     }
 
     pub fn deinit(self: *SpanTable, allocator: std.mem.Allocator) void {
-        var iterator = self.lists.valueIterator();
-        while (iterator.next()) |spans| if (spans.*.len > 0) allocator.free(spans.*);
-        self.lists.deinit(allocator);
+        var entries = self.entries.iterator();
+        while (entries.next()) |entry| if (entry.spans.len > 0) allocator.free(entry.spans);
+        self.entries.deinit();
+        if (self.buckets.len > 0) allocator.free(self.buckets);
         if (self.top.len > 0) allocator.free(self.top);
-        self.* = .{};
+        self.* = .init(allocator);
     }
 
     fn put(
@@ -46,11 +74,13 @@ pub const SpanTable = struct {
         allocator: std.mem.Allocator,
         header: *Header,
         source: []const Span,
-    ) error{OutOfMemory}!void {
-        std.debug.assert(self.lists.get(header) == null);
-        const owned: []Span = if (source.len == 0) &.{} else try allocator.dupe(Span, source);
+        work: poll.WorkContext,
+    ) (error{OutOfMemory} || error{Ecl})!void {
+        const owned: []Span = if (source.len == 0) &.{} else try allocator.alloc(Span, source.len);
         errdefer if (owned.len > 0) allocator.free(owned);
-        try self.lists.put(allocator, header, owned);
+        var indices = work.indices(0, source.len);
+        while (try indices.next()) |index| owned[index] = source[index];
+        try self.insert(header, owned, work);
     }
 
     fn putUniform(
@@ -58,16 +88,52 @@ pub const SpanTable = struct {
         allocator: std.mem.Allocator,
         header: *Header,
         span: Span,
-    ) error{OutOfMemory}!void {
-        if (self.lists.get(header) != null) return;
-        const count: usize = @intCast(header.len);
+        work: poll.WorkContext,
+    ) (error{OutOfMemory} || error{Ecl})!void {
+        const count: usize = @intCast(header.length());
         const owned: []Span = if (count == 0) &.{} else try allocator.alloc(Span, count);
         errdefer if (owned.len > 0) allocator.free(owned);
-        @memset(owned, span);
-        try self.lists.put(allocator, header, owned);
+        var indices = work.indices(0, owned.len);
+        while (try indices.next()) |index| owned[index] = span;
+        try self.insert(header, owned, work);
+    }
+
+    pub fn putOwned(
+        self: *SpanTable,
+        header: *Header,
+        owned: []Span,
+        work: poll.WorkContext,
+    ) poll.Error!void {
+        try self.insert(header, owned, work);
+    }
+    fn insert(
+        self: *SpanTable,
+        header: *Header,
+        owned: []Span,
+        work: poll.WorkContext,
+    ) poll.Error!void {
+        if (self.buckets.len == 0) {
+            self.buckets = try self.entries.allocator.alloc(?*Entry, bucket_count);
+            errdefer {
+                self.entries.allocator.free(self.buckets);
+                self.buckets = &.{};
+            }
+            var indices = work.indices(0, self.buckets.len);
+            while (try indices.next()) |index| self.buckets[index] = null;
+        }
+        const index = bucket(header);
+        const entry = try self.entries.appendPtr(.{
+            .header = header,
+            .spans = owned,
+            .next_bucket = self.buckets[index],
+        });
+        self.buckets[index] = entry;
+    }
+    fn bucket(header: *const Header) usize {
+        const address = @intFromPtr(header) >> 4;
+        return address & (bucket_count - 1);
     }
 };
-
 /// M3 owns this value while executing its code so list identity remains valid
 /// for lazy trace construction.
 pub const Parsed = struct {
@@ -98,32 +164,50 @@ pub fn read(
     source: []const u8,
     diag: *Diag,
 ) Error!ReadResult {
+    return readPolling(allocator, source_name, source, diag, .unlimited()) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Parse => error.Parse,
+        error.Ecl => unreachable,
+    };
+}
+
+pub fn readPolling(
+    allocator: std.mem.Allocator,
+    source_name: []const u8,
+    source: []const u8,
+    diag: *Diag,
+    work: poll.WorkContext,
+) (Error || error{Ecl})!ReadResult {
     diag.* = .{};
-    if (!std.unicode.utf8ValidateSlice(source)) {
+    if (!try validUtf8Polling(source, work)) {
         diag.set(.{}, "source is not valid UTF-8");
         return error.Parse;
     }
 
-    var parser = Parser.init(allocator, source, diag);
+    var parser = Parser.init(allocator, source, diag, work);
     defer parser.spans.deinit(allocator);
-    var forms: std.ArrayList(binder.SpannedValue) = .empty;
-    defer forms.deinit(allocator);
+    var forms = FormList.init(allocator);
+    defer forms.deinit();
     var forms_owned = true;
-    defer if (forms_owned) releaseForms(allocator, forms.items);
+    defer if (forms_owned) releaseFormList(allocator, &forms);
 
     parser.program(&forms) catch |err| switch (err) {
         error.Incomplete => return .{ .incomplete = parser.incomplete.? },
         error.Parse => return error.Parse,
         error.OutOfMemory => return error.OutOfMemory,
+        error.Ecl => return error.Ecl,
     };
 
-    const values = try allocator.alloc(Value, forms.items.len);
+    const values = try allocator.alloc(Value, forms.count);
     errdefer allocator.free(values);
-    const top = try allocator.alloc(Span, forms.items.len);
+    const top = try allocator.alloc(Span, forms.count);
     errdefer allocator.free(top);
     const owned_source_name = try allocator.dupe(u8, source_name);
     errdefer allocator.free(owned_source_name);
-    for (forms.items, 0..) |form, index| {
+    var iterator = forms.iterator();
+    var index: usize = 0;
+    while (iterator.next()) |form| : (index += 1) {
+        try work.step();
         values[index] = form.value;
         top[index] = form.span;
     }
@@ -131,7 +215,7 @@ pub fn read(
     forms_owned = false;
     parser.spans.top = top;
     const spans = parser.spans;
-    parser.spans = .{};
+    parser.spans = .init(allocator);
     return .{ .complete = .{
         .allocator = allocator,
         .forms = values,
@@ -165,14 +249,23 @@ const ContainerKind = enum {
 const Context = struct {
     kind: ContainerKind,
     start: Span,
-    body: std.ArrayList(binder.SpannedValue) = .empty,
-    names: std.ArrayList(binder.Name) = .empty,
+    body: FormList,
+    names: NameList,
     has_binder: bool = false,
 
+    fn init(allocator: std.mem.Allocator, kind: ContainerKind, start: Span) Context {
+        return .{
+            .kind = kind,
+            .start = start,
+            .body = FormList.init(allocator),
+            .names = NameList.init(allocator),
+        };
+    }
+
     fn deinit(self: *Context, allocator: std.mem.Allocator) void {
-        releaseForms(allocator, self.body.items);
-        self.body.deinit(allocator);
-        self.names.deinit(allocator);
+        releaseFormList(allocator, &self.body);
+        self.body.deinit();
+        self.names.deinit();
         self.* = undefined;
     }
 };
@@ -181,21 +274,22 @@ const Parser = struct {
     allocator: std.mem.Allocator,
     cursor: lexer.Cursor,
     diag: *Diag,
-    spans: SpanTable = .{},
+    spans: SpanTable,
     incomplete: ?Incomplete = null,
+    work: poll.WorkContext,
 
-    fn init(allocator: std.mem.Allocator, source: []const u8, diag: *Diag) Parser {
-        return .{ .allocator = allocator, .cursor = .init(source), .diag = diag };
+    fn init(allocator: std.mem.Allocator, source: []const u8, diag: *Diag, work: poll.WorkContext) Parser {
+        return .{ .allocator = allocator, .cursor = .init(source), .diag = diag, .spans = .init(allocator), .work = work };
     }
 
-    fn program(self: *Parser, output: *std.ArrayList(binder.SpannedValue)) InternalError!void {
+    fn program(self: *Parser, output: *FormList) InternalError!void {
         var contexts: std.ArrayList(Context) = .empty;
         defer {
             for (contexts.items) |*context| context.deinit(self.allocator);
             contexts.deinit(self.allocator);
         }
         while (true) {
-            self.cursor.skipIgnored();
+            try self.cursor.skipIgnoredPolling(self.work);
             const next = self.cursor.peek() orelse {
                 if (contexts.items.len == 0) return;
                 const unfinished = contexts.items[contexts.items.len - 1];
@@ -221,7 +315,7 @@ const Parser = struct {
 
     fn scalarForm(
         self: *Parser,
-        output: *std.ArrayList(binder.SpannedValue),
+        output: *FormList,
     ) InternalError!void {
         const next = self.cursor.peek().?;
         switch (next) {
@@ -247,19 +341,20 @@ const Parser = struct {
             "form nesting too deep",
         );
         const start = self.cursor.span();
-        const open = self.cursor.bump().?;
-        var context = Context{
-            .kind = switch (open) {
+        const open = (try self.cursor.bumpPolling(self.work)).?;
+        var context = Context.init(
+            self.allocator,
+            switch (open) {
                 '(' => .paren,
                 '[' => .square,
                 '{' => .dict,
                 else => unreachable,
             },
-            .start = start,
-        };
+            start,
+        );
         errdefer context.deinit(self.allocator);
         if (context.kind != .dict) {
-            self.cursor.skipIgnored();
+            try self.cursor.skipIgnoredPolling(self.work);
             if (self.cursor.peek() == '|') {
                 context.has_binder = true;
                 try self.parseBinderNames(&context.names);
@@ -271,7 +366,7 @@ const Parser = struct {
     fn closeContext(
         self: *Parser,
         contexts: *std.ArrayList(Context),
-        output: *std.ArrayList(binder.SpannedValue),
+        output: *FormList,
     ) InternalError!void {
         const actual = self.cursor.peek().?;
         if (contexts.items.len == 0) return self.failFmt(
@@ -291,7 +386,7 @@ const Parser = struct {
                 .{ active.kind.open(), active.kind.close(), actual },
             );
         }
-        _ = self.cursor.bump();
+        _ = try self.cursor.bumpPolling(self.work);
         var context = contexts.pop().?;
         defer context.deinit(self.allocator);
         const destination = if (contexts.items.len == 0)
@@ -307,20 +402,25 @@ const Parser = struct {
     fn finishList(
         self: *Parser,
         context: *Context,
-        output: *std.ArrayList(binder.SpannedValue),
+        output: *FormList,
     ) InternalError!void {
         var lowered: ?[]binder.SpannedValue = null;
         defer if (lowered) |forms| {
             releaseForms(self.allocator, forms);
             self.allocator.free(forms);
         };
+        const body = try context.body.toOwnedSlice(self.work);
+        defer self.allocator.free(body);
         const elements = if (context.has_binder) blk: {
-            const result = try binder.lower(
+            const names = try context.names.toOwnedSlice(self.work);
+            defer self.allocator.free(names);
+            const result = try binder.lowerPolling(
                 self.allocator,
-                context.names.items,
-                context.body.items,
+                names,
+                body,
                 context.start,
                 self.diag,
+                self.work,
             );
             lowered = result;
             for (result) |form_item| switch (form_item.value) {
@@ -328,11 +428,12 @@ const Parser = struct {
                     self.allocator,
                     header,
                     context.start,
+                    self.work,
                 ),
                 .int, .float, .char, .symbol, .word, .dict => {},
             };
             break :blk result;
-        } else context.body.items;
+        } else body;
 
         const collection = try self.buildList(elements, true);
         try appendOwned(self.allocator, output, .{
@@ -341,16 +442,16 @@ const Parser = struct {
         });
     }
 
-    fn parseBinderNames(self: *Parser, names: *std.ArrayList(binder.Name)) InternalError!void {
+    fn parseBinderNames(self: *Parser, names: *NameList) InternalError!void {
         const start = self.cursor.span();
-        _ = self.cursor.bump();
+        _ = try self.cursor.bumpPolling(self.work);
         while (true) {
-            self.cursor.skipIgnored();
+            try self.cursor.skipIgnoredPolling(self.work);
             const next = self.cursor.peek() orelse
                 return self.more("unclosed binder; expected `|`", start);
             if (next == '|') {
-                _ = self.cursor.bump();
-                if (names.items.len == 0) return self.fail(
+                _ = try self.cursor.bumpPolling(self.work);
+                if (names.count == 0) return self.fail(
                     start,
                     "a binder must contain at least one name",
                 );
@@ -364,32 +465,38 @@ const Parser = struct {
                 "binder names must be unquoted, unqualified symbols",
             );
             const name_span = self.cursor.span();
-            const token = self.cursor.takeToken();
+            const token = try self.cursor.takeTokenPolling(self.work);
             if (token.len == 0) return self.fail(
                 name_span,
                 "binder names must be unquoted, unqualified symbols",
             );
-            try names.append(self.allocator, .{ .bytes = token, .span = name_span });
+            try names.append(.{ .bytes = token, .span = name_span });
         }
     }
 
     fn finishDict(
         self: *Parser,
         context: *Context,
-        output: *std.ArrayList(binder.SpannedValue),
+        output: *FormList,
     ) InternalError!void {
-        if (context.body.items.len % 2 != 0) return self.fail(
-            context.body.items[context.body.items.len - 1].span,
+        const body = try context.body.toOwnedSlice(self.work);
+        defer self.allocator.free(body);
+        if (body.len % 2 != 0) return self.fail(
+            body[body.len - 1].span,
             "dictionary literal key is missing its value",
         );
-        const pairs = try self.allocator.alloc(dict.Pair, context.body.items.len / 2);
+        const pairs = try self.allocator.alloc(dict.Pair, body.len / 2);
         defer self.allocator.free(pairs);
-        for (pairs, 0..) |*pair, index| pair.* = .{
-            context.body.items[index * 2].value,
-            context.body.items[index * 2 + 1].value,
-        };
-        const dictionary = dict.fromPairs(self.allocator, pairs) catch |err| switch (err) {
+        for (pairs, 0..) |*pair, index| {
+            try self.work.step();
+            pair.* = .{
+                body[index * 2].value,
+                body[index * 2 + 1].value,
+            };
+        }
+        const dictionary = storage.fromPairs(self.allocator, pairs, self.constructorPoller()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Ecl => return error.Ecl,
             error.DuplicateKey => return self.fail(
                 context.start,
                 "dictionary literal contains a duplicate key",
@@ -398,30 +505,34 @@ const Parser = struct {
         try appendOwned(self.allocator, output, .{ .value = dictionary, .span = context.start });
     }
 
-    fn parseString(self: *Parser, output: *std.ArrayList(binder.SpannedValue)) InternalError!void {
+    fn parseString(self: *Parser, output: *FormList) InternalError!void {
         const start = self.cursor.span();
-        _ = self.cursor.bump();
-        var codepoints: std.ArrayList(u32) = .empty;
-        defer codepoints.deinit(self.allocator);
-        var char_spans: std.ArrayList(Span) = .empty;
-        defer char_spans.deinit(self.allocator);
+        _ = try self.cursor.bumpPolling(self.work);
+        var codepoints = CodepointList.init(self.allocator);
+        defer codepoints.deinit();
+        var char_spans = SpanList.init(self.allocator);
+        defer char_spans.deinit();
         while (true) {
             const char_span = self.cursor.span();
             const next = self.cursor.peek() orelse
                 return self.more("unclosed string; expected `\"`", start);
             if (next == '"') {
-                _ = self.cursor.bump();
+                _ = try self.cursor.bumpPolling(self.work);
                 break;
             }
             const codepoint: u32 = if (next == '\\') blk: {
-                _ = self.cursor.bump();
+                _ = try self.cursor.bumpPolling(self.work);
                 break :blk try self.stringEscape(start, char_span);
-            } else @intCast(self.cursor.bump().?);
-            try codepoints.append(self.allocator, codepoint);
-            try char_spans.append(self.allocator, char_span);
+            } else @intCast((try self.cursor.bumpPolling(self.work)).?);
+            try codepoints.append(codepoint);
+            try char_spans.append(char_span);
         }
-        const string = try list.fromCodepoints(self.allocator, codepoints.items);
-        self.spans.put(self.allocator, string.list, char_spans.items) catch |err| {
+        const contiguous_codepoints = try codepoints.toOwnedSlice(self.work);
+        defer self.allocator.free(contiguous_codepoints);
+        const contiguous_spans = try char_spans.toOwnedSlice(self.work);
+        defer self.allocator.free(contiguous_spans);
+        const string = try storage.fromCodepoints(self.allocator, contiguous_codepoints, self.constructorPoller());
+        self.spans.put(self.allocator, string.list, contiguous_spans, self.work) catch |err| {
             heap.releaseValue(self.allocator, string);
             return err;
         };
@@ -429,7 +540,7 @@ const Parser = struct {
     }
 
     fn stringEscape(self: *Parser, string_start: Span, escape_span: Span) InternalError!u32 {
-        const next = self.cursor.bump() orelse
+        const next = (try self.cursor.bumpPolling(self.work)) orelse
             return self.more("unclosed string escape", string_start);
         return switch (next) {
             '\\' => '\\',
@@ -450,29 +561,29 @@ const Parser = struct {
 
     fn parseQuotedSymbol(
         self: *Parser,
-        output: *std.ArrayList(binder.SpannedValue),
+        output: *FormList,
     ) InternalError!void {
         const start = self.cursor.span();
-        _ = self.cursor.bump();
-        const token = self.cursor.takeToken();
-        if (!lexer.validSymbol(token)) {
+        _ = try self.cursor.bumpPolling(self.work);
+        const token = try self.cursor.takeTokenPolling(self.work);
+        if (!try lexer.validSymbolPolling(token, self.work)) {
             if (token.len == 0) return self.fail(start, "quoted symbol is missing its name");
             return self.failFmt(start, "invalid quoted symbol `'{s}`", .{token});
         }
-        const id = try intern.intern(token);
-        try output.append(self.allocator, .{ .value = .{ .symbol = id }, .span = start });
+        const id = try self.internToken(token);
+        try output.append(.{ .value = .{ .symbol = id }, .span = start });
     }
 
     fn parseCharacter(
         self: *Parser,
-        output: *std.ArrayList(binder.SpannedValue),
+        output: *FormList,
     ) InternalError!void {
         const start = self.cursor.span();
-        _ = self.cursor.bump();
+        _ = try self.cursor.bumpPolling(self.work);
         const next = self.cursor.peek() orelse
             return self.fail(start, "character literal is missing its character");
-        const codepoint: u32 = if (next == 'u' and self.cursor.peekN(1) == '{') blk: {
-            _ = self.cursor.bump();
+        const codepoint: u32 = if (next == 'u' and (try self.cursor.peekNPolling(1, self.work)) == '{') blk: {
+            _ = try self.cursor.bumpPolling(self.work);
             break :blk try self.unicodeEscape(
                 start,
                 start,
@@ -480,15 +591,15 @@ const Parser = struct {
             );
         } else if (lexer.isTokenBoundary(next) or
             next == ';' or next == '|' or next == '\'' or next == '\\')
-            @intCast(self.cursor.bump().?)
+            @intCast((try self.cursor.bumpPolling(self.work)).?)
         else blk: {
-            const token = self.cursor.takeToken();
+            const token = try self.cursor.takeTokenPolling(self.work);
             if (std.mem.eql(u8, token, "space")) break :blk ' ';
             if (std.mem.eql(u8, token, "tab")) break :blk '\t';
             if (std.mem.eql(u8, token, "newline")) break :blk '\n';
             break :blk try self.singleCodepoint(token, start);
         };
-        try output.append(self.allocator, .{ .value = .{ .char = codepoint }, .span = start });
+        try output.append(.{ .value = .{ .char = codepoint }, .span = start });
     }
 
     fn singleCodepoint(self: *Parser, token: []const u8, span: Span) InternalError!u32 {
@@ -511,7 +622,7 @@ const Parser = struct {
         context: []const u8,
     ) InternalError!u32 {
         std.debug.assert(self.cursor.peek() == '{');
-        _ = self.cursor.bump();
+        _ = try self.cursor.bumpPolling(self.work);
         const digits_start = self.cursor.byteIndex();
         while (true) {
             const next = self.cursor.peek() orelse return self.more(
@@ -527,10 +638,10 @@ const Parser = struct {
                 "invalid character `{u}` in {s}",
                 .{ next, context },
             );
-            _ = self.cursor.bump();
+            _ = try self.cursor.bumpPolling(self.work);
         }
         const digits_end = self.cursor.byteIndex();
-        _ = self.cursor.bump();
+        _ = try self.cursor.bumpPolling(self.work);
         const digits = self.cursor.source[digits_start..digits_end];
         if (digits.len == 0 or digits.len > 6) return self.fail(
             error_span,
@@ -548,11 +659,11 @@ const Parser = struct {
         return codepoint;
     }
 
-    fn parseAtom(self: *Parser, output: *std.ArrayList(binder.SpannedValue)) InternalError!void {
+    fn parseAtom(self: *Parser, output: *FormList) InternalError!void {
         const start = self.cursor.span();
-        const token = self.cursor.takeToken();
+        const token = try self.cursor.takeTokenPolling(self.work);
         if (token.len == 0) return self.fail(start, "expected a token");
-        const item: Value = switch (lexer.classify(token)) {
+        const item: Value = switch (try lexer.classifyPolling(token, self.work)) {
             .int => |number| .{ .int = number },
             .float => |number| .{ .float = number },
             .out_of_range => |kind| return switch (kind) {
@@ -568,37 +679,46 @@ const Parser = struct {
                 ),
             },
             .word => blk: {
-                if (!lexer.validSymbol(token)) return self.failFmt(
+                if (!try lexer.validSymbolPolling(token, self.work)) return self.failFmt(
                     start,
                     "invalid word `{s}`",
                     .{token},
                 );
-                break :blk .{ .word = try intern.intern(token) };
+                break :blk .{ .word = try self.internToken(token) };
             },
         };
-        try output.append(self.allocator, .{ .value = item, .span = start });
+        try output.append(.{ .value = item, .span = start });
     }
 
     fn buildList(
         self: *Parser,
         forms: []const binder.SpannedValue,
         specialize: bool,
-    ) error{OutOfMemory}!Value {
+    ) (error{OutOfMemory} || error{Ecl})!Value {
         const values = try self.allocator.alloc(Value, forms.len);
         defer self.allocator.free(values);
         const element_spans = try self.allocator.alloc(Span, forms.len);
         defer self.allocator.free(element_spans);
         for (forms, 0..) |form_item, index| {
+            try self.work.step();
             values[index] = form_item.value;
             element_spans[index] = form_item.span;
         }
         const collection = if (specialize)
-            try list.fromValues(self.allocator, values)
+            try storage.fromValues(self.allocator, values, self.constructorPoller())
         else
-            try list.fromValuesGeneric(self.allocator, values);
+            try storage.fromValuesGeneric(self.allocator, values, self.constructorPoller());
         errdefer heap.releaseValue(self.allocator, collection);
-        try self.spans.put(self.allocator, collection.list, element_spans);
+        try self.spans.put(self.allocator, collection.list, element_spans, self.work);
         return collection;
+    }
+
+    fn internToken(self: *Parser, token: []const u8) poll.Error!u32 {
+        return intern.internPolling(token, self.work.asPoller());
+    }
+
+    fn constructorPoller(self: *Parser) poll.Poller {
+        return self.work.asPoller();
     }
 
     fn fail(self: *Parser, span: Span, message: []const u8) error{Parse} {
@@ -622,12 +742,24 @@ const Parser = struct {
     }
 };
 
+fn validUtf8Polling(source: []const u8, work: poll.WorkContext) poll.Error!bool {
+    var index: usize = 0;
+    while (index < source.len) {
+        try work.step();
+        const length = std.unicode.utf8ByteSequenceLength(source[index]) catch return false;
+        if (length > source.len - index) return false;
+        _ = std.unicode.utf8Decode(source[index..][0..length]) catch return false;
+        index += length;
+    }
+    return true;
+}
+
 fn appendOwned(
     allocator: std.mem.Allocator,
-    output: *std.ArrayList(binder.SpannedValue),
+    output: *FormList,
     form: binder.SpannedValue,
 ) error{OutOfMemory}!void {
-    output.append(allocator, form) catch |err| {
+    output.append(form) catch |err| {
         heap.releaseValue(allocator, form.value);
         return err;
     };
@@ -635,6 +767,11 @@ fn appendOwned(
 
 fn releaseForms(allocator: std.mem.Allocator, forms: []const binder.SpannedValue) void {
     for (forms) |form| heap.releaseValue(allocator, form.value);
+}
+
+fn releaseFormList(allocator: std.mem.Allocator, forms: *const FormList) void {
+    var iterator = forms.iterator();
+    while (iterator.next()) |form| heap.releaseValue(allocator, form.value);
 }
 
 fn isScalar(codepoint: u32) bool {
@@ -706,19 +843,19 @@ test "span table covers reader-built lists" {
     var parsed = try parsedForTest("(1 [2 3])");
     defer parsed.deinit();
     const outer = parsed.forms[0];
-    try std.testing.expectEqual(@as(usize, 2), parsed.spans.forList(outer.list).?.len);
+    try std.testing.expectEqual(@as(usize, 2), (try parsed.spans.forList(outer.list, .unlimited())).?.len);
     const inner = list.atUnchecked(outer, 1);
-    try std.testing.expectEqual(@as(usize, 2), parsed.spans.forList(inner.list).?.len);
+    try std.testing.expectEqual(@as(usize, 2), (try parsed.spans.forList(inner.list, .unlimited())).?.len);
     const hand_built = try list.fromValues(std.testing.allocator, &.{.{ .int = 1 }});
     defer heap.releaseValue(std.testing.allocator, hand_built);
-    try std.testing.expect(parsed.spans.forList(hand_built.list) == null);
+    try std.testing.expect(try parsed.spans.forList(hand_built.list, .unlimited()) == null);
 }
 
 test "all-char quotation is the string value" {
     var parsed = try parsedForTest("[\\a \\b]");
     defer parsed.deinit();
     try std.testing.expectEqual(value.HeapKind.leaf_char1, parsed.forms[0].list.kind());
-    try std.testing.expectEqual(@as(usize, 2), parsed.spans.forList(parsed.forms[0].list).?.len);
+    try std.testing.expectEqual(@as(usize, 2), (try parsed.spans.forList(parsed.forms[0].list, .unlimited())).?.len);
 }
 
 test "whole-token numbers symbols and reserved characters follow the grammar" {

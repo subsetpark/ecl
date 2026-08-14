@@ -6,8 +6,11 @@ pub const numeric = @import("kernel_numeric.zig");
 pub const sequence = @import("kernel_sequence.zig");
 pub const order = @import("kernel_order.zig");
 pub const dict_text = @import("kernel_dict_text.zig");
+pub const Registry = struct {
+    pub const entries = @import("idioms.zig").registry;
+};
 
-pub fn install(core: *env.Env) error{OutOfMemory}!void {
+pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try numeric.install(core);
     try sequence.install(core);
     try order.install(core);

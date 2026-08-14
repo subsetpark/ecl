@@ -197,14 +197,3 @@ test "order: distinct charges nested structural hash and equality work" {
     try std.testing.expect((try runtime.runUnit("<test>", "distinct pop")) == .ok);
     try std.testing.expect(runtime.last_polls >= 2);
 }
-
-fn allocationProbe(allocator: std.mem.Allocator) !void {
-    var runtime = try session.Session.init(allocator, &.{});
-    defer runtime.deinit();
-    const outcome = try runtime.runUnit("<allocation>", "[2 1 2 1] grade group");
-    if (outcome == .err) heap.releaseValue(allocator, outcome.err);
-}
-
-test "order: allocation failures release sort and hash scratch" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationProbe, .{});
-}

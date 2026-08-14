@@ -39,15 +39,23 @@ proof that the language can build itself).
 | | word | effect | |
 |---|---|---|---|
 | [P] | `call`    | `( q -- … )` | inline application (Joy's `i`) |
-| [P] | `cons`    | `( x l -- l' )` | prepend a value onto any list. On data: `1 [2 3] cons` → `[1 2 3]`. On code, this IS partial application: `3 (+) cons` → `(3 +)`. Joy's name; Factor calls the same operation `curry`, a misnomer |
+| [P] | `cons`    | `( x l -- l' )` | raw structural prepend. On data: `1 [2 3] cons` → `[1 2 3]`. On code it inserts a form: a prepended word executes when the result is called, so `cons` is not universally safe partial application. Factor's `curry` instead preserves a captured word as literal data |
 | [P] | `compose` | `( q r -- qr )` | concatenate quotations |
+| [E] | `literal` | `( x -- q )` | build the plain, inspectable quotation `((x) first)` as `wrap (first) cons`; calling it pushes the exact captured value without executing or resolving it. Use `literal` plus `compose` for safe arbitrary-value capture |
 | [P] | `if`      | `( bool then else -- … )` | inline; branches run on current stack |
 | [E] | `when`    | `( bool then -- … )` | `() if` |
 | [E] | `unless`  | `( bool else -- … )` | `() swap if` |
 | [P] | `while`   | `( cond body -- … )` | inline; `cond` must leave one bool; TCO'd |
 | [P] | `times`   | `( n q -- … )` | inline; run `q` n times; TCO'd |
-| [P] | `cond`    | `( pairs -- … )` | inline; list of `(test) (action)` quotation pairs; the first test leaving true fires its action |
-| [E] | `case`    | `( x d -- … )` | `at call` — dict dispatch; missing key errors (d.17) |
+| [P] | `cond`    | `( clauses -- … )` | inline; flat nonempty odd list `[test action … else]` of quotations; prevalidated, first true test wins |
+| [E] | `case`    | `( x clauses -- … )` | flat nonempty odd list `[key action … else]`; inert keys, prevalidated actions, first whole-value match wins |
+
+Both forms require the rightmost else quotation. `cond` rejects non-quotation
+tests, actions, and else before running its first test. `case` permits any
+Value (including words and quotations) in key slots without executing it,
+permits duplicate keys with the first match winning, and rejects every
+non-quotation action/else before comparing a key. Empty or even clause lists
+are `'shape`; a non-list or invalid member is `'type`.
 
 **Combinator correspondence (Joy / APCL).** The zoo is captured, not
 imported: in a concatenative substrate the applicative adaptors are
@@ -64,14 +72,15 @@ is an idiom-recognition site (d.23).
 
 | | word | effect | |
 |---|---|---|---|
-| [P] | `def`    | `( body 'name -- )`; module: `( body fx 'name -- )` | bind word (public in modules, with mandatory effect declaration) — d.5, d.9, d.18 |
-| [P] | `defp`   | `( body fx 'name -- )` | bind private word with declared effect; top-level error — d.9 |
+| [P] | `def`    | `( body annotation? 'name -- )` | bind word; annotation may contain effect, docstring, or both; module definitions require the effect portion — d.5, d.9, d.18 |
+| [P] | `defp`   | `( body annotation 'name -- )` | bind private module word with mandatory effect and optional docstring; top-level error — d.9 |
 | [P] | `set`    | `( x 'name -- )` | assign value in the current environment; references resolve dynamically |
 | [P] | `setp`   | `( x 'name -- )` | assign private module value; top-level error |
 | [P] | `body`   | `( 'name -- q )` | a word's stored list |
+| [P] | `doc`    | `( 'name -- string )` | resolve normally and return canonicalized documentation (soft source lines folded; paragraphs and `- ` items preserved); missing documentation is `'domain` |
 | [P] | `to-word`   | `( x -- w )` | symbol → word (executable in code); a word passes through — d.22 |
 | [P] | `to-symbol` | `( x -- s )` | word → symbol; a symbol passes through |
-| [P] | `see`    | `( 'name -- )` | print definition (desugared truth) |
+| [P] | `see`    | `( 'name -- )` | print a canonical re-readable definition with one combined annotation |
 | [P] | `which`  | `( 'name -- )` | print resolution (module home, shadowing) |
 | [P] | `words`  | `( -- )` | list the visible dictionary |
 | [P] | `module` | `( 'name body -- )` | isolated; register module — d.18 |
@@ -81,6 +90,13 @@ is an idiom-recognition site (d.23).
 | [P] | `parse`  | `( string -- q )` | the reader, reified: source text → list; `"42" parse first` is string→number |
 | [P] | `type`   | `( x -- s )` | value kind as a symbol: `'int 'float 'char 'symbol 'word 'list 'dict` — dict-dispatch with `case`; the closed d.22 atom set |
 | [P] | `str`    | `( x -- string )` | printed representation (round-trips, d.16) |
+
+Definition annotations are ordinary quotations: `(a -- b)`,
+`(: "Documentation.")`, or `(a -- b : "Documentation.")`. Top-level effects
+are metadata only; cross-home module effects remain dynamically enforced.
+`set`/`setp` do not recognize annotations. The exact namespace names `--` and
+`:` are reserved for definitions, values, locals, modules, aliases, exports,
+and native entries, while still remaining legal word and symbol values.
 
 ## Arithmetic — all *pervasive* (d.13)
 
@@ -147,8 +163,8 @@ Indexing is **0-based** throughout (K convention): `range` counts from
 | [E] | `append`   | `( l x -- l' )` | `wrap cat` (K `,`) |
 | [E] | `empty?`   | `( l -- bool )` | `len 0 =` |
 | [E] | `zip`      | `( l m -- l' )` | `(pair) each2` |
-| [E] | `min-of`   | `( l -- x )` | `dup first swap (min) fold` (K `&/`) |
-| [E] | `max-of`   | `( l -- x )` | `dup first swap (max) fold` (K `\|/`) |
+| [E] | `min-of`   | `( l -- x )` | `dup first (min) fold` (K `&/`) |
+| [E] | `max-of`   | `( l -- x )` | `dup first (max) fold` (K `\|/`) |
 | [P] | `put`      | `( l i x -- l' )` | functional element update; the same word as dict `put`, like `at`; CoW updates in place when unique (d.1) |
 | [P] | `reverse`  | `( l -- l' )` | |
 | [P] | `flip`     | `( l -- l' )` | transpose; rectangular, exact nested-list shape required (K name) |
@@ -244,21 +260,35 @@ pushes its elements.)
 ## Derived showcase (prelude, in ecl)
 
 ```
-(() cons)                       'wrap    def
-(() cons cons)                  'pair    def
-(() swap (cons) times)          'pack    def
-(dup grade at)                'sort    def
-(swap pop)                    'nip     def
-(0 (+) fold)                  'sum     def
-(1 (*) fold)                  'prod    def
-(dup sum swap len /)          'mean    def
-(over swap each where at)     'filter  def
-(at call)                     'case    def
-(|x y q| x q call y q call)   'both    def
-(dup 0 > swap 0 < -)          'signum  def
+### def wrap
+(() cons)
+(value -- list : "Wrap one value in a one-element list.")
+'wrap def
+
+### def literal
+(wrap (first) cons)
+(value -- quotation :
+ "Return a quotation that pushes the exact value as inert data when called.")
+'literal def
+
+### def pack
+(() swap (cons) times)
+(: "Collect the requested number of preceding stack values into a list, preserving their order.")
+'pack def
+
+### def signum
+(dup 0 > swap 0 < -)
+(number -- sign : "Return -1, 0, or 1 according to the sign of a number.")
+'signum def
 ```
 
-Counts: ~81 primitives, ~32 prelude words. The kernel surface
+`case` is also entirely source-defined, but its validation and inert-key
+selection pipeline is intentionally shown in readable, commented form in
+`src/prelude.ecl` rather than compressed into this showcase. Every shipped
+prelude definition follows the same `### def <name>` navigation convention and
+exposes a meaningful nonempty string through `doc`.
+
+Counts: roughly 80 primitives and 38 prelude words. The kernel surface
 (decision 21's optimization target) is the pervasive arithmetic plus
 the [P] list/dict words plus the iteration combinators — about forty
 loops.

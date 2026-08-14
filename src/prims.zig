@@ -10,32 +10,31 @@ const printer = @import("print.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const module_prims = @import("module_prims.zig");
-const prelude = @import("prelude.zig");
+const combinators = @import("combinators.zig");
 const kernels = @import("kernels.zig");
 const kernel_support = @import("kernel_support.zig");
 const kernel_storage = @import("kernel_storage.zig");
+const reader = @import("reader.zig");
+const poll = @import("poll.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 const Definition = struct {
     name: []const u8,
-    primitive: env.Primitive,
+    primitive: env.PrimitiveImpl,
 };
-pub fn install(core: *env.Env) error{OutOfMemory}!void {
-    const definitions = [_]Definition{
+pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
+    const definitions = comptime [_]Definition{
         .{ .name = "dup", .primitive = dup },
         .{ .name = "swap", .primitive = swap },
         .{ .name = "pop", .primitive = pop },
         .{ .name = "over", .primitive = over },
-        .{ .name = "dip", .primitive = dip },
-        .{ .name = "call", .primitive = call },
         .{ .name = "cons", .primitive = cons },
         .{ .name = "compose", .primitive = compose },
-        .{ .name = "if", .primitive = ifWord },
-        .{ .name = "while", .primitive = whileWord },
         .{ .name = "match", .primitive = match },
         .{ .name = "type", .primitive = typeWord },
         .{ .name = "str", .primitive = strWord },
+        .{ .name = "parse", .primitive = parse },
         .{ .name = "dict-of", .primitive = dictOf },
         .{ .name = "attempt", .primitive = attempt },
         .{ .name = "raise", .primitive = raise },
@@ -44,14 +43,10 @@ pub fn install(core: *env.Env) error{OutOfMemory}!void {
         .{ .name = "args", .primitive = args },
         .{ .name = "exit", .primitive = exit },
     };
-    for (definitions) |definition| {
-        const id = try intern.intern(definition.name);
-        try core.installCore(id, .{ .primitive = definition.primitive });
-    }
+    try core.installBuiltins(definitions);
+    try combinators.install(core);
     try kernels.install(core);
     try module_prims.install(core);
-    try prelude.install(core);
-    core.sealCore();
 }
 fn dup(evaluator: *Machine) MachineError!void {
     try evaluator.require(1);
@@ -71,20 +66,6 @@ fn over(evaluator: *Machine) MachineError!void {
     const items = evaluator.unit.stack.items;
     try evaluator.pushBorrowed(items[items.len - 2]);
 }
-fn dip(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    const quotation = try evaluator.popOwned();
-    const protected = try evaluator.popOwned();
-    const header = quotationHeader(evaluator, quotation) catch |err| {
-        heap.releaseValue(evaluator.allocator(), protected);
-        return err;
-    };
-    try evaluator.dipOwned(header, protected);
-}
-fn call(evaluator: *Machine) MachineError!void {
-    const quotation = try evaluator.popOwned();
-    try evaluator.callOwned(try quotationHeader(evaluator, quotation));
-}
 fn cons(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     const collection = try evaluator.popOwned();
@@ -92,12 +73,19 @@ fn cons(evaluator: *Machine) MachineError!void {
     if (collection != .list) return evaluator.typeError("a list");
     const item = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), item);
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     const values = try evaluator.allocator().alloc(Value, count + 1);
     defer evaluator.allocator().free(values);
     values[0] = item;
-    for (0..count) |index| values[index + 1] = list.atUnchecked(collection, index);
-    try evaluator.pushOwned(try list.fromValues(evaluator.allocator(), values));
+    for (0..count) |index| {
+        try evaluator.advanceKernel(1);
+        values[index + 1] = list.atUnchecked(collection, index);
+    }
+    try evaluator.pushOwned(try kernel_storage.fromValues(
+        evaluator.allocator(),
+        values,
+        (kernel_support.Context{ .evaluator = evaluator }).structuralPoller(),
+    ));
 }
 fn compose(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
@@ -106,56 +94,23 @@ fn compose(evaluator: *Machine) MachineError!void {
     const left = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), left);
     if (left != .list or right != .list) return evaluator.typeError("two lists");
-    const left_len: usize = @intCast(left.list.len);
-    const right_len: usize = @intCast(right.list.len);
+    const left_len: usize = @intCast(left.list.length());
+    const right_len: usize = @intCast(right.list.length());
     const values = try evaluator.allocator().alloc(Value, left_len + right_len);
     defer evaluator.allocator().free(values);
-    for (0..left_len) |index| values[index] = list.atUnchecked(left, index);
-    for (0..right_len) |index| values[left_len + index] = list.atUnchecked(right, index);
-    try evaluator.pushOwned(try list.fromValues(evaluator.allocator(), values));
-}
-fn ifWord(evaluator: *Machine) MachineError!void {
-    try evaluator.require(3);
-    const otherwise = try evaluator.popOwned();
-    const then = try evaluator.popOwned();
-    const predicate = try evaluator.popOwned();
-    if (then != .list or otherwise != .list) {
-        releaseThree(evaluator.allocator(), predicate, then, otherwise);
-        return evaluator.typeError("two quotation branches");
+    for (0..left_len) |index| {
+        try evaluator.advanceKernel(1);
+        values[index] = list.atUnchecked(left, index);
     }
-    const is_true = switch (predicate) {
-        .int => |integer| switch (integer) {
-            0 => false,
-            1 => true,
-            else => {
-                releaseThree(evaluator.allocator(), predicate, then, otherwise);
-                return evaluator.typeError("a 0/1 bool");
-            },
-        },
-        .float, .char, .symbol, .word, .list, .dict => {
-            releaseThree(evaluator.allocator(), predicate, then, otherwise);
-            return evaluator.typeError("a 0/1 bool");
-        },
-    };
-    heap.releaseValue(evaluator.allocator(), predicate);
-    const selected = if (is_true) then else otherwise;
-    const discarded = if (is_true) otherwise else then;
-    heap.releaseValue(evaluator.allocator(), discarded);
-    try evaluator.callOwned(selected.list);
-}
-fn whileWord(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    const body = try evaluator.popOwned();
-    const condition = try evaluator.popOwned();
-    const body_header = quotationHeader(evaluator, body) catch |err| {
-        heap.releaseValue(evaluator.allocator(), condition);
-        return err;
-    };
-    const condition_header = quotationHeader(evaluator, condition) catch |err| {
-        heap.decRef(evaluator.allocator(), body_header);
-        return err;
-    };
-    try evaluator.whileOwned(condition_header, body_header);
+    for (0..right_len) |index| {
+        try evaluator.advanceKernel(1);
+        values[left_len + index] = list.atUnchecked(right, index);
+    }
+    try evaluator.pushOwned(try kernel_storage.fromValues(
+        evaluator.allocator(),
+        values,
+        (kernel_support.Context{ .evaluator = evaluator }).structuralPoller(),
+    ));
 }
 fn match(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
@@ -198,11 +153,55 @@ fn strWord(evaluator: *Machine) MachineError!void {
     };
     try evaluator.pushOwned(result);
 }
+
+fn parse(evaluator: *Machine) MachineError!void {
+    const source_value = try evaluator.popOwned();
+    defer heap.releaseValue(evaluator.allocator(), source_value);
+    if (!source_value.isString()) return evaluator.typeError("a string");
+    const poller = (kernel_support.Context{ .evaluator = evaluator }).structuralPoller();
+    const source = kernel_storage.toUtf8Owned(evaluator.allocator(), source_value, poller) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Ecl => return error.Ecl,
+        error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
+    };
+    defer evaluator.allocator().free(source);
+    var diag: reader.Diag = .{};
+    const result = reader.readPolling(
+        evaluator.allocator(),
+        "<parse>",
+        source,
+        &diag,
+        poll.WorkContext.init(poller),
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Ecl => return error.Ecl,
+        error.Parse => {
+            const failure = evaluator.fail(.parse, diag.text());
+            evaluator.unit.pending.?.setLocation("<parse>", diag.span);
+            return failure;
+        },
+    };
+    var parsed = switch (result) {
+        .complete => |complete| complete,
+        .incomplete => |incomplete| {
+            const failure = evaluator.fail(.parse, incomplete.message);
+            evaluator.unit.pending.?.setLocation("<parse>", incomplete.span);
+            return failure;
+        },
+    };
+    defer parsed.deinit();
+    const root = try kernel_storage.fromValuesGeneric(evaluator.allocator(), parsed.forms, poller);
+    var root_owned = true;
+    defer if (root_owned) heap.releaseValue(evaluator.allocator(), root);
+    try evaluator.unit.archive.absorb(&parsed, root, poll.WorkContext.init(poller));
+    root_owned = false;
+    try evaluator.pushBorrowed(root);
+}
 fn dictOf(evaluator: *Machine) MachineError!void {
     const entries = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), entries);
     if (entries != .list) return evaluator.typeError("a flat key/value list");
-    const count: usize = @intCast(entries.list.len);
+    const count: usize = @intCast(entries.list.length());
     if (count % 2 != 0) {
         return evaluator.fail(.contract, "dict-of requires an even-length key/value list");
     }
@@ -273,7 +272,7 @@ fn raise(evaluator: *Machine) MachineError!void {
 }
 fn allSymbols(item: Value) bool {
     if (item != .list) return false;
-    const count: usize = @intCast(item.list.len);
+    const count: usize = @intCast(item.list.length());
     for (0..count) |index| if (list.atUnchecked(item, index) != .symbol) return false;
     return true;
 }
@@ -303,7 +302,7 @@ fn prin(evaluator: *Machine) MachineError!void {
     if (!item.isString()) return evaluator.typeError("a string");
     const output = evaluator.unit.output orelse
         return evaluator.fail(.io, "standard output is unavailable");
-    const count: usize = @intCast(item.list.len);
+    const count: usize = @intCast(item.list.length());
     for (0..count) |index| {
         try evaluator.advanceKernel(1);
         var encoded: [4]u8 = undefined;
@@ -336,9 +335,4 @@ fn quotationHeader(evaluator: *Machine, item: Value) MachineError!*value.Header 
             return evaluator.typeError("a quotation/list");
         },
     };
-}
-fn releaseThree(allocator: std.mem.Allocator, a: Value, b: Value, c: Value) void {
-    heap.releaseValue(allocator, a);
-    heap.releaseValue(allocator, b);
-    heap.releaseValue(allocator, c);
 }

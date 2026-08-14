@@ -13,7 +13,7 @@ const Value = value.Value;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 
-pub fn install(core: *env.Env) error{OutOfMemory}!void {
+pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try support.installPrimitive(core, "keys", keysPrimitive);
     try support.installPrimitive(core, "vals", valsPrimitive);
     try support.installPrimitive(core, "put", putPrimitive);
@@ -90,7 +90,7 @@ fn putPrimitive(evaluator: *Machine) MachineError!void {
             if (key.int < 0) return evaluator.fail(.domain, "put index is negative");
             const index = std.math.cast(usize, key.int) orelse
                 return evaluator.fail(.domain, "put index is out of bounds");
-            const count: usize = @intCast(collection.list.len);
+            const count: usize = @intCast(collection.list.length());
             if (index >= count) return evaluator.fail(.domain, "put index is out of bounds");
             break :blk try replaceListItem(
                 evaluator.allocator(),
@@ -114,22 +114,13 @@ fn replaceListItem(
     context: ?support.Context,
 ) MachineError!Value {
     const header = collection.list;
-    if (heap.isUnique(header) and fitsListRepresentation(header.kind(), new_value)) {
+    if (heap.claimUnique(header)) |unique| if (fitsListRepresentation(header.kind(), new_value)) {
         try pollUpdate(context);
-        switch (header.kind()) {
-            .generic_spine => unreachable,
-            .leaf_i64 => heap.items(i64, header)[index] = new_value.int,
-            .leaf_f64 => heap.items(f64, header)[index] = new_value.float,
-            .leaf_char1 => heap.items(u8, header)[index] = @intCast(new_value.char),
-            .leaf_char2 => heap.items(u16, header)[index] = @intCast(new_value.char),
-            .leaf_char4 => heap.items(u32, header)[index] = new_value.char,
-            .leaf_symbol => heap.items(u32, header)[index] = new_value.symbol,
-            .dict, .reserved_mask => unreachable,
-        }
+        heap.writeUnique(unique, index, new_value);
         return collection;
-    }
+    };
 
-    const count: usize = @intCast(header.len);
+    const count: usize = @intCast(header.length());
     const values = try allocator.alloc(Value, count);
     defer allocator.free(values);
     for (0..count) |position| {
@@ -141,8 +132,9 @@ fn replaceListItem(
         try storage.fromValues(allocator, values, active.structuralPoller())
     else
         try list.fromValues(allocator, values);
-    if (!heap.isUnique(header)) return replacement;
-    heap.adoptRepresentation(allocator, header, replacement.list);
+    const destination = heap.claimUnique(header) orelse return replacement;
+    const source = heap.claimUnique(replacement.list) orelse unreachable;
+    heap.adoptRepresentation(allocator, destination, source);
     return collection;
 }
 
@@ -170,8 +162,8 @@ fn toDictPrimitive(evaluator: *Machine) MachineError!void {
     const keys = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), keys);
     if (keys != .list or values != .list) return evaluator.typeError("two lists");
-    const count: usize = @intCast(keys.list.len);
-    if (values.list.len != keys.list.len) {
+    const count: usize = @intCast(keys.list.length());
+    if (values.list.length() != keys.list.length()) {
         return evaluator.fail(.shape, "to-dict requires equal key and value lengths");
     }
     const pairs = try evaluator.allocator().alloc(dict.Pair, count);
@@ -246,8 +238,8 @@ fn splitPrimitive(evaluator: *Machine) MachineError!void {
     const text = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), text);
     if (!text.isString() or !separator.isString()) return evaluator.typeError("two strings");
-    const text_len: usize = @intCast(text.list.len);
-    const separator_len: usize = @intCast(separator.list.len);
+    const text_len: usize = @intCast(text.list.length());
+    const separator_len: usize = @intCast(separator.list.length());
     const poller = (support.Context{ .evaluator = evaluator }).structuralPoller();
     const part_count = if (separator_len == 0)
         std.math.add(usize, text_len, 2) catch
@@ -294,8 +286,8 @@ fn splitPrimitive(evaluator: *Machine) MachineError!void {
 }
 
 fn countSplitParts(evaluator: *Machine, text: Value, separator: Value) MachineError!usize {
-    const text_len: usize = @intCast(text.list.len);
-    const separator_len: usize = @intCast(separator.list.len);
+    const text_len: usize = @intCast(text.list.length());
+    const separator_len: usize = @intCast(separator.list.length());
     std.debug.assert(separator_len > 0);
     var count: usize = 1;
     var cursor: usize = 0;
@@ -312,7 +304,7 @@ fn countSplitParts(evaluator: *Machine, text: Value, separator: Value) MachineEr
 }
 
 fn startsWithAt(text: Value, separator: Value, start: usize) bool {
-    const separator_len: usize = @intCast(separator.list.len);
+    const separator_len: usize = @intCast(separator.list.length());
     for (0..separator_len) |index| {
         if (list.atUnchecked(text, start + index).char !=
             list.atUnchecked(separator, index).char) return false;
@@ -326,7 +318,7 @@ fn startsWithAtPolling(
     separator: Value,
     start: usize,
 ) MachineError!bool {
-    const separator_len: usize = @intCast(separator.list.len);
+    const separator_len: usize = @intCast(separator.list.length());
     for (0..separator_len) |index| {
         try evaluator.advanceKernel(1);
         if (list.atUnchecked(text, start + index).char !=
@@ -363,14 +355,14 @@ fn joinPrimitive(evaluator: *Machine) MachineError!void {
     if (parts != .list or !separator.isString()) {
         return evaluator.typeError("a list of strings and a string separator");
     }
-    const count: usize = @intCast(parts.list.len);
-    const separator_len: usize = @intCast(separator.list.len);
+    const count: usize = @intCast(parts.list.length());
+    const separator_len: usize = @intCast(separator.list.length());
     var total: usize = 0;
     for (0..count) |index| {
         try evaluator.advanceKernel(1);
         const part = list.atUnchecked(parts, index);
         if (!part.isString()) return evaluator.failAtIndex(.type, "join expected a list of strings", index);
-        total = std.math.add(usize, total, @intCast(part.list.len)) catch
+        total = std.math.add(usize, total, @intCast(part.list.length())) catch
             return evaluator.fail(.overflow, "joined string is too large");
         if (index + 1 < count) total = std.math.add(usize, total, separator_len) catch
             return evaluator.fail(.overflow, "joined string is too large");
@@ -396,7 +388,7 @@ fn copyCodepoints(
     cursor: *usize,
     text: Value,
 ) MachineError!void {
-    const count: usize = @intCast(text.list.len);
+    const count: usize = @intCast(text.list.length());
     for (0..count) |index| {
         try evaluator.advanceKernel(1);
         output[cursor.*] = list.atUnchecked(text, index).char;
@@ -413,8 +405,8 @@ fn formatPrimitive(evaluator: *Machine) MachineError!void {
     if (values != .list or !template.isString()) {
         return evaluator.typeError("a value list and a template string");
     }
-    const template_len: usize = @intCast(template.list.len);
-    const value_count: usize = @intCast(values.list.len);
+    const template_len: usize = @intCast(template.list.length());
+    const value_count: usize = @intCast(values.list.length());
     const Rendered = struct { bytes: []u8, codepoints: usize };
     const replacements = try evaluator.allocator().alloc(Rendered, value_count);
     defer evaluator.allocator().free(replacements);

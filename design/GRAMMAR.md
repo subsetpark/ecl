@@ -48,7 +48,9 @@ delimiters, `"`, `#`, `'`, `\`, `.`, `,`, `;`, `|`. Unicode letters are
 legal; words-not-glyphs is culture, not enforcement.
 
 **Strings**: `"..."`, may span newlines. Escapes: `\\`, `\"`, `\n`,
-`\t`, `\u{...}`. A string is a rank-1 char vector (decision 15).
+`\t`, `\u{...}`. A string is a rank-1 char vector (decision 15). Raw
+newlines, indentation, and blank lines inside the quotes are literal; there is
+no triple-quoted, dedented, or margin-stripped string form.
 
 ## Forms
 
@@ -75,7 +77,70 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
   list value exists — the stored list contains no binder. Bind order:
   leftmost name = deepest value (`10 20 (|lo hi| …)` gives `lo`=10,
   `hi`=20 — names read in argument order). Names must be distinct;
-  the empty binder `(||)` is a parse error.
+   the empty binder `(||)` is a parse error. The exact names `--` and `:` are
+   namespace-reserved and therefore parse errors in a binder; punctuation in a
+   longer otherwise-valid name remains legal.
+
+## Definition annotations
+
+Definition annotations add no grammar: they are ordinary quotation values
+interpreted by `def`/`defp` immediately beneath the quoted name.
+
+```
+(body) 'name def
+(body) (before -- after) 'name def
+(body) (: "Documentation.") 'name def
+(body) (before -- after : "Documentation.") 'name def
+```
+
+A quotation is an annotation candidate only when it contains a top-level word
+`--` or `:`. Nested occurrences and quoted symbols are inert. Recognized
+annotations are never reinterpreted as bodies after a validation error. Module
+definitions require the effect portion; top-level definitions do not. `set`
+and `setp` always treat their value as data.
+
+The exact word spellings `--` and `:` remain readable and reifiable so programs
+can construct annotations. They are reserved only when introducing a namespace
+binding (definition, value, local, module, alias, export, or native entry).
+
+Documentation strings are normalized when `def`/`defp` publishes the binding:
+source indentation and soft prose wrapping are removed, paragraph boundaries
+become one blank line, and Markdown `- ` items remain distinct with indented
+continuations folded into the item. This is specific to recognized annotations;
+all ordinary string contents retain their exact decoded codepoints.
+
+## Source formatting
+
+`ecl fmt <file|->` reads valid source without evaluating it and writes canonical
+source to stdout. Its formatter CST retains trivia, comments, delimiters, atom
+spellings, and complete string tokens in source order. Generic delimited forms
+use uniform structural alignment. Space-separated items pack into locally
+grouped runs up to 100 columns; continuation lines begin immediately inside
+the opening delimiter. Existing physical newlines remain hard boundaries, and
+a comment or multiline child breaks only its local run rather than forcing
+every surrounding item onto a separate line. There are no first-word Lisp
+layout rules.
+
+Comments force physical line boundaries while remaining attached to their
+neighboring forms. Strings are indivisible and byte-preserved except for a
+string in a structurally valid doc annotation immediately followed by
+`'name def`/`defp`; that position uses paragraph-aware word filling. Formatting
+is idempotent. Re-reading preserves program structure and all ordinary literal
+values; the docstring exception preserves the canonical definition semantics
+described above. An indivisible token or preserved comment may exceed the
+100-column target.
+
+`#` introduces comments. The exact `### def <name>` navigation comment marks
+definition blocks: every literal body / optional annotation / quoted
+name / `def` or `defp` block is introduced by `### def <name>`, with exactly
+one empty line after preceding material. At the start of a file or container,
+the otherwise meaningless leading empty line is omitted. Existing `# def` or
+`### def` navigation comments are canonicalized to `### def`; other comments
+are preserved. The navigation header begins the definition block. Ordinary
+explanatory comments attached to that definition follow the header and precede
+the literal body.
+Recognition is a CST pattern, never evaluation or name resolution, and is
+disabled for words directly contained by syntactic dictionary literals.
 
 ## Units
 

@@ -17,6 +17,28 @@ fn absoluteExe() ![:0]u8 {
     );
 }
 
+fn runWithInput(arguments: []const []const u8, input: []const u8) !cli.Result {
+    var child = try std.process.spawn(io, .{
+        .argv = arguments,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    errdefer child.kill(io);
+    try child.stdin.?.writeStreamingAll(io, input);
+    child.stdin.?.close(io);
+    child.stdin = null;
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_reader = child.stdout.?.reader(io, &stdout_buffer);
+    const stdout = try stdout_reader.interface.allocRemaining(allocator, .unlimited);
+    errdefer allocator.free(stdout);
+    var stderr_buffer: [4096]u8 = undefined;
+    var stderr_reader = child.stderr.?.reader(io, &stderr_buffer);
+    const stderr = try stderr_reader.interface.allocRemaining(allocator, .unlimited);
+    errdefer allocator.free(stderr);
+    return .{ .term = try child.wait(io), .stdout = stdout, .stderr = stderr };
+}
+
 test "soul test executes the installed artifact" {
     var result = try run(&.{ build_options.ecl_exe, "3 4 +" });
     defer result.deinit();
@@ -54,29 +76,45 @@ test "runtime errors are dicts on stderr" {
 }
 
 test "piped stdin is exactly one unit" {
-    var child = try std.process.spawn(io, .{
-        .argv = &.{ build_options.ecl_exe, "-" },
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .pipe,
-    });
-    defer child.kill(io);
-    try child.stdin.?.writeStreamingAll(io, "5 6 +");
-    child.stdin.?.close(io);
-    child.stdin = null;
-
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_reader = child.stdout.?.reader(io, &stdout_buffer);
-    const stdout = try stdout_reader.interface.allocRemaining(allocator, .unlimited);
-    errdefer allocator.free(stdout);
-    var stderr_buffer: [4096]u8 = undefined;
-    var stderr_reader = child.stderr.?.reader(io, &stderr_buffer);
-    const stderr = try stderr_reader.interface.allocRemaining(allocator, .unlimited);
-    errdefer allocator.free(stderr);
-    const term = try child.wait(io);
-    var result = cli.Result{ .term = term, .stdout = stdout, .stderr = stderr };
+    var result = try runWithInput(&.{ build_options.ecl_exe, "-" }, "5 6 +");
     defer result.deinit();
     try result.expect(.{ .exit_code = 0, .stdout = "11\n", .stderr = "" });
+}
+
+test "ecl fmt formats files and stdin without evaluating source" {
+    const input = "(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb " ++
+        "cccccccccccccccccccccccccccccccccccccccc) {'kind 'user} raise";
+    const expected = "(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n" ++
+        " cccccccccccccccccccccccccccccccccccccccc)\n" ++
+        "{'kind 'user}\n" ++
+        "raise\n";
+
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    try temporary.dir.writeFile(io, .{ .sub_path = "format.ecl", .data = input });
+    var file_result = try cli.runOptions(.{
+        .argv = &.{ exe, "fmt", "format.ecl" },
+        .cwd = .{ .dir = temporary.dir },
+    });
+    defer file_result.deinit();
+    try file_result.expect(.{ .exit_code = 0, .stdout = expected, .stderr = "" });
+    const unchanged = try temporary.dir.readFileAlloc(io, "format.ecl", allocator, .unlimited);
+    defer allocator.free(unchanged);
+    try std.testing.expectEqualStrings(input, unchanged);
+
+    var stdin_result = try runWithInput(&.{ build_options.ecl_exe, "fmt", "-" }, input);
+    defer stdin_result.deinit();
+    try stdin_result.expect(.{ .exit_code = 0, .stdout = expected, .stderr = "" });
+
+    var invalid = try run(&.{ build_options.ecl_exe, "fmt" });
+    defer invalid.deinit();
+    try invalid.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr = "ecl fmt: expected exactly one FILE or -\n",
+    });
 }
 
 test "scripts print only explicitly" {
@@ -307,4 +345,78 @@ test "e2e: array words fixture matches canonical output" {
         .stdout = @embedFile("acceptance/array-words.out"),
         .stderr = "",
     });
+}
+
+test "e2e: M6 combinators parse and contract payloads" {
+    var behavior = try run(&.{ build_options.ecl_exe, "test/acceptance/combinators.ecl" });
+    defer behavior.deinit();
+    try behavior.expect(.{
+        .exit_code = 0,
+        .stdout = "[1 4 9]\n([1 10] [2 10] [3 10])\n([10 1] [10 2] [10 3])\n" ++
+            "1\n2\n3\n6\n[1 3 6]\n[1 2 3 3]\n3\n222\n111\n\"three\"\n42\n",
+        .stderr = "",
+    });
+
+    var contract = try run(&.{ build_options.ecl_exe, "-e", "[10 20] (dup) each" });
+    defer contract.deinit();
+    try contract.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{
+            "'kind 'contract",
+            "'word 'each",
+            "'expected (a -- b)",
+            "'seeded 1",
+            "'observed 2",
+            "'index 0",
+        },
+    });
+
+    var rebound = try run(&.{ build_options.ecl_exe, "test/acceptance/redefined-plus.ecl" });
+    defer rebound.deinit();
+    try rebound.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
+
+    var isolated = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3] (dup 'k set k *) each pop k" });
+    defer isolated.deinit();
+    try isolated.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'undefined-word", "'word 'k" },
+    });
+}
+
+test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), exe, temporary.dir, "ecl", io, .{});
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    var result = try cli.runOptions(.{
+        .argv = &.{
+            "./ecl",
+            "-e",
+            "'wrap body 'pair body 'sort body 'pack body 1 2 3 4 4 pack \"42\" parse first",
+        },
+        .cwd = .{ .dir = temporary.dir },
+        .environ_map = &environment,
+    });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout = "(() cons) (() cons cons) (dup grade at) (() swap (cons) times) [1 2 3 4] 42\n",
+        .stderr = "",
+    });
+
+    for (&[_][]const u8{ "slurp", "spit", "getenv", "lines" }) |word| {
+        var missing = try cli.runOptions(.{
+            .argv = &.{ "./ecl", "-e", word },
+            .cwd = .{ .dir = temporary.dir },
+            .environ_map = &environment,
+        });
+        defer missing.deinit();
+        try missing.expect(.{
+            .exit_code = 1,
+            .stderr_contains = &.{ "'kind 'undefined-word", word },
+        });
+    }
 }

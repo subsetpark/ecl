@@ -5,7 +5,6 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const dict = @import("dict.zig");
 const equal = @import("equal.zig");
-const intern = @import("intern.zig");
 const env = @import("env.zig");
 const support = @import("kernel_support.zig");
 const storage = @import("kernel_storage.zig");
@@ -14,19 +13,11 @@ const Value = value.Value;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 
-pub fn install(core: *env.Env) error{OutOfMemory}!void {
+pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try support.installPrimitive(core, "cmp", cmpPrimitive);
     try support.installPrimitive(core, "grade", gradePrimitive);
     try support.installPrimitive(core, "distinct", distinctPrimitive);
     try support.installPrimitive(core, "group", groupPrimitive);
-
-    const body = try list.fromValuesGeneric(core.core.allocator, &.{
-        .{ .word = try intern.intern("dup") },
-        .{ .word = try intern.intern("grade") },
-        .{ .word = try intern.intern("at") },
-    });
-    defer heap.releaseValue(core.core.allocator, body);
-    try core.installCore(try intern.intern("sort"), .{ .word = body.list });
 }
 
 fn cmpPrimitive(evaluator: *Machine) MachineError!void {
@@ -51,7 +42,7 @@ fn gradePrimitive(evaluator: *Machine) MachineError!void {
     const collection = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a comparable list");
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     try validateComparable(evaluator, collection);
     const indices = try evaluator.allocator().alloc(usize, count);
     defer evaluator.allocator().free(indices);
@@ -77,11 +68,22 @@ fn gradePrimitive(evaluator: *Machine) MachineError!void {
     ));
 }
 
+pub fn gradePrimitiveForIdiom() env.PrimitiveImpl {
+    return gradePrimitive;
+}
+
+pub fn sortForIdiom(evaluator: *Machine) MachineError!void {
+    try evaluator.require(1);
+    try evaluator.pushBorrowed(evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1]);
+    try gradePrimitive(evaluator);
+    try @import("kernel_sequence.zig").atForIdiom(evaluator);
+}
+
 pub const GradePath = enum { comparison, bucket, radix };
 const comparison_cutoff: usize = 32;
 
 fn chooseGradePath(collection: Value) GradePath {
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     if (count <= comparison_cutoff) return .comparison;
     return switch (collection.list.kind()) {
         .leaf_i64, .leaf_char1, .leaf_char2, .leaf_char4 => if (smallRange(collection))
@@ -98,7 +100,7 @@ pub fn gradePathForTest(collection: Value) GradePath {
 }
 
 fn chooseGradePathForRuntime(evaluator: *Machine, collection: Value) MachineError!GradePath {
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     if (count <= comparison_cutoff) return .comparison;
     return switch (collection.list.kind()) {
         .leaf_i64, .leaf_char1, .leaf_char2, .leaf_char4 => if (try smallRangePolling(
@@ -165,7 +167,7 @@ fn comparisonGrade(evaluator: *Machine, collection: Value, indices: []usize) Mac
 }
 
 fn smallRange(collection: Value) bool {
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     if (count == 0) return false;
     var minimum = integralKey(collection, 0);
     var maximum = minimum;
@@ -180,7 +182,7 @@ fn smallRange(collection: Value) bool {
 }
 
 fn smallRangePolling(evaluator: *Machine, collection: Value) MachineError!bool {
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     if (count == 0) return false;
     try evaluator.advanceKernel(1);
     var minimum = integralKey(collection, 0);
@@ -315,7 +317,7 @@ fn sortableKey(collection: Value, index: usize) u64 {
 }
 
 fn validateComparable(evaluator: *Machine, collection: Value) MachineError!void {
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     if (count == 0) return;
     const first = list.atUnchecked(collection, 0);
     try evaluator.advanceKernel(1);
@@ -346,8 +348,8 @@ const CompareError = error{ OutOfMemory, Ecl, NotComparable };
 
 fn compareValues(evaluator: *Machine, left: Value, right: Value) CompareError!std.math.Order {
     if (left.isString() and right.isString()) {
-        const left_count: usize = @intCast(left.list.len);
-        const right_count: usize = @intCast(right.list.len);
+        const left_count: usize = @intCast(left.list.length());
+        const right_count: usize = @intCast(right.list.length());
         const shared = @min(left_count, right_count);
         for (0..shared) |index| {
             try evaluator.advanceKernel(1);
@@ -415,7 +417,7 @@ fn distinctPrimitive(evaluator: *Machine) MachineError!void {
     const collection = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a list");
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     const results = try evaluator.allocator().alloc(Value, count);
     defer evaluator.allocator().free(results);
     const next = try evaluator.allocator().alloc(usize, count);
@@ -460,7 +462,7 @@ fn groupPrimitive(evaluator: *Machine) MachineError!void {
     const collection = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a list");
-    const count: usize = @intCast(collection.list.len);
+    const count: usize = @intCast(collection.list.length());
     const keys = try evaluator.allocator().alloc(Value, count);
     defer evaluator.allocator().free(keys);
     const next = try evaluator.allocator().alloc(usize, count);

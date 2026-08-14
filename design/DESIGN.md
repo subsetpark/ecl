@@ -67,25 +67,50 @@ are preserved. Nothing below is constrained by compatibility.
 5. **Bindings: `def`/`set` split.** Executability is a property of the
    *binding*, not the value (forced by decision 2: with one list type there is
    nothing to dispatch on). `(body) 'name def` binds a word — reference
-   applies the body. `value 'name set` associates a value with a name in the
+   applies the body. A definition may place one ordinary quotation annotation
+   beneath the name: `(before -- after)`, `(: "Documentation.")`, or
+   `(before -- after : "Documentation.")`. The annotation is recognized only
+   by a top-level `--` or `:` word; nested markers and the quoted symbols
+   `'--`/`':` remain inert data. Recognized annotations are validated as a
+   whole before publication: at most one marker of each kind, `--` before `:`,
+   only effect words around `--`, and exactly one string after `:`. A malformed
+   recognized annotation is `'domain`, never a body fallback; an annotation
+   without a body is `'underflow`.
+
+   Documentation has canonical prose semantics. Publication trims source-only
+   indentation, folds physical line breaks within prose and bullet
+   continuations to spaces, collapses a paragraph boundary to one blank line,
+   and preserves each Markdown `- ` item on its own logical line. `doc` returns
+   this canonical string. Thus source formatting cannot change reflective
+   documentation; strings outside this structurally recognized position remain
+   exact values.
+
+   `value 'name set` associates a value with a name in the
    current environment — reference pushes it, including quotations-as-data.
    `set` is environment assignment, not a lexical binding form: unqualified
    references resolve when executed. Prefer stack flow or binder locals for
    ordinary local values. One namespace, entries tagged word|value.
-   `def` requires a list body (else error pointing at `set`); a data list as
+   `set`/`setp` never recognize annotations, so lists containing bare marker
+   words remain ordinary values. `def` requires a list body (else error
+   pointing at `set`); a data list as
    body is legal and yields a multi-value constant word. Everything is
    late-bound: words see re-`def`s and re-`set`s of their dependencies
    immediately — module words via registry indirection (18); decision 9's
    intra-module early-binding license is observably equivalent, never
-   semantic. No Thunk concept.
+   semantic. Redefinition and `set` replace the complete metadata snapshot:
+   omitting an effect or docstring clears the old one, while extant binding
+   leases retain their old body and metadata safely. No Thunk concept.
 
-6. **No closures, ever.** A quotation is a plain inspectable list; capture is
-   `cons`/splice producing a new plain list (`3 (+) cons` → `(3 +)`).
+6. **No closures, ever.** A quotation is a plain inspectable list. Safe
+   arbitrary-value capture is `literal` plus `compose`, producing visible
+   structure (`3 literal (+) compose` → `((3) first +)`). `cons` remains raw
+   structural prepend/form insertion; a word inserted into executable code
+   will execute when that code is called.
    Locals are definition-site sugar that desugars to point-free code before
    storage; head-position only; not permitted across quotation boundaries in
-   v1 (error suggests `cons`). Spelling: `(|lo hi| …)`, Rust/Ruby-style —
-   see GRAMMAR.md. The locals sugar does not invoke `set`; they are unrelated
-   mechanisms.
+   v1 (the error suggests `literal` plus `compose`). Spelling: `(|lo hi| …)`,
+   Rust/Ruby-style — see GRAMMAR.md. The locals sugar does not invoke `set`;
+   they are unrelated mechanisms.
 
 7. **Errors: crash-only, observed as data at unit boundaries.** No
    try/catch, no handler quotations. Errors propagate; the failing unit of
@@ -94,9 +119,9 @@ are preserved. Nothing below is constrained by compatibility.
    The guarantee is stack-only, stated honestly: env writes and IO
    performed before the failure survive. Failure is observed from outside,
    as data, at one explicit boundary word: `(q) attempt` runs a
-   self-contained quotation (effect `( -- ... )`; inputs arrive via `cons`
-   or env names, never the ambient stack — the same rule as every other
-   quotation boundary) on an isolated substack, and always pushes exactly
+   self-contained quotation (effect `( -- ... )`; inputs arrive via `literal`
+   plus `compose` or env names, never the ambient stack — the same rule as
+   every other quotation boundary) on an isolated substack, and always pushes exactly
    one outcome value: `{'ok (results)}` or `{'err <error dict>}`. Uniform
    arity is what makes reified failure safe in a stack language — the
    desync argument that killed results-on-stack does not apply, because a
@@ -108,8 +133,8 @@ are preserved. Nothing below is constrained by compatibility.
    leftmost `'err`, keeping parallel failure deterministic. The REPL is
    the implicit top-level boundary.
 
-8. **No macro layer.** Runtime quotation construction (`compose`, `cons`,
-   list words) plus `def` *is* the metaprogramming system; `'word body`
+8. **No macro layer.** Runtime quotation construction (`literal`, `compose`,
+   `cons`, list words) plus `def` *is* the metaprogramming system; `'word body`
    fetches a word's list for surgery, `def` rebinds. With immutability,
    build-new-then-rebind is the only way code changes (this is what makes
    cache invalidation tractable). Parse-time words are capped at a handful
@@ -118,15 +143,18 @@ are preserved. Nothing below is constrained by compatibility.
 9. **Hardening is structural: the module boundary, not a per-word act.**
    (Re-ruled 2026-08-12; supersedes the deferred per-word `seal` — no
    `seal` word exists or ever will.) Module `def`/`defp` take a
-   **mandatory effect declaration**: a plain quotation of words with one
-   `--` separator, `( a b -- c )`, shape-validated at registration. Zero
-   grammar change — the declaration is ordinary quotation data,
-   homoiconic and inspectable. Spelling: `( body ) ( a b -- c ) 'name
-   def` — module `def`/`defp` are 3-ary; top-level `def` stays 2-ary
-   (context-dependent arity, precedented by `defp`'s top-level error).
-   Declarations live in the binding cell's effect slot and are shown by
-   `see`/`which`. The architecture is gradual checking: dynamic top
-   level, declared modules, contract-guarded boundaries.
+   **mandatory effect portion** in decision 5's unified annotation. Module
+   `def`/`defp` accept `( a b -- c )` or
+   `( a b -- c : "Documentation.")`; a documentation-only annotation is a
+   registration error. Top-level `def` accepts no annotation, either portion,
+   or both. A top-level effect is reflective metadata and future checker input,
+   not a per-call dynamic contract. Zero grammar change: the annotation is
+   ordinary quotation data, homoiconic and constructible at runtime.
+   Effects and docs live in the binding cell's existing slots. `body` returns
+   only the body, `doc` resolves normally and returns the canonical string, `which`
+   stays concise and includes an effect when present, and `see` prints one
+   canonical combined annotation. The architecture is gradual checking:
+   dynamic top level, declared modules, contract-guarded module boundaries.
    - **v1 enforcement is dynamic:** decision 14's machinery checks the
      observed effect against the declaration at application. Declarations
      are live contracts from day one, not comments awaiting a checker.
@@ -140,6 +168,11 @@ are preserved. Nothing below is constrained by compatibility.
      The old strict-extension promise is amended to: the checker rejects
      only code already violating its own stated contract (success-typing
      discipline; the Dialyzer model).
+   - **Namespace markers are exact reservations.** `--` and `:` remain legal
+     word values and quoted symbols, but cannot be introduced as definitions,
+     values, locals, module names, aliases, exports, or native entries.
+     Binding attempts are `'domain`; binder use is a parse error. Longer names
+     containing the same punctuation remain legal.
    - **Literal-count packing is inferable; dynamic packing is an escape
      hatch.** `pack` consumes the top `n` values, where `n` is itself the
      top input. A nonnegative integer literal gives the checker an ordinary
@@ -217,7 +250,7 @@ are preserved. Nothing below is constrained by compatibility.
       leading axis, exactly one result per element; result specializes when
       rectangular. Depth composes by nesting: `((q) each) each`.
     - `each2`: requires `( a b -- c )`; zip with broadcast conformability.
-      Each-left/right are derived via `cons`, not primitives.
+      Each-left/right are derived via `literal` plus `compose`, not primitives.
     - `for`: requires `( a -- )`; the ordered effect loop, collects nothing.
     - `fold`/`scan`: require `( acc a -- acc )`.
     There is no collect-all `map` (result length would be a dynamic property
@@ -347,7 +380,7 @@ are preserved. Nothing below is constrained by compatibility.
     stateful servers, which ecl does not target. Four primitives;
     everything else is stdlib.
     - `spawn` `( q -- task )`: runs a self-contained quotation (`attempt`'s
-      contract — inputs via `cons`/env, never ambient stack) on its own
+      contract — inputs via `literal` plus `compose`/env, never ambient stack) on its own
       share-nothing substack, concurrently. Immutability makes sharing
       safe with no copying or serialization.
     - `await` `( task -- outcome )`: blocks; delivers the same
@@ -453,9 +486,13 @@ implementation matter, not a design matter.
   blocks, idempotent, cached outcome; await-any; deadline timers for
   await-for). Every unit records spawned children; death or scope-end
   cancels unawaited children (d.20). Cancellation lands at safe points —
-  frame boundaries and chunk boundaries inside kernels (kernels are
-  otherwise safe-point deserts, d.23); discarding a unit is safe because
-  units share nothing mutable.
+  frame boundaries and work-cursor boundaries inside kernels (d.23).
+  Traversal of user-sized data receives a mandatory work context; its cursors
+  charge the shared unit budget per logical item, and its bulk chunks expose
+  no more than 256 already-charged bytes. Repeated passes share that budget.
+  Unknown-size builders use fixed linked chunks rather than relocating arrays
+  or automatically rehashing maps. Discarding a unit is safe because units
+  share nothing mutable.
 
 - **Kernels.** Coarse primitives — pervasive arithmetic/comparison,
   `each`/`each2`/`fold`/`scan`/`for`, `where`/`at`/`raze`,
@@ -547,6 +584,15 @@ implementation matter, not a design matter.
       registry is the one multi-writer table and takes an explicit
       synchronized swap; module words pin one registry generation for a
       whole body — no mixed-generation execution.
+    - **Make runtime invariants structural.** Raw heap headers do not expose
+      mutable payloads: initialization and uniqueness yield different opaque
+      capabilities. Namespace publication requires a validated nominal name;
+      top/module metadata, core construction phase, scope ownership, stack
+      windows, and application modes use distinct types or tagged unions.
+      Native failures carry their payload in the callback result. User-sized
+      traversal accepts a mandatory work capability whose cursors and bounded
+      chunks perform the charging. Debug assertions and naming conventions are
+      checks of last resort, not the authority for these states.
     - **Snapshot semantics are scoped to the recognition guard only:** a
       combinator may resolve its quotation's words once at entry to
       choose a fused kernel; the generic path keeps full per-application
@@ -560,12 +606,15 @@ implementation matter, not a design matter.
       run fully serially or chunked; a program whose elements must run
       concurrently to progress is already broken. This licenses a
       chunking [P] override of the prelude definition.
-    - **Line budget (re-derived 2026-08-12 for the Zig host):**
-      interpreter core ≤ ~9.5k lines excluding kernels, stdlib, and
-      tests; kernels ≤ ~5k; stdlib modules ≤ ~2k. Budgeted per component
+    - **Line budget (recalibrated 2026-08-14 for strong type boundaries):**
+      classified production Zig ≤ 22k lines including kernels and source
+      tooling, while tests and all target-language ECL source are excluded;
+      kernels remain ≤ 5.5k. Budgeted per component
       so the ceiling binds where sprawl would appear — see
-      ARCHITECTURE.md's table. Additions still displace within a
-      component. The superseded ~5k figure was derived from the Rust
+      ARCHITECTURE.md's table. Type/capability boundaries take priority over a
+      historical ceiling: raise and explain the row rather than weaken the
+      representation. The
+      superseded ~5k figure was derived from the Rust
       skeleton's 4.6k, a baseline that does not transfer: different host
       (Zig costs lines for explicit allocators, error unions, and `zig
       fmt`), different data structures (the skeleton's boxed lists,
@@ -605,7 +654,8 @@ a BQN competitor; wrong one for this language).
 
 - **All naming.** Settled — see VOCABULARY.md: Joy/Factor names for the
   stack half, K names for the array half; `pop` (stack) vs `drop`
-  (sequence); `cons` not `curry`; `call` not `i`; Janet's `prin`/`print`
+  (sequence); `cons` for raw prepend and `literal` for safe capture; `call`
+  not `i`; Janet's `prin`/`print`
   convention; primrec/linrec dropped from core. The v1 combinator
   surface (ruled 2026-08-12) captures Joy's zoo and APCL's adaptors
   practically — control flow is the least intuitive element of

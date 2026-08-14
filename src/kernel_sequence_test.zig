@@ -1,7 +1,4 @@
 //! Executable proofs for sequence, search, and shape kernels.
-const std = @import("std");
-const session = @import("session.zig");
-const heap = @import("heap.zig");
 const helper = @import("kernel_test_support.zig");
 
 test "sequence: len shape and ragged shape errors" {
@@ -101,19 +98,4 @@ test "sequence: flip and reshape obey rectangular row-major semantics" {
             .message_contains = "cannot retain trailing axes",
         },
     });
-}
-
-fn allocationProbe(allocator: std.mem.Allocator) !void {
-    var runtime = try session.Session.init(allocator, &.{});
-    defer runtime.deinit();
-    const outcome = try runtime.runUnit(
-        "<allocation>",
-        "[[1 2] [3 4]] flip pop [1 2 3] [2 3] reshape pop " ++
-            "[[1 2] [3]] raze pop [1 2] 5 take pop [2 0 3] where",
-    );
-    if (outcome == .err) heap.releaseValue(allocator, outcome.err);
-}
-
-test "sequence: allocation failures release every intermediate" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationProbe, .{});
 }

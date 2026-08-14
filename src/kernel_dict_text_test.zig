@@ -178,8 +178,8 @@ test "dict-text: update traversals charge polls while copying" {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.calls += 1;
             if (self.calls != self.mutate_at) return;
-            const values = heap.dictStorage(self.source.dict).payload.?.vals;
-            heap.items(i64, values)[0] = 999;
+            const values = heap.dictStorageConst(self.source.dict).payload.?.vals;
+            heap.writeUnique(heap.claimUnique(values).?, 0, .{ .int = 999 });
         }
     };
     var mutator = Mutator{ .source = small, .mutate_at = counter.calls + 2 };
@@ -245,20 +245,4 @@ test "dict-text: update traversals charge polls while copying" {
     };
     try std.testing.expect((try runtime.runUnit("<test>", "{70000 1} merge pop")) == .ok);
     try std.testing.expect(runtime.last_polls >= 1);
-}
-
-fn allocationProbe(allocator: std.mem.Allocator) !void {
-    var runtime = try session.Session.init(allocator, &.{});
-    defer runtime.deinit();
-    const outcome = try runtime.runUnit(
-        "<allocation>",
-        "{'a 1} 'b 2 put keys pop [\"a\" \"b\"] \"—\" join \"—\" split pop " ++
-            "['a 'b] [1 2] to-dict keys pop ['c 3] dict-of keys pop [1 2 3] 1 9 put pop " ++
-            "\"ab\" reverse 0 \\λ put pop ['a 1] str [1] \"{}\" format",
-    );
-    if (outcome == .err) heap.releaseValue(allocator, outcome.err);
-}
-
-test "dict-text: allocation failures release updates and text scratch" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationProbe, .{});
 }

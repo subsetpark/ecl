@@ -53,8 +53,8 @@ pub fn fromI64Slice(
     source: []const i64,
 ) error{OutOfMemory}!Value {
     const header = try heap.allocHeader(allocator, .leaf_i64, source.len, initialCapacity(source.len));
-    @memcpy(heap.items(i64, header)[0..source.len], source);
-    return .{ .list = header };
+    @memcpy(heap.initI64s(header)[0..source.len], source);
+    return .{ .list = heap.publish(header) };
 }
 
 pub fn fromF64Slice(
@@ -62,8 +62,8 @@ pub fn fromF64Slice(
     source: []const f64,
 ) error{OutOfMemory}!Value {
     const header = try heap.allocHeader(allocator, .leaf_f64, source.len, initialCapacity(source.len));
-    @memcpy(heap.items(f64, header)[0..source.len], source);
-    return .{ .list = header };
+    @memcpy(heap.initF64s(header)[0..source.len], source);
+    return .{ .list = heap.publish(header) };
 }
 
 pub fn fromCodepoints(
@@ -75,24 +75,24 @@ pub fn fromCodepoints(
     const cap = initialCapacity(source.len);
     if (max_codepoint <= std.math.maxInt(u8)) {
         const header = try heap.allocHeader(allocator, .leaf_char1, source.len, cap);
-        for (source, 0..) |codepoint, index| heap.items(u8, header)[index] = @intCast(codepoint);
-        return .{ .list = header };
+        for (source, 0..) |codepoint, index| heap.initChars8(header)[index] = @intCast(codepoint);
+        return .{ .list = heap.publish(header) };
     }
     if (max_codepoint <= std.math.maxInt(u16)) {
         const header = try heap.allocHeader(allocator, .leaf_char2, source.len, cap);
-        for (source, 0..) |codepoint, index| heap.items(u16, header)[index] = @intCast(codepoint);
-        return .{ .list = header };
+        for (source, 0..) |codepoint, index| heap.initChars16(header)[index] = @intCast(codepoint);
+        return .{ .list = heap.publish(header) };
     }
     const header = try heap.allocHeader(allocator, .leaf_char4, source.len, cap);
-    @memcpy(heap.items(u32, header)[0..source.len], source);
-    return .{ .list = header };
+    @memcpy(heap.initChars32(header)[0..source.len], source);
+    return .{ .list = heap.publish(header) };
 }
 
 pub fn emptyLike(
     allocator: std.mem.Allocator,
     source: Value,
 ) error{ OutOfMemory, NotAList }!Value {
-    return .{ .list = try heap.allocHeader(allocator, (try listHeader(source)).kind(), 0, 0) };
+    return .{ .list = heap.publish(try heap.allocHeader(allocator, (try listHeader(source)).kind(), 0, 0)) };
 }
 
 pub fn fromSymbolIds(
@@ -100,19 +100,19 @@ pub fn fromSymbolIds(
     source: []const u32,
 ) error{OutOfMemory}!Value {
     const header = try heap.allocHeader(allocator, .leaf_symbol, source.len, initialCapacity(source.len));
-    @memcpy(heap.items(u32, header)[0..source.len], source);
-    return .{ .list = header };
+    @memcpy(heap.initSymbols(header)[0..source.len], source);
+    return .{ .list = heap.publish(header) };
 }
 
 pub fn len(collection: Value) error{NotAList}!usize {
     const header = try listHeader(collection);
-    return @intCast(header.len);
+    return @intCast(header.length());
 }
 
 /// Returns a borrowed cell. Heap children remain owned by the list.
 pub fn at(collection: Value, index: usize) error{ NotAList, IndexOutOfBounds }!Value {
     const header = try listHeader(collection);
-    const used: usize = @intCast(header.len);
+    const used: usize = @intCast(header.length());
     if (index >= used) return error.IndexOutOfBounds;
     return atUnchecked(collection, index);
 }
@@ -122,12 +122,12 @@ pub fn atUnchecked(collection: Value, index: usize) Value {
     const header = collection.list;
     return switch (header.kind()) {
         .generic_spine => heap.valuesConst(header)[index],
-        .leaf_i64 => .{ .int = heap.itemsConst(i64, header)[index] },
-        .leaf_f64 => .{ .float = heap.itemsConst(f64, header)[index] },
-        .leaf_char1 => .{ .char = heap.itemsConst(u8, header)[index] },
-        .leaf_char2 => .{ .char = heap.itemsConst(u16, header)[index] },
-        .leaf_char4 => .{ .char = heap.itemsConst(u32, header)[index] },
-        .leaf_symbol => .{ .symbol = heap.itemsConst(u32, header)[index] },
+        .leaf_i64 => .{ .int = heap.i64s(header)[index] },
+        .leaf_f64 => .{ .float = heap.f64s(header)[index] },
+        .leaf_char1 => .{ .char = heap.chars8(header)[index] },
+        .leaf_char2 => .{ .char = heap.chars16(header)[index] },
+        .leaf_char4 => .{ .char = heap.chars32(header)[index] },
+        .leaf_symbol => .{ .symbol = heap.symbols(header)[index] },
         .dict, .reserved_mask => unreachable,
     };
 }
@@ -141,9 +141,10 @@ pub fn append(
     item: Value,
 ) Error!Value {
     const header = try listHeader(collection);
-    if (!heap.isUnique(header)) return rebuildWithItem(allocator, collection, item, false);
+    const unique = heap.claimUnique(header) orelse
+        return rebuildWithItem(allocator, collection, item, false);
 
-    const used: usize = @intCast(header.len);
+    const used: usize = @intCast(header.length());
     if (used == 0 and header.kind() == .generic_spine) {
         return rebuildWithItem(allocator, collection, item, true);
     }
@@ -162,31 +163,17 @@ pub fn append(
 
     if (used == heap.capacity(header)) {
         const new_capacity = growCapacity(used + 1);
-        switch (header.kind()) {
-            .generic_spine => try heap.replaceBuffer(Value, allocator, header, new_capacity),
-            .leaf_i64 => try heap.replaceBuffer(i64, allocator, header, new_capacity),
-            .leaf_f64 => try heap.replaceBuffer(f64, allocator, header, new_capacity),
-            .leaf_char1 => try heap.replaceBuffer(u8, allocator, header, new_capacity),
-            .leaf_char2 => try heap.replaceBuffer(u16, allocator, header, new_capacity),
-            .leaf_char4 => try heap.replaceBuffer(u32, allocator, header, new_capacity),
-            .leaf_symbol => try heap.replaceBuffer(u32, allocator, header, new_capacity),
-            .dict, .reserved_mask => return error.NotAList,
-        }
+        try heap.replaceBuffer(allocator, unique, new_capacity);
     }
     switch (header.kind()) {
         .generic_spine => {
             heap.retainValue(item);
-            heap.values(header)[used] = item;
+            heap.writeUnique(unique, used, item);
         },
-        .leaf_i64 => heap.items(i64, header)[used] = item.int,
-        .leaf_f64 => heap.items(f64, header)[used] = item.float,
-        .leaf_char1 => heap.items(u8, header)[used] = @intCast(item.char),
-        .leaf_char2 => heap.items(u16, header)[used] = @intCast(item.char),
-        .leaf_char4 => heap.items(u32, header)[used] = item.char,
-        .leaf_symbol => heap.items(u32, header)[used] = item.symbol,
+        .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => heap.writeUnique(unique, used, item),
         .dict, .reserved_mask => return error.NotAList,
     }
-    header.len += 1;
+    heap.setUniqueLength(unique, used + 1);
     return collection;
 }
 
@@ -231,14 +218,14 @@ fn profile(source: []const Value) Profile {
 
 fn fromIntValues(allocator: std.mem.Allocator, source: []const Value) !Value {
     const header = try heap.allocHeader(allocator, .leaf_i64, source.len, initialCapacity(source.len));
-    for (source, 0..) |item, index| heap.items(i64, header)[index] = item.int;
-    return .{ .list = header };
+    for (source, 0..) |item, index| heap.initI64s(header)[index] = item.int;
+    return .{ .list = heap.publish(header) };
 }
 
 fn fromFloatValues(allocator: std.mem.Allocator, source: []const Value) !Value {
     const header = try heap.allocHeader(allocator, .leaf_f64, source.len, initialCapacity(source.len));
-    for (source, 0..) |item, index| heap.items(f64, header)[index] = item.float;
-    return .{ .list = header };
+    for (source, 0..) |item, index| heap.initF64s(header)[index] = item.float;
+    return .{ .list = heap.publish(header) };
 }
 
 fn fromCharValues(
@@ -249,23 +236,23 @@ fn fromCharValues(
     const cap = initialCapacity(source.len);
     if (max_codepoint <= std.math.maxInt(u8)) {
         const header = try heap.allocHeader(allocator, .leaf_char1, source.len, cap);
-        for (source, 0..) |item, index| heap.items(u8, header)[index] = @intCast(item.char);
-        return .{ .list = header };
+        for (source, 0..) |item, index| heap.initChars8(header)[index] = @intCast(item.char);
+        return .{ .list = heap.publish(header) };
     }
     if (max_codepoint <= std.math.maxInt(u16)) {
         const header = try heap.allocHeader(allocator, .leaf_char2, source.len, cap);
-        for (source, 0..) |item, index| heap.items(u16, header)[index] = @intCast(item.char);
-        return .{ .list = header };
+        for (source, 0..) |item, index| heap.initChars16(header)[index] = @intCast(item.char);
+        return .{ .list = heap.publish(header) };
     }
     const header = try heap.allocHeader(allocator, .leaf_char4, source.len, cap);
-    for (source, 0..) |item, index| heap.items(u32, header)[index] = item.char;
-    return .{ .list = header };
+    for (source, 0..) |item, index| heap.initChars32(header)[index] = item.char;
+    return .{ .list = heap.publish(header) };
 }
 
 fn fromSymbolValues(allocator: std.mem.Allocator, source: []const Value) !Value {
     const header = try heap.allocHeader(allocator, .leaf_symbol, source.len, initialCapacity(source.len));
-    for (source, 0..) |item, index| heap.items(u32, header)[index] = item.symbol;
-    return .{ .list = header };
+    for (source, 0..) |item, index| heap.initSymbols(header)[index] = item.symbol;
+    return .{ .list = heap.publish(header) };
 }
 
 fn fromGenericValues(allocator: std.mem.Allocator, source: []const Value) !Value {
@@ -277,9 +264,9 @@ fn fromGenericValues(allocator: std.mem.Allocator, source: []const Value) !Value
     );
     for (source, 0..) |item, index| {
         heap.retainValue(item);
-        heap.values(header)[index] = item;
+        heap.initValues(header)[index] = item;
     }
-    return .{ .list = header };
+    return .{ .list = heap.publish(header) };
 }
 
 fn rebuildWithItem(
@@ -295,7 +282,11 @@ fn rebuildWithItem(
     materialized[old_len] = item;
     const replacement = try fromValues(allocator, materialized);
     if (!adopt) return replacement;
-    heap.adoptRepresentation(allocator, collection.list, replacement.list);
+    heap.adoptRepresentation(
+        allocator,
+        heap.claimUnique(collection.list).?,
+        heap.claimUnique(replacement.list).?,
+    );
     return collection;
 }
 

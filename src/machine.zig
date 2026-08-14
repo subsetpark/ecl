@@ -11,6 +11,7 @@ const modules = @import("modules.zig");
 const reader = @import("reader.zig");
 const poll_api = @import("poll.zig");
 const reflection = @import("reflection.zig");
+const kernel_storage = @import("kernel_storage.zig");
 pub const Value = value.Value;
 pub const Header = value.Header;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -18,6 +19,7 @@ const no_word = std.math.maxInt(u32);
 const no_boundary = std.math.maxInt(u32);
 const fuel_quantum: u32 = 1024;
 pub const kernel_poll_quantum: u32 = 65_536;
+pub const IdiomMode = enum { automatic, generic_only };
 pub const ErrorKind = enum {
     underflow,
     undefined_word,
@@ -50,6 +52,7 @@ const ErrorDataKey = enum {
     path,
     seeded,
     observed,
+    expected,
     index,
     left,
     right,
@@ -66,6 +69,7 @@ pub const EclErr = struct {
     message: [512]u8 = [_]u8{0} ** 512,
     message_len: usize = 0,
     word: ?u32 = null,
+    trace_parent: ?u32 = null,
     site: ?ErrorSite = null,
     data: [5]ErrorData = .{empty_error_data} ** 5,
     data_len: usize = 0,
@@ -235,7 +239,7 @@ pub const EclErr = struct {
         }
         const data_value = try completeRaisedData(allocator, old_data, location);
         defer if (data_value) |item| heap.releaseValue(allocator, item);
-        const old_count: usize = @intCast(raised.dict.len);
+        const old_count: usize = @intCast(raised.dict.length());
         const extra_count = @as(usize, @intFromBool(old_message == null)) +
             @as(usize, @intFromBool(old_word == null and self.word != null)) +
             @as(usize, @intFromBool(old_trace == null)) +
@@ -288,7 +292,7 @@ fn completeRaisedData(
     const has_line = if (data) |item| (try dict.symbolField(allocator, item, line_key)) != null else false;
     const has_col = if (data) |item| (try dict.symbolField(allocator, item, col_key)) != null else false;
     if (data != null and (location == null or has_source and has_line and has_col)) return null;
-    const old_count: usize = if (data) |item| @intCast(item.dict.len) else 0;
+    const old_count: usize = if (data) |item| @intCast(item.dict.length()) else 0;
     const add_source = location != null and !has_source;
     const add_line = location != null and !has_line;
     const add_col = location != null and !has_col;
@@ -351,21 +355,26 @@ const Eval = struct {
     home: ?*modules.ModuleGeneration,
     traced_word: u32,
 };
-const BoundaryKind = enum(u8) { attempt, module };
+const BoundaryMode = union(enum) {
+    attempt: *env.Scope,
+    module: modules.OwnedCandidate,
+};
 const Boundary = struct {
-    kind: BoundaryKind,
+    mode: BoundaryMode,
     stack_base: u32,
     previous_base: u32,
     previous_boundary: u32,
     word: u32,
-    scope: *env.Scope,
-    candidate: ?*modules.ModuleGeneration = null,
     fn deinit(self: Boundary, allocator: std.mem.Allocator) void {
-        if (self.candidate) |candidate| {
-            candidate.destroy();
-        } else {
-            self.scope.deinit();
-            allocator.destroy(self.scope);
+        switch (self.mode) {
+            .module => |candidate_value| {
+                var candidate = candidate_value;
+                candidate.deinit();
+            },
+            .attempt => |scope| {
+                scope.deinit();
+                allocator.destroy(scope);
+            },
         }
     }
 };
@@ -376,27 +385,68 @@ const EffectCheck = struct {
     outputs: u32,
     word: u32,
 };
+pub const StackWindow = enum(u32) {
+    _,
+
+    fn init(depth: usize, seeded: u32) ?StackWindow {
+        if (depth < seeded) return null;
+        return @enumFromInt(@as(u32, @intCast(depth - seeded)));
+    }
+    pub fn base(self: StackWindow) u32 {
+        return @intFromEnum(self);
+    }
+    pub fn observed(self: StackWindow, depth: usize) ?usize {
+        const start: usize = self.base();
+        if (depth < start) return null;
+        return depth - start;
+    }
+};
+pub const ApplicationStep = struct {
+    quotation: *Header,
+    seeded: u32,
+};
+pub const IsolatedApplication = struct {
+    quotation: *Header,
+    context: *anyopaque,
+    resume_fn: *const fn (*Machine, *anyopaque, StackWindow) MachineError!?ApplicationStep,
+    deinit_fn: *const fn (std.mem.Allocator, *anyopaque) void,
+    parent_scope: *env.Scope,
+    home: ?*modules.ModuleGeneration,
+    seeded: u32,
+};
+const ApplicationMode = union(enum) {
+    in_place: StackWindow,
+    isolated: struct {
+        child: *env.Scope,
+        previous_base: StackWindow,
+    },
+};
+const ApplicationFrame = struct {
+    context: *anyopaque,
+    resume_fn: *const fn (*Machine, *anyopaque, StackWindow) MachineError!?ApplicationStep,
+    deinit_fn: *const fn (std.mem.Allocator, *anyopaque) void,
+    parent_scope: *env.Scope,
+    home: ?*modules.ModuleGeneration,
+    mode: ApplicationMode,
+    traced_word: u32,
+    fn deinit(self: ApplicationFrame, allocator: std.mem.Allocator) void {
+        switch (self.mode) {
+            .in_place => {},
+            .isolated => |isolated| {
+                isolated.child.deinit();
+                allocator.destroy(isolated.child);
+            },
+        }
+        self.deinit_fn(allocator, self.context);
+    }
+};
 pub const Frame = union(enum(u8)) {
     eval: Eval,
     restore: Value,
-    while_after_cond: struct {
-        condition: *Header,
-        body: *Header,
-        scope: *env.Scope,
-        home: ?*modules.ModuleGeneration,
-        base: u32,
-        word: u32,
-    },
-    while_after_body: struct {
-        condition: *Header,
-        body: *Header,
-        scope: *env.Scope,
-        home: ?*modules.ModuleGeneration,
-        word: u32,
-    },
     effect_check: EffectCheck,
+    application: ApplicationFrame,
     use_after_load: struct {
-        registry: *modules.Registry,
+        loading: modules.LoadingLease,
         scope: *env.Scope,
         name: u32,
         path: Value,
@@ -406,17 +456,11 @@ pub const Frame = union(enum(u8)) {
         switch (self) {
             .eval => |frame| heap.decRef(allocator, frame.code),
             .restore => |item| heap.releaseValue(allocator, item),
-            .while_after_cond => |frame| {
-                heap.decRef(allocator, frame.condition);
-                heap.decRef(allocator, frame.body);
-            },
-            .while_after_body => |frame| {
-                heap.decRef(allocator, frame.condition);
-                heap.decRef(allocator, frame.body);
-            },
             .effect_check => {},
+            .application => |frame| frame.deinit(allocator),
             .use_after_load => |frame| {
-                frame.registry.endLoading(frame.name);
+                var loading = frame.loading;
+                loading.deinit();
                 heap.releaseValue(allocator, frame.path);
             },
             .boundary => |boundary| boundary.deinit(allocator),
@@ -424,8 +468,12 @@ pub const Frame = union(enum(u8)) {
     }
 };
 comptime {
-    if (@sizeOf(Frame) > 48) @compileError("machine frames must remain at most 48 bytes");
+    // The tagged application mode and immutable driver identity are worth the
+    // extra words: invalid correlated continuation states are unrepresentable.
+    if (@sizeOf(Frame) > 80) @compileError("machine frames must remain at most 80 bytes");
 }
+pub const IdiomRequest = union(enum) { direct: *Header, each, each2, fold, scan };
+pub const PhraseRecognizer = *const fn (*Machine, IdiomRequest) MachineError!bool;
 pub const Unit = struct {
     allocator: std.mem.Allocator,
     frames: std.ArrayList(Frame) = .empty,
@@ -451,6 +499,9 @@ pub const Unit = struct {
     pending: ?EclErr = null,
     last_error: ?Value = null,
     exit_status: ?u8 = null,
+    idiom_mode: IdiomMode = .automatic,
+    idiom_hits: u64 = 0,
+    phrase_recognizer: ?PhraseRecognizer = null,
     pub fn init(
         allocator: std.mem.Allocator,
         stack: std.ArrayList(Value),
@@ -464,7 +515,7 @@ pub const Unit = struct {
             .allocator = allocator,
             .stack = stack,
             .environment = environment,
-            .root_scope = env.Scope.direct(allocator, &environment.session, null, .session),
+            .root_scope = environment.sessionRoot(allocator),
             .archive = archive,
             .output = output,
             .arguments = arguments,
@@ -522,10 +573,12 @@ pub const Machine = struct {
     }
     fn installUse(self: *Machine, scope: *env.Scope, name: u32) MachineError!bool {
         const registry = self.unit.registry orelse return false;
-        const canonical = registry.canonical(name) orelse return false;
-        if (scope.kind == .session) try emitShadowNotices(self, scope, canonical);
-        scope.moveUseToTop(canonical) catch |err| switch (err) {
+        const work = poll_api.WorkContext.init(traversalPoller(self));
+        const canonical = try registry.canonicalWork(name, work) orelse return false;
+        if (scope.kind() == .session) try emitShadowNotices(self, scope, canonical);
+        scope.moveUseToTop(canonical, poll_api.WorkContext.init(traversalPoller(self))) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Ecl => return error.Ecl,
             error.Frozen => return self.fail(.domain, "registered module environments are immutable"),
         };
         return true;
@@ -535,11 +588,11 @@ pub const Machine = struct {
         const registry = self.unit.registry orelse return self.undefinedModule(name);
         const io = self.unit.host_io orelse return self.undefinedModule(name);
         const search = self.unit.ecl_path orelse return self.undefinedModule(name);
-        if (!try registry.beginLoading(name)) {
+        const work = poll_api.WorkContext.init(traversalPoller(self));
+        var loading = try registry.beginLoading(name, work) orelse {
             return self.failFmt(.domain, "recursive auto-load of module `{s}`", .{intern.get(name)});
-        }
-        var loading_owned = true;
-        defer if (loading_owned) registry.endLoading(name);
+        };
+        defer loading.deinit();
         const filename = try std.fmt.allocPrint(self.unit.allocator, "{s}.ecl", .{intern.get(name)});
         defer self.unit.allocator.free(filename);
         var paths = std.mem.splitScalar(u8, search, std.fs.path.delimiter);
@@ -557,13 +610,24 @@ pub const Machine = struct {
                     return failure;
                 },
             };
-            try self.loadPathOwned(candidate, name);
-            loading_owned = false;
+            try self.loadPathForUseOwned(candidate, name, &loading);
             return;
         }
         return self.undefinedModule(name);
     }
-    pub fn loadPathOwned(self: *Machine, path: []const u8, retry_use: ?u32) MachineError!void {
+    pub fn loadPathOwned(self: *Machine, path: []const u8) MachineError!void {
+        return self.loadPathOwnedInner(path, null);
+    }
+    const PendingUse = struct { name: u32, loading: *modules.LoadingLease };
+    fn loadPathForUseOwned(
+        self: *Machine,
+        path: []const u8,
+        name: u32,
+        loading: *modules.LoadingLease,
+    ) MachineError!void {
+        return self.loadPathOwnedInner(path, .{ .name = name, .loading = loading });
+    }
+    fn loadPathOwnedInner(self: *Machine, path: []const u8, retry_use: ?PendingUse) MachineError!void {
         const path_value = try stringValue(self.unit.allocator, path);
         defer heap.releaseValue(self.unit.allocator, path_value);
         const io = self.unit.host_io orelse {
@@ -586,8 +650,15 @@ pub const Machine = struct {
         };
         defer self.unit.allocator.free(source);
         var diag: reader.Diag = .{};
-        const read_result = reader.read(self.unit.allocator, path, source, &diag) catch |err| switch (err) {
+        const read_result = reader.readPolling(
+            self.unit.allocator,
+            path,
+            source,
+            &diag,
+            poll_api.WorkContext.init(traversalPoller(self)),
+        ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Ecl => return error.Ecl,
             error.Parse => {
                 const failure = self.fail(.parse, diag.text());
                 self.unit.pending.?.setLocation(path, diag.span);
@@ -603,42 +674,46 @@ pub const Machine = struct {
             .complete => |complete| complete,
         };
         defer parsed.deinit();
-        const root = try list.fromValuesGeneric(self.unit.allocator, parsed.forms);
+        const root = try kernel_storage.fromValuesGeneric(self.unit.allocator, parsed.forms, traversalPoller(self));
         var root_owned = true;
         defer if (root_owned) heap.releaseValue(self.unit.allocator, root);
-        try self.unit.archive.absorb(&parsed, root);
+        try self.unit.archive.absorb(&parsed, root, .init(traversalPoller(self)));
         root_owned = false;
         heap.incRef(root.list);
-        if (retry_use) |name| {
+        if (retry_use) |pending_use| {
             const scope = self.current.?.scope;
             const home = self.current.?.home;
             _ = self.suspendCurrent() catch {
                 heap.decRef(self.unit.allocator, root.list);
                 return error.OutOfMemory;
             };
-            self.unit.frames.append(self.unit.allocator, .{ .use_after_load = .{
-                .registry = self.unit.registry.?,
+            heap.retainValue(path_value);
+            self.appendFrame(.{ .use_after_load = .{
+                .loading = pending_use.loading.move(),
                 .scope = scope,
-                .name = name,
+                .name = pending_use.name,
                 .path = path_value,
             } }) catch {
                 heap.decRef(self.unit.allocator, root.list);
                 return error.OutOfMemory;
             };
-            heap.retainValue(path_value);
-            self.unit.max_frames = @max(self.unit.max_frames, self.unit.frames.items.len);
             self.current = .{ .code = root.list, .ip = 0, .scope = scope, .home = home, .traced_word = no_word };
         } else {
             try self.callOwned(root.list);
         }
     }
-    pub fn aliasModule(self: *Machine, short: u32, target: u32) MachineError!void {
+    pub fn aliasModule(
+        self: *Machine,
+        short: intern.NamespaceName,
+        target: intern.NamespaceName,
+    ) MachineError!void {
         const registry = self.unit.registry orelse
             return self.fail(.domain, "module registry is unavailable");
-        registry.alias(short, target) catch |err| switch (err) {
+        registry.alias(short, target, poll_api.WorkContext.init(traversalPoller(self))) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.Ecl => return error.Ecl,
             error.NameConflict => return self.fail(.domain, "alias collides with a module name"),
-            error.MissingModule => return self.undefinedModule(target),
+            error.MissingModule => return self.undefinedModule(intern.namespaceId(target)),
             error.InvalidDefinition => return self.fail(.domain, "module and alias names must be unqualified"),
         };
     }
@@ -657,7 +732,8 @@ pub const Machine = struct {
         return resolveWord(self, name);
     }
     pub fn shadowTraceIdsOwned(self: *Machine, name: u32) MachineError![]u32 {
-        if (try intern.dotIndexPolling(intern.get(name), traversalPoller(self)) != null)
+        const work = poll_api.WorkContext.init(traversalPoller(self));
+        if (try intern.dotIndexPolling(intern.get(name), work.asPoller()) != null)
             return self.unit.allocator.alloc(u32, 0);
         var shadows = poll_api.ChunkStack(u32).init(self.unit.allocator);
         defer shadows.deinit();
@@ -665,12 +741,13 @@ pub const Machine = struct {
         var found_winner = false;
         var scope: ?*env.Scope = self.current.?.scope;
         while (scope) |current_scope| : (scope = current_scope.parent) {
-            if (current_scope.environment) |environment| {
-                if (environment.resolveDirect(name)) |loaded| {
+            try work.step();
+            if (current_scope.environmentOrNull()) |environment| {
+                if (try environment.resolveDirect(name, work)) |loaded| {
                     var lease = loaded;
                     defer lease.deinit(self.unit.allocator);
                     const trace_word = if (lease.home) |home|
-                        try qualifiedWordId(self, home, name)
+                        try qualifiedWordId(self, intern.namespaceId(home), name)
                     else
                         name;
                     if (found_winner) {
@@ -681,14 +758,20 @@ pub const Machine = struct {
                 }
                 if (self.unit.registry) |registry| {
                     const uses = environment.useOrder();
-                    var index = uses.len;
-                    while (index > 0) {
-                        index -= 1;
-                        var generation_lease = registry.acquire(uses[index]) orelse continue;
+                    var use_indices = work.reverseIndices(0, uses.len);
+                    while (try use_indices.next()) |index| {
+                        var generation_lease = try registry.acquireWork(
+                            uses[index],
+                            work,
+                        ) orelse continue;
                         defer generation_lease.deinit();
-                        var lease = generation_lease.generation.resolve(name, true) orelse continue;
+                        var lease = try generation_lease.generation.resolve(name, true, work) orelse continue;
                         defer lease.deinit(self.unit.allocator);
-                        const trace_word = try qualifiedWordId(self, generation_lease.generation.name, name);
+                        const trace_word = try qualifiedWordId(
+                            self,
+                            intern.namespaceId(generation_lease.generation.name),
+                            name,
+                        );
                         if (found_winner) {
                             try self.advanceKernel(1);
                             try shadows.push(trace_word);
@@ -698,7 +781,7 @@ pub const Machine = struct {
                 }
             }
         }
-        if (self.unit.environment.core.resolveDirect(name)) |loaded| {
+        if (try self.unit.environment.core.resolveDirect(name, work)) |loaded| {
             var lease = loaded;
             defer lease.deinit(self.unit.allocator);
             if (found_winner) {
@@ -754,6 +837,36 @@ pub const Machine = struct {
     pub fn activeWordId(self: *const Machine) u32 {
         return self.active_word;
     }
+    pub fn setActiveWord(self: *Machine, word: u32) void {
+        self.active_word = word;
+    }
+    pub fn setFailureSite(self: *Machine, code: *Header, index: u32) void {
+        if (self.unit.pending) |*pending| pending.site = .{ .code = code, .index = index };
+    }
+    pub fn commitDirectIdiomTrace(self: *Machine) u32 {
+        const parent = self.active_word;
+        if (self.current.?.ip >= self.current.?.code.length()) self.current.?.traced_word = no_word;
+        return parent;
+    }
+    pub fn setFailureTraceParent(self: *Machine, word: u32) void {
+        if (self.unit.pending) |*pending| pending.trace_parent = word;
+    }
+    pub fn takePrimitiveFailure(self: *Machine) ?EclErr {
+        const failure = self.unit.pending;
+        self.unit.pending = null;
+        return failure;
+    }
+    fn installPrimitiveFailure(self: *Machine, failure_value: EclErr) MachineError {
+        std.debug.assert(self.unit.pending == null);
+        self.unit.pending = failure_value;
+        if (self.unit.pending.?.word == null and self.active_word != no_word) {
+            self.unit.pending.?.word = self.active_word;
+        }
+        return error.Ecl;
+    }
+    pub fn tryIdiom(self: *Machine, request: IdiomRequest) MachineError!bool {
+        return if (self.unit.phrase_recognizer) |recognize| try recognize(self, request) else false;
+    }
     pub fn activeWordName(self: *const Machine) []const u8 {
         return if (self.active_word == no_word) "evaluation" else intern.get(self.active_word);
     }
@@ -802,6 +915,33 @@ pub const Machine = struct {
         );
         self.unit.pending.?.addData(.left, .{ .int = @intCast(left) });
         self.unit.pending.?.addData(.right, .{ .int = @intCast(right) });
+        return failure;
+    }
+    pub fn applicationContractError(
+        self: *Machine,
+        expected: Value,
+        seeded: usize,
+        observed: usize,
+        index: ?usize,
+    ) MachineError {
+        const failure = if (index) |element_index|
+            self.failFmt(
+                .contract,
+                "{s} quotation at element {d} violated its stack effect; seeded {d}, observed {d}",
+                .{ self.activeWordName(), element_index, seeded, observed },
+            )
+        else
+            self.failFmt(
+                .contract,
+                "{s} quotation violated its stack effect; seeded {d}, observed {d}",
+                .{ self.activeWordName(), seeded, observed },
+            );
+        self.unit.pending.?.addData(.expected, expected);
+        self.unit.pending.?.addData(.seeded, .{ .int = @intCast(seeded) });
+        self.unit.pending.?.addData(.observed, .{ .int = @intCast(observed) });
+        if (index) |element_index| {
+            self.unit.pending.?.addData(.index, .{ .int = @intCast(element_index) });
+        }
         return failure;
     }
     /// Kernel safe point. A flat loop calls this between bounded chunks;
@@ -868,69 +1008,115 @@ pub const Machine = struct {
             .traced_word = inherited_trace,
         };
     }
-    /// Consumes condition and body and schedules the iterative while frames.
-    pub fn whileOwned(
+    /// Starts one quotation application behind a base-index stack barrier.
+    /// `application.context` is consumed on every path. Its callback either
+    /// returns null (finished) or transfers that same ownership into the next
+    /// application.
+    pub fn beginIsolatedApplication(
         self: *Machine,
-        condition: *Header,
-        body: *Header,
-    ) error{OutOfMemory}!void {
-        const scope = self.current.?.scope;
-        const home = self.current.?.home;
-        const word = self.active_word;
-        const inherited_trace = self.suspendCurrent() catch {
-            heap.decRef(self.unit.allocator, condition);
-            heap.decRef(self.unit.allocator, body);
-            return error.OutOfMemory;
+        application: IsolatedApplication,
+    ) MachineError!void {
+        return self.beginApplication(application, .isolated, null);
+    }
+    /// The inline counterpart keeps the current stack and scope visible with the same bounded,
+    /// defunctionalized continuation representation.
+    pub fn beginInlineApplication(
+        self: *Machine,
+        application: IsolatedApplication,
+    ) MachineError!void {
+        return self.beginApplication(application, .in_place, null);
+    }
+    const ApplicationLaunch = enum { in_place, isolated };
+    fn beginApplication(
+        self: *Machine,
+        application: IsolatedApplication,
+        launch: ApplicationLaunch,
+        inherited: ?u32,
+    ) MachineError!void {
+        self.require(application.seeded) catch |err| {
+            application.deinit_fn(self.unit.allocator, application.context);
+            return err;
         };
-        self.appendFrame(.{ .while_after_cond = .{
-            .condition = condition,
-            .body = body,
-            .scope = scope,
-            .home = home,
-            .base = @intCast(self.unit.stack.items.len),
-            .word = word,
+        const base = StackWindow.init(self.unit.stack.items.len, application.seeded) orelse unreachable;
+        var child: ?*env.Scope = null;
+        if (launch == .isolated) {
+            child = self.unit.allocator.create(env.Scope) catch {
+                application.deinit_fn(self.unit.allocator, application.context);
+                return error.OutOfMemory;
+            };
+            child.?.* = env.Scope.lazy(self.unit.allocator, application.parent_scope);
+        }
+        var inherited_trace = inherited orelse no_word;
+        if (self.current != null) {
+            std.debug.assert(inherited == null);
+            inherited_trace = self.suspendCurrent() catch {
+                if (child) |scope| {
+                    scope.deinit();
+                    self.unit.allocator.destroy(scope);
+                }
+                application.deinit_fn(self.unit.allocator, application.context);
+                return error.OutOfMemory;
+            };
+        }
+        self.appendFrame(.{ .application = .{
+            .context = application.context,
+            .resume_fn = application.resume_fn,
+            .deinit_fn = application.deinit_fn,
+            .parent_scope = application.parent_scope,
+            .home = application.home,
+            .mode = switch (launch) {
+                .in_place => .{ .in_place = base },
+                .isolated => .{ .isolated = .{
+                    .child = child.?,
+                    .previous_base = @enumFromInt(@as(u32, @intCast(self.unit.stack_base))),
+                } },
+            },
+            .traced_word = inherited_trace,
         } }) catch return error.OutOfMemory;
-        heap.incRef(condition);
+        if (launch == .isolated) self.unit.stack_base = base.base();
+        heap.incRef(application.quotation);
         self.current = .{
-            .code = condition,
+            .code = application.quotation,
             .ip = 0,
-            .scope = scope,
-            .home = home,
+            .scope = child orelse application.parent_scope,
+            .home = application.home,
             .traced_word = inherited_trace,
         };
     }
     pub fn attemptOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
-        return self.beginBoundaryOwned(.attempt, quotation);
+        return self.beginAttemptOwned(quotation);
     }
-    pub fn moduleOwned(self: *Machine, name: u32, quotation: *Header) MachineError!void {
+    pub fn moduleOwned(
+        self: *Machine,
+        name: intern.NamespaceName,
+        quotation: *Header,
+    ) MachineError!void {
         const registry = self.unit.registry orelse {
             heap.decRef(self.unit.allocator, quotation);
             return self.fail(.domain, "module registry is unavailable");
         };
         const word = self.active_word;
-        const candidate = registry.createCandidate(name) catch {
+        var candidate = registry.createCandidate(name) catch {
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
         };
+        errdefer candidate.deinit();
+        const generation = candidate.borrow();
         _ = self.suspendCurrent() catch {
-            candidate.destroy();
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
         };
         if (self.unit.frames.items.len >= no_boundary) {
-            candidate.destroy();
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
         }
         const index: u32 = @intCast(self.unit.frames.items.len);
         self.appendFrame(.{ .boundary = .{
-            .kind = .module,
+            .mode = .{ .module = candidate.move() },
             .stack_base = @intCast(self.unit.stack.items.len),
             .previous_base = @intCast(self.unit.stack_base),
             .previous_boundary = self.unit.boundary_index,
             .word = word,
-            .scope = &candidate.scope,
-            .candidate = candidate,
         } }) catch {
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
@@ -940,8 +1126,8 @@ pub const Machine = struct {
         self.current = .{
             .code = quotation,
             .ip = 0,
-            .scope = &candidate.scope,
-            .home = candidate,
+            .scope = &generation.scope,
+            .home = generation,
             .traced_word = no_word,
         };
     }
@@ -952,9 +1138,8 @@ pub const Machine = struct {
         self.unit.pending.?.raised = raised;
         return error.Ecl;
     }
-    fn beginBoundaryOwned(
+    fn beginAttemptOwned(
         self: *Machine,
-        kind: BoundaryKind,
         quotation: *Header,
     ) error{OutOfMemory}!void {
         const parent_scope = self.current.?.scope;
@@ -979,12 +1164,11 @@ pub const Machine = struct {
         }
         const index: u32 = @intCast(self.unit.frames.items.len);
         self.appendFrame(.{ .boundary = .{
-            .kind = kind,
+            .mode = .{ .attempt = child },
             .stack_base = @intCast(self.unit.stack.items.len),
             .previous_base = @intCast(self.unit.stack_base),
             .previous_boundary = self.unit.boundary_index,
             .word = word,
-            .scope = child,
         } }) catch {
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
@@ -1011,11 +1195,11 @@ pub const Machine = struct {
     /// activation that selected it.
     fn suspendCurrent(self: *Machine) error{OutOfMemory}!u32 {
         const current = self.current.?;
-        const inherited_trace = if (current.ip >= current.code.len)
+        const inherited_trace = if (current.ip >= current.code.length())
             current.traced_word
         else
             no_word;
-        if (current.ip < current.code.len) {
+        if (current.ip < current.code.length()) {
             try self.unit.frames.append(self.unit.allocator, .{ .eval = current });
             self.unit.max_frames = @max(self.unit.max_frames, self.unit.frames.items.len);
         } else {
@@ -1064,7 +1248,7 @@ fn loop(self: *Machine) MachineError!void {
             if (!resumed) return;
         }
         const current = &self.current.?;
-        if (current.ip >= current.code.len) {
+        if (current.ip >= current.code.length()) {
             heap.decRef(self.unit.allocator, current.code);
             self.current = null;
             continue;
@@ -1121,19 +1305,44 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
     const cross_home = resolved.home != null and resolved.home != self.current.?.home;
     switch (resolved.lease.binding) {
         .value => |item| try self.pushBorrowed(item),
-        .word => |body| try scheduleWord(
-            self,
-            body,
-            resolved.trace_word,
-            resolved.home,
-            if (cross_home) resolved.lease.effect else null,
-        ),
+        .word => |body| {
+            const body_header = env.quotationHeader(body);
+            if (resolved.origin == .core and try self.tryIdiom(.{ .direct = body_header })) return;
+            try scheduleWord(
+                self,
+                body_header,
+                resolved.trace_word,
+                resolved.home,
+                if (cross_home) resolved.lease.effect else null,
+            );
+        },
         .primitive => |primitive| {
             const check = if (cross_home)
                 try prepareEffectCheck(self, resolved.lease.effect, resolved.trace_word)
             else
                 null;
-            try primitive(self);
+            switch (try primitive(self)) {
+                .ok => {},
+                .failure => |failure_value| return self.installPrimitiveFailure(failure_value),
+            }
+            if (check) |effect_check| try finishEffectCheck(self, effect_check);
+        },
+        .builtin => |primitive| {
+            const check = if (cross_home)
+                try prepareEffectCheck(self, resolved.lease.effect, resolved.trace_word)
+            else
+                null;
+            primitive(self) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Ecl => {
+                    const failure_value = self.takePrimitiveFailure() orelse
+                        EclErr.init(.domain, "builtin primitive returned error.Ecl without a failure payload");
+                    return self.installPrimitiveFailure(failure_value);
+                },
+            };
+            if (self.takePrimitiveFailure()) |failure_value| {
+                return self.installPrimitiveFailure(failure_value);
+            }
             if (check) |effect_check| try finishEffectCheck(self, effect_check);
         },
     }
@@ -1153,14 +1362,18 @@ pub const Resolution = struct {
 };
 fn resolveWord(self: *Machine, word: u32) MachineError!?Resolution {
     const spelling = intern.get(word);
+    const work = poll_api.WorkContext.init(traversalPoller(self));
     if (try intern.dotIndexPolling(spelling, traversalPoller(self))) |dot| {
         const registry = self.unit.registry orelse return null;
         if (dot == 0 or dot + 1 == spelling.len) return null;
         const prefix = try intern.internPolling(spelling[0..dot], traversalPoller(self));
         const export_name = try intern.internPolling(spelling[dot + 1 ..], traversalPoller(self));
-        var generation_lease = registry.acquire(prefix) orelse return null;
+        var generation_lease = try registry.acquireWork(
+            prefix,
+            work,
+        ) orelse return null;
         const generation = generation_lease.generation;
-        var lease = generation.resolve(export_name, true) orelse {
+        var lease = try generation.resolve(export_name, true, work) orelse {
             generation_lease.deinit();
             return null;
         };
@@ -1172,18 +1385,19 @@ fn resolveWord(self: *Machine, word: u32) MachineError!?Resolution {
             .lease = lease,
             .generation_lease = generation_lease,
             .home = generation,
-            .trace_word = try qualifiedWordId(self, generation.name, export_name),
+            .trace_word = try qualifiedWordId(self, intern.namespaceId(generation.name), export_name),
             .origin = .module,
         };
     }
     var scope: ?*env.Scope = self.current.?.scope;
     while (scope) |current_scope| : (scope = current_scope.parent) {
-        if (current_scope.environment) |environment| {
-            if (environment.resolveDirect(word)) |loaded| {
+        try work.step();
+        if (current_scope.environmentOrNull()) |environment| {
+            if (try environment.resolveDirect(word, work)) |loaded| {
                 var lease = loaded;
                 errdefer lease.deinit(self.unit.allocator);
                 const home = if (lease.home != null and self.current.?.home != null and
-                    lease.home.? == self.current.?.home.?.name)
+                    intern.namespaceId(lease.home.?) == intern.namespaceId(self.current.?.home.?.name))
                     self.current.?.home
                 else
                     null;
@@ -1192,7 +1406,7 @@ fn resolveWord(self: *Machine, word: u32) MachineError!?Resolution {
                     .generation_lease = null,
                     .home = home,
                     .trace_word = if (home) |generation|
-                        try qualifiedWordId(self, generation.name, word)
+                        try qualifiedWordId(self, intern.namespaceId(generation.name), word)
                     else
                         word,
                     .origin = if (home != null) .module else .direct,
@@ -1200,12 +1414,14 @@ fn resolveWord(self: *Machine, word: u32) MachineError!?Resolution {
             }
             if (self.unit.registry) |registry| {
                 const uses = environment.useOrder();
-                var index = uses.len;
-                while (index > 0) {
-                    index -= 1;
-                    var generation_lease = registry.acquire(uses[index]) orelse continue;
+                var use_indices = work.reverseIndices(0, uses.len);
+                while (try use_indices.next()) |index| {
+                    var generation_lease = try registry.acquireWork(
+                        uses[index],
+                        work,
+                    ) orelse continue;
                     const generation = generation_lease.generation;
-                    var lease = generation.resolve(word, true) orelse {
+                    var lease = try generation.resolve(word, true, work) orelse {
                         generation_lease.deinit();
                         continue;
                     };
@@ -1217,14 +1433,14 @@ fn resolveWord(self: *Machine, word: u32) MachineError!?Resolution {
                         .lease = lease,
                         .generation_lease = generation_lease,
                         .home = generation,
-                        .trace_word = try qualifiedWordId(self, generation.name, word),
+                        .trace_word = try qualifiedWordId(self, intern.namespaceId(generation.name), word),
                         .origin = .used,
                     };
                 }
             }
         }
     }
-    if (self.unit.environment.core.resolveDirect(word)) |lease| {
+    if (try self.unit.environment.core.resolveDirect(word, work)) |lease| {
         return .{ .lease = lease, .generation_lease = null, .home = null, .trace_word = word, .origin = .core };
     }
     return null;
@@ -1235,20 +1451,24 @@ fn qualifiedWordId(self: *Machine, module_name: u32, word: u32) MachineError!u32
 fn emitShadowNotices(self: *Machine, scope: *env.Scope, canonical: u32) MachineError!void {
     const output = self.unit.diagnostics orelse return;
     const poller = traversalPoller(self);
-    var generation_lease = self.unit.registry.?.acquire(canonical).?;
+    const work = poll_api.WorkContext.init(poller);
+    var generation_lease = (try self.unit.registry.?.acquireWork(canonical, work)).?;
     defer generation_lease.deinit();
     const generation = generation_lease.generation;
-    const names = try generation.publicNamesOwned(self.unit.allocator, poller);
+    const names = try generation.publicNamesOwned(
+        self.unit.allocator,
+        work,
+    );
     defer self.unit.allocator.free(names);
     try reflection.sortNames(names, poller);
-    const direct = scope.environment orelse return;
+    const direct = scope.environmentOrNull() orelse return;
     for (names) |name| {
         try poller.poll();
-        if (direct.cell(name) == null) continue;
+        if (try direct.cell(name, work) == null) continue;
         try writeDiagnostic(self, output, "session `", poller);
         try writeDiagnostic(self, output, intern.get(name), poller);
         try writeDiagnostic(self, output, "` shadows `", poller);
-        try writeDiagnostic(self, output, intern.get(generation.name), poller);
+        try writeDiagnostic(self, output, intern.get(intern.namespaceId(generation.name)), poller);
         try writeDiagnostic(self, output, ".", poller);
         try writeDiagnostic(self, output, intern.get(name), poller);
         try writeDiagnostic(self, output, "`\n", poller);
@@ -1326,84 +1546,48 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             return true;
         },
         .restore => |item| try self.pushOwned(item),
-        .while_after_cond => |continuation| {
-            self.active_word = continuation.word;
-            if (self.unit.stack.items.len != @as(usize, continuation.base) + 1) {
-                std.debug.assert(@as(usize, continuation.base) >= self.unit.stack_base);
-                std.debug.assert(self.unit.stack.items.len >= self.unit.stack_base);
-                const seeded = @as(usize, continuation.base) - self.unit.stack_base;
-                const observed = self.unit.stack.items.len - self.unit.stack_base;
-                continuationFrameRelease(self.unit.allocator, continuation.condition, continuation.body);
-                const failure = self.failFmt(
-                    .contract,
-                    "while condition must leave exactly one bool; seeded {d}, observed {d}",
-                    .{ seeded, observed },
-                );
-                self.unit.pending.?.addData(.seeded, .{ .int = @intCast(seeded) });
-                self.unit.pending.?.addData(.observed, .{ .int = @intCast(observed) });
-                return failure;
-            }
-            const predicate_value = self.unit.stack.pop().?;
-            const predicate = switch (predicate_value) {
-                .int => |integer| switch (integer) {
-                    0 => false,
-                    1 => true,
-                    else => {
-                        heap.releaseValue(self.unit.allocator, predicate_value);
-                        continuationFrameRelease(self.unit.allocator, continuation.condition, continuation.body);
-                        return self.typeError("a 0/1 bool");
-                    },
-                },
-                .float, .char, .symbol, .word, .list, .dict => {
-                    heap.releaseValue(self.unit.allocator, predicate_value);
-                    continuationFrameRelease(self.unit.allocator, continuation.condition, continuation.body);
-                    return self.typeError("a 0/1 bool");
-                },
-            };
-            if (!predicate) {
-                continuationFrameRelease(self.unit.allocator, continuation.condition, continuation.body);
-                continue;
-            }
-            try self.appendFrame(.{ .while_after_body = .{
-                .condition = continuation.condition,
-                .body = continuation.body,
-                .scope = continuation.scope,
-                .home = continuation.home,
-                .word = continuation.word,
-            } });
-            heap.incRef(continuation.body);
-            self.current = .{
-                .code = continuation.body,
-                .ip = 0,
-                .scope = continuation.scope,
-                .home = continuation.home,
-                .traced_word = no_word,
-            };
-            return true;
-        },
-        .while_after_body => |continuation| {
-            try self.appendFrame(.{ .while_after_cond = .{
-                .condition = continuation.condition,
-                .body = continuation.body,
-                .scope = continuation.scope,
-                .home = continuation.home,
-                .base = @intCast(self.unit.stack.items.len),
-                .word = continuation.word,
-            } });
-            heap.incRef(continuation.condition);
-            self.current = .{
-                .code = continuation.condition,
-                .ip = 0,
-                .scope = continuation.scope,
-                .home = continuation.home,
-                .traced_word = no_word,
-            };
-            return true;
-        },
         .effect_check => |check| try finishEffectCheck(self, check),
+        .application => |continuation| {
+            const launch: Machine.ApplicationLaunch, const base: StackWindow = switch (continuation.mode) {
+                .in_place => |window| .{ .in_place, window },
+                .isolated => |isolated| blk: {
+                    const window: StackWindow = @enumFromInt(@as(u32, @intCast(self.unit.stack_base)));
+                    isolated.child.deinit();
+                    self.unit.allocator.destroy(isolated.child);
+                    self.unit.stack_base = isolated.previous_base.base();
+                    break :blk .{ .isolated, window };
+                },
+            };
+            const next = continuation.resume_fn(
+                self,
+                continuation.context,
+                base,
+            ) catch |err| {
+                if (continuation.traced_word != no_word) {
+                    self.setFailureTraceParent(continuation.traced_word);
+                }
+                continuation.deinit_fn(self.unit.allocator, continuation.context);
+                return err;
+            };
+            if (next) |step| {
+                try self.beginApplication(.{
+                    .quotation = step.quotation,
+                    .context = continuation.context,
+                    .resume_fn = continuation.resume_fn,
+                    .deinit_fn = continuation.deinit_fn,
+                    .parent_scope = continuation.parent_scope,
+                    .home = continuation.home,
+                    .seeded = step.seeded,
+                }, launch, continuation.traced_word);
+                return true;
+            }
+            continuation.deinit_fn(self.unit.allocator, continuation.context);
+        },
         .use_after_load => |continuation| {
             defer heap.releaseValue(self.unit.allocator, continuation.path);
-            continuation.registry.endLoading(continuation.name);
+            var loading = continuation.loading;
+            defer loading.deinit();
+            try loading.finish(poll_api.WorkContext.init(traversalPoller(self)));
             self.active_word = try intern.intern("use");
             if (!try self.installUse(continuation.scope, continuation.name)) {
                 const failure = self.undefinedModule(continuation.name);
@@ -1412,22 +1596,20 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             }
         },
         .boundary => |boundary| {
-            defer if (boundary.kind != .module) boundary.deinit(self.unit.allocator);
             std.debug.assert(self.unit.boundary_index == self.unit.frames.items.len);
             self.unit.boundary_index = boundary.previous_boundary;
             self.unit.stack_base = boundary.previous_base;
             self.active_word = boundary.word;
-            switch (boundary.kind) {
-                .attempt => try finishAttempt(self, boundary.stack_base),
+            switch (boundary.mode) {
+                .attempt => {
+                    defer boundary.deinit(self.unit.allocator);
+                    try finishAttempt(self, boundary.stack_base);
+                },
                 .module => try finishModule(self, boundary),
             }
         },
     };
     return false;
-}
-fn continuationFrameRelease(allocator: std.mem.Allocator, a: *Header, b: *Header) void {
-    heap.decRef(allocator, a);
-    heap.decRef(allocator, b);
 }
 fn finishEffectCheck(self: *Machine, check: EffectCheck) MachineError!void {
     const observed = self.unit.stack.items.len;
@@ -1451,9 +1633,8 @@ fn finishAttempt(self: *Machine, base: u32) MachineError!void {
     try self.pushOwned(outcome);
 }
 fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
-    const candidate = boundary.candidate.?;
-    var candidate_owned = true;
-    defer if (candidate_owned) candidate.destroy();
+    var candidate = boundary.mode.module;
+    defer candidate.deinit();
     const base: usize = boundary.stack_base;
     const observed = self.unit.stack.items.len - base;
     if (observed != 0) {
@@ -1467,13 +1648,16 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
         self.unit.pending.?.addData(.observed, .{ .int = @intCast(observed) });
         return failure;
     }
-    _ = self.unit.registry.?.commit(candidate) catch |err| switch (err) {
+    _ = self.unit.registry.?.commit(
+        &candidate,
+        poll_api.WorkContext.init(traversalPoller(self)),
+    ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Ecl => return error.Ecl,
         error.NameConflict => return self.fail(.domain, "module name collides with an alias"),
         error.MissingModule => unreachable,
         error.InvalidDefinition => return self.fail(.domain, "module names must be unqualified"),
     };
-    candidate_owned = false;
 }
 fn outcomeDict(
     allocator: std.mem.Allocator,
@@ -1485,16 +1669,25 @@ fn outcomeDict(
     return dict.fromUniquePairs(allocator, &.{.{ .{ .symbol = key }, payload }});
 }
 fn handleFailure(self: *Machine) error{OutOfMemory}!bool {
-    var trace: std.ArrayList(u32) = .empty;
-    defer trace.deinit(self.unit.allocator);
-    try collectTrace(self, &trace);
+    const trace = try collectTraceOwned(self);
+    defer self.unit.allocator.free(trace);
     const location = if (self.unit.pending.?.site) |site|
-        self.unit.archive.locate(site.code, site.index)
+        self.unit.archive.locateWork(
+            site.code,
+            site.index,
+            failureWork(self),
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            // An existing language failure remains authoritative; observing
+            // cancellation here stops provenance lookup without manufacturing
+            // a second, payload-less language failure.
+            error.Ecl => null,
+        }
     else
         null;
     var pending = self.unit.pending.?;
     self.unit.pending = null;
-    const error_value = pending.toDict(self.unit.allocator, trace.items, location) catch |err| {
+    const error_value = pending.toDict(self.unit.allocator, trace, location) catch |err| {
         pending.deinit(self.unit.allocator);
         return err;
     };
@@ -1524,30 +1717,61 @@ fn handleFailure(self: *Machine) error{OutOfMemory}!bool {
     try self.pushOwned(outcome);
     return true;
 }
+fn pollFailureTraversal(raw: *anyopaque) poll_api.Error!void {
+    const self: *Machine = @ptrCast(@alignCast(raw));
+    if (self.unit.kernel_fuel <= 1) {
+        self.unit.polls += 1;
+        self.unit.kernel_fuel = kernel_poll_quantum;
+        if (self.unit.cancelled.load(.acquire)) return error.Ecl;
+    } else {
+        self.unit.kernel_fuel -= 1;
+    }
+}
+fn failureWork(self: *Machine) poll_api.WorkContext {
+    return .init(.{ .context = @ptrCast(self), .poll_fn = pollFailureTraversal });
+}
 fn nearestAttempt(self: *const Machine) u32 {
     var index = self.unit.boundary_index;
     while (index != no_boundary) {
         const boundary = self.unit.frames.items[index].boundary;
-        if (boundary.kind == .attempt) return index;
+        if (boundary.mode == .attempt) return index;
         index = boundary.previous_boundary;
     }
     return no_boundary;
 }
-fn collectTrace(self: *Machine, trace: *std.ArrayList(u32)) error{OutOfMemory}!void {
-    if (self.unit.pending.?.word) |word| try trace.append(self.unit.allocator, word);
+fn collectTraceOwned(self: *Machine) error{OutOfMemory}![]u32 {
+    var trace = poll_api.ChunkList(u32).init(self.unit.allocator);
+    defer trace.deinit();
+    collectTrace(self, &trace, failureWork(self)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Ecl => return self.unit.allocator.alloc(u32, 0),
+    };
+    return trace.toOwnedSlice(failureWork(self)) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Ecl => self.unit.allocator.alloc(u32, 0),
+    };
+}
+fn collectTrace(
+    self: *Machine,
+    trace: *poll_api.ChunkList(u32),
+    work: poll_api.WorkContext,
+) poll_api.Error!void {
+    if (self.unit.pending.?.word) |word| try trace.append(word);
+    if (self.unit.pending.?.trace_parent) |word| try trace.append(word);
     if (self.current) |current| {
         if (current.traced_word != no_word) {
-            try trace.append(self.unit.allocator, current.traced_word);
+            try trace.append(current.traced_word);
         }
     }
     var index = self.unit.frames.items.len;
     while (index > 0) {
+        try work.step();
         index -= 1;
         switch (self.unit.frames.items[index]) {
             .eval => |frame| if (frame.traced_word != no_word) {
-                try trace.append(self.unit.allocator, frame.traced_word);
+                try trace.append(frame.traced_word);
             },
-            .restore, .while_after_cond, .while_after_body, .effect_check, .use_after_load, .boundary => {},
+            .restore, .effect_check, .application, .use_after_load, .boundary => {},
         }
     }
 }
@@ -1584,7 +1808,10 @@ test "machine pushes values and late-bound word bodies" {
     const name = try intern.intern("answer");
     const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 7 }});
     defer heap.releaseValue(allocator, body);
-    try environment.define(name, .{ .word = body.list });
+    try environment.define(
+        try intern.namespaceName(name, .unlimited()),
+        .{ .word = .{ .body = env.quotation(body.list).? } },
+    );
     const code = try list.fromValuesGeneric(allocator, &.{.{ .word = name }});
     defer heap.releaseValue(allocator, code);
     var archive = spans.SpanArchive.init(allocator);
@@ -1606,8 +1833,14 @@ test "tail word calls reuse evaluator state" {
     defer heap.releaseValue(allocator, end_body);
     const start_body = try list.fromValuesGeneric(allocator, &.{.{ .word = end }});
     defer heap.releaseValue(allocator, start_body);
-    try environment.define(end, .{ .word = end_body.list });
-    try environment.define(start, .{ .word = start_body.list });
+    try environment.define(
+        try intern.namespaceName(end, .unlimited()),
+        .{ .word = .{ .body = env.quotation(end_body.list).? } },
+    );
+    try environment.define(
+        try intern.namespaceName(start, .unlimited()),
+        .{ .word = .{ .body = env.quotation(start_body.list).? } },
+    );
     const code = try list.fromValuesGeneric(allocator, &.{.{ .word = start }});
     defer heap.releaseValue(allocator, code);
     var archive = spans.SpanArchive.init(allocator);
@@ -1691,5 +1924,5 @@ test "errors: machine-built user dict has the complete d.19 envelope" {
     );
 }
 test "frame representation stays within the frozen budget" {
-    try std.testing.expect(@sizeOf(Frame) <= 48);
+    try std.testing.expect(@sizeOf(Frame) <= 80);
 }

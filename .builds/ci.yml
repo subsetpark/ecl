@@ -25,6 +25,12 @@ tasks:
   - test-safe: |
       cd ecl
       zig build test -Doptimize=ReleaseSafe
+  - test-oom: |
+      cd ecl
+      zig build test-oom
+  - differential: |
+      cd ecl
+      zig build differential
   - oracle: |
       cd ecl
       cargo test --locked --manifest-path poc/rust/Cargo.toml
