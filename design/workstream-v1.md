@@ -295,9 +295,8 @@ tests, and the CLI oracle differential are green locally. The audited
 pre-kernel core is 6,990/9,500 lines (values/RC 2,248/2,300;
 machine 2,290/2,300; modules/registry 1,300/1,300; bootstrap prelude
 29/100), and the closed kernel component is 3,571/5,500 production
-lines. The seven-patch design and formal contracts
-remain recorded in
-[`gameplans/kernels-and-pervasion.json`](../gameplans/kernels-and-pervasion.json).
+lines. Its seven-patch design and formal contracts are complete; the durable
+implementation contract now lives in this workstream and the design documents.
 
 **Definition of Done**:
 ARCHITECTURE.md §Kernels: the (op × leaf-tag) table of monomorphic
