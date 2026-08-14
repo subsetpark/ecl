@@ -213,6 +213,7 @@ fn expectValueIdentical(left: ecl.value.Value, right: ecl.value.Value) !void {
         .char => |item| try std.testing.expectEqual(item, right.char),
         .symbol => |item| try std.testing.expectEqual(item, right.symbol),
         .word => |item| try std.testing.expectEqual(item, right.word),
+        .task => |header| try std.testing.expectEqual(header, right.task),
         .list => |header| {
             try std.testing.expectEqual(header.kind(), right.list.kind());
             try std.testing.expectEqual(header.length(), right.list.length());

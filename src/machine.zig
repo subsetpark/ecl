@@ -9,9 +9,13 @@ const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
 const reader = @import("reader.zig");
+const reader_cursor = @import("reader_cursor.zig");
 const poll_api = @import("poll.zig");
 const reflection = @import("reflection.zig");
 const kernel_storage = @import("kernel_storage.zig");
+const console_api = @import("console.zig");
+const task_join_core = @import("task_join_core.zig");
+const resolution_core = @import("resolution_core.zig");
 pub const Value = value.Value;
 pub const Header = value.Header;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -31,6 +35,8 @@ pub const ErrorKind = enum {
     contract,
     parse,
     io,
+    cancelled,
+    timeout,
     user,
     /// d.19 freezes this set, so `else` cannot silently absorb a new kind.
     /// A hyphenated addition would still need its own arm.
@@ -132,221 +138,610 @@ pub const EclErr = struct {
         self.source_line = span.line;
         self.source_col = span.col;
     }
-    /// Builds the ordinary immutable error value only on the unwind path.
-    pub fn toDict(
-        self: *EclErr,
+};
+
+const ErrorValueProgress = union(enum) { pending, complete: Value };
+const OrdinaryErrorCursor = struct {
+    allocator: std.mem.Allocator,
+    failure: *EclErr,
+    trace_ids: []const u32,
+    location: ?spans.LocatedSpan,
+    names: [9]u32 = .{0} ** 9,
+    name_index: usize = 0,
+    inserter: ?intern.InternInsertionCursor = null,
+    message_builder: ?kernel_storage.TextMaterializer = null,
+    message_value: ?Value = null,
+    trace_items: ?[]Value = null,
+    trace_index: usize = 0,
+    trace_builder: ?kernel_storage.ValueMaterializer = null,
+    trace_value: ?Value = null,
+    data_pairs: [8]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 8,
+    data_index: usize = 0,
+    data_inserter: ?intern.InternInsertionCursor = null,
+    source_builder: ?kernel_storage.TextMaterializer = null,
+    source_value: ?Value = null,
+    data_builder: ?kernel_storage.DictMaterializer = null,
+    data_value: ?Value = null,
+    outer_pairs: [5]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 5,
+    outer_builder: ?kernel_storage.DictMaterializer = null,
+    phase: enum { names, message, trace_allocate, trace_copy, trace_build, data, source, data_build, outer, complete } = .names,
+
+    fn init(
         allocator: std.mem.Allocator,
+        failure: *EclErr,
         trace_ids: []const u32,
         location: ?spans.LocatedSpan,
-    ) error{OutOfMemory}!Value {
-        const effective_location = if (self.source_len > 0)
-            spans.LocatedSpan{
-                .source_name = self.source[0..self.source_len],
-                .span = .{ .line = self.source_line, .col = self.source_col },
-            }
-        else
-            location;
-        if (self.raised != null) return self.raisedToDict(allocator, trace_ids, effective_location);
-        const kind_id = try intern.intern(self.kind.symbol());
-        const kind_key = try intern.intern("kind");
-        const msg_key = try intern.intern("msg");
-        const word_key = try intern.intern("word");
-        const trace_key = try intern.intern("trace");
-        const data_key = try intern.intern("data");
-        const message_value = try stringValue(allocator, self.text());
-        defer heap.releaseValue(allocator, message_value);
-        const trace_values = try allocator.alloc(Value, trace_ids.len);
-        defer allocator.free(trace_values);
-        for (trace_ids, 0..) |id, index| trace_values[index] = .{ .symbol = id };
-        const trace_value = try list.fromValues(allocator, trace_values);
-        defer heap.releaseValue(allocator, trace_value);
-        var data_pairs: [8]dict.Pair = undefined;
-        var data_len: usize = 0;
-        for (self.data[0..self.data_len]) |entry| {
-            const key = try intern.intern(@tagName(entry.key));
-            data_pairs[data_len] = .{ .{ .symbol = key }, entry.value };
-            data_len += 1;
-        }
-        var source_value: ?Value = null;
-        defer if (source_value) |item| heap.releaseValue(allocator, item);
-        if (effective_location) |located| {
-            const source_key = try intern.intern("source");
-            const line_key = try intern.intern("line");
-            const col_key = try intern.intern("col");
-            source_value = try stringValue(allocator, located.source_name);
-            data_pairs[data_len] = .{ .{ .symbol = source_key }, source_value.? };
-            data_len += 1;
-            data_pairs[data_len] = .{ .{ .symbol = line_key }, .{ .int = located.span.line } };
-            data_len += 1;
-            data_pairs[data_len] = .{ .{ .symbol = col_key }, .{ .int = located.span.col } };
-            data_len += 1;
-        }
-        const data_value = try dict.fromUniquePairs(allocator, data_pairs[0..data_len]);
-        defer heap.releaseValue(allocator, data_value);
-        var pairs: [5]dict.Pair = undefined;
-        var count: usize = 0;
-        pairs[count] = .{ .{ .symbol = kind_key }, .{ .symbol = kind_id } };
-        count += 1;
-        pairs[count] = .{ .{ .symbol = msg_key }, message_value };
-        count += 1;
-        if (self.word) |word| {
-            pairs[count] = .{ .{ .symbol = word_key }, .{ .symbol = word } };
-            count += 1;
-        }
-        pairs[count] = .{ .{ .symbol = trace_key }, trace_value };
-        count += 1;
-        pairs[count] = .{ .{ .symbol = data_key }, data_value };
-        count += 1;
-        return dict.fromUniquePairs(allocator, pairs[0..count]);
+    ) OrdinaryErrorCursor {
+        return .{
+            .allocator = allocator,
+            .failure = failure,
+            .trace_ids = trace_ids,
+            .location = if (failure.source_len > 0) .{
+                .source_name = failure.source[0..failure.source_len],
+                .span = .{ .line = failure.source_line, .col = failure.source_col },
+            } else location,
+        };
     }
-    /// Preserves every user field while completing the d.19 envelope from
-    /// unwind context. Explicit fields win; only absent context is attached.
-    fn raisedToDict(
-        self: *EclErr,
-        allocator: std.mem.Allocator,
-        trace_ids: []const u32,
-        location: ?spans.LocatedSpan,
-    ) error{OutOfMemory}!Value {
-        const raised = self.raised.?;
-        const kind_key = try intern.intern("kind");
-        const msg_key = try intern.intern("msg");
-        const word_key = try intern.intern("word");
-        const trace_key = try intern.intern("trace");
-        const data_key = try intern.intern("data");
-        const kind = (try dict.symbolField(allocator, raised, kind_key)).?;
-        const old_message = try dict.symbolField(allocator, raised, msg_key);
-        const old_word = try dict.symbolField(allocator, raised, word_key);
-        const old_trace = try dict.symbolField(allocator, raised, trace_key);
-        const old_data = try dict.symbolField(allocator, raised, data_key);
-        var message_value: ?Value = null;
-        defer if (message_value) |item| heap.releaseValue(allocator, item);
-        if (old_message == null) {
-            var buffer: [512]u8 = undefined;
-            const message = std.fmt.bufPrint(
-                &buffer,
-                "raised '{s}",
-                .{intern.get(kind.symbol)},
-            ) catch "raised user error";
-            message_value = try stringValue(allocator, message);
+    fn deinit(self: *OrdinaryErrorCursor) void {
+        if (self.message_builder) |*builder| builder.deinit();
+        if (self.trace_builder) |*builder| builder.deinit();
+        if (self.source_builder) |*builder| builder.deinit();
+        if (self.data_builder) |*builder| builder.deinit();
+        if (self.outer_builder) |*builder| builder.deinit();
+        if (self.message_value) |item| heap.releaseValue(self.allocator, item);
+        if (self.trace_value) |item| heap.releaseValue(self.allocator, item);
+        if (self.source_value) |item| heap.releaseValue(self.allocator, item);
+        if (self.data_value) |item| heap.releaseValue(self.allocator, item);
+        if (self.trace_items) |items| self.allocator.free(items);
+        self.* = undefined;
+    }
+    fn nameBytes(self: *const OrdinaryErrorCursor) []const u8 {
+        return switch (self.name_index) {
+            0 => self.failure.kind.symbol(),
+            1 => "kind",
+            2 => "msg",
+            3 => "word",
+            4 => "trace",
+            5 => "data",
+            6 => "source",
+            7 => "line",
+            8 => "col",
+            else => unreachable,
+        };
+    }
+    fn advanceNames(self: *OrdinaryErrorCursor) error{OutOfMemory}!ErrorValueProgress {
+        if (self.name_index == self.names.len) {
+            self.message_builder = .init(self.allocator, self.failure.text());
+            self.phase = .message;
+            return .pending;
         }
-        var trace_value: ?Value = null;
-        defer if (trace_value) |item| heap.releaseValue(allocator, item);
-        if (old_trace == null) {
-            const trace_values = try allocator.alloc(Value, trace_ids.len);
-            defer allocator.free(trace_values);
-            for (trace_ids, 0..) |id, index| trace_values[index] = .{ .symbol = id };
-            trace_value = try list.fromValues(allocator, trace_values);
-        }
-        const data_value = try completeRaisedData(allocator, old_data, location);
-        defer if (data_value) |item| heap.releaseValue(allocator, item);
-        const old_count: usize = @intCast(raised.dict.length());
-        const extra_count = @as(usize, @intFromBool(old_message == null)) +
-            @as(usize, @intFromBool(old_word == null and self.word != null)) +
-            @as(usize, @intFromBool(old_trace == null)) +
-            @as(usize, @intFromBool(old_data == null));
-        const pairs = try allocator.alloc(dict.Pair, old_count + extra_count);
-        defer allocator.free(pairs);
-        for (0..old_count) |index| {
-            const key = dict.keyAt(raised.dict, index);
-            const old_value = dict.valueAt(raised.dict, index);
-            pairs[index] = .{
-                key,
-                if (key == .symbol and key.symbol == data_key and data_value != null)
-                    data_value.?
-                else
-                    old_value,
+        if (self.inserter == null) self.inserter = intern.insertionCursor(self.nameBytes());
+        return switch (try self.inserter.?.advance()) {
+            .pending => .pending,
+            .complete => |id| result: {
+                self.names[self.name_index] = id;
+                self.name_index += 1;
+                self.inserter = null;
+                break :result .pending;
+            },
+        };
+    }
+    fn advanceData(self: *OrdinaryErrorCursor) error{OutOfMemory}!ErrorValueProgress {
+        if (self.data_index != self.failure.data_len) {
+            const entry = self.failure.data[self.data_index];
+            if (self.data_inserter == null)
+                self.data_inserter = intern.insertionCursor(@tagName(entry.key));
+            return switch (try self.data_inserter.?.advance()) {
+                .pending => .pending,
+                .complete => |key| result: {
+                    self.data_pairs[self.data_index] = .{ .{ .symbol = key }, entry.value };
+                    self.data_index += 1;
+                    self.data_inserter = null;
+                    break :result .pending;
+                },
             };
         }
-        var count = old_count;
-        if (old_message == null) {
-            pairs[count] = .{ .{ .symbol = msg_key }, message_value.? };
+        if (self.location) |located| {
+            self.source_builder = .init(self.allocator, located.source_name);
+            self.phase = .source;
+        } else {
+            self.data_builder = try .init(self.allocator, self.data_pairs[0..self.data_index], false);
+            self.phase = .data_build;
+        }
+        return .pending;
+    }
+    fn beginOuter(self: *OrdinaryErrorCursor) error{OutOfMemory}!void {
+        var count: usize = 0;
+        self.outer_pairs[count] = .{ .{ .symbol = self.names[1] }, .{ .symbol = self.names[0] } };
+        count += 1;
+        self.outer_pairs[count] = .{ .{ .symbol = self.names[2] }, self.message_value.? };
+        count += 1;
+        if (self.failure.word) |word| {
+            self.outer_pairs[count] = .{ .{ .symbol = self.names[3] }, .{ .symbol = word } };
             count += 1;
         }
-        if (old_word == null) if (self.word) |word| {
-            pairs[count] = .{ .{ .symbol = word_key }, .{ .symbol = word } };
-            count += 1;
+        self.outer_pairs[count] = .{ .{ .symbol = self.names[4] }, self.trace_value.? };
+        count += 1;
+        self.outer_pairs[count] = .{ .{ .symbol = self.names[5] }, self.data_value.? };
+        count += 1;
+        self.outer_builder = try .init(self.allocator, self.outer_pairs[0..count], false);
+        self.phase = .outer;
+    }
+    fn advance(self: *OrdinaryErrorCursor) error{OutOfMemory}!ErrorValueProgress {
+        return switch (self.phase) {
+            .names => try self.advanceNames(),
+            .message => switch (try self.message_builder.?.advance(1)) {
+                .pending => .pending,
+                .complete => |item| result: {
+                    self.message_builder.?.deinit();
+                    self.message_builder = null;
+                    self.message_value = item;
+                    self.phase = .trace_allocate;
+                    break :result .pending;
+                },
+            },
+            .trace_allocate => result: {
+                self.trace_items = try self.allocator.alloc(Value, self.trace_ids.len);
+                self.phase = .trace_copy;
+                break :result .pending;
+            },
+            .trace_copy => result: {
+                if (self.trace_index != self.trace_ids.len) {
+                    self.trace_items.?[self.trace_index] = .{ .symbol = self.trace_ids[self.trace_index] };
+                    self.trace_index += 1;
+                } else {
+                    self.trace_builder = .init(self.allocator, self.trace_items.?);
+                    self.phase = .trace_build;
+                }
+                break :result .pending;
+            },
+            .trace_build => switch (try self.trace_builder.?.advance(1)) {
+                .pending => .pending,
+                .complete => |item| result: {
+                    self.trace_builder.?.deinit();
+                    self.trace_builder = null;
+                    self.trace_value = item;
+                    self.phase = .data;
+                    break :result .pending;
+                },
+            },
+            .data => try self.advanceData(),
+            .source => switch (try self.source_builder.?.advance(1)) {
+                .pending => .pending,
+                .complete => |item| result: {
+                    self.source_builder.?.deinit();
+                    self.source_builder = null;
+                    self.source_value = item;
+                    const located = self.location.?;
+                    self.data_pairs[self.data_index] = .{ .{ .symbol = self.names[6] }, item };
+                    self.data_index += 1;
+                    self.data_pairs[self.data_index] = .{ .{ .symbol = self.names[7] }, .{ .int = located.span.line } };
+                    self.data_index += 1;
+                    self.data_pairs[self.data_index] = .{ .{ .symbol = self.names[8] }, .{ .int = located.span.col } };
+                    self.data_index += 1;
+                    self.data_builder = try .init(self.allocator, self.data_pairs[0..self.data_index], false);
+                    self.phase = .data_build;
+                    break :result .pending;
+                },
+            },
+            .data_build => switch (try self.data_builder.?.advance(1)) {
+                .pending => .pending,
+                .duplicate_key => unreachable,
+                .complete => |item| result: {
+                    self.data_builder.?.deinit();
+                    self.data_builder = null;
+                    self.data_value = item;
+                    try self.beginOuter();
+                    break :result .pending;
+                },
+            },
+            .outer => switch (try self.outer_builder.?.advance(1)) {
+                .pending => .pending,
+                .duplicate_key => unreachable,
+                .complete => |item| result: {
+                    self.outer_builder.?.deinit();
+                    self.outer_builder = null;
+                    self.phase = .complete;
+                    break :result .{ .complete = item };
+                },
+            },
+            .complete => unreachable,
         };
-        if (old_trace == null) {
-            pairs[count] = .{ .{ .symbol = trace_key }, trace_value.? };
-            count += 1;
-        }
-        if (old_data == null) {
-            pairs[count] = .{ .{ .symbol = data_key }, data_value.? };
-            count += 1;
-        }
-        std.debug.assert(count == pairs.len);
-        return dict.fromUniquePairs(allocator, pairs);
     }
 };
-/// Returns an owned replacement only when `data` is absent or provenance
-/// fields must be appended. Existing user payload and positions are retained.
-fn completeRaisedData(
+
+const RaisedErrorCursor = struct {
     allocator: std.mem.Allocator,
-    data: ?Value,
+    failure: *EclErr,
+    trace_ids: []const u32,
     location: ?spans.LocatedSpan,
-) error{OutOfMemory}!?Value {
-    const source_key = try intern.intern("source");
-    const line_key = try intern.intern("line");
-    const col_key = try intern.intern("col");
-    const has_source = if (data) |item| (try dict.symbolField(allocator, item, source_key)) != null else false;
-    const has_line = if (data) |item| (try dict.symbolField(allocator, item, line_key)) != null else false;
-    const has_col = if (data) |item| (try dict.symbolField(allocator, item, col_key)) != null else false;
-    if (data != null and (location == null or has_source and has_line and has_col)) return null;
-    const old_count: usize = if (data) |item| @intCast(item.dict.length()) else 0;
-    const add_source = location != null and !has_source;
-    const add_line = location != null and !has_line;
-    const add_col = location != null and !has_col;
-    const pairs = try allocator.alloc(
-        dict.Pair,
-        old_count + @as(usize, @intFromBool(add_source)) +
-            @as(usize, @intFromBool(add_line)) +
-            @as(usize, @intFromBool(add_col)),
-    );
-    defer allocator.free(pairs);
-    if (data) |item| for (0..old_count) |index| {
-        pairs[index] = .{ dict.keyAt(item.dict, index), dict.valueAt(item.dict, index) };
-    };
-    var source_value: ?Value = null;
-    defer if (source_value) |item| heap.releaseValue(allocator, item);
-    var count = old_count;
-    if (location) |located| {
-        if (add_source) {
-            source_value = try stringValue(allocator, located.source_name);
-            pairs[count] = .{ .{ .symbol = source_key }, source_value.? };
-            count += 1;
-        }
-        if (add_line) {
-            pairs[count] = .{ .{ .symbol = line_key }, .{ .int = located.span.line } };
-            count += 1;
-        }
-        if (add_col) {
-            pairs[count] = .{ .{ .symbol = col_key }, .{ .int = located.span.col } };
-            count += 1;
+    names: [8]u32 = .{0} ** 8,
+    name_index: usize = 0,
+    inserter: ?intern.InternInsertionCursor = null,
+    fields: [5]?Value = .{null} ** 5,
+    field_index: usize = 0,
+    finder: ?kernel_storage.DictFindCursor = null,
+    message_bytes: [512]u8 = .{0} ** 512,
+    message_len: usize = 0,
+    message_builder: ?kernel_storage.TextMaterializer = null,
+    message_value: ?Value = null,
+    trace_items: ?[]Value = null,
+    trace_index: usize = 0,
+    trace_builder: ?kernel_storage.ValueMaterializer = null,
+    trace_value: ?Value = null,
+    data_fields: [3]?Value = .{null} ** 3,
+    data_field_index: usize = 0,
+    data_finder: ?kernel_storage.DictFindCursor = null,
+    data_pairs: ?[]dict.Pair = null,
+    data_copy_index: usize = 0,
+    add_source: bool = false,
+    add_line: bool = false,
+    add_col: bool = false,
+    source_builder: ?kernel_storage.TextMaterializer = null,
+    source_value: ?Value = null,
+    data_builder: ?kernel_storage.DictMaterializer = null,
+    data_value: ?Value = null,
+    outer_pairs: ?[]dict.Pair = null,
+    outer_copy_index: usize = 0,
+    outer_builder: ?kernel_storage.DictMaterializer = null,
+    phase: enum {
+        names,
+        fields,
+        message,
+        trace_allocate,
+        trace_copy,
+        trace_build,
+        data_fields,
+        data_allocate,
+        data_copy,
+        source,
+        data_build,
+        outer_allocate,
+        outer_copy,
+        outer_build,
+        complete,
+    } = .names,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        failure: *EclErr,
+        trace_ids: []const u32,
+        location: ?spans.LocatedSpan,
+    ) RaisedErrorCursor {
+        return .{
+            .allocator = allocator,
+            .failure = failure,
+            .trace_ids = trace_ids,
+            .location = if (failure.source_len > 0) .{
+                .source_name = failure.source[0..failure.source_len],
+                .span = .{ .line = failure.source_line, .col = failure.source_col },
+            } else location,
+        };
+    }
+    fn deinit(self: *RaisedErrorCursor) void {
+        if (self.finder) |*finder| finder.deinit();
+        if (self.data_finder) |*finder| finder.deinit();
+        if (self.message_builder) |*builder| builder.deinit();
+        if (self.trace_builder) |*builder| builder.deinit();
+        if (self.source_builder) |*builder| builder.deinit();
+        if (self.data_builder) |*builder| builder.deinit();
+        if (self.outer_builder) |*builder| builder.deinit();
+        if (self.message_value) |item| heap.releaseValue(self.allocator, item);
+        if (self.trace_value) |item| heap.releaseValue(self.allocator, item);
+        if (self.source_value) |item| heap.releaseValue(self.allocator, item);
+        if (self.data_value) |item| heap.releaseValue(self.allocator, item);
+        if (self.trace_items) |items| self.allocator.free(items);
+        if (self.data_pairs) |pairs| self.allocator.free(pairs);
+        if (self.outer_pairs) |pairs| self.allocator.free(pairs);
+        self.* = undefined;
+    }
+    fn nameBytes(self: *const RaisedErrorCursor) []const u8 {
+        const names = [_][]const u8{ "kind", "msg", "word", "trace", "data", "source", "line", "col" };
+        return names[self.name_index];
+    }
+    fn beginOptionalValues(self: *RaisedErrorCursor) error{OutOfMemory}!void {
+        if (self.fields[1] == null) {
+            const kind = self.fields[0].?.symbol;
+            const message = std.fmt.bufPrint(&self.message_bytes, "raised '{s}", .{intern.get(kind)}) catch
+                "raised user error";
+            self.message_len = message.len;
+            if (message.ptr != self.message_bytes[0..].ptr)
+                @memcpy(self.message_bytes[0..message.len], message);
+            self.message_builder = .init(self.allocator, self.message_bytes[0..self.message_len]);
+            self.phase = .message;
+        } else if (self.fields[3] == null) {
+            self.phase = .trace_allocate;
+        } else {
+            self.phase = .data_fields;
         }
     }
-    std.debug.assert(count == pairs.len);
-    return try dict.fromUniquePairs(allocator, pairs);
+    fn beginData(self: *RaisedErrorCursor) error{OutOfMemory}!void {
+        const old_data = self.fields[4];
+        if (old_data == null or self.location != null and
+            !(self.data_fields[0] != null and self.data_fields[1] != null and self.data_fields[2] != null))
+        {
+            const old_count: usize = if (old_data) |item| @intCast(item.dict.length()) else 0;
+            self.add_source = self.location != null and self.data_fields[0] == null;
+            self.add_line = self.location != null and self.data_fields[1] == null;
+            self.add_col = self.location != null and self.data_fields[2] == null;
+            const count = old_count + @as(usize, @intFromBool(self.add_source)) +
+                @as(usize, @intFromBool(self.add_line)) +
+                @as(usize, @intFromBool(self.add_col));
+            self.data_pairs = try self.allocator.alloc(dict.Pair, count);
+            self.phase = .data_copy;
+        } else self.phase = .outer_allocate;
+    }
+    fn appendDataContext(self: *RaisedErrorCursor) error{OutOfMemory}!void {
+        var index = self.data_copy_index;
+        const located = self.location.?;
+        if (self.add_source) {
+            if (self.source_value == null) {
+                self.source_builder = .init(self.allocator, located.source_name);
+                self.phase = .source;
+                return;
+            }
+            self.data_pairs.?[index] = .{ .{ .symbol = self.names[5] }, self.source_value.? };
+            index += 1;
+        }
+        if (self.add_line) {
+            self.data_pairs.?[index] = .{ .{ .symbol = self.names[6] }, .{ .int = located.span.line } };
+            index += 1;
+        }
+        if (self.add_col) {
+            self.data_pairs.?[index] = .{ .{ .symbol = self.names[7] }, .{ .int = located.span.col } };
+            index += 1;
+        }
+        self.data_builder = try .init(self.allocator, self.data_pairs.?[0..index], false);
+        self.phase = .data_build;
+    }
+    fn beginOuter(self: *RaisedErrorCursor) error{OutOfMemory}!void {
+        const raised = self.failure.raised.?;
+        const old_count: usize = @intCast(raised.dict.length());
+        const extra = @as(usize, @intFromBool(self.fields[1] == null)) +
+            @as(usize, @intFromBool(self.fields[2] == null and self.failure.word != null)) +
+            @as(usize, @intFromBool(self.fields[3] == null)) +
+            @as(usize, @intFromBool(self.fields[4] == null));
+        self.outer_pairs = try self.allocator.alloc(dict.Pair, old_count + extra);
+        self.phase = .outer_copy;
+    }
+    fn appendOuter(self: *RaisedErrorCursor) error{OutOfMemory}!void {
+        var index = self.outer_copy_index;
+        if (self.fields[1] == null) {
+            self.outer_pairs.?[index] = .{ .{ .symbol = self.names[1] }, self.message_value.? };
+            index += 1;
+        }
+        if (self.fields[2] == null) if (self.failure.word) |word| {
+            self.outer_pairs.?[index] = .{ .{ .symbol = self.names[2] }, .{ .symbol = word } };
+            index += 1;
+        };
+        if (self.fields[3] == null) {
+            self.outer_pairs.?[index] = .{ .{ .symbol = self.names[3] }, self.trace_value.? };
+            index += 1;
+        }
+        if (self.fields[4] == null) {
+            self.outer_pairs.?[index] = .{ .{ .symbol = self.names[4] }, self.data_value.? };
+            index += 1;
+        }
+        self.outer_builder = try .init(self.allocator, self.outer_pairs.?[0..index], false);
+        self.phase = .outer_build;
+    }
+    fn advance(self: *RaisedErrorCursor) error{OutOfMemory}!ErrorValueProgress {
+        const raised = self.failure.raised.?;
+        return switch (self.phase) {
+            .names => result: {
+                if (self.name_index == self.names.len) {
+                    self.phase = .fields;
+                    break :result .pending;
+                }
+                if (self.inserter == null) self.inserter = intern.insertionCursor(self.nameBytes());
+                switch (try self.inserter.?.advance()) {
+                    .pending => {},
+                    .complete => |id| {
+                        self.names[self.name_index] = id;
+                        self.name_index += 1;
+                        self.inserter = null;
+                    },
+                }
+                break :result .pending;
+            },
+            .fields => result: {
+                if (self.finder) |*finder| switch (try finder.advance(1)) {
+                    .pending => break :result .pending,
+                    .complete => |found| {
+                        finder.deinit();
+                        self.finder = null;
+                        self.fields[self.field_index] = found;
+                        self.field_index += 1;
+                        break :result .pending;
+                    },
+                };
+                if (self.field_index == self.fields.len) {
+                    try self.beginOptionalValues();
+                } else self.finder = .initHeader(
+                    self.allocator,
+                    raised.dict,
+                    .{ .symbol = self.names[self.field_index] },
+                );
+                break :result .pending;
+            },
+            .message => switch (try self.message_builder.?.advance(1)) {
+                .pending => .pending,
+                .complete => |item| result: {
+                    self.message_builder.?.deinit();
+                    self.message_builder = null;
+                    self.message_value = item;
+                    self.phase = if (self.fields[3] == null) .trace_allocate else .data_fields;
+                    break :result .pending;
+                },
+            },
+            .trace_allocate => result: {
+                self.trace_items = try self.allocator.alloc(Value, self.trace_ids.len);
+                self.phase = .trace_copy;
+                break :result .pending;
+            },
+            .trace_copy => result: {
+                if (self.trace_index != self.trace_ids.len) {
+                    self.trace_items.?[self.trace_index] = .{ .symbol = self.trace_ids[self.trace_index] };
+                    self.trace_index += 1;
+                } else {
+                    self.trace_builder = .init(self.allocator, self.trace_items.?);
+                    self.phase = .trace_build;
+                }
+                break :result .pending;
+            },
+            .trace_build => switch (try self.trace_builder.?.advance(1)) {
+                .pending => .pending,
+                .complete => |item| result: {
+                    self.trace_builder.?.deinit();
+                    self.trace_builder = null;
+                    self.trace_value = item;
+                    self.phase = .data_fields;
+                    break :result .pending;
+                },
+            },
+            .data_fields => result: {
+                const old_data = self.fields[4];
+                if (old_data == null or self.location == null) {
+                    try self.beginData();
+                    break :result .pending;
+                }
+                if (self.data_finder) |*finder| switch (try finder.advance(1)) {
+                    .pending => break :result .pending,
+                    .complete => |found| {
+                        finder.deinit();
+                        self.data_finder = null;
+                        self.data_fields[self.data_field_index] = found;
+                        self.data_field_index += 1;
+                        break :result .pending;
+                    },
+                };
+                if (self.data_field_index == self.data_fields.len) {
+                    try self.beginData();
+                } else self.data_finder = .initHeader(
+                    self.allocator,
+                    old_data.?.dict,
+                    .{ .symbol = self.names[5 + self.data_field_index] },
+                );
+                break :result .pending;
+            },
+            .data_allocate => unreachable,
+            .data_copy => result: {
+                const old_data = self.fields[4];
+                const old_count: usize = if (old_data) |item| @intCast(item.dict.length()) else 0;
+                if (self.data_copy_index != old_count) {
+                    self.data_pairs.?[self.data_copy_index] = .{
+                        dict.keyAt(old_data.?.dict, self.data_copy_index),
+                        dict.valueAt(old_data.?.dict, self.data_copy_index),
+                    };
+                    self.data_copy_index += 1;
+                } else try self.appendDataContext();
+                break :result .pending;
+            },
+            .source => switch (try self.source_builder.?.advance(1)) {
+                .pending => .pending,
+                .complete => |item| result: {
+                    self.source_builder.?.deinit();
+                    self.source_builder = null;
+                    self.source_value = item;
+                    try self.appendDataContext();
+                    break :result .pending;
+                },
+            },
+            .data_build => switch (try self.data_builder.?.advance(1)) {
+                .pending => .pending,
+                .duplicate_key => unreachable,
+                .complete => |item| result: {
+                    self.data_builder.?.deinit();
+                    self.data_builder = null;
+                    self.data_value = item;
+                    self.phase = .outer_allocate;
+                    break :result .pending;
+                },
+            },
+            .outer_allocate => result: {
+                try self.beginOuter();
+                break :result .pending;
+            },
+            .outer_copy => result: {
+                const old_count: usize = @intCast(raised.dict.length());
+                if (self.outer_copy_index != old_count) {
+                    const key = dict.keyAt(raised.dict, self.outer_copy_index);
+                    const old_value = dict.valueAt(raised.dict, self.outer_copy_index);
+                    self.outer_pairs.?[self.outer_copy_index] = .{
+                        key,
+                        if (key == .symbol and key.symbol == self.names[4] and self.data_value != null)
+                            self.data_value.?
+                        else
+                            old_value,
+                    };
+                    self.outer_copy_index += 1;
+                } else try self.appendOuter();
+                break :result .pending;
+            },
+            .outer_build => switch (try self.outer_builder.?.advance(1)) {
+                .pending => .pending,
+                .duplicate_key => unreachable,
+                .complete => |item| result: {
+                    self.outer_builder.?.deinit();
+                    self.outer_builder = null;
+                    self.phase = .complete;
+                    break :result .{ .complete = item };
+                },
+            },
+            .complete => unreachable,
+        };
+    }
+};
+
+const ErrorValueCursor = union(enum) {
+    ordinary: OrdinaryErrorCursor,
+    raised: RaisedErrorCursor,
+    fn init(
+        allocator: std.mem.Allocator,
+        failure: *EclErr,
+        trace_ids: []const u32,
+        location: ?spans.LocatedSpan,
+    ) ErrorValueCursor {
+        return if (failure.raised == null)
+            .{ .ordinary = .init(allocator, failure, trace_ids, location) }
+        else
+            .{ .raised = .init(allocator, failure, trace_ids, location) };
+    }
+    fn deinit(self: *ErrorValueCursor) void {
+        switch (self.*) {
+            inline else => |*cursor| cursor.deinit(),
+        }
+        self.* = undefined;
+    }
+    fn advance(self: *ErrorValueCursor) error{OutOfMemory}!ErrorValueProgress {
+        return switch (self.*) {
+            inline else => |*cursor| cursor.advance(),
+        };
+    }
+};
+pub fn errorValue(
+    allocator: std.mem.Allocator,
+    failure: *EclErr,
+    trace_ids: []const u32,
+    location: ?spans.LocatedSpan,
+) error{OutOfMemory}!Value {
+    var cursor = ErrorValueCursor.init(allocator, failure, trace_ids, location);
+    defer cursor.deinit();
+    while (true) switch (try cursor.advance()) {
+        .pending => {},
+        .complete => |item| return item,
+    };
 }
 pub fn stringValue(
     allocator: std.mem.Allocator,
     bytes: []const u8,
 ) error{OutOfMemory}!Value {
-    var codepoints: std.ArrayList(u32) = .empty;
-    defer codepoints.deinit(allocator);
-    if (!std.unicode.utf8ValidateSlice(bytes)) {
-        for (bytes) |byte| try codepoints.append(allocator, byte);
-    } else {
-        var index: usize = 0;
-        while (index < bytes.len) {
-            const length = std.unicode.utf8ByteSequenceLength(bytes[index]) catch
-                @panic("validated UTF-8 reached an invalid start byte");
-            const codepoint = std.unicode.utf8Decode(bytes[index..][0..length]) catch
-                @panic("validated UTF-8 reached an invalid sequence");
-            try codepoints.append(allocator, codepoint);
-            index += length;
-        }
-    }
-    return list.fromCodepoints(allocator, codepoints.items);
+    var materializer = kernel_storage.TextMaterializer.init(allocator, bytes);
+    defer materializer.deinit();
+    while (true) switch (try materializer.advance(kernel_poll_quantum)) {
+        .pending => {},
+        .complete => |item| return item,
+    };
 }
 const Eval = struct {
     code: *Header,
@@ -366,6 +761,7 @@ const Boundary = struct {
     previous_boundary: u32,
     word: u32,
     fn deinit(self: Boundary, allocator: std.mem.Allocator) void {
+        _ = allocator;
         switch (self.mode) {
             .module => |candidate_value| {
                 var candidate = candidate_value;
@@ -373,7 +769,6 @@ const Boundary = struct {
             },
             .attempt => |scope| {
                 scope.deinit();
-                allocator.destroy(scope);
             },
         }
     }
@@ -434,7 +829,6 @@ const ApplicationFrame = struct {
             .in_place => {},
             .isolated => |isolated| {
                 isolated.child.deinit();
-                allocator.destroy(isolated.child);
             },
         }
         self.deinit_fn(allocator, self.context);
@@ -473,7 +867,100 @@ comptime {
     if (@sizeOf(Frame) > 80) @compileError("machine frames must remain at most 80 bytes");
 }
 pub const IdiomRequest = union(enum) { direct: *Header, each, each2, fold, scan };
-pub const PhraseRecognizer = *const fn (*Machine, IdiomRequest) MachineError!bool;
+pub const IdiomFallback = struct {
+    context: ?*anyopaque = null,
+    run_fn: *const fn (*Machine, ?*anyopaque) MachineError!void,
+    deinit_fn: *const fn (std.mem.Allocator, ?*anyopaque) void,
+    pub fn run(self: IdiomFallback, evaluator: *Machine) MachineError!void {
+        return self.run_fn(evaluator, self.context);
+    }
+    pub fn deinit(self: IdiomFallback, allocator: std.mem.Allocator) void {
+        self.deinit_fn(allocator, self.context);
+    }
+};
+pub const PhraseRecognizer = *const fn (*Machine, IdiomRequest, IdiomFallback) MachineError!void;
+
+pub const ParkRequest = union(enum) {
+    task: Value,
+    any: Value,
+    deadline: struct { task: Value, milliseconds: i64 },
+    close_scope: u8,
+    join: struct {
+        tasks: Value,
+        index: u32,
+        cancel_from: ?u32 = null,
+    },
+
+    pub fn deinit(self: ParkRequest, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .task, .any => |item| heap.releaseValue(allocator, item),
+            .deadline => |deadline| heap.releaseValue(allocator, deadline.task),
+            .close_scope => {},
+            .join => |join| heap.releaseValue(allocator, join.tasks),
+        }
+    }
+};
+
+pub const ParkResume = union(enum) {
+    outcome: Value,
+    indexed: struct { index: u32, outcome: Value },
+    timeout,
+    cancelled,
+    io,
+    out_of_memory,
+    scope_closed: u8,
+
+    fn deinit(self: ParkResume, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .outcome => |outcome| heap.releaseValue(allocator, outcome),
+            .indexed => |indexed| heap.releaseValue(allocator, indexed.outcome),
+            .timeout, .cancelled, .io, .out_of_memory, .scope_closed => {},
+        }
+    }
+};
+
+pub const TaskJoinState = struct {
+    tasks: Value,
+    results: []Value,
+    policy: task_join_core.Join,
+    ok_id: u32,
+    err_id: u32,
+    raised: ?Value = null,
+
+    fn deinit(self: *TaskJoinState, allocator: std.mem.Allocator) void {
+        heap.releaseValue(allocator, self.tasks);
+        const initialized: usize = self.policy.successCount();
+        for (self.results[0..initialized]) |item| heap.releaseValue(allocator, item);
+        allocator.free(self.results);
+        if (self.raised) |raised| heap.releaseValue(allocator, raised);
+        self.* = undefined;
+    }
+};
+
+pub const WorkProgress = enum { completed, yielded, detached, failed };
+
+/// Type-erased owned continuation for native work that must return to the
+/// scheduler between bounded slices.
+pub const WorkDriver = struct {
+    context: *anyopaque,
+    resume_fn: *const fn (*Machine, *anyopaque) MachineError!WorkProgress,
+    deinit_fn: *const fn (std.mem.Allocator, *anyopaque) void,
+    site: ?ErrorSite,
+    trace_parent: ?u32 = null,
+
+    fn advance(self: WorkDriver, evaluator: *Machine) MachineError!WorkProgress {
+        return self.resume_fn(evaluator, self.context);
+    }
+
+    fn deinit(self: WorkDriver, allocator: std.mem.Allocator) void {
+        self.deinit_fn(allocator, self.context);
+    }
+};
+
+comptime {
+    if (@sizeOf(WorkDriver) > 80) @compileError("WorkDriver exceeds its fixed frame budget");
+}
+
 pub const Unit = struct {
     allocator: std.mem.Allocator,
     frames: std.ArrayList(Frame) = .empty,
@@ -485,6 +972,7 @@ pub const Unit = struct {
     archive: *spans.SpanArchive,
     output: ?*std.Io.Writer,
     diagnostics: ?*std.Io.Writer = null,
+    console: ?*console_api.Console = null,
     host_io: ?std.Io = null,
     ecl_path: ?[]const u8 = null,
     arguments: Value,
@@ -502,6 +990,18 @@ pub const Unit = struct {
     idiom_mode: IdiomMode = .automatic,
     idiom_hits: u64 = 0,
     phrase_recognizer: ?PhraseRecognizer = null,
+    scheduler: ?*anyopaque = null,
+    task_scope: ?*anyopaque = null,
+    is_root_unit: bool = true,
+    execution_scope: ?*env.Scope = null,
+    park_request: ?ParkRequest = null,
+    park_resume: ?ParkResume = null,
+    task_join: ?TaskJoinState = null,
+    work_driver: ?WorkDriver = null,
+    native_yield: bool = false,
+    current: ?Eval = null,
+    active_index: u32 = 0,
+    active_word: u32 = no_word,
     pub fn init(
         allocator: std.mem.Allocator,
         stack: std.ArrayList(Value),
@@ -534,12 +1034,22 @@ pub const Unit = struct {
         self.last_error = null;
         return result;
     }
-    fn pinGeneration(self: *Unit, generation: *modules.ModuleGeneration) error{OutOfMemory}!void {
+    pub fn inAttempt(self: *const Unit) bool {
+        var index = self.boundary_index;
+        while (index != no_boundary) {
+            const boundary = self.frames.items[index].boundary;
+            if (boundary.mode == .attempt) return true;
+            index = boundary.previous_boundary;
+        }
+        return false;
+    }
+    pub fn pinGeneration(self: *Unit, generation: *modules.ModuleGeneration) error{OutOfMemory}!void {
         for (self.generation_pins.items) |pinned| if (pinned == generation) return;
         try self.generation_pins.append(self.allocator, generation);
         generation.retain();
     }
     pub fn deinit(self: *Unit) void {
+        if (self.current) |current| heap.decRef(self.allocator, current.code);
         for (self.frames.items) |frame| frame.deinit(self.allocator);
         self.frames.deinit(self.allocator);
         for (self.generation_pins.items) |generation| generation.release();
@@ -548,14 +1058,16 @@ pub const Unit = struct {
         self.stack.deinit(self.allocator);
         if (self.pending) |*pending| pending.deinit(self.allocator);
         if (self.last_error) |item| heap.releaseValue(self.allocator, item);
+        if (self.park_request) |request| request.deinit(self.allocator);
+        if (self.park_resume) |park_result| park_result.deinit(self.allocator);
+        if (self.task_join) |*join| join.deinit(self.allocator);
+        if (self.work_driver) |driver| driver.deinit(self.allocator);
+        self.root_scope.deinit();
         self.* = undefined;
     }
 };
 pub const Machine = struct {
     unit: *Unit,
-    current: ?Eval,
-    active_index: u32 = 0,
-    active_word: u32 = no_word,
     pub fn allocator(self: *const Machine) std.mem.Allocator {
         return self.unit.allocator;
     }
@@ -563,242 +1075,769 @@ pub const Machine = struct {
         return self.unit.environment;
     }
     pub fn currentScope(self: *const Machine) *env.Scope {
-        return self.current.?.scope;
+        return self.unit.current.?.scope;
     }
     pub fn currentHome(self: *const Machine) ?*modules.ModuleGeneration {
-        return self.current.?.home;
+        return self.unit.current.?.home;
     }
-    pub fn useModule(self: *Machine, name: u32) MachineError!bool {
-        return self.installUse(self.currentScope(), name);
-    }
-    fn installUse(self: *Machine, scope: *env.Scope, name: u32) MachineError!bool {
-        const registry = self.unit.registry orelse return false;
-        const work = poll_api.WorkContext.init(traversalPoller(self));
-        const canonical = try registry.canonicalWork(name, work) orelse return false;
-        if (scope.kind() == .session) try emitShadowNotices(self, scope, canonical);
-        scope.moveUseToTop(canonical, poll_api.WorkContext.init(traversalPoller(self))) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Ecl => return error.Ecl,
-            error.Frozen => return self.fail(.domain, "registered module environments are immutable"),
+    pub fn installWorkDriver(
+        self: *Machine,
+        context: *anyopaque,
+        resume_fn: *const fn (*Machine, *anyopaque) MachineError!WorkProgress,
+        deinit_fn: *const fn (std.mem.Allocator, *anyopaque) void,
+    ) void {
+        std.debug.assert(self.unit.work_driver == null);
+        self.unit.work_driver = .{
+            .context = context,
+            .resume_fn = resume_fn,
+            .deinit_fn = deinit_fn,
+            .site = if (self.unit.current) |current| .{
+                .code = current.code,
+                .index = self.unit.active_index,
+            } else null,
         };
-        return true;
+    }
+    /// Marks a preserved native continuation boundary as scheduler-visible.
+    /// Application state already owns its next position, so no native stack
+    /// survives the return.
+    pub fn yieldNativeStep(self: *Machine) MachineError!void {
+        try self.pollKernel();
+        self.unit.native_yield = true;
     }
     pub fn useOrLoad(self: *Machine, name: u32) MachineError!void {
-        if (try self.useModule(name)) return;
+        const driver = try self.unit.allocator.create(UseDriver);
+        driver.* = try .init(self, self.currentScope(), name, true);
+        self.installWorkDriver(driver, UseDriver.advance, UseDriver.destroy);
+    }
+    fn autoLoadModule(self: *Machine, name: u32) MachineError!void {
         const registry = self.unit.registry orelse return self.undefinedModule(name);
-        const io = self.unit.host_io orelse return self.undefinedModule(name);
-        const search = self.unit.ecl_path orelse return self.undefinedModule(name);
-        const work = poll_api.WorkContext.init(traversalPoller(self));
-        var loading = try registry.beginLoading(name, work) orelse {
-            return self.failFmt(.domain, "recursive auto-load of module `{s}`", .{intern.get(name)});
-        };
-        defer loading.deinit();
-        const filename = try std.fmt.allocPrint(self.unit.allocator, "{s}.ecl", .{intern.get(name)});
-        defer self.unit.allocator.free(filename);
-        var paths = std.mem.splitScalar(u8, search, std.fs.path.delimiter);
-        while (paths.next()) |directory| {
-            if (directory.len == 0) continue;
-            const candidate = try std.fs.path.join(self.unit.allocator, &.{ directory, filename });
-            defer self.unit.allocator.free(candidate);
-            std.Io.Dir.cwd().access(io, candidate, .{ .read = true }) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => {
-                    const path_value = try stringValue(self.unit.allocator, candidate);
-                    defer heap.releaseValue(self.unit.allocator, path_value);
-                    const failure = self.failFmt(.io, "cannot access module file `{s}`: {s}", .{ candidate, @errorName(err) });
-                    self.unit.pending.?.addData(.path, path_value);
-                    return failure;
+        const driver = try self.unit.allocator.create(AutoLoadDriver);
+        driver.* = .{ .name = name, .cursor = registry.beginLoadingCursor(name) };
+        self.installWorkDriver(driver, AutoLoadDriver.advance, AutoLoadDriver.destroy);
+    }
+    const AutoLoadDriver = struct {
+        name: u32,
+        cursor: modules.Registry.BeginLoadingCursor,
+        loading: ?modules.LoadingLease = null,
+        filename: ?[]u8 = null,
+        filename_index: usize = 0,
+        search_index: usize = 0,
+        component_start: usize = 0,
+        component_end: usize = 0,
+        candidate: ?[]u8 = null,
+        candidate_index: usize = 0,
+        separator: bool = false,
+        path_materializer: ?kernel_storage.Utf8Materializer = null,
+        path_value: ?Value = null,
+        access_error: ?[]const u8 = null,
+        phase: enum { begin, filename, component_start, component_end, candidate, access, path_value, transfer } = .begin,
+
+        fn resetCandidate(self: *AutoLoadDriver, storage_allocator: std.mem.Allocator) void {
+            if (self.candidate) |candidate| storage_allocator.free(candidate);
+            self.candidate = null;
+            self.candidate_index = 0;
+            self.separator = false;
+            self.access_error = null;
+            self.phase = .component_start;
+        }
+        fn beginCandidate(self: *AutoLoadDriver, evaluator: *Machine) error{OutOfMemory}!void {
+            const search = evaluator.unit.ecl_path.?;
+            const directory = search[self.component_start..self.component_end];
+            self.separator = directory.len != 0 and !std.fs.path.isSep(directory[directory.len - 1]);
+            var length = std.math.add(usize, directory.len, self.filename.?.len) catch
+                return error.OutOfMemory;
+            if (self.separator) length = std.math.add(usize, length, 1) catch
+                return error.OutOfMemory;
+            self.candidate = try evaluator.unit.allocator.alloc(u8, length);
+            self.phase = .candidate;
+        }
+        fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!WorkProgress {
+            const self: *AutoLoadDriver = @ptrCast(@alignCast(raw));
+            try evaluator.pollKernel();
+            var budget: usize = kernel_poll_quantum;
+            while (budget != 0) : (budget -= 1) switch (self.phase) {
+                .begin => switch (try self.cursor.advance()) {
+                    .pending => {},
+                    .complete => |maybe_loading| {
+                        self.loading = maybe_loading orelse return evaluator.failFmt(
+                            .domain,
+                            "recursive auto-load of module `{s}`",
+                            .{intern.get(self.name)},
+                        );
+                        if (evaluator.unit.host_io == null or evaluator.unit.ecl_path == null)
+                            return evaluator.undefinedModule(self.name);
+                        const module_name = intern.get(self.name);
+                        const length = std.math.add(usize, module_name.len, 4) catch
+                            return error.OutOfMemory;
+                        self.filename = try evaluator.unit.allocator.alloc(u8, length);
+                        self.phase = .filename;
+                    },
+                },
+                .filename => {
+                    const module_name = intern.get(self.name);
+                    const extension = ".ecl";
+                    if (self.filename_index != self.filename.?.len) {
+                        self.filename.?[self.filename_index] = if (self.filename_index < module_name.len)
+                            module_name[self.filename_index]
+                        else
+                            extension[self.filename_index - module_name.len];
+                        self.filename_index += 1;
+                    } else self.phase = .component_start;
+                },
+                .component_start => {
+                    const search = evaluator.unit.ecl_path.?;
+                    if (self.search_index == search.len) return evaluator.undefinedModule(self.name);
+                    if (search[self.search_index] == std.fs.path.delimiter) {
+                        self.search_index += 1;
+                    } else {
+                        self.component_start = self.search_index;
+                        self.phase = .component_end;
+                    }
+                },
+                .component_end => {
+                    const search = evaluator.unit.ecl_path.?;
+                    if (self.search_index == search.len or
+                        search[self.search_index] == std.fs.path.delimiter)
+                    {
+                        self.component_end = self.search_index;
+                        if (self.search_index != search.len) self.search_index += 1;
+                        try self.beginCandidate(evaluator);
+                    } else self.search_index += 1;
+                },
+                .candidate => {
+                    const search = evaluator.unit.ecl_path.?;
+                    const directory = search[self.component_start..self.component_end];
+                    if (self.candidate_index != self.candidate.?.len) {
+                        self.candidate.?[self.candidate_index] = if (self.candidate_index < directory.len)
+                            directory[self.candidate_index]
+                        else if (self.separator and self.candidate_index == directory.len)
+                            std.fs.path.sep
+                        else
+                            self.filename.?[self.candidate_index - directory.len - @intFromBool(self.separator)];
+                        self.candidate_index += 1;
+                    } else self.phase = .access;
+                },
+                .access => {
+                    std.Io.Dir.cwd().access(
+                        evaluator.unit.host_io.?,
+                        self.candidate.?,
+                        .{ .read = true },
+                    ) catch |err| switch (err) {
+                        error.FileNotFound => {
+                            self.resetCandidate(evaluator.unit.allocator);
+                            continue;
+                        },
+                        else => self.access_error = @errorName(err),
+                    };
+                    self.path_materializer = .init(evaluator.unit.allocator, self.candidate.?);
+                    self.phase = .path_value;
+                },
+                .path_value => switch (self.path_materializer.?.advance(1) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidUtf8 => return evaluator.fail(.io, "module path is not valid UTF-8"),
+                }) {
+                    .pending => {},
+                    .complete => |path_value| {
+                        self.path_materializer.?.deinit();
+                        self.path_materializer = null;
+                        self.path_value = path_value;
+                        if (self.access_error) |name| {
+                            const failure = evaluator.failFmt(
+                                .io,
+                                "cannot access module file `{s}`: {s}",
+                                .{ self.candidate.?, name },
+                            );
+                            evaluator.unit.pending.?.addData(.path, path_value);
+                            return failure;
+                        }
+                        self.phase = .transfer;
+                    },
+                },
+                .transfer => {
+                    const candidate = self.candidate.?;
+                    const completion: SourceCompletion = .{ .use = .{
+                        .name = self.name,
+                        .loading = self.loading.?.move(),
+                        .path = self.path_value.?,
+                    } };
+                    self.candidate = null;
+                    self.loading = null;
+                    self.path_value = null;
+                    evaluator.unit.work_driver = null;
+                    AutoLoadDriver.destroy(evaluator.unit.allocator, self);
+                    evaluator.fileSourceOwned(candidate, null, completion) catch |err| {
+                        var cleanup = completion;
+                        cleanup.deinit(evaluator.unit.allocator);
+                        evaluator.unit.allocator.free(candidate);
+                        return err;
+                    };
+                    return .detached;
                 },
             };
-            try self.loadPathForUseOwned(candidate, name, &loading);
-            return;
+            return .yielded;
         }
-        return self.undefinedModule(name);
-    }
-    pub fn loadPathOwned(self: *Machine, path: []const u8) MachineError!void {
-        return self.loadPathOwnedInner(path, null);
-    }
-    const PendingUse = struct { name: u32, loading: *modules.LoadingLease };
-    fn loadPathForUseOwned(
-        self: *Machine,
-        path: []const u8,
+        fn destroy(storage_allocator: std.mem.Allocator, raw: *anyopaque) void {
+            const self: *AutoLoadDriver = @ptrCast(@alignCast(raw));
+            if (self.loading) |*loading| loading.deinit();
+            if (self.path_materializer) |*materializer| materializer.deinit();
+            if (self.path_value) |path_value| heap.releaseValue(storage_allocator, path_value);
+            if (self.candidate) |candidate| storage_allocator.free(candidate);
+            if (self.filename) |filename| storage_allocator.free(filename);
+            storage_allocator.destroy(self);
+        }
+    };
+    const UseDriver = struct {
+        const Phase = enum { canonical, acquire, exports, materialize, sort, check, action_materialize, render, write, move };
+        allocator: std.mem.Allocator,
+        scope: *env.Scope,
         name: u32,
-        loading: *modules.LoadingLease,
-    ) MachineError!void {
-        return self.loadPathOwnedInner(path, .{ .name = name, .loading = loading });
-    }
-    fn loadPathOwnedInner(self: *Machine, path: []const u8, retry_use: ?PendingUse) MachineError!void {
-        const path_value = try stringValue(self.unit.allocator, path);
-        defer heap.releaseValue(self.unit.allocator, path_value);
-        const io = self.unit.host_io orelse {
-            const failure = self.fail(.io, "filesystem access is unavailable");
-            self.unit.pending.?.addData(.path, path_value);
-            return failure;
-        };
-        const source = std.Io.Dir.cwd().readFileAlloc(
-            io,
-            path,
-            self.unit.allocator,
-            .unlimited,
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {
-                const failure = self.failFmt(.io, "cannot read `{s}`: {s}", .{ path, @errorName(err) });
-                self.unit.pending.?.addData(.path, path_value);
-                return failure;
-            },
-        };
-        defer self.unit.allocator.free(source);
-        var diag: reader.Diag = .{};
-        const read_result = reader.readPolling(
-            self.unit.allocator,
-            path,
-            source,
-            &diag,
-            poll_api.WorkContext.init(traversalPoller(self)),
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Ecl => return error.Ecl,
-            error.Parse => {
-                const failure = self.fail(.parse, diag.text());
-                self.unit.pending.?.setLocation(path, diag.span);
-                return failure;
-            },
-        };
-        var parsed = switch (read_result) {
-            .incomplete => |incomplete| {
-                const failure = self.fail(.parse, incomplete.message);
-                self.unit.pending.?.setLocation(path, incomplete.span);
-                return failure;
-            },
-            .complete => |complete| complete,
-        };
-        defer parsed.deinit();
-        const root = try kernel_storage.fromValuesGeneric(self.unit.allocator, parsed.forms, traversalPoller(self));
-        var root_owned = true;
-        defer if (root_owned) heap.releaseValue(self.unit.allocator, root);
-        try self.unit.archive.absorb(&parsed, root, .init(traversalPoller(self)));
-        root_owned = false;
-        heap.incRef(root.list);
-        if (retry_use) |pending_use| {
-            const scope = self.current.?.scope;
-            const home = self.current.?.home;
-            _ = self.suspendCurrent() catch {
-                heap.decRef(self.unit.allocator, root.list);
-                return error.OutOfMemory;
-            };
-            heap.retainValue(path_value);
-            self.appendFrame(.{ .use_after_load = .{
-                .loading = pending_use.loading.move(),
+        allow_load: bool,
+        phase: Phase = .canonical,
+        canonical: ?modules.Registry.CanonicalCursor = null,
+        canonical_name: u32 = 0,
+        acquisition: ?modules.Registry.AcquireCursor = null,
+        generation: ?modules.GenerationLease = null,
+        exports: ?modules.ModuleGeneration.PublicNameCursor = null,
+        found: poll_api.ChunkList(u32),
+        names: ?[]u32 = null,
+        found_iterator: ?poll_api.ChunkList(u32).Iterator = null,
+        materialize_index: usize = 0,
+        sorter: ?reflection.NameSortCursor = null,
+        check_index: usize = 0,
+        check_lookup: ?env.DirectLookupCursor = null,
+        actions_found: poll_api.ChunkList(reflection.Action),
+        actions: ?[]reflection.Action = null,
+        action_iterator: ?poll_api.ChunkList(reflection.Action).Iterator = null,
+        action_index: usize = 0,
+        plan: ?reflection.OwnedPlanCursor = null,
+        rendered: ?[]u8 = null,
+        mover: ?env.Environment.MoveUseCursor = null,
+        after_load: ?struct { loading: modules.LoadingLease, path: Value } = null,
+
+        fn init(
+            evaluator: *Machine,
+            scope: *env.Scope,
+            name: u32,
+            allow_load: bool,
+        ) error{OutOfMemory}!UseDriver {
+            return .{
+                .allocator = evaluator.unit.allocator,
                 .scope = scope,
-                .name = pending_use.name,
-                .path = path_value,
-            } }) catch {
-                heap.decRef(self.unit.allocator, root.list);
-                return error.OutOfMemory;
+                .name = name,
+                .allow_load = allow_load,
+                .canonical = if (evaluator.unit.registry) |registry| registry.canonicalCursor(name) else null,
+                .found = .init(evaluator.unit.allocator),
+                .actions_found = .init(evaluator.unit.allocator),
             };
-            self.current = .{ .code = root.list, .ip = 0, .scope = scope, .home = home, .traced_word = no_word };
-        } else {
-            try self.callOwned(root.list);
         }
-    }
-    pub fn aliasModule(
-        self: *Machine,
-        short: intern.NamespaceName,
-        target: intern.NamespaceName,
-    ) MachineError!void {
-        const registry = self.unit.registry orelse
-            return self.fail(.domain, "module registry is unavailable");
-        registry.alias(short, target, poll_api.WorkContext.init(traversalPoller(self))) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Ecl => return error.Ecl,
-            error.NameConflict => return self.fail(.domain, "alias collides with a module name"),
-            error.MissingModule => return self.undefinedModule(intern.namespaceId(target)),
-            error.InvalidDefinition => return self.fail(.domain, "module and alias names must be unqualified"),
+        fn diagnosticsAvailable(self: *UseDriver, evaluator: *Machine) bool {
+            _ = self;
+            return if (evaluator.unit.console) |console|
+                console.diagnostics != null
+            else
+                evaluator.unit.diagnostics != null;
+        }
+        fn beginMove(self: *UseDriver) error{OutOfMemory}!void {
+            self.mover = try self.scope.moveUseCursor(self.canonical_name);
+            self.phase = .move;
+        }
+        fn appendNotice(self: *UseDriver, module_name: u32, name: u32) error{OutOfMemory}!void {
+            for ([_]reflection.Action{
+                .{ .bytes = "session `" },
+                .{ .name = name },
+                .{ .bytes = "` shadows `" },
+                .{ .name = module_name },
+                .{ .bytes = "." },
+                .{ .name = name },
+                .{ .bytes = "`\n" },
+            }) |action| try self.actions_found.append(action);
+        }
+        fn missing(self: *UseDriver, evaluator: *Machine) MachineError!WorkProgress {
+            const name = self.name;
+            const allow_load = self.allow_load;
+            const path = if (self.after_load) |after| retained: {
+                heap.retainValue(after.path);
+                break :retained after.path;
+            } else null;
+            defer if (path) |item| heap.releaseValue(evaluator.unit.allocator, item);
+            evaluator.unit.work_driver = null;
+            UseDriver.destroy(evaluator.unit.allocator, self);
+            if (allow_load) {
+                try evaluator.autoLoadModule(name);
+            } else {
+                const failure = evaluator.undefinedModule(name);
+                if (path) |item| evaluator.unit.pending.?.addData(.path, item);
+                return failure;
+            }
+            return .detached;
+        }
+        fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!WorkProgress {
+            const self: *UseDriver = @ptrCast(@alignCast(raw));
+            try evaluator.pollKernel();
+            var budget: usize = kernel_poll_quantum;
+            while (budget != 0) : (budget -= 1) switch (self.phase) {
+                .canonical => {
+                    const cursor = &(self.canonical orelse return self.missing(evaluator));
+                    switch (cursor.advance()) {
+                        .pending => {},
+                        .complete => |maybe_name| {
+                            self.canonical_name = maybe_name orelse return self.missing(evaluator);
+                            cursor.deinit();
+                            self.canonical = null;
+                            if (self.scope.kind() == .session and self.diagnosticsAvailable(evaluator)) {
+                                self.acquisition = evaluator.unit.registry.?.acquireCursor(self.canonical_name);
+                                self.phase = .acquire;
+                            } else try self.beginMove();
+                        },
+                    }
+                },
+                .acquire => switch (self.acquisition.?.advance()) {
+                    .pending => {},
+                    .complete => |maybe_generation| {
+                        self.acquisition.?.deinit();
+                        self.acquisition = null;
+                        self.generation = maybe_generation orelse unreachable;
+                        self.exports = self.generation.?.generation.publicNameCursor();
+                        self.phase = .exports;
+                    },
+                },
+                .exports => switch (self.exports.?.advance()) {
+                    .pending => {},
+                    .name => |name| try self.found.append(name),
+                    .complete => {
+                        self.exports.?.deinit();
+                        self.exports = null;
+                        self.names = try self.allocator.alloc(u32, self.found.count);
+                        self.found_iterator = self.found.iterator();
+                        self.phase = .materialize;
+                    },
+                },
+                .materialize => if (self.found_iterator.?.next()) |name| {
+                    self.names.?[self.materialize_index] = name.*;
+                    self.materialize_index += 1;
+                } else {
+                    self.sorter = try .init(self.allocator, self.names.?);
+                    self.phase = .sort;
+                },
+                .sort => if (self.sorter.?.advance(1) == .complete) {
+                    self.sorter.?.deinit();
+                    self.sorter = null;
+                    self.phase = .check;
+                },
+                .check => {
+                    if (self.check_lookup) |*lookup| switch (lookup.advance()) {
+                        .pending => continue,
+                        .complete => |maybe_lease| {
+                            lookup.deinit();
+                            self.check_lookup = null;
+                            if (maybe_lease) |loaded| {
+                                var lease = loaded;
+                                defer lease.deinit(self.allocator);
+                                try self.appendNotice(
+                                    intern.namespaceId(self.generation.?.generation.name),
+                                    self.names.?[self.check_index],
+                                );
+                            }
+                            self.check_index += 1;
+                            continue;
+                        },
+                    };
+                    if (self.check_index != self.names.?.len) {
+                        self.check_lookup = self.scope.environmentOrNull().?.directLookupCursor(
+                            self.names.?[self.check_index],
+                        );
+                    } else if (self.actions_found.count == 0) {
+                        try self.beginMove();
+                    } else {
+                        self.actions = try self.allocator.alloc(reflection.Action, self.actions_found.count);
+                        self.action_iterator = self.actions_found.iterator();
+                        self.phase = .action_materialize;
+                    }
+                },
+                .action_materialize => if (self.action_iterator.?.next()) |action| {
+                    self.actions.?[self.action_index] = action.*;
+                    self.action_index += 1;
+                } else {
+                    self.plan = .init(self.allocator, self.actions.?);
+                    self.phase = .render;
+                },
+                .render => switch (try self.plan.?.advance(1)) {
+                    .pending => {},
+                    .complete => |bytes| {
+                        self.rendered = bytes;
+                        self.phase = .write;
+                    },
+                },
+                .write => {
+                    var locked = if (evaluator.unit.console) |console| console.lockDiagnostics() else null;
+                    defer if (locked) |*lease| lease.deinit();
+                    const output = if (locked) |*lease| lease.writer else evaluator.unit.diagnostics.?;
+                    output.writeAll(self.rendered.?) catch return evaluator.fail(.io, "standard error write failed");
+                    output.flush() catch return evaluator.fail(.io, "standard error flush failed");
+                    try self.beginMove();
+                },
+                .move => switch (self.mover.?.advance() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Frozen => return evaluator.fail(.domain, "registered module environments are immutable"),
+                }) {
+                    .pending => {},
+                    .complete => {
+                        if (self.after_load) |*after| {
+                            after.loading.finish();
+                            heap.releaseValue(self.allocator, after.path);
+                            self.after_load = null;
+                        }
+                        return .completed;
+                    },
+                },
+            };
+            return .yielded;
+        }
+        fn destroy(storage_allocator: std.mem.Allocator, raw: *anyopaque) void {
+            const self: *UseDriver = @ptrCast(@alignCast(raw));
+            if (self.canonical) |*cursor| cursor.deinit();
+            if (self.acquisition) |*cursor| cursor.deinit();
+            if (self.exports) |*cursor| cursor.deinit();
+            if (self.generation) |*lease| lease.deinit();
+            if (self.sorter) |*sorter| sorter.deinit();
+            if (self.check_lookup) |*lookup| lookup.deinit();
+            if (self.plan) |*plan| plan.deinit();
+            if (self.mover) |*mover| mover.deinit();
+            if (self.after_load) |*after| {
+                after.loading.deinit();
+                heap.releaseValue(storage_allocator, after.path);
+            }
+            if (self.rendered) |rendered| storage_allocator.free(rendered);
+            if (self.actions) |actions| storage_allocator.free(actions);
+            if (self.names) |names| storage_allocator.free(names);
+            self.actions_found.deinit();
+            self.found.deinit();
+            storage_allocator.destroy(self);
+        }
+    };
+    pub fn parseSourceOwned(self: *Machine, source: []u8) MachineError!void {
+        const source_name = try self.unit.allocator.dupe(u8, "<parse>");
+        errdefer self.unit.allocator.free(source_name);
+        const driver = try self.unit.allocator.create(SourceDriver);
+        driver.* = .{
+            .allocator = self.unit.allocator,
+            .source_name = source_name,
+            .source = source,
+            .completion = .push,
         };
+        self.installWorkDriver(driver, SourceDriver.advance, SourceDriver.destroy);
     }
+    const SourceCompletion = union(enum) {
+        push,
+        call,
+        use: struct {
+            name: u32,
+            loading: ?modules.LoadingLease,
+            path: ?Value,
+        },
+
+        fn deinit(self: *SourceCompletion, storage_allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .push, .call => {},
+                .use => |*use| {
+                    if (use.loading) |*loading| loading.deinit();
+                    if (use.path) |path| heap.releaseValue(storage_allocator, path);
+                },
+            }
+            self.* = undefined;
+        }
+    };
+    fn sourceOwned(
+        self: *Machine,
+        source_name: []u8,
+        source: []u8,
+        completion: SourceCompletion,
+    ) error{OutOfMemory}!void {
+        const driver = try self.unit.allocator.create(SourceDriver);
+        driver.* = .{
+            .allocator = self.unit.allocator,
+            .source_name = source_name,
+            .source = source,
+            .completion = completion,
+        };
+        self.installWorkDriver(driver, SourceDriver.advance, SourceDriver.destroy);
+    }
+    const SourceDriver = struct {
+        allocator: std.mem.Allocator,
+        source_name: []u8,
+        source: []u8,
+        completion: SourceCompletion,
+        diag: reader.Diag = .{},
+        reader_state: ?reader_cursor.ReadCursor = null,
+        parsed: ?reader.Parsed = null,
+        materializer: ?kernel_storage.GenericValueMaterializer = null,
+        root: ?Value = null,
+        root_header: ?*Header = null,
+        absorber: ?spans.SpanArchive.AbsorbCursor = null,
+        phase: enum { read, materialize, absorb, activate } = .read,
+
+        fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!WorkProgress {
+            const self: *SourceDriver = @ptrCast(@alignCast(raw));
+            try evaluator.pollKernel();
+            var budget: usize = kernel_poll_quantum;
+            while (budget != 0) : (budget -= 1) switch (self.phase) {
+                .read => {
+                    if (self.reader_state == null) self.reader_state = reader_cursor.ReadCursor.init(
+                        self.allocator,
+                        self.source_name,
+                        self.source,
+                        &self.diag,
+                    );
+                    switch (self.reader_state.?.advance() catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.Parse => {
+                            const failure = evaluator.fail(.parse, self.diag.text());
+                            evaluator.unit.pending.?.setLocation(self.source_name, self.diag.span);
+                            return failure;
+                        },
+                    }) {
+                        .pending => {},
+                        .complete => |read_result| {
+                            self.reader_state.?.deinit();
+                            self.reader_state = null;
+                            self.parsed = switch (read_result) {
+                                .complete => |parsed| parsed,
+                                .incomplete => |value_incomplete| {
+                                    const failure = evaluator.fail(.parse, value_incomplete.message);
+                                    evaluator.unit.pending.?.setLocation(self.source_name, value_incomplete.span);
+                                    return failure;
+                                },
+                            };
+                            self.materializer = .init(self.allocator, self.parsed.?.forms);
+                            self.phase = .materialize;
+                        },
+                    }
+                },
+                .materialize => switch (try self.materializer.?.advance(1)) {
+                    .pending => {},
+                    .complete => |root| {
+                        self.materializer.?.deinit();
+                        self.materializer = null;
+                        self.root = root;
+                        self.root_header = root.list;
+                        self.absorber = evaluator.unit.archive.absorbCursor(&self.parsed.?, root);
+                        self.phase = .absorb;
+                    },
+                },
+                .absorb => switch (try self.absorber.?.advance()) {
+                    .pending => {},
+                    .complete => {
+                        self.absorber.?.deinit();
+                        self.absorber = null;
+                        self.root = null;
+                        self.phase = .activate;
+                    },
+                },
+                .activate => {
+                    switch (self.completion) {
+                        .push => try evaluator.pushBorrowed(.{ .list = self.root_header.? }),
+                        .call => {
+                            heap.incRef(self.root_header.?);
+                            try evaluator.callOwned(self.root_header.?);
+                        },
+                        .use => |*use| {
+                            const scope = evaluator.unit.current.?.scope;
+                            const home = evaluator.unit.current.?.home;
+                            heap.incRef(self.root_header.?);
+                            _ = evaluator.suspendCurrent() catch {
+                                heap.decRef(self.allocator, self.root_header.?);
+                                return error.OutOfMemory;
+                            };
+                            const continuation: Frame = .{ .use_after_load = .{
+                                .loading = use.loading.?.move(),
+                                .scope = scope,
+                                .name = use.name,
+                                .path = use.path.?,
+                            } };
+                            use.loading = null;
+                            use.path = null;
+                            evaluator.appendFrame(continuation) catch {
+                                continuation.deinit(self.allocator);
+                                heap.decRef(self.allocator, self.root_header.?);
+                                return error.OutOfMemory;
+                            };
+                            evaluator.unit.current = .{
+                                .code = self.root_header.?,
+                                .ip = 0,
+                                .scope = scope,
+                                .home = home,
+                                .traced_word = no_word,
+                            };
+                        },
+                    }
+                    return .completed;
+                },
+            };
+            return .yielded;
+        }
+        fn destroy(storage_allocator: std.mem.Allocator, raw: *anyopaque) void {
+            const self: *SourceDriver = @ptrCast(@alignCast(raw));
+            if (self.absorber) |*absorber| absorber.deinit();
+            if (self.materializer) |*materializer| materializer.deinit();
+            if (self.reader_state) |*state| state.deinit();
+            if (self.root) |root| heap.releaseValue(storage_allocator, root);
+            if (self.parsed) |*parsed| parsed.deinit();
+            self.completion.deinit(storage_allocator);
+            storage_allocator.free(self.source);
+            storage_allocator.free(self.source_name);
+            storage_allocator.destroy(self);
+        }
+    };
+    pub fn loadFileOwned(self: *Machine, path: []u8, path_value: Value) MachineError!void {
+        return self.fileSourceOwned(path, path_value, .call);
+    }
+    fn fileSourceOwned(
+        self: *Machine,
+        path: []u8,
+        path_value: ?Value,
+        completion: SourceCompletion,
+    ) MachineError!void {
+        if (self.unit.host_io == null) {
+            const failure = self.fail(.io, "filesystem access is unavailable");
+            if (path_value) |item| self.unit.pending.?.addData(.path, item);
+            return failure;
+        }
+        const driver = try self.unit.allocator.create(FileSourceDriver);
+        driver.* = .{
+            .allocator = self.unit.allocator,
+            .path = path,
+            .path_value = path_value,
+            .completion = completion,
+        };
+        self.installWorkDriver(driver, FileSourceDriver.advance, FileSourceDriver.destroy);
+    }
+    const FileSourceDriver = struct {
+        allocator: std.mem.Allocator,
+        path: ?[]u8,
+        path_value: ?Value,
+        completion: ?SourceCompletion,
+        io: ?std.Io = null,
+        file: ?std.Io.File = null,
+        file_reader: ?std.Io.File.Reader = null,
+        source: ?[]u8 = null,
+        offset: usize = 0,
+        phase: enum { open, size, read, transfer } = .open,
+
+        fn diagnosticPath(self: *FileSourceDriver) ?Value {
+            if (self.path_value) |item| return item;
+            return switch (self.completion.?) {
+                .use => |use| use.path,
+                .push, .call => null,
+            };
+        }
+        fn failIo(self: *FileSourceDriver, evaluator: *Machine, message: []const u8) MachineError {
+            const failure = evaluator.fail(.io, message);
+            if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
+            return failure;
+        }
+        fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!WorkProgress {
+            const self: *FileSourceDriver = @ptrCast(@alignCast(raw));
+            try evaluator.pollKernel();
+            const io = evaluator.unit.host_io.?;
+            self.io = io;
+            switch (self.phase) {
+                .open => {
+                    self.file = std.Io.Dir.cwd().openFile(io, self.path.?, .{}) catch |err| {
+                        const failure = evaluator.failFmt(
+                            .io,
+                            "cannot read `{s}`: {s}",
+                            .{ self.path.?, @errorName(err) },
+                        );
+                        if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
+                        return failure;
+                    };
+                    self.phase = .size;
+                    return .yielded;
+                },
+                .size => {
+                    const stat = self.file.?.stat(io) catch |err| {
+                        const failure = evaluator.failFmt(
+                            .io,
+                            "cannot read `{s}`: {s}",
+                            .{ self.path.?, @errorName(err) },
+                        );
+                        if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
+                        return failure;
+                    };
+                    if (stat.size > std.math.maxInt(usize))
+                        return self.failIo(evaluator, "source file is too large");
+                    self.source = try self.allocator.alloc(u8, @intCast(stat.size));
+                    self.file_reader = self.file.?.reader(io, &.{});
+                    self.phase = .read;
+                    return .yielded;
+                },
+                .read => {
+                    if (self.offset != self.source.?.len) {
+                        const end = @min(self.offset + kernel_poll_quantum, self.source.?.len);
+                        const amount = self.file_reader.?.interface.readSliceShort(
+                            self.source.?[self.offset..end],
+                        ) catch {
+                            const name = if (self.file_reader.?.err) |err| @errorName(err) else "ReadFailed";
+                            const failure = evaluator.failFmt(
+                                .io,
+                                "cannot read `{s}`: {s}",
+                                .{ self.path.?, name },
+                            );
+                            if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
+                            return failure;
+                        };
+                        if (amount == 0) return self.failIo(evaluator, "source file changed while being read");
+                        self.offset += amount;
+                        return .yielded;
+                    }
+                    self.file.?.close(io);
+                    self.file = null;
+                    self.file_reader = null;
+                    self.phase = .transfer;
+                    return .yielded;
+                },
+                .transfer => {
+                    const path = self.path.?;
+                    const source = self.source.?;
+                    const completion = self.completion.?;
+                    self.path = null;
+                    self.source = null;
+                    self.completion = null;
+                    if (self.path_value) |item| heap.releaseValue(self.allocator, item);
+                    self.path_value = null;
+                    evaluator.unit.work_driver = null;
+                    self.allocator.destroy(self);
+                    evaluator.sourceOwned(path, source, completion) catch |err| {
+                        var cleanup = completion;
+                        cleanup.deinit(evaluator.unit.allocator);
+                        evaluator.unit.allocator.free(path);
+                        evaluator.unit.allocator.free(source);
+                        return err;
+                    };
+                    return .detached;
+                },
+            }
+        }
+        fn destroy(storage_allocator: std.mem.Allocator, raw: *anyopaque) void {
+            const self: *FileSourceDriver = @ptrCast(@alignCast(raw));
+            if (self.file) |file| file.close(self.io.?);
+            if (self.source) |source| storage_allocator.free(source);
+            if (self.path) |path| storage_allocator.free(path);
+            if (self.path_value) |item| heap.releaseValue(storage_allocator, item);
+            if (self.completion) |*completion| completion.deinit(storage_allocator);
+            storage_allocator.destroy(self);
+        }
+    };
     pub fn undefinedModule(self: *Machine, name: u32) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined module `{s}`", .{intern.get(name)});
         self.unit.pending.?.addData(.name, .{ .symbol = name });
         return failure;
     }
     pub fn undefinedName(self: *Machine, name: u32) MachineError {
-        self.active_word = name;
+        self.unit.active_word = name;
         const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(name)});
         self.unit.pending.?.addData(.name, .{ .symbol = name });
         return failure;
-    }
-    pub fn resolveName(self: *Machine, name: u32) MachineError!?Resolution {
-        return resolveWord(self, name);
-    }
-    pub fn shadowTraceIdsOwned(self: *Machine, name: u32) MachineError![]u32 {
-        const work = poll_api.WorkContext.init(traversalPoller(self));
-        if (try intern.dotIndexPolling(intern.get(name), work.asPoller()) != null)
-            return self.unit.allocator.alloc(u32, 0);
-        var shadows = poll_api.ChunkStack(u32).init(self.unit.allocator);
-        defer shadows.deinit();
-        var count: usize = 0;
-        var found_winner = false;
-        var scope: ?*env.Scope = self.current.?.scope;
-        while (scope) |current_scope| : (scope = current_scope.parent) {
-            try work.step();
-            if (current_scope.environmentOrNull()) |environment| {
-                if (try environment.resolveDirect(name, work)) |loaded| {
-                    var lease = loaded;
-                    defer lease.deinit(self.unit.allocator);
-                    const trace_word = if (lease.home) |home|
-                        try qualifiedWordId(self, intern.namespaceId(home), name)
-                    else
-                        name;
-                    if (found_winner) {
-                        try self.advanceKernel(1);
-                        try shadows.push(trace_word);
-                        count = std.math.add(usize, count, 1) catch return error.OutOfMemory;
-                    } else found_winner = true;
-                }
-                if (self.unit.registry) |registry| {
-                    const uses = environment.useOrder();
-                    var use_indices = work.reverseIndices(0, uses.len);
-                    while (try use_indices.next()) |index| {
-                        var generation_lease = try registry.acquireWork(
-                            uses[index],
-                            work,
-                        ) orelse continue;
-                        defer generation_lease.deinit();
-                        var lease = try generation_lease.generation.resolve(name, true, work) orelse continue;
-                        defer lease.deinit(self.unit.allocator);
-                        const trace_word = try qualifiedWordId(
-                            self,
-                            intern.namespaceId(generation_lease.generation.name),
-                            name,
-                        );
-                        if (found_winner) {
-                            try self.advanceKernel(1);
-                            try shadows.push(trace_word);
-                            count = std.math.add(usize, count, 1) catch return error.OutOfMemory;
-                        } else found_winner = true;
-                    }
-                }
-            }
-        }
-        if (try self.unit.environment.core.resolveDirect(name, work)) |loaded| {
-            var lease = loaded;
-            defer lease.deinit(self.unit.allocator);
-            if (found_winner) {
-                try self.advanceKernel(1);
-                try shadows.push(name);
-                count = std.math.add(usize, count, 1) catch return error.OutOfMemory;
-            }
-        }
-        const result = try self.unit.allocator.alloc(u32, count);
-        errdefer self.unit.allocator.free(result);
-        var index = count;
-        while (shadows.pop()) |shadow| {
-            try self.advanceKernel(1);
-            index -= 1;
-            result[index] = shadow;
-        }
-        return result;
     }
     pub fn available(self: *const Machine) usize {
         return self.unit.stack.items.len - self.unit.stack_base;
@@ -835,17 +1874,50 @@ pub const Machine = struct {
         return self.pushOwned(item);
     }
     pub fn activeWordId(self: *const Machine) u32 {
-        return self.active_word;
+        return self.unit.active_word;
     }
     pub fn setActiveWord(self: *Machine, word: u32) void {
-        self.active_word = word;
+        self.unit.active_word = word;
     }
     pub fn setFailureSite(self: *Machine, code: *Header, index: u32) void {
         if (self.unit.pending) |*pending| pending.site = .{ .code = code, .index = index };
     }
+    pub fn setWorkDriverSite(self: *Machine, code: *Header, index: u32) void {
+        if (self.unit.work_driver) |*driver| driver.site = .{ .code = code, .index = index };
+    }
+    pub fn setWorkDriverTraceParent(self: *Machine, word: u32) void {
+        if (self.unit.work_driver) |*driver| driver.trace_parent = word;
+    }
+
+    pub fn beginTaskJoinOwned(
+        self: *Machine,
+        tasks: Value,
+        ok_id: u32,
+        err_id: u32,
+    ) MachineError!void {
+        std.debug.assert(tasks == .list);
+        std.debug.assert(self.unit.task_join == null and self.unit.park_request == null);
+        const count: usize = @intCast(tasks.list.length());
+        const results = self.unit.allocator.alloc(Value, count) catch {
+            heap.releaseValue(self.unit.allocator, tasks);
+            return error.OutOfMemory;
+        };
+        const started = task_join_core.start(@intCast(count));
+        self.unit.task_join = .{
+            .tasks = tasks,
+            .results = results,
+            .policy = started.next,
+            .ok_id = ok_id,
+            .err_id = err_id,
+        };
+        switch (started.command.next) {
+            .request => |index| requestTaskJoin(self, index, null),
+            .finish => try finishTaskJoin(self),
+        }
+    }
     pub fn commitDirectIdiomTrace(self: *Machine) u32 {
-        const parent = self.active_word;
-        if (self.current.?.ip >= self.current.?.code.length()) self.current.?.traced_word = no_word;
+        const parent = self.unit.active_word;
+        if (self.unit.current.?.ip >= self.unit.current.?.code.length()) self.unit.current.?.traced_word = no_word;
         return parent;
     }
     pub fn setFailureTraceParent(self: *Machine, word: u32) void {
@@ -859,21 +1931,23 @@ pub const Machine = struct {
     fn installPrimitiveFailure(self: *Machine, failure_value: EclErr) MachineError {
         std.debug.assert(self.unit.pending == null);
         self.unit.pending = failure_value;
-        if (self.unit.pending.?.word == null and self.active_word != no_word) {
-            self.unit.pending.?.word = self.active_word;
+        if (self.unit.pending.?.word == null and self.unit.active_word != no_word) {
+            self.unit.pending.?.word = self.unit.active_word;
         }
         return error.Ecl;
     }
-    pub fn tryIdiom(self: *Machine, request: IdiomRequest) MachineError!bool {
-        return if (self.unit.phrase_recognizer) |recognize| try recognize(self, request) else false;
+    pub fn continueWithIdiom(self: *Machine, request: IdiomRequest, fallback: IdiomFallback) MachineError!void {
+        if (self.unit.phrase_recognizer) |recognize| return recognize(self, request, fallback);
+        defer fallback.deinit(self.unit.allocator);
+        return fallback.run(self);
     }
     pub fn activeWordName(self: *const Machine) []const u8 {
-        return if (self.active_word == no_word) "evaluation" else intern.get(self.active_word);
+        return if (self.unit.active_word == no_word) "evaluation" else intern.get(self.unit.active_word);
     }
     pub fn fail(self: *Machine, kind: ErrorKind, message: []const u8) MachineError {
         std.debug.assert(self.unit.pending == null);
         self.unit.pending = EclErr.init(kind, message);
-        if (self.active_word != no_word) self.unit.pending.?.word = self.active_word;
+        if (self.unit.active_word != no_word) self.unit.pending.?.word = self.unit.active_word;
         return error.Ecl;
     }
     pub fn failFmt(
@@ -884,7 +1958,7 @@ pub const Machine = struct {
     ) MachineError {
         std.debug.assert(self.unit.pending == null);
         self.unit.pending = EclErr.initFmt(kind, format, args);
-        if (self.active_word != no_word) self.unit.pending.?.word = self.active_word;
+        if (self.unit.active_word != no_word) self.unit.pending.?.word = self.unit.active_word;
         return error.Ecl;
     }
     pub fn typeError(self: *Machine, expected: []const u8) MachineError {
@@ -949,7 +2023,7 @@ pub const Machine = struct {
     pub fn pollKernel(self: *Machine) MachineError!void {
         self.unit.polls += 1;
         if (self.unit.cancelled.load(.acquire)) {
-            return self.fail(.user, "unit cancelled");
+            return self.fail(.cancelled, "unit cancelled");
         }
     }
     /// Charges logical kernel work against one unit-wide budget. Keeping the
@@ -959,23 +2033,29 @@ pub const Machine = struct {
     /// the boundary polls before executing and is charged to the fresh
     /// interval in full.
     pub fn advanceKernel(self: *Machine, amount: usize) MachineError!void {
+        _ = try self.chargeKernel(amount);
+    }
+    fn chargeKernel(self: *Machine, amount: usize) MachineError!bool {
         std.debug.assert(amount <= kernel_poll_quantum);
-        if (amount == 0) return;
+        if (amount == 0) return false;
+        var reached_boundary = false;
         if (amount >= self.unit.kernel_fuel) {
             try self.pollKernel();
             self.unit.kernel_fuel = kernel_poll_quantum;
+            reached_boundary = true;
         }
         self.unit.kernel_fuel -= @intCast(amount);
+        return reached_boundary;
     }
     /// Consumes a quotation header and applies it inline.
     pub fn callOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
-        const scope = self.current.?.scope;
-        const home = self.current.?.home;
+        const scope = self.unit.current.?.scope;
+        const home = self.unit.current.?.home;
         const inherited_trace = self.suspendCurrent() catch {
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
         };
-        self.current = .{
+        self.unit.current = .{
             .code = quotation,
             .ip = 0,
             .scope = scope,
@@ -989,8 +2069,8 @@ pub const Machine = struct {
         quotation: *Header,
         protected: Value,
     ) error{OutOfMemory}!void {
-        const scope = self.current.?.scope;
-        const home = self.current.?.home;
+        const scope = self.unit.current.?.scope;
+        const home = self.unit.current.?.home;
         const inherited_trace = self.suspendCurrent() catch {
             heap.decRef(self.unit.allocator, quotation);
             heap.releaseValue(self.unit.allocator, protected);
@@ -1000,7 +2080,7 @@ pub const Machine = struct {
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
         };
-        self.current = .{
+        self.unit.current = .{
             .code = quotation,
             .ip = 0,
             .scope = scope,
@@ -1040,19 +2120,17 @@ pub const Machine = struct {
         const base = StackWindow.init(self.unit.stack.items.len, application.seeded) orelse unreachable;
         var child: ?*env.Scope = null;
         if (launch == .isolated) {
-            child = self.unit.allocator.create(env.Scope) catch {
+            child = env.Scope.createLazy(self.unit.allocator, application.parent_scope) catch {
                 application.deinit_fn(self.unit.allocator, application.context);
                 return error.OutOfMemory;
             };
-            child.?.* = env.Scope.lazy(self.unit.allocator, application.parent_scope);
         }
         var inherited_trace = inherited orelse no_word;
-        if (self.current != null) {
+        if (self.unit.current != null) {
             std.debug.assert(inherited == null);
             inherited_trace = self.suspendCurrent() catch {
                 if (child) |scope| {
                     scope.deinit();
-                    self.unit.allocator.destroy(scope);
                 }
                 application.deinit_fn(self.unit.allocator, application.context);
                 return error.OutOfMemory;
@@ -1075,7 +2153,7 @@ pub const Machine = struct {
         } }) catch return error.OutOfMemory;
         if (launch == .isolated) self.unit.stack_base = base.base();
         heap.incRef(application.quotation);
-        self.current = .{
+        self.unit.current = .{
             .code = application.quotation,
             .ip = 0,
             .scope = child orelse application.parent_scope,
@@ -1095,7 +2173,7 @@ pub const Machine = struct {
             heap.decRef(self.unit.allocator, quotation);
             return self.fail(.domain, "module registry is unavailable");
         };
-        const word = self.active_word;
+        const word = self.unit.active_word;
         var candidate = registry.createCandidate(name) catch {
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
@@ -1123,7 +2201,7 @@ pub const Machine = struct {
         };
         self.unit.boundary_index = index;
         self.unit.stack_base = self.unit.stack.items.len;
-        self.current = .{
+        self.unit.current = .{
             .code = quotation,
             .ip = 0,
             .scope = &generation.scope,
@@ -1134,7 +2212,7 @@ pub const Machine = struct {
     pub fn raiseOwned(self: *Machine, raised: Value) MachineError {
         std.debug.assert(self.unit.pending == null);
         self.unit.pending = EclErr.init(.user, "raised error");
-        if (self.active_word != no_word) self.unit.pending.?.word = self.active_word;
+        if (self.unit.active_word != no_word) self.unit.pending.?.word = self.unit.active_word;
         self.unit.pending.?.raised = raised;
         return error.Ecl;
     }
@@ -1142,23 +2220,20 @@ pub const Machine = struct {
         self: *Machine,
         quotation: *Header,
     ) error{OutOfMemory}!void {
-        const parent_scope = self.current.?.scope;
-        const home = self.current.?.home;
-        const word = self.active_word;
-        const child = self.unit.allocator.create(env.Scope) catch {
+        const parent_scope = self.unit.current.?.scope;
+        const home = self.unit.current.?.home;
+        const word = self.unit.active_word;
+        const child = env.Scope.createLazy(self.unit.allocator, parent_scope) catch {
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
         };
-        child.* = env.Scope.lazy(self.unit.allocator, parent_scope);
         _ = self.suspendCurrent() catch {
             child.deinit();
-            self.unit.allocator.destroy(child);
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
         };
         if (self.unit.frames.items.len >= no_boundary) {
             child.deinit();
-            self.unit.allocator.destroy(child);
             heap.decRef(self.unit.allocator, quotation);
             return error.OutOfMemory;
         }
@@ -1175,7 +2250,7 @@ pub const Machine = struct {
         };
         self.unit.boundary_index = index;
         self.unit.stack_base = self.unit.stack.items.len;
-        self.current = .{
+        self.unit.current = .{
             .code = quotation,
             .ip = 0,
             .scope = child,
@@ -1194,7 +2269,7 @@ pub const Machine = struct {
     /// inherits its named trace owner so inline control does not erase the
     /// activation that selected it.
     fn suspendCurrent(self: *Machine) error{OutOfMemory}!u32 {
-        const current = self.current.?;
+        const current = self.unit.current.?;
         const inherited_trace = if (current.ip >= current.code.length())
             current.traced_word
         else
@@ -1205,25 +2280,29 @@ pub const Machine = struct {
         } else {
             heap.decRef(self.unit.allocator, current.code);
         }
-        self.current = null;
+        self.unit.current = null;
         return inherited_trace;
     }
 };
-pub fn run(unit: *Unit, code: *Header) MachineError!void {
+pub const RunStatus = enum { completed, yielded, parked };
+
+pub fn initialize(unit: *Unit, code: *Header) void {
     std.debug.assert(unit.frames.items.len == 0);
     std.debug.assert(unit.pending == null and unit.last_error == null);
+    std.debug.assert(unit.current == null);
     heap.incRef(code);
-    var evaluator = Machine{
-        .unit = unit,
-        .current = .{
-            .code = code,
-            .ip = 0,
-            .scope = &unit.root_scope,
-            .home = null,
-            .traced_word = no_word,
-        },
+    unit.current = .{
+        .code = code,
+        .ip = 0,
+        .scope = unit.execution_scope orelse &unit.root_scope,
+        .home = null,
+        .traced_word = no_word,
     };
-    loop(&evaluator) catch |err| switch (err) {
+}
+
+pub fn runSlice(unit: *Unit) MachineError!RunStatus {
+    var evaluator = Machine{ .unit = unit };
+    return loop(&evaluator) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => {
             abort(&evaluator, true);
@@ -1231,83 +2310,358 @@ pub fn run(unit: *Unit, code: *Header) MachineError!void {
         },
     };
 }
-fn loop(self: *Machine) MachineError!void {
+
+pub fn run(unit: *Unit, code: *Header) MachineError!void {
+    initialize(unit, code);
+    while (true) switch (try runSlice(unit)) {
+        .completed => return,
+        .yielded => {},
+        .parked => unreachable,
+    };
+}
+
+fn loop(self: *Machine) MachineError!RunStatus {
     while (true) {
+        if (self.unit.park_resume != null) {
+            resumePark(self) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Ecl => {
+                    try startFailure(self);
+                    continue;
+                },
+            };
+        }
+        if (self.unit.park_request != null) return .parked;
+        if (self.unit.work_driver) |driver| {
+            const progress = driver.advance(self) catch |err| {
+                if (err == error.Ecl and self.unit.pending.?.site == null) {
+                    self.unit.pending.?.site = driver.site;
+                }
+                if (err == error.Ecl and self.unit.pending.?.trace_parent == null) {
+                    self.unit.pending.?.trace_parent = driver.trace_parent;
+                }
+                clearWorkDriver(self.unit);
+                switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Ecl => {
+                        try startFailure(self);
+                        continue;
+                    },
+                }
+            };
+            switch (progress) {
+                .yielded => return .yielded,
+                .completed => {
+                    clearWorkDriver(self.unit);
+                    continue;
+                },
+                // The driver destroyed and detached itself before invoking a
+                // continuation which may have installed its successor.
+                .detached => continue,
+                .failed => {
+                    clearWorkDriver(self.unit);
+                    return error.Ecl;
+                },
+            }
+        }
         if (self.unit.exit_status != null) {
             cleanupControl(self);
-            return;
+            return .completed;
         }
-        if (self.current == null) {
+        if (self.unit.current == null) {
             const resumed = resumeFrames(self) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Ecl => {
-                    if (try handleFailure(self)) continue;
-                    return error.Ecl;
+                    try startFailure(self);
+                    continue;
                 },
             };
-            if (!resumed) return;
+            if (!resumed) return .completed;
+            // A frame continuation may replace its native-stack tail with an
+            // owned driver. Let that driver run before dispatching the parent
+            // Eval which resumeFrames may also have restored.
+            if (self.unit.work_driver != null) continue;
+            if (self.unit.native_yield) {
+                self.unit.native_yield = false;
+                return .yielded;
+            }
         }
-        const current = &self.current.?;
+        const current = &self.unit.current.?;
         if (current.ip >= current.code.length()) {
             heap.decRef(self.unit.allocator, current.code);
-            self.current = null;
+            self.unit.current = null;
             continue;
+        }
+        if (self.unit.fuel == 0) {
+            self.unit.polls += 1;
+            self.unit.fuel = fuel_quantum;
+            if (self.unit.cancelled.load(.acquire)) {
+                self.unit.active_word = no_word;
+                self.unit.pending = EclErr.init(.cancelled, "unit cancelled");
+                try startFailure(self);
+                continue;
+            }
+            return .yielded;
         }
         poll(self) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
-                if (try handleFailure(self)) continue;
-                return error.Ecl;
+                try startFailure(self);
+                continue;
             },
         };
-        self.active_index = current.ip;
+        self.unit.active_index = current.ip;
         const form = list.atUnchecked(.{ .list = current.code }, current.ip);
         current.ip += 1;
         dispatch(self, form) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
-                if (self.unit.pending.?.site == null and self.current != null) {
+                if (self.unit.pending.?.site == null and self.unit.current != null) {
                     self.unit.pending.?.site = .{
-                        .code = self.current.?.code,
-                        .index = self.active_index,
+                        .code = self.unit.current.?.code,
+                        .index = self.unit.active_index,
                     };
                 }
-                if (try handleFailure(self)) continue;
-                return error.Ecl;
+                try startFailure(self);
+                continue;
             },
         };
     }
 }
-fn poll(self: *Machine) MachineError!void {
-    if (self.unit.fuel == 0) {
-        self.unit.polls += 1;
-        self.unit.fuel = fuel_quantum;
-        if (self.unit.cancelled.load(.acquire)) {
-            self.active_word = no_word;
-            return self.fail(.user, "unit cancelled");
-        }
+
+fn clearWorkDriver(unit: *Unit) void {
+    const driver = unit.work_driver orelse return;
+    unit.work_driver = null;
+    driver.deinit(unit.allocator);
+}
+
+fn resumePark(self: *Machine) MachineError!void {
+    const park_result = self.unit.park_resume.?;
+    self.unit.park_resume = null;
+    switch (park_result) {
+        .outcome => |outcome| if (self.unit.task_join != null)
+            try resumeTaskJoin(self, outcome)
+        else
+            try self.pushOwned(outcome),
+        .indexed => |indexed| {
+            errdefer heap.releaseValue(self.unit.allocator, indexed.outcome);
+            try self.pushOwned(.{ .int = indexed.index });
+            try self.pushOwned(indexed.outcome);
+        },
+        .timeout => {
+            var timeout = EclErr.init(.timeout, "task wait timed out");
+            defer timeout.deinit(self.unit.allocator);
+            const failure = try errorValue(self.unit.allocator, &timeout, &.{}, null);
+            try self.pushOwned(try outcomeDict(self.unit.allocator, "err", failure));
+        },
+        .cancelled => {
+            abandonTaskJoin(self);
+            return self.fail(.cancelled, "unit cancelled while awaiting a task");
+        },
+        .io => {
+            abandonTaskJoin(self);
+            return self.fail(.io, "could not start the scheduler timer thread");
+        },
+        .out_of_memory => if (self.unit.task_join != null)
+            try resumeTaskJoinOutOfMemory(self)
+        else
+            return error.OutOfMemory,
+        .scope_closed => |status| self.unit.exit_status = status,
     }
+}
+
+fn resumeTaskJoin(self: *Machine, outcome: Value) MachineError!void {
+    defer heap.releaseValue(self.unit.allocator, outcome);
+    const join = &self.unit.task_join.?;
+    const key = dict.keyAt(outcome.dict, 0);
+    const payload = dict.valueAt(outcome.dict, 0);
+    if (key.symbol == join.err_id) return advanceTaskJoin(self, .raised, payload);
+    std.debug.assert(key.symbol == join.ok_id);
+    if (payload != .list or payload.list.length() != 1)
+        return advanceTaskJoin(self, .contract, null);
+    return advanceTaskJoin(self, .success, list.atUnchecked(payload, 0));
+}
+
+fn resumeTaskJoinOutOfMemory(self: *Machine) MachineError!void {
+    return advanceTaskJoin(self, .out_of_memory, null);
+}
+
+fn advanceTaskJoin(
+    self: *Machine,
+    event: task_join_core.Event,
+    payload: ?Value,
+) MachineError!void {
+    const join = &self.unit.task_join.?;
+    const decision = task_join_core.decide(join.policy, event) catch
+        @panic("invalid task join transition");
+    join.policy = decision.next;
+    if (decision.command.store_result) |result_index| {
+        const result = payload.?;
+        heap.retainValue(result);
+        join.results[result_index] = result;
+    }
+    if (decision.command.record_failure) |failure| switch (failure) {
+        .raised => {
+            const raised = payload.?;
+            heap.retainValue(raised);
+            join.raised = raised;
+        },
+        .contract, .out_of_memory => {},
+    };
+    switch (decision.command.next) {
+        .request => |index| requestTaskJoin(self, index, decision.command.cancel_from),
+        .finish => try finishTaskJoin(self),
+    }
+}
+
+fn requestTaskJoin(self: *Machine, index: u32, cancel_from: ?u32) void {
+    const join = &self.unit.task_join.?;
+    heap.retainValue(join.tasks);
+    self.unit.park_request = .{ .join = .{
+        .tasks = join.tasks,
+        .index = index,
+        .cancel_from = cancel_from,
+    } };
+}
+
+fn finishTaskJoin(self: *Machine) MachineError!void {
+    var join = self.unit.task_join.?;
+    self.unit.task_join = null;
+    var join_owned = true;
+    defer if (join_owned) join.deinit(self.unit.allocator);
+    const summary = join.policy.complete;
+    if (summary.failure) |failure| switch (failure) {
+        .raised => {
+            const raised = join.raised.?;
+            join.raised = null;
+            return self.raiseOwned(raised);
+        },
+        .contract => |index| return self.failAtIndex(
+            .contract,
+            "par-each child must leave exactly one result",
+            index,
+        ),
+        .out_of_memory => return error.OutOfMemory,
+    };
+    std.debug.assert(summary.successes == join.results.len);
+    const state = try self.unit.allocator.create(JoinMaterializeDriver);
+    state.* = .{
+        .join = join,
+        .materializer = kernel_storage.ValueMaterializer.init(
+            self.unit.allocator,
+            join.results,
+        ),
+    };
+    join_owned = false;
+    self.installWorkDriver(
+        state,
+        JoinMaterializeDriver.advance,
+        JoinMaterializeDriver.destroy,
+    );
+}
+
+const JoinMaterializeDriver = struct {
+    join: TaskJoinState,
+    materializer: kernel_storage.ValueMaterializer,
+
+    fn advance(
+        evaluator: *Machine,
+        raw: *anyopaque,
+    ) MachineError!WorkProgress {
+        const self: *JoinMaterializeDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        return switch (try self.materializer.advance(kernel_poll_quantum)) {
+            .pending => .yielded,
+            .complete => |result| completed: {
+                errdefer heap.releaseValue(evaluator.allocator(), result);
+                try evaluator.pushOwned(result);
+                break :completed .completed;
+            },
+        };
+    }
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *JoinMaterializeDriver = @ptrCast(@alignCast(raw));
+        self.materializer.deinit();
+        self.join.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+fn abandonTaskJoin(self: *Machine) void {
+    if (self.unit.task_join) |*join| join.deinit(self.unit.allocator);
+    self.unit.task_join = null;
+}
+fn poll(self: *Machine) MachineError!void {
     self.unit.fuel -= 1;
 }
 fn dispatch(self: *Machine, form: Value) MachineError!void {
     const word = switch (form) {
         .word => |id| id,
-        .int, .float, .char, .symbol, .list, .dict => return self.pushBorrowed(form),
+        .int, .float, .char, .symbol, .list, .dict, .task => return self.pushBorrowed(form),
     };
-    self.active_word = word;
-    var resolved = (try resolveWord(self, word)) orelse {
-        const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(word)});
-        self.unit.pending.?.addData(.name, .{ .symbol = word });
-        return failure;
-    };
-    defer resolved.deinit(self.unit.allocator);
-    self.active_word = resolved.trace_word;
-    const cross_home = resolved.home != null and resolved.home != self.current.?.home;
+    self.unit.active_word = word;
+    const driver = try self.unit.allocator.create(DispatchDriver);
+    driver.* = .{ .resolution = .init(self, word) };
+    self.installWorkDriver(driver, DispatchDriver.advance, DispatchDriver.destroy);
+}
+
+const DispatchDriver = struct {
+    resolution: ResolutionCursor,
+
+    fn advance(self_machine: *Machine, raw: *anyopaque) MachineError!WorkProgress {
+        const self: *DispatchDriver = @ptrCast(@alignCast(raw));
+        try self_machine.pollKernel();
+        var budget: usize = kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (self.resolution.advance()) {
+            .pending => {},
+            .complete => |maybe_resolved| {
+                self.resolution.deinit();
+                const allocator = self_machine.unit.allocator;
+                allocator.destroy(self);
+                self_machine.unit.work_driver = null;
+                var resolved = maybe_resolved orelse {
+                    const word = self_machine.unit.active_word;
+                    const failure = self_machine.failFmt(
+                        .undefined_word,
+                        "undefined word `{s}`",
+                        .{intern.get(word)},
+                    );
+                    self_machine.unit.pending.?.addData(.name, .{ .symbol = word });
+                    return failure;
+                };
+                defer resolved.deinit(allocator);
+                try executeResolved(self_machine, &resolved);
+                return .detached;
+            },
+        };
+        return .yielded;
+    }
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *DispatchDriver = @ptrCast(@alignCast(raw));
+        self.resolution.deinit();
+        allocator.destroy(self);
+    }
+};
+
+fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
+    self.unit.active_word = resolved.trace_word;
+    const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home;
     switch (resolved.lease.binding) {
         .value => |item| try self.pushBorrowed(item),
         .word => |body| {
             const body_header = env.quotationHeader(body);
-            if (resolved.origin == .core and try self.tryIdiom(.{ .direct = body_header })) return;
+            if (resolved.origin == .core) {
+                const fallback = try self.unit.allocator.create(DirectWordFallback);
+                heap.incRef(body_header);
+                fallback.* = .{ .body = body_header, .word = resolved.trace_word };
+                return self.continueWithIdiom(.{ .direct = body_header }, .{
+                    .context = fallback,
+                    .run_fn = DirectWordFallback.run,
+                    .deinit_fn = DirectWordFallback.destroy,
+                });
+            }
             try scheduleWord(
                 self,
                 body_header,
@@ -1347,7 +2701,22 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         },
     }
 }
-pub const ResolutionOrigin = enum { direct, used, module, core };
+
+const DirectWordFallback = struct {
+    body: *Header,
+    word: u32,
+    fn run(evaluator: *Machine, raw: ?*anyopaque) MachineError!void {
+        const self: *DirectWordFallback = @ptrCast(@alignCast(raw.?));
+        return scheduleWord(evaluator, self.body, self.word, null, null);
+    }
+    fn destroy(allocator: std.mem.Allocator, raw: ?*anyopaque) void {
+        const self: *DirectWordFallback = @ptrCast(@alignCast(raw.?));
+        heap.decRef(allocator, self.body);
+        allocator.destroy(self);
+    }
+};
+
+pub const ResolutionOrigin = resolution_core.Origin;
 pub const Resolution = struct {
     lease: env.BindingLease,
     generation_lease: ?modules.GenerationLease,
@@ -1360,140 +2729,439 @@ pub const Resolution = struct {
         self.* = undefined;
     }
 };
-fn resolveWord(self: *Machine, word: u32) MachineError!?Resolution {
-    const spelling = intern.get(word);
-    const work = poll_api.WorkContext.init(traversalPoller(self));
-    if (try intern.dotIndexPolling(spelling, traversalPoller(self))) |dot| {
-        const registry = self.unit.registry orelse return null;
-        if (dot == 0 or dot + 1 == spelling.len) return null;
-        const prefix = try intern.internPolling(spelling[0..dot], traversalPoller(self));
-        const export_name = try intern.internPolling(spelling[dot + 1 ..], traversalPoller(self));
-        var generation_lease = try registry.acquireWork(
-            prefix,
-            work,
-        ) orelse return null;
-        const generation = generation_lease.generation;
-        var lease = try generation.resolve(export_name, true, work) orelse {
-            generation_lease.deinit();
-            return null;
+
+pub const ResolutionProgress = union(enum) { pending, complete: ?Resolution };
+pub const ResolutionCursor = struct {
+    const Phase = enum {
+        dot,
+        prefix,
+        export_name,
+        qualified_acquire,
+        qualified_export,
+        scope,
+        direct,
+        uses,
+        used_acquire,
+        used_export,
+        core,
+        complete,
+    };
+    allocator: std.mem.Allocator,
+    registry: ?*modules.Registry,
+    core: *env.Environment,
+    current_home: ?*modules.ModuleGeneration,
+    word: u32,
+    spelling: []const u8,
+    phase: Phase = .dot,
+    dot: intern.DotCursor,
+    dot_index: usize = 0,
+    atom_lookup: ?intern.InternLookupCursor = null,
+    prefix: u32 = 0,
+    export_name: u32 = 0,
+    scope: ?*env.Scope,
+    direct: ?env.DirectLookupCursor = null,
+    use_shape: ?env.ShapeLease = null,
+    use_ordinal: usize = 0,
+    acquisition: ?modules.Registry.AcquireCursor = null,
+    generation: ?modules.GenerationLease = null,
+    export_lookup: ?modules.ModuleGeneration.ResolveCursor = null,
+
+    pub fn init(evaluator: *Machine, word: u32) ResolutionCursor {
+        const spelling = intern.get(word);
+        return .{
+            .allocator = evaluator.unit.allocator,
+            .registry = evaluator.unit.registry,
+            .core = &evaluator.unit.environment.core,
+            .current_home = evaluator.unit.current.?.home,
+            .word = word,
+            .spelling = spelling,
+            .dot = intern.dotCursor(spelling),
+            .scope = evaluator.unit.current.?.scope,
         };
-        errdefer {
-            lease.deinit(self.unit.allocator);
-            generation_lease.deinit();
-        }
+    }
+
+    pub fn deinit(self: *ResolutionCursor) void {
+        if (self.direct) |*cursor| cursor.deinit();
+        if (self.use_shape) |*shape| shape.deinit();
+        if (self.acquisition) |*cursor| cursor.deinit();
+        if (self.export_lookup) |*cursor| cursor.deinit();
+        if (self.generation) |*lease| lease.deinit();
+        self.* = undefined;
+    }
+
+    fn directResult(self: *ResolutionCursor, lease: env.BindingLease) Resolution {
+        const home = if (lease.home != null and self.current_home != null and
+            intern.namespaceId(lease.home.?) == intern.namespaceId(self.current_home.?.name))
+            self.current_home
+        else
+            null;
+        return .{
+            .lease = lease,
+            .generation_lease = null,
+            .home = home,
+            .trace_word = if (home != null) lease.trace_word.? else self.word,
+            .origin = if (home != null) .module else .direct,
+        };
+    }
+
+    fn generationResult(
+        self: *ResolutionCursor,
+        lease: env.BindingLease,
+        origin: ResolutionOrigin,
+    ) Resolution {
+        const generation_lease = self.generation.?;
+        self.generation = null;
         return .{
             .lease = lease,
             .generation_lease = generation_lease,
-            .home = generation,
-            .trace_word = try qualifiedWordId(self, intern.namespaceId(generation.name), export_name),
-            .origin = .module,
+            .home = generation_lease.generation,
+            .trace_word = lease.trace_word.?,
+            .origin = origin,
         };
     }
-    var scope: ?*env.Scope = self.current.?.scope;
-    while (scope) |current_scope| : (scope = current_scope.parent) {
-        try work.step();
-        if (current_scope.environmentOrNull()) |environment| {
-            if (try environment.resolveDirect(word, work)) |loaded| {
-                var lease = loaded;
-                errdefer lease.deinit(self.unit.allocator);
-                const home = if (lease.home != null and self.current.?.home != null and
-                    intern.namespaceId(lease.home.?) == intern.namespaceId(self.current.?.home.?.name))
-                    self.current.?.home
-                else
-                    null;
-                return .{
-                    .lease = lease,
-                    .generation_lease = null,
-                    .home = home,
-                    .trace_word = if (home) |generation|
-                        try qualifiedWordId(self, intern.namespaceId(generation.name), word)
-                    else
-                        word,
-                    .origin = if (home != null) .module else .direct,
+
+    pub fn advance(self: *ResolutionCursor) ResolutionProgress {
+        return switch (self.phase) {
+            .dot => switch (self.dot.advance()) {
+                .pending => .pending,
+                .complete => |maybe_dot| result: {
+                    if (maybe_dot) |dot_index| {
+                        if (dot_index == 0 or dot_index + 1 == self.spelling.len or self.registry == null) {
+                            self.phase = .complete;
+                            break :result .{ .complete = null };
+                        }
+                        self.dot_index = dot_index;
+                        self.atom_lookup = intern.lookupCursor(self.spelling[0..dot_index]);
+                        self.phase = .prefix;
+                    } else self.phase = .scope;
+                    break :result .pending;
+                },
+            },
+            .prefix => switch (self.atom_lookup.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_prefix| result: {
+                    self.prefix = maybe_prefix orelse {
+                        self.phase = .complete;
+                        break :result .{ .complete = null };
+                    };
+                    self.atom_lookup = intern.lookupCursor(self.spelling[self.dot_index + 1 ..]);
+                    self.phase = .export_name;
+                    break :result .pending;
+                },
+            },
+            .export_name => switch (self.atom_lookup.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_export| result: {
+                    self.export_name = maybe_export orelse {
+                        self.phase = .complete;
+                        break :result .{ .complete = null };
+                    };
+                    self.acquisition = self.registry.?.acquireCursor(self.prefix);
+                    self.phase = .qualified_acquire;
+                    break :result .pending;
+                },
+            },
+            .qualified_acquire => switch (self.acquisition.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_generation| result: {
+                    self.acquisition.?.deinit();
+                    self.acquisition = null;
+                    self.generation = maybe_generation;
+                    const generation = if (self.generation) |lease|
+                        lease.generation
+                    else {
+                        self.phase = .complete;
+                        break :result .{ .complete = null };
+                    };
+                    self.export_lookup = generation.resolveCursor(self.export_name, true);
+                    self.phase = .qualified_export;
+                    break :result .pending;
+                },
+            },
+            .qualified_export => switch (self.export_lookup.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_lease| result: {
+                    self.export_lookup.?.deinit();
+                    self.export_lookup = null;
+                    const lease = maybe_lease orelse {
+                        self.generation.?.deinit();
+                        self.generation = null;
+                        self.phase = .complete;
+                        break :result .{ .complete = null };
+                    };
+                    self.phase = .complete;
+                    break :result .{ .complete = self.generationResult(lease, .module) };
+                },
+            },
+            .scope => result: {
+                const current = self.scope orelse {
+                    self.direct = self.core.directLookupCursor(self.word);
+                    self.phase = .core;
+                    break :result .pending;
                 };
-            }
-            if (self.unit.registry) |registry| {
-                const uses = environment.useOrder();
-                var use_indices = work.reverseIndices(0, uses.len);
-                while (try use_indices.next()) |index| {
-                    var generation_lease = try registry.acquireWork(
-                        uses[index],
-                        work,
-                    ) orelse continue;
-                    const generation = generation_lease.generation;
-                    var lease = try generation.resolve(word, true, work) orelse {
-                        generation_lease.deinit();
-                        continue;
-                    };
-                    errdefer {
-                        lease.deinit(self.unit.allocator);
-                        generation_lease.deinit();
-                    }
-                    return .{
-                        .lease = lease,
-                        .generation_lease = generation_lease,
-                        .home = generation,
-                        .trace_word = try qualifiedWordId(self, intern.namespaceId(generation.name), word),
-                        .origin = .used,
-                    };
+                self.scope = current.parent;
+                if (current.environmentOrNull()) |environment| {
+                    self.direct = environment.directLookupCursor(self.word);
+                    self.phase = .direct;
                 }
-            }
+                break :result .pending;
+            },
+            .direct => switch (self.direct.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_lease| result: {
+                    const environment = self.direct.?.shape.environment;
+                    self.direct.?.deinit();
+                    self.direct = null;
+                    if (maybe_lease) |lease| {
+                        self.phase = .complete;
+                        break :result .{ .complete = self.directResult(lease) };
+                    }
+                    if (self.registry != null) {
+                        self.use_shape = environment.acquireShape();
+                        self.use_ordinal = 0;
+                        self.phase = .uses;
+                    } else self.phase = .scope;
+                    break :result .pending;
+                },
+            },
+            .uses => result: {
+                const uses = self.use_shape.?.useOrder();
+                const index = resolution_core.usedIndex(uses.len, self.use_ordinal) orelse {
+                    self.use_shape.?.deinit();
+                    self.use_shape = null;
+                    self.phase = .scope;
+                    break :result .pending;
+                };
+                self.use_ordinal += 1;
+                self.acquisition = self.registry.?.acquireCursor(uses[index]);
+                self.phase = .used_acquire;
+                break :result .pending;
+            },
+            .used_acquire => switch (self.acquisition.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_generation| result: {
+                    self.acquisition.?.deinit();
+                    self.acquisition = null;
+                    self.generation = maybe_generation;
+                    if (self.generation) |generation| {
+                        self.export_lookup = generation.generation.resolveCursor(self.word, true);
+                        self.phase = .used_export;
+                    } else self.phase = .uses;
+                    break :result .pending;
+                },
+            },
+            .used_export => switch (self.export_lookup.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_lease| result: {
+                    self.export_lookup.?.deinit();
+                    self.export_lookup = null;
+                    if (maybe_lease) |lease| {
+                        self.phase = .complete;
+                        break :result .{ .complete = self.generationResult(lease, .used) };
+                    }
+                    self.generation.?.deinit();
+                    self.generation = null;
+                    self.phase = .uses;
+                    break :result .pending;
+                },
+            },
+            .core => switch (self.direct.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_lease| result: {
+                    self.direct.?.deinit();
+                    self.direct = null;
+                    self.phase = .complete;
+                    const lease = maybe_lease orelse break :result .{ .complete = null };
+                    break :result .{ .complete = .{
+                        .lease = lease,
+                        .generation_lease = null,
+                        .home = null,
+                        .trace_word = self.word,
+                        .origin = .core,
+                    } };
+                },
+            },
+            .complete => unreachable,
+        };
+    }
+};
+
+pub const ShadowProgress = union(enum) { pending, complete: []u32 };
+pub const ShadowCursor = struct {
+    const Phase = enum { dot, scope, direct, uses, acquire, export_name, core, materialize, complete };
+    allocator: std.mem.Allocator,
+    registry: ?*modules.Registry,
+    core: *env.Environment,
+    word: u32,
+    phase: Phase = .dot,
+    dot: intern.DotCursor,
+    scope: ?*env.Scope,
+    direct: ?env.DirectLookupCursor = null,
+    use_shape: ?env.ShapeLease = null,
+    use_ordinal: usize = 0,
+    acquisition: ?modules.Registry.AcquireCursor = null,
+    generation: ?modules.GenerationLease = null,
+    export_lookup: ?modules.ModuleGeneration.ResolveCursor = null,
+    search: resolution_core.Search = .searching,
+    found: poll_api.ChunkList(u32),
+    output: ?[]u32 = null,
+    iterator: ?poll_api.ChunkList(u32).Iterator = null,
+    output_index: usize = 0,
+
+    pub fn init(evaluator: *Machine, word: u32) ShadowCursor {
+        return .{
+            .allocator = evaluator.unit.allocator,
+            .registry = evaluator.unit.registry,
+            .core = &evaluator.unit.environment.core,
+            .word = word,
+            .dot = intern.dotCursor(intern.get(word)),
+            .scope = evaluator.unit.current.?.scope,
+            .found = .init(evaluator.unit.allocator),
+        };
+    }
+    pub fn deinit(self: *ShadowCursor) void {
+        if (self.direct) |*cursor| cursor.deinit();
+        if (self.use_shape) |*shape| shape.deinit();
+        if (self.acquisition) |*cursor| cursor.deinit();
+        if (self.export_lookup) |*cursor| cursor.deinit();
+        if (self.generation) |*lease| lease.deinit();
+        if (self.output) |output| self.allocator.free(output);
+        self.found.deinit();
+        self.* = undefined;
+    }
+    fn record(self: *ShadowCursor, trace_word: u32, origin: ResolutionOrigin) error{OutOfMemory}!void {
+        const decision = resolution_core.consider(self.search, .{ .trace_word = trace_word, .origin = origin });
+        self.search = decision.next;
+        switch (decision.command) {
+            .winner => {},
+            .shadow => |shadow| try self.found.append(shadow.trace_word),
         }
     }
-    if (try self.unit.environment.core.resolveDirect(word, work)) |lease| {
-        return .{ .lease = lease, .generation_lease = null, .home = null, .trace_word = word, .origin = .core };
+    pub fn advance(self: *ShadowCursor) error{OutOfMemory}!ShadowProgress {
+        return switch (self.phase) {
+            .dot => switch (self.dot.advance()) {
+                .pending => .pending,
+                .complete => |maybe_dot| result: {
+                    if (maybe_dot != null) {
+                        self.output = try self.allocator.alloc(u32, 0);
+                        self.phase = .complete;
+                        break :result .{ .complete = self.takeOutput() };
+                    }
+                    self.phase = .scope;
+                    break :result .pending;
+                },
+            },
+            .scope => result: {
+                const current = self.scope orelse {
+                    self.direct = self.core.directLookupCursor(self.word);
+                    self.phase = .core;
+                    break :result .pending;
+                };
+                self.scope = current.parent;
+                if (current.environmentOrNull()) |environment| {
+                    self.direct = environment.directLookupCursor(self.word);
+                    self.phase = .direct;
+                }
+                break :result .pending;
+            },
+            .direct => switch (self.direct.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_lease| result: {
+                    const environment = self.direct.?.shape.environment;
+                    self.direct.?.deinit();
+                    self.direct = null;
+                    if (maybe_lease) |loaded| {
+                        var lease = loaded;
+                        defer lease.deinit(self.allocator);
+                        try self.record(
+                            lease.trace_word orelse self.word,
+                            if (lease.home != null) .module else .direct,
+                        );
+                    }
+                    if (self.registry != null) {
+                        self.use_shape = environment.acquireShape();
+                        self.use_ordinal = 0;
+                        self.phase = .uses;
+                    } else self.phase = .scope;
+                    break :result .pending;
+                },
+            },
+            .uses => result: {
+                const uses = self.use_shape.?.useOrder();
+                const index = resolution_core.usedIndex(uses.len, self.use_ordinal) orelse {
+                    self.use_shape.?.deinit();
+                    self.use_shape = null;
+                    self.phase = .scope;
+                    break :result .pending;
+                };
+                self.use_ordinal += 1;
+                self.acquisition = self.registry.?.acquireCursor(uses[index]);
+                self.phase = .acquire;
+                break :result .pending;
+            },
+            .acquire => switch (self.acquisition.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_generation| result: {
+                    self.acquisition.?.deinit();
+                    self.acquisition = null;
+                    self.generation = maybe_generation;
+                    if (self.generation) |generation| {
+                        self.export_lookup = generation.generation.resolveCursor(self.word, true);
+                        self.phase = .export_name;
+                    } else self.phase = .uses;
+                    break :result .pending;
+                },
+            },
+            .export_name => switch (self.export_lookup.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_lease| result: {
+                    self.export_lookup.?.deinit();
+                    self.export_lookup = null;
+                    if (maybe_lease) |loaded| {
+                        var lease = loaded;
+                        defer lease.deinit(self.allocator);
+                        try self.record(lease.trace_word.?, .used);
+                    }
+                    self.generation.?.deinit();
+                    self.generation = null;
+                    self.phase = .uses;
+                    break :result .pending;
+                },
+            },
+            .core => switch (self.direct.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_lease| result: {
+                    self.direct.?.deinit();
+                    self.direct = null;
+                    if (maybe_lease) |loaded| {
+                        var lease = loaded;
+                        defer lease.deinit(self.allocator);
+                        try self.record(self.word, .core);
+                    }
+                    self.output = try self.allocator.alloc(u32, self.found.count);
+                    self.iterator = self.found.iterator();
+                    self.phase = .materialize;
+                    break :result .pending;
+                },
+            },
+            .materialize => if (self.iterator.?.next()) |name| result: {
+                self.output.?[self.output_index] = name.*;
+                self.output_index += 1;
+                break :result .pending;
+            } else result: {
+                self.phase = .complete;
+                break :result .{ .complete = self.takeOutput() };
+            },
+            .complete => unreachable,
+        };
     }
-    return null;
-}
-fn qualifiedWordId(self: *Machine, module_name: u32, word: u32) MachineError!u32 {
-    return intern.qualifiedPolling(self.unit.allocator, module_name, word, traversalPoller(self));
-}
-fn emitShadowNotices(self: *Machine, scope: *env.Scope, canonical: u32) MachineError!void {
-    const output = self.unit.diagnostics orelse return;
-    const poller = traversalPoller(self);
-    const work = poll_api.WorkContext.init(poller);
-    var generation_lease = (try self.unit.registry.?.acquireWork(canonical, work)).?;
-    defer generation_lease.deinit();
-    const generation = generation_lease.generation;
-    const names = try generation.publicNamesOwned(
-        self.unit.allocator,
-        work,
-    );
-    defer self.unit.allocator.free(names);
-    try reflection.sortNames(names, poller);
-    const direct = scope.environmentOrNull() orelse return;
-    for (names) |name| {
-        try poller.poll();
-        if (try direct.cell(name, work) == null) continue;
-        try writeDiagnostic(self, output, "session `", poller);
-        try writeDiagnostic(self, output, intern.get(name), poller);
-        try writeDiagnostic(self, output, "` shadows `", poller);
-        try writeDiagnostic(self, output, intern.get(intern.namespaceId(generation.name)), poller);
-        try writeDiagnostic(self, output, ".", poller);
-        try writeDiagnostic(self, output, intern.get(name), poller);
-        try writeDiagnostic(self, output, "`\n", poller);
+    fn takeOutput(self: *ShadowCursor) []u32 {
+        const result = self.output.?;
+        self.output = null;
+        return result;
     }
-    output.flush() catch return self.fail(.io, "standard error flush failed");
-}
-fn traversalPoller(self: *Machine) poll_api.Poller {
-    return .{ .context = @ptrCast(self), .poll_fn = pollTraversal };
-}
-fn pollTraversal(raw: *anyopaque) poll_api.Error!void {
-    const self: *Machine = @ptrCast(@alignCast(raw));
-    try self.advanceKernel(1);
-}
-fn writeDiagnostic(
-    self: *Machine,
-    output: *std.Io.Writer,
-    bytes: []const u8,
-    poller: poll_api.Poller,
-) MachineError!void {
-    reflection.writeBytes(output, bytes, poller) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.WriteFailed => return self.fail(.io, "standard error write failed"),
-    };
-}
+};
+
 fn scheduleWord(
     self: *Machine,
     body: *Header,
@@ -1501,14 +3169,14 @@ fn scheduleWord(
     resolved_home: ?*modules.ModuleGeneration,
     effect: ?env.Effect,
 ) MachineError!void {
-    const scope = if (resolved_home) |home| &home.scope else self.current.?.scope;
-    const home = resolved_home orelse self.current.?.home;
+    const scope = if (resolved_home) |home| &home.scope else self.unit.current.?.scope;
+    const home = resolved_home orelse self.unit.current.?.home;
     if (resolved_home) |generation| try self.unit.pinGeneration(generation);
     const check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
     _ = self.suspendCurrent() catch return error.OutOfMemory;
     if (check) |effect_check| try self.appendFrame(.{ .effect_check = effect_check });
     heap.incRef(body);
-    self.current = .{ .code = body, .ip = 0, .scope = scope, .home = home, .traced_word = word };
+    self.unit.current = .{ .code = body, .ip = 0, .scope = scope, .home = home, .traced_word = word };
 }
 fn prepareEffectCheck(
     self: *Machine,
@@ -1516,12 +3184,12 @@ fn prepareEffectCheck(
     word: u32,
 ) MachineError!EffectCheck {
     const declared = effect orelse {
-        self.active_word = word;
+        self.unit.active_word = word;
         return self.fail(.domain, "module word has no effect declaration");
     };
     const available: u32 = @intCast(self.available());
     if (available < declared.inputs) {
-        self.active_word = word;
+        self.unit.active_word = word;
         const failure = self.failFmt(
             .contract,
             "{s} declared {d} input{s}, but found {d}",
@@ -1542,7 +3210,7 @@ fn prepareEffectCheck(
 fn resumeFrames(self: *Machine) MachineError!bool {
     while (self.unit.frames.pop()) |frame| switch (frame) {
         .eval => |continuation| {
-            self.current = continuation;
+            self.unit.current = continuation;
             return true;
         },
         .restore => |item| try self.pushOwned(item),
@@ -1553,7 +3221,6 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                 .isolated => |isolated| blk: {
                     const window: StackWindow = @enumFromInt(@as(u32, @intCast(self.unit.stack_base)));
                     isolated.child.deinit();
-                    self.unit.allocator.destroy(isolated.child);
                     self.unit.stack_base = isolated.previous_base.base();
                     break :blk .{ .isolated, window };
                 },
@@ -1582,30 +3249,42 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                 return true;
             }
             continuation.deinit_fn(self.unit.allocator, continuation.context);
+            // Native work installed by an application continuation is the
+            // continuation's tail. Do not cross restore/boundary frames until
+            // that owned work has produced its stack result.
+            if (self.unit.work_driver != null) return true;
         },
         .use_after_load => |continuation| {
-            defer heap.releaseValue(self.unit.allocator, continuation.path);
             var loading = continuation.loading;
-            defer loading.deinit();
-            try loading.finish(poll_api.WorkContext.init(traversalPoller(self)));
-            self.active_word = try intern.intern("use");
-            if (!try self.installUse(continuation.scope, continuation.name)) {
-                const failure = self.undefinedModule(continuation.name);
-                self.unit.pending.?.addData(.path, continuation.path);
-                return failure;
-            }
+            var transferred = false;
+            defer if (!transferred) {
+                loading.deinit();
+                heap.releaseValue(self.unit.allocator, continuation.path);
+            };
+            self.unit.active_word = try intern.intern("use");
+            const driver = try self.unit.allocator.create(Machine.UseDriver);
+            errdefer self.unit.allocator.destroy(driver);
+            driver.* = try .init(self, continuation.scope, continuation.name, false);
+            driver.after_load = .{ .loading = loading, .path = continuation.path };
+            transferred = true;
+            self.installWorkDriver(driver, Machine.UseDriver.advance, Machine.UseDriver.destroy);
+            return true;
         },
         .boundary => |boundary| {
             std.debug.assert(self.unit.boundary_index == self.unit.frames.items.len);
             self.unit.boundary_index = boundary.previous_boundary;
             self.unit.stack_base = boundary.previous_base;
-            self.active_word = boundary.word;
+            self.unit.active_word = boundary.word;
             switch (boundary.mode) {
                 .attempt => {
                     defer boundary.deinit(self.unit.allocator);
                     try finishAttempt(self, boundary.stack_base);
+                    return true;
                 },
-                .module => try finishModule(self, boundary),
+                .module => {
+                    try finishModule(self, boundary);
+                    if (self.unit.work_driver != null) return true;
+                },
             }
         },
     };
@@ -1614,7 +3293,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
 fn finishEffectCheck(self: *Machine, check: EffectCheck) MachineError!void {
     const observed = self.unit.stack.items.len;
     if (observed == check.expected_depth) return;
-    self.active_word = check.word;
+    self.unit.active_word = check.word;
     const observed_relative = observed - self.unit.stack_base;
     const failure = self.failFmt(
         .contract,
@@ -1626,19 +3305,85 @@ fn finishEffectCheck(self: *Machine, check: EffectCheck) MachineError!void {
     return failure;
 }
 fn finishAttempt(self: *Machine, base: u32) MachineError!void {
-    const start: usize = base;
-    const results = try list.fromValues(self.unit.allocator, self.unit.stack.items[start..]);
-    truncateStack(self, start);
-    const outcome = try outcomeDict(self.unit.allocator, "ok", results);
-    try self.pushOwned(outcome);
+    const driver = try self.unit.allocator.create(AttemptResultDriver);
+    driver.* = .init(self.unit.allocator, base, self.unit.stack.items[base..]);
+    self.installWorkDriver(driver, AttemptResultDriver.advance, AttemptResultDriver.destroy);
 }
+const AttemptResultDriver = struct {
+    allocator: std.mem.Allocator,
+    base: usize,
+    materializer: kernel_storage.ValueMaterializer,
+    results: ?Value = null,
+    release_cursor: ?heap.ReleaseCursor = null,
+    phase: enum { materialize, release, outcome } = .materialize,
+
+    fn init(allocator: std.mem.Allocator, base: u32, values: []const Value) AttemptResultDriver {
+        return .{
+            .allocator = allocator,
+            .base = base,
+            .materializer = .init(allocator, values),
+        };
+    }
+    fn deinit(self: *AttemptResultDriver) void {
+        self.materializer.deinit();
+        if (self.release_cursor) |*cursor|
+            while (!cursor.advance(kernel_poll_quantum)) {};
+        if (self.results) |results| heap.releaseValue(self.allocator, results);
+        self.allocator.destroy(self);
+    }
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!WorkProgress {
+        const self: *AttemptResultDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        var budget: usize = kernel_poll_quantum;
+        while (budget != 0) switch (self.phase) {
+            .materialize => switch (try self.materializer.advance(budget)) {
+                .pending => return .yielded,
+                .complete => |results| {
+                    self.results = results;
+                    self.phase = .release;
+                    return .yielded;
+                },
+            },
+            .release => {
+                if (self.release_cursor) |*cursor| {
+                    const progress = cursor.advanceCounted(budget);
+                    budget -= @max(progress.consumed, 1);
+                    if (!progress.complete) return .yielded;
+                    self.release_cursor = null;
+                    continue;
+                }
+                if (evaluator.unit.stack.items.len == self.base) {
+                    self.phase = .outcome;
+                    continue;
+                }
+                self.release_cursor = .initValue(
+                    self.allocator,
+                    evaluator.unit.stack.pop().?,
+                );
+            },
+            .outcome => {
+                const results = self.results.?;
+                self.results = null;
+                const outcome = try outcomeDict(self.allocator, "ok", results);
+                errdefer heap.releaseValue(self.allocator, outcome);
+                try evaluator.pushOwned(outcome);
+                return .completed;
+            },
+        };
+        return .yielded;
+    }
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        _ = allocator;
+        const self: *AttemptResultDriver = @ptrCast(@alignCast(raw));
+        self.deinit();
+    }
+};
 fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
     var candidate = boundary.mode.module;
     defer candidate.deinit();
     const base: usize = boundary.stack_base;
     const observed = self.unit.stack.items.len - base;
     if (observed != 0) {
-        truncateStack(self, base);
         const failure = self.failFmt(
             .contract,
             "module body must leave an empty stack; observed {d} values",
@@ -1648,18 +3393,38 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
         self.unit.pending.?.addData(.observed, .{ .int = @intCast(observed) });
         return failure;
     }
-    _ = self.unit.registry.?.commit(
-        &candidate,
-        poll_api.WorkContext.init(traversalPoller(self)),
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.NameConflict => return self.fail(.domain, "module name collides with an alias"),
-        error.MissingModule => unreachable,
-        error.InvalidDefinition => return self.fail(.domain, "module names must be unqualified"),
-    };
+    const driver = try self.unit.allocator.create(ModuleCommitDriver);
+    driver.candidate = candidate.move();
+    driver.cursor = self.unit.registry.?.commitCursor(&driver.candidate);
+    self.installWorkDriver(driver, ModuleCommitDriver.advance, ModuleCommitDriver.destroy);
 }
-fn outcomeDict(
+const ModuleCommitDriver = struct {
+    candidate: modules.OwnedCandidate,
+    cursor: modules.Registry.CommitCursor,
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!WorkProgress {
+        const self: *ModuleCommitDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        var budget: usize = kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (self.cursor.advance() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Ecl => unreachable,
+            error.NameConflict => return evaluator.fail(.domain, "module name collides with an alias"),
+            error.MissingModule => unreachable,
+            error.InvalidDefinition => return evaluator.fail(.domain, "module names must be unqualified"),
+        }) {
+            .pending => {},
+            .complete => return .completed,
+        };
+        return .yielded;
+    }
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *ModuleCommitDriver = @ptrCast(@alignCast(raw));
+        self.cursor.deinit();
+        self.candidate.deinit();
+        allocator.destroy(self);
+    }
+};
+pub fn outcomeDict(
     allocator: std.mem.Allocator,
     name: []const u8,
     payload: Value,
@@ -1668,121 +3433,206 @@ fn outcomeDict(
     const key = try intern.intern(name);
     return dict.fromUniquePairs(allocator, &.{.{ .{ .symbol = key }, payload }});
 }
-fn handleFailure(self: *Machine) error{OutOfMemory}!bool {
-    const trace = try collectTraceOwned(self);
-    defer self.unit.allocator.free(trace);
-    const location = if (self.unit.pending.?.site) |site|
-        self.unit.archive.locateWork(
-            site.code,
-            site.index,
-            failureWork(self),
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            // An existing language failure remains authoritative; observing
-            // cancellation here stops provenance lookup without manufacturing
-            // a second, payload-less language failure.
-            error.Ecl => null,
-        }
-    else
-        null;
-    var pending = self.unit.pending.?;
+fn startFailure(self: *Machine) error{OutOfMemory}!void {
+    std.debug.assert(self.unit.work_driver == null and self.unit.pending != null);
+    const capacity = std.math.add(usize, self.unit.frames.items.len, 3) catch
+        return error.OutOfMemory;
+    const trace = try self.unit.allocator.alloc(u32, capacity);
+    errdefer self.unit.allocator.free(trace);
+    const driver = try self.unit.allocator.create(FailureDriver);
+    driver.* = .{
+        .allocator = self.unit.allocator,
+        .failure = self.unit.pending.?,
+        .trace = trace,
+        .frame_index = self.unit.frames.items.len,
+        .boundary_index = self.unit.boundary_index,
+    };
     self.unit.pending = null;
-    const error_value = pending.toDict(self.unit.allocator, trace, location) catch |err| {
-        pending.deinit(self.unit.allocator);
-        return err;
-    };
-    pending.deinit(self.unit.allocator);
-    const attempt_index = nearestAttempt(self);
-    if (attempt_index == no_boundary) {
-        cleanupControl(self);
-        truncateStack(self, self.unit.entry_base);
-        self.unit.stack_base = 0;
-        self.unit.boundary_index = no_boundary;
-        self.unit.last_error = error_value;
-        return false;
+    driver.appendInitial(self);
+    self.installWorkDriver(driver, FailureDriver.advance, FailureDriver.destroy);
+}
+
+const FailureDriver = struct {
+    allocator: std.mem.Allocator,
+    failure: EclErr,
+    trace: []u32,
+    trace_count: usize = 0,
+    frame_index: usize,
+    location_cursor: ?spans.SpanArchive.LocateCursor = null,
+    location: ?spans.LocatedSpan = null,
+    value_cursor: ?ErrorValueCursor = null,
+    error_value: ?Value = null,
+    boundary_index: u32,
+    attempt_index: u32 = no_boundary,
+    attempt_stack_base: usize = 0,
+    previous_base: usize = 0,
+    previous_boundary: u32 = no_boundary,
+    outcome_inserter: ?intern.InternInsertionCursor = null,
+    outcome_pair: [1]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }},
+    outcome_builder: ?kernel_storage.DictMaterializer = null,
+    phase: enum { trace, locate, value, nearest, current, frames, boundary, stack, outcome_name, outcome, finish } = .trace,
+
+    fn appendInitial(self: *FailureDriver, evaluator: *Machine) void {
+        if (self.failure.word) |word| self.appendTrace(word);
+        if (self.failure.trace_parent) |word| self.appendTrace(word);
+        if (evaluator.unit.current) |current|
+            if (current.traced_word != no_word) self.appendTrace(current.traced_word);
     }
-    const boundary = self.unit.frames.items[attempt_index].boundary;
-    releaseCurrent(self);
-    var index = self.unit.frames.items.len;
-    while (index > @as(usize, attempt_index) + 1) {
-        index -= 1;
-        self.unit.frames.items[index].deinit(self.unit.allocator);
+    fn appendTrace(self: *FailureDriver, word: u32) void {
+        self.trace[self.trace_count] = word;
+        self.trace_count += 1;
     }
-    boundary.deinit(self.unit.allocator);
-    self.unit.frames.shrinkRetainingCapacity(attempt_index);
-    truncateStack(self, boundary.stack_base);
-    self.unit.stack_base = boundary.previous_base;
-    self.unit.boundary_index = boundary.previous_boundary;
-    const outcome = try outcomeDict(self.unit.allocator, "err", error_value);
-    try self.pushOwned(outcome);
-    return true;
-}
-fn pollFailureTraversal(raw: *anyopaque) poll_api.Error!void {
-    const self: *Machine = @ptrCast(@alignCast(raw));
-    if (self.unit.kernel_fuel <= 1) {
-        self.unit.polls += 1;
-        self.unit.kernel_fuel = kernel_poll_quantum;
-        if (self.unit.cancelled.load(.acquire)) return error.Ecl;
-    } else {
-        self.unit.kernel_fuel -= 1;
+    fn deinit(self: *FailureDriver, storage_allocator: std.mem.Allocator) void {
+        if (self.value_cursor) |*cursor| cursor.deinit();
+        if (self.outcome_builder) |*builder| builder.deinit();
+        if (self.error_value) |item| heap.releaseValue(storage_allocator, item);
+        self.failure.deinit(storage_allocator);
+        storage_allocator.free(self.trace);
+        storage_allocator.destroy(self);
     }
-}
-fn failureWork(self: *Machine) poll_api.WorkContext {
-    return .init(.{ .context = @ptrCast(self), .poll_fn = pollFailureTraversal });
-}
-fn nearestAttempt(self: *const Machine) u32 {
-    var index = self.unit.boundary_index;
-    while (index != no_boundary) {
-        const boundary = self.unit.frames.items[index].boundary;
-        if (boundary.mode == .attempt) return index;
-        index = boundary.previous_boundary;
+    fn beginLocation(self: *FailureDriver, evaluator: *Machine) void {
+        if (self.failure.site) |site| {
+            self.location_cursor = evaluator.unit.archive.locateCursor(site.code, site.index);
+            self.phase = .locate;
+        } else self.beginValue();
     }
-    return no_boundary;
-}
-fn collectTraceOwned(self: *Machine) error{OutOfMemory}![]u32 {
-    var trace = poll_api.ChunkList(u32).init(self.unit.allocator);
-    defer trace.deinit();
-    collectTrace(self, &trace, failureWork(self)) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return self.unit.allocator.alloc(u32, 0),
-    };
-    return trace.toOwnedSlice(failureWork(self)) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.Ecl => self.unit.allocator.alloc(u32, 0),
-    };
-}
-fn collectTrace(
-    self: *Machine,
-    trace: *poll_api.ChunkList(u32),
-    work: poll_api.WorkContext,
-) poll_api.Error!void {
-    if (self.unit.pending.?.word) |word| try trace.append(word);
-    if (self.unit.pending.?.trace_parent) |word| try trace.append(word);
-    if (self.current) |current| {
-        if (current.traced_word != no_word) {
-            try trace.append(current.traced_word);
+    fn beginValue(self: *FailureDriver) void {
+        self.value_cursor = .init(
+            self.allocator,
+            &self.failure,
+            self.trace[0..self.trace_count],
+            self.location,
+        );
+        self.phase = .value;
+    }
+    fn beginUnwind(self: *FailureDriver, evaluator: *Machine) void {
+        self.phase = .current;
+        if (self.attempt_index == no_boundary) {
+            self.attempt_stack_base = evaluator.unit.entry_base;
+            self.previous_base = 0;
+            self.previous_boundary = no_boundary;
         }
     }
-    var index = self.unit.frames.items.len;
-    while (index > 0) {
-        try work.step();
-        index -= 1;
-        switch (self.unit.frames.items[index]) {
-            .eval => |frame| if (frame.traced_word != no_word) {
-                try trace.append(frame.traced_word);
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!WorkProgress {
+        const self: *FailureDriver = @ptrCast(@alignCast(raw));
+        var budget: usize = kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (self.phase) {
+            .trace => {
+                if (self.frame_index == 0) {
+                    self.beginLocation(evaluator);
+                    continue;
+                }
+                self.frame_index -= 1;
+                switch (evaluator.unit.frames.items[self.frame_index]) {
+                    .eval => |frame| if (frame.traced_word != no_word) self.appendTrace(frame.traced_word),
+                    .restore, .effect_check, .application, .use_after_load, .boundary => {},
+                }
             },
-            .restore, .effect_check, .application, .use_after_load, .boundary => {},
-        }
+            .locate => switch (self.location_cursor.?.advance()) {
+                .pending => {},
+                .complete => |location| {
+                    self.location = location;
+                    self.location_cursor = null;
+                    self.beginValue();
+                },
+            },
+            .value => switch (try self.value_cursor.?.advance()) {
+                .pending => {},
+                .complete => |item| {
+                    self.value_cursor.?.deinit();
+                    self.value_cursor = null;
+                    self.error_value = item;
+                    self.phase = .nearest;
+                },
+            },
+            .nearest => {
+                if (self.boundary_index == no_boundary) {
+                    self.beginUnwind(evaluator);
+                    continue;
+                }
+                const boundary = evaluator.unit.frames.items[self.boundary_index].boundary;
+                if (boundary.mode == .attempt) {
+                    self.attempt_index = self.boundary_index;
+                    self.attempt_stack_base = boundary.stack_base;
+                    self.previous_base = boundary.previous_base;
+                    self.previous_boundary = boundary.previous_boundary;
+                    self.beginUnwind(evaluator);
+                } else self.boundary_index = boundary.previous_boundary;
+            },
+            .current => {
+                releaseCurrent(evaluator);
+                self.phase = .frames;
+            },
+            .frames => {
+                const target: usize = if (self.attempt_index == no_boundary)
+                    0
+                else
+                    @as(usize, self.attempt_index) + 1;
+                if (evaluator.unit.frames.items.len != target) {
+                    var frame = evaluator.unit.frames.pop().?;
+                    frame.deinit(self.allocator);
+                } else self.phase = .boundary;
+            },
+            .boundary => {
+                if (self.attempt_index != no_boundary) {
+                    var frame = evaluator.unit.frames.pop().?;
+                    frame.deinit(self.allocator);
+                }
+                self.phase = .stack;
+            },
+            .stack => {
+                const target = @min(@as(usize, self.attempt_stack_base), evaluator.unit.stack.items.len);
+                if (evaluator.unit.stack.items.len != target) {
+                    const item = evaluator.unit.stack.pop().?;
+                    heap.releaseValue(self.allocator, item);
+                    continue;
+                }
+                evaluator.unit.stack_base = self.previous_base;
+                evaluator.unit.boundary_index = self.previous_boundary;
+                if (self.attempt_index == no_boundary) {
+                    evaluator.unit.last_error = self.error_value.?;
+                    self.error_value = null;
+                    self.phase = .finish;
+                } else {
+                    self.outcome_inserter = intern.insertionCursor("err");
+                    self.phase = .outcome_name;
+                }
+            },
+            .outcome_name => switch (try self.outcome_inserter.?.advance()) {
+                .pending => {},
+                .complete => |key| {
+                    self.outcome_pair[0] = .{ .{ .symbol = key }, self.error_value.? };
+                    self.outcome_builder = try .init(self.allocator, &self.outcome_pair, false);
+                    self.phase = .outcome;
+                },
+            },
+            .outcome => switch (try self.outcome_builder.?.advance(1)) {
+                .pending => {},
+                .duplicate_key => unreachable,
+                .complete => |outcome| {
+                    self.outcome_builder.?.deinit();
+                    self.outcome_builder = null;
+                    try evaluator.pushOwned(outcome);
+                    self.phase = .finish;
+                },
+            },
+            .finish => return if (self.attempt_index == no_boundary) .failed else .completed,
+        };
+        return .yielded;
     }
-}
+    fn destroy(storage_allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *FailureDriver = @ptrCast(@alignCast(raw));
+        self.deinit(storage_allocator);
+    }
+};
 fn truncateStack(self: *Machine, length: usize) void {
     const target = @min(length, self.unit.stack.items.len);
     for (self.unit.stack.items[target..]) |item| heap.releaseValue(self.unit.allocator, item);
     self.unit.stack.shrinkRetainingCapacity(target);
 }
 fn releaseCurrent(self: *Machine) void {
-    if (self.current) |current| heap.decRef(self.unit.allocator, current.code);
-    self.current = null;
+    if (self.unit.current) |current| heap.decRef(self.unit.allocator, current.code);
+    self.unit.current = null;
 }
 fn cleanupControl(self: *Machine) void {
     releaseCurrent(self);
@@ -1809,7 +3659,7 @@ test "machine pushes values and late-bound word bodies" {
     const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 7 }});
     defer heap.releaseValue(allocator, body);
     try environment.define(
-        try intern.namespaceName(name, .unlimited()),
+        try intern.namespaceName(name),
         .{ .word = .{ .body = env.quotation(body.list).? } },
     );
     const code = try list.fromValuesGeneric(allocator, &.{.{ .word = name }});
@@ -1834,11 +3684,11 @@ test "tail word calls reuse evaluator state" {
     const start_body = try list.fromValuesGeneric(allocator, &.{.{ .word = end }});
     defer heap.releaseValue(allocator, start_body);
     try environment.define(
-        try intern.namespaceName(end, .unlimited()),
+        try intern.namespaceName(end),
         .{ .word = .{ .body = env.quotation(end_body.list).? } },
     );
     try environment.define(
-        try intern.namespaceName(start, .unlimited()),
+        try intern.namespaceName(start),
         .{ .word = .{ .body = env.quotation(start_body.list).? } },
     );
     const code = try list.fromValuesGeneric(allocator, &.{.{ .word = start }});
@@ -1876,7 +3726,7 @@ test "kernel fuel charges the block that crosses a poll boundary" {
     const cancelled = std.atomic.Value(bool).init(false);
     var unit = Unit.init(allocator, .empty, &environment, &archive, null, .{ .int = 0 }, &cancelled);
     defer unit.deinit();
-    var evaluator = Machine{ .unit = &unit, .current = null };
+    var evaluator = Machine{ .unit = &unit };
 
     unit.kernel_fuel = 256;
     try evaluator.advanceKernel(256);
@@ -1913,7 +3763,7 @@ test "errors: machine-built user dict has the complete d.19 envelope" {
     var language_error = EclErr.init(.user, "machine user error");
     defer language_error.deinit(allocator);
     language_error.word = worker;
-    const error_value = try language_error.toDict(allocator, &.{worker}, null);
+    const error_value = try errorValue(allocator, &language_error, &.{worker}, null);
     defer heap.releaseValue(allocator, error_value);
     const rendered = try @import("print.zig").toOwnedString(allocator, error_value);
     defer allocator.free(rendered);

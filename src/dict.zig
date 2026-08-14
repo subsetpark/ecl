@@ -220,11 +220,11 @@ pub fn valueAt(header: *Header, index: usize) Value {
 fn dictHeader(dictionary: Value) error{NotADict}!*Header {
     return switch (dictionary) {
         .dict => |header| if (header.kind() == .dict) header else error.NotADict,
-        .int, .float, .char, .symbol, .word, .list => error.NotADict,
+        .int, .float, .char, .symbol, .word, .list, .task => error.NotADict,
     };
 }
 
-fn cachedHash(header: *Header, index: usize) u64 {
+pub fn hashAt(header: *Header, index: usize) u64 {
     const hashes = heap.dictStorageConst(header).payload.?.hashes.?;
     return @bitCast(heap.i64s(hashes)[index]);
 }
@@ -239,7 +239,7 @@ fn findWithAllocator(
     const storage = heap.dictStorageConst(header);
     if (count < index_threshold or storage.index == null) {
         for (0..count) |index| {
-            if (cachedHash(header, index) != key_hash) continue;
+            if (hashAt(header, index) != key_hash) continue;
             if (try equal.matchWithAllocator(allocator, keyAt(header, index), key)) return index;
         }
         return null;
@@ -251,7 +251,7 @@ fn findWithAllocator(
         const encoded = table[slot];
         if (encoded == empty_index) return null;
         const index = encoded - 1;
-        if (cachedHash(header, index) == key_hash and
+        if (hashAt(header, index) == key_hash and
             try equal.matchWithAllocator(allocator, keyAt(header, index), key)) return index;
         slot = (slot + 1) & (table.len - 1);
     }

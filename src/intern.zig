@@ -4,7 +4,6 @@
 //! external input can grow this table without bound; bucket chains never rehash.
 
 const std = @import("std");
-const poll = @import("poll.zig");
 
 const entries_per_segment = 256;
 const byte_segment_size = 64 * 1024;
@@ -21,23 +20,20 @@ pub fn namespaceId(name: NamespaceName) u32 {
     return @intFromEnum(name);
 }
 
-pub const NameError = poll.Error || error{InvalidName};
+pub const NameError = error{InvalidName};
 
-pub fn namespaceName(id: u32, work: poll.WorkContext) NameError!NamespaceName {
-    const bytes = process_table.getBytes(id) orelse return error.InvalidName;
-    if (bytes.len == 0 or isReservedBytes(bytes)) return error.InvalidName;
-    var cursor = work.cursor(u8, bytes);
-    while (try cursor.next()) |byte| if (byte == '.') return error.InvalidName;
-    return @enumFromInt(id);
+pub fn namespaceName(id: u32) NameError!NamespaceName {
+    _ = process_table.getBytes(id) orelse return error.InvalidName;
+    var cursor = NamespaceCursor.init(id);
+    while (true) switch (cursor.advance()) {
+        .pending => {},
+        .complete => |name| return name orelse error.InvalidName,
+    };
 }
 
 pub fn internNamespace(bytes: []const u8) error{ OutOfMemory, InvalidName }!NamespaceName {
     const id = try intern(bytes);
-    return namespaceName(id, .unlimited()) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.InvalidName => error.InvalidName,
-        error.Ecl => unreachable,
-    };
+    return namespaceName(id);
 }
 
 pub fn trustedNamespace(bytes: []const u8) error{OutOfMemory}!NamespaceName {
@@ -66,11 +62,13 @@ const ByteSegment = struct {
 
 const AtomicEntrySegment = std.atomic.Value(?*EntrySegment);
 const AtomicByteSegment = std.atomic.Value(?*ByteSegment);
+const AtomicBucket = std.atomic.Value(u32);
 
 pub const Table = struct {
     allocator: std.mem.Allocator,
-    mutex: std.atomic.Mutex = .unlocked,
-    buckets: [bucket_count]u32 = [_]u32{no_entry} ** bucket_count,
+    mutex: std.Io.Mutex = .init,
+    buckets: [bucket_count]AtomicBucket =
+        [_]AtomicBucket{AtomicBucket.init(no_entry)} ** bucket_count,
     count: std.atomic.Value(u32) = .init(0),
     entry_segments: [max_segments]AtomicEntrySegment =
         [_]AtomicEntrySegment{AtomicEntrySegment.init(null)} ** max_segments,
@@ -96,86 +94,11 @@ pub const Table = struct {
     }
 
     pub fn internBytes(self: *Table, bytes: []const u8) error{OutOfMemory}!u32 {
-        return self.internBytesImpl(bytes, null) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.Ecl => unreachable,
+        var cursor = self.internCursor(bytes);
+        while (true) switch (try cursor.advance()) {
+            .pending => {},
+            .complete => |id| return id,
         };
-    }
-
-    pub fn internBytesPolling(
-        self: *Table,
-        bytes: []const u8,
-        poller: poll.Poller,
-    ) poll.Error!u32 {
-        return self.internBytesImpl(bytes, poller);
-    }
-
-    fn internBytesImpl(
-        self: *Table,
-        bytes: []const u8,
-        poller: ?poll.Poller,
-    ) poll.Error!u32 {
-        const hash = if (poller) |active|
-            try hashBytesPolling(bytes, active)
-        else
-            std.hash.Wyhash.hash(0, bytes);
-        // Zig 0.16's atomic mutex is tryLock-only, so M1 spins on its
-        // effectively uncontended writer path. Before M7 enables parallel
-        // parsing, replace this with a blocking mutex to avoid burning cores.
-        while (!self.mutex.tryLock()) {
-            if (poller) |active| try active.poll();
-            std.atomic.spinLoopHint();
-        }
-        defer self.mutex.unlock();
-
-        if (try self.findBytes(bytes, hash, poller)) |id| return id;
-        if (bytes.len > std.math.maxInt(u32)) return error.OutOfMemory;
-        const id = self.count.load(.monotonic);
-        const entry_segment_index: usize = id / entries_per_segment;
-        if (entry_segment_index >= max_segments) return error.OutOfMemory;
-        const entry_segment = try self.ensureEntrySegment(entry_segment_index);
-        const reservation = try self.reserveSpace(bytes.len);
-        const destination = reservation.segment.bytes[reservation.offset..][0..bytes.len];
-        if (poller) |active|
-            try copyBytesPolling(destination, bytes, active)
-        else
-            @memcpy(destination, bytes);
-        reservation.segment.used += bytes.len;
-        const bucket = bucketIndex(hash);
-        entry_segment.entries[id % entries_per_segment] = .{
-            .hash = hash,
-            .byte_segment = @intCast(reservation.segment_index),
-            .offset = @intCast(reservation.offset),
-            .len = @intCast(bytes.len),
-            .next = self.buckets[bucket],
-        };
-        self.buckets[bucket] = id;
-        self.count.store(id + 1, .release);
-        return id;
-    }
-
-    fn findBytes(
-        self: *const Table,
-        bytes: []const u8,
-        hash: u64,
-        poller: ?poll.Poller,
-    ) poll.Error!?u32 {
-        var cursor = self.buckets[bucketIndex(hash)];
-        while (cursor != no_entry) {
-            if (poller) |active| try active.poll();
-            const segment = self.entry_segments[cursor / entries_per_segment].load(.monotonic).?;
-            const entry = segment.entries[cursor % entries_per_segment];
-            if (entry.hash == hash and entry.len == bytes.len) {
-                const stored = self.getBytes(cursor).?;
-                const equal = if (poller) |active|
-                    try equalBytesPolling(bytes, stored, active)
-                else
-                    std.mem.eql(u8, bytes, stored);
-                if (equal) return cursor;
-            }
-            cursor = entry.next;
-        }
-        return null;
     }
 
     pub fn getBytes(self: *const Table, id: u32) ?[]const u8 {
@@ -185,6 +108,137 @@ pub const Table = struct {
         const entry = segment.entries[id % entries_per_segment];
         const byte_segment = self.byte_segments[entry.byte_segment].load(.acquire).?;
         return byte_segment.bytes[entry.offset..][0..entry.len];
+    }
+
+    pub const LookupProgress = union(enum) { pending, complete: ?u32 };
+    pub const LookupCursor = struct {
+        table: *const Table,
+        bytes: []const u8,
+        hasher: std.hash.Wyhash = std.hash.Wyhash.init(0),
+        hash_index: usize = 0,
+        hash: ?u64 = null,
+        entry_id: u32 = no_entry,
+        initial_head: u32 = no_entry,
+        compare_index: usize = 0,
+        entry_loaded: bool = false,
+
+        pub fn advance(self: *LookupCursor) LookupProgress {
+            if (self.hash == null) {
+                const end = @min(self.hash_index + 256, self.bytes.len);
+                self.hasher.update(self.bytes[self.hash_index..end]);
+                self.hash_index = end;
+                if (end != self.bytes.len) return .pending;
+                const hash = self.hasher.final();
+                self.hash = hash;
+                self.entry_id = self.table.buckets[bucketIndex(hash)].load(.acquire);
+                self.initial_head = self.entry_id;
+                return .pending;
+            }
+            if (self.entry_id == no_entry) return .{ .complete = null };
+            const segment = self.table.entry_segments[self.entry_id / entries_per_segment].load(.acquire).?;
+            const entry = segment.entries[self.entry_id % entries_per_segment];
+            if (!self.entry_loaded) {
+                self.entry_loaded = true;
+                self.compare_index = 0;
+                if (entry.hash != self.hash.? or entry.len != self.bytes.len) {
+                    self.entry_id = entry.next;
+                    self.entry_loaded = false;
+                }
+                return .pending;
+            }
+            const stored = self.table.getBytes(self.entry_id).?;
+            const end = @min(self.compare_index + 256, self.bytes.len);
+            if (!std.mem.eql(u8, self.bytes[self.compare_index..end], stored[self.compare_index..end])) {
+                self.entry_id = entry.next;
+                self.entry_loaded = false;
+                return .pending;
+            }
+            self.compare_index = end;
+            if (end != self.bytes.len) return .pending;
+            return .{ .complete = self.entry_id };
+        }
+    };
+    pub fn lookupCursor(self: *const Table, bytes: []const u8) LookupCursor {
+        return .{ .table = self, .bytes = bytes };
+    }
+
+    pub const InternProgress = union(enum) { pending, complete: u32 };
+    pub const InternCursor = struct {
+        table: *Table,
+        bytes: []const u8,
+        lookup: LookupCursor,
+        reservation: ?Reservation = null,
+        copy_index: usize = 0,
+        phase: enum { lookup, reserve, copy, recheck, commit, complete } = .lookup,
+
+        pub fn advance(self: *InternCursor) error{OutOfMemory}!InternProgress {
+            return switch (self.phase) {
+                .lookup, .recheck => switch (self.lookup.advance()) {
+                    .pending => .pending,
+                    .complete => |maybe_id| result: {
+                        if (maybe_id) |id| {
+                            self.phase = .complete;
+                            break :result .{ .complete = id };
+                        }
+                        self.phase = if (self.reservation == null) .reserve else .commit;
+                        break :result .pending;
+                    },
+                },
+                .reserve => result: {
+                    if (self.bytes.len > std.math.maxInt(u32)) return error.OutOfMemory;
+                    std.Io.Threaded.mutexLock(&self.table.mutex);
+                    defer std.Io.Threaded.mutexUnlock(&self.table.mutex);
+                    const reservation = try self.table.reserveSpace(self.bytes.len);
+                    reservation.segment.used += self.bytes.len;
+                    self.reservation = reservation;
+                    self.phase = .copy;
+                    break :result .pending;
+                },
+                .copy => result: {
+                    const reservation = self.reservation.?;
+                    const destination = reservation.segment.bytes[reservation.offset..][0..self.bytes.len];
+                    const end = @min(self.copy_index + 256, self.bytes.len);
+                    @memcpy(destination[self.copy_index..end], self.bytes[self.copy_index..end]);
+                    self.copy_index = end;
+                    if (end == self.bytes.len) {
+                        self.lookup = self.table.lookupCursor(self.bytes);
+                        self.phase = .recheck;
+                    }
+                    break :result .pending;
+                },
+                .commit => result: {
+                    std.Io.Threaded.mutexLock(&self.table.mutex);
+                    defer std.Io.Threaded.mutexUnlock(&self.table.mutex);
+                    const hash = self.lookup.hash.?;
+                    const bucket = bucketIndex(hash);
+                    if (self.table.buckets[bucket].load(.acquire) != self.lookup.initial_head) {
+                        self.lookup = self.table.lookupCursor(self.bytes);
+                        self.phase = .recheck;
+                        break :result .pending;
+                    }
+                    const id = self.table.count.load(.monotonic);
+                    const segment_index: usize = id / entries_per_segment;
+                    if (segment_index >= max_segments) return error.OutOfMemory;
+                    const entry_segment = try self.table.ensureEntrySegment(segment_index);
+                    const reservation = self.reservation.?;
+                    entry_segment.entries[id % entries_per_segment] = .{
+                        .hash = hash,
+                        .byte_segment = @intCast(reservation.segment_index),
+                        .offset = @intCast(reservation.offset),
+                        .len = @intCast(self.bytes.len),
+                        .next = self.table.buckets[bucket].load(.monotonic),
+                    };
+                    self.table.buckets[bucket].store(id, .release);
+                    self.table.count.store(id + 1, .release);
+                    self.phase = .complete;
+                    break :result .{ .complete = id };
+                },
+                .complete => unreachable,
+            };
+        }
+    };
+    pub fn internCursor(self: *Table, bytes: []const u8) InternCursor {
+        return .{ .table = self, .bytes = bytes, .lookup = self.lookupCursor(bytes) };
     }
 
     fn ensureEntrySegment(
@@ -241,65 +295,101 @@ fn bucketIndex(hash: u64) usize {
     return @as(usize, @truncate(hash)) & (bucket_count - 1);
 }
 
-fn hashBytesPolling(bytes: []const u8, poller: poll.Poller) poll.Error!u64 {
-    var hasher = std.hash.Wyhash.init(0);
-    var chunks = poll.WorkContext.init(poller).chunks(bytes);
-    while (try chunks.next()) |chunk| hasher.update(chunk);
-    return hasher.final();
-}
-
-fn equalBytesPolling(left: []const u8, right: []const u8, poller: poll.Poller) poll.Error!bool {
-    for (left, right) |left_byte, right_byte| {
-        try poller.poll();
-        if (left_byte != right_byte) return false;
-    }
-    return true;
-}
-
-fn copyBytesPolling(destination: []u8, source: []const u8, poller: poll.Poller) poll.Error!void {
-    var chunks = poll.WorkContext.init(poller).chunks(source);
-    var start: usize = 0;
-    while (try chunks.next()) |chunk| : (start += chunk.len) {
-        @memcpy(destination[start..][0..chunk.len], chunk);
-    }
-}
-
 var process_table = Table.init(std.heap.smp_allocator);
 
 pub fn intern(bytes: []const u8) error{OutOfMemory}!u32 {
     return process_table.internBytes(bytes);
 }
 
-pub fn dotIndexPolling(bytes: []const u8, poller: poll.Poller) poll.Error!?usize {
-    for (bytes, 0..) |byte, index| {
-        try poller.poll();
-        if (byte == '.') return index;
-    }
-    return null;
+pub const InternLookupCursor = Table.LookupCursor;
+pub fn lookupCursor(bytes: []const u8) InternLookupCursor {
+    return process_table.lookupCursor(bytes);
 }
 
-pub fn internPolling(bytes: []const u8, poller: poll.Poller) poll.Error!u32 {
-    return process_table.internBytesPolling(bytes, poller);
+pub const InternInsertionCursor = Table.InternCursor;
+pub fn insertionCursor(bytes: []const u8) InternInsertionCursor {
+    return process_table.internCursor(bytes);
 }
 
-pub fn qualifiedPolling(
+pub const QualifiedProgress = union(enum) { pending, complete: u32 };
+pub const QualifiedCursor = struct {
     allocator: std.mem.Allocator,
-    module_name: u32,
-    word: u32,
-    poller: poll.Poller,
-) poll.Error!u32 {
-    const module_bytes = get(module_name);
-    const word_bytes = get(word);
-    const separator_end = std.math.add(usize, module_bytes.len, 1) catch return error.OutOfMemory;
-    const length = std.math.add(usize, separator_end, word_bytes.len) catch return error.OutOfMemory;
-    const bytes = try allocator.alloc(u8, length);
-    defer allocator.free(bytes);
-    try copyBytesPolling(bytes[0..module_bytes.len], module_bytes, poller);
-    try poller.poll();
-    bytes[module_bytes.len] = '.';
-    try copyBytesPolling(bytes[separator_end..], word_bytes, poller);
-    return internPolling(bytes, poller);
+    module: []const u8,
+    word: []const u8,
+    bytes: []u8,
+    copy_index: usize = 0,
+    inserter: ?InternInsertionCursor = null,
+    pub fn init(
+        allocator: std.mem.Allocator,
+        module_name: u32,
+        word: u32,
+    ) error{OutOfMemory}!QualifiedCursor {
+        const module = get(module_name);
+        const word_bytes = get(word);
+        const separator_end = std.math.add(usize, module.len, 1) catch return error.OutOfMemory;
+        const length = std.math.add(usize, separator_end, word_bytes.len) catch return error.OutOfMemory;
+        return .{
+            .allocator = allocator,
+            .module = module,
+            .word = word_bytes,
+            .bytes = try allocator.alloc(u8, length),
+        };
+    }
+    pub fn deinit(self: *QualifiedCursor) void {
+        self.allocator.free(self.bytes);
+        self.* = undefined;
+    }
+    pub fn advance(self: *QualifiedCursor) error{OutOfMemory}!QualifiedProgress {
+        if (self.inserter) |*inserter| return switch (try inserter.advance()) {
+            .pending => .pending,
+            .complete => |id| .{ .complete = id },
+        };
+        if (self.copy_index != self.bytes.len) {
+            if (self.copy_index < self.module.len)
+                self.bytes[self.copy_index] = self.module[self.copy_index]
+            else if (self.copy_index == self.module.len)
+                self.bytes[self.copy_index] = '.'
+            else
+                self.bytes[self.copy_index] = self.word[self.copy_index - self.module.len - 1];
+            self.copy_index += 1;
+            return .pending;
+        }
+        self.inserter = insertionCursor(self.bytes);
+        return .pending;
+    }
+};
+
+pub const DotProgress = union(enum) { pending, complete: ?usize };
+pub const DotCursor = struct {
+    bytes: []const u8,
+    index: usize = 0,
+    pub fn advance(self: *DotCursor) DotProgress {
+        if (self.index == self.bytes.len) return .{ .complete = null };
+        const index = self.index;
+        self.index += 1;
+        return if (self.bytes[index] == '.') .{ .complete = index } else .pending;
+    }
+};
+pub fn dotCursor(bytes: []const u8) DotCursor {
+    return .{ .bytes = bytes };
 }
+
+pub const NamespaceProgress = union(enum) { pending, complete: ?NamespaceName };
+pub const NamespaceCursor = struct {
+    id: u32,
+    bytes: []const u8,
+    index: usize = 0,
+    pub fn init(id: u32) NamespaceCursor {
+        return .{ .id = id, .bytes = get(id) };
+    }
+    pub fn advance(self: *NamespaceCursor) NamespaceProgress {
+        if (self.bytes.len == 0 or isReservedBytes(self.bytes)) return .{ .complete = null };
+        if (self.index == self.bytes.len) return .{ .complete = @enumFromInt(self.id) };
+        const byte = self.bytes[self.index];
+        self.index += 1;
+        return if (byte == '.') .{ .complete = null } else .pending;
+    }
+};
 
 pub fn get(id: u32) []const u8 {
     return process_table.getBytes(id) orelse unreachable;
@@ -332,19 +422,7 @@ test "interning round-trips and is idempotent" {
     try std.testing.expectEqualStrings("array", table.getBytes(other).?);
 }
 
-test "polling interning stops inside hash equality and publication copy" {
-    const PollStop = struct {
-        calls: usize = 0,
-        fail_at: usize,
-        fn tick(raw: *anyopaque) poll.Error!void {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.calls += 1;
-            if (self.calls == self.fail_at) return error.Ecl;
-        }
-        fn poller(self: *@This()) poll.Poller {
-            return .{ .context = self, .poll_fn = tick };
-        }
-    };
+test "intern cursors yield through hashing, copying, and concurrent publication" {
     const allocator = std.testing.allocator;
     const bytes = try allocator.alloc(u8, 70_000);
     defer allocator.free(bytes);
@@ -352,30 +430,29 @@ test "polling interning stops inside hash equality and publication copy" {
     var table = Table.init(allocator);
     defer table.deinit();
 
-    var hash_stop = PollStop{ .fail_at = 1024 };
-    try std.testing.expectError(error.Ecl, table.internBytesPolling(bytes, hash_stop.poller()));
-    try std.testing.expectEqual(@as(?[]const u8, null), table.getBytes(0));
-
-    var copy_stop = PollStop{ .fail_at = bytes.len + 128 };
-    try std.testing.expectError(error.Ecl, table.internBytesPolling(bytes, copy_stop.poller()));
-    try std.testing.expectEqual(@as(?[]const u8, null), table.getBytes(0));
-
-    const id = try table.internBytes(bytes);
-    try std.testing.expectEqual(@as(u32, 0), id);
-    try std.testing.expectEqualSlices(u8, bytes, table.getBytes(id).?);
-    try std.testing.expectEqual(id, try table.internBytes(bytes));
-
-    var complete = PollStop{ .fail_at = std.math.maxInt(usize) };
-    try std.testing.expectEqual(id, try table.internBytesPolling(bytes, complete.poller()));
-    try std.testing.expect(complete.calls > bytes.len * 2);
-
-    var equality_stop = PollStop{ .fail_at = bytes.len + 128 };
-    try std.testing.expectError(error.Ecl, table.internBytesPolling(bytes, equality_stop.poller()));
-    try std.testing.expectEqualSlices(u8, bytes, table.getBytes(id).?);
-    try std.testing.expectEqual(id, try table.internBytes(bytes));
+    var first = table.internCursor(bytes);
+    var second = table.internCursor(bytes);
+    var first_id: ?u32 = null;
+    var second_id: ?u32 = null;
+    var transitions: usize = 0;
+    while (first_id == null or second_id == null) {
+        if (first_id == null) switch (try first.advance()) {
+            .pending => {},
+            .complete => |id| first_id = id,
+        };
+        if (second_id == null) switch (try second.advance()) {
+            .pending => {},
+            .complete => |id| second_id = id,
+        };
+        transitions += 1;
+    }
+    try std.testing.expect(transitions > bytes.len / 256);
+    try std.testing.expectEqual(first_id.?, second_id.?);
+    try std.testing.expectEqualSlices(u8, bytes, table.getBytes(first_id.?).?);
+    try std.testing.expectEqual(first_id.?, try table.internBytes(bytes));
 
     const next = try table.internBytes("after-cancellation");
-    try std.testing.expectEqual(id + 1, next);
+    try std.testing.expectEqual(first_id.? + 1, next);
     try std.testing.expectEqualStrings("after-cancellation", table.getBytes(next).?);
     try std.testing.expectEqual(next, try table.internBytes("after-cancellation"));
 }

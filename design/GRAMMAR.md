@@ -40,6 +40,10 @@ non-whitespace, non-delimiter, non-reserved characters, classified
    banned inside symbols.
 4. **Word** — anything else: a symbol, evaluated by lookup.
 
+The exact decimal form `<task:N>` (ASCII digits, no sign) is reserved as an
+unparseable runtime display marker wherever an atom may occur. The same bytes
+inside a string literal are ordinary character data.
+
 **Symbols**: one or more segments joined by `.` — the dot is the module
 qualification separator and nothing else (decision 18: `stats.mean`;
 quotable: `'stats.mean`). Leading, trailing, or doubled dots are parse

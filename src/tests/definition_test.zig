@@ -117,7 +117,7 @@ test "redefinition and set clear metadata while old leases remain valid" {
     defer runtime.deinit();
     try expectOk(&runtime, "(1) (-- n : \"Old metadata.\") 'lease-target def");
     const id = try intern.intern("lease-target");
-    var old = (try runtime.environment.session.resolveDirect(id, .unlimited())).?;
+    var old = (runtime.environment.session.resolveDirect(id)).?;
     defer old.deinit(runtime.allocator);
     try std.testing.expect(old.effect != null and old.doc != null);
     const old_body = old.binding.word;
@@ -125,7 +125,7 @@ test "redefinition and set clear metadata while old leases remain valid" {
     const old_doc = old.doc.?;
 
     try expectOk(&runtime, "(2) 'lease-target def");
-    var current = (try runtime.environment.session.resolveDirect(id, .unlimited())).?;
+    var current = (runtime.environment.session.resolveDirect(id)).?;
     defer current.deinit(runtime.allocator);
     try std.testing.expect(current.effect == null and current.doc == null);
     try std.testing.expectEqual(old_body, old.binding.word);
@@ -135,7 +135,7 @@ test "redefinition and set clear metadata while old leases remain valid" {
 
     try expectOk(&runtime, "(3) (-- n : \"Temporary.\") 'set-target def 9 'set-target set");
     const set_id = try intern.intern("set-target");
-    var replaced = (try runtime.environment.session.resolveDirect(set_id, .unlimited())).?;
+    var replaced = (runtime.environment.session.resolveDirect(set_id)).?;
     defer replaced.deinit(runtime.allocator);
     try std.testing.expect(replaced.binding == .value);
     try std.testing.expect(replaced.effect == null and replaced.doc == null);
@@ -187,11 +187,11 @@ test "reserved namespace names reject every binding surface but remain readable"
 
     try std.testing.expectError(
         error.InvalidName,
-        intern.namespaceName(try intern.intern("--"), .unlimited()),
+        intern.namespaceName(try intern.intern("--")),
     );
     try std.testing.expectError(
         error.InvalidName,
-        intern.namespaceName(try intern.intern(":"), .unlimited()),
+        intern.namespaceName(try intern.intern(":")),
     );
 }
 
@@ -212,9 +212,8 @@ test "long annotation traversal and reflection observe cancellation" {
     runtime.cancelled.store(true, .release);
     try expectErrorContains(&runtime, "'cancelled-definition def", "unit cancelled");
     try std.testing.expect(runtime.last_polls >= 1);
-    try std.testing.expect(try runtime.environment.session.resolveDirect(
+    try std.testing.expect(runtime.environment.session.resolveDirect(
         try intern.intern("cancelled-definition"),
-        .unlimited(),
     ) == null);
 
     var doc_runtime = try session.Session.init(allocator, &.{});
@@ -234,9 +233,8 @@ test "long annotation traversal and reflection observe cancellation" {
     doc_runtime.cancelled.store(true, .release);
     try expectErrorContains(&doc_runtime, "'cancelled-doc def", "unit cancelled");
     try std.testing.expect(doc_runtime.last_polls >= 1);
-    try std.testing.expect(try doc_runtime.environment.session.resolveDirect(
+    try std.testing.expect(doc_runtime.environment.session.resolveDirect(
         try intern.intern("cancelled-doc"),
-        .unlimited(),
     ) == null);
 
     var output_buffer: [256]u8 = undefined;
@@ -252,7 +250,7 @@ test "long annotation traversal and reflection observe cancellation" {
     defer heap.releaseValue(allocator, long_doc);
     const long_id = try intern.intern("long-doc");
     try reflection_runtime.environment.define(
-        try intern.namespaceName(long_id, .unlimited()),
+        try intern.namespaceName(long_id),
         .{ .word = .{
             .body = env.quotation(long_body.list).?,
             .doc = env.documentation(long_doc.list).?,
@@ -273,5 +271,5 @@ test "long annotation traversal and reflection observe cancellation" {
     name_runtime.cancelled.store(true, .release);
     try expectErrorContains(&name_runtime, "def", "unit cancelled");
     try std.testing.expect(name_runtime.last_polls >= 1);
-    try std.testing.expect(try name_runtime.environment.session.resolveDirect(long_name, .unlimited()) == null);
+    try std.testing.expect(name_runtime.environment.session.resolveDirect(long_name) == null);
 }

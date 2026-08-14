@@ -168,5 +168,5 @@ test "numeric: short kernel loops share the unit poll budget" {
 }
 
 test "numeric test module references the frozen value tags" {
-    try std.testing.expectEqual(@as(usize, 9), @typeInfo(value.HeapKind).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 10), @typeInfo(value.HeapKind).@"enum".fields.len);
 }

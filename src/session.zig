@@ -12,14 +12,20 @@ const prims = @import("prims.zig");
 const prelude = @import("prelude.zig");
 const idioms = @import("idioms.zig");
 const printer = @import("print.zig");
-const poll = @import("poll.zig");
 const intern = @import("intern.zig");
+const scheduler_api = @import("scheduler.zig");
+const console_api = @import("console.zig");
+const session_options = @import("session_options");
 pub const Value = value.Value;
 pub const UnitOutcome = union(enum) {
     ok,
     incomplete: reader.Incomplete,
     err: Value,
 };
+pub const Config = struct {
+    worker_count: usize = default_worker_count,
+};
+pub const default_worker_count: usize = session_options.default_worker_count;
 pub const Session = struct {
     allocator: std.mem.Allocator,
     environment: env.Env,
@@ -31,6 +37,10 @@ pub const Session = struct {
     host_io: ?std.Io,
     ecl_path: ?[]u8,
     arguments: Value,
+    console: console_api.Console,
+    scheduler: scheduler_api.Scheduler,
+    root_tasks: scheduler_api.TaskScope,
+    root_scope: ?env.Scope = null,
     cancelled: std.atomic.Value(bool) = .init(false),
     requested_exit: ?u8 = null,
     last_max_frames: usize = 0,
@@ -41,7 +51,14 @@ pub const Session = struct {
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, null, null, null, null);
+        return initFull(allocator, arguments, null, null, null, null, .{});
+    }
+    pub fn initWithConfig(
+        allocator: std.mem.Allocator,
+        arguments: []const []const u8,
+        config: Config,
+    ) error{OutOfMemory}!Session {
+        return initFull(allocator, arguments, null, null, null, null, config);
     }
     /// The output writer must outlive the session.
     pub fn initWithOutput(
@@ -49,7 +66,7 @@ pub const Session = struct {
         arguments: []const []const u8,
         output: *std.Io.Writer,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, output, null, null, null);
+        return initFull(allocator, arguments, output, null, null, null, .{});
     }
     pub fn initWithHost(
         allocator: std.mem.Allocator,
@@ -59,7 +76,18 @@ pub const Session = struct {
         diagnostics: *std.Io.Writer,
         ecl_path: ?[]const u8,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, output, diagnostics, io, ecl_path);
+        return initFull(allocator, arguments, output, diagnostics, io, ecl_path, .{});
+    }
+    pub fn initWithHostConfig(
+        allocator: std.mem.Allocator,
+        arguments: []const []const u8,
+        io: std.Io,
+        output: *std.Io.Writer,
+        diagnostics: *std.Io.Writer,
+        ecl_path: ?[]const u8,
+        config: Config,
+    ) error{OutOfMemory}!Session {
+        return initFull(allocator, arguments, output, diagnostics, io, ecl_path, config);
     }
     fn initFull(
         allocator: std.mem.Allocator,
@@ -68,7 +96,9 @@ pub const Session = struct {
         diagnostics: ?*std.Io.Writer,
         host_io: ?std.Io,
         ecl_path: ?[]const u8,
+        config: Config,
     ) error{OutOfMemory}!Session {
+        if (config.worker_count == 0) return error.OutOfMemory;
         var environment = env.Env.init(allocator);
         errdefer environment.deinit();
         var building = environment.beginCoreBuild();
@@ -85,6 +115,7 @@ pub const Session = struct {
         const owned_ecl_path = if (ecl_path) |path| try allocator.dupe(u8, path) else null;
         errdefer if (owned_ecl_path) |path| allocator.free(path);
         const argv = try argumentsValue(allocator, arguments);
+        var scheduler = scheduler_api.Scheduler.init(allocator, .{ .worker_count = config.worker_count });
         return .{
             .allocator = allocator,
             .environment = environment,
@@ -95,9 +126,15 @@ pub const Session = struct {
             .host_io = host_io,
             .ecl_path = owned_ecl_path,
             .arguments = argv,
+            .console = console_api.Console.init(output, diagnostics),
+            .scheduler = scheduler,
+            .root_tasks = scheduler_api.TaskScope.init(&scheduler),
         };
     }
     pub fn deinit(self: *Session) void {
+        self.root_tasks.scheduler = &self.scheduler;
+        self.scheduler.deinit(&self.root_tasks);
+        if (self.root_scope) |*root_scope| root_scope.deinit();
         for (self.stack.items) |item| heap.releaseValue(self.allocator, item);
         self.stack.deinit(self.allocator);
         heap.releaseValue(self.allocator, self.arguments);
@@ -112,6 +149,9 @@ pub const Session = struct {
         source_name: []const u8,
         source: []const u8,
     ) error{OutOfMemory}!UnitOutcome {
+        self.root_tasks.scheduler = &self.scheduler;
+        if (self.root_scope == null)
+            self.root_scope = self.environment.sessionRoot(self.allocator);
         var diag: reader.Diag = .{};
         const read_result = reader.read(self.allocator, source_name, source, &diag) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -122,7 +162,7 @@ pub const Session = struct {
                     .source_name = source_name,
                     .span = diag.span,
                 };
-                return .{ .err = try parse_error.toDict(self.allocator, &.{}, location) };
+                return .{ .err = try machine.errorValue(self.allocator, &parse_error, &.{}, location) };
             },
         };
         switch (read_result) {
@@ -142,10 +182,7 @@ pub const Session = struct {
         var root_owned = true;
         defer if (root_owned) heap.releaseValue(self.allocator, root);
         const root_header = root.list;
-        self.archive.absorb(parsed, root, poll.WorkContext.unlimited()) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Ecl => unreachable,
-        };
+        try self.archive.absorb(parsed, root);
         root_owned = false;
         const checkpoint = try self.allocator.dupe(Value, self.stack.items);
         defer self.allocator.free(checkpoint);
@@ -167,6 +204,11 @@ pub const Session = struct {
         unit.ecl_path = self.ecl_path;
         unit.idiom_mode = self.idiom_mode;
         unit.phrase_recognizer = idioms.tryApply;
+        unit.console = &self.console;
+        unit.scheduler = &self.scheduler;
+        unit.task_scope = &self.root_tasks;
+        unit.is_root_unit = true;
+        unit.execution_scope = if (self.root_scope) |*root_scope| root_scope else unreachable;
         self.stack = .empty;
         defer {
             self.stack = unit.takeStack();
@@ -176,7 +218,7 @@ pub const Session = struct {
             self.last_idiom_hits = unit.idiom_hits;
             unit.deinit();
         }
-        machine.run(&unit, root_header) catch |err| switch (err) {
+        self.scheduler.runRoot(&unit, root_header) catch |err| switch (err) {
             error.OutOfMemory => {
                 restoreCheckpoint(&unit, checkpoint);
                 checkpoint_owned = false;
@@ -200,12 +242,47 @@ pub const Session = struct {
         }
         return allocating.toOwnedSlice();
     }
+    pub fn writeOutput(self: *Session, bytes: []const u8) error{WriteFailed}!void {
+        var lease = self.console.lockOutput() orelse return error.WriteFailed;
+        defer lease.deinit();
+        lease.writer.writeAll(bytes) catch return error.WriteFailed;
+        lease.writer.flush() catch return error.WriteFailed;
+    }
+    pub fn writeOutputLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
+        var lease = self.console.lockOutput() orelse return error.WriteFailed;
+        defer lease.deinit();
+        lease.writer.writeAll(bytes) catch return error.WriteFailed;
+        lease.writer.writeByte('\n') catch return error.WriteFailed;
+        lease.writer.flush() catch return error.WriteFailed;
+    }
+    pub fn writeDiagnostics(self: *Session, bytes: []const u8) error{WriteFailed}!void {
+        var lease = self.console.lockDiagnostics() orelse return error.WriteFailed;
+        defer lease.deinit();
+        lease.writer.writeAll(bytes) catch return error.WriteFailed;
+        lease.writer.flush() catch return error.WriteFailed;
+    }
+    pub fn writeDiagnosticsLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
+        var lease = self.console.lockDiagnostics() orelse return error.WriteFailed;
+        defer lease.deinit();
+        lease.writer.writeAll(bytes) catch return error.WriteFailed;
+        lease.writer.writeByte('\n') catch return error.WriteFailed;
+        lease.writer.flush() catch return error.WriteFailed;
+    }
     pub fn registerNativeModule(
         self: *Session,
         name: intern.NamespaceName,
         definitions: []const modules.NativeDefinition,
     ) modules.RegistryError!u64 {
-        return self.registry.registerNative(name, definitions, .unlimited());
+        return self.registry.registerNative(name, definitions);
+    }
+    pub fn schedulerWorkerThreadCount(self: *const Session) usize {
+        return self.scheduler.workerThreadCount();
+    }
+    pub fn schedulerTimerThreadCount(self: *const Session) usize {
+        return self.scheduler.timerThreadCount();
+    }
+    pub fn schedulerTimerEntryCount(self: *Session) usize {
+        return self.scheduler.timerEntryCount();
     }
 };
 fn restoreCheckpoint(unit: *machine.Unit, checkpoint: []const Value) void {

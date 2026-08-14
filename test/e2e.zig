@@ -2,11 +2,22 @@ const std = @import("std");
 const build_options = @import("build_options");
 const cli = @import("cli_test_support.zig");
 
+test {
+    _ = @import("scheduler_shell_property.zig");
+}
+
 const allocator = std.testing.allocator;
 const io = std.testing.io;
 
 fn run(arguments: []const []const u8) !cli.Result {
     return cli.run(arguments);
+}
+
+fn runWithWorkers(arguments: []const []const u8, workers: []const u8) !cli.Result {
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_WORKERS", workers);
+    return cli.runOptions(.{ .argv = arguments, .environ_map = &environment });
 }
 
 fn absoluteExe() ![:0]u8 {
@@ -43,6 +54,45 @@ test "soul test executes the installed artifact" {
     var result = try run(&.{ build_options.ecl_exe, "3 4 +" });
     defer result.deinit();
     try result.expect(.{ .exit_code = 0, .stdout = "7\n", .stderr = "" });
+}
+
+test "e2e: worker configuration rejects every non-positive decimal form" {
+    const invalid = [_][]const u8{ "", "0", "+1", "-1", "1x", "999999999999999999999999999999999999" };
+    for (invalid) |workers| {
+        var result = try runWithWorkers(&.{ build_options.ecl_exe, "3 4 +" }, workers);
+        defer result.deinit();
+        try result.expect(.{
+            .exit_code = 2,
+            .stdout = "",
+            .stderr = "ecl: ECL_WORKERS must be a positive base-10 integer\n",
+        });
+    }
+}
+
+test "e2e: cancellation timeout and par-each agree at one and eight workers" {
+    for ([_][]const u8{ "1", "8" }) |workers| {
+        var cancel_timeout = try runWithWorkers(
+            &.{ build_options.ecl_exe, "test/acceptance/cancel-timeout.ecl" },
+            workers,
+        );
+        defer cancel_timeout.deinit();
+        try cancel_timeout.expect(.{
+            .exit_code = 0,
+            .stdout = "'cancelled\n'timeout\n",
+            .stderr = "",
+        });
+
+        var par_each = try runWithWorkers(
+            &.{ build_options.ecl_exe, "test/acceptance/par-each.ecl" },
+            workers,
+        );
+        defer par_each.deinit();
+        try par_each.expect(.{
+            .exit_code = 0,
+            .stdout = "[1 4 9]\n'domain\n",
+            .stderr = "",
+        });
+    }
 }
 
 test "runtime errors are dicts on stderr" {

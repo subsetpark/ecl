@@ -20,8 +20,11 @@ Decision 21's doctrine becomes two enforced rules:
    dispatch technique is worth 1–5% even in bytecode-bound languages,
    and ecl is kernel-bound by design.)
 2. **Zig line budget (recalibrated 2026-08-14 for structural type boundaries).**
-   Every classified production Zig file, including kernels and build/source-audit
-   tooling, is counted. Tests and all target-language ECL source are excluded:
+   Only shipped business-logic Zig is counted, including kernels, the CLI, and
+   the formatter. Tests (including inline `test` declarations), fixtures,
+   build/source-audit verification tooling, and all target-language ECL source
+   are excluded from every ceiling. Excluded Zig remains exactly classified and
+   is reported separately by the audit:
 
    | component | budget | measured |
    |---|---|---|
@@ -34,15 +37,15 @@ Decision 21's doctrine becomes two enforced rules:
    | definition annotations and doc normalization | 1,000 | 602 |
    | CLI and source formatter | 1,900 | 1,374 |
    | kernels and idioms | 5,500 | 4,069 |
-   | source-audit tooling | 1,400 | 540 |
-   | **production Zig total** | **22,000** | **15,555** |
+   | **business-logic Zig total** | **22,000** | **15,015** |
 
    These ceilings were raised specifically so nominal IDs, opaque heap
    capabilities, validated publication types, tagged application/scope modes,
-   typestate, mandatory work cursors, and AST-aware enforcement can remain
+   typestate, and mandatory work cursors can remain
    explicit. A limit must not incentivize weakening a type boundary. The audit
    recursively enumerates `src/**/*.zig` and requires every file to belong to exactly one
-   production component or test/tool input; adding an unclassified file fails.
+   business-logic component or uncapped verification input; adding an
+   unclassified file fails.
    `src/prelude.ecl` and other ECL code are intentionally not line-counted.
    Runtime sources remain directly under `src/`; test suites and helpers are
    grouped in `src/tests/`, while substantive build-only checks live in
@@ -127,16 +130,16 @@ generation (permanently, per decision 21).
 
 ## Bounded work
 
-- **User-sized traversal carries a `WorkContext`.** Cancellable entry points
-  create it from the unit's structural poller; bootstrap, cleanup, and other
-  deliberately non-cancellable callers use the explicit no-op context. A
-  context does not own a fresh counter: every cursor made from it charges the
-  same unit-wide kernel budget, including repeated normalization passes.
-- **Iteration and bulk access are coupled to charging.** Index and slice
-  cursors charge before returning each logical item. Byte chunks charge every
-  byte before exposing at most 256 bytes to hashing, copying, or output, so a
-  standard-library bulk operation never hides unbounded work behind one poll.
-  The old pre-charge-whole-traversal operation does not exist.
+- **User-sized traversal is an explicit cursor.** There is one cursor-based
+  implementation of each algorithm. Scheduler-attached shells own that state
+  in a `WorkDriver`, advance at most one accounted quantum, and return the Unit
+  to the ready queue with the exact next position and partial result. Blocking
+  bootstrap/tool shells may drive the same cursor repeatedly; there is no
+  cancellation-only, unlimited, or second synchronous implementation.
+- **Iteration and bulk access are coupled to cursor progress.** Index, slice,
+  byte, release, and materialization cursors expose bounded chunks and report
+  suspension before another quantum. Standard-library bulk operations cannot
+  hide unbounded work behind one logical transition.
 - **Construction has two approved shapes.** A known-size result is allocated
   exactly once and initialized through a work cursor. An unknown-size result
   uses linked fixed chunks, then materializes exactly once through a work
@@ -154,10 +157,13 @@ generation (permanently, per decision 21).
   function spans, comments and string literals cannot evade or spuriously trip
   a rule. Behavioral tests separately prove cancellation through public paths.
 
-Work cursors keep their position explicitly. M7 can therefore lift a long
-cursor into a resumable machine work frame without changing traversal
-semantics; the current milestone requires cancellation bounds, not scheduler
-yielding between quanta.
+Work cursors keep position explicitly and every scheduler-reached traversal
+returns at the unit-wide kernel budget. Cancellation is therefore observed no
+later than the existing 65,536-element safe-point interval; evaluator fuel
+returns movable units to the scheduler between dispatch slices. At the same
+boundary a long pure kernel lets the pool execute one other ready slice, which
+provides one-worker progress without yielding from inside console or
+publication critical sections.
 
 ## Typed publication and control state
 
@@ -170,11 +176,11 @@ yielding between quanta.
   destroys it. Attempt and module boundaries are distinct tagged-union states,
   so candidate ownership no longer depends on nullable pointers or side-band
   booleans.
-- Auto-loading likewise owns a consumable `LoadingLease`. Cancellable removal
-  consumes it only after success; unwinding retains the capability and performs
-  non-cancellable cleanup. Environment and module-resolution probes require a
-  `WorkContext` in their public signatures, including shadow and visibility
-  checks, so runtime lookup cannot silently select an unlimited traversal.
+- Auto-loading likewise owns a consumable `LoadingLease`. Removal consumes it
+  only after success; unwinding retains the capability until the cursor-owned
+  cleanup phase. Environment and module resolution expose explicit cursors,
+  including shadow and visibility checks, so runtime lookup cannot silently
+  select another traversal implementation.
 - Public native callbacks return `PrimitiveOutcome`, which atomically carries
   either success or the complete language-failure payload. Trusted builtins use
   a separate callback variant, so public registration cannot return a detached
@@ -432,6 +438,17 @@ out). Kernels never own threads.
 
 ## Scheduler
 
+- **Functional core, imperative shell:** `scheduler_core.zig` is an
+  allocation-free transition module for unit, wait, registration-ownership,
+  and scope decisions. The
+  threaded shell owns locks, queues, task payloads, clocks, and handlers, and
+  executes only commands returned by that core. Generated Minish traces use
+  the same transitions and shrink failing event programs while checking
+  exactly-once publication/wake, queue consistency, structured child counts,
+  safety, and cancellation-drain liveness. A second generated property drives
+  the installed CLI with shrinking scheduler scenarios and a process deadline;
+  it covers the imperative registrations and handlers that the pure model
+  deliberately cannot observe.
 - **Green units on a fixed pool** (default = cores; 1-worker degenerate
   config supported and tested). v1: one mutex-protected global run
   queue — the invariant to protect is "unit is a movable object," not
@@ -440,13 +457,31 @@ out). Kernels never own threads.
 - **Fuel/reduction safe points** (BEAM model): a per-unit counter
   decremented per dispatch step and per kernel chunk (~64K elements —
   kernels are safe-point deserts otherwise, d.23); at zero, check the
-  atomic cancel flag, maybe yield, refill. No signals, ever.
+  atomic cancel flag, maybe yield, refill. Native work which spans a quantum
+  is represented by an owned, type-erased `WorkDriver`; each resume performs
+  one bounded slice and returns the unit to the ready queue. A worker never
+  runs another unit recursively while retaining the current unit's native
+  stack. Attempt, task-outcome, and join-result list construction use the same
+  exact-size resumable materializer. Raised-error field lookup and trace
+  validation are likewise scheduler-visible cursor work. No signals, ever.
 - **Task cells:** write-once, multi-waiter (handles are dup-able
   values), under a small per-cell mutex in v1. `await` parks the unit
   (never blocks a worker); completion moves waiters to run queues.
-  **Wake tokens:** a unit's wake is CAS'd once per park so completion
-  and cancel can't double-enqueue it (a unit on two workers corrupts its
-  stacks). Cancel must also remove parked units from waiter lists.
+  **Wake decisions:** one mutexed `WaitSet` policy selects exactly once per
+  park, so completion and cancel cannot double-enqueue a unit (a unit on two
+  workers corrupts its stacks). The core distinguishes registering,
+  selected-before-activation, active, and delivered wait phases. Each cell-list
+  entry is a stable owning wake handle in the wait set's exact-size,
+  non-relocating registration array, never a borrowed pointer into temporary
+  setup storage. Each entry has its own ownership phase and reference count;
+  the array remains alive until every entry retires. Completion detaches at
+  most 256 handles per scheduler turn; the core separately models directory
+  cleanup and delivery return in either order. Wait setup, canonical duplicate
+  lookup, loser cleanup, and value-graph retirement are resumable scheduler
+  jobs. This is deliberately reference-counted rather than lock-free
+  reclamation: the Negele scheduler's processor-local hazard-pointer shortcut
+  requires uncooperative regions and processor identity that ecl does not have.
+  Cancel must also remove parked units from waiter lists.
 - **Structured lifetime:** children list under the per-task mutex, and
   spawn re-checks its own cancel flag after registering each child
   (kill-on-arrival — closes the orphan race). Scope close cancels
@@ -454,8 +489,22 @@ out). Kernels never own threads.
   reporting its outcome. A cancelled unit's outcome is
   `{'err {'kind 'cancelled …}}` with trace fields when the poll site can
   produce them, absent otherwise.
-- **Timers:** one timer thread + binary heap (timing wheels are a scale
-  problem ecl doesn't have). **IO:** direct on workers in v1 (scripting
+  Language code cannot call a blocking scheduler wait API: `await`, joins,
+  deadlines, and permitted root `exit` all emit typed park requests. The shell
+  alone registers and resumes those requests; root-scope blocking exists only
+  inside scheduler-owned exit handling and teardown. A root waiter's release
+  store is its selector's final access to that stack-owned generation; every
+  scheduler pointer and result destination is captured first. This prevents an
+  old wake from observing a later root wait at the same stack address.
+  Cancellation walks keep a retained next-cell cursor, validate it with a tree
+  epoch, and release the tree mutex every 256 cells; mutations restart the
+  idempotent walk. Root teardown waits on a scope-owned condition using the
+  same scope mutex as the child-count predicate, so final-child notification
+  cannot be lost between the predicate check and sleep.
+- **Timers:** one lazy timer thread + an indexed binary heap whose pointer
+  slots grow in fixed chunks; embedded wait nodes never relocate and removal
+  is allocation-free (timing wheels are a scale problem ecl doesn't have).
+  **IO:** direct on workers in v1 (scripting
   scale); the committed evolution is the blocking-pool split reusing the
   await machinery unchanged. Console writes take the stdout lock per
   call — whole-write atomicity, satisfying d.11/d.20's interleaving

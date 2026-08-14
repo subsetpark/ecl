@@ -2,28 +2,12 @@ const std = @import("std");
 const formatter = @import("../formatter.zig");
 const doc_text = @import("../doc.zig");
 const heap = @import("../heap.zig");
-const list = @import("../list.zig");
-const poll = @import("../poll.zig");
 const printer = @import("../print.zig");
 const reader = @import("../reader.zig");
 const equal = @import("../equal.zig");
 const support = @import("kernel_test_support.zig");
 
 const allocator = std.testing.allocator;
-
-fn noPoll(_: *anyopaque) poll.Error!void {}
-const PollStop = struct {
-    calls: usize = 0,
-    fail_at: usize,
-    fn tick(raw: *anyopaque) poll.Error!void {
-        const self: *PollStop = @ptrCast(@alignCast(raw));
-        self.calls += 1;
-        if (self.calls == self.fail_at) return error.Ecl;
-    }
-    fn poller(self: *PollStop) poll.Poller {
-        return .{ .context = self, .poll_fn = tick };
-    }
-};
 
 test "documentation normalization folds physical prose lines" {
     var diag: reader.Diag = .{};
@@ -32,44 +16,11 @@ test "documentation normalization folds physical prose lines" {
         .incomplete => return error.UnexpectedIncomplete,
     };
     defer parsed.deinit();
-    var context: u8 = 0;
-    const normalized = try doc_text.normalize(allocator, parsed.forms[0], .{
-        .context = &context,
-        .poll_fn = noPoll,
-    });
+    const normalized = try doc_text.normalize(allocator, parsed.forms[0]);
     defer heap.releaseValue(allocator, normalized);
     const rendered = try printer.toOwnedString(allocator, normalized);
     defer allocator.free(rendered);
     try std.testing.expectEqualStrings("\"a b\\n\\n- one more\"", rendered);
-}
-
-test "documentation normalization polls every indentation and blank-line pass" {
-    const padded = try allocator.alloc(u32, 70_001);
-    defer allocator.free(padded);
-    @memset(padded, ' ');
-    padded[35_000] = 'x';
-    const padded_line = try list.fromCodepoints(allocator, padded);
-    defer heap.releaseValue(allocator, padded_line);
-    // countLines and collectLines finish first; this stop lands in the
-    // trailing indentation scan after the leading scan has also completed.
-    var indentation_stop = PollStop{ .fail_at = 200_000 };
-    try std.testing.expectError(
-        error.Ecl,
-        doc_text.normalize(allocator, padded_line, indentation_stop.poller()),
-    );
-    try std.testing.expectEqual(indentation_stop.fail_at, indentation_stop.calls);
-
-    const breaks = try allocator.alloc(u32, 70_000);
-    defer allocator.free(breaks);
-    @memset(breaks, '\n');
-    const blank_lines = try list.fromCodepoints(allocator, breaks);
-    defer heap.releaseValue(allocator, blank_lines);
-    var bounds_stop = PollStop{ .fail_at = 180_000 };
-    try std.testing.expectError(
-        error.Ecl,
-        doc_text.normalize(allocator, blank_lines, bounds_stop.poller()),
-    );
-    try std.testing.expectEqual(bounds_stop.fail_at, bounds_stop.calls);
 }
 
 fn expectFormat(source: []const u8, expected: []const u8) !void {

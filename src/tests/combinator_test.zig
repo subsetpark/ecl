@@ -46,7 +46,7 @@ fn expectCancelledAfterSetup(
     try support.expectLanguageError(failure, .{
         .name = source,
         .source = source,
-        .kind = "user",
+        .kind = "cancelled",
         .message = "unit cancelled",
     });
     try std.testing.expect(runtime.last_polls >= 1);
@@ -187,7 +187,7 @@ test "empty inline iterations remain cancellable and bounded-frame" {
     try support.expectLanguageError(failure, .{
         .name = "cancelled times",
         .source = "70000 () times",
-        .kind = "user",
+        .kind = "cancelled",
         .word = "times",
         .message = "unit cancelled",
     });

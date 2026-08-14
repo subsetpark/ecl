@@ -283,7 +283,10 @@ are preserved. Nothing below is constrained by compatibility.
     way; the brackets show what the representation did. So `(1 2 3)` prints
     as `[1 2 3]`, and a ragged result like `[[1 2] [3]] 10 *` prints as
     `([10 20] [30])`. Either bracket pair is accepted on input and
-    normalizes; printed output round-trips to the same value. Pairs must
+    normalizes; printed output round-trips to the same value when it contains
+    no Session-linked runtime capability. A task instead prints as a stable
+    per-Session `<task:N>` marker, which the reader deliberately rejects bare
+    or nested. Pairs must
     match: `[1 2 3)` is a parse error — brackets are interchangeable per
     pair, never per token. Specialization is therefore visible at the
     prompt, not mysterious.
@@ -366,7 +369,8 @@ are preserved. Nothing below is constrained by compatibility.
     (kind-specific payload dict, e.g. expected/got shapes, contract's
     required-vs-observed effect and element index). Core kinds, closed
     set: `'underflow`, `'undefined-word`, `'type`, `'shape`, `'conform`,
-    `'overflow`, `'domain`, `'contract`, `'parse`, `'io`, `'user`. User
+    `'overflow`, `'domain`, `'contract`, `'parse`, `'io`, `'cancelled`,
+    `'timeout`, `'user`. User
     kinds are any other symbol. `raise` throws a dict; `fail` is sugar for
     raising `{'kind 'user 'msg msg}`. No host exception ever leaks.
     Errors are sendable by construction — immutable plain data, no live
@@ -383,11 +387,14 @@ are preserved. Nothing below is constrained by compatibility.
       contract — inputs via `literal` plus `compose`/env, never ambient stack) on its own
       share-nothing substack, concurrently. Immutability makes sharing
       safe with no copying or serialization.
-    - `await` `( task -- outcome )`: blocks; delivers the same
+    - `await` `( task -- outcome )`: parks its green unit without occupying a
+      worker; delivers the same
       `{'ok …}/{'err …}` outcome as `attempt`; idempotent (outcome
       cached), so handles stay observationally value-like. `await-for`
-      adds a deadline → `{'err {'kind 'timeout}}`.
-    - `await-any` (races); `cancel` (task dies with
+      adds a non-cancelling deadline → `{'err {'kind 'timeout}}`; a terminal
+      task beats even a zero deadline.
+    - `await-any` (races; already-terminal ties choose the lowest list index);
+      `cancel` (task dies with
       `{'err {'kind 'cancelled}}`, no-op if done). Cancellation is
       unconditional and safe *because* tasks are transactions — killing
       one discards an isolated substack and leaves nothing.
@@ -396,12 +403,19 @@ are preserved. Nothing below is constrained by compatibility.
     - **Structured lifetime:** a dying unit cancels its unawaited tasks
       ("a failed unit leaves nothing" extends to processes); dropped
       handles are cancelled at scope end — no detached daemons; the REPL
-      session is the root scope; a `tasks` word lists pending work.
+      session is the root scope; a `tasks` word lists pending descendants in
+      spawn preorder.
     - **Determinism:** await order is program order, so gathered results
       and `par-each`'s leftmost-error rule are deterministic.
       Nondeterminism enters only where chosen (`await-any`) and at IO
       interleaving across concurrent tasks (within a task IO is ordered;
       across tasks, unspecified).
+    - **Runtime capabilities:** task `match`/hash use handle identity and both
+      `str` and `pp` show `<task:N>`. That display is not source syntax and
+      cannot be used to forge a handle.
+    - **Process control:** `exit` belongs to the root unit outside `attempt`.
+      Descendant or attempt-contained calls raise catchable `'domain`; an
+      allowed exit first cancels and quiesces the root task scope.
     - **Refused:** promise-style combinator algebras on pending tasks —
       no `.then` chains, no auto-flattening (a task holding a task is
       just a value); await, then use ordinary words. No function
@@ -607,9 +621,10 @@ implementation matter, not a design matter.
       concurrently to progress is already broken. This licenses a
       chunking [P] override of the prelude definition.
     - **Line budget (recalibrated 2026-08-14 for strong type boundaries):**
-      classified production Zig ≤ 22k lines including kernels and source
-      tooling, while tests and all target-language ECL source are excluded;
-      kernels remain ≤ 5.5k. Budgeted per component
+      classified shipped business-logic Zig ≤ 22k lines including kernels,
+      while tests, fixtures, build/source-audit verification tooling, and all
+      target-language ECL source are excluded; kernels remain ≤ 5.5k. Budgeted
+      per business-logic component
       so the ceiling binds where sprawl would appear — see
       ARCHITECTURE.md's table. Type/capability boundaries take priority over a
       historical ceiling: raise and explain the row rather than weaken the

@@ -3,12 +3,16 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const minish = b.dependency("minish", .{}).module("minish");
 
     const mod = b.addModule("ecl", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    const runtime_options = b.addOptions();
+    runtime_options.addOption(usize, "default_worker_count", 1);
+    mod.addOptions("session_options", runtime_options);
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -22,7 +26,16 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
-    const tests = b.addTest(.{ .root_module = mod });
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const test_options = b.addOptions();
+    test_options.addOption(usize, "default_worker_count", 1);
+    test_mod.addOptions("session_options", test_options);
+    test_mod.addImport("minish", minish);
+    const tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
@@ -32,6 +45,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     });
+    oom_mod.addOptions("session_options", test_options);
     const oom_tests = b.addTest(.{
         .root_module = oom_mod,
         .filters = &.{"oom:"},
@@ -63,9 +77,30 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     e2e_mod.addOptions("build_options", e2e_options);
+    e2e_mod.addImport("minish", minish);
     const e2e_tests = b.addTest(.{ .root_module = e2e_mod });
     const run_e2e_tests = b.addRunArtifact(e2e_tests);
     test_step.dependOn(&run_e2e_tests.step);
+
+    const worker_step = b.step("test-workers", "Run the full suite with one and eight workers");
+    for ([_][]const u8{ "1", "8" }) |workers| {
+        const worker_count: usize = if (std.mem.eql(u8, workers, "1")) 1 else 8;
+        const worker_test_mod = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const worker_options = b.addOptions();
+        worker_options.addOption(usize, "default_worker_count", worker_count);
+        worker_test_mod.addOptions("session_options", worker_options);
+        worker_test_mod.addImport("minish", minish);
+        const worker_tests = b.addTest(.{ .root_module = worker_test_mod });
+        const run_worker_tests = b.addRunArtifact(worker_tests);
+        worker_step.dependOn(&run_worker_tests.step);
+        const run_worker_e2e = b.addRunArtifact(e2e_tests);
+        run_worker_e2e.setEnvironmentVariable("ECL_WORKERS", workers);
+        worker_step.dependOn(&run_worker_e2e.step);
+    }
 
     // Zig 0.16's TSan runtime crashes at process startup on macOS (including
     // for an empty test binary). SourceHut runs this step on Linux, where the
@@ -77,6 +112,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_thread = target.result.os.tag == .linux,
     });
+    tsan_mod.addOptions("session_options", test_options);
+    tsan_mod.addImport("minish", minish);
     const tsan_tests = b.addTest(.{ .root_module = tsan_mod });
     const run_tsan_tests = b.addRunArtifact(tsan_tests);
     const tsan_step = b.step("test-tsan", "Run tests under ThreadSanitizer");

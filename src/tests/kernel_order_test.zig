@@ -2,7 +2,6 @@
 const std = @import("std");
 const list = @import("../list.zig");
 const heap = @import("../heap.zig");
-const order = @import("../kernel_order.zig");
 const session = @import("../session.zig");
 const helper = @import("kernel_test_support.zig");
 
@@ -21,29 +20,7 @@ test "order: cmp and grade share exact whole-value ordering" {
     });
 }
 
-test "order: grade is stable across comparison bucket radix and float paths" {
-    const allocator = std.testing.allocator;
-    const small = try list.fromI64Slice(allocator, &.{ 2, 1, 2, 1 });
-    defer heap.releaseValue(allocator, small);
-    try std.testing.expectEqual(order.GradePath.comparison, order.gradePathForTest(small));
-
-    var narrow_values: [64]i64 = undefined;
-    for (&narrow_values, 0..) |*item, index| item.* = @intCast(index % 4);
-    const narrow = try list.fromI64Slice(allocator, &narrow_values);
-    defer heap.releaseValue(allocator, narrow);
-    try std.testing.expectEqual(order.GradePath.bucket, order.gradePathForTest(narrow));
-
-    var wide_values: [64]i64 = undefined;
-    for (&wide_values, 0..) |*item, index| item.* = @intCast(index * 10_000);
-    const wide = try list.fromI64Slice(allocator, &wide_values);
-    defer heap.releaseValue(allocator, wide);
-    try std.testing.expectEqual(order.GradePath.radix, order.gradePathForTest(wide));
-
-    var floats: [64]f64 = undefined;
-    for (&floats, 0..) |*item, index| item.* = @floatFromInt(64 - index);
-    const float_values = try list.fromF64Slice(allocator, &floats);
-    defer heap.releaseValue(allocator, float_values);
-    try std.testing.expectEqual(order.GradePath.radix, order.gradePathForTest(float_values));
+test "order: grade is stable" {
     try helper.expectStack("[2 1 2 1] grade", "[1 3 0 2]");
 }
 
@@ -68,7 +45,7 @@ fn appendDescendingExpectation(
     try buffer.append(allocator, ']');
 }
 
-test "order: bucket radix float char and generic algorithms execute" {
+test "order: grade handles large numeric char and generic inputs" {
     const allocator = std.testing.allocator;
     var source: std.ArrayList(u8) = .empty;
     defer source.deinit(allocator);

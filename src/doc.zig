@@ -3,7 +3,6 @@ const std = @import("std");
 const value = @import("value.zig");
 const list = @import("list.zig");
 const lexer = @import("lexer.zig");
-const poll = @import("poll.zig");
 const storage = @import("kernel_storage.zig");
 
 const Value = value.Value;
@@ -17,207 +16,261 @@ const Line = struct {
 
 const Kind = enum { prose, bullet };
 
-const Sink = struct {
-    output: ?[]u32,
-    len: usize = 0,
+pub const NormalizeProgress = union(enum) { pending, complete: Value };
 
-    fn append(self: *Sink, codepoint: u32) error{OutOfMemory}!void {
-        if (self.output) |items| items[self.len] = codepoint;
-        self.len = std.math.add(usize, self.len, 1) catch return error.OutOfMemory;
-    }
-};
-
-/// Returns a newly owned canonical string. Physical prose wrapping and source
-/// indentation do not survive; paragraph and Markdown-bullet structure does.
 pub fn normalize(
     allocator: std.mem.Allocator,
     document: Value,
-    poller: poll.Poller,
-) poll.Error!Value {
-    std.debug.assert(document.isString());
-    const work = poll.WorkContext.init(poller);
-    const line_count = try countLines(document, work);
-    const lines = try allocator.alloc(Line, line_count);
-    defer allocator.free(lines);
-    try collectLines(document, lines, work);
-
-    const bounds = try contentBounds(lines, work);
-    if (bounds.start == bounds.end) return storage.fromCodepoints(allocator, &.{}, poller);
-    const margin = try commonMargin(lines, bounds.start, bounds.end, work);
-
-    var measured: Sink = .{ .output = null };
-    try render(document, lines[bounds.start..bounds.end], margin, &measured, work);
-    const codepoints = try allocator.alloc(u32, measured.len);
-    defer allocator.free(codepoints);
-    var written: Sink = .{ .output = codepoints };
-    try render(document, lines[bounds.start..bounds.end], margin, &written, work);
-    std.debug.assert(written.len == codepoints.len);
-    return storage.fromCodepoints(allocator, codepoints, poller);
-}
-
-fn countLines(document: Value, work: poll.WorkContext) poll.Error!usize {
-    const count: usize = @intCast(document.list.length());
-    var lines: usize = 1;
-    var indices = work.indices(0, count);
-    while (try indices.next()) |index| {
-        const codepoint = at(document, index);
-        if (isLineBreak(codepoint)) {
-            lines = std.math.add(usize, lines, 1) catch return error.OutOfMemory;
-            if (codepoint == '\r' and index + 1 < count and at(document, index + 1) == '\n') {
-                indices.skip(1);
-            }
-        }
-    }
-    return lines;
-}
-
-fn collectLines(document: Value, lines: []Line, work: poll.WorkContext) poll.Error!void {
-    const count: usize = @intCast(document.list.length());
-    var line_index: usize = 0;
-    var start: usize = 0;
-    var indices = work.indices(0, count);
-    while (try indices.next()) |index| {
-        const codepoint = at(document, index);
-        if (!isLineBreak(codepoint)) continue;
-        lines[line_index] = try inspectLine(document, start, index, work);
-        line_index += 1;
-        if (codepoint == '\r' and index + 1 < count and at(document, index + 1) == '\n') {
-            indices.skip(1);
-        }
-        start = indices.index;
-    }
-    lines[line_index] = try inspectLine(document, start, count, work);
-    std.debug.assert(line_index + 1 == lines.len);
-}
-
-fn inspectLine(document: Value, start: usize, raw_end: usize, work: poll.WorkContext) poll.Error!Line {
-    var leading = start;
-    var forward = work.indices(start, raw_end);
-    while (try forward.next()) |index| {
-        if (!isHorizontal(at(document, index))) break;
-        leading = index + 1;
-    }
-    var end = raw_end;
-    var reverse = work.reverseIndices(leading, raw_end);
-    while (try reverse.next()) |index| {
-        if (!isHorizontal(at(document, index))) break;
-        end = index;
-    }
-    return .{
-        .start = start,
-        .end = end,
-        .leading = leading - start,
-        .blank = leading == raw_end,
+) error{OutOfMemory}!Value {
+    var cursor = try NormalizeCursor.init(allocator, document);
+    defer cursor.deinit();
+    while (true) switch (try cursor.advance(1024)) {
+        .pending => {},
+        .complete => |result| return result,
     };
 }
 
-fn contentBounds(lines: []const Line, work: poll.WorkContext) poll.Error!struct { start: usize, end: usize } {
-    var start: usize = 0;
-    var forward = work.indices(0, lines.len);
-    while (try forward.next()) |index| {
-        if (!lines[index].blank) break;
-        start = index + 1;
-    }
-    var end = lines.len;
-    var reverse = work.reverseIndices(start, lines.len);
-    while (try reverse.next()) |index| {
-        if (!lines[index].blank) break;
-        end = index;
-    }
-    return .{ .start = start, .end = end };
-}
-
-fn commonMargin(lines: []const Line, start: usize, end: usize, work: poll.WorkContext) poll.Error!usize {
-    var margin: ?usize = null;
-    var indices = work.indices(start, end);
-    while (try indices.next()) |index| {
-        if (lines[index].blank or index == 0) continue;
-        margin = @min(margin orelse lines[index].leading, lines[index].leading);
-    }
-    return margin orelse 0;
-}
-
-fn render(
+/// Resumable two-pass documentation normalization. Line discovery, margin
+/// selection, collapsed rendering, and exact string materialization all keep
+/// their next position in this owned state.
+pub const NormalizeCursor = struct {
+    allocator: std.mem.Allocator,
     document: Value,
-    lines: []const Line,
-    margin: usize,
-    sink: *Sink,
-    work: poll.WorkContext,
-) poll.Error!void {
-    var emitted = false;
-    var pending_blank = false;
-    var previous: Kind = .prose;
-    var line_indices = work.indices(0, lines.len);
-    while (try line_indices.next()) |relative_index| {
-        const line = lines[relative_index];
-        if (line.blank) {
-            if (emitted) pending_blank = true;
-            continue;
+    lines: []Line,
+    line_count: usize = 0,
+    phase: enum { scan, bounds, render_count, render_fill, materialize } = .scan,
+    source_index: usize = 0,
+    line_start: usize = 0,
+    leading: usize = 0,
+    seen_content: bool = false,
+    last_content_end: usize = 0,
+    bounds_index: usize = 0,
+    content_start: usize = 0,
+    content_end: usize = 0,
+    margin: ?usize = null,
+    render_line: usize = 0,
+    render_mode: enum { idle, bullet_trim, content } = .idle,
+    render_index: usize = 0,
+    render_end: usize = 0,
+    pending_space: bool = false,
+    emitted: bool = false,
+    pending_blank: bool = false,
+    previous: Kind = .prose,
+    current: Kind = .prose,
+    queue: [3]u32 = .{0} ** 3,
+    queue_index: usize = 0,
+    queue_len: usize = 0,
+    output_count: usize = 0,
+    output: ?[]u32 = null,
+    output_index: usize = 0,
+    materializer: ?storage.CodepointMaterializer = null,
+
+    pub fn init(allocator: std.mem.Allocator, document: Value) error{OutOfMemory}!NormalizeCursor {
+        std.debug.assert(document.isString());
+        const count: usize = @intCast(document.list.length());
+        return .{
+            .allocator = allocator,
+            .document = document,
+            .lines = try allocator.alloc(Line, count + 1),
+        };
+    }
+
+    pub fn deinit(self: *NormalizeCursor) void {
+        if (self.materializer) |*materializer| materializer.deinit();
+        if (self.output) |output| self.allocator.free(output);
+        self.allocator.free(self.lines);
+        self.* = undefined;
+    }
+
+    pub fn advance(self: *NormalizeCursor, budget: usize) error{OutOfMemory}!NormalizeProgress {
+        var remaining = budget;
+        while (remaining != 0) : (remaining -= 1) switch (self.phase) {
+            .scan => self.scanOne(),
+            .bounds => self.boundOne(),
+            .render_count, .render_fill => try self.renderOne(),
+            .materialize => return switch (try self.materializer.?.advance(remaining)) {
+                .pending => .pending,
+                .complete => |result| .{ .complete = result },
+            },
+        };
+        return .pending;
+    }
+
+    fn scanOne(self: *NormalizeCursor) void {
+        const count: usize = @intCast(self.document.list.length());
+        if (self.source_index == count) {
+            self.finishLine(count);
+            self.phase = .bounds;
+            return;
         }
-        const raw_index = relative_index;
-        const removed = if (raw_index == 0 and line.start == 0)
+        const codepoint = at(self.document, self.source_index);
+        if (isLineBreak(codepoint)) {
+            const raw_end = self.source_index;
+            self.source_index += if (codepoint == '\r' and self.source_index + 1 < count and
+                at(self.document, self.source_index + 1) == '\n') 2 else 1;
+            self.finishLine(raw_end);
+            self.line_start = self.source_index;
+            self.leading = 0;
+            self.seen_content = false;
+            self.last_content_end = self.source_index;
+        } else {
+            if (isHorizontal(codepoint)) {
+                if (!self.seen_content) self.leading += 1;
+            } else {
+                self.seen_content = true;
+                self.last_content_end = self.source_index + 1;
+            }
+            self.source_index += 1;
+        }
+    }
+
+    fn finishLine(self: *NormalizeCursor, raw_end: usize) void {
+        self.lines[self.line_count] = .{
+            .start = self.line_start,
+            .end = if (self.seen_content) self.last_content_end else raw_end,
+            .leading = self.leading,
+            .blank = !self.seen_content,
+        };
+        self.line_count += 1;
+    }
+
+    fn boundOne(self: *NormalizeCursor) void {
+        if (self.bounds_index == self.line_count) {
+            self.content_end = self.bounds_index;
+            while (self.content_end > self.content_start and self.lines[self.content_end - 1].blank)
+                self.content_end -= 1;
+            self.resetRender();
+            self.phase = .render_count;
+            return;
+        }
+        const line = self.lines[self.bounds_index];
+        if (!line.blank) {
+            if (self.bounds_index != 0)
+                self.margin = @min(self.margin orelse line.leading, line.leading);
+        } else if (self.content_start == self.bounds_index) {
+            self.content_start += 1;
+        }
+        self.bounds_index += 1;
+    }
+
+    fn resetRender(self: *NormalizeCursor) void {
+        self.render_line = self.content_start;
+        self.render_mode = .idle;
+        self.pending_space = false;
+        self.emitted = false;
+        self.pending_blank = false;
+        self.previous = .prose;
+        self.queue_index = 0;
+        self.queue_len = 0;
+    }
+
+    fn emit(self: *NormalizeCursor, codepoint: u32) error{OutOfMemory}!void {
+        if (self.output) |output| output[self.output_index] = codepoint;
+        self.output_index = std.math.add(usize, self.output_index, 1) catch return error.OutOfMemory;
+    }
+
+    fn enqueue(self: *NormalizeCursor, items: []const u32) void {
+        std.debug.assert(self.queue_len == self.queue_index and items.len <= self.queue.len);
+        @memcpy(self.queue[0..items.len], items);
+        self.queue_index = 0;
+        self.queue_len = items.len;
+    }
+
+    fn finishRenderedLine(self: *NormalizeCursor) void {
+        self.emitted = true;
+        self.pending_blank = false;
+        self.previous = self.current;
+        self.render_line += 1;
+        self.render_mode = .idle;
+        self.pending_space = false;
+    }
+
+    fn renderOne(self: *NormalizeCursor) error{OutOfMemory}!void {
+        if (self.queue_index != self.queue_len) {
+            try self.emit(self.queue[self.queue_index]);
+            self.queue_index += 1;
+            return;
+        }
+        if (self.render_mode == .bullet_trim) {
+            if (self.render_index == self.render_end) {
+                self.finishRenderedLine();
+            } else if (isHorizontal(at(self.document, self.render_index))) {
+                self.render_index += 1;
+            } else {
+                self.render_mode = .content;
+                self.enqueue(&.{' '});
+            }
+            return;
+        }
+        if (self.render_mode == .content) {
+            if (self.render_index == self.render_end) {
+                self.finishRenderedLine();
+                return;
+            }
+            const codepoint = at(self.document, self.render_index);
+            self.render_index += 1;
+            if (isHorizontal(codepoint)) {
+                self.pending_space = self.output_index > 0;
+            } else {
+                if (self.pending_space) self.enqueue(&.{ ' ', codepoint }) else self.enqueue(&.{codepoint});
+                self.pending_space = false;
+            }
+            return;
+        }
+        if (self.render_line == self.content_end) {
+            if (self.phase == .render_count) {
+                self.output_count = self.output_index;
+                self.output = try self.allocator.alloc(u32, self.output_count);
+                self.output_index = 0;
+                self.resetRender();
+                self.phase = .render_fill;
+            } else {
+                std.debug.assert(self.output_index == self.output_count);
+                self.materializer = .init(self.allocator, self.output.?);
+                self.phase = .materialize;
+            }
+            return;
+        }
+        const line = self.lines[self.render_line];
+        if (line.blank) {
+            if (self.emitted) self.pending_blank = true;
+            self.render_line += 1;
+            return;
+        }
+        const removed = if (self.render_line == 0 and line.start == 0)
             line.leading
         else
-            @min(line.leading, margin);
+            @min(line.leading, self.margin orelse 0);
         const start = line.start + removed;
         const remaining_indent = line.leading - removed;
-        const content_start = line.start + line.leading;
-        const bullet = isBullet(document, content_start, line.end);
-        const current: Kind = if (bullet) .bullet else if (previous == .bullet and remaining_indent > 0)
+        const item_start = line.start + line.leading;
+        const bullet = isBullet(self.document, item_start, line.end);
+        self.current = if (bullet) .bullet else if (self.previous == .bullet and remaining_indent > 0)
             .bullet
         else
             .prose;
-        if (emitted) {
-            if (pending_blank) {
-                try sink.append('\n');
-                try sink.append('\n');
-            } else if (bullet or (previous == .bullet and current == .prose)) {
-                try sink.append('\n');
-            } else {
-                try sink.append(' ');
-            }
+        if (self.emitted) {
+            if (self.pending_blank)
+                self.enqueue(&.{ '\n', '\n' })
+            else if (bullet or (self.previous == .bullet and self.current == .prose))
+                self.enqueue(&.{'\n'})
+            else
+                self.enqueue(&.{' '});
         }
+        self.render_end = line.end;
         if (bullet) {
-            try sink.append('-');
-            var item_start = content_start + 1;
-            var item_indices = work.indices(item_start, line.end);
-            while (try item_indices.next()) |index| {
-                if (!isHorizontal(at(document, index))) break;
-                item_start = index + 1;
+            if (self.queue_len == self.queue_index) self.enqueue(&.{'-'}) else {
+                self.queue[self.queue_len] = '-';
+                self.queue_len += 1;
             }
-            if (item_start < line.end) {
-                try sink.append(' ');
-                try appendCollapsed(document, item_start, line.end, sink, work);
-            }
+            self.render_index = item_start + 1;
+            self.render_mode = .bullet_trim;
         } else {
-            try appendCollapsed(document, @max(start, content_start), line.end, sink, work);
+            self.render_index = @max(start, item_start);
+            self.render_mode = .content;
         }
-        emitted = true;
-        pending_blank = false;
-        previous = current;
     }
-}
-
-fn appendCollapsed(
-    document: Value,
-    start: usize,
-    end: usize,
-    sink: *Sink,
-    work: poll.WorkContext,
-) poll.Error!void {
-    var pending_space = false;
-    var indices = work.indices(start, end);
-    while (try indices.next()) |index| {
-        const codepoint = at(document, index);
-        if (isHorizontal(codepoint)) {
-            pending_space = sink.len > 0;
-            continue;
-        }
-        if (pending_space) try sink.append(' ');
-        try sink.append(codepoint);
-        pending_space = false;
-    }
-}
+};
 
 fn isBullet(document: Value, start: usize, end: usize) bool {
     return start < end and at(document, start) == '-' and

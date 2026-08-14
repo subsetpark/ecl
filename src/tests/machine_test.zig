@@ -386,7 +386,7 @@ test "public parse cancellation reaches UTF-8 materialization" {
         .ok, .incomplete => return error.TestUnexpectedResult,
     };
     defer heap.releaseValue(allocator, failure);
-    try std.testing.expectEqualStrings("user", try errorKind(allocator, failure));
+    try std.testing.expectEqualStrings("cancelled", try errorKind(allocator, failure));
     const rendered = try printer.toOwnedString(allocator, failure);
     defer allocator.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "unit cancelled") != null);
@@ -413,7 +413,7 @@ test "public parse cancellation reaches ignored-source scanning" {
         .ok, .incomplete => return error.TestUnexpectedResult,
     };
     defer heap.releaseValue(allocator, failure);
-    try std.testing.expectEqualStrings("user", try errorKind(allocator, failure));
+    try std.testing.expectEqualStrings("cancelled", try errorKind(allocator, failure));
     const rendered = try printer.toOwnedString(allocator, failure);
     defer allocator.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "unit cancelled") != null);

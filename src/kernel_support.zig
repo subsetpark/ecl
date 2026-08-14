@@ -4,7 +4,6 @@ const value = @import("value.zig");
 const env = @import("env.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
-const poll_api = @import("poll.zig");
 
 pub const Value = value.Value;
 pub const HeapKind = value.HeapKind;
@@ -118,13 +117,6 @@ pub const Context = struct {
         try self.advance(1);
     }
 
-    pub fn structuralPoller(self: Context) poll_api.Poller {
-        return .{
-            .context = @ptrCast(self.evaluator),
-            .poll_fn = pollMachine,
-        };
-    }
-
     pub fn failAt(
         self: Context,
         kind: machine.ErrorKind,
@@ -134,11 +126,6 @@ pub const Context = struct {
         return self.evaluator.failAtIndex(kind, message, index);
     }
 };
-
-fn pollMachine(raw: *anyopaque) poll_api.Error!void {
-    const evaluator: *Machine = @ptrCast(@alignCast(raw));
-    try evaluator.advanceKernel(1);
-}
 
 pub fn installPrimitive(
     core: *env.BuildingEnv,

@@ -5,7 +5,6 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const lexer = @import("lexer.zig");
 const reader = @import("reader.zig");
-const poll = @import("poll.zig");
 const doc_text = @import("doc.zig");
 const Value = value.Value;
 pub const max_width: usize = 100;
@@ -178,7 +177,7 @@ const Probe = union(enum) {
     fill: struct { words: []const []const u8, index: usize },
 };
 const ProbeStack = struct {
-    items: [max_probe_steps]Probe = undefined,
+    items: [max_probe_steps]Probe,
     len: usize = 0,
     fn push(self: *ProbeStack, item: Probe) bool {
         if (self.len == self.items.len) return false;
@@ -247,7 +246,8 @@ const Renderer = struct {
         return self.output.toOwnedSlice(self.allocator);
     }
     fn fits(self: *Renderer, available: usize, candidate: *const Doc) bool {
-        var commands: ProbeStack = .{};
+        // SAFETY: ProbeStack reads only initialized slots below `len`.
+        var commands: ProbeStack = .{ .items = undefined };
         _ = commands.push(.{ .frame = .{ .doc = candidate, .indent = 0, .mode = .flat } });
         var pending = self.stack.items.len;
         var remaining = available;
@@ -910,16 +910,8 @@ fn decodeAndNormalize(allocator: std.mem.Allocator, token: []const u8) Error!Val
     };
     defer parsed.deinit();
     if (parsed.forms.len != 1 or !parsed.forms[0].isString()) return error.InvalidSource;
-    var context: u8 = 0;
-    return doc_text.normalize(allocator, parsed.forms[0], .{
-        .context = &context,
-        .poll_fn = noPoll,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.Ecl => unreachable,
-    };
+    return doc_text.normalize(allocator, parsed.forms[0]);
 }
-fn noPoll(_: *anyopaque) poll.Error!void {}
 fn escapedWord(
     allocator: std.mem.Allocator,
     document: Value,

@@ -1,9 +1,11 @@
-//! Seeded cross-module properties for the complete value layer.
+//! Shrinking cross-module properties for the complete value layer.
 
 const std = @import("std");
+const minish = @import("minish");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
+const storage = @import("../kernel_storage.zig");
 const equal = @import("../equal.zig");
 const dict = @import("../dict.zig");
 const printer = @import("../print.zig");
@@ -11,103 +13,171 @@ const testgen = @import("testgen.zig");
 
 const Value = value.Value;
 
-test "seeded arbitrary values lock equality, hash, and print laws" {
+fn valueLaws(recipe: testgen.ValueRecipe) !void {
     const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(0xecc0_0001);
-    const random = prng.random();
-    for (0..1000) |_| {
-        const a = try testgen.generateValue(allocator, random, 4, .allowed);
-        defer heap.releaseValue(allocator, a);
-        const b = try testgen.generateValue(allocator, random, 4, .allowed);
-        defer heap.releaseValue(allocator, b);
-        try std.testing.expect(equal.match(a, a));
-        try std.testing.expectEqual(equal.match(a, b), equal.match(b, a));
-        if (equal.match(a, b)) try std.testing.expectEqual(equal.hash(a), equal.hash(b));
+    const a = try testgen.valueFromRecipe(allocator, recipe, 4, .allowed, 0x00);
+    defer heap.releaseValue(allocator, a);
+    const b = try testgen.valueFromRecipe(allocator, recipe, 4, .allowed, 0xa7);
+    defer heap.releaseValue(allocator, b);
 
-        const first = try printer.toOwnedString(allocator, a);
-        defer allocator.free(first);
-        const second = try printer.toOwnedString(allocator, a);
-        defer allocator.free(second);
-        try std.testing.expectEqualStrings(first, second);
-    }
+    try std.testing.expect(equal.match(a, a));
+    try std.testing.expectEqual(equal.match(a, b), equal.match(b, a));
+    if (equal.match(a, b)) try std.testing.expectEqual(equal.hash(a), equal.hash(b));
+
+    const first = try printer.toOwnedString(allocator, a);
+    defer allocator.free(first);
+    const second = try printer.toOwnedString(allocator, a);
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
 }
 
-test "seeded specialization and cross-representation laws" {
+test "arbitrary values lock equality hash and print laws with shrinking" {
+    try minish.check(std.testing.allocator, testgen.value_recipe_generator, valueLaws, .{
+        .num_runs = 1000,
+        .seed = 0xecc0_0001,
+        .max_shrink_attempts = 512,
+    });
+}
+
+fn specializationLaws(encoded: u64) !void {
     const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(0xecc0_0002);
-    const random = prng.random();
-    for (0..1000) |_| {
-        const count = random.intRangeAtMost(usize, 1, 8);
-        const items = try allocator.alloc(Value, count);
-        defer allocator.free(items);
-        const use_chars = random.boolean();
-        for (items) |*item| item.* = if (use_chars)
-            .{ .char = testgen.randomCodepoint(random) }
+    const count: usize = @intCast(encoded % 8 + 1);
+    const items = try allocator.alloc(Value, count);
+    defer allocator.free(items);
+    const use_chars = encoded & 0x100 != 0;
+    var remaining = std.math.rotr(u64, encoded, 9);
+    for (items) |*item| {
+        item.* = if (use_chars)
+            .{ .char = testgen.codepoint(@truncate(remaining)) }
         else
-            .{ .int = random.intRangeAtMost(i64, -1000, 1000) };
-
-        const leaf = try list.fromValues(allocator, items);
-        defer heap.releaseValue(allocator, leaf);
-        const spine = try list.fromValuesGeneric(allocator, items);
-        defer heap.releaseValue(allocator, spine);
-        if (use_chars) {
-            try std.testing.expect(leaf.isString());
-        } else {
-            try std.testing.expectEqual(value.HeapKind.leaf_i64, leaf.list.kind());
-        }
-        for (items, 0..) |expected, index| {
-            try std.testing.expectEqual(expected, try list.at(leaf, index));
-        }
-        try std.testing.expect(equal.match(leaf, spine));
-        try std.testing.expectEqual(equal.hash(leaf), equal.hash(spine));
+            .{ .int = @as(i16, @bitCast(@as(u16, @truncate(remaining)))) };
+        remaining = std.math.rotr(u64, remaining, 8);
     }
+
+    const leaf = try list.fromValues(allocator, items);
+    defer heap.releaseValue(allocator, leaf);
+    const spine = try list.fromValuesGeneric(allocator, items);
+    defer heap.releaseValue(allocator, spine);
+    if (use_chars) {
+        try std.testing.expect(leaf.isString());
+    } else {
+        try std.testing.expectEqual(value.HeapKind.leaf_i64, leaf.list.kind());
+    }
+    for (items, 0..) |expected, index| {
+        try std.testing.expectEqual(expected, try list.at(leaf, index));
+    }
+    try std.testing.expect(equal.match(leaf, spine));
+    try std.testing.expectEqual(equal.hash(leaf), equal.hash(spine));
 }
 
-test "seeded numeric and dict ordering laws" {
-    const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(0xecc0_0003);
-    const random = prng.random();
-    for (0..1000) |_| {
-        const integer = random.intRangeAtMost(i32, -1_000_000, 1_000_000);
-        const int_value = Value{ .int = integer };
-        const float_value = Value{ .float = @floatFromInt(integer) };
-        try std.testing.expect(equal.match(int_value, float_value));
-        try std.testing.expectEqual(equal.hash(int_value), equal.hash(float_value));
+test "specialization and cross-representation laws shrink to integers" {
+    try minish.check(std.testing.allocator, minish.gen.int(u64), specializationLaws, .{
+        .num_runs = 1000,
+        .seed = 0xecc0_0002,
+        .max_shrink_attempts = 512,
+    });
+}
 
-        const pairs = [_]dict.Pair{
-            .{ .{ .int = 1 }, .{ .char = testgen.randomCodepoint(random) } },
-            .{ .{ .int = 2 }, .{ .int = integer } },
-            .{ .{ .int = 3 }, .{ .word = try testgen.randomInternedId(random) } },
+fn resumableMaterializationLaw(encoded: u64) !void {
+    const allocator = std.testing.allocator;
+    const count: usize = @intCast(encoded % 33);
+    const items = try allocator.alloc(Value, count);
+    defer allocator.free(items);
+    var bits = std.math.rotr(u64, encoded, 6);
+    for (items) |*item| {
+        item.* = switch (bits % 5) {
+            0 => .{ .int = @as(i16, @bitCast(@as(u16, @truncate(bits)))) },
+            1 => .{ .float = @floatFromInt(@as(i16, @bitCast(@as(u16, @truncate(bits))))) },
+            2 => .{ .char = testgen.codepoint(@truncate(bits)) },
+            3 => .{ .symbol = @truncate(bits) },
+            else => .{ .word = @truncate(bits) },
         };
-        const reversed = [_]dict.Pair{ pairs[2], pairs[1], pairs[0] };
-        const first = try dict.fromPairs(allocator, &pairs);
-        defer heap.releaseValue(allocator, first);
-        const second = try dict.fromPairs(allocator, &reversed);
-        defer heap.releaseValue(allocator, second);
-        try std.testing.expect(equal.match(first, second));
-        try std.testing.expectEqual(equal.hash(first), equal.hash(second));
+        bits = std.math.rotr(u64, bits, 7);
     }
+
+    const expected = try list.fromValues(allocator, items);
+    defer heap.releaseValue(allocator, expected);
+    var materializer = storage.ValueMaterializer.init(allocator, items);
+    defer materializer.deinit();
+    const budget: usize = @intCast((encoded >> 48) % 9 + 1);
+    const actual = while (true) switch (try materializer.advance(budget)) {
+        .pending => continue,
+        .complete => |complete| break complete,
+    };
+    defer heap.releaseValue(allocator, actual);
+    try std.testing.expectEqual(expected.list.kind(), actual.list.kind());
+    try std.testing.expect(equal.match(expected, actual));
 }
 
-test "seeded append sharing laws" {
-    const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(0xecc0_0004);
-    const random = prng.random();
-    for (0..1000) |_| {
-        const original = try list.fromValues(allocator, &.{
-            .{ .int = random.int(i32) },
-            .{ .int = random.int(i32) },
-        });
-        defer heap.releaseValue(allocator, original);
-        const unique = try list.append(allocator, original, .{ .int = random.int(i32) });
-        try std.testing.expectEqual(original.list, unique.list);
+test "resumable list materialization preserves specialization under arbitrary slices" {
+    try minish.check(std.testing.allocator, minish.gen.int(u64), resumableMaterializationLaw, .{
+        .num_runs = 1000,
+        .seed = 0xecc0_0005,
+        .max_shrink_attempts = 512,
+    });
+}
 
-        heap.incRef(original.list);
-        defer heap.decRef(allocator, original.list);
-        const copied = try list.append(allocator, original, .{ .int = random.int(i32) });
-        defer heap.releaseValue(allocator, copied);
-        try std.testing.expect(original.list != copied.list);
-        try std.testing.expectEqual(@as(usize, 3), try list.len(original));
-        try std.testing.expectEqual(@as(usize, 4), try list.len(copied));
-    }
+fn numericAndDictLaws(encoded: u64) !void {
+    const allocator = std.testing.allocator;
+    const integer: i32 = @bitCast(@as(u32, @truncate(encoded)));
+    const int_value = Value{ .int = integer };
+    const float_value = Value{ .float = @floatFromInt(integer) };
+    try std.testing.expect(equal.match(int_value, float_value));
+    try std.testing.expectEqual(equal.hash(int_value), equal.hash(float_value));
+
+    const pairs = [_]dict.Pair{
+        .{ .{ .int = 1 }, .{ .char = testgen.codepoint(@truncate(encoded >> 32)) } },
+        .{ .{ .int = 2 }, .{ .int = integer } },
+        .{ .{ .int = 3 }, .{ .word = try testgen.internedId(@truncate(encoded >> 40)) } },
+    };
+    const reversed = [_]dict.Pair{ pairs[2], pairs[1], pairs[0] };
+    const first = try dict.fromPairs(allocator, &pairs);
+    defer heap.releaseValue(allocator, first);
+    const second = try dict.fromPairs(allocator, &reversed);
+    defer heap.releaseValue(allocator, second);
+    try std.testing.expect(equal.match(first, second));
+    try std.testing.expectEqual(equal.hash(first), equal.hash(second));
+}
+
+test "numeric and dict ordering laws shrink to integers" {
+    try minish.check(std.testing.allocator, minish.gen.int(u64), numericAndDictLaws, .{
+        .num_runs = 1000,
+        .seed = 0xecc0_0003,
+        .max_shrink_attempts = 512,
+    });
+}
+
+fn appendSharingLaws(encoded: u64) !void {
+    const allocator = std.testing.allocator;
+    const original = try list.fromValues(allocator, &.{
+        .{ .int = @as(i32, @bitCast(@as(u32, @truncate(encoded)))) },
+        .{ .int = @as(i32, @bitCast(@as(u32, @truncate(encoded >> 16)))) },
+    });
+    defer heap.releaseValue(allocator, original);
+    const unique = try list.append(
+        allocator,
+        original,
+        .{ .int = @as(i32, @bitCast(@as(u32, @truncate(encoded >> 32)))) },
+    );
+    try std.testing.expectEqual(original.list, unique.list);
+
+    heap.incRef(original.list);
+    defer heap.decRef(allocator, original.list);
+    const copied = try list.append(
+        allocator,
+        original,
+        .{ .int = @as(i32, @bitCast(@as(u32, @truncate(encoded >> 48)))) },
+    );
+    defer heap.releaseValue(allocator, copied);
+    try std.testing.expect(original.list != copied.list);
+    try std.testing.expectEqual(@as(usize, 3), try list.len(original));
+    try std.testing.expectEqual(@as(usize, 4), try list.len(copied));
+}
+
+test "append sharing laws shrink to integers" {
+    try minish.check(std.testing.allocator, minish.gen.int(u64), appendSharingLaws, .{
+        .num_runs = 1000,
+        .seed = 0xecc0_0004,
+        .max_shrink_attempts = 512,
+    });
 }

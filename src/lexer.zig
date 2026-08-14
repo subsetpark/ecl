@@ -1,7 +1,6 @@
 //! UTF-8 cursor, source spans, diagnostics, and whole-token classification.
 
 const std = @import("std");
-const poll = @import("poll.zig");
 
 pub const Span = struct {
     line: u32 = 1,
@@ -88,23 +87,8 @@ pub const Cursor = struct {
             @panic("validated UTF-8 cursor reached an invalid sequence");
     }
 
-    pub fn peekN(self: *const Cursor, offset: usize) ?u21 {
-        return self.peekNPolling(offset, .unlimited()) catch @panic("non-polling lexer cursor failed");
-    }
-
-    pub fn peekNPolling(self: *const Cursor, offset: usize, work: poll.WorkContext) poll.Error!?u21 {
-        var copy = self.*;
-        for (0..offset) |_| _ = try copy.bumpPolling(work) orelse return null;
-        return copy.peek();
-    }
-
     pub fn bump(self: *Cursor) ?u21 {
-        return self.bumpPolling(.unlimited()) catch @panic("non-polling lexer cursor failed");
-    }
-
-    pub fn bumpPolling(self: *Cursor, work: poll.WorkContext) poll.Error!?u21 {
         const codepoint = self.peek() orelse return null;
-        try work.step();
         const length = std.unicode.utf8ByteSequenceLength(self.source[self.index]) catch
             @panic("validated UTF-8 cursor reached an invalid start byte");
         self.index += length;
@@ -118,121 +102,261 @@ pub const Cursor = struct {
     }
 
     pub fn skipIgnored(self: *Cursor) void {
-        self.skipIgnoredPolling(.unlimited()) catch @panic("non-polling lexer cursor failed");
-    }
-
-    pub fn skipIgnoredPolling(self: *Cursor, work: poll.WorkContext) poll.Error!void {
-        while (true) {
-            while (self.peek()) |codepoint| {
-                if (!isWhitespace(codepoint) and codepoint != ',') break;
-                _ = try self.bumpPolling(work);
-            }
-            if (self.peek() != '#') return;
-            while (self.peek()) |codepoint| {
-                if (codepoint == '\n') break;
-                _ = try self.bumpPolling(work);
-            }
-        }
+        var ignored = IgnoredCursor{ .source = self };
+        while (ignored.advance() == .pending) {}
     }
 
     /// Takes one maximal atom token. Quote and backslash dispatch only when
     /// token-initial; inside a token, symbol validation diagnoses them.
     pub fn takeToken(self: *Cursor) []const u8 {
-        return self.takeTokenPolling(.unlimited()) catch @panic("non-polling lexer cursor failed");
+        var token = TokenCursor.init(self);
+        while (true) switch (token.advance()) {
+            .pending => {},
+            .complete => |bytes| return bytes,
+        };
     }
+};
 
-    pub fn takeTokenPolling(self: *Cursor, work: poll.WorkContext) poll.Error![]const u8 {
-        const start = self.index;
-        while (self.peek()) |codepoint| {
-            if (isTokenBoundary(codepoint) or
-                codepoint == ';' or codepoint == '|') break;
-            _ = try self.bumpPolling(work);
+pub const ScanProgress = enum { pending, complete };
+pub const IgnoredCursor = struct {
+    source: *Cursor,
+    comment: bool = false,
+    pub fn advance(self: *IgnoredCursor) ScanProgress {
+        const next = self.source.peek() orelse return .complete;
+        if (self.comment) {
+            if (next == '\n') self.comment = false else _ = self.source.bump();
+            return .pending;
         }
-        return self.source[start..self.index];
+        if (isWhitespace(next) or next == ',') {
+            _ = self.source.bump();
+            return .pending;
+        }
+        if (next == '#') {
+            _ = self.source.bump();
+            self.comment = true;
+            return .pending;
+        }
+        return .complete;
+    }
+};
+
+pub const TokenProgress = union(enum) { pending, complete: []const u8 };
+pub const TokenCursor = struct {
+    source: *Cursor,
+    start: usize,
+    pub fn init(source: *Cursor) TokenCursor {
+        return .{ .source = source, .start = source.index };
+    }
+    pub fn advance(self: *TokenCursor) TokenProgress {
+        const next = self.source.peek() orelse
+            return .{ .complete = self.source.source[self.start..self.source.index] };
+        if (isTokenBoundary(next) or next == ';' or next == '|')
+            return .{ .complete = self.source.source[self.start..self.source.index] };
+        _ = self.source.bump();
+        return .pending;
     }
 };
 
 pub fn classify(token: []const u8) Classification {
-    return classifyPolling(token, .unlimited()) catch unreachable;
-}
-
-pub fn classifyPolling(token: []const u8, work: poll.WorkContext) poll.Error!Classification {
-    if (std.mem.eql(u8, token, "inf") or std.mem.eql(u8, token, "+inf")) {
-        return .{ .float = std.math.inf(f64) };
-    }
-    if (std.mem.eql(u8, token, "-inf")) return .{ .float = -std.math.inf(f64) };
-
-    var unsigned = token;
-    var negative = false;
-    if (unsigned.len > 1 and (unsigned[0] == '+' or unsigned[0] == '-')) {
-        negative = unsigned[0] == '-';
-        unsigned = unsigned[1..];
-    }
-
-    if (std.mem.startsWith(u8, unsigned, "0x")) {
-        const digits = unsigned[2..];
-        if (digits.len == 0 or !try allHexDigitsPolling(digits, work)) return .word;
-        const magnitude = (try parseMagnitudePolling(digits, 16, work)) orelse
-            return .{ .out_of_range = .integer };
-        if (negative) {
-            const min_magnitude = @as(u64, std.math.maxInt(i64)) + 1;
-            if (magnitude == min_magnitude) return .{ .int = std.math.minInt(i64) };
-            if (magnitude > std.math.maxInt(i64)) return .{ .out_of_range = .integer };
-            return .{ .int = -@as(i64, @intCast(magnitude)) };
-        }
-        if (magnitude > std.math.maxInt(i64)) return .{ .out_of_range = .integer };
-        return .{ .int = @intCast(magnitude) };
-    }
-
-    if (try validDecimalIntPolling(unsigned, work)) {
-        const magnitude = (try parseMagnitudeSkippingUnderscoresPolling(unsigned, 10, work)) orelse
-            return .{ .out_of_range = .integer };
-        if (negative) {
-            const min_magnitude = @as(u64, std.math.maxInt(i64)) + 1;
-            if (magnitude == min_magnitude) return .{ .int = std.math.minInt(i64) };
-            if (magnitude > std.math.maxInt(i64)) return .{ .out_of_range = .integer };
-            return .{ .int = -@as(i64, @intCast(magnitude)) };
-        }
-        if (magnitude > std.math.maxInt(i64)) return .{ .out_of_range = .integer };
-        return .{ .int = @intCast(magnitude) };
-    }
-
-    if (try validFloatPolling(unsigned, work)) {
-        const number = parseFloatPolling(token, work) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Ecl => return error.Ecl,
-            error.InvalidCharacter => return .{ .out_of_range = .float },
-        };
-        if (!std.math.isFinite(number)) return .{ .out_of_range = .float };
-        return .{ .float = number };
-    }
-    return .word;
+    var cursor = ClassifyCursor.init(token);
+    while (true) switch (cursor.advance()) {
+        .pending => {},
+        .complete => |classification| return classification,
+    };
 }
 
 pub fn validSymbol(token: []const u8) bool {
-    return validSymbolPolling(token, .unlimited()) catch unreachable;
+    var cursor = SymbolCursor.init(token);
+    while (true) switch (cursor.advance()) {
+        .pending => {},
+        .complete => |valid| return valid,
+    };
 }
 
-pub fn validSymbolPolling(token: []const u8, work: poll.WorkContext) poll.Error!bool {
-    if (token.len == 0 or token[0] == '\'' or token[0] == '\\') return false;
-    if (token[0] == '.' or token[token.len - 1] == '.') return false;
-    var previous_dot = false;
-    for (token) |byte| {
-        try work.step();
+pub const SymbolProgress = union(enum) { pending, complete: bool };
+pub const SymbolCursor = struct {
+    token: []const u8,
+    index: usize = 0,
+    previous_dot: bool = false,
+    pub fn init(token: []const u8) SymbolCursor {
+        return .{ .token = token };
+    }
+    pub fn advance(self: *SymbolCursor) SymbolProgress {
+        if (self.token.len == 0 or self.token[0] == '\'' or self.token[0] == '\\' or
+            self.token[0] == '.' or self.token[self.token.len - 1] == '.')
+            return .{ .complete = false };
+        if (self.index == self.token.len) return .{ .complete = true };
+        const byte = self.token[self.index];
+        self.index += 1;
         if (byte == '.') {
-            if (previous_dot) return false;
-            previous_dot = true;
-            continue;
+            if (self.previous_dot) return .{ .complete = false };
+            self.previous_dot = true;
+            return .pending;
         }
-        previous_dot = false;
-        if (byte < 0x80 and (std.ascii.isWhitespace(byte) or
-            byte == ',' or switch (byte) {
+        self.previous_dot = false;
+        if (byte < 0x80 and (std.ascii.isWhitespace(byte) or byte == ',' or switch (byte) {
             '(', ')', '[', ']', '{', '}', '"', '#', '\'', '\\', ';', '|' => true,
             else => false,
-        })) return false;
+        })) return .{ .complete = false };
+        return .pending;
     }
-    return true;
-}
+};
+
+pub const ClassifyProgress = union(enum) { pending, complete: Classification };
+pub const ClassifyCursor = struct {
+    token: []const u8,
+    unsigned: []const u8,
+    negative: bool,
+    index: usize = 0,
+    hex: bool,
+    decimal_valid: bool = true,
+    decimal_any: bool = false,
+    decimal_previous_digit: bool = false,
+    magnitude: u64 = 0,
+    magnitude_overflow: bool = false,
+    float_valid: bool = true,
+    dot_seen: bool = false,
+    exponent_seen: bool = false,
+    mantissa_before: usize = 0,
+    mantissa_after: usize = 0,
+    exponent_digits: usize = 0,
+    exponent_sign_seen: bool = false,
+    exponent_negative: bool = false,
+    explicit_exponent: i64 = 0,
+    significand: u64 = 0,
+    significand_digits: usize = 0,
+    significant_started: bool = false,
+    total_significant: usize = 0,
+    round_up: bool = false,
+
+    pub fn init(token: []const u8) ClassifyCursor {
+        var unsigned = token;
+        var negative = false;
+        if (unsigned.len > 1 and (unsigned[0] == '+' or unsigned[0] == '-')) {
+            negative = unsigned[0] == '-';
+            unsigned = unsigned[1..];
+        }
+        const hex = std.mem.startsWith(u8, unsigned, "0x");
+        return .{
+            .token = token,
+            .unsigned = if (hex) unsigned[2..] else unsigned,
+            .negative = negative,
+            .hex = hex,
+        };
+    }
+    fn finishInteger(self: *ClassifyCursor) Classification {
+        if (self.magnitude_overflow) return .{ .out_of_range = .integer };
+        if (self.negative) {
+            const min_magnitude = @as(u64, std.math.maxInt(i64)) + 1;
+            if (self.magnitude == min_magnitude) return .{ .int = std.math.minInt(i64) };
+            if (self.magnitude > std.math.maxInt(i64)) return .{ .out_of_range = .integer };
+            return .{ .int = -@as(i64, @intCast(self.magnitude)) };
+        }
+        if (self.magnitude > std.math.maxInt(i64)) return .{ .out_of_range = .integer };
+        return .{ .int = @intCast(self.magnitude) };
+    }
+    fn finishFloat(self: *ClassifyCursor) Classification {
+        if (!self.float_valid or self.mantissa_before == 0 or
+            (self.dot_seen and self.mantissa_after == 0) or
+            (self.exponent_seen and self.exponent_digits == 0) or
+            (!self.dot_seen and !self.exponent_seen)) return .word;
+        const omitted = self.total_significant - self.significand_digits;
+        var significand = self.significand;
+        if (self.round_up and significand != std.math.maxInt(u64)) significand += 1;
+        const fraction_digits: i64 = @intCast(self.mantissa_after);
+        const exponent = (if (self.exponent_negative) -self.explicit_exponent else self.explicit_exponent) -
+            fraction_digits + @as(i64, @intCast(omitted));
+        var number = @as(f64, @floatFromInt(significand)) * std.math.pow(f64, 10.0, @floatFromInt(exponent));
+        if (self.negative) number = -number;
+        return if (std.math.isFinite(number)) .{ .float = number } else .{ .out_of_range = .float };
+    }
+    pub fn advance(self: *ClassifyCursor) ClassifyProgress {
+        if (std.mem.eql(u8, self.token, "inf") or std.mem.eql(u8, self.token, "+inf"))
+            return .{ .complete = .{ .float = std.math.inf(f64) } };
+        if (std.mem.eql(u8, self.token, "-inf"))
+            return .{ .complete = .{ .float = -std.math.inf(f64) } };
+        if (self.index == self.unsigned.len) {
+            if (self.hex)
+                return .{ .complete = if (self.unsigned.len != 0 and self.decimal_valid)
+                    self.finishInteger()
+                else
+                    .word };
+            if (self.decimal_valid and self.decimal_any and self.decimal_previous_digit)
+                return .{ .complete = self.finishInteger() };
+            return .{ .complete = self.finishFloat() };
+        }
+        const byte = self.unsigned[self.index];
+        self.index += 1;
+        if (self.hex) {
+            const digit = std.fmt.charToDigit(byte, 16) catch {
+                self.decimal_valid = false;
+                return .pending;
+            };
+            self.magnitude = std.math.mul(u64, self.magnitude, 16) catch overflow: {
+                self.magnitude_overflow = true;
+                break :overflow self.magnitude;
+            };
+            if (!self.magnitude_overflow) self.magnitude = std.math.add(u64, self.magnitude, digit) catch overflow: {
+                self.magnitude_overflow = true;
+                break :overflow self.magnitude;
+            };
+            return .pending;
+        }
+        if (std.ascii.isDigit(byte)) {
+            self.decimal_any = true;
+            self.decimal_previous_digit = true;
+            if (!self.magnitude_overflow) {
+                self.magnitude = std.math.mul(u64, self.magnitude, 10) catch overflow: {
+                    self.magnitude_overflow = true;
+                    break :overflow self.magnitude;
+                };
+                if (!self.magnitude_overflow) self.magnitude = std.math.add(u64, self.magnitude, byte - '0') catch overflow: {
+                    self.magnitude_overflow = true;
+                    break :overflow self.magnitude;
+                };
+            }
+            if (self.exponent_seen) {
+                self.exponent_digits += 1;
+                self.explicit_exponent = @min(1_000_000, self.explicit_exponent * 10 + byte - '0');
+            } else {
+                if (self.dot_seen) self.mantissa_after += 1 else self.mantissa_before += 1;
+                if (byte != '0' or self.significant_started) {
+                    self.significant_started = true;
+                    self.total_significant += 1;
+                    if (self.significand_digits < 19) {
+                        self.significand = self.significand * 10 + byte - '0';
+                        self.significand_digits += 1;
+                    } else if (self.total_significant == 20 and byte >= '5') self.round_up = true;
+                }
+            }
+            return .pending;
+        }
+        if (byte == '_') {
+            if (!self.decimal_previous_digit) self.decimal_valid = false;
+            self.decimal_previous_digit = false;
+            self.float_valid = false;
+            return .pending;
+        }
+        self.decimal_valid = false;
+        if (!self.exponent_seen and byte == '.' and !self.dot_seen) {
+            self.dot_seen = true;
+            return .pending;
+        }
+        if (!self.exponent_seen and (byte == 'e' or byte == 'E')) {
+            self.exponent_seen = true;
+            return .pending;
+        }
+        if (self.exponent_seen and self.exponent_digits == 0 and !self.exponent_sign_seen and
+            (byte == '+' or byte == '-'))
+        {
+            self.exponent_sign_seen = true;
+            self.exponent_negative = byte == '-';
+            return .pending;
+        }
+        self.float_valid = false;
+        return .pending;
+    }
+};
 
 pub fn isTokenBoundary(codepoint: u21) bool {
     return isWhitespace(codepoint) or codepoint == ',' or switch (codepoint) {
@@ -257,181 +381,6 @@ pub fn isWhitespace(codepoint: u21) bool {
         => true,
         else => false,
     };
-}
-
-fn validDecimalIntPolling(token: []const u8, work: poll.WorkContext) poll.Error!bool {
-    var previous_digit = false;
-    var any = false;
-    for (token) |byte| {
-        try work.step();
-        if (std.ascii.isDigit(byte)) {
-            any = true;
-            previous_digit = true;
-        } else if (byte == '_' and previous_digit) {
-            previous_digit = false;
-        } else return false;
-    }
-    return any and previous_digit;
-}
-
-fn validFloatPolling(token: []const u8, work: poll.WorkContext) poll.Error!bool {
-    var exponent_index: ?usize = null;
-    for (token, 0..) |byte, index| {
-        try work.step();
-        if (byte == '_') return false;
-        if (byte != 'e' and byte != 'E') continue;
-        if (exponent_index != null) return false;
-        exponent_index = index;
-    }
-    const mantissa = token[0 .. exponent_index orelse token.len];
-    if (exponent_index) |index| {
-        var exponent = token[index + 1 ..];
-        if (exponent.len > 0 and (exponent[0] == '+' or exponent[0] == '-')) {
-            exponent = exponent[1..];
-        }
-        if (exponent.len == 0 or !try allDecimalDigitsPolling(exponent, work)) return false;
-    }
-    var dot: ?usize = null;
-    for (mantissa, 0..) |byte, index| {
-        try work.step();
-        if (byte != '.') continue;
-        if (dot != null) return false;
-        dot = index;
-    }
-    if (dot) |index| {
-        if (index == 0 or index + 1 == mantissa.len) return false;
-        if (!try allDecimalDigitsPolling(mantissa[0..index], work) or
-            !try allDecimalDigitsPolling(mantissa[index + 1 ..], work)) return false;
-    } else if (!try allDecimalDigitsPolling(mantissa, work)) return false;
-    return dot != null or exponent_index != null;
-}
-
-fn allDecimalDigitsPolling(bytes: []const u8, work: poll.WorkContext) poll.Error!bool {
-    if (bytes.len == 0) return false;
-    for (bytes) |byte| {
-        try work.step();
-        if (!std.ascii.isDigit(byte)) return false;
-    }
-    return true;
-}
-
-fn allHexDigitsPolling(bytes: []const u8, work: poll.WorkContext) poll.Error!bool {
-    for (bytes) |byte| {
-        try work.step();
-        if (!std.ascii.isHex(byte)) return false;
-    }
-    return true;
-}
-
-fn parseMagnitudePolling(bytes: []const u8, base: u8, work: poll.WorkContext) poll.Error!?u64 {
-    var result: u64 = 0;
-    for (bytes) |byte| {
-        try work.step();
-        const digit = std.fmt.charToDigit(byte, base) catch return null;
-        result = std.math.mul(u64, result, base) catch return null;
-        result = std.math.add(u64, result, digit) catch return null;
-    }
-    return result;
-}
-
-fn parseMagnitudeSkippingUnderscoresPolling(
-    bytes: []const u8,
-    base: u8,
-    work: poll.WorkContext,
-) poll.Error!?u64 {
-    var result: u64 = 0;
-    for (bytes) |byte| {
-        try work.step();
-        if (byte == '_') continue;
-        const digit = std.fmt.charToDigit(byte, base) catch return null;
-        result = std.math.mul(u64, result, base) catch return null;
-        result = std.math.add(u64, result, digit) catch return null;
-    }
-    return result;
-}
-
-fn parseFloatPolling(
-    token: []const u8,
-    work: poll.WorkContext,
-) (poll.Error || std.fmt.ParseFloatError)!f64 {
-    const bounded_scan = 4096;
-    if (token.len <= bounded_scan) return std.fmt.parseFloat(f64, token);
-
-    const negative = token[0] == '-';
-    const mantissa_start: usize = @intFromBool(token[0] == '-' or token[0] == '+');
-    var exponent_start = token.len;
-    for (token[mantissa_start..], mantissa_start..) |byte, index| {
-        try work.step();
-        if (byte == 'e' or byte == 'E') {
-            exponent_start = index;
-            break;
-        }
-    }
-    var explicit_exponent: i64 = 0;
-    if (exponent_start < token.len) {
-        var index = exponent_start + 1;
-        const exponent_negative = token[index] == '-';
-        if (token[index] == '-' or token[index] == '+') index += 1;
-        while (index < token.len) : (index += 1) {
-            try work.step();
-            explicit_exponent = @min(
-                1_000_000,
-                explicit_exponent * 10 + @as(i64, token[index] - '0'),
-            );
-        }
-        if (exponent_negative) explicit_exponent = -explicit_exponent;
-    }
-
-    const significant_limit = 1024;
-    var significant: [significant_limit + 1]u8 = undefined;
-    var significant_len: usize = 0;
-    var omitted_nonzero = false;
-    var digit_position: i64 = 0;
-    var digits_before_dot: i64 = 0;
-    var first_nonzero: ?i64 = null;
-    var saw_dot = false;
-    for (token[mantissa_start..exponent_start]) |byte| {
-        try work.step();
-        if (byte == '.') {
-            saw_dot = true;
-            digits_before_dot = digit_position;
-            continue;
-        }
-        if (byte != '0' and first_nonzero == null) first_nonzero = digit_position;
-        if (first_nonzero != null) {
-            if (significant_len < significant_limit) {
-                significant[significant_len] = byte;
-                significant_len += 1;
-            } else if (byte != '0') omitted_nonzero = true;
-        }
-        digit_position += 1;
-    }
-    if (!saw_dot) digits_before_dot = digit_position;
-    if (first_nonzero == null) return if (negative) -0.0 else 0.0;
-    if (omitted_nonzero) {
-        significant[significant_len] = '1';
-        significant_len += 1;
-    }
-    const exponent = std.math.clamp(
-        explicit_exponent + digits_before_dot - first_nonzero.? - 1,
-        -1_000_000,
-        1_000_000,
-    );
-    var normalized: [significant_limit + 40]u8 = undefined;
-    var output: usize = 0;
-    if (negative) {
-        normalized[output] = '-';
-        output += 1;
-    }
-    normalized[output] = significant[0];
-    output += 1;
-    normalized[output] = '.';
-    output += 1;
-    @memcpy(normalized[output..][0 .. significant_len - 1], significant[1..significant_len]);
-    output += significant_len - 1;
-    const suffix = std.fmt.bufPrint(normalized[output..], "e{d}", .{exponent}) catch unreachable;
-    output += suffix.len;
-    return std.fmt.parseFloat(f64, normalized[0..output]);
 }
 
 test "token classification matrix" {

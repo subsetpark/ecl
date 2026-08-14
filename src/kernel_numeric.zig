@@ -6,6 +6,8 @@ const list = @import("list.zig");
 const dict = @import("dict.zig");
 const equal = @import("equal.zig");
 const env = @import("env.zig");
+const machine = @import("machine.zig");
+const poll = @import("poll.zig");
 const support = @import("kernel_support.zig");
 const storage = @import("kernel_storage.zig");
 
@@ -20,11 +22,8 @@ const ScalarError = error{ Type, Overflow, Domain };
 const ScalarBinary = *const fn (Value, Value) ScalarError!Value;
 const ScalarUnary = *const fn (Value) ScalarError!Value;
 const binary_op_count = std.meta.fields(BinaryOp).len;
-const unary_op_count = std.meta.fields(UnaryOp).len;
 const heap_kind_count = std.meta.fields(HeapKind).len;
-const FaultMask = [support.fault_block / 64]u64;
 const BinaryMatrix = [binary_op_count][heap_kind_count][heap_kind_count]?ScalarBinary;
-const UnaryMatrix = [unary_op_count][heap_kind_count]?ScalarUnary;
 
 const binary_matrix: BinaryMatrix = blk: {
     @setEvalBranchQuota(10_000);
@@ -43,21 +42,6 @@ const binary_matrix: BinaryMatrix = blk: {
                     matrix[operation_field.value][left_field.value][right_field.value] =
                         selectScalar(operation);
                 }
-            }
-        }
-    }
-    break :blk matrix;
-};
-
-const unary_matrix: UnaryMatrix = blk: {
-    var matrix = std.mem.zeroes(UnaryMatrix);
-    for (std.meta.fields(UnaryOp)) |operation_field| {
-        const operation: UnaryOp = @enumFromInt(operation_field.value);
-        for (std.meta.fields(HeapKind)) |operand_field| {
-            const kind: HeapKind = @enumFromInt(operand_field.value);
-            const sample = leafSample(kind);
-            if (sample != null and supportsUnary(operation, sample.?)) {
-                matrix[operation_field.value][operand_field.value] = selectUnary(operation);
             }
         }
     }
@@ -118,668 +102,539 @@ fn binaryPrimitive(evaluator: *Machine, operation: BinaryOp) MachineError!void {
     var left_owned = true;
     defer if (left_owned) heap.releaseValue(evaluator.allocator(), left);
 
-    if (try tryInPlaceBinary(.{ .evaluator = evaluator }, operation, left, right)) |reused| {
-        switch (reused.source) {
-            .left => left_owned = false,
-            .right => right_owned = false,
-        }
-        return evaluator.pushOwned(reused.value);
-    }
-
-    var result = try pervadeBinary(.{ .evaluator = evaluator }, operation, left, right, 0, null);
-    var result_owned = true;
-    defer if (result_owned) heap.releaseValue(evaluator.allocator(), result);
-
-    if (adoption(left, result)) |pair| {
-        heap.adoptRepresentation(evaluator.allocator(), pair.destination, pair.source);
-        result = left;
-        left_owned = false;
-        result_owned = false;
-    } else if (adoption(right, result)) |pair| {
-        heap.adoptRepresentation(evaluator.allocator(), pair.destination, pair.source);
-        result = right;
-        right_owned = false;
-        result_owned = false;
-    }
-    result_owned = false;
-    try evaluator.pushOwned(result);
-}
-
-/// Test hook for proving the full pervasive kernel without constructing an
-/// env binding. Inputs are borrowed; the result is owned by the caller.
-pub fn binaryForTest(
-    evaluator: *Machine,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-) MachineError!Value {
-    return pervadeBinary(.{ .evaluator = evaluator }, operation, left, right, 0, null);
+    const driver = try evaluator.allocator().create(PervadeDriver);
+    errdefer evaluator.allocator().destroy(driver);
+    driver.* = .{
+        .left = left,
+        .right = right,
+        .cursor = try PervadeCursor.initBinary(evaluator.allocator(), operation, left, right),
+    };
+    left_owned = false;
+    right_owned = false;
+    evaluator.installWorkDriver(driver, PervadeDriver.advance, PervadeDriver.destroy);
 }
 
 fn unaryPrimitive(evaluator: *Machine, operation: UnaryOp) MachineError!void {
     const operand = try evaluator.popOwned();
     var operand_owned = true;
     defer if (operand_owned) heap.releaseValue(evaluator.allocator(), operand);
-    if (try tryInPlaceUnary(.{ .evaluator = evaluator }, operation, operand)) |result| {
-        operand_owned = false;
-        return evaluator.pushOwned(result);
-    }
-    var result = try pervadeUnary(.{ .evaluator = evaluator }, operation, operand, 0, null);
-    var result_owned = true;
-    defer if (result_owned) heap.releaseValue(evaluator.allocator(), result);
-    if (adoption(operand, result)) |pair| {
-        heap.adoptRepresentation(evaluator.allocator(), pair.destination, pair.source);
-        result = operand;
-        operand_owned = false;
-        result_owned = false;
-    }
-    result_owned = false;
-    try evaluator.pushOwned(result);
-}
-
-const ReuseSource = enum { left, right };
-const Reused = struct { value: Value, source: ReuseSource };
-
-fn tryInPlaceBinary(
-    context: support.Context,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-) MachineError!?Reused {
-    const left_flat = left == .list and isFlat(left.list);
-    const right_flat = right == .list and isFlat(right.list);
-    if (!left_flat and !right_flat) return null;
-    if (left == .list and !left_flat or right == .list and !right_flat) return null;
-    if (left == .dict or right == .dict) return null;
-    const count: usize = if (left_flat)
-        @intCast(left.list.length())
-    else
-        @intCast(right.list.length());
-    if (left_flat and right_flat and left.list.length() != right.list.length()) return null;
-    if (count == 0) return null;
-    const scalar = if (left_flat and right_flat)
-        selectLeafBinary(operation, left.list.kind(), right.list.kind()) orelse return null
-    else
-        selectScalar(operation);
-    const left_scalar = !left_flat;
-    const right_scalar = !right_flat;
-    const range = support.IndexRange.init(0, count);
-    const left_unique = if (left_flat) heap.claimUnique(left.list) else null;
-    const right_unique = if (right_flat) heap.claimUnique(right.list) else null;
-    var left_compatible = left_unique != null;
-    var right_compatible = right_unique != null;
-    if (!left_compatible and !right_compatible) return null;
-
-    for (range.start..range.end) |index| {
-        try context.poll();
-        const a = if (left_scalar) left else list.atUnchecked(left, index);
-        const b = if (right_scalar) right else list.atUnchecked(right, index);
-        const result = scalar(a, b) catch |fault| return scalarFailure(context, fault, index);
-        left_compatible = left_compatible and valueFitsKind(result, left.list.kind());
-        right_compatible = right_compatible and valueFitsKind(result, right.list.kind());
-    }
-    const source: ReuseSource = if (left_compatible)
-        .left
-    else if (right_compatible)
-        .right
-    else
-        return null;
-    const destination_unique = if (source == .left) left_unique.? else right_unique.?;
-    for (range.start..range.end) |index| {
-        try context.poll();
-        const a = if (left_scalar) left else list.atUnchecked(left, index);
-        const b = if (right_scalar) right else list.atUnchecked(right, index);
-        const result = scalar(a, b) catch |fault| return scalarFailure(context, fault, index);
-        writeValue(destination_unique, index, result);
-    }
-    return .{ .value = if (source == .left) left else right, .source = source };
-}
-
-fn tryInPlaceUnary(
-    context: support.Context,
-    operation: UnaryOp,
-    operand: Value,
-) MachineError!?Value {
-    if (operand != .list or !isFlat(operand.list) or operand.list.length() == 0) return null;
-    const unique = heap.claimUnique(operand.list) orelse return null;
-    const scalar = selectLeafUnary(operation, operand.list.kind()) orelse return null;
-    const count: usize = @intCast(operand.list.length());
-    const range = support.IndexRange.init(0, count);
-    for (range.start..range.end) |index| {
-        try context.poll();
-        const result = scalar(list.atUnchecked(operand, index)) catch |fault|
-            return scalarFailure(context, fault, index);
-        if (!valueFitsKind(result, operand.list.kind())) return null;
-    }
-    for (range.start..range.end) |index| {
-        try context.poll();
-        const result = scalar(list.atUnchecked(operand, index)) catch |fault|
-            return scalarFailure(context, fault, index);
-        writeValue(unique, index, result);
-    }
-    return operand;
-}
-
-fn valueFitsKind(item: Value, kind: HeapKind) bool {
-    return switch (kind) {
-        .leaf_i64 => item == .int,
-        .leaf_f64 => item == .float,
-        .leaf_char1 => item == .char and item.char <= std.math.maxInt(u8),
-        .leaf_char2 => item == .char and item.char <= std.math.maxInt(u16),
-        .leaf_char4 => item == .char,
-        .leaf_symbol => item == .symbol,
-        .generic_spine, .dict, .reserved_mask => false,
+    const driver = try evaluator.allocator().create(PervadeDriver);
+    errdefer evaluator.allocator().destroy(driver);
+    driver.* = .{
+        .left = operand,
+        .cursor = try PervadeCursor.initUnary(evaluator.allocator(), operation, operand),
     };
+    operand_owned = false;
+    evaluator.installWorkDriver(driver, PervadeDriver.advance, PervadeDriver.destroy);
 }
 
-fn writeValue(header: *heap.UniqueHeader, index: usize, item: Value) void {
-    std.debug.assert(valueFitsKind(item, heap.uniqueHeader(header).kind()));
-    heap.writeUnique(header, index, item);
-}
+const PervadeDriver = struct {
+    left: Value,
+    right: ?Value = null,
+    cursor: PervadeCursor,
 
-/// Test hook matching `binaryForTest` for unary pervasion.
-pub fn unaryForTest(
-    evaluator: *Machine,
-    operation: UnaryOp,
-    operand: Value,
-) MachineError!Value {
-    return pervadeUnary(.{ .evaluator = evaluator }, operation, operand, 0, null);
-}
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *PervadeDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        return switch (try self.cursor.advance(evaluator, machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .complete => |result| completed: {
+                errdefer heap.releaseValue(evaluator.allocator(), result);
+                try evaluator.pushOwned(result);
+                break :completed .completed;
+            },
+        };
+    }
 
-const Adoption = struct {
-    destination: *heap.UniqueHeader,
-    source: *heap.UniqueHeader,
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *PervadeDriver = @ptrCast(@alignCast(raw));
+        self.cursor.deinit();
+        heap.releaseValue(allocator, self.left);
+        if (self.right) |right| heap.releaseValue(allocator, right);
+        allocator.destroy(self);
+    }
 };
 
-fn adoption(candidate: Value, result: Value) ?Adoption {
-    const candidate_header = candidate.heapHeader() orelse return null;
-    const result_header = result.heapHeader() orelse return null;
-    if (candidate_header == result_header or candidate_header.kind() != result_header.kind()) return null;
-    return .{
-        .destination = heap.claimUnique(candidate_header) orelse return null,
-        .source = heap.claimUnique(result_header) orelse return null,
+pub const PervadeProgress = union(enum) { pending, complete: Value };
+
+pub const PervadeCursor = struct {
+    allocator: std.mem.Allocator,
+    frames: poll.ChunkStack(Frame),
+    last: ?Value = null,
+
+    const BinaryNode = struct {
+        operation: BinaryOp,
+        left: Value,
+        right: Value,
+        depth: usize,
+        logical_index: ?usize,
     };
-}
-
-pub fn pervadeBinary(
-    context: support.Context,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-    depth: usize,
-    logical_index: ?usize,
-) MachineError!Value {
-    if (depth >= support.max_depth and
-        (left == .list or left == .dict or right == .list or right == .dict))
-    {
-        return context.evaluator.fail(.domain, "pervasion nesting exceeds 256 levels");
-    }
-    // Dicts are the outer pervasive structure: preserve their keys and recurse
-    // through values even when the other operand is a list.
-    if (left == .dict and right == .dict) {
-        return dictBinary(context, operation, left, right, depth);
-    }
-    if (left == .dict) return dictScalarRight(context, operation, left, right, depth);
-    if (right == .dict) return scalarLeftDict(context, operation, left, right, depth);
-    if (left == .list and right == .list) {
-        const left_len: usize = @intCast(left.list.length());
-        const right_len: usize = @intCast(right.list.length());
-        if (left_len != right_len) return context.evaluator.conformError(left_len, right_len);
-        if (isFlat(left.list) and isFlat(right.list)) {
-            return flatBinary(context, operation, left, right, left_len);
-        }
-        return listBinary(context, operation, left, right, depth);
-    }
-    if (left == .list) {
-        if (isFlat(left.list) and isAtom(right)) {
-            return flatScalarRight(context, operation, left, right);
-        }
-        return listScalarRight(context, operation, left, right, depth);
-    }
-    if (right == .list) {
-        if (isAtom(left) and isFlat(right.list)) {
-            return scalarLeftFlat(context, operation, left, right);
-        }
-        return scalarLeftList(context, operation, left, right, depth);
-    }
-    return applyScalar(context, selectScalar(operation), left, right, logical_index);
-}
-
-pub fn pervadeUnary(
-    context: support.Context,
-    operation: UnaryOp,
-    operand: Value,
-    depth: usize,
-    logical_index: ?usize,
-) MachineError!Value {
-    if (depth >= support.max_depth and (operand == .list or operand == .dict)) {
-        return context.evaluator.fail(.domain, "pervasion nesting exceeds 256 levels");
-    }
-    if (operand == .list) {
-        if (isFlat(operand.list)) return flatUnary(context, operation, operand);
-        const count: usize = @intCast(operand.list.length());
-        const results = try context.allocator().alloc(Value, count);
-        defer context.allocator().free(results);
-        var initialized: usize = 0;
-        defer releaseValues(context.allocator(), results[0..initialized]);
-        for (0..count) |index| {
-            try context.poll();
-            results[index] = try pervadeUnary(
-                context,
-                operation,
-                list.atUnchecked(operand, index),
-                depth + 1,
-                index,
-            );
-            initialized += 1;
-        }
-        return storage.fromValues(context.allocator(), results, context.structuralPoller());
-    }
-    if (operand == .dict) {
-        const count: usize = @intCast(operand.dict.length());
-        const pairs = try context.allocator().alloc(dict.Pair, count);
-        defer context.allocator().free(pairs);
-        var initialized: usize = 0;
-        defer for (pairs[0..initialized]) |pair| heap.releaseValue(context.allocator(), pair[1]);
-        for (0..count) |index| {
-            try context.poll();
-            pairs[index] = .{
-                dict.keyAt(operand.dict, index),
-                try pervadeUnary(context, operation, dict.valueAt(operand.dict, index), depth + 1, index),
-            };
-            initialized += 1;
-        }
-        return storage.fromUniquePairs(
-            context.allocator(),
-            pairs,
-            context.structuralPoller(),
-        );
-    }
-    return applyUnary(context, selectUnary(operation), operand, logical_index);
-}
-
-fn flatBinary(
-    context: support.Context,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-    count: usize,
-) MachineError!Value {
-    if (count == 0) return storage.fromValues(context.allocator(), &.{}, context.structuralPoller());
-    const scalar = selectLeafBinary(operation, left.list.kind(), right.list.kind()) orelse
-        return scalarFailure(context, error.Type, 0);
-    return runFlatBinary(
-        context,
-        scalar,
-        left,
-        right,
-        support.IndexRange.init(0, count),
-        false,
-        false,
-    );
-}
-
-fn flatScalarRight(
-    context: support.Context,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-) MachineError!Value {
-    const count: usize = @intCast(left.list.length());
-    const scalar = selectScalar(operation);
-    if (count > 0 and !supports(operation, list.atUnchecked(left, 0), right)) {
-        return scalarFailure(context, error.Type, 0);
-    }
-    return runFlatBinary(
-        context,
-        scalar,
-        left,
-        right,
-        support.IndexRange.init(0, count),
-        false,
-        true,
-    );
-}
-
-fn scalarLeftFlat(
-    context: support.Context,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-) MachineError!Value {
-    const count: usize = @intCast(right.list.length());
-    const scalar = selectScalar(operation);
-    if (count > 0 and !supports(operation, left, list.atUnchecked(right, 0))) {
-        return scalarFailure(context, error.Type, 0);
-    }
-    return runFlatBinary(
-        context,
-        scalar,
-        left,
-        right,
-        support.IndexRange.init(0, count),
-        true,
-        false,
-    );
-}
-
-fn runFlatBinary(
-    context: support.Context,
-    scalar: ScalarBinary,
-    left: Value,
-    right: Value,
-    range: support.IndexRange,
-    left_scalar: bool,
-    right_scalar: bool,
-) MachineError!Value {
-    const results = try context.allocator().alloc(Value, range.len());
-    defer context.allocator().free(results);
-    var block_start = range.start;
-    while (block_start < range.end) {
-        const block_end = @min(block_start + support.fault_block, range.end);
-        try context.advance(block_end - block_start);
-        var scratch: [support.fault_block]Value = undefined;
-        var faults: FaultMask = @splat(0);
-        for (block_start..block_end) |index| {
-            const a = if (left_scalar) left else list.atUnchecked(left, index);
-            const b = if (right_scalar) right else list.atUnchecked(right, index);
-            scratch[index - block_start] = scalar(a, b) catch {
-                markFault(&faults, index - block_start);
-                continue;
-            };
-        }
-        if (hasFault(faults)) {
-            for (block_start..block_end) |index| {
-                const a = if (left_scalar) left else list.atUnchecked(left, index);
-                const b = if (right_scalar) right else list.atUnchecked(right, index);
-                _ = scalar(a, b) catch |fault| return scalarFailure(context, fault, index);
-            }
-            return context.evaluator.fail(.domain, "kernel fault mask changed during scalar rescan");
-        }
-        const output_start = block_start - range.start;
-        @memcpy(
-            results[output_start .. output_start + block_end - block_start],
-            scratch[0 .. block_end - block_start],
-        );
-        block_start = block_end;
-    }
-    return storage.fromValues(context.allocator(), results, context.structuralPoller());
-}
-
-fn flatUnary(context: support.Context, operation: UnaryOp, operand: Value) MachineError!Value {
-    const count: usize = @intCast(operand.list.length());
-    if (count == 0) return storage.fromValues(context.allocator(), &.{}, context.structuralPoller());
-    const scalar = selectLeafUnary(operation, operand.list.kind()) orelse
-        return scalarFailure(context, error.Type, 0);
-    const range = support.IndexRange.init(0, count);
-    const results = try context.allocator().alloc(Value, range.len());
-    defer context.allocator().free(results);
-    var block_start = range.start;
-    while (block_start < range.end) {
-        const block_end = @min(block_start + support.fault_block, range.end);
-        try context.advance(block_end - block_start);
-        var scratch: [support.fault_block]Value = undefined;
-        var faults: FaultMask = @splat(0);
-        for (block_start..block_end) |index| {
-            scratch[index - block_start] = scalar(list.atUnchecked(operand, index)) catch {
-                markFault(&faults, index - block_start);
-                continue;
-            };
-        }
-        if (hasFault(faults)) {
-            for (block_start..block_end) |index| {
-                _ = scalar(list.atUnchecked(operand, index)) catch |fault|
-                    return scalarFailure(context, fault, index);
-            }
-            return context.evaluator.fail(.domain, "kernel fault mask changed during scalar rescan");
-        }
-        const output_start = block_start - range.start;
-        @memcpy(
-            results[output_start .. output_start + block_end - block_start],
-            scratch[0 .. block_end - block_start],
-        );
-        block_start = block_end;
-    }
-    return storage.fromValues(context.allocator(), results, context.structuralPoller());
-}
-
-fn markFault(mask: *FaultMask, index: usize) void {
-    mask[index / 64] |= @as(u64, 1) << @intCast(index % 64);
-}
-
-fn hasFault(mask: FaultMask) bool {
-    for (mask) |word| if (word != 0) return true;
-    return false;
-}
-
-fn listBinary(
-    context: support.Context,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-    depth: usize,
-) MachineError!Value {
-    const count: usize = @intCast(left.list.length());
-    const results = try context.allocator().alloc(Value, count);
-    defer context.allocator().free(results);
-    var initialized: usize = 0;
-    defer releaseValues(context.allocator(), results[0..initialized]);
-    for (0..count) |index| {
-        try context.poll();
-        results[index] = try pervadeBinary(
-            context,
-            operation,
-            list.atUnchecked(left, index),
-            list.atUnchecked(right, index),
-            depth + 1,
-            index,
-        );
-        initialized += 1;
-    }
-    return storage.fromValues(context.allocator(), results, context.structuralPoller());
-}
-
-fn listScalarRight(
-    context: support.Context,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-    depth: usize,
-) MachineError!Value {
-    const count: usize = @intCast(left.list.length());
-    const results = try context.allocator().alloc(Value, count);
-    defer context.allocator().free(results);
-    var initialized: usize = 0;
-    defer releaseValues(context.allocator(), results[0..initialized]);
-    for (0..count) |index| {
-        try context.poll();
-        results[index] = try pervadeBinary(
-            context,
-            operation,
-            list.atUnchecked(left, index),
-            right,
-            depth + 1,
-            index,
-        );
-        initialized += 1;
-    }
-    return storage.fromValues(context.allocator(), results, context.structuralPoller());
-}
-
-fn scalarLeftList(
-    context: support.Context,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-    depth: usize,
-) MachineError!Value {
-    const count: usize = @intCast(right.list.length());
-    const results = try context.allocator().alloc(Value, count);
-    defer context.allocator().free(results);
-    var initialized: usize = 0;
-    defer releaseValues(context.allocator(), results[0..initialized]);
-    for (0..count) |index| {
-        try context.poll();
-        results[index] = try pervadeBinary(
-            context,
-            operation,
-            left,
-            list.atUnchecked(right, index),
-            depth + 1,
-            index,
-        );
-        initialized += 1;
-    }
-    return storage.fromValues(context.allocator(), results, context.structuralPoller());
-}
-
-fn dictBinary(
-    context: support.Context,
-    operation: BinaryOp,
-    left: Value,
-    right: Value,
-    depth: usize,
-) MachineError!Value {
-    const left_count: usize = @intCast(left.dict.length());
-    const right_count: usize = @intCast(right.dict.length());
-    const pairs = try context.allocator().alloc(dict.Pair, left_count + right_count);
-    defer context.allocator().free(pairs);
-    const owned = try context.allocator().alloc(bool, left_count + right_count);
-    defer context.allocator().free(owned);
-    for (owned) |*item_owned| {
-        try context.poll();
-        item_owned.* = false;
-    }
-    var count: usize = 0;
-    defer for (pairs[0..count], owned[0..count]) |pair, is_owned| {
-        if (is_owned) heap.releaseValue(context.allocator(), pair[1]);
+    const UnaryNode = struct {
+        operation: UnaryOp,
+        operand: Value,
+        depth: usize,
+        logical_index: ?usize,
     };
-    for (0..left_count) |index| {
-        try context.poll();
-        const key = dict.keyAt(left.dict, index);
-        const right_value = storage.get(
-            context.allocator(),
-            right,
-            key,
-            context.structuralPoller(),
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Ecl => return error.Ecl,
-            error.NotADict => unreachable,
-        };
-        pairs[count] = .{ key, if (right_value) |item|
-            try pervadeBinary(context, operation, dict.valueAt(left.dict, index), item, depth + 1, index)
+    const ListFrame = struct {
+        operation: union(enum) { binary: BinaryOp, unary: UnaryOp },
+        left: Value,
+        right: ?Value,
+        left_scalar: bool,
+        right_scalar: bool,
+        depth: usize,
+        values: []Value,
+        index: usize = 0,
+        waiting: bool = false,
+        materializer: ?storage.ValueMaterializer = null,
+        result: ?Value = null,
+        release_index: usize = 0,
+
+        fn deinit(self: *ListFrame, allocator: std.mem.Allocator) void {
+            if (self.materializer) |*materializer| materializer.deinit();
+            for (self.values[self.release_index..self.index]) |item| heap.releaseValue(allocator, item);
+            allocator.free(self.values);
+            if (self.result) |result| heap.releaseValue(allocator, result);
+        }
+    };
+    const DictMode = union(enum) {
+        unary: UnaryOp,
+        left: BinaryOp,
+        right: BinaryOp,
+        both: BinaryOp,
+    };
+    const DictFrame = struct {
+        mode: DictMode,
+        left: Value,
+        right: ?Value,
+        depth: usize,
+        pairs: []dict.Pair,
+        phase: enum { left, right, materialize, release } = .left,
+        index: usize = 0,
+        candidate: usize = 0,
+        pair_count: usize = 0,
+        waiting: bool = false,
+        match_cursor: ?equal.MatchCursor = null,
+        materializer: ?storage.DictMaterializer = null,
+        result: ?Value = null,
+        release_index: usize = 0,
+
+        fn deinit(self: *DictFrame, allocator: std.mem.Allocator) void {
+            if (self.match_cursor) |*cursor| cursor.deinit();
+            if (self.materializer) |*materializer| materializer.deinit();
+            for (self.pairs[self.release_index..self.pair_count]) |pair|
+                heap.releaseValue(allocator, pair[1]);
+            allocator.free(self.pairs);
+            if (self.result) |result| heap.releaseValue(allocator, result);
+        }
+    };
+    const Frame = union(enum) {
+        binary: BinaryNode,
+        unary: UnaryNode,
+        list: ListFrame,
+        dictionary: DictFrame,
+
+        fn deinit(self: *Frame, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .binary, .unary => {},
+                .list => |*frame| frame.deinit(allocator),
+                .dictionary => |*frame| frame.deinit(allocator),
+            }
+        }
+    };
+
+    pub fn initBinary(
+        allocator: std.mem.Allocator,
+        operation: BinaryOp,
+        left: Value,
+        right: Value,
+    ) error{OutOfMemory}!PervadeCursor {
+        var frames = poll.ChunkStack(Frame).init(allocator);
+        errdefer frames.deinit();
+        try frames.push(.{ .binary = .{
+            .operation = operation,
+            .left = left,
+            .right = right,
+            .depth = 0,
+            .logical_index = null,
+        } });
+        return .{ .allocator = allocator, .frames = frames };
+    }
+
+    pub fn initUnary(
+        allocator: std.mem.Allocator,
+        operation: UnaryOp,
+        operand: Value,
+    ) error{OutOfMemory}!PervadeCursor {
+        var frames = poll.ChunkStack(Frame).init(allocator);
+        errdefer frames.deinit();
+        try frames.push(.{ .unary = .{
+            .operation = operation,
+            .operand = operand,
+            .depth = 0,
+            .logical_index = null,
+        } });
+        return .{ .allocator = allocator, .frames = frames };
+    }
+
+    pub fn deinit(self: *PervadeCursor) void {
+        if (self.last) |last| heap.releaseValue(self.allocator, last);
+        while (self.frames.pop()) |frame_value| {
+            var frame = frame_value;
+            frame.deinit(self.allocator);
+        }
+        self.frames.deinit();
+        self.* = undefined;
+    }
+
+    pub fn advance(
+        self: *PervadeCursor,
+        evaluator: *Machine,
+        budget: usize,
+    ) MachineError!PervadeProgress {
+        std.debug.assert(budget != 0);
+        var remaining = budget;
+        while (remaining != 0) : (remaining -= 1) {
+            var frame = self.frames.pop() orelse {
+                const result = self.last.?;
+                self.last = null;
+                return .{ .complete = result };
+            };
+            switch (frame) {
+                .binary => |node| try self.startBinary(evaluator, node),
+                .unary => |node| try self.startUnary(evaluator, node),
+                .list => |*list_frame| {
+                    if (!try self.advanceList(evaluator, list_frame, remaining)) return .pending;
+                },
+                .dictionary => |*dict_frame| {
+                    if (!try self.advanceDict(evaluator, dict_frame, remaining)) return .pending;
+                },
+            }
+        }
+        return .pending;
+    }
+
+    fn startBinary(self: *PervadeCursor, evaluator: *Machine, node: BinaryNode) MachineError!void {
+        if (node.depth >= support.max_depth and
+            (node.left == .list or node.left == .dict or node.right == .list or node.right == .dict))
+            return evaluator.fail(.domain, "pervasion nesting exceeds 256 levels");
+        if (node.left == .dict or node.right == .dict) {
+            try self.pushDictBinary(node);
+            return;
+        }
+        if (node.left == .list or node.right == .list) {
+            const left_count: usize = if (node.left == .list) @intCast(node.left.list.length()) else 0;
+            const right_count: usize = if (node.right == .list) @intCast(node.right.list.length()) else 0;
+            if (node.left == .list and node.right == .list and left_count != right_count)
+                return evaluator.conformError(left_count, right_count);
+            const count = if (node.left == .list) left_count else right_count;
+            const values = try self.allocator.alloc(Value, count);
+            errdefer self.allocator.free(values);
+            try self.frames.push(.{ .list = .{
+                .operation = .{ .binary = node.operation },
+                .left = node.left,
+                .right = node.right,
+                .left_scalar = node.left != .list,
+                .right_scalar = node.right != .list,
+                .depth = node.depth,
+                .values = values,
+            } });
+            return;
+        }
+        self.last = selectScalar(node.operation)(node.left, node.right) catch |fault|
+            return scalarFailure(evaluator, fault, node.logical_index);
+    }
+
+    fn startUnary(self: *PervadeCursor, evaluator: *Machine, node: UnaryNode) MachineError!void {
+        if (node.depth >= support.max_depth and (node.operand == .list or node.operand == .dict))
+            return evaluator.fail(.domain, "pervasion nesting exceeds 256 levels");
+        if (node.operand == .dict) {
+            const count: usize = @intCast(node.operand.dict.length());
+            const pairs = try self.allocator.alloc(dict.Pair, count);
+            errdefer self.allocator.free(pairs);
+            try self.frames.push(.{ .dictionary = .{
+                .mode = .{ .unary = node.operation },
+                .left = node.operand,
+                .right = null,
+                .depth = node.depth,
+                .pairs = pairs,
+            } });
+            return;
+        }
+        if (node.operand == .list) {
+            const count: usize = @intCast(node.operand.list.length());
+            const values = try self.allocator.alloc(Value, count);
+            errdefer self.allocator.free(values);
+            try self.frames.push(.{ .list = .{
+                .operation = .{ .unary = node.operation },
+                .left = node.operand,
+                .right = null,
+                .left_scalar = false,
+                .right_scalar = false,
+                .depth = node.depth,
+                .values = values,
+            } });
+            return;
+        }
+        self.last = selectUnary(node.operation)(node.operand) catch |fault|
+            return scalarFailure(evaluator, fault, node.logical_index);
+    }
+
+    fn advanceList(
+        self: *PervadeCursor,
+        _: *Machine,
+        frame: *ListFrame,
+        budget: usize,
+    ) MachineError!bool {
+        errdefer frame.deinit(self.allocator);
+        if (frame.result) |result| {
+            if (frame.release_index != frame.index) {
+                heap.releaseValue(self.allocator, frame.values[frame.release_index]);
+                frame.release_index += 1;
+                try self.frames.reserve(1);
+                try self.frames.push(.{ .list = frame.* });
+                return true;
+            }
+            self.allocator.free(frame.values);
+            frame.result = null;
+            self.last = result;
+            return true;
+        }
+        if (frame.waiting) {
+            frame.values[frame.index] = self.last.?;
+            self.last = null;
+            frame.index += 1;
+            frame.waiting = false;
+        }
+        if (frame.index != frame.values.len) {
+            const index = frame.index;
+            frame.waiting = true;
+            try self.frames.reserve(2);
+            try self.frames.push(.{ .list = frame.* });
+            switch (frame.operation) {
+                .binary => |operation| try self.frames.push(.{ .binary = .{
+                    .operation = operation,
+                    .left = if (frame.left_scalar) frame.left else list.atUnchecked(frame.left, index),
+                    .right = if (frame.right_scalar) frame.right.? else list.atUnchecked(frame.right.?, index),
+                    .depth = frame.depth + 1,
+                    .logical_index = index,
+                } }),
+                .unary => |operation| try self.frames.push(.{ .unary = .{
+                    .operation = operation,
+                    .operand = list.atUnchecked(frame.left, index),
+                    .depth = frame.depth + 1,
+                    .logical_index = index,
+                } }),
+            }
+            return true;
+        }
+        if (frame.materializer == null)
+            frame.materializer = .init(self.allocator, frame.values);
+        try self.frames.reserve(1);
+        switch (try frame.materializer.?.advance(budget)) {
+            .pending => {
+                try self.frames.push(.{ .list = frame.* });
+                return false;
+            },
+            .complete => |result| {
+                frame.result = result;
+                try self.frames.push(.{ .list = frame.* });
+                return false;
+            },
+        }
+    }
+
+    fn pushDictBinary(self: *PervadeCursor, node: BinaryNode) error{OutOfMemory}!void {
+        const both = node.left == .dict and node.right == .dict;
+        const dictionary = if (node.left == .dict) node.left else node.right;
+        const capacity: usize = if (both)
+            @as(usize, @intCast(node.left.dict.length())) + @as(usize, @intCast(node.right.dict.length()))
         else
-            dict.valueAt(left.dict, index) };
-        owned[count] = right_value != null;
-        count += 1;
+            @intCast(dictionary.dict.length());
+        const pairs = try self.allocator.alloc(dict.Pair, capacity);
+        errdefer self.allocator.free(pairs);
+        try self.frames.push(.{ .dictionary = .{
+            .mode = if (both)
+                .{ .both = node.operation }
+            else if (node.left == .dict)
+                .{ .left = node.operation }
+            else
+                .{ .right = node.operation },
+            .left = node.left,
+            .right = node.right,
+            .depth = node.depth,
+            .pairs = pairs,
+        } });
     }
-    for (0..right_count) |index| {
-        try context.poll();
-        const key = dict.keyAt(right.dict, index);
-        const left_value = storage.get(
-            context.allocator(),
-            left,
-            key,
-            context.structuralPoller(),
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Ecl => return error.Ecl,
-            error.NotADict => unreachable,
-        };
-        if (left_value != null) continue;
-        pairs[count] = .{ key, dict.valueAt(right.dict, index) };
-        count += 1;
-    }
-    return storage.fromUniquePairs(
-        context.allocator(),
-        pairs[0..count],
-        context.structuralPoller(),
-    );
-}
 
-fn dictScalarRight(
-    context: support.Context,
-    operation: BinaryOp,
-    dictionary: Value,
-    right: Value,
-    depth: usize,
-) MachineError!Value {
-    return mapDict(context, dictionary, struct {
-        fn apply(ctx: support.Context, op: BinaryOp, item: Value, other: Value, d: usize, i: usize) MachineError!Value {
-            return pervadeBinary(ctx, op, item, other, d + 1, i);
+    fn advanceDict(
+        self: *PervadeCursor,
+        _: *Machine,
+        frame: *DictFrame,
+        budget: usize,
+    ) MachineError!bool {
+        errdefer frame.deinit(self.allocator);
+        if (frame.phase == .release) {
+            if (frame.release_index != frame.pair_count) {
+                heap.releaseValue(self.allocator, frame.pairs[frame.release_index][1]);
+                frame.release_index += 1;
+                try self.frames.reserve(1);
+                try self.frames.push(.{ .dictionary = frame.* });
+                return true;
+            }
+            self.allocator.free(frame.pairs);
+            const result = frame.result.?;
+            frame.result = null;
+            self.last = result;
+            return true;
         }
-    }.apply, operation, right, depth);
-}
-
-fn scalarLeftDict(
-    context: support.Context,
-    operation: BinaryOp,
-    left: Value,
-    dictionary: Value,
-    depth: usize,
-) MachineError!Value {
-    const count: usize = @intCast(dictionary.dict.length());
-    const pairs = try context.allocator().alloc(dict.Pair, count);
-    defer context.allocator().free(pairs);
-    var initialized: usize = 0;
-    defer for (pairs[0..initialized]) |pair| heap.releaseValue(context.allocator(), pair[1]);
-    for (0..count) |index| {
-        try context.poll();
-        pairs[index] = .{
-            dict.keyAt(dictionary.dict, index),
-            try pervadeBinary(
-                context,
-                operation,
-                left,
-                dict.valueAt(dictionary.dict, index),
-                depth + 1,
-                index,
-            ),
-        };
-        initialized += 1;
+        if (frame.waiting) {
+            frame.pairs[frame.pair_count][1] = self.last.?;
+            self.last = null;
+            frame.pair_count += 1;
+            frame.index += 1;
+            frame.candidate = 0;
+            frame.waiting = false;
+        }
+        if (frame.phase == .materialize) {
+            if (frame.materializer == null) frame.materializer = try .init(
+                self.allocator,
+                frame.pairs[0..frame.pair_count],
+                false,
+            );
+            try self.frames.reserve(1);
+            switch (try frame.materializer.?.advance(budget)) {
+                .pending => {
+                    try self.frames.push(.{ .dictionary = frame.* });
+                    return false;
+                },
+                .duplicate_key => unreachable,
+                .complete => |result| {
+                    frame.materializer.?.deinit();
+                    frame.materializer = null;
+                    frame.result = result;
+                    frame.phase = .release;
+                    try self.frames.push(.{ .dictionary = frame.* });
+                    return false;
+                },
+            }
+        }
+        switch (frame.mode) {
+            .unary, .left, .right => {
+                const dictionary = switch (frame.mode) {
+                    .unary, .left => frame.left,
+                    .right => frame.right.?,
+                    .both => unreachable,
+                };
+                const count: usize = @intCast(dictionary.dict.length());
+                if (frame.index == count) {
+                    frame.phase = .materialize;
+                    try self.frames.reserve(1);
+                    try self.frames.push(.{ .dictionary = frame.* });
+                    return true;
+                }
+                const index = frame.index;
+                frame.pairs[frame.pair_count][0] = dict.keyAt(dictionary.dict, index);
+                frame.waiting = true;
+                try self.frames.reserve(2);
+                try self.frames.push(.{ .dictionary = frame.* });
+                switch (frame.mode) {
+                    .unary => |operation| try self.frames.push(.{ .unary = .{
+                        .operation = operation,
+                        .operand = dict.valueAt(dictionary.dict, index),
+                        .depth = frame.depth + 1,
+                        .logical_index = index,
+                    } }),
+                    .left => |operation| try self.frames.push(.{ .binary = .{
+                        .operation = operation,
+                        .left = dict.valueAt(dictionary.dict, index),
+                        .right = frame.right.?,
+                        .depth = frame.depth + 1,
+                        .logical_index = index,
+                    } }),
+                    .right => |operation| try self.frames.push(.{ .binary = .{
+                        .operation = operation,
+                        .left = frame.left,
+                        .right = dict.valueAt(dictionary.dict, index),
+                        .depth = frame.depth + 1,
+                        .logical_index = index,
+                    } }),
+                    .both => unreachable,
+                }
+                return true;
+            },
+            .both => |operation| {
+                const left_count: usize = @intCast(frame.left.dict.length());
+                const right_count: usize = @intCast(frame.right.?.dict.length());
+                const source = if (frame.phase == .left) frame.left else frame.right.?;
+                const source_count = if (frame.phase == .left) left_count else right_count;
+                const other = if (frame.phase == .left) frame.right.? else frame.left;
+                const other_count = if (frame.phase == .left) right_count else left_count;
+                if (frame.index == source_count) {
+                    if (frame.phase == .left) {
+                        frame.phase = .right;
+                        frame.index = 0;
+                        frame.candidate = 0;
+                    } else frame.phase = .materialize;
+                    try self.frames.reserve(1);
+                    try self.frames.push(.{ .dictionary = frame.* });
+                    return true;
+                }
+                if (frame.candidate == other_count) {
+                    const key = dict.keyAt(source.dict, frame.index);
+                    const item = dict.valueAt(source.dict, frame.index);
+                    heap.retainValue(item);
+                    frame.pairs[frame.pair_count] = .{ key, item };
+                    frame.pair_count += 1;
+                    frame.index += 1;
+                    frame.candidate = 0;
+                    try self.frames.reserve(1);
+                    try self.frames.push(.{ .dictionary = frame.* });
+                    return true;
+                }
+                if (frame.match_cursor == null) frame.match_cursor = try .init(
+                    self.allocator,
+                    dict.keyAt(source.dict, frame.index),
+                    dict.keyAt(other.dict, frame.candidate),
+                );
+                try self.frames.reserve(2);
+                switch (try frame.match_cursor.?.advance(budget)) {
+                    .pending => {
+                        try self.frames.push(.{ .dictionary = frame.* });
+                        return false;
+                    },
+                    .complete => |matches| {
+                        frame.match_cursor.?.deinit();
+                        frame.match_cursor = null;
+                        if (!matches) {
+                            frame.candidate += 1;
+                            try self.frames.push(.{ .dictionary = frame.* });
+                            return false;
+                        }
+                        if (frame.phase == .right) {
+                            frame.index += 1;
+                            frame.candidate = 0;
+                            try self.frames.push(.{ .dictionary = frame.* });
+                            return false;
+                        }
+                        const index = frame.index;
+                        const candidate = frame.candidate;
+                        frame.pairs[frame.pair_count][0] = dict.keyAt(frame.left.dict, index);
+                        frame.waiting = true;
+                        try self.frames.push(.{ .dictionary = frame.* });
+                        try self.frames.push(.{ .binary = .{
+                            .operation = operation,
+                            .left = dict.valueAt(frame.left.dict, index),
+                            .right = dict.valueAt(frame.right.?.dict, candidate),
+                            .depth = frame.depth + 1,
+                            .logical_index = index,
+                        } });
+                        return false;
+                    },
+                }
+            },
+        }
     }
-    return storage.fromUniquePairs(
-        context.allocator(),
-        pairs,
-        context.structuralPoller(),
-    );
-}
-
-fn mapDict(
-    context: support.Context,
-    dictionary: Value,
-    comptime apply: anytype,
-    operation: BinaryOp,
-    other: Value,
-    depth: usize,
-) MachineError!Value {
-    const count: usize = @intCast(dictionary.dict.length());
-    const pairs = try context.allocator().alloc(dict.Pair, count);
-    defer context.allocator().free(pairs);
-    var initialized: usize = 0;
-    defer for (pairs[0..initialized]) |pair| heap.releaseValue(context.allocator(), pair[1]);
-    for (0..count) |index| {
-        try context.poll();
-        pairs[index] = .{
-            dict.keyAt(dictionary.dict, index),
-            try apply(
-                context,
-                operation,
-                dict.valueAt(dictionary.dict, index),
-                other,
-                depth,
-                index,
-            ),
-        };
-        initialized += 1;
-    }
-    return storage.fromUniquePairs(
-        context.allocator(),
-        pairs,
-        context.structuralPoller(),
-    );
-}
+};
 
 fn selectLeafBinary(operation: BinaryOp, left: HeapKind, right: HeapKind) ?ScalarBinary {
     return binary_matrix[@intFromEnum(operation)][@intFromEnum(left)][@intFromEnum(right)];
@@ -787,10 +642,6 @@ fn selectLeafBinary(operation: BinaryOp, left: HeapKind, right: HeapKind) ?Scala
 
 pub fn matrixEntryForTest(operation: BinaryOp, left: HeapKind, right: HeapKind) bool {
     return selectLeafBinary(operation, left, right) != null;
-}
-
-fn selectLeafUnary(operation: UnaryOp, operand: HeapKind) ?ScalarUnary {
-    return unary_matrix[@intFromEnum(operation)][@intFromEnum(operand)];
 }
 
 fn selectScalar(operation: BinaryOp) ScalarBinary {
@@ -813,26 +664,7 @@ fn selectUnary(operation: UnaryOp) ScalarUnary {
     };
 }
 
-fn applyScalar(
-    context: support.Context,
-    scalar: ScalarBinary,
-    left: Value,
-    right: Value,
-    index: ?usize,
-) MachineError!Value {
-    return scalar(left, right) catch |fault| scalarFailure(context, fault, index);
-}
-
-fn applyUnary(
-    context: support.Context,
-    scalar: ScalarUnary,
-    operand: Value,
-    index: ?usize,
-) MachineError!Value {
-    return scalar(operand) catch |fault| scalarFailure(context, fault, index);
-}
-
-fn scalarFailure(context: support.Context, fault: ScalarError, index: ?usize) MachineError {
+fn scalarFailure(evaluator: *Machine, fault: ScalarError, index: ?usize) MachineError {
     const kind: @import("machine.zig").ErrorKind = switch (fault) {
         error.Type => .type,
         error.Overflow => .overflow,
@@ -843,8 +675,8 @@ fn scalarFailure(context: support.Context, fault: ScalarError, index: ?usize) Ma
         error.Overflow => "kernel arithmetic overflow",
         error.Domain => "kernel arithmetic is outside its domain",
     };
-    if (index) |logical_index| return context.failAt(kind, message, logical_index);
-    return context.evaluator.fail(kind, message);
+    if (index) |logical_index| return evaluator.failAtIndex(kind, message, logical_index);
+    return evaluator.fail(kind, message);
 }
 
 fn scalarBinary(comptime operation: BinaryOp, left: Value, right: Value) ScalarError!Value {
@@ -869,7 +701,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
         .neg => switch (operand) {
             .int => |integer| .{ .int = std.math.sub(i64, 0, integer) catch return error.Overflow },
             .float => |number| try checkedFloat(-number, !std.math.isFinite(number)),
-            .char, .symbol, .word, .list, .dict => error.Type,
+            .char, .symbol, .word, .list, .dict, .task => error.Type,
         },
         .abs => switch (operand) {
             .int => |integer| if (integer == std.math.minInt(i64))
@@ -877,7 +709,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
             else
                 .{ .int = if (integer < 0) -integer else integer },
             .float => |number| try checkedFloat(@abs(number), !std.math.isFinite(number)),
-            .char, .symbol, .word, .list, .dict => error.Type,
+            .char, .symbol, .word, .list, .dict, .task => error.Type,
         },
         .sqrt => switch (operand) {
             .int => |integer| if (integer < 0)
@@ -888,7 +720,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
                 error.Domain
             else
                 try checkedFloat(@sqrt(number), !std.math.isFinite(number)),
-            .char, .symbol, .word, .list, .dict => error.Type,
+            .char, .symbol, .word, .list, .dict, .task => error.Type,
         },
         .floor, .ceil, .round => switch (operand) {
             .int => operand,
@@ -898,7 +730,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
                 .round => @round(number),
                 else => unreachable,
             }),
-            .char, .symbol, .word, .list, .dict => error.Type,
+            .char, .symbol, .word, .list, .dict, .task => error.Type,
         },
         .exp, .log, .sin, .cos => transcendental(operation, operand),
     };
@@ -1048,7 +880,7 @@ fn asFloat(operand: Value) f64 {
     return switch (operand) {
         .int => |integer| @floatFromInt(integer),
         .float => |number| number,
-        .char, .symbol, .word, .list, .dict => unreachable,
+        .char, .symbol, .word, .list, .dict, .task => unreachable,
     };
 }
 
@@ -1064,39 +896,21 @@ fn supports(operation: BinaryOp, left: Value, right: Value) bool {
     };
 }
 
-fn supportsUnary(operation: UnaryOp, operand: Value) bool {
-    return switch (operation) {
-        .neg, .abs, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => operand.isNumber(),
-        .not_word => operand == .int,
-    };
-}
-
 fn leafSample(kind: HeapKind) ?Value {
     return switch (kind) {
         .leaf_i64 => .{ .int = 0 },
         .leaf_f64 => .{ .float = 0.0 },
         .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = 0 },
         .leaf_symbol => .{ .symbol = 0 },
-        .generic_spine, .dict, .reserved_mask => null,
-    };
-}
-
-fn isFlat(header: *value.Header) bool {
-    return switch (header.kind()) {
-        .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .generic_spine, .dict, .reserved_mask => false,
+        .generic_spine, .dict, .task, .reserved_mask => null,
     };
 }
 
 fn isAtom(item: Value) bool {
     return switch (item) {
         .int, .float, .char, .symbol, .word => true,
-        .list, .dict => false,
+        .list, .dict, .task => false,
     };
-}
-
-fn releaseValues(allocator: std.mem.Allocator, values: []const Value) void {
-    for (values) |item| heap.releaseValue(allocator, item);
 }
 
 test "numeric dispatch matrix rejects symbols explicitly" {
@@ -1116,66 +930,4 @@ test "numeric scalar semantics include exact mixed comparison and chars" {
         (try scalarBinary(.add, .{ .char = 'a' }, .{ .int = 1 })).char,
     );
     try std.testing.expectError(error.Domain, scalarBinary(.div, .{ .int = 1 }, .{ .int = 0 }));
-}
-
-test "numeric in-place preflight leaves a unique faulting leaf untouched" {
-    const allocator = std.testing.allocator;
-    var environment = env.Env.init(allocator);
-    defer environment.deinit();
-    var archive = @import("spans.zig").SpanArchive.init(allocator);
-    defer archive.deinit();
-    const cancelled = std.atomic.Value(bool).init(false);
-    var unit = @import("machine.zig").Unit.init(
-        allocator,
-        .empty,
-        &environment,
-        &archive,
-        null,
-        .{ .int = 0 },
-        &cancelled,
-    );
-    defer unit.deinit();
-    var evaluator = Machine{ .unit = &unit, .current = null };
-    const input = try list.fromI64Slice(allocator, &.{ 1, 2 });
-    defer heap.releaseValue(allocator, input);
-
-    try std.testing.expectError(error.Ecl, tryInPlaceBinary(
-        .{ .evaluator = &evaluator },
-        .add,
-        .{ .int = std.math.maxInt(i64) - 1 },
-        input,
-    ));
-    try std.testing.expectEqual(@as(i64, 1), list.atUnchecked(input, 0).int);
-    try std.testing.expectEqual(@as(i64, 2), list.atUnchecked(input, 1).int);
-}
-
-test "numeric in-place reuse deterministically prefers the left leaf" {
-    const allocator = std.testing.allocator;
-    var environment = env.Env.init(allocator);
-    defer environment.deinit();
-    var archive = @import("spans.zig").SpanArchive.init(allocator);
-    defer archive.deinit();
-    const cancelled = std.atomic.Value(bool).init(false);
-    var unit = @import("machine.zig").Unit.init(
-        allocator,
-        .empty,
-        &environment,
-        &archive,
-        null,
-        .{ .int = 0 },
-        &cancelled,
-    );
-    defer unit.deinit();
-    var evaluator = Machine{ .unit = &unit, .current = null };
-    const left = try list.fromI64Slice(allocator, &.{ 1, 2 });
-    defer heap.releaseValue(allocator, left);
-    const right = try list.fromI64Slice(allocator, &.{ 10, 20 });
-    defer heap.releaseValue(allocator, right);
-
-    const reused = (try tryInPlaceBinary(.{ .evaluator = &evaluator }, .add, left, right)).?;
-    try std.testing.expectEqual(ReuseSource.left, reused.source);
-    try std.testing.expectEqual(left.list, reused.value.list);
-    try std.testing.expectEqual(@as(i64, 11), list.atUnchecked(left, 0).int);
-    try std.testing.expectEqual(@as(i64, 22), list.atUnchecked(left, 1).int);
-    try std.testing.expectEqual(@as(i64, 10), list.atUnchecked(right, 0).int);
 }

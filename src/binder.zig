@@ -23,7 +23,360 @@ pub const SpannedValue = struct {
 };
 
 pub const Error = error{ OutOfMemory, Parse };
-const FormList = poll.ChunkList(SpannedValue);
+const LocalMap = poll.U32Map(usize);
+const WalkFrame = struct {
+    item: Value,
+    next_child: ?usize = null,
+};
+
+pub const LowerProgress = union(enum) {
+    pending,
+    complete: []SpannedValue,
+};
+
+/// Resumable binder validation and lowering. One call performs at most one
+/// token byte, hash-table probe, nested-list edge, or output operation.
+pub const LowerCursor = struct {
+    allocator: std.mem.Allocator,
+    names: []const Name,
+    body: []const SpannedValue,
+    binder_span: Span,
+    diag: *Diag,
+    locals_init: LocalMap.InitCursor,
+    locals: ?LocalMap = null,
+    local_indices: []?usize,
+    walk: poll.ChunkStack(WalkFrame),
+    phase: enum { locals_init, names, body, words, size, empty, output, complete } = .locals_init,
+    name_index: usize = 0,
+    body_index: usize = 0,
+    byte_index: usize = 0,
+    classifier: ?lexer.ClassifyCursor = null,
+    symbol: ?lexer.SymbolCursor = null,
+    inserter: ?intern.InternInsertionCursor = null,
+    putter: ?LocalMap.PutCursor = null,
+    lookup: ?LocalMap.RawLookupCursor = null,
+    lookup_kind: enum { top, nested } = .top,
+    nested_active: bool = false,
+    words: [6]u32 = .{0} ** 6,
+    word_index: usize = 0,
+    output_count: usize = 2,
+    output: ?[]SpannedValue = null,
+    output_index: usize = 0,
+    emit_body_index: usize = 0,
+    emit_step: usize = 0,
+    empty_materializer: ?storage.I64Materializer = null,
+    wrapper_source: [1]Value = .{.{ .int = 0 }},
+    wrapper_materializer: ?storage.ValueMaterializer = null,
+
+    const storage = @import("kernel_storage.zig");
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        names: []const Name,
+        body: []const SpannedValue,
+        binder_span: Span,
+        diag: *Diag,
+    ) error{OutOfMemory}!LowerCursor {
+        return .{
+            .allocator = allocator,
+            .names = names,
+            .body = body,
+            .binder_span = binder_span,
+            .diag = diag,
+            .locals_init = LocalMap.initCursor(allocator, names.len),
+            .local_indices = try allocator.alloc(?usize, body.len),
+            .walk = .init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *LowerCursor) void {
+        self.locals_init.deinit();
+        if (self.locals) |*locals| locals.deinit();
+        if (self.empty_materializer) |*materializer| materializer.deinit();
+        if (self.wrapper_materializer) |*materializer| materializer.deinit();
+        if (self.output) |output| {
+            for (output[0..self.output_index]) |form| heap.releaseValue(self.allocator, form.value);
+            self.allocator.free(output);
+        }
+        self.allocator.free(self.local_indices);
+        self.walk.deinit();
+        self.* = undefined;
+    }
+
+    fn failName(self: *LowerCursor, name: Name) error{Parse} {
+        self.diag.setFmt(name.span, "invalid binder name `{s}`", .{name.bytes});
+        return error.Parse;
+    }
+
+    fn resetName(self: *LowerCursor) void {
+        self.classifier = null;
+        self.symbol = null;
+        self.inserter = null;
+        self.putter = null;
+        self.byte_index = 0;
+        self.name_index += 1;
+    }
+
+    fn advanceName(self: *LowerCursor) (error{ OutOfMemory, Parse })!LowerProgress {
+        if (self.name_index == self.names.len) {
+            self.phase = .body;
+            return .pending;
+        }
+        const name = self.names[self.name_index];
+        if (self.classifier == null) self.classifier = .init(name.bytes);
+        if (self.symbol == null) return switch (self.classifier.?.advance()) {
+            .pending => .pending,
+            .complete => |classification| result: {
+                if (classification != .word) return self.failName(name);
+                self.symbol = .init(name.bytes);
+                break :result .pending;
+            },
+        };
+        if (self.byte_index == 0) return switch (self.symbol.?.advance()) {
+            .pending => .pending,
+            .complete => |valid| result: {
+                if (!valid or intern.isReservedBytes(name.bytes)) return self.failName(name);
+                self.byte_index = 1;
+                break :result .pending;
+            },
+        };
+        if (self.byte_index <= name.bytes.len + 1) {
+            const index = self.byte_index - 1;
+            self.byte_index += 1;
+            if (index != name.bytes.len) {
+                if (name.bytes[index] == '.') return self.failName(name);
+                return .pending;
+            }
+            self.inserter = intern.insertionCursor(name.bytes);
+            return .pending;
+        }
+        if (self.putter == null) return switch (try self.inserter.?.advance()) {
+            .pending => .pending,
+            .complete => |id| result: {
+                self.putter = self.locals.?.putCursor(id, self.name_index);
+                break :result .pending;
+            },
+        };
+        return switch (self.putter.?.advance()) {
+            .pending => .pending,
+            .complete => |inserted| result: {
+                if (!inserted) {
+                    self.diag.setFmt(name.span, "duplicate binder name `{s}`", .{name.bytes});
+                    return error.Parse;
+                }
+                self.resetName();
+                break :result .pending;
+            },
+        };
+    }
+
+    fn advanceBody(self: *LowerCursor) (error{ OutOfMemory, Parse })!LowerProgress {
+        if (self.lookup) |*lookup| return switch (lookup.advance()) {
+            .pending => .pending,
+            .complete => |found| result: {
+                const kind = self.lookup_kind;
+                const matched_id = if (kind == .nested and found != null)
+                    self.walk.topPtr().?.item.word
+                else
+                    0;
+                self.lookup = null;
+                if (kind == .top) {
+                    self.local_indices[self.body_index] = found;
+                    self.body_index += 1;
+                } else {
+                    _ = self.walk.pop().?;
+                    if (found != null) {
+                        self.diag.setFmt(
+                            self.body[self.body_index].span,
+                            "local `{s}` crosses a quotation boundary; capture it explicitly with `literal` and `compose`",
+                            .{intern.get(matched_id)},
+                        );
+                        return error.Parse;
+                    }
+                }
+                break :result .pending;
+            },
+        };
+        if (!self.walk.isEmpty()) {
+            const frame = self.walk.topPtr().?;
+            return switch (frame.item) {
+                .word => |id| result: {
+                    self.lookup_kind = .nested;
+                    self.lookup = self.locals.?.rawLookup(id);
+                    break :result .pending;
+                },
+                .list => result: {
+                    if (frame.next_child == null) {
+                        frame.next_child = @intCast(frame.item.list.length());
+                        break :result .pending;
+                    }
+                    if (frame.next_child.? == 0) {
+                        _ = self.walk.pop().?;
+                        break :result .pending;
+                    }
+                    frame.next_child.? -= 1;
+                    try self.walk.push(.{ .item = list.atUnchecked(frame.item, frame.next_child.?) });
+                    break :result .pending;
+                },
+                .int, .float, .char, .symbol, .dict, .task => result: {
+                    _ = self.walk.pop().?;
+                    break :result .pending;
+                },
+            };
+        }
+        if (self.nested_active) {
+            self.nested_active = false;
+            self.body_index += 1;
+            return .pending;
+        }
+        if (self.body_index == self.body.len) {
+            self.body_index = 0;
+            self.phase = .words;
+            return .pending;
+        }
+        return switch (self.body[self.body_index].value) {
+            .word => |id| result: {
+                self.lookup_kind = .top;
+                self.lookup = self.locals.?.rawLookup(id);
+                break :result .pending;
+            },
+            .list => |header| result: {
+                self.local_indices[self.body_index] = null;
+                try self.walk.push(.{ .item = .{ .list = header } });
+                self.nested_active = true;
+                break :result .pending;
+            },
+            .int, .float, .char, .symbol, .dict, .task => result: {
+                self.local_indices[self.body_index] = null;
+                self.body_index += 1;
+                break :result .pending;
+            },
+        };
+    }
+
+    fn append(self: *LowerCursor, form: SpannedValue) void {
+        self.output.?[self.output_index] = form;
+        self.output_index += 1;
+    }
+
+    fn atom(self: *LowerCursor, item: Value) void {
+        self.append(.{ .value = item, .span = self.binder_span });
+    }
+
+    fn advanceOutput(self: *LowerCursor) (error{OutOfMemory})!LowerProgress {
+        if (self.emit_body_index == self.body.len) {
+            self.atom(.{ .word = self.words[5] });
+            const output = self.output.?;
+            self.output = null;
+            self.phase = .complete;
+            return .{ .complete = output };
+        }
+        if (self.local_indices[self.emit_body_index]) |index| {
+            switch (self.emit_step) {
+                0 => self.atom(.{ .word = self.words[1] }),
+                1 => self.atom(.{ .int = @intCast(index) }),
+                2 => self.atom(.{ .word = self.words[2] }),
+                3 => self.atom(.{ .word = self.words[3] }),
+                else => unreachable,
+            }
+            self.emit_step += 1;
+            if (self.emit_step == 4) {
+                self.emit_step = 0;
+                self.emit_body_index += 1;
+            }
+            return .pending;
+        }
+        if (self.emit_step == 0) {
+            self.wrapper_source[0] = self.body[self.emit_body_index].value;
+            self.wrapper_materializer = .init(self.allocator, &self.wrapper_source);
+            self.emit_step = 1;
+            return .pending;
+        }
+        if (self.emit_step == 1) return switch (try self.wrapper_materializer.?.advance(1)) {
+            .pending => .pending,
+            .complete => |wrapper| result: {
+                self.wrapper_materializer.?.deinit();
+                self.wrapper_materializer = null;
+                self.append(.{ .value = wrapper, .span = self.binder_span });
+                self.emit_step = 2;
+                break :result .pending;
+            },
+        };
+        self.atom(.{ .word = self.words[4] });
+        self.emit_step = 0;
+        self.emit_body_index += 1;
+        return .pending;
+    }
+
+    pub fn advance(self: *LowerCursor) (error{ OutOfMemory, Parse })!LowerProgress {
+        return switch (self.phase) {
+            .locals_init => switch (try self.locals_init.advance()) {
+                .pending => .pending,
+                .complete => |locals| result: {
+                    self.locals = locals;
+                    if (self.names.len == 0) {
+                        self.diag.set(self.binder_span, "a binder must contain at least one name");
+                        return error.Parse;
+                    }
+                    self.phase = .names;
+                    break :result .pending;
+                },
+            },
+            .names => try self.advanceName(),
+            .body => try self.advanceBody(),
+            .words => result: {
+                const names = [_][]const u8{ "cons", "dup", "at", "swap", "dip", "pop" };
+                if (self.inserter == null) self.inserter = intern.insertionCursor(names[self.word_index]);
+                switch (try self.inserter.?.advance()) {
+                    .pending => {},
+                    .complete => |id| {
+                        self.words[self.word_index] = id;
+                        self.word_index += 1;
+                        self.inserter = null;
+                        if (self.word_index == names.len) self.phase = .size;
+                    },
+                }
+                break :result .pending;
+            },
+            .size => result: {
+                if (self.body_index != self.body.len) {
+                    const additional: usize = if (self.local_indices[self.body_index] != null) 4 else 2;
+                    self.output_count = std.math.add(usize, self.output_count, additional) catch
+                        return error.OutOfMemory;
+                    self.body_index += 1;
+                    break :result .pending;
+                }
+                self.output_count = std.math.add(usize, self.output_count, self.names.len) catch
+                    return error.OutOfMemory;
+                self.output = try self.allocator.alloc(SpannedValue, self.output_count);
+                self.empty_materializer = .init(self.allocator, &.{});
+                self.phase = .empty;
+                break :result .pending;
+            },
+            .empty => switch (try self.empty_materializer.?.advance(1)) {
+                .pending => .pending,
+                .complete => |empty| result: {
+                    self.empty_materializer.?.deinit();
+                    self.empty_materializer = null;
+                    self.append(.{ .value = empty, .span = self.binder_span });
+                    if (self.name_index != self.names.len) unreachable;
+                    self.name_index = 0;
+                    self.phase = .output;
+                    break :result .pending;
+                },
+            },
+            .output => result: {
+                if (self.name_index != self.names.len) {
+                    self.atom(.{ .word = self.words[0] });
+                    self.name_index += 1;
+                    break :result .pending;
+                }
+                break :result try self.advanceOutput();
+            },
+            .complete => unreachable,
+        };
+    }
+};
 
 /// Borrows `body` and returns a newly-owned slice whose heap values each own
 /// one reference. The caller frees the slice and releases those values.
@@ -34,159 +387,12 @@ pub fn lower(
     binder_span: Span,
     diag: *Diag,
 ) Error![]SpannedValue {
-    return lowerPolling(allocator, names, body, binder_span, diag, .unlimited()) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.Parse => error.Parse,
-        error.Ecl => unreachable,
+    var cursor = try LowerCursor.init(allocator, names, body, binder_span, diag);
+    defer cursor.deinit();
+    while (true) switch (try cursor.advance()) {
+        .pending => {},
+        .complete => |forms| return forms,
     };
-}
-
-pub fn lowerPolling(
-    allocator: std.mem.Allocator,
-    names: []const Name,
-    body: []const SpannedValue,
-    binder_span: Span,
-    diag: *Diag,
-    work: poll.WorkContext,
-) (Error || error{Ecl})![]SpannedValue {
-    if (names.len == 0) {
-        diag.set(binder_span, "a binder must contain at least one name");
-        return error.Parse;
-    }
-
-    var locals = try poll.U32Index.init(allocator, names.len, work);
-    defer locals.deinit();
-    for (names, 0..) |name, index| {
-        try work.step();
-        const classification = try lexer.classifyPolling(name.bytes, work);
-        const valid_class = classification == .word;
-        var qualified = false;
-        for (name.bytes) |byte| {
-            try work.step();
-            if (byte == '.') qualified = true;
-        }
-        if (!valid_class or !try lexer.validSymbolPolling(name.bytes, work) or
-            intern.isReservedBytes(name.bytes) or qualified)
-        {
-            diag.setFmt(name.span, "invalid binder name `{s}`", .{name.bytes});
-            return error.Parse;
-        }
-        const name_id = try intern.internPolling(name.bytes, work.asPoller());
-        if (!try locals.put(name_id, index, work)) {
-            diag.setFmt(name.span, "duplicate binder name `{s}`", .{name.bytes});
-            return error.Parse;
-        }
-    }
-
-    for (body) |form| {
-        try work.step();
-        switch (form.value) {
-            .list => if (try nestedLocalReference(allocator, form.value, &locals, work)) |id| {
-                diag.setFmt(
-                    form.span,
-                    "local `{s}` crosses a quotation boundary; capture it explicitly with `literal` and `compose`",
-                    .{intern.get(id)},
-                );
-                return error.Parse;
-            },
-            .int, .float, .char, .symbol, .word, .dict => {},
-        }
-    }
-
-    const words = struct {
-        cons: u32,
-        dup: u32,
-        at: u32,
-        swap: u32,
-        dip: u32,
-        pop: u32,
-    }{
-        .cons = try intern.intern("cons"),
-        .dup = try intern.intern("dup"),
-        .at = try intern.intern("at"),
-        .swap = try intern.intern("swap"),
-        .dip = try intern.intern("dip"),
-        .pop = try intern.intern("pop"),
-    };
-
-    var output = FormList.init(allocator);
-    defer output.deinit();
-    errdefer {
-        var iterator = output.iterator();
-        while (iterator.next()) |form| heap.releaseValue(allocator, form.value);
-    }
-
-    // The lowering's locals accumulator is the canonical empty vector `[]`,
-    // not the ordinary empty quotation `()`.
-    const empty = try list.fromI64Slice(allocator, &.{});
-    try appendOwned(allocator, &output, .{ .value = empty, .span = binder_span });
-    for (names) |_| {
-        try work.step();
-        try appendAtom(&output, .{ .word = words.cons }, binder_span);
-    }
-
-    for (body) |form| {
-        try work.step();
-        if (form.value == .word) {
-            if (try locals.get(form.value.word, work)) |index| {
-                try appendAtom(&output, .{ .word = words.dup }, binder_span);
-                try appendAtom(&output, .{ .int = @intCast(index) }, binder_span);
-                try appendAtom(&output, .{ .word = words.at }, binder_span);
-                try appendAtom(&output, .{ .word = words.swap }, binder_span);
-                continue;
-            }
-        }
-        const wrapper = try list.fromValues(allocator, &.{form.value});
-        try appendOwned(allocator, &output, .{ .value = wrapper, .span = binder_span });
-        try appendAtom(&output, .{ .word = words.dip }, binder_span);
-    }
-    try appendAtom(&output, .{ .word = words.pop }, binder_span);
-    return output.toOwnedSlice(work);
-}
-
-fn appendOwned(
-    allocator: std.mem.Allocator,
-    output: *FormList,
-    form: SpannedValue,
-) error{OutOfMemory}!void {
-    output.append(form) catch |err| {
-        heap.releaseValue(allocator, form.value);
-        return err;
-    };
-}
-
-fn appendAtom(
-    output: *FormList,
-    item: Value,
-    span: Span,
-) error{OutOfMemory}!void {
-    try output.append(.{ .value = item, .span = span });
-}
-
-fn nestedLocalReference(
-    allocator: std.mem.Allocator,
-    root: Value,
-    locals: *const poll.U32Index,
-    work_context: poll.WorkContext,
-) (error{OutOfMemory} || error{Ecl})!?u32 {
-    var work = poll.ChunkStack(Value).init(allocator);
-    defer work.deinit();
-    try work.push(root);
-    while (work.pop()) |current| switch (current) {
-        .word => |id| {
-            if (try locals.get(id, work_context) != null) return id;
-        },
-        .list => |header| {
-            var index: usize = @intCast(header.length());
-            while (index > 0) {
-                try work_context.step();
-                index -= 1;
-                try work.push(list.atUnchecked(current, index));
-            }
-        },
-        .int, .float, .char, .symbol, .dict => {},
-    };
-    return null;
 }
 
 fn releaseForms(allocator: std.mem.Allocator, forms: []const SpannedValue) void {

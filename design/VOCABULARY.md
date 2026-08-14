@@ -88,8 +88,8 @@ is an idiom-recognition site (d.23).
 | [P] | `alias`  | `( 'short 'name -- )` | short registry name |
 | [P] | `load`   | `( path -- )` | replay file as one unit — d.18, grammar |
 | [P] | `parse`  | `( string -- q )` | the reader, reified: source text → list; `"42" parse first` is string→number |
-| [P] | `type`   | `( x -- s )` | value kind as a symbol: `'int 'float 'char 'symbol 'word 'list 'dict` — dict-dispatch with `case`; the closed d.22 atom set |
-| [P] | `str`    | `( x -- string )` | printed representation (round-trips, d.16) |
+| [P] | `type`   | `( x -- s )` | value kind as a symbol: `'int 'float 'char 'symbol 'word 'list 'dict 'task` — dict-dispatch with `case`; the closed d.22 atom set |
+| [P] | `str`    | `( x -- string )` | printed representation (round-trips except Session-linked task capabilities, d.16/d.20) |
 
 Definition annotations are ordinary quotations: `(a -- b)`,
 `(: "Documentation.")`, or `(a -- b : "Documentation.")`. Top-level effects
@@ -236,11 +236,11 @@ pushes its elements.)
 |---|---|---|---|
 | [P] | `spawn`     | `( q -- task )` | isolated, concurrent |
 | [P] | `await`     | `( task -- outcome )` | idempotent |
-| [P] | `await-for` | `( task ms -- outcome )` | `'timeout` on deadline |
-| [P] | `await-any` | `( l -- i outcome )` | first completion; index + outcome |
+| [P] | `await-for` | `( task ms -- outcome )` | nonnegative integer milliseconds; timeout does not cancel the task |
+| [P] | `await-any` | `( l -- i outcome )` | nonempty all-task list; lowest already-done index, otherwise first completion |
 | [P] | `cancel`    | `( task -- )` | no-op if done |
-| [P] | `tasks`     | `( -- l )` | pending tasks in scope |
-| [E] | `par-each`  | `( l q -- l' )` | spawn per element, await in order, re-raise leftmost `'err` |
+| [P] | `tasks`     | `( -- l )` | pending descendants in deterministic spawn preorder |
+| [E] | `par-each`  | `( l q -- l' )` | one task per element; ordered results; indexed one-result contract; re-raise leftmost `'err` after sibling quiescence |
 
 ## IO
 
@@ -255,7 +255,7 @@ pushes its elements.)
 | [E] | `lines` | `( path -- l )` | `slurp "\n" split` |
 | [P] | `args`  | `( -- l )` | CLI arguments, list of strings |
 | [P] | `getenv` | `( name -- s )` | environment variable; unset errors (absence is absence, d.22) — `attempt`/`or-else` for defaults |
-| [P] | `exit`  | `( n -- )` | terminate process |
+| [P] | `exit`  | `( n -- )` | root-only outside `attempt`; quiesce descendants, then terminate process |
 
 ## Derived showcase (prelude, in ecl)
 

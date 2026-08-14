@@ -6,6 +6,7 @@ const list = @import("list.zig");
 const dict = @import("dict.zig");
 const equal = @import("equal.zig");
 const env = @import("env.zig");
+const machine = @import("machine.zig");
 const support = @import("kernel_support.zig");
 const storage = @import("kernel_storage.zig");
 
@@ -23,49 +24,41 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 fn cmpPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     const right = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), right);
+    var right_owned = true;
+    defer if (right_owned) heap.releaseValue(evaluator.allocator(), right);
     const left = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), left);
-    const ordering = compareValues(evaluator, left, right) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.NotComparable => return evaluator.typeError("two comparable numbers, chars, or strings"),
-    };
-    try evaluator.pushOwned(.{ .int = switch (ordering) {
-        .lt => -1,
-        .eq => 0,
-        .gt => 1,
-    } });
+    var left_owned = true;
+    defer if (left_owned) heap.releaseValue(evaluator.allocator(), left);
+    const driver = try evaluator.allocator().create(CompareDriver);
+    driver.* = .{ .left = left, .right = right, .cursor = .init(left, right) };
+    left_owned = false;
+    right_owned = false;
+    evaluator.installWorkDriver(driver, CompareDriver.advance, CompareDriver.destroy);
 }
 
 fn gradePrimitive(evaluator: *Machine) MachineError!void {
+    return startGrade(evaluator, false);
+}
+
+fn startGrade(evaluator: *Machine, sorted_values: bool) MachineError!void {
     const collection = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), collection);
+    var collection_owned = true;
+    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a comparable list");
     const count: usize = @intCast(collection.list.length());
-    try validateComparable(evaluator, collection);
     const indices = try evaluator.allocator().alloc(usize, count);
-    defer evaluator.allocator().free(indices);
-    for (indices, 0..) |*index, position| {
-        try evaluator.advanceKernel(1);
-        index.* = position;
-    }
-    switch (try chooseGradePathForRuntime(evaluator, collection)) {
-        .comparison => try comparisonGrade(evaluator, collection, indices),
-        .bucket => try bucketGrade(evaluator, collection, indices),
-        .radix => try radixGrade(evaluator, collection, indices),
-    }
-    const result = try evaluator.allocator().alloc(i64, count);
-    defer evaluator.allocator().free(result);
-    for (indices, 0..) |index, position| {
-        try evaluator.advanceKernel(1);
-        result[position] = @intCast(index);
-    }
-    try evaluator.pushOwned(try storage.fromI64Slice(
-        evaluator.allocator(),
-        result,
-        (support.Context{ .evaluator = evaluator }).structuralPoller(),
-    ));
+    errdefer evaluator.allocator().free(indices);
+    const scratch = try evaluator.allocator().alloc(usize, count);
+    errdefer evaluator.allocator().free(scratch);
+    const driver = try evaluator.allocator().create(GradeDriver);
+    driver.* = .{
+        .collection = collection,
+        .sorted_values = sorted_values,
+        .indices = indices,
+        .scratch = scratch,
+    };
+    collection_owned = false;
+    evaluator.installWorkDriver(driver, GradeDriver.advance, GradeDriver.destroy);
 }
 
 pub fn gradePrimitiveForIdiom() env.PrimitiveImpl {
@@ -73,301 +66,256 @@ pub fn gradePrimitiveForIdiom() env.PrimitiveImpl {
 }
 
 pub fn sortForIdiom(evaluator: *Machine) MachineError!void {
-    try evaluator.require(1);
-    try evaluator.pushBorrowed(evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1]);
-    try gradePrimitive(evaluator);
-    try @import("kernel_sequence.zig").atForIdiom(evaluator);
+    try startGrade(evaluator, true);
 }
 
-pub const GradePath = enum { comparison, bucket, radix };
-const comparison_cutoff: usize = 32;
+const CompareProgress = union(enum) { pending, complete: std.math.Order, not_comparable };
+const CompareCursor = struct {
+    left: Value,
+    right: Value,
+    index: usize = 0,
 
-fn chooseGradePath(collection: Value) GradePath {
-    const count: usize = @intCast(collection.list.length());
-    if (count <= comparison_cutoff) return .comparison;
-    return switch (collection.list.kind()) {
-        .leaf_i64, .leaf_char1, .leaf_char2, .leaf_char4 => if (smallRange(collection))
-            .bucket
-        else
-            .radix,
-        .leaf_f64 => .radix,
-        .generic_spine, .leaf_symbol, .dict, .reserved_mask => .comparison,
-    };
-}
+    fn init(left: Value, right: Value) CompareCursor {
+        return .{ .left = left, .right = right };
+    }
 
-pub fn gradePathForTest(collection: Value) GradePath {
-    return chooseGradePath(collection);
-}
-
-fn chooseGradePathForRuntime(evaluator: *Machine, collection: Value) MachineError!GradePath {
-    const count: usize = @intCast(collection.list.length());
-    if (count <= comparison_cutoff) return .comparison;
-    return switch (collection.list.kind()) {
-        .leaf_i64, .leaf_char1, .leaf_char2, .leaf_char4 => if (try smallRangePolling(
-            evaluator,
-            collection,
-        ))
-            .bucket
-        else
-            .radix,
-        .leaf_f64 => .radix,
-        .generic_spine, .leaf_symbol, .dict, .reserved_mask => .comparison,
-    };
-}
-
-fn comparisonGrade(evaluator: *Machine, collection: Value, indices: []usize) MachineError!void {
-    if (indices.len < 2) return;
-    const scratch = try evaluator.allocator().alloc(usize, indices.len);
-    defer evaluator.allocator().free(scratch);
-    var source = indices;
-    var destination = scratch;
-    var source_is_result = true;
-    var width: usize = 1;
-    while (width < indices.len) {
-        var start: usize = 0;
-        while (start < indices.len) {
-            const middle = start + @min(width, indices.len - start);
-            const end = middle + @min(width, indices.len - middle);
-            var left = start;
-            var right = middle;
-            var output = start;
-            while (left < middle or right < end) : (output += 1) {
-                try evaluator.advanceKernel(1);
-                var choose_left = right == end;
-                if (!choose_left and left < middle) {
-                    const ordering = compareValues(
-                        evaluator,
-                        list.atUnchecked(collection, source[left]),
-                        list.atUnchecked(collection, source[right]),
-                    ) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        error.Ecl => return error.Ecl,
-                        error.NotComparable => unreachable,
-                    };
-                    choose_left = ordering == .lt or
-                        (ordering == .eq and source[left] < source[right]);
-                }
-                if (choose_left) {
-                    destination[output] = source[left];
-                    left += 1;
-                } else {
-                    destination[output] = source[right];
-                    right += 1;
-                }
+    fn advance(self: *CompareCursor, budget: usize) CompareProgress {
+        if (self.left.isString() and self.right.isString()) {
+            const left_count: usize = @intCast(self.left.list.length());
+            const right_count: usize = @intCast(self.right.list.length());
+            const shared = @min(left_count, right_count);
+            const end = @min(self.index + budget, shared);
+            while (self.index != end) : (self.index += 1) {
+                const left_char = list.atUnchecked(self.left, self.index).char;
+                const right_char = list.atUnchecked(self.right, self.index).char;
+                if (left_char < right_char) return .{ .complete = .lt };
+                if (left_char > right_char) return .{ .complete = .gt };
             }
-            start = end;
-        }
-        const old_source = source;
-        source = destination;
-        destination = old_source;
-        source_is_result = !source_is_result;
-        width = if (width > indices.len / 2) indices.len else width * 2;
-    }
-    if (!source_is_result) try copyIndices(evaluator, indices, source);
-}
-
-fn smallRange(collection: Value) bool {
-    const count: usize = @intCast(collection.list.length());
-    if (count == 0) return false;
-    var minimum = integralKey(collection, 0);
-    var maximum = minimum;
-    for (1..count) |index| {
-        const key = integralKey(collection, index);
-        minimum = @min(minimum, key);
-        maximum = @max(maximum, key);
-    }
-    const span: u128 = @intCast(maximum - minimum);
-    const adaptive = @max(@as(u128, 256), @as(u128, count) * 4);
-    return span + 1 <= adaptive and span < 1_000_000;
-}
-
-fn smallRangePolling(evaluator: *Machine, collection: Value) MachineError!bool {
-    const count: usize = @intCast(collection.list.length());
-    if (count == 0) return false;
-    try evaluator.advanceKernel(1);
-    var minimum = integralKey(collection, 0);
-    var maximum = minimum;
-    for (1..count) |index| {
-        try evaluator.advanceKernel(1);
-        const key = integralKey(collection, index);
-        minimum = @min(minimum, key);
-        maximum = @max(maximum, key);
-    }
-    const span: u128 = @intCast(maximum - minimum);
-    const adaptive = @max(@as(u128, 256), @as(u128, count) * 4);
-    return span + 1 <= adaptive and span < 1_000_000;
-}
-
-fn bucketGrade(evaluator: *Machine, collection: Value, indices: []usize) MachineError!void {
-    if (indices.len == 0) return;
-    try evaluator.advanceKernel(1);
-    var minimum = integralKey(collection, 0);
-    var maximum = minimum;
-    for (1..indices.len) |index| {
-        try evaluator.advanceKernel(1);
-        const key = integralKey(collection, index);
-        minimum = @min(minimum, key);
-        maximum = @max(maximum, key);
-    }
-    const bucket_count: usize = @intCast(maximum - minimum + 1);
-    const counts = try evaluator.allocator().alloc(usize, bucket_count);
-    defer evaluator.allocator().free(counts);
-    for (counts) |*count| {
-        try evaluator.advanceKernel(1);
-        count.* = 0;
-    }
-    for (0..indices.len) |index| {
-        try evaluator.advanceKernel(1);
-        const bucket: usize = @intCast(integralKey(collection, index) - minimum);
-        counts[bucket] += 1;
-    }
-    var total: usize = 0;
-    for (counts) |*count| {
-        try evaluator.advanceKernel(1);
-        const frequency = count.*;
-        count.* = total;
-        total += frequency;
-    }
-    const output = try evaluator.allocator().alloc(usize, indices.len);
-    defer evaluator.allocator().free(output);
-    for (0..indices.len) |index| {
-        try evaluator.advanceKernel(1);
-        const bucket: usize = @intCast(integralKey(collection, index) - minimum);
-        output[counts[bucket]] = index;
-        counts[bucket] += 1;
-    }
-    try copyIndices(evaluator, indices, output);
-}
-
-fn radixGrade(evaluator: *Machine, collection: Value, indices: []usize) MachineError!void {
-    if (indices.len < 2) return;
-    const scratch = try evaluator.allocator().alloc(usize, indices.len);
-    defer evaluator.allocator().free(scratch);
-    var source = indices;
-    var destination = scratch;
-    var swapped = false;
-    for (0..8) |byte_index| {
-        var counts = [_]usize{0} ** 256;
-        var only_bucket: ?u8 = null;
-        var varied = false;
-        for (source) |index| {
-            try evaluator.advanceKernel(1);
-            const bucket: u8 = @truncate(sortableKey(collection, index) >> @intCast(byte_index * 8));
-            counts[bucket] += 1;
-            if (only_bucket) |known| {
-                varied = varied or known != bucket;
-            } else {
-                only_bucket = bucket;
-            }
-        }
-        if (!varied) continue;
-        var total: usize = 0;
-        for (&counts) |*count| {
-            try evaluator.advanceKernel(1);
-            const frequency = count.*;
-            count.* = total;
-            total += frequency;
-        }
-        for (source) |index| {
-            try evaluator.advanceKernel(1);
-            const bucket: u8 = @truncate(sortableKey(collection, index) >> @intCast(byte_index * 8));
-            destination[counts[bucket]] = index;
-            counts[bucket] += 1;
-        }
-        const old_source = source;
-        source = destination;
-        destination = old_source;
-        swapped = !swapped;
-    }
-    if (swapped) try copyIndices(evaluator, indices, source);
-}
-
-fn copyIndices(evaluator: *Machine, destination: []usize, source: []const usize) MachineError!void {
-    std.debug.assert(destination.len == source.len);
-    for (source, destination) |index, *output| {
-        try evaluator.advanceKernel(1);
-        output.* = index;
-    }
-}
-
-fn integralKey(collection: Value, index: usize) i128 {
-    const item = list.atUnchecked(collection, index);
-    return switch (item) {
-        .int => |integer| integer,
-        .char => |codepoint| codepoint,
-        .float, .symbol, .word, .list, .dict => unreachable,
-    };
-}
-
-fn sortableKey(collection: Value, index: usize) u64 {
-    const item = list.atUnchecked(collection, index);
-    return switch (item) {
-        .int => |integer| @as(u64, @bitCast(integer)) ^ (@as(u64, 1) << 63),
-        .char => |codepoint| codepoint,
-        .float => |number| blk: {
-            const normalized = if (number == 0.0) 0.0 else number;
-            const bits: u64 = @bitCast(normalized);
-            break :blk if (bits & (@as(u64, 1) << 63) != 0)
-                ~bits
+            if (self.index != shared) return .pending;
+            return .{ .complete = if (left_count < right_count)
+                .lt
+            else if (left_count > right_count)
+                .gt
             else
-                bits ^ (@as(u64, 1) << 63);
-        },
-        .symbol, .word, .list, .dict => unreachable,
-    };
-}
+                .eq };
+        }
+        if (self.left.isString() or self.right.isString()) return .not_comparable;
+        return .{ .complete = equal.compareScalars(self.left, self.right) catch
+            return .not_comparable };
+    }
+};
 
-fn validateComparable(evaluator: *Machine, collection: Value) MachineError!void {
-    const count: usize = @intCast(collection.list.length());
-    if (count == 0) return;
-    const first = list.atUnchecked(collection, 0);
-    try evaluator.advanceKernel(1);
-    _ = compareValues(evaluator, first, first) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.NotComparable => return evaluator.failAtIndex(
-            .type,
-            "grade expected mutually comparable numbers, chars, or strings",
-            0,
-        ),
-    };
-    for (1..count) |index| {
-        try evaluator.advanceKernel(1);
-        _ = compareValues(evaluator, first, list.atUnchecked(collection, index)) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Ecl => return error.Ecl,
-            error.NotComparable => return evaluator.failAtIndex(
-                .type,
-                "grade expected mutually comparable numbers, chars, or strings",
-                index,
-            ),
+const CompareDriver = struct {
+    left: Value,
+    right: Value,
+    cursor: CompareCursor,
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *CompareDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        return switch (self.cursor.advance(machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .not_comparable => evaluator.typeError("two comparable numbers, chars, or strings"),
+            .complete => |ordering| completed: {
+                try evaluator.pushOwned(.{ .int = switch (ordering) {
+                    .lt => -1,
+                    .eq => 0,
+                    .gt => 1,
+                } });
+                break :completed .completed;
+            },
         };
     }
-}
-
-const CompareError = error{ OutOfMemory, Ecl, NotComparable };
-
-fn compareValues(evaluator: *Machine, left: Value, right: Value) CompareError!std.math.Order {
-    if (left.isString() and right.isString()) {
-        const left_count: usize = @intCast(left.list.length());
-        const right_count: usize = @intCast(right.list.length());
-        const shared = @min(left_count, right_count);
-        for (0..shared) |index| {
-            try evaluator.advanceKernel(1);
-            const left_char = list.atUnchecked(left, index).char;
-            const right_char = list.atUnchecked(right, index).char;
-            if (left_char < right_char) return .lt;
-            if (left_char > right_char) return .gt;
-        }
-        return if (left_count < right_count)
-            .lt
-        else if (left_count > right_count)
-            .gt
-        else
-            .eq;
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *CompareDriver = @ptrCast(@alignCast(raw));
+        heap.releaseValue(allocator, self.left);
+        heap.releaseValue(allocator, self.right);
+        allocator.destroy(self);
     }
-    if (left.isString() or right.isString()) return error.NotComparable;
-    return equal.compareScalars(left, right) catch error.NotComparable;
-}
+};
+
+const GradeDriver = struct {
+    collection: Value,
+    sorted_values: bool,
+    indices: []usize,
+    scratch: []usize,
+    phase: enum { validate, initialize, merge, copy, prepare, materialize } = .validate,
+    index: usize = 0,
+    comparator: ?CompareCursor = null,
+    width: usize = 1,
+    start: usize = 0,
+    middle: usize = 0,
+    end: usize = 0,
+    left: usize = 0,
+    right: usize = 0,
+    output: usize = 0,
+    run_ready: bool = false,
+    source_scratch: bool = false,
+    integers: ?[]i64 = null,
+    values: ?[]Value = null,
+    i64_materializer: ?storage.I64Materializer = null,
+    value_materializer: ?storage.ValueMaterializer = null,
+
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *GradeDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) switch (self.phase) {
+            .validate => {
+                if (self.indices.len == 0 or self.index == self.indices.len) {
+                    self.phase = .initialize;
+                    self.index = 0;
+                    continue;
+                }
+                if (self.comparator == null) self.comparator = .init(
+                    list.atUnchecked(self.collection, 0),
+                    list.atUnchecked(self.collection, self.index),
+                );
+                switch (self.comparator.?.advance(1)) {
+                    .pending => return .yielded,
+                    .not_comparable => return evaluator.failAtIndex(
+                        .type,
+                        "grade expected mutually comparable numbers, chars, or strings",
+                        self.index,
+                    ),
+                    .complete => {
+                        self.comparator = null;
+                        self.index += 1;
+                        budget -= 1;
+                    },
+                }
+            },
+            .initialize => {
+                const end = @min(self.index + budget, self.indices.len);
+                const initialized = end - self.index;
+                while (self.index != end) : (self.index += 1) self.indices[self.index] = self.index;
+                budget -= initialized;
+                if (self.index == self.indices.len) {
+                    self.phase = .merge;
+                    self.index = 0;
+                }
+            },
+            .merge => {
+                if (self.width >= self.indices.len) {
+                    self.phase = if (self.source_scratch) .copy else .prepare;
+                    self.index = 0;
+                    continue;
+                }
+                if (!self.run_ready) {
+                    if (self.start == self.indices.len) {
+                        self.source_scratch = !self.source_scratch;
+                        self.start = 0;
+                        self.width = if (self.width > self.indices.len / 2)
+                            self.indices.len
+                        else
+                            self.width * 2;
+                        continue;
+                    }
+                    self.middle = self.start + @min(self.width, self.indices.len - self.start);
+                    self.end = self.middle + @min(self.width, self.indices.len - self.middle);
+                    self.left = self.start;
+                    self.right = self.middle;
+                    self.output = self.start;
+                    self.run_ready = true;
+                }
+                if (self.output == self.end) {
+                    self.start = self.end;
+                    self.run_ready = false;
+                    continue;
+                }
+                const source = if (self.source_scratch) self.scratch else self.indices;
+                var choose_left = self.right == self.end;
+                if (!choose_left and self.left != self.middle) {
+                    if (self.comparator == null) self.comparator = .init(
+                        list.atUnchecked(self.collection, source[self.left]),
+                        list.atUnchecked(self.collection, source[self.right]),
+                    );
+                    switch (self.comparator.?.advance(1)) {
+                        .pending => return .yielded,
+                        .not_comparable => unreachable,
+                        .complete => |ordering| {
+                            self.comparator = null;
+                            choose_left = ordering == .lt or
+                                (ordering == .eq and source[self.left] < source[self.right]);
+                        },
+                    }
+                }
+                const destination = if (self.source_scratch) self.indices else self.scratch;
+                destination[self.output] = if (choose_left) source[self.left] else source[self.right];
+                if (choose_left) self.left += 1 else self.right += 1;
+                self.output += 1;
+                budget -= 1;
+            },
+            .copy => {
+                const end = @min(self.index + budget, self.indices.len);
+                @memcpy(self.indices[self.index..end], self.scratch[self.index..end]);
+                const copied = end - self.index;
+                self.index = end;
+                budget -= copied;
+                if (self.index == self.indices.len) {
+                    self.phase = .prepare;
+                    self.index = 0;
+                }
+            },
+            .prepare => {
+                if (self.sorted_values) {
+                    if (self.values == null) self.values = try evaluator.allocator().alloc(Value, self.indices.len);
+                    const end = @min(self.index + budget, self.indices.len);
+                    const prepared = end - self.index;
+                    while (self.index != end) : (self.index += 1)
+                        self.values.?[self.index] = list.atUnchecked(self.collection, self.indices[self.index]);
+                    budget -= prepared;
+                    if (self.index == self.indices.len) {
+                        self.value_materializer = .init(evaluator.allocator(), self.values.?);
+                        self.phase = .materialize;
+                    }
+                } else {
+                    if (self.integers == null) self.integers = try evaluator.allocator().alloc(i64, self.indices.len);
+                    const end = @min(self.index + budget, self.indices.len);
+                    const prepared = end - self.index;
+                    while (self.index != end) : (self.index += 1)
+                        self.integers.?[self.index] = @intCast(self.indices[self.index]);
+                    budget -= prepared;
+                    if (self.index == self.indices.len) {
+                        self.i64_materializer = .init(evaluator.allocator(), self.integers.?);
+                        self.phase = .materialize;
+                    }
+                }
+            },
+            .materialize => {
+                const progress: union(enum) { pending, complete: Value } = if (self.sorted_values)
+                    switch (try self.value_materializer.?.advance(budget)) {
+                        .pending => .pending,
+                        .complete => |result| .{ .complete = result },
+                    }
+                else switch (try self.i64_materializer.?.advance(budget)) {
+                    .pending => .pending,
+                    .complete => |result| .{ .complete = result },
+                };
+                return switch (progress) {
+                    .pending => .yielded,
+                    .complete => |result| completed: {
+                        errdefer heap.releaseValue(evaluator.allocator(), result);
+                        try evaluator.pushOwned(result);
+                        break :completed .completed;
+                    },
+                };
+            },
+        };
+        return .yielded;
+    }
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *GradeDriver = @ptrCast(@alignCast(raw));
+        if (self.i64_materializer) |*materializer| materializer.deinit();
+        if (self.value_materializer) |*materializer| materializer.deinit();
+        if (self.integers) |integers| allocator.free(integers);
+        if (self.values) |values| allocator.free(values);
+        allocator.free(self.indices);
+        allocator.free(self.scratch);
+        heap.releaseValue(allocator, self.collection);
+        allocator.destroy(self);
+    }
+};
 
 fn lessIndex(collection: Value, left: usize, right: usize) error{NotComparable}!bool {
     const ordering = try equal.compareScalars(
@@ -377,179 +325,287 @@ fn lessIndex(collection: Value, left: usize, right: usize) error{NotComparable}!
     return ordering == .lt or (ordering == .eq and left < right);
 }
 
-const no_index = std.math.maxInt(usize);
-const HashSlot = struct { hash: u64 = 0, head: usize = no_index };
-const FixedHashTable = struct {
-    slots: []HashSlot,
-
-    fn init(evaluator: *Machine, max_entries: usize) MachineError!FixedHashTable {
-        const minimum = std.math.mul(usize, max_entries, 2) catch return error.OutOfMemory;
-        var capacity: usize = 1;
-        while (capacity < minimum) {
-            capacity = std.math.mul(usize, capacity, 2) catch return error.OutOfMemory;
-        }
-        const slots = try evaluator.allocator().alloc(HashSlot, capacity);
-        errdefer evaluator.allocator().free(slots);
-        for (slots) |*slot| {
-            try evaluator.advanceKernel(1);
-            slot.* = .{};
-        }
-        return .{ .slots = slots };
-    }
-
-    fn deinit(self: FixedHashTable, allocator: std.mem.Allocator) void {
-        allocator.free(self.slots);
-    }
-
-    fn slotFor(self: FixedHashTable, evaluator: *Machine, hash: u64) MachineError!*HashSlot {
-        var index: usize = @intCast(hash & (self.slots.len - 1));
-        for (0..self.slots.len) |_| {
-            try evaluator.advanceKernel(1);
-            const slot = &self.slots[index];
-            if (slot.head == no_index or slot.hash == hash) return slot;
-            index = (index + 1) & (self.slots.len - 1);
-        }
-        unreachable;
-    }
-};
-
 fn distinctPrimitive(evaluator: *Machine) MachineError!void {
     const collection = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), collection);
+    var collection_owned = true;
+    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a list");
     const count: usize = @intCast(collection.list.length());
     const results = try evaluator.allocator().alloc(Value, count);
-    defer evaluator.allocator().free(results);
-    const next = try evaluator.allocator().alloc(usize, count);
-    defer evaluator.allocator().free(next);
-    const table = try FixedHashTable.init(evaluator, count);
-    defer table.deinit(evaluator.allocator());
-    var result_count: usize = 0;
-    const poller = (support.Context{ .evaluator = evaluator }).structuralPoller();
-    for (0..count) |index| {
-        try evaluator.advanceKernel(1);
-        const item = list.atUnchecked(collection, index);
-        const hash = try equal.hashWithPolling(evaluator.allocator(), item, poller);
-        const slot = try table.slotFor(evaluator, hash);
-        var known = false;
-        var candidate = slot.head;
-        while (candidate != no_index) : (candidate = next[candidate]) {
-            if (try equal.matchWithPolling(
+    errdefer evaluator.allocator().free(results);
+    const driver = try evaluator.allocator().create(DistinctDriver);
+    driver.* = .{ .collection = collection, .results = results };
+    collection_owned = false;
+    evaluator.installWorkDriver(driver, DistinctDriver.advance, DistinctDriver.destroy);
+}
+
+const DistinctDriver = struct {
+    collection: Value,
+    results: []Value,
+    result_count: usize = 0,
+    item_index: usize = 0,
+    candidate: usize = 0,
+    matcher: ?equal.MatchCursor = null,
+    materializer: ?storage.ValueMaterializer = null,
+
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *DistinctDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) {
+            if (self.materializer) |*materializer| {
+                return switch (try materializer.advance(budget)) {
+                    .pending => .yielded,
+                    .complete => |result| completed: {
+                        materializer.deinit();
+                        self.materializer = null;
+                        errdefer heap.releaseValue(evaluator.allocator(), result);
+                        try evaluator.pushOwned(result);
+                        break :completed .completed;
+                    },
+                };
+            }
+            if (self.item_index == self.results.len) {
+                self.materializer = .init(
+                    evaluator.allocator(),
+                    self.results[0..self.result_count],
+                );
+                continue;
+            }
+            if (self.candidate == self.result_count) {
+                self.results[self.result_count] = list.atUnchecked(self.collection, self.item_index);
+                self.result_count += 1;
+                self.item_index += 1;
+                self.candidate = 0;
+                budget -= 1;
+                continue;
+            }
+            if (self.matcher == null) self.matcher = try .init(
                 evaluator.allocator(),
-                results[candidate],
-                item,
-                poller,
-            )) {
-                known = true;
-                break;
+                self.results[self.candidate],
+                list.atUnchecked(self.collection, self.item_index),
+            );
+            switch (try self.matcher.?.advance(1)) {
+                .pending => budget -= 1,
+                .complete => |matches| {
+                    self.matcher.?.deinit();
+                    self.matcher = null;
+                    if (matches) {
+                        self.item_index += 1;
+                        self.candidate = 0;
+                    } else self.candidate += 1;
+                    budget -= 1;
+                },
             }
         }
-        if (known) continue;
-        results[result_count] = item;
-        next[result_count] = slot.head;
-        slot.hash = hash;
-        slot.head = result_count;
-        result_count += 1;
+        return .yielded;
     }
-    try evaluator.pushOwned(try storage.fromValues(
-        evaluator.allocator(),
-        results[0..result_count],
-        poller,
-    ));
-}
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *DistinctDriver = @ptrCast(@alignCast(raw));
+        if (self.matcher) |*matcher| matcher.deinit();
+        if (self.materializer) |*materializer| materializer.deinit();
+        allocator.free(self.results);
+        heap.releaseValue(allocator, self.collection);
+        allocator.destroy(self);
+    }
+};
 
 fn groupPrimitive(evaluator: *Machine) MachineError!void {
     const collection = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), collection);
+    var collection_owned = true;
+    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a list");
-    const count: usize = @intCast(collection.list.length());
-    const keys = try evaluator.allocator().alloc(Value, count);
-    defer evaluator.allocator().free(keys);
-    const next = try evaluator.allocator().alloc(usize, count);
-    defer evaluator.allocator().free(next);
-    const assignments = try evaluator.allocator().alloc(usize, count);
-    defer evaluator.allocator().free(assignments);
-    const frequencies = try evaluator.allocator().alloc(usize, count);
-    defer evaluator.allocator().free(frequencies);
-    const table = try FixedHashTable.init(evaluator, count);
-    defer table.deinit(evaluator.allocator());
-    var key_count: usize = 0;
-    const poller = (support.Context{ .evaluator = evaluator }).structuralPoller();
-    for (0..count) |index| {
-        try evaluator.advanceKernel(1);
-        const item = list.atUnchecked(collection, index);
-        const hash = try equal.hashWithPolling(evaluator.allocator(), item, poller);
-        const slot = try table.slotFor(evaluator, hash);
-        var group_index: ?usize = null;
-        var candidate = slot.head;
-        while (candidate != no_index) : (candidate = next[candidate]) {
-            if (try equal.matchWithPolling(
-                evaluator.allocator(),
-                keys[candidate],
-                item,
-                poller,
-            )) {
-                group_index = candidate;
-                break;
-            }
-        }
-        if (group_index == null) {
-            group_index = key_count;
-            keys[key_count] = item;
-            frequencies[key_count] = 0;
-            next[key_count] = slot.head;
-            slot.hash = hash;
-            slot.head = key_count;
-            key_count += 1;
-        }
-        assignments[index] = group_index.?;
-        frequencies[group_index.?] += 1;
-    }
-
-    const offsets = try evaluator.allocator().alloc(usize, key_count + 1);
-    defer evaluator.allocator().free(offsets);
-    offsets[0] = 0;
-    for (frequencies[0..key_count], 0..) |frequency, index| {
-        try evaluator.advanceKernel(1);
-        offsets[index + 1] = offsets[index] + frequency;
-    }
-    std.debug.assert(offsets[key_count] == count);
-    const cursors = try evaluator.allocator().alloc(usize, key_count);
-    defer evaluator.allocator().free(cursors);
-    for (cursors, offsets[0..key_count]) |*cursor, offset| {
-        try evaluator.advanceKernel(1);
-        cursor.* = offset;
-    }
-    const indices = try evaluator.allocator().alloc(i64, count);
-    defer evaluator.allocator().free(indices);
-    for (assignments, 0..) |group_index, index| {
-        try evaluator.advanceKernel(1);
-        indices[cursors[group_index]] = @intCast(index);
-        cursors[group_index] += 1;
-    }
-
-    const pairs = try evaluator.allocator().alloc(dict.Pair, key_count);
-    defer evaluator.allocator().free(pairs);
-    var initialized: usize = 0;
-    defer for (pairs[0..initialized]) |pair| heap.releaseValue(evaluator.allocator(), pair[1]);
-    for (keys[0..key_count], 0..) |key, index| {
-        try evaluator.advanceKernel(1);
-        pairs[index] = .{
-            key,
-            try storage.fromI64Slice(
-                evaluator.allocator(),
-                indices[offsets[index]..offsets[index + 1]],
-                poller,
-            ),
-        };
-        initialized += 1;
-    }
-    try evaluator.pushOwned(try storage.fromUniquePairs(
-        evaluator.allocator(),
-        pairs,
-        poller,
-    ));
+    const driver = try evaluator.allocator().create(GroupDriver);
+    driver.* = .{ .collection = collection };
+    collection_owned = false;
+    evaluator.installWorkDriver(driver, GroupDriver.advance, GroupDriver.destroy);
 }
+
+const GroupDriver = struct {
+    collection: Value,
+    keys: ?[]Value = null,
+    assignments: ?[]usize = null,
+    frequencies: ?[]usize = null,
+    offsets: ?[]usize = null,
+    cursors: ?[]usize = null,
+    indices: ?[]i64 = null,
+    pairs: ?[]dict.Pair = null,
+    phase: enum { allocate, scan, offsets, cursors, scatter, groups, dictionary, release } = .allocate,
+    item_index: usize = 0,
+    key_count: usize = 0,
+    candidate: usize = 0,
+    index: usize = 0,
+    matcher: ?equal.MatchCursor = null,
+    group_materializer: ?storage.I64Materializer = null,
+    dict_materializer: ?storage.DictMaterializer = null,
+    initialized_pairs: usize = 0,
+    released_pairs: usize = 0,
+    result: ?Value = null,
+
+    fn allocate(self: *GroupDriver, allocator: std.mem.Allocator) error{OutOfMemory}!void {
+        const count: usize = @intCast(self.collection.list.length());
+        self.keys = try allocator.alloc(Value, count);
+        self.assignments = try allocator.alloc(usize, count);
+        self.frequencies = try allocator.alloc(usize, count);
+        self.offsets = try allocator.alloc(usize, count + 1);
+        self.cursors = try allocator.alloc(usize, count);
+        self.indices = try allocator.alloc(i64, count);
+        self.pairs = try allocator.alloc(dict.Pair, count);
+        self.offsets.?[0] = 0;
+        self.phase = .scan;
+    }
+
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *GroupDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) switch (self.phase) {
+            .allocate => try self.allocate(evaluator.allocator()),
+            .scan => {
+                const count: usize = @intCast(self.collection.list.length());
+                if (self.item_index == count) {
+                    self.phase = .offsets;
+                    self.index = 0;
+                    continue;
+                }
+                if (self.candidate == self.key_count) {
+                    self.keys.?[self.key_count] = list.atUnchecked(self.collection, self.item_index);
+                    self.frequencies.?[self.key_count] = 0;
+                    self.key_count += 1;
+                    self.assignments.?[self.item_index] = self.key_count - 1;
+                    self.frequencies.?[self.key_count - 1] += 1;
+                    self.item_index += 1;
+                    self.candidate = 0;
+                    budget -= 1;
+                    continue;
+                }
+                if (self.matcher == null) self.matcher = try .init(
+                    evaluator.allocator(),
+                    self.keys.?[self.candidate],
+                    list.atUnchecked(self.collection, self.item_index),
+                );
+                switch (try self.matcher.?.advance(1)) {
+                    .pending => budget -= 1,
+                    .complete => |matches| {
+                        self.matcher.?.deinit();
+                        self.matcher = null;
+                        if (matches) {
+                            self.assignments.?[self.item_index] = self.candidate;
+                            self.frequencies.?[self.candidate] += 1;
+                            self.item_index += 1;
+                            self.candidate = 0;
+                        } else self.candidate += 1;
+                        budget -= 1;
+                    },
+                }
+            },
+            .offsets => {
+                if (self.index == self.key_count) {
+                    self.phase = .cursors;
+                    self.index = 0;
+                    continue;
+                }
+                self.offsets.?[self.index + 1] = self.offsets.?[self.index] + self.frequencies.?[self.index];
+                self.index += 1;
+                budget -= 1;
+            },
+            .cursors => {
+                if (self.index == self.key_count) {
+                    self.phase = .scatter;
+                    self.index = 0;
+                    continue;
+                }
+                self.cursors.?[self.index] = self.offsets.?[self.index];
+                self.index += 1;
+                budget -= 1;
+            },
+            .scatter => {
+                if (self.index == self.assignments.?.len) {
+                    self.phase = .groups;
+                    self.index = 0;
+                    continue;
+                }
+                const group_index = self.assignments.?[self.index];
+                self.indices.?[self.cursors.?[group_index]] = @intCast(self.index);
+                self.cursors.?[group_index] += 1;
+                self.index += 1;
+                budget -= 1;
+            },
+            .groups => {
+                if (self.index == self.key_count) {
+                    self.dict_materializer = try .init(
+                        evaluator.allocator(),
+                        self.pairs.?[0..self.key_count],
+                        false,
+                    );
+                    self.phase = .dictionary;
+                    continue;
+                }
+                if (self.group_materializer == null) self.group_materializer = .init(
+                    evaluator.allocator(),
+                    self.indices.?[self.offsets.?[self.index]..self.offsets.?[self.index + 1]],
+                );
+                switch (try self.group_materializer.?.advance(budget)) {
+                    .pending => return .yielded,
+                    .complete => |group| {
+                        self.group_materializer.?.deinit();
+                        self.group_materializer = null;
+                        self.pairs.?[self.index] = .{ self.keys.?[self.index], group };
+                        self.initialized_pairs += 1;
+                        self.index += 1;
+                        return .yielded;
+                    },
+                }
+            },
+            .dictionary => switch (try self.dict_materializer.?.advance(budget)) {
+                .pending => return .yielded,
+                .duplicate_key => unreachable,
+                .complete => |result| {
+                    self.dict_materializer.?.deinit();
+                    self.dict_materializer = null;
+                    self.result = result;
+                    self.phase = .release;
+                    self.index = 0;
+                },
+            },
+            .release => {
+                if (self.released_pairs == self.initialized_pairs) {
+                    const result = self.result.?;
+                    self.result = null;
+                    errdefer heap.releaseValue(evaluator.allocator(), result);
+                    try evaluator.pushOwned(result);
+                    return .completed;
+                }
+                heap.releaseValue(evaluator.allocator(), self.pairs.?[self.released_pairs][1]);
+                self.released_pairs += 1;
+                budget -= 1;
+            },
+        };
+        return .yielded;
+    }
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *GroupDriver = @ptrCast(@alignCast(raw));
+        if (self.matcher) |*matcher| matcher.deinit();
+        if (self.group_materializer) |*materializer| materializer.deinit();
+        if (self.dict_materializer) |*materializer| materializer.deinit();
+        if (self.result) |result| heap.releaseValue(allocator, result);
+        if (self.pairs) |pairs| {
+            for (pairs[self.released_pairs..self.initialized_pairs]) |pair|
+                heap.releaseValue(allocator, pair[1]);
+            allocator.free(pairs);
+        }
+        if (self.keys) |items| allocator.free(items);
+        if (self.assignments) |items| allocator.free(items);
+        if (self.frequencies) |items| allocator.free(items);
+        if (self.offsets) |items| allocator.free(items);
+        if (self.cursors) |items| allocator.free(items);
+        if (self.indices) |items| allocator.free(items);
+        heap.releaseValue(allocator, self.collection);
+        allocator.destroy(self);
+    }
+};
 
 test "order comparator breaks equal values by original position" {
     const allocator = std.testing.allocator;

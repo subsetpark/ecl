@@ -1,29 +1,13 @@
 //! Cross-layer reader properties and Rust-oracle fixture parity.
 
 const std = @import("std");
+const minish = @import("minish");
 const heap = @import("../heap.zig");
 const equal = @import("../equal.zig");
-const dict = @import("../dict.zig");
 const printer = @import("../print.zig");
 const lexer = @import("../lexer.zig");
 const reader = @import("../reader.zig");
-const poll = @import("../poll.zig");
 const testgen = @import("testgen.zig");
-
-const PollStop = struct {
-    calls: usize = 0,
-    fail_at: usize,
-
-    fn tick(raw: *anyopaque) poll.Error!void {
-        const self: *PollStop = @ptrCast(@alignCast(raw));
-        self.calls += 1;
-        if (self.calls == self.fail_at) return error.Ecl;
-    }
-
-    fn poller(self: *PollStop) poll.Poller {
-        return .{ .context = self, .poll_fn = tick };
-    }
-};
 
 fn repeatedSource(
     allocator: std.mem.Allocator,
@@ -46,95 +30,67 @@ fn repeatedSource(
     return source;
 }
 
-fn expectReadCancelled(source: []const u8) !void {
-    return expectReadCancelledAt(source, 65_536);
+fn expectReadNeedsSteps(source: []const u8, minimum: usize) !void {
+    var diag: lexer.Diag = .{};
+    var cursor = reader.ReadCursor.init(std.testing.allocator, "<reader-yield>", source, &diag);
+    defer cursor.deinit();
+    for (0..minimum) |_| try std.testing.expect((try cursor.advance()) == .pending);
+    while (true) switch (try cursor.advance()) {
+        .pending => {},
+        .complete => |result| {
+            var parsed = switch (result) {
+                .complete => |complete| complete,
+                .incomplete => return error.TestUnexpectedResult,
+            };
+            parsed.deinit();
+            return;
+        },
+    };
 }
 
-fn expectReadCancelledAt(source: []const u8, fail_at: usize) !void {
-    var stop = PollStop{ .fail_at = fail_at };
+fn expectRoundTrip(original: testgen.Value) !void {
+    const allocator = std.testing.allocator;
+    const source = try printer.toOwnedString(allocator, original);
+    defer allocator.free(source);
     var diag: lexer.Diag = .{};
-    try std.testing.expectError(error.Ecl, reader.readPolling(
-        std.testing.allocator,
-        "<reader-cancel>",
-        source,
-        &diag,
-        poll.WorkContext.init(stop.poller()),
-    ));
-    try std.testing.expectEqual(stop.fail_at, stop.calls);
-}
-
-fn expectLateReadCancellation(source: []const u8) !void {
-    var counter = PollStop{ .fail_at = std.math.maxInt(usize) };
-    var diag: lexer.Diag = .{};
-    var parsed = switch (try reader.readPolling(
-        std.testing.allocator,
-        "<reader-late-cancel>",
-        source,
-        &diag,
-        poll.WorkContext.init(counter.poller()),
-    )) {
+    var parsed = switch (try reader.read(allocator, "<round-trip>", source, &diag)) {
         .complete => |complete| complete,
         .incomplete => return error.TestUnexpectedResult,
     };
-    parsed.deinit();
-    try std.testing.expect(counter.calls > 65_536);
-    try expectReadCancelledAt(source, counter.calls - 1);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.forms.len);
+    try std.testing.expect(equal.match(original, parsed.forms[0]));
+    try std.testing.expectEqual(equal.hash(original), equal.hash(parsed.forms[0]));
 }
 
-test "parse-print identity for seeded dict-free values" {
+fn dictFreeRoundTrip(recipe: testgen.ValueRecipe) !void {
     const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(0xecc0_1001);
-    const random = prng.random();
-    for (0..1000) |_| {
-        const original = try testgen.generateValue(allocator, random, 4, .excluded);
-        defer heap.releaseValue(allocator, original);
-        const source = try printer.toOwnedString(allocator, original);
-        defer allocator.free(source);
-        var diag: lexer.Diag = .{};
-        var parsed = switch (try reader.read(allocator, "<round-trip>", source, &diag)) {
-            .complete => |complete| complete,
-            .incomplete => return error.TestUnexpectedResult,
-        };
-        defer parsed.deinit();
-        try std.testing.expectEqual(@as(usize, 1), parsed.forms.len);
-        try std.testing.expect(equal.match(original, parsed.forms[0]));
-        try std.testing.expectEqual(equal.hash(original), equal.hash(parsed.forms[0]));
-    }
+    const original = try testgen.valueFromRecipe(allocator, recipe, 4, .excluded, 0x00);
+    defer heap.releaseValue(allocator, original);
+    try expectRoundTrip(original);
 }
 
-test "parse-print identity for seeded dict values" {
+test "parse-print identity for arbitrary dict-free values shrinks structurally" {
+    try minish.check(std.testing.allocator, testgen.value_recipe_generator, dictFreeRoundTrip, .{
+        .num_runs = 1000,
+        .seed = 0xecc0_1001,
+        .max_shrink_attempts = 512,
+    });
+}
+
+fn dictRoundTrip(recipe: testgen.ValueRecipe) !void {
     const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(0xecc0_1002);
-    const random = prng.random();
-    for (0..500) |_| {
-        const count = random.uintLessThan(usize, 5);
-        const pairs = try allocator.alloc(dict.Pair, count);
-        defer allocator.free(pairs);
-        var initialized: usize = 0;
-        defer for (pairs[0..initialized]) |pair| {
-            heap.releaseValue(allocator, pair[0]);
-            heap.releaseValue(allocator, pair[1]);
-        };
-        const base = random.intRangeAtMost(i64, -1_000_000, 1_000_000);
-        for (pairs, 0..) |*pair, index| {
-            pair[0] = .{ .int = base + @as(i64, @intCast(index)) };
-            pair[1] = try testgen.generateValue(allocator, random, 3, .allowed);
-            initialized += 1;
-        }
-        const original = try dict.fromPairs(allocator, pairs);
-        defer heap.releaseValue(allocator, original);
-        const source = try printer.toOwnedString(allocator, original);
-        defer allocator.free(source);
-        var diag: lexer.Diag = .{};
-        var parsed = switch (try reader.read(allocator, "<dict-shape>", source, &diag)) {
-            .complete => |complete| complete,
-            .incomplete => return error.TestUnexpectedResult,
-        };
-        defer parsed.deinit();
-        try std.testing.expectEqual(@as(usize, 1), parsed.forms.len);
-        try std.testing.expect(equal.match(original, parsed.forms[0]));
-        try std.testing.expectEqual(equal.hash(original), equal.hash(parsed.forms[0]));
-    }
+    const original = try testgen.dictFromRecipe(allocator, recipe, 3, 0x5d);
+    defer heap.releaseValue(allocator, original);
+    try expectRoundTrip(original);
+}
+
+test "parse-print identity for arbitrary dict values shrinks structurally" {
+    try minish.check(std.testing.allocator, testgen.value_recipe_generator, dictRoundTrip, .{
+        .num_runs = 500,
+        .seed = 0xecc0_1002,
+        .max_shrink_attempts = 512,
+    });
 }
 
 test "reader fixtures remain byte-for-byte anchors" {
@@ -179,76 +135,92 @@ test "reader fixtures remain byte-for-byte anchors" {
     );
 }
 
-test "polling reader cancels inside lexical binder span and top-form traversals" {
+test "reader yields inside lexical binder span and top-form traversals" {
     const allocator = std.testing.allocator;
     const comment = try repeatedSource(allocator, "#", "a", 40_000, "");
     defer allocator.free(comment);
-    try expectReadCancelled(comment);
+    try expectReadNeedsSteps(comment, 1024);
 
     const token = try repeatedSource(allocator, "", "a", 40_000, "");
     defer allocator.free(token);
-    try expectReadCancelled(token);
+    try expectReadNeedsSteps(token, 1024);
 
     const string = try repeatedSource(allocator, "\"", "a", 40_000, "\"");
     defer allocator.free(string);
-    try expectReadCancelled(string);
+    try expectReadNeedsSteps(string, 1024);
 
     // Validation plus tokenization stays below one quantum; lowering the
     // large binder body is the traversal that crosses it.
     const binder_source = try repeatedSource(allocator, "(|x| ", "1 ", 14_000, ")");
     defer allocator.free(binder_source);
-    try expectReadCancelled(binder_source);
+    try expectReadNeedsSteps(binder_source, 65_536);
 
     // The first copy into list storage stays below the boundary; copying its
     // element spans is what consumes the remainder.
     const span_source = try repeatedSource(allocator, "[", "1 ", 11_000, "]");
     defer allocator.free(span_source);
-    try expectReadCancelled(span_source);
+    try expectReadNeedsSteps(span_source, 65_536);
 
     // With no containing list, the final forms/spans handoff crosses the
     // boundary after validation and tokenization complete.
     const forms_source = try repeatedSource(allocator, "", "1 ", 14_000, "");
     defer allocator.free(forms_source);
-    try expectReadCancelled(forms_source);
+    try expectReadNeedsSteps(forms_source, 65_536);
 
     // Lexing and span publication alone stay below one quantum. The
     // specialization/profile and storage copies must supply the safe point.
     const constructed_string = try repeatedSource(allocator, "\"", "a", 15_000, "\"");
     defer allocator.free(constructed_string);
-    try expectReadCancelled(constructed_string);
+    try expectReadNeedsSteps(constructed_string, 65_536);
 
     const constructed_list = try repeatedSource(allocator, "[", "1 ", 10_000, "]");
     defer allocator.free(constructed_list);
-    try expectReadCancelled(constructed_list);
+    try expectReadNeedsSteps(constructed_list, 65_536);
 
     // The string itself materializes below the boundary; structurally
     // hashing it as a dictionary key crosses the remaining poll budget.
     const hashed_key = try repeatedSource(allocator, "{\"", "a", 12_000, "\" 1}");
     defer allocator.free(hashed_key);
-    try expectReadCancelled(hashed_key);
+    try expectReadNeedsSteps(hashed_key, 65_536);
 }
 
-test "polling reader bounds long classification and post-growth materialization" {
+test "reader bounds long classification and post-growth materialization" {
     const allocator = std.testing.allocator;
     const atom = try repeatedSource(allocator, "", "a", 70_000, "");
     defer allocator.free(atom);
-    try expectReadCancelledAt(atom, 170_000);
+    try expectReadNeedsSteps(atom, 170_000);
 
     const quoted = try repeatedSource(allocator, "'", "a", 70_000, "");
     defer allocator.free(quoted);
-    try expectReadCancelledAt(quoted, 170_000);
+    try expectReadNeedsSteps(quoted, 170_000);
 
     const forms = try repeatedSource(allocator, "", "1 ", 65_537, "");
     defer allocator.free(forms);
-    try expectLateReadCancellation(forms);
+    try expectReadNeedsSteps(forms, 65_536);
 
     const string = try repeatedSource(allocator, "\"", "a", 65_537, "\"");
     defer allocator.free(string);
-    try expectLateReadCancellation(string);
+    try expectReadNeedsSteps(string, 65_536);
 
     const binder_output = try repeatedSource(allocator, "(|x| ", "1 ", 32_769, ")");
     defer allocator.free(binder_output);
-    try expectLateReadCancellation(binder_output);
+    try expectReadNeedsSteps(binder_output, 65_536);
+
+    const task_marker = try repeatedSource(allocator, "<task:", "0", 70_000, ">");
+    defer allocator.free(task_marker);
+    var diag: lexer.Diag = .{};
+    var cursor = reader.ReadCursor.init(allocator, "<task-marker>", task_marker, &diag);
+    defer cursor.deinit();
+    for (0..task_marker.len * 2) |_| try std.testing.expect((try cursor.advance()) == .pending);
+    var rejected = false;
+    while (!rejected) {
+        const progress = cursor.advance() catch |err| {
+            try std.testing.expectEqual(error.Parse, err);
+            rejected = true;
+            continue;
+        };
+        if (progress == .complete) return error.TestExpectedError;
+    }
 }
 
 fn readFailureProbe(allocator: std.mem.Allocator) !void {

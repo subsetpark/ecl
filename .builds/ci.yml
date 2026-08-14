@@ -25,6 +25,12 @@ tasks:
   - test-safe: |
       cd ecl
       zig build test -Doptimize=ReleaseSafe
+  - test-fast: |
+      cd ecl
+      zig build test -Doptimize=ReleaseFast
+  - test-workers: |
+      cd ecl
+      zig build test-workers -Doptimize=ReleaseSafe
   - test-oom: |
       cd ecl
       zig build test-oom
@@ -45,4 +51,4 @@ tasks:
       echo '3290bd511d37e4f6ccca3621b9894cd6c378195cdaac27520d0bd894058b2b9b  /tmp/zlint' | sha256sum -c -
       chmod +x /tmp/zlint
       cd ecl
-      /tmp/zlint --deny-warnings
+      git ls-files '*.zig' | /tmp/zlint -S --deny-warnings

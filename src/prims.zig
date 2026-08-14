@@ -12,10 +12,8 @@ const machine = @import("machine.zig");
 const module_prims = @import("module_prims.zig");
 const combinators = @import("combinators.zig");
 const kernels = @import("kernels.zig");
-const kernel_support = @import("kernel_support.zig");
 const kernel_storage = @import("kernel_storage.zig");
-const reader = @import("reader.zig");
-const poll = @import("poll.zig");
+const task_prims = @import("task_prims.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
@@ -47,6 +45,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try combinators.install(core);
     try kernels.install(core);
     try module_prims.install(core);
+    try task_prims.install(core);
 }
 fn dup(evaluator: *Machine) MachineError!void {
     try evaluator.require(1);
@@ -69,63 +68,149 @@ fn over(evaluator: *Machine) MachineError!void {
 fn cons(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     const collection = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), collection);
+    var collection_owned = true;
+    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
     if (collection != .list) return evaluator.typeError("a list");
     const item = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), item);
+    var item_owned = true;
+    defer if (item_owned) heap.releaseValue(evaluator.allocator(), item);
     const count: usize = @intCast(collection.list.length());
     const values = try evaluator.allocator().alloc(Value, count + 1);
-    defer evaluator.allocator().free(values);
-    values[0] = item;
-    for (0..count) |index| {
-        try evaluator.advanceKernel(1);
-        values[index + 1] = list.atUnchecked(collection, index);
-    }
-    try evaluator.pushOwned(try kernel_storage.fromValues(
-        evaluator.allocator(),
-        values,
-        (kernel_support.Context{ .evaluator = evaluator }).structuralPoller(),
-    ));
+    errdefer evaluator.allocator().free(values);
+    const state = try evaluator.allocator().create(ConcatDriver);
+    state.* = ConcatDriver.init(evaluator.allocator(), .cons, item, collection, values);
+    item_owned = false;
+    collection_owned = false;
+    evaluator.installWorkDriver(state, ConcatDriver.advance, ConcatDriver.destroy);
 }
 fn compose(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     const right = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), right);
+    var right_owned = true;
+    defer if (right_owned) heap.releaseValue(evaluator.allocator(), right);
     const left = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), left);
+    var left_owned = true;
+    defer if (left_owned) heap.releaseValue(evaluator.allocator(), left);
     if (left != .list or right != .list) return evaluator.typeError("two lists");
     const left_len: usize = @intCast(left.list.length());
     const right_len: usize = @intCast(right.list.length());
     const values = try evaluator.allocator().alloc(Value, left_len + right_len);
-    defer evaluator.allocator().free(values);
-    for (0..left_len) |index| {
-        try evaluator.advanceKernel(1);
-        values[index] = list.atUnchecked(left, index);
-    }
-    for (0..right_len) |index| {
-        try evaluator.advanceKernel(1);
-        values[left_len + index] = list.atUnchecked(right, index);
-    }
-    try evaluator.pushOwned(try kernel_storage.fromValues(
-        evaluator.allocator(),
-        values,
-        (kernel_support.Context{ .evaluator = evaluator }).structuralPoller(),
-    ));
+    errdefer evaluator.allocator().free(values);
+    const state = try evaluator.allocator().create(ConcatDriver);
+    state.* = ConcatDriver.init(evaluator.allocator(), .compose, left, right, values);
+    left_owned = false;
+    right_owned = false;
+    evaluator.installWorkDriver(state, ConcatDriver.advance, ConcatDriver.destroy);
 }
+
+const ConcatDriver = struct {
+    mode: enum { cons, compose },
+    left: Value,
+    right: Value,
+    values: []Value,
+    index: usize = 0,
+    materializing: bool = false,
+    materializer: kernel_storage.ValueMaterializer,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        mode: @FieldType(ConcatDriver, "mode"),
+        left: Value,
+        right: Value,
+        values: []Value,
+    ) ConcatDriver {
+        return .{
+            .mode = mode,
+            .left = left,
+            .right = right,
+            .values = values,
+            .materializer = .init(allocator, values),
+        };
+    }
+
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *ConcatDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        var budget = machine.kernel_poll_quantum;
+        while (!self.materializing and budget != 0 and self.index != self.values.len) : (budget -= 1) {
+            self.values[self.index] = switch (self.mode) {
+                .cons => if (self.index == 0)
+                    self.left
+                else
+                    list.atUnchecked(self.right, self.index - 1),
+                .compose => blk: {
+                    const left_len: usize = @intCast(self.left.list.length());
+                    break :blk if (self.index < left_len)
+                        list.atUnchecked(self.left, self.index)
+                    else
+                        list.atUnchecked(self.right, self.index - left_len);
+                },
+            };
+            self.index += 1;
+        }
+        if (self.index != self.values.len) return .yielded;
+        self.materializing = true;
+        if (budget == 0) return .yielded;
+        return switch (try self.materializer.advance(budget)) {
+            .pending => .yielded,
+            .complete => |result| completed: {
+                errdefer heap.releaseValue(evaluator.allocator(), result);
+                try evaluator.pushOwned(result);
+                break :completed .completed;
+            },
+        };
+    }
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *ConcatDriver = @ptrCast(@alignCast(raw));
+        self.materializer.deinit();
+        allocator.free(self.values);
+        heap.releaseValue(allocator, self.left);
+        heap.releaseValue(allocator, self.right);
+        allocator.destroy(self);
+    }
+};
 fn match(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     const right = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), right);
+    var right_owned = true;
+    defer if (right_owned) heap.releaseValue(evaluator.allocator(), right);
     const left = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), left);
-    const matches = try equal.matchWithPolling(
-        evaluator.allocator(),
-        left,
-        right,
-        (kernel_support.Context{ .evaluator = evaluator }).structuralPoller(),
-    );
-    try evaluator.pushOwned(.{ .int = @intFromBool(matches) });
+    var left_owned = true;
+    defer if (left_owned) heap.releaseValue(evaluator.allocator(), left);
+    const state = try evaluator.allocator().create(MatchDriver);
+    errdefer evaluator.allocator().destroy(state);
+    state.* = .{ .left = left, .right = right, .cursor = try .init(evaluator.allocator(), left, right) };
+    left_owned = false;
+    right_owned = false;
+    evaluator.installWorkDriver(state, MatchDriver.advance, MatchDriver.destroy);
 }
+
+const MatchDriver = struct {
+    left: Value,
+    right: Value,
+    cursor: equal.MatchCursor,
+
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *MatchDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        return switch (try self.cursor.advance(machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .complete => |matches| completed: {
+                try evaluator.pushOwned(.{ .int = @intFromBool(matches) });
+                break :completed .completed;
+            },
+        };
+    }
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *MatchDriver = @ptrCast(@alignCast(raw));
+        self.cursor.deinit();
+        heap.releaseValue(allocator, self.left);
+        heap.releaseValue(allocator, self.right);
+        allocator.destroy(self);
+    }
+};
 fn typeWord(evaluator: *Machine) MachineError!void {
     const item = try evaluator.popOwned();
     defer heap.releaseValue(evaluator.allocator(), item);
@@ -137,185 +222,373 @@ fn typeWord(evaluator: *Machine) MachineError!void {
         .word => "word",
         .list => "list",
         .dict => "dict",
+        .task => "task",
     };
     try evaluator.pushOwned(.{ .symbol = try intern.intern(spelling) });
 }
 fn strWord(evaluator: *Machine) MachineError!void {
     const item = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), item);
-    const poller = (kernel_support.Context{ .evaluator = evaluator }).structuralPoller();
-    const rendered = try printer.toOwnedStringWithPolling(evaluator.allocator(), item, poller);
-    defer evaluator.allocator().free(rendered);
-    const result = kernel_storage.fromUtf8(evaluator.allocator(), rendered, poller) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.InvalidUtf8 => unreachable,
-    };
-    try evaluator.pushOwned(result);
+    var item_owned = true;
+    defer if (item_owned) heap.releaseValue(evaluator.allocator(), item);
+    const state = try evaluator.allocator().create(StrDriver);
+    errdefer evaluator.allocator().destroy(state);
+    state.* = .{ .item = item, .render = try .init(evaluator.allocator(), item) };
+    item_owned = false;
+    evaluator.installWorkDriver(state, StrDriver.advance, StrDriver.destroy);
 }
+
+const StrDriver = struct {
+    item: Value,
+    render: printer.OwnedStringCursor,
+    rendered: ?[]u8 = null,
+    utf8: ?kernel_storage.Utf8Materializer = null,
+
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *StrDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        if (self.utf8 == null) switch (try self.render.advance(machine.kernel_poll_quantum)) {
+            .pending => return .yielded,
+            .complete => |bytes| {
+                self.rendered = bytes;
+                self.utf8 = .init(evaluator.allocator(), bytes);
+                return .yielded;
+            },
+        };
+        return switch (self.utf8.?.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => unreachable,
+        }) {
+            .pending => .yielded,
+            .complete => |result| completed: {
+                errdefer heap.releaseValue(evaluator.allocator(), result);
+                try evaluator.pushOwned(result);
+                break :completed .completed;
+            },
+        };
+    }
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *StrDriver = @ptrCast(@alignCast(raw));
+        if (self.utf8) |*utf8| utf8.deinit();
+        if (self.rendered) |bytes| allocator.free(bytes);
+        self.render.deinit();
+        heap.releaseValue(allocator, self.item);
+        allocator.destroy(self);
+    }
+};
 
 fn parse(evaluator: *Machine) MachineError!void {
     const source_value = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), source_value);
-    if (!source_value.isString()) return evaluator.typeError("a string");
-    const poller = (kernel_support.Context{ .evaluator = evaluator }).structuralPoller();
-    const source = kernel_storage.toUtf8Owned(evaluator.allocator(), source_value, poller) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
+    if (!source_value.isString()) {
+        heap.releaseValue(evaluator.allocator(), source_value);
+        return evaluator.typeError("a string");
+    }
+    errdefer heap.releaseValue(evaluator.allocator(), source_value);
+    const driver = try evaluator.allocator().create(ParseDriver);
+    driver.* = .{
+        .source_value = source_value,
+        .encoder = .init(evaluator.allocator(), source_value),
     };
-    defer evaluator.allocator().free(source);
-    var diag: reader.Diag = .{};
-    const result = reader.readPolling(
-        evaluator.allocator(),
-        "<parse>",
-        source,
-        &diag,
-        poll.WorkContext.init(poller),
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.Parse => {
-            const failure = evaluator.fail(.parse, diag.text());
-            evaluator.unit.pending.?.setLocation("<parse>", diag.span);
-            return failure;
-        },
-    };
-    var parsed = switch (result) {
-        .complete => |complete| complete,
-        .incomplete => |incomplete| {
-            const failure = evaluator.fail(.parse, incomplete.message);
-            evaluator.unit.pending.?.setLocation("<parse>", incomplete.span);
-            return failure;
-        },
-    };
-    defer parsed.deinit();
-    const root = try kernel_storage.fromValuesGeneric(evaluator.allocator(), parsed.forms, poller);
-    var root_owned = true;
-    defer if (root_owned) heap.releaseValue(evaluator.allocator(), root);
-    try evaluator.unit.archive.absorb(&parsed, root, poll.WorkContext.init(poller));
-    root_owned = false;
-    try evaluator.pushBorrowed(root);
+    evaluator.installWorkDriver(driver, ParseDriver.advance, ParseDriver.destroy);
 }
+const ParseDriver = struct {
+    source_value: Value,
+    encoder: kernel_storage.ToUtf8Cursor,
+    source: ?[]u8 = null,
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *ParseDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        if (self.source == null) switch (self.encoder.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |source| self.source = source,
+        };
+        const source = self.source.?;
+        self.source = null;
+        evaluator.unit.work_driver = null;
+        ParseDriver.destroy(evaluator.allocator(), self);
+        evaluator.parseSourceOwned(source) catch |err| {
+            evaluator.allocator().free(source);
+            return err;
+        };
+        return .detached;
+    }
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *ParseDriver = @ptrCast(@alignCast(raw));
+        if (self.source) |source| allocator.free(source);
+        self.encoder.deinit();
+        heap.releaseValue(allocator, self.source_value);
+        allocator.destroy(self);
+    }
+};
 fn dictOf(evaluator: *Machine) MachineError!void {
     const entries = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), entries);
+    var entries_owned = true;
+    defer if (entries_owned) heap.releaseValue(evaluator.allocator(), entries);
     if (entries != .list) return evaluator.typeError("a flat key/value list");
     const count: usize = @intCast(entries.list.length());
     if (count % 2 != 0) {
         return evaluator.fail(.contract, "dict-of requires an even-length key/value list");
     }
     const pairs = try evaluator.allocator().alloc(dict.Pair, count / 2);
-    defer evaluator.allocator().free(pairs);
-    for (pairs, 0..) |*pair, index| {
-        try evaluator.advanceKernel(2);
-        pair.* = .{
-            list.atUnchecked(entries, index * 2),
-            list.atUnchecked(entries, index * 2 + 1),
+    errdefer evaluator.allocator().free(pairs);
+    const driver = try evaluator.allocator().create(DictOfDriver);
+    driver.* = .{ .entries = entries, .pairs = pairs };
+    entries_owned = false;
+    evaluator.installWorkDriver(driver, DictOfDriver.advance, DictOfDriver.destroy);
+}
+
+const DictOfDriver = struct {
+    entries: Value,
+    pairs: []dict.Pair,
+    index: usize = 0,
+    materializer: ?kernel_storage.DictMaterializer = null,
+
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *DictOfDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        if (self.materializer == null) {
+            const end = @min(self.index + machine.kernel_poll_quantum, self.pairs.len);
+            while (self.index != end) : (self.index += 1) self.pairs[self.index] = .{
+                list.atUnchecked(self.entries, self.index * 2),
+                list.atUnchecked(self.entries, self.index * 2 + 1),
+            };
+            if (self.index != self.pairs.len) return .yielded;
+            self.materializer = try .init(evaluator.allocator(), self.pairs, true);
+            return .yielded;
+        }
+        return switch (try self.materializer.?.advance(machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .duplicate_key => evaluator.fail(.domain, "dict-of received a duplicate key"),
+            .complete => |dictionary| completed: {
+                errdefer heap.releaseValue(evaluator.allocator(), dictionary);
+                try evaluator.pushOwned(dictionary);
+                break :completed .completed;
+            },
         };
     }
-    const dictionary = kernel_storage.fromPairs(
-        evaluator.allocator(),
-        pairs,
-        (kernel_support.Context{ .evaluator = evaluator }).structuralPoller(),
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.DuplicateKey => return evaluator.fail(.domain, "dict-of received a duplicate key"),
-    };
-    try evaluator.pushOwned(dictionary);
-}
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *DictOfDriver = @ptrCast(@alignCast(raw));
+        if (self.materializer) |*materializer| materializer.deinit();
+        allocator.free(self.pairs);
+        heap.releaseValue(allocator, self.entries);
+        allocator.destroy(self);
+    }
+};
 fn attempt(evaluator: *Machine) MachineError!void {
     const quotation = try evaluator.popOwned();
     try evaluator.attemptOwned(try quotationHeader(evaluator, quotation));
 }
 fn raise(evaluator: *Machine) MachineError!void {
     const raised = try evaluator.popOwned();
-    var raised_owned = true;
-    defer if (raised_owned) heap.releaseValue(evaluator.allocator(), raised);
     if (raised != .dict) {
+        heap.releaseValue(evaluator.allocator(), raised);
         return evaluator.typeError("an error dict");
     }
-    const kind_id = try intern.intern("kind");
-    const kind = try dict.symbolField(evaluator.allocator(), raised, kind_id) orelse {
-        return evaluator.typeError("an error dict containing a symbol at 'kind");
+    var owned = true;
+    defer if (owned) heap.releaseValue(evaluator.allocator(), raised);
+    const driver = try evaluator.allocator().create(RaiseDriver);
+    errdefer evaluator.allocator().destroy(driver);
+    driver.* = .{
+        .raised = raised,
+        .keys = .{
+            try intern.intern("kind"),
+            try intern.intern("msg"),
+            try intern.intern("word"),
+            try intern.intern("trace"),
+            try intern.intern("data"),
+        },
     };
-    if (kind != .symbol) {
-        return evaluator.typeError("an error dict containing a symbol at 'kind");
-    }
-    const msg_id = try intern.intern("msg");
-    if (try dict.symbolField(evaluator.allocator(), raised, msg_id)) |message| {
-        if (!message.isString()) {
-            return evaluator.typeError("an error dict with a string at 'msg");
-        }
-    }
-    const word_id = try intern.intern("word");
-    if (try dict.symbolField(evaluator.allocator(), raised, word_id)) |word| {
-        if (word != .symbol) {
-            return evaluator.typeError("an error dict with a symbol at 'word");
-        }
-    }
-    const trace_id = try intern.intern("trace");
-    if (try dict.symbolField(evaluator.allocator(), raised, trace_id)) |trace| {
-        if (trace != .list or !allSymbols(trace)) {
-            return evaluator.typeError("an error dict with symbols at 'trace");
-        }
-    }
-    const data_id = try intern.intern("data");
-    if (try dict.symbolField(evaluator.allocator(), raised, data_id)) |data| {
-        if (data != .dict) {
-            return evaluator.typeError("an error dict with a dict at 'data");
-        }
-    }
-    raised_owned = false;
-    return evaluator.raiseOwned(raised);
+    owned = false;
+    evaluator.installWorkDriver(driver, RaiseDriver.advance, RaiseDriver.destroy);
 }
-fn allSymbols(item: Value) bool {
-    if (item != .list) return false;
-    const count: usize = @intCast(item.list.length());
-    for (0..count) |index| if (list.atUnchecked(item, index) != .symbol) return false;
-    return true;
-}
+const RaiseDriver = struct {
+    raised: Value,
+    keys: [5]u32,
+    field_index: usize = 0,
+    lookup: ?kernel_storage.DictFindCursor = null,
+    trace: ?Value = null,
+    trace_index: usize = 0,
+    transferred: bool = false,
+    phase: enum { lookup, trace, finish } = .lookup,
+
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *RaiseDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        switch (self.phase) {
+            .lookup => {
+                if (self.field_index == self.keys.len) {
+                    self.phase = .finish;
+                    return .yielded;
+                }
+                if (self.lookup == null) self.lookup = .initHeader(
+                    evaluator.allocator(),
+                    self.raised.dict,
+                    .{ .symbol = self.keys[self.field_index] },
+                );
+                switch (try self.lookup.?.advance(machine.kernel_poll_quantum)) {
+                    .pending => return .yielded,
+                    .complete => |found| {
+                        self.lookup.?.deinit();
+                        self.lookup = null;
+                        try self.validateField(evaluator, found);
+                        if (self.phase == .lookup) self.field_index += 1;
+                        return .yielded;
+                    },
+                }
+            },
+            .trace => {
+                const trace = self.trace.?;
+                const count: usize = @intCast(trace.list.length());
+                const end = @min(self.trace_index + machine.kernel_poll_quantum, count);
+                while (self.trace_index != end) : (self.trace_index += 1) {
+                    if (list.atUnchecked(trace, self.trace_index) != .symbol)
+                        return evaluator.typeError("an error dict with symbols at 'trace");
+                }
+                if (self.trace_index == count) {
+                    self.trace = null;
+                    self.field_index += 1;
+                    self.phase = .lookup;
+                }
+                return .yielded;
+            },
+            .finish => {
+                self.transferred = true;
+                return evaluator.raiseOwned(self.raised);
+            },
+        }
+    }
+    fn validateField(self: *RaiseDriver, evaluator: *Machine, found: ?Value) MachineError!void {
+        switch (self.field_index) {
+            0 => if (found == null or found.? != .symbol)
+                return evaluator.typeError("an error dict containing a symbol at 'kind"),
+            1 => if (found) |message| {
+                if (!message.isString())
+                    return evaluator.typeError("an error dict with a string at 'msg");
+            },
+            2 => if (found) |word| {
+                if (word != .symbol)
+                    return evaluator.typeError("an error dict with a symbol at 'word");
+            },
+            3 => if (found) |trace| {
+                if (trace != .list)
+                    return evaluator.typeError("an error dict with symbols at 'trace");
+                self.trace = trace;
+                self.trace_index = 0;
+                self.phase = .trace;
+            },
+            4 => if (found) |data| {
+                if (data != .dict)
+                    return evaluator.typeError("an error dict with a dict at 'data");
+            },
+            else => unreachable,
+        }
+    }
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *RaiseDriver = @ptrCast(@alignCast(raw));
+        if (self.lookup) |*lookup| lookup.deinit();
+        if (!self.transferred) heap.releaseValue(allocator, self.raised);
+        allocator.destroy(self);
+    }
+};
 fn pp(evaluator: *Machine) MachineError!void {
     const item = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), item);
-    const output = evaluator.unit.output orelse
+    var item_owned = true;
+    defer if (item_owned) heap.releaseValue(evaluator.allocator(), item);
+    if (evaluator.unit.console == null and evaluator.unit.output == null)
         return evaluator.fail(.io, "standard output is unavailable");
-    printer.printWithPolling(
-        evaluator.allocator(),
-        item,
-        output,
-        (kernel_support.Context{ .evaluator = evaluator }).structuralPoller(),
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.WriteFailed => return evaluator.fail(.io, "standard output write failed"),
-    };
-    output.writeByte('\n') catch
-        return evaluator.fail(.io, "standard output write failed");
-    output.flush() catch
-        return evaluator.fail(.io, "standard output flush failed");
+    const state = try evaluator.allocator().create(PpDriver);
+    errdefer evaluator.allocator().destroy(state);
+    state.* = .{ .item = item, .render = try .init(evaluator.allocator(), item) };
+    item_owned = false;
+    evaluator.installWorkDriver(state, PpDriver.advance, PpDriver.destroy);
 }
+
+const PpDriver = struct {
+    item: Value,
+    render: printer.OwnedStringCursor,
+
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *PpDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        return switch (try self.render.advance(machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .complete => |rendered| completed: {
+                defer evaluator.allocator().free(rendered);
+                var locked = if (evaluator.unit.console) |console| console.lockOutput() else null;
+                defer if (locked) |*lease| lease.deinit();
+                const output = if (locked) |*lease| lease.writer else evaluator.unit.output.?;
+                output.writeAll(rendered) catch
+                    return evaluator.fail(.io, "standard output write failed");
+                output.writeByte('\n') catch
+                    return evaluator.fail(.io, "standard output write failed");
+                output.flush() catch
+                    return evaluator.fail(.io, "standard output flush failed");
+                break :completed .completed;
+            },
+        };
+    }
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *PpDriver = @ptrCast(@alignCast(raw));
+        self.render.deinit();
+        heap.releaseValue(allocator, self.item);
+        allocator.destroy(self);
+    }
+};
+
 fn prin(evaluator: *Machine) MachineError!void {
     const item = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), item);
+    var item_owned = true;
+    defer if (item_owned) heap.releaseValue(evaluator.allocator(), item);
     if (!item.isString()) return evaluator.typeError("a string");
-    const output = evaluator.unit.output orelse
+    if (evaluator.unit.console == null and evaluator.unit.output == null)
         return evaluator.fail(.io, "standard output is unavailable");
-    const count: usize = @intCast(item.list.length());
-    for (0..count) |index| {
-        try evaluator.advanceKernel(1);
-        var encoded: [4]u8 = undefined;
-        const length = std.unicode.utf8Encode(
-            @intCast(list.atUnchecked(item, index).char),
-            &encoded,
-        ) catch return evaluator.fail(.domain, "string contains an invalid Unicode scalar");
-        output.writeAll(encoded[0..length]) catch
-            return evaluator.fail(.io, "standard output write failed");
-    }
-    output.flush() catch
-        return evaluator.fail(.io, "standard output flush failed");
+    const state = try evaluator.allocator().create(PrinDriver);
+    state.* = .{ .item = item, .encoder = .init(evaluator.allocator(), item) };
+    item_owned = false;
+    evaluator.installWorkDriver(state, PrinDriver.advance, PrinDriver.destroy);
 }
+
+const PrinDriver = struct {
+    item: Value,
+    encoder: kernel_storage.StringEncoder,
+
+    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
+        const self: *PrinDriver = @ptrCast(@alignCast(raw));
+        try evaluator.pollKernel();
+        return switch (self.encoder.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return evaluator.fail(
+                .domain,
+                "string contains an invalid Unicode scalar",
+            ),
+        }) {
+            .pending => .yielded,
+            .complete => |encoded| completed: {
+                defer evaluator.allocator().free(encoded);
+                var locked = if (evaluator.unit.console) |console| console.lockOutput() else null;
+                defer if (locked) |*lease| lease.deinit();
+                const output = if (locked) |*lease| lease.writer else evaluator.unit.output.?;
+                output.writeAll(encoded) catch
+                    return evaluator.fail(.io, "standard output write failed");
+                output.flush() catch
+                    return evaluator.fail(.io, "standard output flush failed");
+                break :completed .completed;
+            },
+        };
+    }
+
+    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
+        const self: *PrinDriver = @ptrCast(@alignCast(raw));
+        self.encoder.deinit();
+        heap.releaseValue(allocator, self.item);
+        allocator.destroy(self);
+    }
+};
 fn args(evaluator: *Machine) MachineError!void {
     try evaluator.pushBorrowed(evaluator.unit.arguments);
 }
@@ -325,12 +598,16 @@ fn exit(evaluator: *Machine) MachineError!void {
     if (status != .int or status.int < 0 or status.int > 255) {
         return evaluator.typeError("an exit status from 0 through 255");
     }
-    evaluator.unit.exit_status = @intCast(status.int);
+    if (!evaluator.unit.is_root_unit or evaluator.unit.inAttempt()) {
+        return evaluator.fail(.domain, "exit is available only to the root unit outside attempt");
+    }
+    std.debug.assert(evaluator.unit.park_request == null);
+    evaluator.unit.park_request = .{ .close_scope = @intCast(status.int) };
 }
 fn quotationHeader(evaluator: *Machine, item: Value) MachineError!*value.Header {
     return switch (item) {
         .list => |header| header,
-        .int, .float, .char, .symbol, .word, .dict => {
+        .int, .float, .char, .symbol, .word, .dict, .task => {
             heap.releaseValue(evaluator.allocator(), item);
             return evaluator.typeError("a quotation/list");
         },

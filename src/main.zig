@@ -37,8 +37,9 @@ fn entry(init: std.process.Init) AppError!u8 {
         return error.OutOfMemory;
     const cli = arguments[1..];
     if (cli.len == 0) {
+        const worker_count = try configuredWorkers(init) orelse return 2;
         const tty = std.Io.File.stdin().isTty(init.io) catch return error.Io;
-        return if (tty) repl(init) else runStdin(init, &.{});
+        return if (tty) repl(init, worker_count) else runStdin(init, &.{}, worker_count);
     }
     const first = cli[0];
     if (std.mem.eql(u8, first, "-h") or std.mem.eql(u8, first, "--help")) {
@@ -53,6 +54,7 @@ fn entry(init: std.process.Init) AppError!u8 {
         return 0;
     }
     if (std.mem.eql(u8, first, "fmt")) return formatCommand(init, cli[1..]);
+    const worker_count = try configuredWorkers(init) orelse return 2;
     if (std.mem.eql(u8, first, "-e") or std.mem.eql(u8, first, "--eval")) {
         if (cli.len < 2) return emitSyntheticError(
             init,
@@ -60,9 +62,9 @@ fn entry(init: std.process.Init) AppError!u8 {
             "-e/--eval requires source text",
             null,
         );
-        return executeSource(init, "<command>", cli[1], cli[2..], true);
+        return executeSource(init, "<command>", cli[1], cli[2..], true, worker_count);
     }
-    if (std.mem.eql(u8, first, "-")) return runStdin(init, cli[1..]);
+    if (std.mem.eql(u8, first, "-")) return runStdin(init, cli[1..], worker_count);
     const is_file: bool = file: {
         std.Io.Dir.cwd().access(init.io, first, .{ .read = true }) catch |err| switch (err) {
             error.FileNotFound, error.NameTooLong, error.BadPathName => break :file false,
@@ -78,7 +80,7 @@ fn entry(init: std.process.Init) AppError!u8 {
             .unlimited,
         ) catch |err| return emitIoError(init, "cannot read script", err);
         defer init.gpa.free(source);
-        return executeSource(init, first, source, cli[1..], false);
+        return executeSource(init, first, source, cli[1..], false, worker_count);
     }
     if (std.mem.endsWith(u8, first, ".ecl")) {
         var buffer: [512]u8 = undefined;
@@ -89,9 +91,30 @@ fn entry(init: std.process.Init) AppError!u8 {
         ) catch "script file does not exist";
         return emitSyntheticError(init, .io, message, null);
     }
-    return executeSource(init, "<command>", first, cli[1..], true);
+    return executeSource(init, "<command>", first, cli[1..], true, worker_count);
 }
-fn runStdin(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
+fn configuredWorkers(init: std.process.Init) AppError!?usize {
+    const raw = init.environ_map.get("ECL_WORKERS") orelse
+        return @max(@as(usize, 1), std.Thread.getCpuCount() catch 1);
+    if (raw.len == 0) {
+        try writeFile(init.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
+        return null;
+    }
+    for (raw) |byte| if (!std.ascii.isDigit(byte)) {
+        try writeFile(init.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
+        return null;
+    };
+    const count = std.fmt.parseInt(usize, raw, 10) catch {
+        try writeFile(init.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
+        return null;
+    };
+    if (count == 0) {
+        try writeFile(init.io, .stderr, "ecl: ECL_WORKERS must be a positive base-10 integer\n");
+        return null;
+    }
+    return count;
+}
+fn runStdin(init: std.process.Init, arguments: []const []const u8, worker_count: usize) AppError!u8 {
     var buffer: [8192]u8 = undefined;
     var file_reader = std.Io.File.stdin().reader(init.io, &buffer);
     const source = file_reader.interface.allocRemaining(init.gpa, .unlimited) catch |err| switch (err) {
@@ -99,7 +122,7 @@ fn runStdin(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
         else => return emitIoError(init, "cannot read stdin", err),
     };
     defer init.gpa.free(source);
-    return executeSource(init, "<stdin>", source, arguments, true);
+    return executeSource(init, "<stdin>", source, arguments, true, worker_count);
 }
 
 fn readFormatStdin(init: std.process.Init) AppError![]u8 {
@@ -143,18 +166,20 @@ fn executeSource(
     source: []const u8,
     arguments: []const []const u8,
     print_stack: bool,
+    worker_count: usize,
 ) AppError!u8 {
     var output_buffer: [4096]u8 = undefined;
     var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
     var diagnostic_buffer: [4096]u8 = undefined;
     var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
-    var session = try ecl.session.Session.initWithHost(
+    var session = try ecl.session.Session.initWithHostConfig(
         init.gpa,
         arguments,
         init.io,
         &output_writer.interface,
         &diagnostic_writer.interface,
         init.environ_map.get("ECL_PATH"),
+        .{ .worker_count = worker_count },
     );
     defer session.deinit();
     const outcome = try session.runUnit(source_name, source);
@@ -172,23 +197,24 @@ fn executeSource(
         ),
         .err => |error_value| {
             defer ecl.heap.releaseValue(init.gpa, error_value);
-            try printError(init, error_value);
+            try printSessionError(init, &session, error_value);
             return 1;
         },
     }
 }
-fn repl(init: std.process.Init) AppError!u8 {
+fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
     var output_buffer: [4096]u8 = undefined;
     var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
     var diagnostic_buffer: [4096]u8 = undefined;
     var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
-    var session = try ecl.session.Session.initWithHost(
+    var session = try ecl.session.Session.initWithHostConfig(
         init.gpa,
         &.{},
         init.io,
         &output_writer.interface,
         &diagnostic_writer.interface,
         init.environ_map.get("ECL_PATH"),
+        .{ .worker_count = worker_count },
     );
     defer session.deinit();
     var pending: std.ArrayList(u8) = .empty;
@@ -197,7 +223,7 @@ fn repl(init: std.process.Init) AppError!u8 {
     var file_reader = std.Io.File.stdin().reader(init.io, &input_buffer);
     var continuation = false;
     while (true) {
-        try writeFile(init.io, .stdout, if (continuation) ".. " else "ecl> ");
+        session.writeOutput(if (continuation) ".. " else "ecl> ") catch return error.Io;
         var line = std.Io.Writer.Allocating.init(init.gpa);
         defer line.deinit();
         const has_delimiter = has: {
@@ -213,7 +239,7 @@ fn repl(init: std.process.Init) AppError!u8 {
         defer init.gpa.free(line_bytes);
         if (line_bytes.len == 0 and !has_delimiter) {
             if (pending.items.len == 0) {
-                try writeFile(init.io, .stdout, "\n");
+                session.writeOutput("\n") catch return error.Io;
                 return 0;
             }
             return emitIncompleteAtEof(init, &session, pending.items);
@@ -231,7 +257,7 @@ fn repl(init: std.process.Init) AppError!u8 {
             },
             .err => |error_value| {
                 defer ecl.heap.releaseValue(init.gpa, error_value);
-                try printError(init, error_value);
+                try printSessionError(init, &session, error_value);
                 pending.clearRetainingCapacity();
                 continuation = false;
             },
@@ -254,17 +280,16 @@ fn emitIncompleteAtEof(
         .ok => 0,
         .err => |error_value| status: {
             defer ecl.heap.releaseValue(init.gpa, error_value);
-            try printError(init, error_value);
+            try printSessionError(init, session, error_value);
             break :status 1;
         },
     };
 }
-fn printStack(init: std.process.Init, session: *const ecl.session.Session) AppError!void {
+fn printStack(init: std.process.Init, session: *ecl.session.Session) AppError!void {
     const display = try session.stackDisplay();
     defer init.gpa.free(display);
     if (display.len == 0) return;
-    try writeFile(init.io, .stdout, display);
-    try writeFile(init.io, .stdout, "\n");
+    session.writeOutputLine(display) catch return error.Io;
 }
 fn emitSyntheticError(
     init: std.process.Init,
@@ -274,7 +299,7 @@ fn emitSyntheticError(
 ) AppError!u8 {
     var language_error = ecl.machine.EclErr.init(kind, message);
     defer language_error.deinit(init.gpa);
-    const error_value = try language_error.toDict(init.gpa, &.{}, location);
+    const error_value = try ecl.machine.errorValue(init.gpa, &language_error, &.{}, location);
     defer ecl.heap.releaseValue(init.gpa, error_value);
     try printError(init, error_value);
     return 1;
@@ -297,6 +322,15 @@ fn printError(init: std.process.Init, error_value: ecl.value.Value) AppError!voi
     defer init.gpa.free(rendered);
     try writeFile(init.io, .stderr, rendered);
     try writeFile(init.io, .stderr, "\n");
+}
+fn printSessionError(
+    init: std.process.Init,
+    session: *ecl.session.Session,
+    error_value: ecl.value.Value,
+) AppError!void {
+    const rendered = try ecl.print.toOwnedString(init.gpa, error_value);
+    defer init.gpa.free(rendered);
+    session.writeDiagnosticsLine(rendered) catch return error.Io;
 }
 const Output = enum { stdout, stderr };
 fn writeFile(io: std.Io, output: Output, bytes: []const u8) AppError!void {

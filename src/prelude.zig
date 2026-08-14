@@ -7,7 +7,6 @@ const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
 const machine = @import("machine.zig");
-const poll = @import("poll.zig");
 
 pub const Error = error{ OutOfMemory, InvalidPrelude };
 
@@ -52,10 +51,7 @@ pub fn installSource(
     const root = try list.fromValuesGeneric(allocator, parsed.forms);
     var root_owned = true;
     defer if (root_owned) heap.releaseValue(allocator, root);
-    archive.absorb(&parsed, root, poll.WorkContext.unlimited()) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => unreachable,
-    };
+    try archive.absorb(&parsed, root);
     root_owned = false;
     const arguments = try list.fromValuesGeneric(allocator, &.{});
     defer heap.releaseValue(allocator, arguments);

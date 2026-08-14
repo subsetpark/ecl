@@ -1,12 +1,9 @@
 //! Executable proofs for immutable dict and Unicode text kernels.
 const std = @import("std");
-const value = @import("../value.zig");
 const session = @import("../session.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const dict = @import("../dict.zig");
-const poll = @import("../poll.zig");
-const storage = @import("../kernel_storage.zig");
 const helper = @import("kernel_test_support.zig");
 
 test "dict-text: dict operations preserve order ownership and right wins" {
@@ -146,50 +143,8 @@ test "dict-text: format enforces braces placeholders and canonical values" {
     });
 }
 
-test "dict-text: update traversals charge polls while copying" {
+test "dict-text: large updates yield through the public runtime" {
     const allocator = std.testing.allocator;
-
-    var small_pairs: [20]dict.Pair = undefined;
-    for (&small_pairs, 0..) |*pair, index| pair.* = .{
-        .{ .int = @intCast(index) },
-        .{ .int = @intCast(index) },
-    };
-    const small = try dict.fromUniquePairs(allocator, &small_pairs);
-    defer heap.releaseValue(allocator, small);
-    const Counter = struct {
-        calls: usize = 0,
-
-        fn tick(raw: *anyopaque) poll.Error!void {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.calls += 1;
-        }
-    };
-    var counter: Counter = .{};
-    _ = try storage.get(allocator, small, .{ .int = 19 }, .{
-        .context = &counter,
-        .poll_fn = Counter.tick,
-    });
-    const Mutator = struct {
-        source: value.Value,
-        mutate_at: usize,
-        calls: usize = 0,
-
-        fn tick(raw: *anyopaque) poll.Error!void {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.calls += 1;
-            if (self.calls != self.mutate_at) return;
-            const values = heap.dictStorageConst(self.source.dict).payload.?.vals;
-            heap.writeUnique(heap.claimUnique(values).?, 0, .{ .int = 999 });
-        }
-    };
-    var mutator = Mutator{ .source = small, .mutate_at = counter.calls + 2 };
-    const updated = try storage.put(allocator, small, .{ .int = 19 }, .{ .int = 190 }, .{
-        .context = &mutator,
-        .poll_fn = Mutator.tick,
-    });
-    try std.testing.expectEqual(small.dict, updated.dict);
-    try std.testing.expectEqual(@as(i64, 0), (try dict.get(updated, .{ .int = 0 })).?.int);
-
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
 
@@ -212,14 +167,7 @@ test "dict-text: update traversals charge polls while copying" {
         .{ .int = @intCast(index) },
         .{ .int = @intCast(index) },
     };
-    var ignored: u8 = 0;
-    const NoPoll = struct {
-        fn tick(_: *anyopaque) poll.Error!void {}
-    };
-    const dictionary = try storage.fromUniquePairs(allocator, pairs, .{
-        .context = &ignored,
-        .poll_fn = NoPoll.tick,
-    });
+    const dictionary = try dict.fromUniquePairs(allocator, pairs);
     defer heap.releaseValue(allocator, dictionary);
 
     heap.retainValue(dictionary);

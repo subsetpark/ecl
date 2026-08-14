@@ -17,7 +17,9 @@ walking skeleton remains a frozen executable semantics oracle.
   list/dict updates and construction, kind reflection, cycling take,
   count-vector where, canonical `str`, pervasive transcendentals, Unicode
   split/join/format, isolated quotation combinators, inline control, pure
-  `parse`, guarded phrase recognition, and an embedded source prelude.
+  `parse`, guarded phrase recognition, identity task values, structured
+  concurrency on a lazy fixed worker pool, deadline waits, whole-call console
+  serialization, and an embedded source prelude.
   Test suites and their helpers live under [`src/tests/`](src/tests/);
   build-only architecture checks live under [`src/tools/`](src/tools/).
 - [`poc/rust/`](poc/rust/) contains the Rust walking-skeleton interpreter and
@@ -30,17 +32,23 @@ To test the Zig implementation with the pinned Zig 0.16 toolchain:
 zig build test
 zig build test -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseFast
+zig build test-workers
 zig build test-oom
 zig build test-tsan
 zig build source-audit
 zig build differential
 ```
 
-`test` keeps low-level exhaustive allocator checks alongside ordinary
+`test-workers` runs the complete library and real-binary suite at one and eight
+workers. `test` keeps low-level exhaustive allocator checks alongside ordinary
 behavioral coverage. `test-oom` is the separate ReleaseSafe gate for the
 costlier full-session sweep; it initializes one session and traverses every
 runtime surface under each injected allocation failure without repeatedly
 bootstrapping the embedded prelude.
+
+Scheduler interleavings are generated against the allocation-free policy core
+with the pinned Minish property-testing library. Failures retain a fixed replay
+seed and are automatically shrunk to a smaller event trace.
 
 To run the calculator:
 
@@ -54,6 +62,9 @@ ECL_PATH=test/acceptance/modules \
 
 # Re-registering heals qualified, used, and aliased callers.
 ./zig-out/bin/ecl test/acceptance/hot-reload.ecl
+
+# Concurrency is configured per process.
+ECL_WORKERS=8 ./zig-out/bin/ecl '[1 2 3] (dup *) par-each'
 
 # Format a file, or pipe source through standard input. Output is stdout-only.
 ./zig-out/bin/ecl fmt src/prelude.ecl
@@ -123,5 +134,35 @@ retain raw newlines exactly. For example:
 
 The public
 `parse` word uses the same bounded reader to return unevaluated forms with
-`<parse>` provenance; it performs no filesystem access. `par-each` remains an
-M7 feature, and `slurp`, `spit`, `getenv`, and `lines` remain deferred to M9.
+`<parse>` provenance; it performs no filesystem access. `slurp`, `spit`,
+`getenv`, and `lines` remain deferred to M9.
+
+## M7 tasks and structured concurrency
+
+`spawn` runs a quotation with an empty isolated stack and returns an opaque
+identity handle. `await` parks the calling unit and returns the child's cached
+`{'ok [...]}` or `{'err {...}}` outcome; duplicated handles and multiple
+waiters observe the same result. `cancel` recursively flags a task tree,
+`tasks` snapshots pending descendants in spawn preorder, `await-any` selects
+one indexed completion, and `await-for` limits a wait without cancelling the
+task. Task displays such as `<task:1>` are intentionally rejected by the
+reader because they are live Session capabilities, not serializable values.
+Large native operations, result publication, joins, and cancellation walks
+resume in bounded scheduler slices; no task runs another task recursively on
+its suspended native stack.
+
+`par-each` is source-defined and joins in input order, so successful results
+and the leftmost failure are stable across worker counts. Cross-task console
+calls and genuinely concurrent `await-any` completions may reorder. Use
+`par-each` for coarse independent work; ordinary pervasive array kernels are
+the efficient choice for element-wise arithmetic. `ECL_WORKERS` accepts only a
+positive base-10 integer and defaults to the available CPU count. Workers and
+the single timer thread are both started lazily.
+
+Scheduler policy is an allocation-free functional core; the threaded runtime
+is its imperative shell. Minish checks both generated core interleavings and
+shrinking public-CLI scenarios under a liveness deadline, so wait-registration
+or handler bypasses are covered as well as policy transitions. The core also
+tracks directory, cell, detached-delivery, and retired registration ownership;
+the shell uses stable owning wake handles and publishes a root wake only as its
+final access to that stack generation.

@@ -5,7 +5,6 @@ const intern = @import("../intern.zig");
 const list = @import("../list.zig");
 const machine = @import("../machine.zig");
 const modules = @import("../modules.zig");
-const poll = @import("../poll.zig");
 const printer = @import("../print.zig");
 const session = @import("../session.zig");
 
@@ -41,29 +40,6 @@ fn expectErrorContains(
     for (needles) |needle| try std.testing.expect(std.mem.indexOf(u8, rendered, needle) != null);
 }
 
-fn cancelLoading(_: *anyopaque) poll.Error!void {
-    return error.Ecl;
-}
-
-fn finishLoadingWithCleanup(loading: *modules.LoadingLease, work: poll.WorkContext) poll.Error!void {
-    defer loading.deinit();
-    try loading.finish(work);
-}
-
-test "registry: cancelled loading removal retains cleanup ownership" {
-    var registry = modules.Registry.init(std.testing.allocator);
-    defer registry.deinit();
-    const name = try intern.intern("cancelled-loading");
-    var loading = (try registry.beginLoading(name, .unlimited())).?;
-    var context: u8 = 0;
-    try std.testing.expectError(error.Ecl, finishLoadingWithCleanup(&loading, .init(.{
-        .context = &context,
-        .poll_fn = cancelLoading,
-    })));
-    var retry = (try registry.beginLoading(name, .unlimited())).?;
-    defer retry.deinit();
-}
-
 test "env: new names and use edits bump shape and deep lookup is ordered" {
     var environment = env.Environment.init(std.testing.allocator);
     defer environment.deinit();
@@ -72,18 +48,20 @@ test "env: new names and use edits bump shape and deep lookup is ordered" {
     defer scope.deinit();
     const first = try intern.trustedNamespace("first-env-name");
     const second = try intern.trustedNamespace("second-env-name");
-    _ = try scope.publishModule(first, .{ .value = .{ .item = .{ .int = 1 }, .visibility = .public } }, .unlimited());
+    _ = try scope.publishModule(first, .{ .value = .{ .item = .{ .int = 1 }, .visibility = .public } });
     try std.testing.expectEqual(@as(u64, 1), environment.generation());
-    _ = try scope.publishModule(second, .{ .value = .{ .item = .{ .int = 2 }, .visibility = .public } }, .unlimited());
+    _ = try scope.publishModule(second, .{ .value = .{ .item = .{ .int = 2 }, .visibility = .public } });
     try std.testing.expectEqual(@as(u64, 2), environment.generation());
-    try scope.moveUseToTop(8, .unlimited());
+    try scope.moveUseToTop(8);
     try std.testing.expectEqual(@as(u64, 3), environment.generation());
-    try scope.moveUseToTop(8, .unlimited());
+    try scope.moveUseToTop(8);
     try std.testing.expectEqual(@as(u64, 3), environment.generation());
-    try scope.moveUseToTop(9, .unlimited());
-    try scope.moveUseToTop(8, .unlimited());
-    try std.testing.expectEqualSlices(u32, &.{ 9, 8 }, environment.useOrder());
-    const names = try environment.namesOwned(std.testing.allocator, .unlimited());
+    try scope.moveUseToTop(9);
+    try scope.moveUseToTop(8);
+    var shape = environment.acquireShape();
+    defer shape.deinit();
+    try std.testing.expectEqualSlices(u32, &.{ 9, 8 }, shape.useOrder());
+    const names = try environment.namesOwned(std.testing.allocator);
     defer std.testing.allocator.free(names);
     std.mem.sort(u32, names, {}, std.sort.asc(u32));
     var expected = [_]u32{ intern.namespaceId(first), intern.namespaceId(second) };
@@ -92,7 +70,7 @@ test "env: new names and use edits bump shape and deep lookup is ordered" {
     scope.freezeModule();
     try std.testing.expectError(
         error.Frozen,
-        scope.publishModule(first, .{ .value = .{ .item = .{ .int = 3 }, .visibility = .public } }, .unlimited()),
+        scope.publishModule(first, .{ .value = .{ .item = .{ .int = 3 }, .visibility = .public } }),
     );
 }
 
@@ -399,12 +377,12 @@ test "reflection failures are total" {
     try expectErrorContains(&no_output, "'missing which", &.{"'kind 'undefined-word"});
 }
 
-fn nativeAnswer(evaluator: *machine.Machine) env.PrimitiveResult {
+fn nativeAnswer(evaluator: *machine.Machine) error{OutOfMemory}!env.PrimitiveOutcome {
     try evaluator.pushOwned(.{ .int = 42 });
     return .ok;
 }
 
-fn nativeAnswerReloaded(evaluator: *machine.Machine) env.PrimitiveResult {
+fn nativeAnswerReloaded(evaluator: *machine.Machine) error{OutOfMemory}!env.PrimitiveOutcome {
     try evaluator.pushOwned(.{ .int = 43 });
     return .ok;
 }
@@ -419,7 +397,7 @@ test "public native failures carry their payload atomically" {
     const separator = try intern.intern("--");
     const effect_value = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .word = separator }});
     defer heap.releaseValue(std.testing.allocator, effect_value);
-    const effect = (try env.ValidatedEffect.parse(effect_value.list, separator, .unlimited())).?;
+    const effect = (env.ValidatedEffect.parse(effect_value.list, separator)).?;
     _ = try runtime.registerNativeModule(
         try intern.trustedNamespace("failing-native"),
         &.{.{ .primitive = .{
@@ -457,7 +435,7 @@ test "registry: native modules share ordinary generations and effects" {
         .{ .word = output_name },
     });
     defer heap.releaseValue(allocator, effect_value);
-    const effect = (try env.ValidatedEffect.parse(effect_value.list, separator, .unlimited())).?;
+    const effect = (env.ValidatedEffect.parse(effect_value.list, separator)).?;
     const module_name = try intern.trustedNamespace("native");
     const answer_name = try intern.trustedNamespace("answer");
     try std.testing.expectEqual(@as(u64, 1), try runtime.registerNativeModule(module_name, &.{.{
@@ -478,10 +456,9 @@ test "registry: native modules share ordinary generations and effects" {
     );
     const invalid_effect = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
     defer heap.releaseValue(allocator, invalid_effect);
-    try std.testing.expect((try env.ValidatedEffect.parse(
+    try std.testing.expect((env.ValidatedEffect.parse(
         invalid_effect.list,
         separator,
-        .unlimited(),
     )) == null);
 }
 
@@ -497,15 +474,13 @@ fn envWorker(context: EnvThreadContext) void {
         _ = context.scope.publishTop(
             context.name,
             .{ .value = .{ .int = @intCast(index) } },
-            .unlimited(),
         ) catch {
             context.failed.store(true, .release);
             return;
         };
         var lease = (context.environment.resolveDirect(
             intern.namespaceId(context.name),
-            .unlimited(),
-        ) catch unreachable) orelse {
+        )) orelse {
             context.failed.store(true, .release);
             return;
         };
@@ -545,15 +520,15 @@ test "env: a replaced interior remains valid only through its binding lease" {
     defer heap.releaseValue(std.testing.allocator, body);
     const document = try list.fromCodepoints(std.testing.allocator, &.{ 'd', 'o', 'c' });
     defer heap.releaseValue(std.testing.allocator, document);
-    const effect = (try env.ValidatedEffect.parse(body.list, separator, .unlimited())).?;
+    const effect = (env.ValidatedEffect.parse(body.list, separator)).?;
     const name = try intern.trustedNamespace("leased-metadata");
     _ = try scope.publishTop(name, .{ .word = .{
         .body = env.quotation(body.list).?,
         .effect = effect,
         .doc = env.documentation(document.list).?,
-    } }, .unlimited());
-    var old = (try environment.session.resolveDirect(intern.namespaceId(name), .unlimited())).?;
-    _ = try scope.publishTop(name, .{ .value = .{ .int = 9 } }, .unlimited());
+    } });
+    var old = (environment.session.resolveDirect(intern.namespaceId(name))).?;
+    _ = try scope.publishTop(name, .{ .value = .{ .int = 9 } });
     try std.testing.expectEqual(@as(u32, 3), heap.refCount(body.list));
     old.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 1), heap.refCount(body.list));
@@ -569,7 +544,7 @@ const RegistryThreadContext = struct {
 fn commitCandidate(context: RegistryThreadContext, name: intern.NamespaceName) bool {
     var candidate = context.registry.createCandidate(name) catch return false;
     defer candidate.deinit();
-    _ = context.registry.commit(&candidate, .unlimited()) catch return false;
+    _ = context.registry.commit(&candidate) catch return false;
     return true;
 }
 
@@ -633,12 +608,12 @@ test "registry: old generation leases survive reload and reclaim after release" 
     _ = try first.borrow().scope.publishModule(value_name, .{ .value = .{
         .item = body,
         .visibility = .public,
-    } }, .unlimited());
-    _ = try registry.commit(&first, .unlimited());
+    } });
+    _ = try registry.commit(&first);
     var old = registry.acquire(intern.namespaceId(module_name)).?;
     var second = try registry.createCandidate(module_name);
     defer second.deinit();
-    _ = try registry.commit(&second, .unlimited());
+    _ = try registry.commit(&second);
     try std.testing.expectEqual(@as(u64, 1), old.generation.generation);
     try std.testing.expectEqual(@as(u32, 2), heap.refCount(body.list));
     old.deinit();
@@ -763,15 +738,15 @@ fn environmentAllocationProbe(allocator: std.mem.Allocator) !void {
     const after_uses = try intern.trustedNamespace("allocation-after-uses");
     _ = try scope.publishTop(first, .{ .word = .{
         .body = env.quotation(body.list).?,
-    } }, .unlimited());
-    var lease = (try environment.session.resolveDirect(intern.namespaceId(first), .unlimited())).?;
+    } });
+    var lease = (environment.session.resolveDirect(intern.namespaceId(first))).?;
     defer lease.deinit(allocator);
-    _ = try scope.publishTop(first, .{ .value = .{ .int = 2 } }, .unlimited());
-    _ = try scope.publishTop(second, .{ .value = .{ .int = 3 } }, .unlimited());
-    try scope.moveUseToTop(8, .unlimited());
-    try scope.moveUseToTop(9, .unlimited());
-    _ = try scope.publishTop(after_uses, .{ .value = .{ .int = 4 } }, .unlimited());
-    const names = try environment.session.namesOwned(allocator, .unlimited());
+    _ = try scope.publishTop(first, .{ .value = .{ .int = 2 } });
+    _ = try scope.publishTop(second, .{ .value = .{ .int = 3 } });
+    try scope.moveUseToTop(8);
+    try scope.moveUseToTop(9);
+    _ = try scope.publishTop(after_uses, .{ .value = .{ .int = 4 } });
+    const names = try environment.session.namesOwned(allocator);
     allocator.free(names);
 }
 
@@ -784,7 +759,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     });
     defer heap.releaseValue(allocator, effect_value);
     const separator = try intern.intern("--");
-    const effect = (try env.ValidatedEffect.parse(effect_value.list, separator, .unlimited())).?;
+    const effect = (env.ValidatedEffect.parse(effect_value.list, separator)).?;
     const first_name = try intern.trustedNamespace("allocation-module");
     const alias_name = try intern.trustedNamespace("allocation-alias");
     const second_name = try intern.trustedNamespace("allocation-native");
@@ -795,9 +770,9 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .callback = nativeAnswer,
         .visibility = .public,
         .effect = effect,
-    } }, .unlimited());
-    _ = try registry.commit(&first, .unlimited());
-    try registry.alias(alias_name, first_name, .unlimited());
+    } });
+    _ = try registry.commit(&first);
+    try registry.alias(alias_name, first_name);
     var lease = registry.acquire(intern.namespaceId(alias_name)).?;
     defer lease.deinit();
     var second = try registry.createCandidate(first_name);
@@ -806,13 +781,13 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .callback = nativeAnswer,
         .visibility = .public,
         .effect = effect,
-    } }, .unlimited());
-    _ = try registry.commit(&second, .unlimited());
+    } });
+    _ = try registry.commit(&second);
     _ = try registry.registerNative(second_name, &.{.{ .primitive = .{
         .name = word_name,
         .callback = nativeAnswer,
         .effect = effect,
-    } }}, .unlimited());
+    } }});
 }
 
 test "environment and registry APIs propagate every allocation failure" {

@@ -48,6 +48,12 @@ pub const DictStorage = struct {
     index_len: usize = 0,
 };
 
+pub const TaskStorage = struct {
+    identity: u64,
+    payload: *anyopaque,
+    destroy: *const fn (std.mem.Allocator, *anyopaque) ?Value,
+};
+
 const Object = struct {
     header: HeaderImpl,
     capacity: usize,
@@ -142,11 +148,36 @@ pub fn allocHeader(
         .leaf_char4 => try allocPayload(u32, allocator, capacity_value),
         .leaf_symbol => try allocPayload(u32, allocator, capacity_value),
         .dict => @ptrCast(try allocator.create(DictStorage)),
+        .task => unreachable,
         .reserved_mask => null,
     };
     const initializing: *InitializingHeader = @ptrCast(@alignCast(&obj.header));
     if (kind_value == .dict) initDictStorage(initializing).* = .{};
     return initializing;
+}
+
+pub fn allocTaskHeader(
+    allocator: std.mem.Allocator,
+    identity: u64,
+    payload: *anyopaque,
+    destroy: *const fn (std.mem.Allocator, *anyopaque) ?Value,
+) error{OutOfMemory}!*InitializingHeader {
+    const obj = try allocator.create(Object);
+    errdefer allocator.destroy(obj);
+    const storage = try allocator.create(TaskStorage);
+    storage.* = .{ .identity = identity, .payload = payload, .destroy = destroy };
+    obj.* = .{
+        .header = HeaderImpl.init(.task, identity),
+        .capacity = 0,
+        .payload = @ptrCast(storage),
+        .next_destroy = null,
+    };
+    return @ptrCast(@alignCast(&obj.header));
+}
+
+pub fn taskStorage(header: *const Header) *const TaskStorage {
+    std.debug.assert(kind(header) == .task);
+    return @ptrCast(@alignCast(objectConst(header).payload.?));
 }
 
 fn allocPayload(
@@ -247,7 +278,7 @@ pub fn writeUnique(header: *UniqueHeader, index: usize, item: Value) void {
         .leaf_char2 => payloadItems(u16, raw)[index] = @intCast(item.char),
         .leaf_char4 => payloadItems(u32, raw)[index] = item.char,
         .leaf_symbol => payloadItems(u32, raw)[index] = item.symbol,
-        .dict, .reserved_mask => unreachable,
+        .dict, .task, .reserved_mask => unreachable,
     }
 }
 
@@ -281,19 +312,13 @@ pub fn retainValue(item: Value) void {
         .int, .float, .char, .symbol, .word => {},
         .list => |header| incRef(header),
         .dict => |header| incRef(header),
+        .task => |header| incRef(header),
     }
 }
 
 pub fn decRef(allocator: std.mem.Allocator, header: *Header) void {
-    var work: ?*Header = null;
-    releaseOnto(header, &work);
-    while (work) |current| {
-        const obj = object(current);
-        work = obj.next_destroy;
-        releaseChildren(current, &work);
-        freePayload(allocator, current);
-        allocator.destroy(obj);
-    }
+    var cursor = ReleaseCursor.initHeader(allocator, header);
+    while (!cursor.advance(std.math.maxInt(usize))) {}
 }
 
 pub fn releaseValue(allocator: std.mem.Allocator, item: Value) void {
@@ -301,6 +326,7 @@ pub fn releaseValue(allocator: std.mem.Allocator, item: Value) void {
         .int, .float, .char, .symbol, .word => {},
         .list => |header| decRef(allocator, header),
         .dict => |header| decRef(allocator, header),
+        .task => |header| decRef(allocator, header),
     }
 }
 
@@ -311,34 +337,6 @@ fn releaseOnto(header: *Header, work: *?*Header) void {
     _ = headerImpl(header).rc.load(.acquire);
     object(header).next_destroy = work.*;
     work.* = header;
-}
-
-fn releaseChildren(header: *Header, work: *?*Header) void {
-    switch (kind(header)) {
-        .generic_spine => {
-            const used: usize = @intCast(length(header));
-            for (valuesConst(header)[0..used]) |child| {
-                if (child.heapHeader()) |child_header| releaseOnto(child_header, work);
-            }
-        },
-        .dict => {
-            const storage = dictStorageConst(header);
-            if (storage.initialized) {
-                const payload = storage.payload.?;
-                releaseOnto(payload.keys, work);
-                releaseOnto(payload.vals, work);
-                if (payload.hashes) |hashes| releaseOnto(hashes, work);
-            }
-        },
-        .leaf_i64,
-        .leaf_f64,
-        .leaf_char1,
-        .leaf_char2,
-        .leaf_char4,
-        .leaf_symbol,
-        .reserved_mask,
-        => {},
-    }
 }
 
 fn freePayload(allocator: std.mem.Allocator, header: *Header) void {
@@ -357,11 +355,124 @@ fn freePayload(allocator: std.mem.Allocator, header: *Header) void {
             if (storage.index) |index| allocator.free(index[0..storage.index_len]);
             allocator.destroy(storage);
         },
+        .task => {
+            const storage: *TaskStorage = @constCast(taskStorage(header));
+            allocator.destroy(storage);
+        },
         .reserved_mask => {},
     }
     obj.payload = null;
     obj.capacity = 0;
 }
+
+/// Allocation-free, resumable destruction of an owned value graph. A cursor
+/// is itself the sole owner of every zero-reference object in its intrusive
+/// work stack, so it must always be advanced to completion.
+pub const ReleaseCursor = struct {
+    allocator: std.mem.Allocator,
+    work: ?*Header = null,
+    current: ?*Header = null,
+    child_index: usize = 0,
+    preserve_current: bool = false,
+
+    pub fn initValue(allocator: std.mem.Allocator, item: Value) ReleaseCursor {
+        var self = ReleaseCursor{ .allocator = allocator };
+        if (item.heapHeader()) |header| releaseOnto(header, &self.work);
+        return self;
+    }
+
+    pub fn initHeader(allocator: std.mem.Allocator, header: *Header) ReleaseCursor {
+        var self = ReleaseCursor{ .allocator = allocator };
+        releaseOnto(header, &self.work);
+        return self;
+    }
+
+    fn initChildren(allocator: std.mem.Allocator, header: *Header) ReleaseCursor {
+        return .{
+            .allocator = allocator,
+            .current = header,
+            .preserve_current = true,
+        };
+    }
+
+    pub fn advance(self: *ReleaseCursor, budget: usize) bool {
+        return self.advanceCounted(budget).complete;
+    }
+
+    pub const Advance = struct { complete: bool, consumed: usize };
+
+    pub fn advanceCounted(self: *ReleaseCursor, budget: usize) Advance {
+        std.debug.assert(budget != 0);
+        var consumed: usize = 0;
+        while (consumed != budget) : (consumed += 1) {
+            if (self.current == null) {
+                const next = self.work orelse return .{ .complete = true, .consumed = consumed };
+                self.work = object(next).next_destroy;
+                object(next).next_destroy = null;
+                self.current = next;
+                self.child_index = 0;
+            }
+            if (self.releaseNextChild()) continue;
+            const finished = self.current.?;
+            self.current = null;
+            if (self.preserve_current) {
+                self.preserve_current = false;
+                continue;
+            }
+            freePayload(self.allocator, finished);
+            self.allocator.destroy(object(finished));
+        }
+        return .{
+            .complete = self.current == null and self.work == null,
+            .consumed = consumed,
+        };
+    }
+
+    fn releaseNextChild(self: *ReleaseCursor) bool {
+        const header = self.current.?;
+        switch (kind(header)) {
+            .generic_spine => {
+                const used: usize = @intCast(length(header));
+                if (self.child_index == used) return false;
+                const child = valuesConst(header)[self.child_index];
+                self.child_index += 1;
+                if (child.heapHeader()) |child_header| releaseOnto(child_header, &self.work);
+                return true;
+            },
+            .dict => {
+                const storage = dictStorageConst(header);
+                if (!storage.initialized) return false;
+                const payload = storage.payload.?;
+                const child = switch (self.child_index) {
+                    0 => payload.keys,
+                    1 => payload.vals,
+                    2 => payload.hashes orelse return false,
+                    else => return false,
+                };
+                self.child_index += 1;
+                releaseOnto(child, &self.work);
+                return true;
+            },
+            .task => {
+                if (self.child_index != 0) return false;
+                self.child_index = 1;
+                const storage: *TaskStorage = @constCast(taskStorage(header));
+                if (storage.destroy(self.allocator, storage.payload)) |child| {
+                    if (child.heapHeader()) |child_header| releaseOnto(child_header, &self.work);
+                }
+                return true;
+            },
+            .leaf_i64,
+            .leaf_f64,
+            .leaf_char1,
+            .leaf_char2,
+            .leaf_char4,
+            .leaf_symbol,
+            .reserved_mask,
+            => return false,
+        }
+    }
+};
 
 fn freeItems(
     comptime T: type,
@@ -406,7 +517,7 @@ pub fn replaceBuffer(
         .leaf_char1 => resizePayload(u8, allocator, raw, new_capacity),
         .leaf_char2 => resizePayload(u16, allocator, raw, new_capacity),
         .leaf_char4, .leaf_symbol => resizePayload(u32, allocator, raw, new_capacity),
-        .dict, .reserved_mask => unreachable,
+        .dict, .task, .reserved_mask => unreachable,
     };
 }
 
@@ -421,15 +532,8 @@ fn replaceRepresentation(
     new_payload: ?*anyopaque,
 ) void {
     const raw = uniqueHeader(header);
-    var work: ?*Header = null;
-    releaseChildren(raw, &work);
-    while (work) |current| {
-        const obj = object(current);
-        work = obj.next_destroy;
-        releaseChildren(current, &work);
-        freePayload(allocator, current);
-        allocator.destroy(obj);
-    }
+    var cursor = ReleaseCursor.initChildren(allocator, raw);
+    while (!cursor.advance(std.math.maxInt(usize))) {}
     freePayload(allocator, raw);
     const obj = object(raw);
     obj.capacity = new_capacity;
@@ -511,6 +615,18 @@ test "deep spine destruction is iterative" {
         current = publish(parent);
     }
     decRef(allocator, current);
+}
+
+test "release cursor suspends wide value destruction at its budget" {
+    const allocator = std.testing.allocator;
+    const width = 65_537;
+    const initializing = try allocHeader(allocator, .generic_spine, width, width);
+    for (initValues(initializing)) |*item| item.* = .{ .int = 1 };
+    var cursor = ReleaseCursor.initHeader(allocator, publish(initializing));
+    const first = cursor.advanceCounted(1024);
+    try std.testing.expect(!first.complete);
+    try std.testing.expectEqual(@as(usize, 1024), first.consumed);
+    while (!cursor.advance(1024)) {}
 }
 
 const ReferenceContext = struct {

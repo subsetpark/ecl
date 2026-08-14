@@ -7,6 +7,70 @@ const heap = @import("../heap.zig");
 const intern = @import("../intern.zig");
 const session = @import("../session.zig");
 
+const LockedAllocator = struct {
+    child: std.mem.Allocator,
+    mutex: std.Io.Mutex = .init,
+
+    fn allocator(self: *LockedAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *LockedAllocator = @ptrCast(@alignCast(context));
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return self.child.rawAlloc(len, alignment, return_address);
+    }
+
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) bool {
+        const self: *LockedAllocator = @ptrCast(@alignCast(context));
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return self.child.rawResize(memory, alignment, new_len, return_address);
+    }
+
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        const self: *LockedAllocator = @ptrCast(@alignCast(context));
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return self.child.rawRemap(memory, alignment, new_len, return_address);
+    }
+
+    fn free(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        return_address: usize,
+    ) void {
+        const self: *LockedAllocator = @ptrCast(@alignCast(context));
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        self.child.rawFree(memory, alignment, return_address);
+    }
+};
+
 fn runOk(runtime: *session.Session, name: []const u8, source: []const u8) !void {
     switch (try runtime.runUnit(name, source)) {
         .ok => {},
@@ -19,12 +83,14 @@ fn runOk(runtime: *session.Session, name: []const u8, source: []const u8) !void 
 }
 
 fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
+    var locked_allocator = LockedAllocator{ .child = allocator };
+    const thread_safe_allocator = locked_allocator.allocator();
     var output_buffer: [16384]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
     var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
     var runtime = try session.Session.initWithHost(
-        allocator,
+        thread_safe_allocator,
         &.{"argument"},
         std.testing.io,
         &output,
@@ -76,6 +142,15 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     );
     try runOk(
         &runtime,
+        "oom-concurrency.ecl",
+        "([1 2 3] str) spawn await pop " ++
+            "(1) spawn dup pair await-any pop pop " ++
+            "(1) spawn 0 await-for pop " ++
+            "((1) () while) spawn dup cancel await pop " ++
+            "[1 2 3] (dup *) par-each pop",
+    );
+    try runOk(
+        &runtime,
         "oom-reflection.ecl",
         "'reflection-module ((1) ( -- n ) 'f def) module " ++
             "'reflection-module use 'reflection-module.f body pop words " ++
@@ -97,14 +172,14 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "(1) (-- n : \"Old.\") 'allocation-target def",
     );
     const id = try intern.intern("allocation-target");
-    var old = (try runtime.environment.session.resolveDirect(id, .unlimited())).?;
-    defer old.deinit(allocator);
+    var old = (runtime.environment.session.resolveDirect(id)).?;
+    defer old.deinit(thread_safe_allocator);
     const outcome = runtime.runUnit(
         "oom-definition-replacement.ecl",
         "(2) (input -- output : \"Replacement.\") 'allocation-target def",
     ) catch |err| {
-        var current = (try runtime.environment.session.resolveDirect(id, .unlimited())).?;
-        defer current.deinit(allocator);
+        var current = (runtime.environment.session.resolveDirect(id)).?;
+        defer current.deinit(thread_safe_allocator);
         try std.testing.expectEqual(old.binding.word, current.binding.word);
         try std.testing.expectEqual(old.effect.?.quotation, current.effect.?.quotation);
         try std.testing.expectEqual(old.doc.?, current.doc.?);
@@ -114,7 +189,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         .ok => {},
         .incomplete => return error.UnexpectedIncomplete,
         .err => |failure| {
-            heap.releaseValue(allocator, failure);
+            heap.releaseValue(thread_safe_allocator, failure);
             return error.UnexpectedLanguageError;
         },
     }

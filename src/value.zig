@@ -10,6 +10,7 @@ pub const Tag = enum(u8) {
     word,
     list,
     dict,
+    task,
 };
 
 /// The representation tag is a construction-time fact. Extending this enum is
@@ -23,6 +24,7 @@ pub const HeapKind = enum(u8) {
     leaf_char4,
     leaf_symbol,
     dict,
+    task,
     reserved_mask,
 };
 
@@ -55,6 +57,7 @@ pub const Value = union(Tag) {
     word: u32,
     list: *Header,
     dict: *Header,
+    task: *Header,
 
     pub fn tag(self: Value) Tag {
         return std.meta.activeTag(self);
@@ -65,6 +68,7 @@ pub const Value = union(Tag) {
             .int, .float, .char, .symbol, .word => null,
             .list => |header| header,
             .dict => |header| header,
+            .task => |header| header,
         };
     }
 
@@ -77,7 +81,7 @@ pub const Value = union(Tag) {
         if (self != .list) return false;
         return switch (self.list.kind()) {
             .leaf_char1, .leaf_char2, .leaf_char4 => true,
-            .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .reserved_mask => false,
+            .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .reserved_mask => false,
         };
     }
 };
@@ -88,7 +92,7 @@ comptime {
 
 test "value and header layouts are frozen" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Value));
-    try std.testing.expectEqual(@as(usize, 9), @typeInfo(HeapKind).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 10), @typeInfo(HeapKind).@"enum".fields.len);
 }
 
 test "atom constructors round-trip their payloads" {

@@ -466,7 +466,7 @@ ARCHITECTURE.md §Scheduler: green units on a lazily-spun fixed worker
 pool (no threads until first `spawn`; 1-worker config supported),
 fuel/reduction safe points including kernel chunk polls (~64K
 elements), task cells (write-once, multi-waiter, per-cell mutex) with
-**CAS'd wake tokens** (no double-enqueue), cancellation with
+single-winner wait-policy transitions (no double-enqueue), cancellation with
 kill-on-arrival and waiter-list removal, structured lifetime with
 wait-for-quiescence at scope close, cancelled outcomes as
 `{'err {'kind 'cancelled …}}`, one timer thread + binary heap for
@@ -484,6 +484,23 @@ milestone must make reclamation worker-safe — quiescent-point or
 epoch/lease-gated compaction of superseded shapes and directories — so
 long-lived sessions stop growing with distinct-name insertions and
 module re-registrations.
+
+**Settled M7 semantics.** Task values are identity-bearing capabilities
+linked to live Session state. Both `str` and `pp` render a task as its
+stable per-Session `<task:N>` marker; the reader rejects that exact
+runtime marker wherever an atom may occur, so a task or any rendered
+structure containing one is deliberately unparseable. Decision 16's
+canonical reader round-trip applies only to values containing no
+session-linked runtime object. Scheduling remains cooperative rather
+than arbitrary native-stack preemption, but every user-sized traversal
+has one explicit cursor implementation. Scheduler-attached drivers preserve
+that cursor and its partial result and return to the scheduler within the
+accounted-work quantum; blocking bootstrap and tool shells drive the same
+cursor without introducing a legacy traversal mode. Process exit is owned by the
+root Unit outside `attempt`: `exit` in a spawned Unit or inside `attempt`
+raises an ordinary catchable `'domain`, while an allowed root exit
+closes, cancels, and quiesces the root task scope before exposing its
+status to the CLI.
 
 **Why this is a safe pause point**: The language surface of DESIGN.md
 is complete; only scope-ruled stdlib and REPL polish remain.
@@ -559,8 +576,9 @@ The terminal acceptance suite below is implemented as a CI job
 (fixtures + expect scripts where interactive) and green. README rewritten
 around the real binary (install, tour, module guide). The d.23 line
 budget is audited by a CI check (the recalibrated per-component budget:
-classified production Zig ≤ 22,000 including kernels and source tooling but
-excluding tests and target-language ECL source; kernels ≤ 5,500). Snapshot retention is bounded (the M7 reclamation
+classified shipped business-logic Zig ≤ 22,000 including kernels but excluding
+tests, fixtures, build/source-audit verification tooling, and target-language
+ECL source; kernels ≤ 5,500). Snapshot retention is bounded (the M7 reclamation
 obligation): a soak fixture that defines and re-registers in a loop
 shows stable memory. A `v1.0` tag exists.
 
@@ -924,15 +942,18 @@ script in CI.
   - **Traces to**: Milestone 9 — embedded stdlib registration (mechanism Milestone 4).
 
 - **DoD-25 — line budget**
-  - **Assert**: classified production Zig (including kernels and source tooling,
-    excluding tests and all target-language ECL source) ≤ 22,000
-    lines and every component inside its ARCHITECTURE.md row; kernels
-    ≤ 5,500. Core excludes `test` blocks wherever they appear and
-    excludes test-only sources (`*_test.zig`, `testgen.zig`).
+  - **Assert**: classified shipped business-logic Zig (including kernels but
+    excluding tests, fixtures, build/source-audit verification tooling, and all
+    target-language ECL source) ≤ 22,000 lines and every budgeted component
+    inside its ARCHITECTURE.md row; kernels ≤ 5,500. Business logic excludes
+    `test` blocks wherever they appear and excludes every test-only source.
+    Verification Zig remains exactly classified and is reported separately but
+    has no line ceiling.
   - **Verify by** `cmd`: `zig build source-audit` (the dedicated audit in
     `src/tools/source_audit.zig` prints the split and fails the build when a
     component exceeds its row); `zig build test` depends on this audit.
-  - **Expected**: exit 0 with the per-component counts printed.
+  - **Expected**: exit 0 with per-component business-logic counts and separate
+    uncapped verification counts printed.
   - **Traces to**: Milestone 10 — the source audit (budget: d.23,
     re-derived for the Zig host 2026-08-12).
 

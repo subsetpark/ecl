@@ -222,3 +222,13 @@
 (sequence needle -- index :
  "Return the first matching index, or the sequence length when no element matches.")
 'find def
+
+### def par-each
+(|l q|
+ l type 'list match ({'kind 'type 'msg "par-each expected a list"} raise) unless
+ q type 'list match ({'kind 'type 'msg "par-each expected a quotation"} raise) unless
+ l (literal) q literal compose (compose spawn) compose each
+ task-join)
+(sequence quotation -- results :
+ "Apply a quotation concurrently to every element and return one result per element in input order.")
+'par-each def

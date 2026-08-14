@@ -46,3 +46,11 @@
 - Raise a component or representation ceiling when a strong type boundary honestly
   needs the space. Never weaken or compress away the type boundary merely to satisfy
   a historical line-count or frame-size limit; update and explain the ceiling.
+
+## Line budgets
+
+- Apply component and total line ceilings only to shipped business-logic Zig.
+- Exclude test-only sources, inline `test` declarations, fixtures, build/source-audit
+  verification tooling, and all target-language ECL from every line ceiling.
+- Keep excluded Zig exactly classified and report it separately, but do not cap it.
+  Do not move shipped behavior into an excluded file to evade a business-logic budget.

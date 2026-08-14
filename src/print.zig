@@ -14,6 +14,210 @@ const Action = union(enum) {
     render: Value,
     sequence: struct { collection: Value, index: usize },
     dictionary: struct { header: *value.Header, index: usize, key: bool },
+    string: struct { collection: Value, index: usize },
+    bytes: struct { source: []const u8, index: usize },
+};
+
+pub const RenderProgress = enum { pending, complete };
+
+/// Owned rendering state. Each transition writes only a scalar rendering, one
+/// collection edge, one codepoint, or at most 256 identifier bytes.
+pub const RenderCursor = struct {
+    actions: poll_api.ChunkStack(Action),
+
+    pub fn init(allocator: std.mem.Allocator, item: Value) error{OutOfMemory}!RenderCursor {
+        var actions = poll_api.ChunkStack(Action).init(allocator);
+        errdefer actions.deinit();
+        try actions.push(.{ .render = item });
+        return .{ .actions = actions };
+    }
+
+    pub fn deinit(self: *RenderCursor) void {
+        self.actions.deinit();
+        self.* = undefined;
+    }
+
+    pub fn advance(
+        self: *RenderCursor,
+        writer: *std.Io.Writer,
+        budget: usize,
+    ) (error{OutOfMemory} || std.Io.Writer.Error)!RenderProgress {
+        std.debug.assert(budget != 0);
+        for (0..budget) |_| {
+            const action = self.actions.pop() orelse return .complete;
+            try self.renderAction(action, writer);
+            if (self.actions.isEmpty()) return .complete;
+        }
+        return .pending;
+    }
+
+    fn renderAction(
+        self: *RenderCursor,
+        action: Action,
+        writer: *std.Io.Writer,
+    ) (error{OutOfMemory} || std.Io.Writer.Error)!void {
+        switch (action) {
+            .render => |current| switch (current) {
+                .int => |number| try writer.print("{d}", .{number}),
+                .float => |number| try writeFloat(number, writer),
+                .char => |codepoint| try writeChar(codepoint, writer),
+                .symbol => |id| {
+                    try writer.writeByte('\'');
+                    try self.pushBytes(intern.get(id));
+                },
+                .word => |id| try self.pushBytes(intern.get(id)),
+                .list => |header| switch (header.kind()) {
+                    .leaf_char1, .leaf_char2, .leaf_char4 => {
+                        try writer.writeByte('"');
+                        if (header.length() == 0) try writer.writeByte('"') else try self.actions.push(.{ .string = .{ .collection = current, .index = 0 } });
+                    },
+                    .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol => {
+                        try writer.writeByte(if (header.kind() == .generic_spine) '(' else '[');
+                        try self.actions.push(.{ .sequence = .{ .collection = current, .index = 0 } });
+                    },
+                    .dict, .task, .reserved_mask => unreachable,
+                },
+                .dict => |header| {
+                    try writer.writeByte('{');
+                    try self.actions.push(.{ .dictionary = .{ .header = header, .index = 0, .key = true } });
+                },
+                .task => |header| try writer.print("<task:{d}>", .{heap.taskStorage(header).identity}),
+            },
+            .sequence => |continuation| {
+                const count: usize = @intCast(continuation.collection.list.length());
+                if (continuation.index == count) {
+                    try writer.writeByte(if (continuation.collection.list.kind() == .generic_spine) ')' else ']');
+                    return;
+                }
+                if (continuation.index > 0) try writer.writeByte(' ');
+                try self.actions.push(.{ .sequence = .{
+                    .collection = continuation.collection,
+                    .index = continuation.index + 1,
+                } });
+                try self.actions.push(.{ .render = list.atUnchecked(
+                    continuation.collection,
+                    continuation.index,
+                ) });
+            },
+            .dictionary => |continuation| {
+                const count: usize = @intCast(continuation.header.length());
+                if (continuation.index == count) {
+                    try writer.writeByte('}');
+                    return;
+                }
+                if (!continuation.key or continuation.index > 0) try writer.writeByte(' ');
+                const child = if (continuation.key)
+                    dict.keyAt(continuation.header, continuation.index)
+                else
+                    dict.valueAt(continuation.header, continuation.index);
+                try self.actions.push(.{ .dictionary = .{
+                    .header = continuation.header,
+                    .index = continuation.index + @intFromBool(!continuation.key),
+                    .key = !continuation.key,
+                } });
+                try self.actions.push(.{ .render = child });
+            },
+            .string => |continuation| {
+                try writeStringCodepoint(
+                    list.atUnchecked(continuation.collection, continuation.index).char,
+                    writer,
+                );
+                const next = continuation.index + 1;
+                if (next == continuation.collection.list.length()) {
+                    try writer.writeByte('"');
+                } else {
+                    try self.actions.push(.{ .string = .{
+                        .collection = continuation.collection,
+                        .index = next,
+                    } });
+                }
+            },
+            .bytes => |continuation| {
+                const end = @min(continuation.index + 256, continuation.source.len);
+                try writer.writeAll(continuation.source[continuation.index..end]);
+                if (end != continuation.source.len) {
+                    try self.actions.push(.{ .bytes = .{ .source = continuation.source, .index = end } });
+                }
+            },
+        }
+    }
+
+    fn pushBytes(self: *RenderCursor, bytes: []const u8) error{OutOfMemory}!void {
+        if (bytes.len != 0) try self.actions.push(.{ .bytes = .{ .source = bytes, .index = 0 } });
+    }
+};
+
+pub const OwnedStringProgress = union(enum) { pending, complete: []u8 };
+
+/// Exact-size two-pass rendering state for scheduler drivers. No growable
+/// writer is used in the cancellable path.
+pub const OwnedStringCursor = struct {
+    allocator: std.mem.Allocator,
+    item: Value,
+    cursor: RenderCursor,
+    phase: enum { count, fill, complete } = .count,
+    byte_count: usize = 0,
+    output: ?[]u8 = null,
+    written: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator, item: Value) error{OutOfMemory}!OwnedStringCursor {
+        return .{
+            .allocator = allocator,
+            .item = item,
+            .cursor = try RenderCursor.init(allocator, item),
+        };
+    }
+
+    pub fn deinit(self: *OwnedStringCursor) void {
+        self.cursor.deinit();
+        if (self.output) |output| self.allocator.free(output);
+        self.* = undefined;
+    }
+
+    pub fn advance(
+        self: *OwnedStringCursor,
+        budget: usize,
+    ) error{OutOfMemory}!OwnedStringProgress {
+        std.debug.assert(budget != 0 and self.phase != .complete);
+        switch (self.phase) {
+            .count => {
+                var buffer: [256]u8 = undefined;
+                var counter = std.Io.Writer.Discarding.init(&buffer);
+                const progress = self.cursor.advance(&counter.writer, budget) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.WriteFailed => unreachable,
+                };
+                const produced = std.math.cast(usize, counter.fullCount()) orelse
+                    return error.OutOfMemory;
+                self.byte_count = std.math.add(usize, self.byte_count, produced) catch
+                    return error.OutOfMemory;
+                if (progress == .pending) return .pending;
+                var fill_cursor = try RenderCursor.init(self.allocator, self.item);
+                errdefer fill_cursor.deinit();
+                const output = try self.allocator.alloc(u8, self.byte_count);
+                self.cursor.deinit();
+                self.cursor = fill_cursor;
+                self.output = output;
+                self.phase = .fill;
+                return .pending;
+            },
+            .fill => {
+                var fixed = std.Io.Writer.fixed(self.output.?[self.written..]);
+                const progress = self.cursor.advance(&fixed, budget) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.WriteFailed => unreachable,
+                };
+                self.written += fixed.buffered().len;
+                if (progress == .pending) return .pending;
+                std.debug.assert(self.written == self.output.?.len);
+                const result = self.output.?;
+                self.output = null;
+                self.phase = .complete;
+                return .{ .complete = result };
+            },
+            .complete => unreachable,
+        }
+    }
 };
 
 pub fn print(item: Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -28,98 +232,11 @@ pub fn printWithAllocator(
     item: Value,
     writer: *std.Io.Writer,
 ) (error{OutOfMemory} || std.Io.Writer.Error)!void {
-    printInternal(allocator, item, writer, null) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.WriteFailed => return error.WriteFailed,
-        error.Ecl => unreachable,
-    };
-}
-
-pub fn printWithPolling(
-    allocator: std.mem.Allocator,
-    item: Value,
-    writer: *std.Io.Writer,
-    poller: poll_api.Poller,
-) (poll_api.Error || std.Io.Writer.Error)!void {
-    return printInternal(allocator, item, writer, poller);
-}
-
-fn printInternal(
-    allocator: std.mem.Allocator,
-    item: Value,
-    writer: *std.Io.Writer,
-    poller: ?poll_api.Poller,
-) (poll_api.Error || std.Io.Writer.Error)!void {
-    var actions = poll_api.ChunkStack(Action).init(allocator);
-    defer actions.deinit();
-    try actions.push(.{ .render = item });
-    while (actions.pop()) |action| switch (action) {
-        .render => |current| {
-            try pollMaybe(poller);
-            switch (current) {
-                .int => |number| try writer.print("{d}", .{number}),
-                .float => |number| try writeFloat(number, writer),
-                .char => |codepoint| try writeChar(codepoint, writer),
-                .symbol => |id| {
-                    try writer.writeByte('\'');
-                    try writeAllPolling(intern.get(id), writer, poller);
-                },
-                .word => |id| try writeAllPolling(intern.get(id), writer, poller),
-                .list => |header| switch (header.kind()) {
-                    .leaf_char1, .leaf_char2, .leaf_char4 => try writeString(current, writer, poller),
-                    .generic_spine,
-                    .leaf_i64,
-                    .leaf_f64,
-                    .leaf_symbol,
-                    => {
-                        const open: u8 = if (header.kind() == .generic_spine) '(' else '[';
-                        try writer.writeByte(open);
-                        try actions.push(.{ .sequence = .{ .collection = current, .index = 0 } });
-                    },
-                    .dict, .reserved_mask => unreachable,
-                },
-                .dict => |header| {
-                    try writer.writeByte('{');
-                    try actions.push(.{ .dictionary = .{ .header = header, .index = 0, .key = true } });
-                },
-            }
-        },
-        .sequence => |continuation| {
-            try pollMaybe(poller);
-            const count: usize = @intCast(continuation.collection.list.length());
-            if (continuation.index == count) {
-                try writer.writeByte(if (continuation.collection.list.kind() == .generic_spine) ')' else ']');
-                continue;
-            }
-            if (continuation.index > 0) try writer.writeByte(' ');
-            try actions.push(.{ .sequence = .{
-                .collection = continuation.collection,
-                .index = continuation.index + 1,
-            } });
-            try actions.push(.{ .render = list.atUnchecked(
-                continuation.collection,
-                continuation.index,
-            ) });
-        },
-        .dictionary => |continuation| {
-            try pollMaybe(poller);
-            const count: usize = @intCast(continuation.header.length());
-            if (continuation.index == count) {
-                try writer.writeByte('}');
-                continue;
-            }
-            if (!continuation.key or continuation.index > 0) try writer.writeByte(' ');
-            const child = if (continuation.key)
-                dict.keyAt(continuation.header, continuation.index)
-            else
-                dict.valueAt(continuation.header, continuation.index);
-            try actions.push(.{ .dictionary = .{
-                .header = continuation.header,
-                .index = continuation.index + @intFromBool(!continuation.key),
-                .key = !continuation.key,
-            } });
-            try actions.push(.{ .render = child });
-        },
+    var cursor = try RenderCursor.init(allocator, item);
+    defer cursor.deinit();
+    while (true) switch (try cursor.advance(writer, 1024)) {
+        .pending => {},
+        .complete => return,
     };
 }
 
@@ -127,43 +244,12 @@ pub fn toOwnedString(
     allocator: std.mem.Allocator,
     item: Value,
 ) error{OutOfMemory}![]u8 {
-    return toOwnedStringInternal(allocator, item, null) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.Ecl => unreachable,
+    var cursor = try OwnedStringCursor.init(allocator, item);
+    defer cursor.deinit();
+    while (true) switch (try cursor.advance(1024)) {
+        .pending => {},
+        .complete => |rendered| return rendered,
     };
-}
-
-pub fn toOwnedStringWithPolling(
-    allocator: std.mem.Allocator,
-    item: Value,
-    poller: poll_api.Poller,
-) poll_api.Error![]u8 {
-    return toOwnedStringInternal(allocator, item, poller);
-}
-
-fn toOwnedStringInternal(
-    allocator: std.mem.Allocator,
-    item: Value,
-    poller: ?poll_api.Poller,
-) poll_api.Error![]u8 {
-    var counter_buffer: [256]u8 = undefined;
-    var counter = std.Io.Writer.Discarding.init(&counter_buffer);
-    printInternal(allocator, item, &counter.writer, poller) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.WriteFailed => unreachable,
-    };
-    const count = std.math.cast(usize, counter.fullCount()) orelse return error.OutOfMemory;
-    const result = try allocator.alloc(u8, count);
-    errdefer allocator.free(result);
-    var fixed = std.Io.Writer.fixed(result);
-    printInternal(allocator, item, &fixed, poller) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => return error.Ecl,
-        error.WriteFailed => unreachable,
-    };
-    std.debug.assert(fixed.buffered().len == result.len);
-    return result;
 }
 
 fn writeFloat(number: f64, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -193,48 +279,18 @@ fn writeChar(codepoint: u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     return writeCodepoint(codepoint, writer);
 }
 
-fn writeString(
-    collection: Value,
-    writer: *std.Io.Writer,
-    poller: ?poll_api.Poller,
-) (poll_api.Error || std.Io.Writer.Error)!void {
-    try writer.writeByte('"');
-    const count: usize = @intCast(collection.list.length());
-    for (0..count) |index| {
-        try pollMaybe(poller);
-        const codepoint = list.atUnchecked(collection, index).char;
-        switch (codepoint) {
-            '\\' => try writer.writeAll("\\\\"),
-            '"' => try writer.writeAll("\\\""),
-            '\n' => try writer.writeAll("\\n"),
-            '\t' => try writer.writeAll("\\t"),
-            else => if (isControl(codepoint) or !isScalar(codepoint)) {
-                try writer.print("\\u{{{x}}}", .{codepoint});
-            } else {
-                try writeCodepoint(codepoint, writer);
-            },
-        }
+fn writeStringCodepoint(codepoint: u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    switch (codepoint) {
+        '\\' => try writer.writeAll("\\\\"),
+        '"' => try writer.writeAll("\\\""),
+        '\n' => try writer.writeAll("\\n"),
+        '\t' => try writer.writeAll("\\t"),
+        else => if (isControl(codepoint) or !isScalar(codepoint)) {
+            try writer.print("\\u{{{x}}}", .{codepoint});
+        } else {
+            try writeCodepoint(codepoint, writer);
+        },
     }
-    try writer.writeByte('"');
-}
-
-fn writeAllPolling(
-    bytes: []const u8,
-    writer: *std.Io.Writer,
-    poller: ?poll_api.Poller,
-) (poll_api.Error || std.Io.Writer.Error)!void {
-    if (poller == null) return writer.writeAll(bytes);
-    var start: usize = 0;
-    while (start < bytes.len) {
-        try pollMaybe(poller);
-        const end = @min(start + 256, bytes.len);
-        try writer.writeAll(bytes[start..end]);
-        start = end;
-    }
-}
-
-fn pollMaybe(poller: ?poll_api.Poller) poll_api.Error!void {
-    if (poller) |active| try active.poll();
 }
 
 fn writeCodepoint(codepoint: u32, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -330,17 +386,7 @@ test "deep rendering uses an explicit worklist" {
     try std.testing.expectEqual(@as(u8, ')'), rendered[rendered.len - 1]);
 }
 
-test "poll-aware rendering can interrupt one large value" {
-    const Stop = struct {
-        calls: usize = 0,
-        at: usize,
-
-        fn tick(raw: *anyopaque) poll_api.Error!void {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.calls += 1;
-            if (self.calls == self.at) return error.Ecl;
-        }
-    };
+test "owned rendering exposes resumable transitions for one large value" {
     const allocator = std.testing.allocator;
     const numbers = try allocator.alloc(i64, 70_000);
     defer allocator.free(numbers);
@@ -348,11 +394,16 @@ test "poll-aware rendering can interrupt one large value" {
     const collection = try list.fromI64Slice(allocator, numbers);
     defer heap.releaseValue(allocator, collection);
 
-    var stop = Stop{ .at = 65_537 };
-    try std.testing.expectError(error.Ecl, toOwnedStringWithPolling(
-        allocator,
-        collection,
-        .{ .context = &stop, .poll_fn = Stop.tick },
-    ));
-    try std.testing.expectEqual(stop.at, stop.calls);
+    var cursor = try OwnedStringCursor.init(allocator, collection);
+    defer cursor.deinit();
+    for (0..65_537) |_| try std.testing.expectEqual(
+        OwnedStringProgress.pending,
+        try cursor.advance(1),
+    );
+    const rendered = while (true) switch (try cursor.advance(1024)) {
+        .pending => {},
+        .complete => |complete| break complete,
+    };
+    defer allocator.free(rendered);
+    try std.testing.expect(rendered.len > numbers.len);
 }
