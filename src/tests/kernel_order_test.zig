@@ -1,9 +1,9 @@
 //! Executable proofs for stable ordering, distinct, and group.
 const std = @import("std");
-const list = @import("list.zig");
-const heap = @import("heap.zig");
-const order = @import("kernel_order.zig");
-const session = @import("session.zig");
+const list = @import("../list.zig");
+const heap = @import("../heap.zig");
+const order = @import("../kernel_order.zig");
+const session = @import("../session.zig");
 const helper = @import("kernel_test_support.zig");
 
 test "order: cmp and grade share exact whole-value ordering" {

@@ -11,7 +11,7 @@
 - Inspect text in a test only when that text is itself a documented program input or
   output, such as parser input, formatter output, or a generated artifact contract.
 - Keep focused allocator failure sweeps in the normal suite. Consolidate exhaustive
-  initialized-Session coverage in `src/oom_test.zig`, run by `zig build test-oom`, so
+  initialized-Session coverage in `src/tests/oom_test.zig`, run by `zig build test-oom`, so
   the embedded prelude is not bootstrapped independently for every runtime surface.
 
 ## Embedded prelude

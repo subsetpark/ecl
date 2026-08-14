@@ -18,6 +18,8 @@ walking skeleton remains a frozen executable semantics oracle.
   count-vector where, canonical `str`, pervasive transcendentals, Unicode
   split/join/format, isolated quotation combinators, inline control, pure
   `parse`, guarded phrase recognition, and an embedded source prelude.
+  Test suites and their helpers live under [`src/tests/`](src/tests/);
+  build-only architecture checks live under [`src/tools/`](src/tools/).
 - [`poc/rust/`](poc/rust/) contains the Rust walking-skeleton interpreter and
   its examples and tests. It is a standalone Cargo project and is not evolved
   with the real interpreter.

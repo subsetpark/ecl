@@ -1,12 +1,12 @@
 //! Seeded cross-module properties for the complete value layer.
 
 const std = @import("std");
-const value = @import("value.zig");
-const heap = @import("heap.zig");
-const list = @import("list.zig");
-const equal = @import("equal.zig");
-const dict = @import("dict.zig");
-const printer = @import("print.zig");
+const value = @import("../value.zig");
+const heap = @import("../heap.zig");
+const list = @import("../list.zig");
+const equal = @import("../equal.zig");
+const dict = @import("../dict.zig");
+const printer = @import("../print.zig");
 const testgen = @import("testgen.zig");
 
 const Value = value.Value;

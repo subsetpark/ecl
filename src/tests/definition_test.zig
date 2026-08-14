@@ -1,11 +1,11 @@
 const std = @import("std");
-const value = @import("value.zig");
-const heap = @import("heap.zig");
-const list = @import("list.zig");
-const intern = @import("intern.zig");
-const env = @import("env.zig");
-const printer = @import("print.zig");
-const session = @import("session.zig");
+const value = @import("../value.zig");
+const heap = @import("../heap.zig");
+const list = @import("../list.zig");
+const intern = @import("../intern.zig");
+const env = @import("../env.zig");
+const printer = @import("../print.zig");
+const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {

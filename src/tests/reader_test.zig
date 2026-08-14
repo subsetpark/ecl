@@ -1,13 +1,13 @@
 //! Cross-layer reader properties and Rust-oracle fixture parity.
 
 const std = @import("std");
-const heap = @import("heap.zig");
-const equal = @import("equal.zig");
-const dict = @import("dict.zig");
-const printer = @import("print.zig");
-const lexer = @import("lexer.zig");
-const reader = @import("reader.zig");
-const poll = @import("poll.zig");
+const heap = @import("../heap.zig");
+const equal = @import("../equal.zig");
+const dict = @import("../dict.zig");
+const printer = @import("../print.zig");
+const lexer = @import("../lexer.zig");
+const reader = @import("../reader.zig");
+const poll = @import("../poll.zig");
 const testgen = @import("testgen.zig");
 
 const PollStop = struct {

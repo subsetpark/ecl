@@ -1,12 +1,12 @@
 //! Shared behavioral test helpers for M5 kernel families.
 const std = @import("std");
-const value = @import("value.zig");
-const session = @import("session.zig");
-const heap = @import("heap.zig");
-const list = @import("list.zig");
-const dict = @import("dict.zig");
-const intern = @import("intern.zig");
-const printer = @import("print.zig");
+const value = @import("../value.zig");
+const session = @import("../session.zig");
+const heap = @import("../heap.zig");
+const list = @import("../list.zig");
+const dict = @import("../dict.zig");
+const intern = @import("../intern.zig");
+const printer = @import("../print.zig");
 
 const allocator = std.testing.allocator;
 

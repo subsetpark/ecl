@@ -930,7 +930,7 @@ script in CI.
     ≤ 5,500. Core excludes `test` blocks wherever they appear and
     excludes test-only sources (`*_test.zig`, `testgen.zig`).
   - **Verify by** `cmd`: `zig build source-audit` (the dedicated audit in
-    `src/source_audit.zig` prints the split and fails the build when a
+    `src/tools/source_audit.zig` prints the split and fails the build when a
     component exceeds its row); `zig build test` depends on this audit.
   - **Expected**: exit 0 with the per-component counts printed.
   - **Traces to**: Milestone 10 — the source audit (budget: d.23,

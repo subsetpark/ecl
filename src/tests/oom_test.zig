@@ -3,9 +3,9 @@
 //! Keeping these surfaces in one probe avoids replaying the embedded prelude
 //! bootstrap independently for every feature-specific failure index.
 const std = @import("std");
-const heap = @import("heap.zig");
-const intern = @import("intern.zig");
-const session = @import("session.zig");
+const heap = @import("../heap.zig");
+const intern = @import("../intern.zig");
+const session = @import("../session.zig");
 
 fn runOk(runtime: *session.Session, name: []const u8, source: []const u8) !void {
     switch (try runtime.runUnit(name, source)) {

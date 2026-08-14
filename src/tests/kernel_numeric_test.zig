@@ -1,10 +1,10 @@
 //! Executable proofs for numeric dispatch, pervasion, faults, and ownership.
 const std = @import("std");
-const value = @import("value.zig");
-const numeric = @import("kernel_numeric.zig");
-const session = @import("session.zig");
-const heap = @import("heap.zig");
-const list = @import("list.zig");
+const value = @import("../value.zig");
+const numeric = @import("../kernel_numeric.zig");
+const session = @import("../session.zig");
+const heap = @import("../heap.zig");
+const list = @import("../list.zig");
 const helper = @import("kernel_test_support.zig");
 
 test "numeric: comptime matrix is total over supported signatures and dispatches once" {

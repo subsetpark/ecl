@@ -1,7 +1,7 @@
 const std = @import("std");
-const session = @import("session.zig");
-const machine = @import("machine.zig");
-const heap = @import("heap.zig");
+const session = @import("../session.zig");
+const machine = @import("../machine.zig");
+const heap = @import("../heap.zig");
 const support = @import("kernel_test_support.zig");
 
 const allocator = std.testing.allocator;

@@ -34,16 +34,19 @@ Decision 21's doctrine becomes two enforced rules:
    | definition annotations and doc normalization | 1,000 | 602 |
    | CLI and source formatter | 1,900 | 1,374 |
    | kernels and idioms | 5,500 | 4,069 |
-   | source-audit tooling | 1,400 | 520 |
-   | **production Zig total** | **22,000** | **15,535** |
+   | source-audit tooling | 1,400 | 540 |
+   | **production Zig total** | **22,000** | **15,555** |
 
    These ceilings were raised specifically so nominal IDs, opaque heap
    capabilities, validated publication types, tagged application/scope modes,
    typestate, mandatory work cursors, and AST-aware enforcement can remain
    explicit. A limit must not incentivize weakening a type boundary. The audit
-   enumerates `src/*.zig` and requires every file to belong to exactly one
+   recursively enumerates `src/**/*.zig` and requires every file to belong to exactly one
    production component or test/tool input; adding an unclassified file fails.
    `src/prelude.ecl` and other ECL code are intentionally not line-counted.
+   Runtime sources remain directly under `src/`; test suites and helpers are
+   grouped in `src/tests/`, while substantive build-only checks live in
+   `src/tools/` behind package-root entrypoints required by Zig.
 
    The same dedicated source audit lexes `src/prelude.ecl` well enough to
    distinguish comments from multiline strings. It requires each top-level

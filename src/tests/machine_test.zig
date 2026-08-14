@@ -1,13 +1,13 @@
 //! Cross-layer frame-machine proofs owned by M3's final patch.
 
 const std = @import("std");
-const session = @import("session.zig");
-const value = @import("value.zig");
-const heap = @import("heap.zig");
-const list = @import("list.zig");
-const dict = @import("dict.zig");
-const intern = @import("intern.zig");
-const printer = @import("print.zig");
+const session = @import("../session.zig");
+const value = @import("../value.zig");
+const heap = @import("../heap.zig");
+const list = @import("../list.zig");
+const dict = @import("../dict.zig");
+const intern = @import("../intern.zig");
+const printer = @import("../print.zig");
 
 const Value = value.Value;
 

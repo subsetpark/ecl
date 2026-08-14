@@ -1,11 +1,11 @@
 //! Shared seeded value generators for cross-layer property suites.
 
 const std = @import("std");
-const value = @import("value.zig");
-const heap = @import("heap.zig");
-const intern = @import("intern.zig");
-const list = @import("list.zig");
-const dict = @import("dict.zig");
+const value = @import("../value.zig");
+const heap = @import("../heap.zig");
+const intern = @import("../intern.zig");
+const list = @import("../list.zig");
+const dict = @import("../dict.zig");
 
 pub const Value = value.Value;
 pub const Dicts = enum { allowed, excluded };

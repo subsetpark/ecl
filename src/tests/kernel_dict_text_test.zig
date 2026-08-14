@@ -1,12 +1,12 @@
 //! Executable proofs for immutable dict and Unicode text kernels.
 const std = @import("std");
-const value = @import("value.zig");
-const session = @import("session.zig");
-const heap = @import("heap.zig");
-const list = @import("list.zig");
-const dict = @import("dict.zig");
-const poll = @import("poll.zig");
-const storage = @import("kernel_storage.zig");
+const value = @import("../value.zig");
+const session = @import("../session.zig");
+const heap = @import("../heap.zig");
+const list = @import("../list.zig");
+const dict = @import("../dict.zig");
+const poll = @import("../poll.zig");
+const storage = @import("../kernel_storage.zig");
 const helper = @import("kernel_test_support.zig");
 
 test "dict-text: dict operations preserve order ownership and right wins" {

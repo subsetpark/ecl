@@ -1,11 +1,11 @@
 const std = @import("std");
 const support = @import("kernel_test_support.zig");
-const prelude = @import("prelude.zig");
-const prims = @import("prims.zig");
-const env = @import("env.zig");
-const modules = @import("modules.zig");
-const spans = @import("spans.zig");
-const intern = @import("intern.zig");
+const prelude = @import("../prelude.zig");
+const prims = @import("../prims.zig");
+const env = @import("../env.zig");
+const modules = @import("../modules.zig");
+const spans = @import("../spans.zig");
+const intern = @import("../intern.zig");
 
 test "embedded prelude exposes source bodies and derived dataflow" {
     try support.expectStacks(&.{

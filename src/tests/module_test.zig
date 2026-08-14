@@ -1,13 +1,13 @@
 const std = @import("std");
-const env = @import("env.zig");
-const heap = @import("heap.zig");
-const intern = @import("intern.zig");
-const list = @import("list.zig");
-const machine = @import("machine.zig");
-const modules = @import("modules.zig");
-const poll = @import("poll.zig");
-const printer = @import("print.zig");
-const session = @import("session.zig");
+const env = @import("../env.zig");
+const heap = @import("../heap.zig");
+const intern = @import("../intern.zig");
+const list = @import("../list.zig");
+const machine = @import("../machine.zig");
+const modules = @import("../modules.zig");
+const poll = @import("../poll.zig");
+const printer = @import("../print.zig");
+const session = @import("../session.zig");
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {
     const outcome = try runtime.runUnit("module-test.ecl", source);
