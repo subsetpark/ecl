@@ -7,6 +7,7 @@ const list = @import("list.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const snapshot_core = @import("snapshot_core.zig");
+const primitive_docs = @import("primitive_docs.zig");
 
 fn readerDecision(
     before: snapshot_core.Reader,
@@ -1071,11 +1072,14 @@ pub const Env = struct {
             error.Frozen => unreachable,
         };
     }
-    fn installCore(self: *Env, name: intern.NamespaceName, binding: Binding) error{OutOfMemory}!void {
-        _ = self.core.bind(name, .{ .binding = binding }) catch |err| switch (err) {
+    fn installCoreSpec(self: *Env, name: intern.NamespaceName, spec: BindingSpec) error{OutOfMemory}!void {
+        _ = self.core.bind(name, spec) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Frozen => unreachable,
         };
+    }
+    fn installCore(self: *Env, name: intern.NamespaceName, binding: Binding) error{OutOfMemory}!void {
+        try self.installCoreSpec(name, .{ .binding = binding });
     }
     pub fn beginCoreBuild(self: *Env) BuildingEnv {
         return .{ .target = self };
@@ -1089,12 +1093,67 @@ pub const Env = struct {
 pub const BuildingEnv = struct {
     target: *Env,
 
+    const BuiltinEffect = struct {
+        value: value.Value,
+        validated: ValidatedEffect,
+    };
+
+    fn builtinEffect(
+        self: *BuildingEnv,
+        comptime source: []const u8,
+    ) error{OutOfMemory}!BuiltinEffect {
+        const token_count = comptime countEffectTokens(source);
+        var tokens: [token_count]value.Value = undefined;
+        var iterator = std.mem.tokenizeScalar(u8, source, ' ');
+        var index: usize = 0;
+        var separator_index: ?usize = null;
+        while (iterator.next()) |token| : (index += 1) {
+            const id = try intern.intern(token);
+            tokens[index] = .{ .word = id };
+            if (std.mem.eql(u8, token, "--")) separator_index = index;
+        }
+        std.debug.assert(index == token_count and separator_index != null);
+        const effect_value = try list.fromValuesGeneric(self.target.core.allocator, &tokens);
+        return .{
+            .value = effect_value,
+            .validated = .fromValidated(effect_value.list, separator_index.?),
+        };
+    }
+
     pub fn installCore(
         self: *BuildingEnv,
         name: intern.NamespaceName,
         binding: Binding,
     ) error{OutOfMemory}!void {
         try self.target.installCore(name, binding);
+    }
+    pub fn installBuiltin(
+        self: *BuildingEnv,
+        comptime name: []const u8,
+        primitive: PrimitiveImpl,
+    ) error{OutOfMemory}!void {
+        comptime assertStaticNamespace(name);
+        const metadata = comptime primitive_docs.forName(name);
+        const document_value = try machine.stringValue(
+            self.target.core.allocator,
+            metadata.text,
+        );
+        defer heap.releaseValue(self.target.core.allocator, document_value);
+        const builtin_effect: ?BuiltinEffect = if (metadata.effect) |source|
+            try self.builtinEffect(source)
+        else
+            null;
+        defer if (builtin_effect) |effect| {
+            heap.releaseValue(self.target.core.allocator, effect.value);
+        };
+        try self.target.installCoreSpec(
+            try intern.trustedNamespace(name),
+            .{
+                .binding = .{ .builtin = primitive },
+                .effect = if (builtin_effect) |effect| effect.validated else null,
+                .doc = documentation(document_value.list).?,
+            },
+        );
     }
     pub fn installBuiltins(self: *BuildingEnv, comptime definitions: anytype) error{OutOfMemory}!void {
         comptime {
@@ -1108,10 +1167,7 @@ pub const BuildingEnv = struct {
             }
         }
         inline for (definitions) |definition| {
-            try self.installCore(
-                try intern.trustedNamespace(definition.name),
-                .{ .builtin = definition.primitive },
-            );
+            try self.installBuiltin(definition.name, definition.primitive);
         }
     }
     pub fn runtime(self: *BuildingEnv) *Env {
@@ -1127,6 +1183,13 @@ pub const BuildingEnv = struct {
         self.* = undefined;
     }
 };
+
+fn countEffectTokens(comptime source: []const u8) usize {
+    if (source.len == 0) @compileError("primitive effect cannot be empty");
+    var count: usize = 1;
+    for (source) |byte| count += @intFromBool(byte == ' ');
+    return count;
+}
 pub fn assertStaticNamespace(comptime name: []const u8) void {
     if (name.len == 0 or intern.isReservedBytes(name) or
         std.mem.indexOfScalar(u8, name, '.') != null)

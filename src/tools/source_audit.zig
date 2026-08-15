@@ -72,6 +72,13 @@ const components = [_]Component{
     }, .sources = &.{
         @embedFile("../definition_prims.zig"), @embedFile("../doc.zig"),
     } },
+    // Names, reflective prose, and fixed effects are one compile-time registry;
+    // the ceiling covers that deliberate single source of truth.
+    .{ .name = "primitive documentation", .budget = 300, .files = &.{
+        "primitive_docs.zig",
+    }, .sources = &.{
+        @embedFile("../primitive_docs.zig"),
+    } },
     .{ .name = "CLI and formatter", .budget = 1900, .files = &.{
         "main.zig", "formatter.zig",
     }, .sources = &.{

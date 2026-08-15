@@ -55,6 +55,56 @@ test "definition annotations support all top-level forms and dynamic data" {
     );
 }
 
+test "every primitive exposes meaningful reflective documentation" {
+    const names = [_][]const u8{
+        "dup",       "swap",    "pop",     "over",  "cons",      "compose",
+        "match",     "type",    "str",     "parse", "dict-of",   "attempt",
+        "raise",     "pp",      "prin",    "args",  "exit",      "dip",
+        "call",      "if",      "while",   "times", "cond",      "each",
+        "each2",     "for",     "fold",    "scan",  "infra",     "def",
+        "set",       "defp",    "setp",    "body",  "doc",       "which",
+        "see",       "module",  "use",     "alias", "words",     "load",
+        "spawn",     "await",   "cancel",  "tasks", "await-any", "await-for",
+        "task-join", "+",       "-",       "*",     "/",         "div",
+        "mod",       "pow",     "atan2",   "min",   "max",       "=",
+        "<>",        "<",       ">",       "<=",    ">=",        "and",
+        "or",        "neg",     "abs",     "sqrt",  "floor",     "ceil",
+        "round",     "exp",     "log",     "sin",   "cos",       "not",
+        "at",        "where",   "in",      "raze",  "cat",       "take",
+        "drop",      "reverse", "first",   "rest",  "range",     "shape",
+        "len",       "flip",    "reshape", "cmp",   "grade",     "distinct",
+        "group",     "keys",    "vals",    "put",   "to-dict",   "del",
+        "merge",     "has?",    "split",   "join",  "format",
+    };
+    var source = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer source.deinit();
+    var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer expected.deinit();
+    try source.writer.writeAll(
+        "'over doc \"Copy the value beneath the top of the stack onto the top.\" match ",
+    );
+    try expected.writer.writeByte('1');
+    for (names) |name| {
+        try source.writer.print("'{s} doc len 0 > ", .{name});
+        try expected.writer.writeAll(" 1");
+    }
+
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    defer runtime.deinit();
+    try expectOk(&runtime, source.written());
+    const display = try runtime.stackDisplay();
+    defer runtime.allocator.free(display);
+    try std.testing.expectEqualStrings(expected.written(), display);
+    try expectOk(&runtime, "'over see 'call see");
+    try std.testing.expectEqualStrings(
+        "<primitive> (x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") 'over def\n" ++
+            "<primitive> (: \"Run a quotation on the current stack.\") 'call def\n",
+        output.written(),
+    );
+}
+
 test "which reports effect metadata without expanding documentation" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();

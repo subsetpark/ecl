@@ -2,7 +2,6 @@
 const std = @import("std");
 const value = @import("value.zig");
 const env = @import("env.zig");
-const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 
 pub const Value = value.Value;
@@ -132,9 +131,7 @@ pub fn installPrimitive(
     comptime name: []const u8,
     primitive: env.PrimitiveImpl,
 ) error{OutOfMemory}!void {
-    comptime env.assertStaticNamespace(name);
-    const id = try intern.trustedNamespace(name);
-    try core.installCore(id, .{ .builtin = primitive });
+    try core.installBuiltin(name, primitive);
 }
 
 test "kernel constants freeze bounded work contracts" {
