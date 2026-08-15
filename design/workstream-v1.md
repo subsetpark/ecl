@@ -12,7 +12,7 @@ combinator-entry idiom recognition, and green-unit concurrency. v1 is
 slow-but-correct everywhere the architecture permits, but never violates
 the decision-21 invariants that make it evolvable to K-order later.
 Scope additions ruled in during planning: REPL line editing/completion,
-and `str`, `csv`, `json`, and `http` stdlib modules.
+and `str`, `csv`, `json`, `table`, and `http` stdlib modules.
 
 ## Current State
 
@@ -51,8 +51,10 @@ Verified in the checkout (2026-08-12):
   the awk-floor transcendentals, exact whole-value `cmp`, and the separate
   frozen-Rust differential job, isolated and inline combinators, guarded
   phrase recognition, and the documented embedded target-language prelude.
-  M7 concurrency, M8 line editing, and M9 stdlib remain future
-  milestones.
+  Its ordinary lists, ordered dicts, `group`, `at`, `where`, `flip`, folds,
+  and pervasive kernels provide the data-plane substrate for tabular work;
+  no table module or table runtime kind exists. M7 concurrency, M8 line
+  editing, and M9 stdlib remain future milestones.
 - All derived core words now live in `src/prelude.ecl`; the loader embeds and
   evaluates that ordinary source with retained provenance before freezing the
   core. Every definition is a documented `### def <name>` block.
@@ -82,6 +84,11 @@ Verified in the checkout (2026-08-12):
 - **JSON null in a language with no nil** (see Open Questions) — the
   first time absence-is-absence (d.22) meets an external data model
   that reifies null.
+- **Validated tables without a table runtime kind** — the stdlib must make
+  a useful columnar contract over ordinary dicts while remaining honest that
+  core dict operations can forge invalid candidates. Every `table.*` boundary
+  therefore validates the convention; no evaluator, kernel, reflection, or
+  serialization path may grow hidden table behavior.
 
 ## Established Precedents
 
@@ -529,10 +536,10 @@ touched.
 
 ---
 
-### Milestone 9: stdlib-str-csv-json-http
+### Milestone 9: stdlib-str-csv-json-table-http
 
 **Definition of Done**:
-Four stdlib modules ship inside the binary (embedded sources / native
+Five stdlib modules ship inside the binary (embedded sources / native
 builtins registered lazily via the M4 mechanism, so the single-binary
 story holds; `ECL_PATH` remains for user modules). The same milestone owns
 the explicit host scripting words needed by that layer:
@@ -562,6 +569,19 @@ the explicit host scripting words needed by that layer:
   emission requires string/symbol dict keys ('type error otherwise);
   the null ruling implemented per the resolved Open Question and
   recorded in DESIGN.md as a decision addendum.
+- **`table`** — ecl source over validated ordinary column dicts, never a new
+  runtime kind. Its constructors and conversions are `table.from-columns`,
+  `table.from-rows`, `table.from-header-rows`, `table.from-records`,
+  `table.rows`, `table.header-rows`, and `table.records`; inspection and
+  transformation are `table.valid?`, `table.names`, `table.column`,
+  `table.cast`, `table.select`, `table.rename`, `table.with-column`, and
+  `table.where`; analysis is `table.group-by`, `table.aggregate`,
+  `table.inner-join`, and `table.left-join-with`. Column names are strings and
+  columns are equal-length lists. Aggregation specs are
+  `[output-name input-name quotation]` triples whose isolated quotation has
+  `( column -- value )`; joins accept explicit left/right name pairs. The
+  Decisions Made policy below freezes validation, ordering, collision,
+  missingness, error, and reflection behavior.
 - **`http`** — native, client only: `http.get`/`http.post`
   (url [headers-dict] [body] → response dict with 'status, 'headers,
   'body), TLS included, timeouts surfacing as 'io error dicts; blocking
@@ -572,12 +592,15 @@ the explicit host scripting words needed by that layer:
 scripting primitives are additive; evaluator and value semantics are
 untouched.
 
-**Unlocks**: Real scripting workloads (fetch → parse → array-crunch →
-emit) — the awk/sed/jq positioning made literal.
+**Unlocks**: Real scripting workloads (read/fetch → parse → validate → join →
+aggregate → emit) — the awk/sed/jq positioning made literal.
 
 **Established Precedents** (milestone-scoped):
 - **[rfc-spec] RFC 4180 — Common Format and MIME Type for CSV Files** — https://www.rfc-editor.org/rfc/rfc4180 — the comma, record-ending, quoting, escaping, and field-preservation contract.
 - **[rfc-spec] RFC 8259 — The JSON Data Interchange Format** — https://www.rfc-editor.org/rfc/rfc8259 — the parse/emit contract, including duplicate-key and number-precision guidance.
+- **[documentation] q column dictionaries and tables** — https://code.kx.com/kdb-x/how_to/basics/work-with-tables.html
+  The ordered name-to-equal-length-columns representation and column-oriented
+  analysis model, adopted without q's distinct table type or query syntax.
 
 ---
 
@@ -611,7 +634,7 @@ from a proven baseline.
 - Milestone 6 (combinators-and-recognition) -> [4, 5]
 - Milestone 7 (scheduler-and-concurrency) -> [6]
 - Milestone 8 (repl-line-editing) -> [4]        # parallel with 5–7
-- Milestone 9 (stdlib-str-csv-json-http) -> [6] # http may precede 7; blocking IO is v1-legal
+- Milestone 9 (stdlib-str-csv-json-table-http) -> [6] # http may precede 7; blocking IO is v1-legal
 - Milestone 10 (v1-acceptance) -> [7, 8, 9]
 
 ## Open Questions
@@ -706,6 +729,74 @@ from a proven baseline.
   an ordinary first row; `csv.emit` accepts the same representation. This
   preserves leading zeroes, empty cells, and ragged record widths without
   inventing null, header, or scalar-coercion semantics.
+- **A table is a validated ordinary column dictionary, not a runtime type.**
+  It is a nonempty insertion-ordered dict whose keys are unique nonempty
+  strings and whose values are lists with one common top-level length. A table
+  may have zero rows but never zero columns. `table.valid?` recognizes exactly
+  this convention and every other exported `table.*` word validates every
+  table input before doing work; it returns 0 only for a convention mismatch,
+  while cancellation and OOM still propagate. Core reflection remains honest:
+  `type` reports `'dict`; printing, `match`, `keys`/`vals`/`at`/`put`,
+  pervasion, and `json.emit` retain their ordinary dict behavior; `csv.emit`
+  consumes an explicit `table.rows` or `table.header-rows` result. No reader,
+  evaluator, value tag, heap kind, kernel dispatch, or generic serializer
+  recognizes tables implicitly. A core dict operation may therefore produce
+  an invalid candidate, which the next `table.*` boundary rejects rather than
+  repairing or reclassifying.
+- **Table construction and conversion are strict and explicit.**
+  `table.from-columns` validates the column-dict convention.
+  `table.from-rows` takes explicit names and exact-width rows, including an
+  empty row list for a known zero-row schema; `table.from-header-rows` requires
+  a nonempty first row of unique nonempty string names and exact-width data
+  rows. `table.from-records` accepts a nonempty list of dicts with the same
+  string key set, uses first-record insertion order, and tolerates later key
+  order differences but not missing or extra keys; an empty record list is
+  `'shape` because it carries no schema. `table.rows` returns data rows in
+  order, `table.header-rows` prefixes the ordered names for a schema-preserving
+  CSV round-trip (including zero rows), and `table.records` returns row dicts
+  in schema order but necessarily loses schema when its result is empty.
+  `table.rows` paired with `table.names` is the schema-preserving explicit-row
+  form. CSV remains text-only; `table.cast` takes a dict from existing column
+  name to an isolated `( cell -- value )` quotation, prevalidates the complete
+  spec, and performs the only requested coercions transactionally.
+- **Table transformations preserve schema and row order unless their name says
+  otherwise.** `table.select` requires a nonempty unique list of existing
+  names in desired output order; `table.rename` takes an ordered dict from old
+  name to new name and rejects missing sources, non-string targets, and
+  collisions; `table.with-column` requires exactly the table row count,
+  replaces an existing name in place, and appends a new name; and `table.where`
+  accepts only an exact-length 0/1 mask.
+  `table.group-by` accepts zero or more existing names and returns an
+  insertion-ordered dict from scalar or composite structural keys to stable
+  row-index lists; no names means one global group. `table.aggregate`
+  prevalidates unique `[output-name input-name quotation]` specs, rejects
+  missing inputs and output/key collisions, requires at least one key or
+  aggregate output, calls each `( column -- value )` quotation once per group
+  in group-then-spec order and in isolation, and returns key columns first
+  followed by aggregate columns. With grouping keys, a zero-row table has zero
+  result rows; without keys it has one global group and quotations receive
+  empty columns.
+- **Table joins are stable equijoins with explicit missingness.** Join keys are
+  a nonempty list of `[left-name right-name]` string pairs, with no column
+  repeated on either side. Equality is ECL's whole-value structural equality;
+  duplicate keys produce the full
+  many-to-many product in left-row order and, within each left row, right-row
+  order. Results contain all left columns in their original order followed by
+  right non-key columns in right order; any non-key name collision is
+  `'domain` and must be resolved with `table.rename`. `table.inner-join` emits
+  matches only. `table.left-join-with` emits one row for an unmatched left row
+  and requires a fill dict covering exactly every appended right column; it
+  never invents null. Right/full/as-of/window joins and query syntax are out of
+  v1. JSON `'null` remains ordinary data, not a missing-cell marker.
+- **Table failures follow the existing semantic kinds.** Non-dicts,
+  non-string names, non-list columns, invalid masks/spec members, and invalid
+  record members are `'type`; zero-column schemas, unequal column lengths,
+  and row/mask width mismatches are `'shape`; missing, empty, or duplicate
+  names, schema disagreement, join/rename collisions, and incomplete fill
+  dicts are `'domain`; aggregation quotation shape failures are `'contract`.
+  Validation, grouping, casting, joins, and materialization traverse through
+  the existing polled combinators or explicit `WorkContext` cursors, and
+  cancellation, OOM, or user errors expose no partial table.
 - **http is client-only in v1.** A server is long-running-process
   territory the positioning explicitly declined (d.20/d.21).
 - **JSON null ↔ the symbol `'null`** (user ruling, this session).
@@ -958,7 +1049,73 @@ script in CI.
     and the zero-field row yields `'kind 'shape`.
   - **Traces to**: Milestone 9 — csv native module.
 
-- **DoD-24 — http client**
+- **DoD-24 — table representation and conversions**
+  - **Assert**: a valid table remains an ordinary dict under every core
+    interface, while `table.*` constructors, row/record conversions, and
+    transformations preserve its ordered equal-length-column convention.
+  - **Verify by** `cmd`: fixture `table-values.ecl` constructs populated
+    tables through every constructor and zero-row tables through the explicit
+    column, named-row, and header-row constructors; observes `type`, `match`,
+    `keys`, `at`, `str`, and `json.emit`; round-trips through
+    `table.rows`, `table.header-rows`, and `table.records`; and exercises
+    `table.names`, `table.column`, `table.cast`, `table.select`,
+    `table.rename`, `table.with-column`, and `table.where`.
+  - **Expected**: `type` is `'dict`, `table.valid?` is 1, ordinary dict
+    observations match the underlying column dict, names plus rows and
+    header-inclusive rows round-trip populated and zero-row schemas, populated
+    records round-trip while empty records are explicitly schema-less, casts
+    are the only scalar coercions, and every transformation produces the
+    fixture's expected ordered column dict.
+  - **Traces to**: Milestone 9 — embedded `table` module value policy and
+    conversion/transform words.
+
+- **DoD-25 — table validation boundary**
+  - **Assert**: invalid table candidates are never implicitly repaired or
+    reclassified, and every exported `table.*` operation validates all table
+    and specification inputs before executing user quotations or exposing a
+    partial result.
+  - **Verify by** `cmd`: fixture `table-invalid.ecl` passes zero-column,
+    non-string-name, non-list-column, unequal-length, duplicate-header,
+    record-schema-mismatch, bad-mask, bad-cast, bad-aggregate, colliding-name,
+    and incomplete-fill cases through every applicable public word; it also
+    breaks a valid table with core `put` and retries a table operation.
+  - **Expected**: `table.valid?` returns 0 for each invalid candidate; operations
+    fail as `'type`, `'shape`, `'domain`, or `'contract` according to the
+    frozen policy, no cast/aggregate quotation runs before complete
+    prevalidation, and core `type` continues to report `'dict`.
+  - **Traces to**: Milestone 9 — embedded `table` module validators.
+
+- **DoD-26 — table filtering and aggregation**
+  - **Assert**: CSV text can be explicitly cast, filtered, grouped by named
+    columns, and aggregated with ordinary ECL quotations while preserving
+    first-key occurrence order and stable rows within each group.
+  - **Verify by** `cmd`: fixture `table-analysis.ecl` uses `slurp`,
+    `csv.parse`, and `table.from-header-rows` on `sales.csv`; explicitly casts
+    `amount` and `quantity`, derives `revenue` with `table.with-column`, filters
+    by an exact 0/1 mask, inspects `table.group-by`, and calls
+    `table.aggregate` by `region` with `sum`, `len`, and `mean` quotations.
+  - **Expected**: the grouped index dict and final region/revenue/count/mean
+    column dict match the checked-in expected values exactly; no header or
+    numeric inference occurs.
+  - **Traces to**: Milestone 9 — embedded `table` module grouping and
+    aggregation words.
+
+- **DoD-27 — stable table joins and explicit missingness**
+  - **Assert**: inner and filled left equijoins support named composite keys,
+    expand duplicate matches many-to-many in stable left-major/right-minor
+    order, reject non-key column collisions, and never invent a missing value.
+  - **Verify by** `cmd`: fixture `table-joins.ecl` loads an orders CSV through
+    `slurp`/`csv.parse` and a JSON array of customer records through
+    `slurp`/`json.parse`, converts both to tables, then exercises
+    `table.inner-join` and `table.left-join-with` using duplicate, unmatched,
+    composite-key, collision, and exact-fill cases.
+  - **Expected**: inner and left results match expected ordered column dicts;
+    duplicates expand in the specified order, unmatched left rows use only
+    caller-provided fills, collisions and incomplete fills are `'domain`, and
+    a JSON `'null` value remains ordinary data when present.
+  - **Traces to**: Milestone 9 — embedded `table` module join words.
+
+- **DoD-28 — http client**
   - **Assert**: `http.get` against a local fixture server returns a
     dict with `'status 200` and the body; a refused connection yields
     `'kind 'io`.
@@ -968,7 +1125,7 @@ script in CI.
     without crashing the interpreter.
   - **Traces to**: Milestone 9 — http native module.
 
-- **DoD-25 — str module via embedded stdlib**
+- **DoD-29 — str module via embedded stdlib**
   - **Assert**: `'str use "hello" str.upper` works with no ECL_PATH
     set.
   - **Verify by** `cmd`: `ecl "'str use \"hello\" str.upper pp"` in an
@@ -976,7 +1133,7 @@ script in CI.
   - **Expected**: `"HELLO"`.
   - **Traces to**: Milestone 9 — embedded stdlib registration (mechanism Milestone 4).
 
-- **DoD-26 — line budget**
+- **DoD-30 — line budget**
   - **Assert**: classified shipped business-logic Zig (including kernels but
     excluding tests, fixtures, build/source-audit verification tooling, and all
     target-language ECL source) ≤ 22,000 lines and every budgeted component
@@ -992,7 +1149,7 @@ script in CI.
   - **Traces to**: Milestone 10 — the source audit (budget: d.23,
     re-derived for the Zig host 2026-08-12).
 
-- **DoD-27 — module effect declarations (d.9)**
+- **DoD-31 — module effect declarations (d.9)**
   - **Assert**: a module `def` without an effect declaration fails
     registration; a declared effect is enforced dynamically when a call
     enters from outside its home module; same-home calls are unbracketed;
@@ -1013,7 +1170,7 @@ script in CI.
   - **Traces to**: Milestone 4 — module `def`/`defp` declaration
     validation + the cross-home d.14 dynamic enforcement hook.
 
-- **DoD-28 — embedded target-language prelude**
+- **DoD-32 — embedded target-language prelude**
   - **Assert**: the shipped [E] core vocabulary loads without filesystem
     support, remains reflectable as ordinary ecl bodies, exposes nonempty
     documentation for every word, follows the audited `### def <name>` block

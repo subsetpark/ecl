@@ -49,10 +49,16 @@ are preserved. Nothing below is constrained by compatibility.
    `(1 2 3)` and `[1 2 3]` are the same value. Ragged data is legal (a list
    whose elements didn't specialize). Box = quote: heterogeneity lives in
    lists, no separate box or generic-list type. Strings are rank-1 char
-   vectors. Dicts are first-class (`{...}` literal), the table story is
-   dict-of-column-vectors. **`shape` demands rectangularity**: on ragged
-   data it errors — `len` (top-level count) is the word that works on any
-   list.
+   vectors. Dicts are first-class (`{...}` literal), and the stdlib table
+   convention is a validated nonempty insertion-ordered dict from unique
+   nonempty string names to equal-length column lists; zero rows are legal.
+   A table is never a runtime type: it remains `'dict` to reflection,
+   printing, equality, pervasion, core dict operations, and generic
+   serialization, and only `table.*` boundaries recognize and validate the
+   convention. A core dict operation may create an invalid candidate, which
+   the next table boundary rejects rather than repairing or reclassifying.
+   **`shape` demands rectangularity**: on ragged data it errors — `len`
+   (top-level count) is the word that works on any list.
 
 3. **Broadcast: leading-axis, pairwise descent** (K conformability). Atoms
    extend to lists; lists pair elementwise at each level and recurse. (ec's
