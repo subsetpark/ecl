@@ -31,12 +31,12 @@
 
 ### def when
 (() if)
-(: "Call a quotation when the condition is truthy; otherwise do nothing.")
+(: "Call a quotation when the condition is the boolean 1; otherwise do nothing.")
 'when def
 
 ### def unless
 (() swap if)
-(: "Call a quotation when the condition is falsey; otherwise do nothing.")
+(: "Call a quotation when the condition is the boolean 0; otherwise do nothing.")
 'unless def
 
 ### def case
@@ -149,7 +149,8 @@
 ### def filter
 (over swap each where at)
 (sequence predicate -- matches :
- "Keep the elements for which a predicate quotation returns truthy.")
+ "Apply a predicate to every element, retaining each element as many times as its returned
+  non-negative integer count.")
 'filter def
 
 ### def partition
@@ -159,12 +160,14 @@
 
 ### def any?
 (|l q| l q each 0 (or) fold)
-(sequence predicate -- bool : "Return true when a predicate is truthy for at least one element.")
+(sequence predicate -- bool :
+ "Return 1 when a predicate returns 1 for at least one element; otherwise return 0.")
 'any? def
 
 ### def all?
 (|l q| l q each 1 (and) fold)
-(sequence predicate -- bool : "Return true when a predicate is truthy for every element.")
+(sequence predicate -- bool :
+ "Return 1 when a predicate returns 1 for every element; otherwise return 0.")
 'all? def
 
 ### def sum

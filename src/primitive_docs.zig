@@ -28,10 +28,10 @@ const entries = [_]Metadata{
 
     .{ .name = "dip", .effect = null, .text = "Run a quotation beneath a protected top stack value." },
     .{ .name = "call", .effect = null, .text = "Run a quotation on the current stack." },
-    .{ .name = "if", .effect = null, .text = "Run one of two quotations according to a boolean condition." },
-    .{ .name = "while", .effect = null, .text = "Run a body quotation while a condition quotation returns true." },
+    .{ .name = "if", .effect = null, .text = "Run one of two quotations according to a 0/1 boolean condition." },
+    .{ .name = "while", .effect = null, .text = "Run a body quotation while a condition quotation returns the boolean 1." },
     .{ .name = "times", .effect = null, .text = "Run a quotation the requested nonnegative number of times." },
-    .{ .name = "cond", .effect = null, .text = "Run the first action whose test quotation succeeds, or the final else quotation." },
+    .{ .name = "cond", .effect = null, .text = "Run the first action whose test quotation returns the boolean 1, or the final else quotation." },
     .{ .name = "each", .effect = "list quotation -- list", .text = "Apply a one-input, one-output quotation independently to each list element." },
     .{ .name = "each2", .effect = "left right quotation -- list", .text = "Apply a two-input, one-output quotation across two conforming lists." },
     .{ .name = "for", .effect = "list quotation --", .text = "Apply a one-input, zero-output quotation to each list element in order." },
