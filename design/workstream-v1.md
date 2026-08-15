@@ -12,7 +12,7 @@ combinator-entry idiom recognition, and green-unit concurrency. v1 is
 slow-but-correct everywhere the architecture permits, but never violates
 the decision-21 invariants that make it evolvable to K-order later.
 Scope additions ruled in during planning: REPL line editing/completion,
-and `str`, `json`, and `http` stdlib modules.
+and `str`, `csv`, `json`, and `http` stdlib modules.
 
 ## Current State
 
@@ -529,10 +529,10 @@ touched.
 
 ---
 
-### Milestone 9: stdlib-str-json-http
+### Milestone 9: stdlib-str-csv-json-http
 
 **Definition of Done**:
-Three stdlib modules ship inside the binary (embedded sources / native
+Four stdlib modules ship inside the binary (embedded sources / native
 builtins registered lazily via the M4 mechanism, so the single-binary
 story holds; `ECL_PATH` remains for user modules). The same milestone owns
 the explicit host scripting words needed by that layer:
@@ -545,6 +545,17 @@ the explicit host scripting words needed by that layer:
   idiom. `lines` [E] `( path -- list )` lands here, not M6, as the ordinary
   source body `(slurp "\n" split)`. These are explicit capabilities and do
   not alter the pure M6 `parse` contract.
+- **`csv`** — native: `csv.parse` `( string -- rows )` and `csv.emit`
+  `( rows -- string )` for RFC 4180 comma-delimited data. Parsing accepts
+  CRLF or LF record endings, quoted commas and newlines, and doubled-quote
+  escapes; it preserves empty fields and record widths and returns every
+  field as a string, with no header interpretation, delimiter sniffing, or
+  scalar inference. Emission accepts a list of nonempty rows whose cells are
+  strings and produces canonical CRLF-terminated RFC 4180 output, quoting
+  exactly the fields that require it. Empty input maps to an empty row list;
+  malformed quoting is `'parse`, non-list rows and non-string cells are
+  `'type`, and a zero-field row is `'shape`. Both user-sized traversals are
+  native, `WorkContext`-polled scanners.
 - **`json`** — native: `json.parse` (string → value) and `json.emit`
   (value → string) per RFC 8259; integral in-range numbers → int64,
   else f64; objects → dicts (keys as strings), arrays → lists;
@@ -565,6 +576,7 @@ untouched.
 emit) — the awk/sed/jq positioning made literal.
 
 **Established Precedents** (milestone-scoped):
+- **[rfc-spec] RFC 4180 — Common Format and MIME Type for CSV Files** — https://www.rfc-editor.org/rfc/rfc4180 — the comma, record-ending, quoting, escaping, and field-preservation contract.
 - **[rfc-spec] RFC 8259 — The JSON Data Interchange Format** — https://www.rfc-editor.org/rfc/rfc8259 — the parse/emit contract, including duplicate-key and number-precision guidance.
 
 ---
@@ -599,7 +611,7 @@ from a proven baseline.
 - Milestone 6 (combinators-and-recognition) -> [4, 5]
 - Milestone 7 (scheduler-and-concurrency) -> [6]
 - Milestone 8 (repl-line-editing) -> [4]        # parallel with 5–7
-- Milestone 9 (stdlib-str-json-http) -> [6]     # http may precede 7; blocking IO is v1-legal
+- Milestone 9 (stdlib-str-csv-json-http) -> [6] # http may precede 7; blocking IO is v1-legal
 - Milestone 10 (v1-acceptance) -> [7, 8, 9]
 
 ## Open Questions
@@ -689,6 +701,11 @@ from a proven baseline.
   post-v1, against the invariants v1 preserved.
 - **Stdlib ships embedded in the binary**, not via ECL_PATH files —
   single-binary distribution is part of the positioning (d.21).
+- **CSV is text-preserving table interchange, not schema inference.**
+  `csv.parse` returns rows of strings and treats a header, when present, as
+  an ordinary first row; `csv.emit` accepts the same representation. This
+  preserves leading zeroes, empty cells, and ragged record widths without
+  inventing null, header, or scalar-coercion semantics.
 - **http is client-only in v1.** A server is long-running-process
   territory the positioning explicitly declined (d.20/d.21).
 - **JSON null ↔ the symbol `'null`** (user ruling, this session).
@@ -923,7 +940,25 @@ script in CI.
     fires.
   - **Traces to**: Milestone 9 — json native module.
 
-- **DoD-23 — http client**
+- **DoD-23 — csv round-trip**
+  - **Assert**: `csv.parse` preserves fields, empty cells, record widths,
+    header-looking and scalar-looking text, quoted commas/newlines, and
+    doubled quotes as strings; `csv.emit ∘ csv.parse` is identity on a
+    canonical RFC 4180 corpus; malformed quotes and invalid tables are
+    rejected with the specified error kinds.
+  - **Verify by** `cmd`: fixture `csv.ecl` reads a corpus containing CRLF
+    and LF records, blank and ragged records, a header-looking first row,
+    leading-zero text, semicolons, embedded commas/newlines, and escaped
+    quotes, then checks the parsed rows and emits the canonical corpus;
+    separate cases parse an unclosed quoted field and emit a numeric cell,
+    a non-list row, and a zero-field row.
+  - **Expected**: parsed rows match the fixture's nested string lists;
+    canonical output matches byte-for-byte; the malformed input yields
+    `'kind 'parse`, the numeric cell and non-list row yield `'kind 'type`,
+    and the zero-field row yields `'kind 'shape`.
+  - **Traces to**: Milestone 9 — csv native module.
+
+- **DoD-24 — http client**
   - **Assert**: `http.get` against a local fixture server returns a
     dict with `'status 200` and the body; a refused connection yields
     `'kind 'io`.
@@ -933,7 +968,7 @@ script in CI.
     without crashing the interpreter.
   - **Traces to**: Milestone 9 — http native module.
 
-- **DoD-24 — str module via embedded stdlib**
+- **DoD-25 — str module via embedded stdlib**
   - **Assert**: `'str use "hello" str.upper` works with no ECL_PATH
     set.
   - **Verify by** `cmd`: `ecl "'str use \"hello\" str.upper pp"` in an
@@ -941,7 +976,7 @@ script in CI.
   - **Expected**: `"HELLO"`.
   - **Traces to**: Milestone 9 — embedded stdlib registration (mechanism Milestone 4).
 
-- **DoD-25 — line budget**
+- **DoD-26 — line budget**
   - **Assert**: classified shipped business-logic Zig (including kernels but
     excluding tests, fixtures, build/source-audit verification tooling, and all
     target-language ECL source) ≤ 22,000 lines and every budgeted component
@@ -957,7 +992,7 @@ script in CI.
   - **Traces to**: Milestone 10 — the source audit (budget: d.23,
     re-derived for the Zig host 2026-08-12).
 
-- **DoD-26 — module effect declarations (d.9)**
+- **DoD-27 — module effect declarations (d.9)**
   - **Assert**: a module `def` without an effect declaration fails
     registration; a declared effect is enforced dynamically when a call
     enters from outside its home module; same-home calls are unbracketed;
@@ -978,7 +1013,7 @@ script in CI.
   - **Traces to**: Milestone 4 — module `def`/`defp` declaration
     validation + the cross-home d.14 dynamic enforcement hook.
 
-- **DoD-27 — embedded target-language prelude**
+- **DoD-28 — embedded target-language prelude**
   - **Assert**: the shipped [E] core vocabulary loads without filesystem
     support, remains reflectable as ordinary ecl bodies, exposes nonempty
     documentation for every word, follows the audited `### def <name>` block
