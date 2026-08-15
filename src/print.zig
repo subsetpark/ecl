@@ -13,7 +13,7 @@ pub const Value = value.Value;
 const Action = union(enum) {
     render: Value,
     sequence: struct { collection: Value, index: usize },
-    dictionary: struct { header: *value.Header, index: usize, key: bool },
+    dictionary: struct { header: *value.DictHandle, index: usize, key: bool },
     string: struct { collection: Value, index: usize },
     bytes: struct { source: []const u8, index: usize },
 };
@@ -319,6 +319,8 @@ fn expectPrint(expected: []const u8, item: Value) !void {
 
 test "canonical printer matches the Rust proof-of-concept fixtures" {
     const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     const plus = try intern.intern("+");
     const sym = try intern.intern("sym");
     try expectPrint("2.0", .{ .float = 2.0 });
@@ -330,26 +332,26 @@ test "canonical printer matches the Rust proof-of-concept fixtures" {
     try expectPrint("sym", .{ .word = sym });
 
     const integers = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
-    defer heap.releaseValue(allocator, integers);
+    defer heap.testing.releaseValue(allocator, integers);
     try expectPrint("[1 2]", integers);
     const quotation = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .word = plus } });
-    defer heap.releaseValue(allocator, quotation);
+    defer heap.testing.releaseValue(allocator, quotation);
     try expectPrint("(1 +)", quotation);
     const singleton = try list.fromValues(allocator, &.{.{ .int = 3 }});
-    defer heap.releaseValue(allocator, singleton);
+    defer heap.testing.releaseValue(allocator, singleton);
     const nested = try list.fromValues(allocator, &.{ integers, singleton });
-    defer heap.releaseValue(allocator, nested);
+    defer heap.testing.releaseValue(allocator, nested);
     try expectPrint("([1 2] [3])", nested);
     const string = try list.fromValues(allocator, &.{ .{ .char = 'a' }, .{ .char = 'b' } });
-    defer heap.releaseValue(allocator, string);
+    defer heap.testing.releaseValue(allocator, string);
     try expectPrint("\"ab\"", string);
     const empty_string = try list.fromCodepoints(allocator, &.{});
-    defer heap.releaseValue(allocator, empty_string);
+    defer heap.testing.releaseValue(allocator, empty_string);
     try expectPrint("\"\"", empty_string);
 
     const a = try intern.intern("a");
-    const dictionary = try dict.fromPairs(allocator, &.{.{ .{ .symbol = a }, .{ .int = 1 } }});
-    defer heap.releaseValue(allocator, dictionary);
+    const dictionary = try dict.fromPairs(allocator, cleanup.domain(), &.{.{ .{ .symbol = a }, .{ .int = 1 } }});
+    defer heap.testing.releaseValue(allocator, dictionary);
     try expectPrint("{'a 1}", dictionary);
 }
 
@@ -364,7 +366,7 @@ test "char and string escapes follow the grammar" {
         .{ .char = '\n' },
         .{ .char = '\\' },
     });
-    defer heap.releaseValue(allocator, string);
+    defer heap.testing.releaseValue(allocator, string);
     try expectPrint("\"\\\"\\n\\\\\"", string);
 }
 
@@ -375,10 +377,10 @@ test "deep rendering uses an explicit worklist" {
     var current = Value{ .int = 1 };
     for (0..100_000) |_| {
         const next = try list.fromValuesGeneric(allocator, &.{current});
-        if (current.heapHeader()) |_| heap.releaseValue(allocator, current);
+        if (current.heapHeader()) |_| heap.testing.releaseValue(allocator, current);
         current = next;
     }
-    defer heap.releaseValue(allocator, current);
+    defer heap.testing.releaseValue(allocator, current);
     const rendered = try toOwnedString(allocator, current);
     defer allocator.free(rendered);
     try std.testing.expectEqual(@as(usize, 200_001), rendered.len);
@@ -392,7 +394,7 @@ test "owned rendering exposes resumable transitions for one large value" {
     defer allocator.free(numbers);
     for (numbers, 0..) |*number, index| number.* = @intCast(index);
     const collection = try list.fromI64Slice(allocator, numbers);
-    defer heap.releaseValue(allocator, collection);
+    defer heap.testing.releaseValue(allocator, collection);
 
     var cursor = try OwnedStringCursor.init(allocator, collection);
     defer cursor.deinit();

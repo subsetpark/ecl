@@ -41,12 +41,33 @@ pub const Header = opaque {
     }
 };
 
+/// Public values carry kind-specific handles.  The three pointer types have
+/// the same representation, but cannot be interchanged without returning to
+/// heap.zig, which is the sole issuer and eraser of these capabilities.
+pub const ListHandle = opaque {
+    pub fn kind(self: *ListHandle) HeapKind {
+        return @import("heap.zig").listKind(self);
+    }
+
+    pub fn length(self: *ListHandle) u64 {
+        return @import("heap.zig").listLength(self);
+    }
+};
+
+pub const DictHandle = opaque {
+    pub fn length(self: *DictHandle) u64 {
+        return @import("heap.zig").dictLength(self);
+    }
+};
+
+pub const TaskHandle = opaque {};
+
 /// Kept beside Header so equality can inspect dicts without importing the
 /// operations layer and creating a module cycle.
 pub const DictPayload = struct {
-    keys: *Header,
-    vals: *Header,
-    hashes: ?*Header,
+    keys: *ListHandle,
+    vals: *ListHandle,
+    hashes: *ListHandle,
 };
 
 pub const Value = union(Tag) {
@@ -55,9 +76,9 @@ pub const Value = union(Tag) {
     char: u32,
     symbol: u32,
     word: u32,
-    list: *Header,
-    dict: *Header,
-    task: *Header,
+    list: *ListHandle,
+    dict: *DictHandle,
+    task: *TaskHandle,
 
     pub fn tag(self: Value) Tag {
         return std.meta.activeTag(self);
@@ -66,9 +87,9 @@ pub const Value = union(Tag) {
     pub fn heapHeader(self: Value) ?*Header {
         return switch (self) {
             .int, .float, .char, .symbol, .word => null,
-            .list => |header| header,
-            .dict => |header| header,
-            .task => |header| header,
+            .list => |header| @import("heap.zig").headerFromList(header),
+            .dict => |header| @import("heap.zig").headerFromDict(header),
+            .task => |header| @import("heap.zig").headerFromTask(header),
         };
     }
 
@@ -88,11 +109,8 @@ pub const Value = union(Tag) {
 
 comptime {
     if (@sizeOf(Value) != 16) @compileError("Value must remain exactly 16 bytes");
-}
-
-test "value and header layouts are frozen" {
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(Value));
-    try std.testing.expectEqual(@as(usize, 10), @typeInfo(HeapKind).@"enum".fields.len);
+    if (@typeInfo(HeapKind).@"enum".fields.len != 10)
+        @compileError("HeapKind dispatch count changed; update every exhaustive representation switch");
 }
 
 test "atom constructors round-trip their payloads" {

@@ -10,9 +10,29 @@
   or dedicated build tooling—not by treating implementation text as test behavior.
 - Inspect text in a test only when that text is itself a documented program input or
   output, such as parser input, formatter output, or a generated artifact contract.
+- Do not add test-only accessors that expose a private table, dispatch choice, layout,
+  field, or other representation merely so a test can inspect it. Enforce static
+  completeness, size, and layout rules with production `comptime` validation or the
+  source audit; keep runtime tests about observable results and errors.
 - Keep focused allocator failure sweeps in the normal suite. Consolidate exhaustive
   initialized-Session coverage in `src/tests/oom_test.zig`, run by `zig build test-oom`, so
   the embedded prelude is not bootstrapped independently for every runtime surface.
+- Treat a model-only property as specification evidence, not proof of the production
+  implementation. Concurrency and reclamation acceptance must exercise the real
+  publisher, leases/cursors, mutation path, and retirement domain through public or
+  production-connected interfaces.
+- For snapshot reclamation, run real readers that repeatedly acquire, resolve through,
+  and release production leases while real writers publish and the same domain reclaims.
+  Assert stable observable values and, after delayed readers release and retirement
+  settles, memory bounded independently of update count. Run that path under TSan and
+  retain a counting-allocator delayed-reader property covering Shape and Directory
+  histories, alias churn, and distinct-module publication.
+- Keep gameplan proof traceability exact: every `testMap` row names exactly one existing
+  test in its declared file and exactly one introducing and implementing patch entry.
+  Reject duplicate, stale, missing, or mismatched ledger entries.
+- Exercise every operation of an opaque public capability through its real factory,
+  registration, or runtime path so Zig analyzes lazily reached method bodies. A type
+  declaration compiling without any caller is not proof that its public surface works.
 
 ## Embedded prelude
 
@@ -31,26 +51,153 @@
 
 ## Structural invariants
 
+- This application is still in its design phase. When a defect exposes a weak ownership,
+  lifetime, publication, scheduling, or authority seam, revise the representation and
+  architectural invariant rather than preserving the seam with a field reorder, extra
+  assertion, naming convention, special-case drain, or source-audit exception.
 - Prefer nominal IDs, opaque handles, validated factories, capability values,
   typestate transitions, and tagged unions over correlated raw fields, booleans,
   debug assertions, naming conventions, or comments.
 - Make invalid ownership, publication metadata, environment phase, stack-window,
   and continuation-mode states unrepresentable where Zig permits it. Use `comptime`
   validation for static registries and exhaustive switches for state machines.
-- Route every user-sized traversal through `WorkContext` cursors or bounded chunks.
-  Use exact-size materialization for known results and fixed chunks plus one polled
-  materialization pass for unknown results; do not introduce relocating or rehashing
-  storage into cancellable paths.
-- Enforce the remaining source-level boundaries with AST-aware build tooling over
-  every classified production file. Behavioral tests remain public-interface tests.
+- Give consuming APIs an explicit ownership contract on both success and failure.
+  Transfer ownership through moved/consumed capabilities or tagged results; never make
+  a caller infer whether a failed append, publication, or transition retained or
+  destroyed its input.
+- Update the gameplan and `design/ARCHITECTURE.md` when introducing or revising a
+  structural invariant. Acceptance must show that every producer and consumer uses the
+  new seam and that invalid states are unavailable in all build modes.
 - Raise a component or representation ceiling when a strong type boundary honestly
   needs the space. Never weaken or compress away the type boundary merely to satisfy
   a historical line-count or frame-size limit; update and explain the ceiling.
 
+## Ownership, lifetime, and capabilities
+
+- Define one lifetime protocol for provisional and published generations, Units, tasks,
+  scopes, descendants, drivers, pins, leases, and cursors. Do not duplicate teardown
+  ordering assumptions between owners or rely on a unique-refcount assertion to stand
+  in for quiescence.
+- Keep an embedded owner alive until every descendant has propagated its parent release.
+  Encode `waiting-for-children`, scope teardown, environment teardown, pin release, and
+  final destruction as one exhaustive typestate, releasing dependents before their
+  lifetime guards.
+- A pin, lease, cursor, handle, or callback-owned value that releases through a
+  reclamation domain must not outlive that domain. Shutdown must first close new lifetime
+  creation, then join/adopt outstanding owners, settle their retirement, and only then
+  destroy the issuing domain.
+- Separate observation, execution, and mutation into distinct nominal capabilities.
+  Upgrading requires a distinct owner-issued authority and consumes the source
+  capability. Observation APIs return metadata or pinned cursors, not raw homes,
+  mutable scopes, ownership factories, or an implicit path to greater authority.
+- Give Session-facing and registered-native callers only opaque semantic facades. Do not
+  expose raw `Env`, `Registry`, Unit, module-home, reclamation-domain, wake-control,
+  queue, or manual-advancement aliases when a narrower operation can express the
+  contract. A lower-level API is valid only when its caller explicitly owns the
+  corresponding lifetime and reclamation root.
+- Private authority types may appear in signatures, but untrusted callers must be unable
+  to construct or obtain their values or factories. Keep private runtime primitive
+  bindings unreachable through public dictionaries, reflection, shadowing, and
+  higher-order combinators; grant trusted builtins only the narrow operation they need.
+- Each reclamation root mints or owns exactly one opaque host authority, and subordinate
+  objects derive allocator and retirement-domain access from that owner. Bind mutation
+  authority separately to its issuer. Use opaque/private backing state so neither
+  authority can be forged, substituted, or retargeted after construction. Never accept
+  a separately correlated allocator/domain/host tuple, and never rely on a debug
+  assertion or audit alone to reject a mismatch in optimized builds.
+- Scheduler-attached state may enqueue or advance bounded retirement only. Blocking
+  destruction requires owner-derived host authority that worker-visible types cannot
+  obtain; reaching the final reference never grants permission to traverse a user-sized
+  graph synchronously.
+- Make retirement settlement inseparable from public mutation authority. Every public
+  mutation operation, blocking or resumable, settles or explicitly transfers its
+  retirement work on every exit path, and opaque Session APIs must not expose lower-level
+  mutable aliases that bypass that postcondition.
+- Every cursor borrowing snapshot-owned storage owns the corresponding snapshot lease
+  for its complete lifetime and, when that storage belongs to a generation, an
+  independent generation pin. Releasing the originating lease must not invalidate an
+  independent cursor.
+
+## Bounded work and scheduling
+
+- Route every user-sized traversal, cleanup, and terminal unwind through `WorkContext`
+  cursors or bounded chunks. Use exact-size materialization for known results and fixed
+  chunks plus one polled materialization pass for unknown results; do not introduce
+  relocating or rehashing storage into cancellable paths.
+- Treat reclamation and terminal cleanup as ordinary resumable scheduler work. A final
+  reader, writer, reference, task, or generation may detach and enqueue work, but may not
+  hide an unbounded traversal inside one nominal scheduler step.
+- Cooperative and worker-pool executors use one arbitration policy for ready work,
+  cancellation, wait delivery, teardown, and retirement. Bound consecutive service of
+  every class so neither a continuously ready task nor a reclamation backlog can starve
+  the other classes or make cancellation latency scale with a whole retired graph.
+- Cold and idle Sessions must not strand retirement. Root completion and every public
+  blocking turn must settle or transfer the backlog even before the worker pool starts
+  and while a sole worker is busy.
+- Treat task-tree registration, publication, and cancellation as one protocol. Publish
+  stable task state before making a spawn reachable, register it atomically with its
+  tree, prevent a cancelled ready task from dispatching, and keep cancellation
+  allocation-free. Snapshot passes carry a mutation epoch and restart count/collection
+  when the tree changes.
+- Capture an absolute deadline before lazy timer startup and store deadline precedence
+  in the wait-arbitration state. Completion, cancellation, timer insertion, and timer
+  wake revalidate against that same deadline before committing a winner; already-expired
+  or terminal waits must not start timer infrastructure unnecessarily.
+
+## Publication and reclamation
+
+- Represent task publication and other multi-phase handoffs as tagged states whose
+  variants own exactly the metadata valid in that phase. Transitions consume one state
+  and construct the next; do not coordinate publication with nullable fields and flags.
+- Give every lock-free multi-field publication one documented happens-before protocol.
+  Publish initialized payload/count metadata before reachable heads, and capture a
+  generation/version before any dependent shape derived from it. Readers must announce
+  and validate using the same ordering used by replacement and reclamation. Use
+  sequential consistency when correctness depends on a single total order across
+  independent reader/writer atomics; weakening it requires an explicit proof.
+- Binding, Shape, Directory, module-generation, and analogous snapshot publishers use
+  one explicit reader/writer handoff that prevents early reclamation under every final-
+  reader/later-writer interleaving.
+- Read terminal task state under the same lock or tagged publication transition that
+  makes it terminal; never infer completion from independently nullable fields.
+- Publication locks protect validation, state transition, and O(1) detachment only.
+  After unlocking, enqueue typed bounded retirement; never allocate for, walk, destroy,
+  or call into the shared retirement domain while holding a publication lock.
+- After delayed leases drain and bounded retirement is serviced, residual retired memory
+  must be bounded by current or peak simultaneously live state rather than total
+  publication/reload history. Document any retention or backpressure bound while readers
+  remain, recycle fixed retirement records where appropriate, and prove the residual
+  bound with delayed readers and repeated public updates.
+
+## Architectural enforcement
+
+- Recursively enumerate every first-party Zig source and require exactly one production
+  or verification classification. Derive all production audits from that exhaustive
+  classification; never maintain a narrower hardcoded source subset that new files can
+  evade.
+- Enforce source-level boundaries primarily with types, opaque state, `comptime`, and
+  exhaustive switching. Use AST-aware build tooling over every classified production
+  file for constraints Zig cannot express; method-name lists, literal-loop detection,
+  comments, debug assertions, and behavioral tests are not substitutes for a closed
+  type or capability seam.
+- Make the audit follow semantic ownership and blocking-destruction boundaries, including
+  indirect helpers and every destructor spelling, rather than recognizing only selected
+  names or direct loops.
+- Treat source-audit output as the measurement and classification authority. Update
+  `design/ARCHITECTURE.md`, the workstream, and the gameplan in the same change whenever
+  classifications, reachability rules, ceilings, measured totals, or proof claims move;
+  clearly label historical figures as historical.
+
 ## Line budgets
 
 - Apply component and total line ceilings only to shipped business-logic Zig.
-- Exclude test-only sources, inline `test` declarations, fixtures, build/source-audit
-  verification tooling, and all target-language ECL from every line ceiling.
-- Keep excluded Zig exactly classified and report it separately, but do not cap it.
-  Do not move shipped behavior into an excluded file to evade a business-logic budget.
+- In mixed files, start at shipped entry, `pub`, `export`, and production-`comptime`
+  roots and follow production declaration reachability. Exclude inline `test` declarations,
+  `builtin.is_test` declarations, and private top-level helpers reachable only from
+  verification code, along with standalone test sources, fixtures, build/source-audit
+  tooling, and all target-language ECL.
+- Keep excluded Zig exactly classified and report it through exhaustive file/input
+  coverage, not verification LOC totals or ceilings. Verification LOC is neither
+  measured nor controlled.
+- Do not move shipped behavior into an excluded declaration or file to evade a
+  business-logic budget.

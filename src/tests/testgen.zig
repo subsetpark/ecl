@@ -183,7 +183,7 @@ fn materializeList(
     const items = try allocator.alloc(Value, count);
     defer allocator.free(items);
     var initialized: usize = 0;
-    defer for (items[0..initialized]) |item| heap.releaseValue(allocator, item);
+    defer for (items[0..initialized]) |item| heap.testing.releaseValue(allocator, item);
     for (items) |*item| {
         item.* = try materializeValue(allocator, cursor, depth, dicts);
         initialized += 1;
@@ -196,13 +196,15 @@ fn materializeDict(
     cursor: *RecipeCursor,
     depth: usize,
 ) error{OutOfMemory}!Value {
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     const count = cursor.next() % 4;
     const pairs = try allocator.alloc(dict.Pair, count);
     defer allocator.free(pairs);
     var initialized: usize = 0;
     defer for (pairs[0..initialized]) |pair| {
-        heap.releaseValue(allocator, pair[0]);
-        heap.releaseValue(allocator, pair[1]);
+        heap.testing.releaseValue(allocator, pair[0]);
+        heap.testing.releaseValue(allocator, pair[1]);
     };
     const base = signedInteger(cursor);
     for (pairs, 0..) |*pair, index| {
@@ -210,7 +212,7 @@ fn materializeDict(
         pair[1] = try materializeValue(allocator, cursor, depth, .allowed);
         initialized += 1;
     }
-    return dict.fromUniquePairs(allocator, pairs);
+    return dict.fromUniquePairs(allocator, cleanup.domain(), pairs);
 }
 
 pub fn codepoint(encoded: u8) u32 {

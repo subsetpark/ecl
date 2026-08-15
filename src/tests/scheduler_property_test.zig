@@ -131,16 +131,15 @@ const Model = struct {
 
     fn spawn(self: *Model, parent: Parent) anyerror!void {
         if (self.used == self.tasks.len) return;
-        const parent_scope = self.scope(parent);
-        const registered = try scheduler.decideScope(parent_scope.*, .register_child);
-        parent_scope.* = registered.next;
-
         const index = self.used;
         self.used += 1;
         self.tasks[index] = .{ .used = true, .parent = parent };
         const published = try scheduler.decideUnit(self.tasks[index].unit, .publish);
         self.tasks[index].unit = published.next;
         try self.performUnitCommand(index, published.command);
+        const parent_scope = self.scope(parent);
+        const registered = try scheduler.decideScope(parent_scope.*, .register_child);
+        parent_scope.* = registered.next;
         if (registered.command == .cancel_arriving_child) try self.cancel(index);
     }
 
@@ -158,6 +157,14 @@ const Model = struct {
     ) anyerror!void {
         switch (command) {
             .none => {},
+            .cancel_before_dispatch => {
+                const stopped = try scheduler.decideUnit(
+                    self.tasks[index].unit,
+                    .{ .body_finished = .language_error },
+                );
+                self.tasks[index].unit = stopped.next;
+                try self.performUnitCommand(index, stopped.command);
+            },
             .enqueue => {
                 try std.testing.expect(!self.tasks[index].queued);
                 self.tasks[index].queued = true;
@@ -179,6 +186,7 @@ const Model = struct {
         const dispatched = try scheduler.decideUnit(self.tasks[index].unit, .dispatch);
         self.tasks[index].unit = dispatched.next;
         try self.performUnitCommand(index, dispatched.command);
+        if (dispatched.command == .cancel_before_dispatch) return;
         const decision = switch (action) {
             0 => try scheduler.decideUnit(self.tasks[index].unit, .yield),
             1 => try scheduler.decideUnit(self.tasks[index].unit, .park),
@@ -393,7 +401,7 @@ fn runGeneratedTrace(trace: Trace) anyerror!void {
                     .{ .task = @intCast(index) }
                 else
                     .root;
-                if (model.scope(parent).* != .closed) try model.spawn(parent);
+                try model.spawn(parent);
             },
             1, 2 => if (chooseReadyTask(&model, encoded / 6)) |index| {
                 try model.dispatchAndAct(index, @intCast((encoded / 25) % 3));
@@ -456,6 +464,26 @@ test "scheduler properties: every wake permutation selects exactly one winner" {
         try std.testing.expectEqual(@as(usize, 1), wakes);
         try std.testing.expect(state.delivered.eql(order[0]));
     }
+}
+
+test "scheduler properties: cancelled ready units cannot dispatch body work" {
+    var unit: scheduler.Unit = .{ .ready = .{} };
+    unit = (try scheduler.decideUnit(unit, .cancel)).next;
+    const dispatch = try scheduler.decideUnit(unit, .dispatch);
+    try std.testing.expect(dispatch.command == .cancel_before_dispatch);
+    try std.testing.expectEqual(scheduler.UnitPhase.running, dispatch.next.phase());
+
+    const stopped = try scheduler.decideUnit(
+        dispatch.next,
+        .{ .body_finished = .language_error },
+    );
+    try std.testing.expect(stopped.command == .close_scope);
+}
+
+test "scheduler properties: every child registered after close is killed on arrival" {
+    const registered = try scheduler.decideScope(.closed, .register_child);
+    try std.testing.expectEqual(scheduler.Scope{ .closing = 1 }, registered.next);
+    try std.testing.expect(registered.command == .cancel_arriving_child);
 }
 
 test "scheduler properties: selection before activation delivers once on activation" {

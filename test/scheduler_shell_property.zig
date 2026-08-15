@@ -6,7 +6,7 @@ const cli = @import("cli_test_support.zig");
 
 const allocator = std.testing.allocator;
 
-const Operation = enum(u4) {
+const Operation = enum(u5) {
     par_each,
     task_join,
     await_one,
@@ -20,7 +20,11 @@ const Operation = enum(u4) {
     attempt_materialization,
     wide_wait_setup,
     cancel_tree,
+    tasks_mutation,
     root_quiescence,
+    infra_stack_handoff,
+    infra_fairness,
+    value_owner_handoff,
 };
 
 const Scenario = struct {
@@ -78,7 +82,7 @@ fn runShellScenario(encoded: u16) !void {
         },
         .task_join => {
             try appendTasks(&source_buffer.writer, scenario.width);
-            try source_buffer.writer.writeAll(" task-join");
+            try source_buffer.writer.writeAll(" (await 'ok at first) par-each");
             try appendValues(&expected_buffer.writer, scenario.width, false);
             try expected_buffer.writer.writeByte('\n');
         },
@@ -107,7 +111,7 @@ fn runShellScenario(encoded: u16) !void {
             try source_buffer.writer.writeAll("((1) () while) spawn 'gate set ");
             for (0..scenario.width) |_| try source_buffer.writer.writeAll("(gate await) spawn ");
             try source_buffer.writer.print(
-                "{d} pack gate cancel task-join len",
+                "{d} pack gate cancel (await) par-each len",
                 .{scenario.width},
             );
             try expected_buffer.writer.print("{d}\n", .{scenario.width});
@@ -156,10 +160,45 @@ fn runShellScenario(encoded: u16) !void {
                     "(1) () while) spawn dup 20 await-for pop dup cancel await pop",
             );
         },
+        .tasks_mutation => {
+            const width = 300 + scenario.width * 20;
+            try source_buffer.writer.print(
+                "((1) () while) spawn 'gate set [1] {d} take " ++
+                    "(pop (gate await pop) spawn) each pop " ++
+                    "gate cancel tasks len pop",
+                .{width},
+            );
+        },
         .root_quiescence => {
             for (0..scenario.width * 20) |_| {
                 try source_buffer.writer.writeAll("(1) spawn pop ");
             }
+        },
+        .infra_stack_handoff => {
+            try appendValues(&source_buffer.writer, scenario.width, false);
+            try source_buffer.writer.writeAll(" (dup) infra");
+            try expected_buffer.writer.writeByte('[');
+            for (0..scenario.width) |index| {
+                if (index != 0) try expected_buffer.writer.writeByte(' ');
+                try expected_buffer.writer.print("{d}", .{index});
+            }
+            try expected_buffer.writer.print(" {d}]\n", .{scenario.width - 1});
+        },
+        .infra_fairness => {
+            try source_buffer.writer.writeAll(
+                "([1] 200000 take () infra len) spawn " ++
+                    "(7) spawn pair await-any pop",
+            );
+            try expected_buffer.writer.writeAll("1\n");
+        },
+        .value_owner_handoff => {
+            try source_buffer.writer.writeByte('[');
+            for (0..scenario.width) |index| {
+                if (index != 0) try source_buffer.writer.writeByte(' ');
+                try source_buffer.writer.print("{d}", .{index % 3});
+            }
+            try source_buffer.writer.writeAll("] dup group keys len swap 1 pack \"{}\" format pop");
+            try expected_buffer.writer.print("{d}\n", .{@min(scenario.width, 3)});
         },
     }
 
@@ -200,6 +239,10 @@ test "scheduler shell property: generated public waits always quiesce" {
     try runShellScenario(@intFromEnum(Operation.raise_fairness));
     try runShellScenario(@intFromEnum(Operation.attempt_materialization));
     try runShellScenario(@intFromEnum(Operation.wide_wait_setup));
+    try runShellScenario(@intFromEnum(Operation.tasks_mutation));
+    try runShellScenario(@intFromEnum(Operation.infra_stack_handoff));
+    try runShellScenario(@intFromEnum(Operation.infra_fairness));
+    try runShellScenario(@intFromEnum(Operation.value_owner_handoff));
     try minish.check(allocator, minish.gen.int(u16), runShellScenario, .{
         .num_runs = 42,
         .seed = 0x5e11_c0de,

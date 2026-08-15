@@ -6,7 +6,7 @@ const lexer = @import("lexer.zig");
 const poll = @import("poll.zig");
 
 pub const Value = value.Value;
-pub const Header = value.Header;
+pub const Header = value.ListHandle;
 pub const Span = lexer.Span;
 pub const Diag = lexer.Diag;
 pub const Error = error{ OutOfMemory, Parse };
@@ -33,14 +33,38 @@ pub const SpanTable = struct {
     pub fn init(allocator: std.mem.Allocator) SpanTable {
         return .{ .entries = .init(allocator) };
     }
-    pub fn deinit(self: *SpanTable, allocator: std.mem.Allocator) void {
-        var entries = self.entries.iterator();
-        while (entries.next()) |entry| if (entry.spans.len > 0) allocator.free(entry.spans);
-        self.entries.deinit();
-        if (self.buckets.len > 0) allocator.free(self.buckets);
-        if (self.top.len > 0) allocator.free(self.top);
-        self.* = .init(allocator);
-    }
+    pub const RetireProgress = enum { pending, complete };
+    pub const RetireCursor = struct {
+        table: *SpanTable,
+        entries: EntryList.Iterator,
+        phase: enum { entries, storage, complete } = .entries,
+
+        pub fn init(table: *SpanTable) RetireCursor {
+            return .{ .table = table, .entries = table.entries.iterator() };
+        }
+
+        pub fn advance(self: *RetireCursor, releases: *heap.ReleaseDomain) RetireProgress {
+            return switch (self.phase) {
+                .entries => if (self.entries.next()) |entry| result: {
+                    if (entry.spans.len > 0) self.table.entries.allocator.free(entry.spans);
+                    break :result .pending;
+                } else result: {
+                    self.table.entries.retire(releases);
+                    self.phase = .storage;
+                    break :result .pending;
+                },
+                .storage => result: {
+                    const allocator = self.table.entries.allocator;
+                    if (self.table.buckets.len > 0) allocator.free(self.table.buckets);
+                    if (self.table.top.len > 0) allocator.free(self.table.top);
+                    self.table.* = .init(allocator);
+                    self.phase = .complete;
+                    break :result .complete;
+                },
+                .complete => unreachable,
+            };
+        }
+    };
     fn bucket(header: *const Header) usize {
         const address = @intFromPtr(header) >> 4;
         return address & (bucket_count - 1);
@@ -154,20 +178,83 @@ pub const SpanTable = struct {
 
 pub const Parsed = struct {
     allocator: std.mem.Allocator,
-    forms: []Value,
+    forms: heap.OwnedValueBuffer,
+    releases: *heap.ReleaseDomain,
     spans: SpanTable,
     source_name: []u8,
 
-    pub fn deinit(self: *Parsed) void {
-        self.spans.deinit(self.allocator);
-        for (self.forms) |form| heap.releaseValue(self.allocator, form);
-        self.allocator.free(self.forms);
-        self.allocator.free(self.source_name);
+    pub fn values(self: *const Parsed) []const Value {
+        return self.forms.values();
+    }
+
+    pub const RetireCursor = struct {
+        parsed: *Parsed,
+        spans: SpanTable.RetireCursor,
+        phase: enum { spans, forms, source_name, complete } = .spans,
+
+        pub fn init(parsed: *Parsed) RetireCursor {
+            return .{ .parsed = parsed, .spans = .init(&parsed.spans) };
+        }
+
+        pub fn advance(self: *RetireCursor) bool {
+            return switch (self.phase) {
+                .spans => switch (self.spans.advance(self.releaseDomain())) {
+                    .pending => false,
+                    .complete => result: {
+                        self.phase = .forms;
+                        break :result false;
+                    },
+                },
+                .forms => result: {
+                    self.parsed.forms.deinit();
+                    self.phase = .source_name;
+                    break :result false;
+                },
+                .source_name => result: {
+                    self.parsed.allocator.free(self.parsed.source_name);
+                    self.parsed.source_name = &.{};
+                    self.phase = .complete;
+                    break :result false;
+                },
+                .complete => true,
+            };
+        }
+
+        fn releaseDomain(self: *const RetireCursor) *heap.ReleaseDomain {
+            return self.parsed.releases;
+        }
+    };
+};
+
+/// Parsed result driven synchronously by an explicit host. The issuing cleanup
+/// capability is captured at construction, so teardown cannot be paired with
+/// another reclamation domain.
+pub const HostParsed = struct {
+    parsed: Parsed,
+    host: *const heap.HostCleanup,
+
+    pub fn values(self: *const HostParsed) []const Value {
+        return self.parsed.values();
+    }
+
+    pub fn borrow(self: *HostParsed) *Parsed {
+        return &self.parsed;
+    }
+
+    pub fn deinit(self: *HostParsed) void {
+        var cursor = Parsed.RetireCursor.init(&self.parsed);
+        while (!cursor.advance()) _ = self.parsed.releases.advance(256);
+        self.host.drain();
         self.* = undefined;
     }
 };
 
 pub const ReadResult = union(enum) {
     complete: Parsed,
+    incomplete: Incomplete,
+};
+
+pub const HostReadResult = union(enum) {
+    complete: HostParsed,
     incomplete: Incomplete,
 };

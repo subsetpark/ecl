@@ -8,6 +8,7 @@ const equal = @import("equal.zig");
 
 pub const Value = value.Value;
 pub const Header = value.Header;
+pub const DictHandle = value.DictHandle;
 pub const Pair = [2]Value;
 
 pub const Error = error{ OutOfMemory, DuplicateKey, NotADict };
@@ -17,6 +18,7 @@ const empty_index: u32 = 0;
 
 pub fn fromPairs(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     pairs: []const Pair,
 ) error{ OutOfMemory, DuplicateKey }!Value {
     if (pairs.len >= std.math.maxInt(u32)) return error.OutOfMemory;
@@ -38,48 +40,40 @@ pub fn fromPairs(
         hashes[index] = @bitCast(key_hash);
     }
 
-    const keys_value = try list.fromValues(allocator, keys);
-    var keys_owned = true;
-    defer if (keys_owned) heap.releaseValue(allocator, keys_value);
-    const vals_value = try list.fromValues(allocator, vals);
-    var vals_owned = true;
-    defer if (vals_owned) heap.releaseValue(allocator, vals_value);
-    const hashes_value = try list.fromI64Slice(allocator, hashes);
-    var hashes_owned = true;
-    defer if (hashes_owned) heap.releaseValue(allocator, hashes_value);
+    var keys_value = heap.OwnedValue.init(releases, try list.fromValues(allocator, keys));
+    defer keys_value.deinit();
+    var vals_value = heap.OwnedValue.init(releases, try list.fromValues(allocator, vals));
+    defer vals_value.deinit();
+    var hashes_value = heap.OwnedValue.init(releases, try list.fromI64Slice(allocator, hashes));
+    defer hashes_value.deinit();
 
-    const index = if (pairs.len >= index_threshold)
+    var index = if (pairs.len >= index_threshold)
         try buildIndex(allocator, hashes)
     else
         null;
-    var index_owned = index != null;
-    defer if (index_owned) allocator.free(index.?);
+    defer if (index) |owned_index| allocator.free(owned_index);
 
-    const header = try heap.allocHeader(allocator, .dict, pairs.len, pairs.len);
-    const storage = heap.initDictStorage(header);
-    storage.* = .{
-        .payload = .{
-            .keys = keys_value.list,
-            .vals = vals_value.list,
-            .hashes = hashes_value.list,
-        },
-        .initialized = true,
-        .index = if (index) |table| table.ptr else null,
-        .index_len = if (index) |table| table.len else 0,
-    };
-    keys_owned = false;
-    vals_owned = false;
-    hashes_owned = false;
-    index_owned = false;
-    return .{ .dict = heap.publish(header) };
+    var builder = try heap.DictBuilder.init(allocator, pairs.len);
+    defer builder.retirePartial(releases);
+    const header = builder.finish(.{
+        .keys = keys_value.borrow().list,
+        .vals = vals_value.borrow().list,
+        .hashes = hashes_value.borrow().list,
+    }, index);
+    _ = keys_value.take();
+    _ = vals_value.take();
+    _ = hashes_value.take();
+    index = null;
+    return .{ .dict = header };
 }
 
 /// `fromPairs` for call sites whose keys are distinct by construction.
 pub fn fromUniquePairs(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     pairs: []const Pair,
 ) error{OutOfMemory}!Value {
-    return fromPairs(allocator, pairs) catch |err| switch (err) {
+    return fromPairs(allocator, releases, pairs) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.DuplicateKey => unreachable,
     };
@@ -122,15 +116,15 @@ pub fn symbolField(
     };
 }
 
-/// Functional-update ownership contract: inputs remain owned by their callers.
-/// If the result has the same header as `dictionary`, ownership is unchanged;
-/// if it has a different header, the caller owns that additional result.
+/// Inputs remain owned by their callers. The result tag states whether the
+/// existing owner was updated or an additional root was returned.
 pub fn put(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     dictionary: Value,
     key: Value,
     new_value: Value,
-) error{ OutOfMemory, NotADict }!Value {
+) error{ OutOfMemory, NotADict }!heap.UpdateResult {
     const header = try dictHeader(dictionary);
     const found = try findWithAllocator(allocator, header, key);
     const old_len: usize = @intCast(header.length());
@@ -143,18 +137,20 @@ pub fn put(
     } else {
         pairs[old_len] = .{ key, new_value };
     }
-    const replacement = try fromUniquePairs(allocator, pairs);
-    return installReplacement(allocator, dictionary, replacement);
+    const replacement = try fromUniquePairs(allocator, releases, pairs);
+    return installReplacement(releases, dictionary, replacement);
 }
 
 /// Uses the same functional-update ownership contract as `put`.
 pub fn del(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     dictionary: Value,
     key: Value,
-) error{ OutOfMemory, NotADict }!Value {
+) error{ OutOfMemory, NotADict }!heap.UpdateResult {
     const header = try dictHeader(dictionary);
-    const found = try findWithAllocator(allocator, header, key) orelse return dictionary;
+    const found = try findWithAllocator(allocator, header, key) orelse
+        return .{ .in_place = dictionary };
     const old_len: usize = @intCast(header.length());
     const pairs = try allocator.alloc(Pair, old_len - 1);
     defer allocator.free(pairs);
@@ -164,16 +160,17 @@ pub fn del(
         pairs[dest] = .{ keyAt(header, index), valueAt(header, index) };
         dest += 1;
     }
-    const replacement = try fromUniquePairs(allocator, pairs);
-    return installReplacement(allocator, dictionary, replacement);
+    const replacement = try fromUniquePairs(allocator, releases, pairs);
+    return installReplacement(releases, dictionary, replacement);
 }
 
 /// Uses `put`'s ownership contract for `left`; `right` is always unchanged.
 pub fn merge(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     left: Value,
     right: Value,
-) error{ OutOfMemory, NotADict }!Value {
+) error{ OutOfMemory, NotADict }!heap.UpdateResult {
     const left_header = try dictHeader(left);
     const right_header = try dictHeader(right);
     const left_len: usize = @intCast(left_header.length());
@@ -195,49 +192,50 @@ pub fn merge(
             count += 1;
         }
     }
-    const replacement = try fromUniquePairs(allocator, pairs[0..count]);
-    return installReplacement(allocator, left, replacement);
+    const replacement = try fromUniquePairs(allocator, releases, pairs[0..count]);
+    return installReplacement(releases, left, replacement);
 }
 
 pub fn keysOf(dictionary: Value) error{NotADict}!Value {
     const header = try dictHeader(dictionary);
-    return .{ .list = heap.dictStorageConst(header).payload.?.keys };
+    return .{ .list = heap.dictStorageConst(header).payload().keys };
 }
 
 pub fn valsOf(dictionary: Value) error{NotADict}!Value {
     const header = try dictHeader(dictionary);
-    return .{ .list = heap.dictStorageConst(header).payload.?.vals };
+    return .{ .list = heap.dictStorageConst(header).payload().vals };
 }
 
-pub fn keyAt(header: *Header, index: usize) Value {
-    return list.atUnchecked(.{ .list = heap.dictStorageConst(header).payload.?.keys }, index);
+pub fn keyAt(header: *DictHandle, index: usize) Value {
+    return list.atUnchecked(.{ .list = heap.dictStorageConst(header).payload().keys }, index);
 }
 
-pub fn valueAt(header: *Header, index: usize) Value {
-    return list.atUnchecked(.{ .list = heap.dictStorageConst(header).payload.?.vals }, index);
+pub fn valueAt(header: *DictHandle, index: usize) Value {
+    return list.atUnchecked(.{ .list = heap.dictStorageConst(header).payload().vals }, index);
 }
 
-fn dictHeader(dictionary: Value) error{NotADict}!*Header {
+fn dictHeader(dictionary: Value) error{NotADict}!*DictHandle {
     return switch (dictionary) {
-        .dict => |header| if (header.kind() == .dict) header else error.NotADict,
+        .dict => |header| header,
         .int, .float, .char, .symbol, .word, .list, .task => error.NotADict,
     };
 }
 
-pub fn hashAt(header: *Header, index: usize) u64 {
-    const hashes = heap.dictStorageConst(header).payload.?.hashes.?;
+pub fn hashAt(header: *DictHandle, index: usize) u64 {
+    const hashes = heap.dictStorageConst(header).payload().hashes;
     return @bitCast(heap.i64s(hashes)[index]);
 }
 
 fn findWithAllocator(
     allocator: std.mem.Allocator,
-    header: *Header,
+    header: *DictHandle,
     key: Value,
 ) error{OutOfMemory}!?usize {
     const count: usize = @intCast(header.length());
     const key_hash = try equal.hashWithAllocator(allocator, key);
     const storage = heap.dictStorageConst(header);
-    if (count < index_threshold or storage.index == null) {
+    const maybe_index = storage.index();
+    if (count < index_threshold or maybe_index == null) {
         for (0..count) |index| {
             if (hashAt(header, index) != key_hash) continue;
             if (try equal.matchWithAllocator(allocator, keyAt(header, index), key)) return index;
@@ -245,7 +243,7 @@ fn findWithAllocator(
         return null;
     }
 
-    const table = storage.index.?[0..storage.index_len];
+    const table = maybe_index.?;
     var slot: usize = @intCast(key_hash & (table.len - 1));
     for (0..table.len) |_| {
         const encoded = table[slot];
@@ -282,48 +280,58 @@ fn buildIndex(
 /// its identity; a shared `original` is untouched and the replacement's owned
 /// reference is returned to the caller.
 fn installReplacement(
-    allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     original: Value,
     replacement: Value,
-) Value {
-    const destination = heap.claimUnique(original.dict) orelse return replacement;
-    const source = heap.claimUnique(replacement.dict) orelse unreachable;
-    heap.adoptRepresentation(allocator, destination, source);
-    return original;
+) heap.UpdateResult {
+    const destination = heap.claimUniqueDict(original.dict) orelse
+        return .{ .replacement = replacement };
+    const source = heap.claimUniqueDict(replacement.dict) orelse unreachable;
+    heap.adoptDictRepresentationDeferred(releases, destination, source);
+    return .{ .in_place = original };
 }
 
 fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
-    const dictionary = try fromPairs(allocator, &.{
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    const releases = cleanup.domain();
+    const dictionary = try fromPairs(allocator, releases, &.{
         .{ .{ .int = 1 }, .{ .word = 10 } },
         .{ .{ .float = 2.5 }, .{ .word = 20 } },
     });
-    heap.releaseValue(allocator, dictionary);
+    heap.testing.releaseValue(allocator, dictionary);
 }
 
 fn putFailureProbe(allocator: std.mem.Allocator) !void {
-    var dictionary = try fromPairs(allocator, &.{.{ .{ .int = 1 }, .{ .word = 10 } }});
-    defer heap.releaseValue(allocator, dictionary);
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    const releases = cleanup.domain();
+    var dictionary = try fromPairs(allocator, releases, &.{.{ .{ .int = 1 }, .{ .word = 10 } }});
+    defer heap.testing.releaseValue(allocator, dictionary);
     _ = try getWithAllocator(allocator, dictionary, .{ .int = 1 });
-    dictionary = try put(allocator, dictionary, .{ .int = 2 }, .{ .word = 20 });
-    dictionary = try del(allocator, dictionary, .{ .int = 1 });
-    const right = try fromPairs(allocator, &.{.{ .{ .int = 2 }, .{ .word = 30 } }});
-    defer heap.releaseValue(allocator, right);
-    dictionary = try merge(allocator, dictionary, right);
+    dictionary = (try put(allocator, releases, dictionary, .{ .int = 2 }, .{ .word = 20 })).value();
+    dictionary = (try del(allocator, releases, dictionary, .{ .int = 1 })).value();
+    const right = try fromPairs(allocator, releases, &.{.{ .{ .int = 2 }, .{ .word = 30 } }});
+    defer heap.testing.releaseValue(allocator, right);
+    dictionary = (try merge(allocator, releases, dictionary, right)).value();
 }
 
 test "dicts preserve insertion order and reject duplicate keys" {
     const allocator = std.testing.allocator;
-    const dictionary = try fromPairs(allocator, &.{
+    var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+    const dictionary = try fromPairs(allocator, releases, &.{
         .{ .{ .int = 3 }, .{ .word = 30 } },
         .{ .{ .int = 1 }, .{ .word = 10 } },
         .{ .{ .int = 2 }, .{ .word = 20 } },
     });
-    defer heap.releaseValue(allocator, dictionary);
+    defer heap.testing.releaseValue(allocator, dictionary);
     const keys = try keysOf(dictionary);
     try std.testing.expectEqual(@as(i64, 3), (try list.at(keys, 0)).int);
     try std.testing.expectEqual(@as(i64, 1), (try list.at(keys, 1)).int);
     try std.testing.expectEqual(@as(i64, 2), (try list.at(keys, 2)).int);
-    try std.testing.expectError(error.DuplicateKey, fromPairs(allocator, &.{
+    try std.testing.expectError(error.DuplicateKey, fromPairs(allocator, releases, &.{
         .{ .{ .int = 2 }, .{ .word = 1 } },
         .{ .{ .float = 2.0 }, .{ .word = 2 } },
     }));
@@ -331,28 +339,34 @@ test "dicts preserve insertion order and reject duplicate keys" {
 
 test "dict equality and hash ignore insertion order" {
     const allocator = std.testing.allocator;
-    const first = try fromPairs(allocator, &.{
+    var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+    const first = try fromPairs(allocator, releases, &.{
         .{ .{ .int = 1 }, .{ .word = 10 } },
         .{ .{ .int = 2 }, .{ .word = 20 } },
     });
-    defer heap.releaseValue(allocator, first);
-    const second = try fromPairs(allocator, &.{
+    defer heap.testing.releaseValue(allocator, first);
+    const second = try fromPairs(allocator, releases, &.{
         .{ .{ .float = 2.0 }, .{ .word = 20 } },
         .{ .{ .float = 1.0 }, .{ .word = 10 } },
     });
-    defer heap.releaseValue(allocator, second);
+    defer heap.testing.releaseValue(allocator, second);
     try std.testing.expect(equal.match(first, second));
     try std.testing.expectEqual(equal.hash(first), equal.hash(second));
 }
 
 test "numeric hash collisions above f64 precision remain distinct keys" {
     const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
     const two_to_53: i64 = 1 << 53;
-    const dictionary = try fromPairs(allocator, &.{
+    const dictionary = try fromPairs(allocator, releases, &.{
         .{ .{ .int = two_to_53 + 1 }, .{ .word = 1 } },
         .{ .{ .float = @floatFromInt(two_to_53) }, .{ .word = 2 } },
     });
-    defer heap.releaseValue(allocator, dictionary);
+    defer heap.testing.releaseValue(allocator, dictionary);
 
     try std.testing.expectEqual(@as(u32, 1), (try get(dictionary, .{ .int = two_to_53 + 1 })).?.word);
     try std.testing.expectEqual(@as(u32, 2), (try get(
@@ -363,42 +377,48 @@ test "numeric hash collisions above f64 precision remain distinct keys" {
 
 test "dicts index larger tables and accept structural values as keys" {
     const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
     var pairs: [20]Pair = undefined;
     for (&pairs, 0..) |*pair, index| pair.* = .{
         .{ .int = @intCast(index) },
         .{ .word = @intCast(index + 100) },
     };
-    const indexed = try fromPairs(allocator, &pairs);
-    defer heap.releaseValue(allocator, indexed);
-    try std.testing.expect(heap.dictStorageConst(indexed.dict).index != null);
+    const indexed = try fromPairs(allocator, releases, &pairs);
+    defer heap.testing.releaseValue(allocator, indexed);
     for (0..pairs.len) |index| {
         const found = (try get(indexed, .{ .float = @floatFromInt(index) })).?;
         try std.testing.expectEqual(@as(u32, @intCast(index + 100)), found.word);
     }
 
     const leaf_key = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
-    defer heap.releaseValue(allocator, leaf_key);
-    const dictionary = try fromPairs(allocator, &.{.{ leaf_key, .{ .word = 9 } }});
-    defer heap.releaseValue(allocator, dictionary);
+    defer heap.testing.releaseValue(allocator, leaf_key);
+    const dictionary = try fromPairs(allocator, releases, &.{.{ leaf_key, .{ .word = 9 } }});
+    defer heap.testing.releaseValue(allocator, dictionary);
     const spine_key = try list.fromValuesGeneric(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
-    defer heap.releaseValue(allocator, spine_key);
+    defer heap.testing.releaseValue(allocator, spine_key);
     try std.testing.expectEqual(@as(u32, 9), (try get(dictionary, spine_key)).?.word);
 }
 
 test "merge is right-biased and preserves the left insertion story" {
     const allocator = std.testing.allocator;
-    const left = try fromPairs(allocator, &.{
+    var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+    const left = try fromPairs(allocator, releases, &.{
         .{ .{ .int = 1 }, .{ .word = 10 } },
         .{ .{ .int = 2 }, .{ .word = 20 } },
     });
-    defer heap.releaseValue(allocator, left);
-    const right = try fromPairs(allocator, &.{
+    defer heap.testing.releaseValue(allocator, left);
+    const right = try fromPairs(allocator, releases, &.{
         .{ .{ .int = 2 }, .{ .word = 200 } },
         .{ .{ .int = 3 }, .{ .word = 30 } },
     });
-    defer heap.releaseValue(allocator, right);
-    const result = try merge(allocator, left, right);
-    defer if (result.dict != left.dict) heap.releaseValue(allocator, result);
+    defer heap.testing.releaseValue(allocator, right);
+    const update = try merge(allocator, releases, left, right);
+    defer if (update == .replacement) heap.testing.releaseValue(allocator, update.value());
+    const result = update.value();
     try std.testing.expectEqual(@as(u32, 200), (try get(result, .{ .int = 2 })).?.word);
     const keys = try keysOf(result);
     try std.testing.expectEqual(@as(i64, 1), (try list.at(keys, 0)).int);
@@ -408,36 +428,48 @@ test "merge is right-biased and preserves the left insertion story" {
 
 test "functional updates mutate only unique dict headers" {
     const allocator = std.testing.allocator;
-    const unique = try fromPairs(allocator, &.{.{ .{ .int = 1 }, .{ .word = 10 } }});
-    defer heap.releaseValue(allocator, unique);
-    const unique_result = try put(allocator, unique, .{ .int = 2 }, .{ .word = 20 });
+    var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+    const unique = try fromPairs(allocator, releases, &.{.{ .{ .int = 1 }, .{ .word = 10 } }});
+    defer heap.testing.releaseValue(allocator, unique);
+    const unique_update = try put(allocator, releases, unique, .{ .int = 2 }, .{ .word = 20 });
+    try std.testing.expect(unique_update == .in_place);
+    const unique_result = unique_update.value();
     try std.testing.expectEqual(unique.dict, unique_result.dict);
     try std.testing.expectEqual(@as(u32, 20), (try get(unique, .{ .int = 2 })).?.word);
 
     heap.incRef(unique.dict);
-    defer heap.decRef(allocator, unique.dict);
-    const shared_result = try put(allocator, unique, .{ .int = 3 }, .{ .word = 30 });
-    defer heap.releaseValue(allocator, shared_result);
+    defer heap.testing.decRef(allocator, unique.dict);
+    const shared_update = try put(allocator, releases, unique, .{ .int = 3 }, .{ .word = 30 });
+    try std.testing.expect(shared_update == .replacement);
+    const shared_result = shared_update.value();
+    defer heap.testing.releaseValue(allocator, shared_result);
     try std.testing.expect(unique.dict != shared_result.dict);
     try std.testing.expect((try get(unique, .{ .int = 3 })) == null);
     try std.testing.expectEqual(@as(u32, 30), (try get(shared_result, .{ .int = 3 })).?.word);
 
-    const shared_deleted = try del(allocator, unique, .{ .int = 2 });
-    defer heap.releaseValue(allocator, shared_deleted);
+    const shared_deleted_update = try del(allocator, releases, unique, .{ .int = 2 });
+    try std.testing.expect(shared_deleted_update == .replacement);
+    const shared_deleted = shared_deleted_update.value();
+    defer heap.testing.releaseValue(allocator, shared_deleted);
     try std.testing.expect(unique.dict != shared_deleted.dict);
     try std.testing.expect((try get(unique, .{ .int = 2 })) != null);
     try std.testing.expect((try get(shared_deleted, .{ .int = 2 })) == null);
 
-    const right = try fromPairs(allocator, &.{.{ .{ .int = 4 }, .{ .word = 40 } }});
-    defer heap.releaseValue(allocator, right);
-    const shared_merged = try merge(allocator, unique, right);
-    defer heap.releaseValue(allocator, shared_merged);
+    const right = try fromPairs(allocator, releases, &.{.{ .{ .int = 4 }, .{ .word = 40 } }});
+    defer heap.testing.releaseValue(allocator, right);
+    const shared_merged_update = try merge(allocator, releases, unique, right);
+    try std.testing.expect(shared_merged_update == .replacement);
+    const shared_merged = shared_merged_update.value();
+    defer heap.testing.releaseValue(allocator, shared_merged);
     try std.testing.expect(unique.dict != shared_merged.dict);
     try std.testing.expect((try get(unique, .{ .int = 4 })) == null);
     try std.testing.expectEqual(@as(u32, 40), (try get(shared_merged, .{ .int = 4 })).?.word);
 
-    const deleted = try del(allocator, shared_result, .{ .int = 2 });
-    defer if (deleted.dict != shared_result.dict) heap.releaseValue(allocator, deleted);
+    const deleted_update = try del(allocator, releases, shared_result, .{ .int = 2 });
+    defer if (deleted_update == .replacement) heap.testing.releaseValue(allocator, deleted_update.value());
+    const deleted = deleted_update.value();
     try std.testing.expect((try get(deleted, .{ .int = 2 })) == null);
 }
 

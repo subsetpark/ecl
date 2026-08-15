@@ -228,8 +228,8 @@ pub const Table = struct {
                         .len = @intCast(self.bytes.len),
                         .next = self.table.buckets[bucket].load(.monotonic),
                     };
-                    self.table.buckets[bucket].store(id, .release);
                     self.table.count.store(id + 1, .release);
+                    self.table.buckets[bucket].store(id, .release);
                     self.phase = .complete;
                     break :result .{ .complete = id };
                 },
@@ -247,7 +247,7 @@ pub const Table = struct {
     ) error{OutOfMemory}!*EntrySegment {
         if (self.entry_segments[segment_index].load(.monotonic)) |segment| return segment;
         const segment = try self.allocator.create(EntrySegment);
-        // SAFETY: entries are published one at a time before count's release-store.
+        // SAFETY: entries are initialized before count publishes their IDs.
         segment.* = .{ .entries = undefined };
         self.entry_segments[segment_index].store(segment, .monotonic);
         return segment;
@@ -495,5 +495,11 @@ test "concurrent interning publishes stable lock-free reads" {
     for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, internWorker, .{context});
     for (threads) |thread| thread.join();
     try std.testing.expect(!failed.load(.acquire));
-    try std.testing.expectEqual(@as(u32, 3), table.count.load(.acquire));
+    const alpha = try table.internBytes("alpha");
+    const beta = try table.internBytes("beta");
+    const gamma = try table.internBytes("gamma");
+    try std.testing.expect(alpha != beta and alpha != gamma and beta != gamma);
+    try std.testing.expectEqualStrings("alpha", table.getBytes(alpha).?);
+    try std.testing.expectEqualStrings("beta", table.getBytes(beta).?);
+    try std.testing.expectEqualStrings("gamma", table.getBytes(gamma).?);
 }

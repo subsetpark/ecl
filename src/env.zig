@@ -1,21 +1,14 @@
 //! Stable binding cells, immutable environment shapes, and lazy scopes.
 const std = @import("std");
+const builtin = @import("builtin");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const poll = @import("poll.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
-const snapshot_core = @import("snapshot_core.zig");
 const primitive_docs = @import("primitive_docs.zig");
-
-fn readerDecision(
-    before: snapshot_core.Reader,
-    event: snapshot_core.ReaderEvent,
-) snapshot_core.ReaderDecision {
-    return snapshot_core.decideReader(before, event) catch
-        @panic("invalid snapshot reader transition");
-}
+const snapshot_api = @import("snapshot.zig");
 /// Public native callbacks cannot split a language-error tag from its payload.
 /// The dispatcher installs `.failure` atomically after the callback returns.
 pub const PrimitiveOutcome = union(enum) {
@@ -23,7 +16,7 @@ pub const PrimitiveOutcome = union(enum) {
     failure: machine.EclErr,
 };
 pub const PrimitiveResult = error{OutOfMemory}!PrimitiveOutcome;
-pub const Primitive = *const fn (*machine.Machine) PrimitiveResult;
+pub const Primitive = *const fn (*machine.NativeMachine) PrimitiveResult;
 
 /// Existing in-tree primitives use Machine's ergonomic error helpers. They
 /// occupy a separate binding variant which is unavailable through native
@@ -34,25 +27,25 @@ pub const Quotation = opaque {};
 pub const DocumentationString = opaque {};
 pub const EffectQuotation = opaque {};
 
-pub fn quotation(header: *value.Header) ?*Quotation {
+pub fn quotation(header: *value.ListHandle) ?*Quotation {
     return switch (header.kind()) {
         .generic_spine, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => @ptrCast(@alignCast(header)),
         .dict, .task, .reserved_mask => null,
     };
 }
 
-pub fn quotationHeader(body: *const Quotation) *value.Header {
+pub fn quotationHeader(body: *const Quotation) *value.ListHandle {
     return @ptrCast(@alignCast(@constCast(body)));
 }
 
-pub fn documentation(header: *value.Header) ?*DocumentationString {
+pub fn documentation(header: *value.ListHandle) ?*DocumentationString {
     return switch (header.kind()) {
         .leaf_char1, .leaf_char2, .leaf_char4 => @ptrCast(@alignCast(header)),
         .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .reserved_mask => null,
     };
 }
 
-pub fn documentationHeader(document: *const DocumentationString) *value.Header {
+pub fn documentationHeader(document: *const DocumentationString) *value.ListHandle {
     return @ptrCast(@alignCast(@constCast(document)));
 }
 
@@ -68,29 +61,50 @@ pub const Binding = union(enum) {
             .primitive, .builtin => {},
         }
     }
-    pub fn release(self: Binding, allocator: std.mem.Allocator) void {
+    pub fn retire(self: Binding, releases: *heap.ReleaseDomain) void {
         switch (self) {
-            .word => |body| heap.decRef(allocator, quotationHeader(body)),
-            .value => |item| heap.releaseValue(allocator, item),
+            .word => |body| releases.releaseHeader(quotationHeader(body)),
+            .value => |item| releases.releaseValue(item),
             .primitive, .builtin => {},
         }
     }
 };
 pub const Visibility = enum { public, private };
+pub const BindingOrigin = union(enum) {
+    top,
+    module: struct {
+        home: intern.NamespaceName,
+        trace_word: u32,
+    },
+
+    pub fn home(self: BindingOrigin) ?intern.NamespaceName {
+        return switch (self) {
+            .top => null,
+            .module => |module| module.home,
+        };
+    }
+
+    pub fn traceWord(self: BindingOrigin) ?u32 {
+        return switch (self) {
+            .top => null,
+            .module => |module| module.trace_word,
+        };
+    }
+};
 pub const ValidatedEffect = struct {
     quotation: *EffectQuotation,
     inputs: u32,
     outputs: u32,
-    pub fn header(self: ValidatedEffect) *value.Header {
+    pub fn header(self: ValidatedEffect) *value.ListHandle {
         return @ptrCast(@alignCast(self.quotation));
     }
     pub fn retain(self: ValidatedEffect) void {
         heap.incRef(self.header());
     }
-    pub fn release(self: ValidatedEffect, allocator: std.mem.Allocator) void {
-        heap.decRef(allocator, self.header());
+    pub fn retire(self: ValidatedEffect, releases: *heap.ReleaseDomain) void {
+        releases.releaseHeader(self.header());
     }
-    pub fn fromValidated(effect_header: *value.Header, separator_index: usize) ValidatedEffect {
+    pub fn fromValidated(effect_header: *value.ListHandle, separator_index: usize) ValidatedEffect {
         std.debug.assert(effect_header.kind() == .generic_spine and separator_index < effect_header.length());
         return .{
             .quotation = @ptrCast(@alignCast(effect_header)),
@@ -100,7 +114,7 @@ pub const ValidatedEffect = struct {
     }
     pub const ParseProgress = union(enum) { pending, complete: ?ValidatedEffect };
     pub const ParseCursor = struct {
-        header: *value.Header,
+        header: *value.ListHandle,
         separator: u32,
         index: usize = 0,
         split: ?usize = null,
@@ -125,7 +139,7 @@ pub const ValidatedEffect = struct {
             return .pending;
         }
     };
-    pub fn parse(effect_header: *value.Header, separator: u32) ?ValidatedEffect {
+    pub fn parse(effect_header: *value.ListHandle, separator: u32) ?ValidatedEffect {
         var cursor = ParseCursor{ .header = effect_header, .separator = separator };
         while (true) switch (cursor.advance()) {
             .pending => {},
@@ -164,8 +178,7 @@ pub const ModulePublication = union(enum) {
 const BindingSpec = struct {
     binding: Binding,
     visibility: Visibility = .public,
-    home: ?intern.NamespaceName = null,
-    trace_word: ?u32 = null,
+    origin: BindingOrigin = .top,
     effect: ?ValidatedEffect = null,
     doc: ?*DocumentationString = null,
     compiled: ?*Quotation = null,
@@ -188,22 +201,19 @@ const BindingSpec = struct {
             .word => |word| .{
                 .binding = .{ .word = word.body },
                 .visibility = word.visibility,
-                .home = home,
-                .trace_word = trace_word,
+                .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
                 .effect = word.effect,
                 .doc = word.doc,
             },
             .value => |item| .{
                 .binding = .{ .value = item.item },
                 .visibility = item.visibility,
-                .home = home,
-                .trace_word = trace_word,
+                .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
             },
             .primitive => |primitive| .{
                 .binding = .{ .primitive = primitive.callback },
                 .visibility = primitive.visibility,
-                .home = home,
-                .trace_word = trace_word,
+                .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
                 .effect = primitive.effect,
             },
         };
@@ -214,17 +224,18 @@ const BindingSpec = struct {
         if (self.doc) |doc| heap.incRef(documentationHeader(doc));
         if (self.compiled) |compiled| heap.incRef(quotationHeader(compiled));
     }
-    fn release(self: BindingSpec, allocator: std.mem.Allocator) void {
-        self.binding.release(allocator);
-        if (self.effect) |effect| effect.release(allocator);
-        if (self.doc) |doc| heap.decRef(allocator, documentationHeader(doc));
-        if (self.compiled) |compiled| heap.decRef(allocator, quotationHeader(compiled));
+    fn retire(self: BindingSpec, releases: *heap.ReleaseDomain) void {
+        self.binding.retire(releases);
+        if (self.effect) |effect| effect.retire(releases);
+        if (self.doc) |doc| releases.releaseHeader(documentationHeader(doc));
+        if (self.compiled) |compiled| releases.releaseHeader(quotationHeader(compiled));
     }
-    pub fn deinit(self: *BindingSpec, allocator: std.mem.Allocator) void {
-        self.release(allocator);
+    pub fn deinit(self: *BindingSpec, releases: *heap.ReleaseDomain) void {
+        self.retire(releases);
     }
 };
 const BindingSnapshot = struct {
+    retirement: heap.ReleaseDomain.Retirement = .{},
     spec: BindingSpec,
     previous: ?*BindingSnapshot,
     fn create(
@@ -237,11 +248,26 @@ const BindingSnapshot = struct {
         snapshot.* = .{ .spec = spec, .previous = previous };
         return snapshot;
     }
-    fn destroyChain(first: ?*BindingSnapshot, allocator: std.mem.Allocator) void {
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *BindingSnapshot,
+    ) bool {
+        const previous = self.previous;
+        self.spec.retire(releases);
+        allocator.destroy(self);
+        if (previous) |next| releases.retire(next, &next.retirement);
+        return true;
+    }
+    fn destroyChain(
+        first: ?*BindingSnapshot,
+        allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
+    ) void {
         var cursor = first;
         while (cursor) |snapshot| {
             cursor = snapshot.previous;
-            snapshot.spec.release(allocator);
+            snapshot.spec.retire(releases);
             allocator.destroy(snapshot);
         }
     }
@@ -249,54 +275,69 @@ const BindingSnapshot = struct {
 /// Owned payload snapshot; release it with the environment's allocator. This
 /// is intentionally distinct from the unpublished internal specification.
 pub const BindingLease = struct {
+    releases: *heap.ReleaseDomain,
     binding: Binding,
     visibility: Visibility,
-    home: ?intern.NamespaceName,
-    trace_word: ?u32,
+    origin: BindingOrigin,
     effect: ?ValidatedEffect,
     doc: ?*DocumentationString,
     compiled: ?*Quotation,
 
-    fn fromSpec(spec: BindingSpec) BindingLease {
+    fn fromSpec(spec: BindingSpec, releases: *heap.ReleaseDomain) BindingLease {
         return .{
+            .releases = releases,
             .binding = spec.binding,
             .visibility = spec.visibility,
-            .home = spec.home,
-            .trace_word = spec.trace_word,
+            .origin = spec.origin,
             .effect = spec.effect,
             .doc = spec.doc,
             .compiled = spec.compiled,
         };
     }
 
-    pub fn deinit(self: *BindingLease, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *BindingLease) void {
         const spec = BindingSpec{
             .binding = self.binding,
             .visibility = self.visibility,
-            .home = self.home,
-            .trace_word = self.trace_word,
+            .origin = self.origin,
             .effect = self.effect,
             .doc = self.doc,
             .compiled = self.compiled,
         };
-        spec.release(allocator);
+        spec.retire(self.releases);
         self.* = undefined;
+    }
+
+    pub fn home(self: BindingLease) ?intern.NamespaceName {
+        return self.origin.home();
+    }
+
+    pub fn traceWord(self: BindingLease) ?u32 {
+        return self.origin.traceWord();
     }
 };
 pub const BindingCell = struct {
+    const Publisher = snapshot_api.Publisher(BindingSnapshot);
     allocator: std.mem.Allocator,
-    current: std.atomic.Value(*BindingSnapshot),
+    releases: *heap.ReleaseDomain,
+    publisher: Publisher,
     snapshots: *BindingSnapshot,
-    readers: std.atomic.Value(u32) = .init(0),
     retire_lock: std.Io.Mutex = .init,
+    retirement: heap.ReleaseDomain.Retirement = .{},
     fn create(
         allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
         spec: BindingSpec,
     ) error{OutOfMemory}!*BindingCell {
         const snapshot = try BindingSnapshot.create(allocator, spec, null);
-        errdefer BindingSnapshot.destroyChain(snapshot, allocator);
+        errdefer BindingSnapshot.destroyChain(snapshot, allocator, releases);
         const cell = try allocator.create(BindingCell);
-        cell.* = .{ .allocator = allocator, .current = .init(snapshot), .snapshots = snapshot };
+        cell.* = .{
+            .allocator = allocator,
+            .releases = releases,
+            .publisher = .init(snapshot),
+            .snapshots = snapshot,
+        };
         return cell;
     }
     fn replace(
@@ -305,56 +346,71 @@ pub const BindingCell = struct {
         spec: BindingSpec,
     ) error{OutOfMemory}!void {
         self.lockRetired();
-        defer std.Io.Threaded.mutexUnlock(&self.retire_lock);
-        const snapshot = try BindingSnapshot.create(allocator, spec, self.snapshots);
+        const snapshot = BindingSnapshot.create(allocator, spec, self.snapshots) catch {
+            std.Io.Threaded.mutexUnlock(&self.retire_lock);
+            return error.OutOfMemory;
+        };
         self.snapshots = snapshot;
-        self.current.store(snapshot, .seq_cst);
-        self.reclaimRetired(allocator);
+        self.publisher.publish(snapshot);
+        const retired = self.detachRetired();
+        std.Io.Threaded.mutexUnlock(&self.retire_lock);
+        if (retired) |first| self.releases.retire(first, &first.retirement);
     }
-    fn destroy(self: *BindingCell, allocator: std.mem.Allocator) void {
-        BindingSnapshot.destroyChain(self.snapshots, allocator);
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *BindingCell,
+    ) bool {
+        std.debug.assert(self.publisher.quiescent());
+        const snapshots = self.publisher.currentOwned();
+        self.publisher.publish(null);
+        if (snapshots) |first| releases.retire(first, &first.retirement);
         allocator.destroy(self);
+        return true;
+    }
+    fn retire(self: *BindingCell) void {
+        self.releases.retire(self, &self.retirement);
     }
     fn lockRetired(self: *BindingCell) void {
         std.Io.Threaded.mutexLock(&self.retire_lock);
     }
-    fn reclaimRetired(self: *BindingCell, allocator: std.mem.Allocator) void {
-        const retired_count: usize = @intFromBool(self.snapshots.previous != null);
-        if (snapshot_core.decideReclamation(
-            self.readers.load(.seq_cst),
-            retired_count,
-        ) == .keep) return;
+    fn detachRetired(self: *BindingCell) ?*BindingSnapshot {
+        if (!self.publisher.quiescent()) return null;
         const retired = self.snapshots.previous;
         self.snapshots.previous = null;
-        BindingSnapshot.destroyChain(retired, allocator);
+        return retired;
     }
     pub fn load(self: *BindingCell) BindingLease {
-        var protocol: snapshot_core.Reader = .idle;
-        const announced = readerDecision(protocol, .announce);
-        protocol = announced.next;
-        std.debug.assert(announced.command == .announce);
-        _ = self.readers.fetchAdd(1, .seq_cst);
-        const snapshot = self.current.load(.seq_cst);
-        const protected = readerDecision(protocol, .protect);
-        protocol = protected.next;
-        std.debug.assert(protected.command == .retain_payload);
-        snapshot.spec.retain();
-        const result = BindingLease.fromSpec(snapshot.spec);
-        const left = readerDecision(protocol, .leave);
-        std.debug.assert(left.command == .leave and left.next == .idle);
-        if (self.readers.fetchSub(1, .seq_cst) == 1) {
+        var lease = self.publisher.acquire();
+        lease.snapshot.?.spec.retain();
+        const result = BindingLease.fromSpec(lease.snapshot.?.spec, self.releases);
+        if (lease.deinit()) {
             self.lockRetired();
-            self.reclaimRetired(self.allocator);
+            const retired = self.detachRetired();
             std.Io.Threaded.mutexUnlock(&self.retire_lock);
+            if (retired) |first| self.releases.retire(first, &first.retirement);
         }
         return result;
     }
 };
 const Shape = struct {
-    const NameMap = poll.U32Map(*BindingCell);
+    const NameMap = poll.FixedMap(intern.NamespaceName, *BindingCell);
     names: NameMap,
     uses: []u32 = &.{},
     previous: ?*Shape = null,
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *Shape,
+    ) bool {
+        const previous = self.previous;
+        self.names.deinit();
+        if (self.uses.len > 0) allocator.free(self.uses);
+        allocator.destroy(self);
+        if (previous) |next| releases.retire(next, &next.retirement);
+        return true;
+    }
     fn destroyChain(first: ?*Shape, allocator: std.mem.Allocator) void {
         var cursor = first;
         while (cursor) |shape| {
@@ -365,10 +421,59 @@ const Shape = struct {
         }
     }
 };
+const ShapePublisher = snapshot_api.Publisher(Shape);
+
+/// Copyable observation authority for an environment. The backing pointer is
+/// intentionally unavailable: readers can create leases and cursors, but
+/// cannot retarget allocator or retirement ownership metadata.
+pub const EnvironmentView = enum(usize) {
+    invalid = 0,
+    _,
+
+    fn init(environment: *const Environment) EnvironmentView {
+        return @enumFromInt(@intFromPtr(environment));
+    }
+
+    fn target(self: EnvironmentView) *const Environment {
+        std.debug.assert(self != .invalid);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+
+    pub fn acquireShape(self: EnvironmentView) ShapeLease {
+        return self.target().acquireShape();
+    }
+
+    pub fn nameCursor(self: EnvironmentView) NameCursor {
+        return self.target().nameCursor();
+    }
+
+    pub fn directLookupCursor(self: EnvironmentView, id: u32) DirectLookupCursor {
+        return self.target().directLookupCursor(id);
+    }
+
+    pub fn resolveDirect(self: EnvironmentView, id: u32) ?BindingLease {
+        return self.target().resolveDirect(id);
+    }
+
+    pub fn generation(self: EnvironmentView) u64 {
+        return self.target().generation();
+    }
+
+    pub fn namesOwned(
+        self: EnvironmentView,
+        allocator: std.mem.Allocator,
+    ) error{OutOfMemory}![]u32 {
+        return self.target().namesOwned(allocator);
+    }
+};
+comptime {
+    heap.requireOpaqueObservation(EnvironmentView);
+}
+
 pub const ShapeLease = struct {
-    environment: *const Environment,
+    environment: EnvironmentView,
+    lease: ShapePublisher.Lease,
     shape: ?*const Shape,
-    protocol: snapshot_core.Reader,
 
     pub fn useOrder(self: *const ShapeLease) []const u32 {
         return if (self.shape) |shape| shape.uses else &.{};
@@ -379,14 +484,12 @@ pub const ShapeLease = struct {
     }
 
     pub fn deinit(self: *ShapeLease) void {
-        const environment = @constCast(self.environment);
-        const left = readerDecision(self.protocol, .leave);
-        self.protocol = left.next;
-        std.debug.assert(left.command == .leave);
-        if (environment.shape_readers.fetchSub(1, .seq_cst) == 1) {
+        const environment = @constCast(self.environment.target());
+        if (self.lease.deinit()) {
             environment.lockBlocking();
-            environment.reclaimShapes();
+            const retired = environment.detachRetiredShapes();
             environment.unlock();
+            if (retired) |first| environment.releases.retire(first, &first.retirement);
         }
         self.* = undefined;
     }
@@ -406,7 +509,10 @@ pub const NameCursor = struct {
         return switch (entries.advance()) {
             .pending => .pending,
             .complete => .complete,
-            .entry => |entry| .{ .entry = .{ .name = entry.key, .lease = entry.value.load() } },
+            .entry => |entry| .{ .entry = .{
+                .name = intern.namespaceId(entry.key),
+                .lease = entry.value.load(),
+            } },
         };
     }
 };
@@ -431,22 +537,61 @@ pub const BindError = error{ OutOfMemory, Frozen };
 /// Publishes immutable name/use shapes and stable, lease-backed cells.
 pub const Environment = struct {
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     writer: std.Io.Mutex = .init,
-    current: std.atomic.Value(?*Shape) = .init(null),
-    shape_readers: std.atomic.Value(u32) = .init(0),
+    shapes: ShapePublisher,
     cells: poll.ChunkList(*BindingCell),
     shape_generation: std.atomic.Value(u64) = .init(0),
     frozen: std.atomic.Value(bool) = .init(false),
-    pub fn init(allocator: std.mem.Allocator) Environment {
-        return .{ .allocator = allocator, .cells = .init(allocator) };
-    }
-    pub fn deinit(self: *Environment) void {
-        std.debug.assert(self.shape_readers.load(.acquire) == 0);
-        Shape.destroyChain(self.current.load(.acquire), self.allocator);
-        var cells = self.cells.iterator();
-        while (cells.next()) |binding_cell| binding_cell.*.destroy(self.allocator);
-        self.cells.deinit();
-        self.* = undefined;
+
+    pub const TeardownCursor = struct {
+        target: *Environment,
+        state: union(enum) {
+            shapes: ?*Shape,
+            cells: poll.ChunkList(*BindingCell).Iterator,
+            storage,
+            complete,
+        },
+
+        pub fn init(target: *Environment) TeardownCursor {
+            std.debug.assert(target.shapes.quiescent());
+            const shapes = target.shapes.currentOwned();
+            target.shapes.publish(null);
+            return .{ .target = target, .state = .{ .shapes = shapes } };
+        }
+
+        pub fn advance(self: *TeardownCursor) bool {
+            return switch (self.state) {
+                .shapes => |shapes| result: {
+                    if (shapes) |first|
+                        self.target.releases.retire(first, &first.retirement);
+                    self.state = .{ .cells = self.target.cells.iterator() };
+                    break :result false;
+                },
+                .cells => |*cells| if (cells.next()) |binding_cell| result: {
+                    const cell = binding_cell.*;
+                    self.target.releases.retire(cell, &cell.retirement);
+                    break :result false;
+                } else result: {
+                    self.state = .storage;
+                    break :result false;
+                },
+                .storage => {
+                    self.target.cells.retire(self.target.releases);
+                    self.state = .complete;
+                    return true;
+                },
+                .complete => true,
+            };
+        }
+    };
+    pub fn init(allocator: std.mem.Allocator, releases: *heap.ReleaseDomain) Environment {
+        return .{
+            .allocator = allocator,
+            .releases = releases,
+            .shapes = .init(null),
+            .cells = .init(allocator),
+        };
     }
     fn lockBlocking(self: *Environment) void {
         std.Io.Threaded.mutexLock(&self.writer);
@@ -454,25 +599,19 @@ pub const Environment = struct {
     fn unlock(self: *Environment) void {
         std.Io.Threaded.mutexUnlock(&self.writer);
     }
-    fn reclaimShapes(self: *Environment) void {
-        const current = self.current.load(.acquire) orelse return;
-        const retired_count: usize = @intFromBool(current.previous != null);
-        if (snapshot_core.decideReclamation(
-            self.shape_readers.load(.seq_cst),
-            retired_count,
-        ) == .keep) return;
+    fn detachRetiredShapes(self: *Environment) ?*Shape {
+        if (!self.shapes.quiescent()) return null;
+        const current = self.shapes.currentOwned() orelse return null;
         const retired = current.previous;
         current.previous = null;
-        Shape.destroyChain(retired, self.allocator);
+        return retired;
     }
     pub fn acquireShape(self: *const Environment) ShapeLease {
-        const announced = readerDecision(.idle, .announce);
-        std.debug.assert(announced.command == .announce);
-        _ = @constCast(self).shape_readers.fetchAdd(1, .seq_cst);
+        const lease = self.shapes.acquire();
         return .{
-            .environment = self,
-            .shape = self.current.load(.acquire),
-            .protocol = announced.next,
+            .environment = .init(self),
+            .shape = lease.snapshot,
+            .lease = lease,
         };
     }
     pub fn nameCursor(self: *const Environment) NameCursor {
@@ -485,145 +624,183 @@ pub const Environment = struct {
     pub fn directLookupCursor(self: *const Environment, id: u32) DirectLookupCursor {
         const shape = self.acquireShape();
         return .{
-            .lookup = if (shape.shape) |current| current.names.rawLookup(id) else null,
+            .lookup = if (shape.shape) |current|
+                current.names.rawLookup(@enumFromInt(id))
+            else
+                null,
             .shape = shape,
         };
     }
 
     pub const BindProgress = union(enum) { pending, complete: *BindingCell };
     pub const BindCursor = struct {
+        const Builder = union(enum) {
+            initialize: Shape.NameMap.InitCursor,
+            clone: Shape.NameMap.CloneCursor,
+
+            fn deinit(self: *Builder) void {
+                switch (self.*) {
+                    inline else => |*cursor| cursor.deinit(),
+                }
+            }
+        };
+        const Built = struct { shape: ShapeLease, names: Shape.NameMap, uses: []u32 };
+        const State = union(enum) {
+            snapshot,
+            lookup: struct { shape: ShapeLease, cursor: ?Shape.NameMap.RawLookupCursor },
+            build: struct { shape: ShapeLease, builder: Builder },
+            allocate_uses: struct { shape: ShapeLease, names: Shape.NameMap },
+            copy_uses: struct {
+                built: Built,
+                index: usize = 0,
+            },
+            insert: struct { built: *Built, cursor: Shape.NameMap.PutCursor },
+            commit: *Built,
+            complete,
+        };
+
         environment: *Environment,
-        id: u32,
+        id: intern.NamespaceName,
         spec: BindingSpec,
         candidate_cell: ?*BindingCell,
-        shape: ?ShapeLease = null,
-        generation: u64 = 0,
-        lookup: ?Shape.NameMap.RawLookupCursor = null,
-        initializer: ?Shape.NameMap.InitCursor = null,
-        cloner: ?Shape.NameMap.CloneCursor = null,
-        names: ?Shape.NameMap = null,
-        insertion: ?Shape.NameMap.PutCursor = null,
-        uses: ?[]u32 = null,
-        copy_index: usize = 0,
-        phase: enum { snapshot, lookup, build, copy_uses, insert, commit, complete } = .snapshot,
+        state: State = .snapshot,
 
         fn init(
             environment: *Environment,
-            id: u32,
+            id: intern.NamespaceName,
             spec: BindingSpec,
         ) error{OutOfMemory}!BindCursor {
             return .{
                 .environment = environment,
                 .id = id,
                 .spec = spec,
-                .candidate_cell = try BindingCell.create(environment.allocator, spec),
+                .candidate_cell = try BindingCell.create(
+                    environment.allocator,
+                    environment.releases,
+                    spec,
+                ),
             };
         }
         pub fn deinit(self: *BindCursor) void {
-            if (self.shape) |*shape| shape.deinit();
-            if (self.initializer) |*initializer| initializer.deinit();
-            if (self.cloner) |*cloner| cloner.deinit();
-            if (self.names) |*names| names.deinit();
-            if (self.uses) |uses| self.environment.allocator.free(uses);
-            if (self.candidate_cell) |candidate| candidate.destroy(self.environment.allocator);
+            switch (self.state) {
+                .lookup => |*state| state.shape.deinit(),
+                .build => |*state| {
+                    state.builder.deinit();
+                    state.shape.deinit();
+                },
+                .allocate_uses => |*state| {
+                    state.names.deinit();
+                    state.shape.deinit();
+                },
+                .copy_uses => |*state| self.deinitBuilt(&state.built),
+                .insert => |state| self.destroyBuilt(state.built),
+                .commit => |built| self.destroyBuilt(built),
+                .snapshot, .complete => {},
+            }
+            if (self.candidate_cell) |candidate| candidate.retire();
             self.* = undefined;
         }
-        fn resetCandidate(self: *BindCursor) void {
-            if (self.initializer) |*initializer| initializer.deinit();
-            self.initializer = null;
-            if (self.cloner) |*cloner| cloner.deinit();
-            self.cloner = null;
-            if (self.names) |*names| names.deinit();
-            self.names = null;
-            self.insertion = null;
-            if (self.uses) |uses| self.environment.allocator.free(uses);
-            self.uses = null;
-            self.copy_index = 0;
+        fn deinitBuilt(self: *BindCursor, built: *Built) void {
+            built.names.deinit();
+            self.environment.allocator.free(built.uses);
+            built.shape.deinit();
         }
-        fn takeSnapshot(self: *BindCursor) BindError!void {
-            if (self.environment.frozen.load(.acquire)) return error.Frozen;
-            self.shape = self.environment.acquireShape();
-            self.generation = self.environment.shape_generation.load(.acquire);
-            self.lookup = if (self.shape.?.shape) |shape| shape.names.rawLookup(self.id) else null;
-            self.phase = .lookup;
-        }
-        fn retry(self: *BindCursor) void {
-            self.resetCandidate();
-            self.shape.?.deinit();
-            self.shape = null;
-            self.lookup = null;
-            self.phase = .snapshot;
+        fn destroyBuilt(self: *BindCursor, built: *Built) void {
+            self.deinitBuilt(built);
+            self.environment.allocator.destroy(built);
         }
         pub fn advance(self: *BindCursor) BindError!BindProgress {
-            return switch (self.phase) {
+            return switch (self.state) {
                 .snapshot => result: {
-                    try self.takeSnapshot();
+                    if (self.environment.frozen.load(.acquire)) return error.Frozen;
+                    const shape = self.environment.acquireShape();
+                    self.state = .{ .lookup = .{
+                        .cursor = if (shape.shape) |current| current.names.rawLookup(self.id) else null,
+                        .shape = shape,
+                    } };
                     break :result .pending;
                 },
-                .lookup => if (self.lookup) |*lookup| switch (lookup.advance()) {
+                .lookup => |*state| if (state.cursor) |*lookup| switch (lookup.advance()) {
                     .pending => .pending,
                     .complete => |maybe_cell| result: {
                         if (maybe_cell) |existing| {
                             self.environment.lockBlocking();
-                            defer self.environment.unlock();
-                            if (self.environment.frozen.load(.acquire)) return error.Frozen;
-                            try existing.replace(self.environment.allocator, self.spec);
-                            self.candidate_cell.?.destroy(self.environment.allocator);
+                            if (self.environment.frozen.load(.acquire)) {
+                                self.environment.unlock();
+                                return error.Frozen;
+                            }
+                            existing.replace(self.environment.allocator, self.spec) catch |err| {
+                                self.environment.unlock();
+                                return err;
+                            };
+                            self.environment.unlock();
+                            self.candidate_cell.?.retire();
                             self.candidate_cell = null;
-                            self.phase = .complete;
+                            state.shape.deinit();
+                            self.state = .complete;
                             break :result .{ .complete = existing };
                         }
-                        self.cloner = self.shape.?.shape.?.names.cloneCursor(1);
-                        self.phase = .build;
+                        self.state = .{ .build = .{
+                            .shape = state.shape,
+                            .builder = .{ .clone = state.shape.shape.?.names.cloneCursor(1) },
+                        } };
                         break :result .pending;
                     },
                 } else result: {
-                    self.initializer = Shape.NameMap.initCursor(self.environment.allocator, 1);
-                    self.phase = .build;
+                    self.state = .{ .build = .{
+                        .shape = state.shape,
+                        .builder = .{ .initialize = Shape.NameMap.initCursor(
+                            self.environment.allocator,
+                            1,
+                        ) },
+                    } };
                     break :result .pending;
                 },
-                .build => if (self.cloner) |*cloner| switch (try cloner.advance()) {
-                    .pending => .pending,
-                    .complete => |names| result: {
-                        cloner.deinit();
-                        self.cloner = null;
-                        self.names = names;
-                        const prior_uses = self.shape.?.useOrder();
-                        self.uses = try self.environment.allocator.alloc(u32, prior_uses.len);
-                        self.phase = .copy_uses;
-                        break :result .pending;
-                    },
-                } else switch (try self.initializer.?.advance()) {
-                    .pending => .pending,
-                    .complete => |names| result: {
-                        self.initializer.?.deinit();
-                        self.initializer = null;
-                        self.names = names;
-                        self.uses = try self.environment.allocator.alloc(u32, 0);
-                        self.phase = .copy_uses;
-                        break :result .pending;
+                .build => |*state| switch (state.builder) {
+                    inline else => |*builder| switch (try builder.advance()) {
+                        .pending => .pending,
+                        .complete => |names| result: {
+                            builder.deinit();
+                            self.state = .{ .allocate_uses = .{
+                                .shape = state.shape,
+                                .names = names,
+                            } };
+                            break :result .pending;
+                        },
                     },
                 },
-                .copy_uses => result: {
-                    const prior_uses = self.shape.?.useOrder();
-                    if (self.copy_index != prior_uses.len) {
-                        self.uses.?[self.copy_index] = prior_uses[self.copy_index];
-                        self.copy_index += 1;
+                .allocate_uses => |*state| result: {
+                    const uses = try self.environment.allocator.alloc(u32, state.shape.useOrder().len);
+                    self.state = .{ .copy_uses = .{ .built = .{
+                        .shape = state.shape,
+                        .names = state.names,
+                        .uses = uses,
+                    } } };
+                    break :result .pending;
+                },
+                .copy_uses => |*state| result: {
+                    const prior_uses = state.built.shape.useOrder();
+                    if (state.index != prior_uses.len) {
+                        state.built.uses[state.index] = prior_uses[state.index];
+                        state.index += 1;
                     } else {
-                        self.insertion = self.names.?.putCursor(self.id, self.candidate_cell.?);
-                        self.phase = .insert;
+                        const built = try self.environment.allocator.create(Built);
+                        built.* = state.built;
+                        self.state = .{ .insert = .{
+                            .built = built,
+                            .cursor = built.names.putCursor(self.id, self.candidate_cell.?),
+                        } };
                     }
                     break :result .pending;
                 },
-                .insert => switch (self.insertion.?.advance()) {
+                .insert => |*state| switch (state.cursor.advance()) {
                     .pending => .pending,
                     .complete => result: {
-                        self.insertion = null;
-                        self.phase = .commit;
+                        self.state = .{ .commit = state.built };
                         break :result .pending;
                     },
                 },
-                .commit => result: {
+                .commit => |state| result: {
                     const next = try self.environment.allocator.create(Shape);
                     self.environment.lockBlocking();
                     if (self.environment.frozen.load(.acquire)) {
@@ -631,30 +808,31 @@ pub const Environment = struct {
                         self.environment.allocator.destroy(next);
                         return error.Frozen;
                     }
-                    if (self.environment.shape_generation.load(.acquire) != self.generation) {
+                    if (!self.environment.shapes.isCurrent(state.shape.shape)) {
                         self.environment.unlock();
                         self.environment.allocator.destroy(next);
-                        self.retry();
+                        self.destroyBuilt(state);
+                        self.state = .snapshot;
                         break :result .pending;
                     }
-                    const old = self.environment.current.load(.acquire);
-                    next.* = .{ .names = self.names.?, .uses = self.uses.?, .previous = old };
-                    self.names = null;
-                    self.uses = null;
                     const published_cell = self.candidate_cell.?;
                     self.environment.cells.append(published_cell) catch {
-                        self.names = next.names;
-                        self.uses = next.uses;
                         self.environment.unlock();
                         self.environment.allocator.destroy(next);
                         return error.OutOfMemory;
                     };
+                    next.* = .{
+                        .names = state.names,
+                        .uses = state.uses,
+                        .previous = self.environment.shapes.currentOwned(),
+                    };
                     self.candidate_cell = null;
-                    self.environment.current.store(next, .release);
+                    self.environment.shapes.publish(next);
                     _ = self.environment.shape_generation.fetchAdd(1, .release);
-                    self.environment.reclaimShapes();
                     self.environment.unlock();
-                    self.phase = .complete;
+                    state.shape.deinit();
+                    self.environment.allocator.destroy(state);
+                    self.state = .complete;
                     break :result .{ .complete = published_cell };
                 },
                 .complete => unreachable,
@@ -667,7 +845,7 @@ pub const Environment = struct {
         name: intern.NamespaceName,
         spec: BindingSpec,
     ) error{OutOfMemory}!BindCursor {
-        return .init(self, intern.namespaceId(name), spec);
+        return .init(self, name, spec);
     }
     fn bind(
         self: *Environment,
@@ -705,7 +883,6 @@ pub const Environment = struct {
         environment: *Environment,
         canonical: u32,
         shape: ?ShapeLease = null,
-        generation: u64 = 0,
         scan_index: usize = 0,
         found: bool = false,
         uses: ?[]u32 = null,
@@ -749,7 +926,6 @@ pub const Environment = struct {
                 .snapshot => result: {
                     if (self.environment.frozen.load(.acquire)) return error.Frozen;
                     self.shape = self.environment.acquireShape();
-                    self.generation = self.environment.shape_generation.load(.acquire);
                     const prior = self.shape.?.useOrder();
                     if (prior.len != 0 and prior[prior.len - 1] == self.canonical) {
                         self.phase = .complete;
@@ -818,7 +994,7 @@ pub const Environment = struct {
                         self.environment.allocator.destroy(next);
                         return error.Frozen;
                     }
-                    if (self.environment.shape_generation.load(.acquire) != self.generation) {
+                    if (!self.environment.shapes.isCurrent(self.shape.?.shape)) {
                         self.environment.unlock();
                         self.environment.allocator.destroy(next);
                         self.reset();
@@ -827,13 +1003,12 @@ pub const Environment = struct {
                     next.* = .{
                         .names = self.names.?,
                         .uses = self.uses.?,
-                        .previous = self.environment.current.load(.acquire),
+                        .previous = self.environment.shapes.currentOwned(),
                     };
                     self.names = null;
                     self.uses = null;
-                    self.environment.current.store(next, .release);
+                    self.environment.shapes.publish(next);
                     _ = self.environment.shape_generation.fetchAdd(1, .release);
-                    self.environment.reclaimShapes();
                     self.environment.unlock();
                     self.phase = .complete;
                     break :result .complete;
@@ -856,7 +1031,7 @@ pub const Environment = struct {
             .complete => break,
             .entry => |entry| {
                 var lease = entry.lease;
-                lease.deinit(allocator);
+                lease.deinit();
                 result[index] = entry.name;
                 index += 1;
             },
@@ -886,6 +1061,107 @@ pub const Scope = struct {
     allocation: ScopeAllocation = .embedded,
     isolated_environment: std.atomic.Value(?*Environment) = .init(null),
     publication_lock: std.Io.Mutex = .init,
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    retirement_state: ?RetireCursor.State = null,
+
+    pub const RetireCursor = struct {
+        scope: *Scope,
+        state: State,
+
+        const State = union(enum) {
+            environment: struct {
+                target: *Environment,
+                cursor: Environment.TeardownCursor,
+            },
+            parent,
+            destroy,
+            complete,
+        };
+
+        pub fn init(scope: *Scope) RetireCursor {
+            const old = scope.refs.fetchSub(1, .release);
+            std.debug.assert(old != 0);
+            if (old != 1) return .{ .scope = scope, .state = .complete };
+            _ = scope.refs.load(.acquire);
+            const target = if (scope.storage == .isolated)
+                scope.isolated_environment.load(.acquire)
+            else
+                null;
+            return .{
+                .scope = scope,
+                .state = if (target) |environment|
+                    .{ .environment = .{
+                        .target = environment,
+                        .cursor = .init(environment),
+                    } }
+                else
+                    .parent,
+            };
+        }
+
+        pub fn advance(self: *RetireCursor) bool {
+            return switch (self.state) {
+                .environment => |*environment| result: {
+                    if (!environment.cursor.advance()) break :result false;
+                    self.scope.isolated_environment.store(null, .release);
+                    self.scope.allocator.destroy(environment.target);
+                    self.state = .parent;
+                    break :result false;
+                },
+                .parent => result: {
+                    if (self.scope.parent) |parent| parent.retire();
+                    self.state = .destroy;
+                    break :result false;
+                },
+                .destroy => {
+                    const allocator = self.scope.allocator;
+                    const allocation = self.scope.allocation;
+                    switch (allocation) {
+                        .heap => allocator.destroy(self.scope),
+                        .embedded => self.scope.* = undefined,
+                    }
+                    self.state = .complete;
+                    return true;
+                },
+                .complete => true,
+            };
+        }
+    };
+    /// Teardown owner for scopes embedded in a larger allocation. Unlike an
+    /// ordinary retained reference, the embedding allocation is the scope's
+    /// storage authority: it must remain present until every heap child has
+    /// propagated its parent release. Only then may the owner reference be
+    /// consumed and the embedded scope invalidated.
+    pub const EmbeddedTeardownCursor = struct {
+        scope: *Scope,
+        state: State = .waiting_for_children,
+
+        const State = union(enum) {
+            waiting_for_children,
+            retiring: RetireCursor,
+            complete,
+        };
+
+        pub fn init(scope: *Scope) EmbeddedTeardownCursor {
+            std.debug.assert(scope.allocation == .embedded);
+            return .{ .scope = scope };
+        }
+
+        pub fn advance(self: *EmbeddedTeardownCursor) bool {
+            return switch (self.state) {
+                .waiting_for_children => result: {
+                    if (self.scope.refs.load(.acquire) != 1) break :result false;
+                    self.state = .{ .retiring = self.scope.retireCursor() };
+                    break :result false;
+                },
+                .retiring => |*cursor| if (cursor.advance()) result: {
+                    self.state = .complete;
+                    break :result true;
+                } else false,
+                .complete => true,
+            };
+        }
+    };
     fn direct(
         allocator: std.mem.Allocator,
         storage: ScopeStorage,
@@ -922,39 +1198,50 @@ pub const Scope = struct {
             .isolated => .isolated,
         };
     }
-    pub fn environmentOrNull(self: *const Scope) ?*Environment {
+    pub fn environmentOrNull(self: *const Scope) ?EnvironmentView {
         return switch (self.storage) {
-            .session => |target| target,
-            .core_build => |target| target,
-            .module_root => |module| module.target,
-            .isolated => self.isolated_environment.load(.acquire),
+            .session => |target| .init(target),
+            .core_build => |target| .init(target),
+            .module_root => |module| .init(module.target),
+            .isolated => if (self.isolated_environment.load(.acquire)) |target| .init(target) else null,
         };
     }
-    pub fn deinit(self: *Scope) void {
+    fn releaseDomain(self: *const Scope) *heap.ReleaseDomain {
+        return switch (self.storage) {
+            .session => |target| target.releases,
+            .core_build => |target| target.releases,
+            .module_root => |module| module.target.releases,
+            .isolated => self.parent.?.releaseDomain(),
+        };
+    }
+    pub fn retireCursor(self: *Scope) RetireCursor {
+        return .init(self);
+    }
+    pub fn retire(self: *Scope) void {
+        const cursor = self.retireCursor();
+        if (cursor.state == .complete) return;
+        std.debug.assert(self.allocation == .heap);
+        self.retirement_state = cursor.state;
+        const releases = self.releaseDomain();
+        releases.retire(self, &self.retirement);
+    }
+    pub fn advanceRetirement(
+        _: *heap.ReleaseDomain,
+        _: std.mem.Allocator,
+        self: *Scope,
+    ) bool {
+        var cursor = RetireCursor{ .scope = self, .state = self.retirement_state.? };
+        if (cursor.advance()) return true;
+        self.retirement_state = cursor.state;
+        return false;
+    }
+    pub fn releaseTrivial(self: *Scope) void {
+        std.debug.assert(self.parent == null and self.environmentOrNull() != null);
+        std.debug.assert(self.storage != .isolated);
         const old = self.refs.fetchSub(1, .release);
-        std.debug.assert(old != 0);
-        if (old != 1) return;
+        std.debug.assert(old == 1);
         _ = self.refs.load(.acquire);
-        const allocator = self.allocator;
-        const parent = self.parent;
-        const allocation = self.allocation;
-        if (self.storage == .isolated) {
-            const target = self.isolated_environment.load(.acquire) orelse {
-                if (parent) |scope| scope.deinit();
-                switch (allocation) {
-                    .heap => allocator.destroy(self),
-                    .embedded => self.* = undefined,
-                }
-                return;
-            };
-            target.deinit();
-            allocator.destroy(target);
-        }
-        if (parent) |scope| scope.deinit();
-        switch (allocation) {
-            .heap => allocator.destroy(self),
-            .embedded => self.* = undefined,
-        }
+        self.* = undefined;
     }
     fn writableEnvironment(self: *Scope) error{OutOfMemory}!*Environment {
         return switch (self.storage) {
@@ -967,7 +1254,7 @@ pub const Scope = struct {
                 defer std.Io.Threaded.mutexUnlock(&self.publication_lock);
                 if (self.isolated_environment.load(.acquire)) |target| break :blk target;
                 const created = try self.allocator.create(Environment);
-                created.* = Environment.init(self.allocator);
+                created.* = Environment.init(self.allocator, self.releaseDomain());
                 self.isolated_environment.store(created, .release);
                 break :blk created;
             },
@@ -1048,32 +1335,61 @@ pub const Scope = struct {
         }
     }
 };
-pub const Env = struct {
+const EnvState = struct {
+    host: *const heap.HostCleanup,
     core: Environment,
     session: Environment,
-    pub fn init(allocator: std.mem.Allocator) Env {
-        return .{
-            .core = Environment.init(allocator),
-            .session = Environment.init(allocator),
+};
+
+pub const Env = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn privateState(self: *const Env) *EnvState {
+        std.debug.assert(self.* != .consumed);
+        return @ptrFromInt(@intFromEnum(self.*));
+    }
+
+    pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!Env {
+        const allocator = host.allocator();
+        const releases = heap.hostDomain(host);
+        const backing = try allocator.create(EnvState);
+        backing.* = .{
+            .host = host,
+            .core = Environment.init(allocator, releases),
+            .session = Environment.init(allocator, releases),
         };
+        return @enumFromInt(@intFromPtr(backing));
     }
     pub fn deinit(self: *Env) void {
-        self.session.deinit();
-        self.core.deinit();
-        self.* = undefined;
+        const backing = self.privateState();
+        const allocator = backing.host.allocator();
+        var session_cursor = Environment.TeardownCursor.init(&backing.session);
+        while (!session_cursor.advance()) {}
+        var core_cursor = Environment.TeardownCursor.init(&backing.core);
+        while (!core_cursor.advance()) {}
+        backing.host.drain();
+        allocator.destroy(backing);
+        self.* = .consumed;
+    }
+    pub fn coreView(self: *const Env) EnvironmentView {
+        return .init(&self.privateState().core);
+    }
+    pub fn sessionView(self: *const Env) EnvironmentView {
+        return .init(&self.privateState().session);
     }
     pub fn define(
         self: *Env,
         name: intern.NamespaceName,
         publication: TopPublication,
     ) error{OutOfMemory}!void {
-        _ = self.session.bind(name, BindingSpec.fromTop(publication)) catch |err| switch (err) {
+        _ = self.privateState().session.bind(name, BindingSpec.fromTop(publication)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Frozen => unreachable,
         };
     }
     fn installCoreSpec(self: *Env, name: intern.NamespaceName, spec: BindingSpec) error{OutOfMemory}!void {
-        _ = self.core.bind(name, spec) catch |err| switch (err) {
+        _ = self.privateState().core.bind(name, spec) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Frozen => unreachable,
         };
@@ -1085,9 +1401,18 @@ pub const Env = struct {
         return .{ .target = self };
     }
     pub fn sessionRoot(self: *Env, allocator: std.mem.Allocator) Scope {
-        return Scope.direct(allocator, .{ .session = &self.session }, null);
+        return Scope.direct(allocator, .{ .session = &self.privateState().session }, null);
+    }
+    pub fn createSessionRoot(self: *Env, allocator: std.mem.Allocator) error{OutOfMemory}!*Scope {
+        const root = try allocator.create(Scope);
+        root.* = self.sessionRoot(allocator);
+        root.allocation = .heap;
+        return root;
     }
 };
+comptime {
+    heap.requireOpaqueHostRoot(Env, EnvState);
+}
 /// Typestate capability for the only phase in which core publication is
 /// legal. `finish` consumes the capability and freezes the core.
 pub const BuildingEnv = struct {
@@ -1102,6 +1427,7 @@ pub const BuildingEnv = struct {
         self: *BuildingEnv,
         comptime source: []const u8,
     ) error{OutOfMemory}!BuiltinEffect {
+        const core = &self.target.privateState().core;
         const token_count = comptime countEffectTokens(source);
         var tokens: [token_count]value.Value = undefined;
         var iterator = std.mem.tokenizeScalar(u8, source, ' ');
@@ -1113,7 +1439,7 @@ pub const BuildingEnv = struct {
             if (std.mem.eql(u8, token, "--")) separator_index = index;
         }
         std.debug.assert(index == token_count and separator_index != null);
-        const effect_value = try list.fromValuesGeneric(self.target.core.allocator, &tokens);
+        const effect_value = try list.fromValuesGeneric(core.allocator, &tokens);
         return .{
             .value = effect_value,
             .validated = .fromValidated(effect_value.list, separator_index.?),
@@ -1132,19 +1458,21 @@ pub const BuildingEnv = struct {
         comptime name: []const u8,
         primitive: PrimitiveImpl,
     ) error{OutOfMemory}!void {
+        const core = &self.target.privateState().core;
         comptime assertStaticNamespace(name);
         const metadata = comptime primitive_docs.forName(name);
         const document_value = try machine.stringValue(
-            self.target.core.allocator,
+            core.allocator,
+            core.releases,
             metadata.text,
         );
-        defer heap.releaseValue(self.target.core.allocator, document_value);
+        defer core.releases.releaseValue(document_value);
         const builtin_effect: ?BuiltinEffect = if (metadata.effect) |source|
             try self.builtinEffect(source)
         else
             null;
         defer if (builtin_effect) |effect| {
-            heap.releaseValue(self.target.core.allocator, effect.value);
+            core.releases.releaseValue(effect.value);
         };
         try self.target.installCoreSpec(
             try intern.trustedNamespace(name),
@@ -1170,14 +1498,25 @@ pub const BuildingEnv = struct {
             try self.installBuiltin(definition.name, definition.primitive);
         }
     }
+    pub fn installInternalBuiltin(
+        self: *BuildingEnv,
+        comptime name: []const u8,
+        primitive: PrimitiveImpl,
+    ) error{OutOfMemory}!void {
+        comptime assertStaticNamespace(name);
+        try self.target.installCoreSpec(
+            try intern.trustedNamespace(name),
+            .{ .binding = .{ .builtin = primitive }, .visibility = .private },
+        );
+    }
     pub fn runtime(self: *BuildingEnv) *Env {
         return self.target;
     }
     pub fn rootScope(self: *BuildingEnv, allocator: std.mem.Allocator) Scope {
-        return Scope.direct(allocator, .{ .core_build = &self.target.core }, null);
+        return Scope.direct(allocator, .{ .core_build = &self.target.privateState().core }, null);
     }
     pub fn finish(self: *BuildingEnv) void {
-        self.target.core.freeze();
+        self.target.privateState().core.freeze();
         // SAFETY: Finishing consumes the builder; invalidation catches reuse
         // after its target environment becomes immutable.
         self.* = undefined;
@@ -1197,36 +1536,52 @@ pub fn assertStaticNamespace(comptime name: []const u8) void {
         @compileError("invalid builtin namespace name: " ++ name);
     }
 }
-fn definitionFailureProbe(allocator: std.mem.Allocator) !void {
-    var environment = Env.init(allocator);
-    defer environment.deinit();
-    const body = try @import("list.zig").fromValuesGeneric(allocator, &.{.{ .int = 7 }});
-    defer heap.releaseValue(allocator, body);
-    const name = try intern.trustedNamespace("failure-probe");
-    try environment.define(name, .{ .word = .{ .body = quotation(body.list).? } });
-    try environment.define(name, .{ .value = .{ .int = 9 } });
-}
+pub const testing = if (builtin.is_test) struct {
+    pub fn deinitEnvironment(environment: *Environment) void {
+        var cursor = Environment.TeardownCursor.init(environment);
+        while (!cursor.advance()) {}
+        environment.* = undefined;
+    }
+
+    pub fn deinitScope(scope: *Scope, releases: *heap.ReleaseDomain) void {
+        switch (scope.allocation) {
+            .embedded => {
+                var cursor = Scope.EmbeddedTeardownCursor.init(scope);
+                while (!cursor.advance()) _ = releases.advance(256);
+            },
+            .heap => {
+                var cursor = scope.retireCursor();
+                while (!cursor.advance()) _ = releases.advance(256);
+            },
+        }
+    }
+} else struct {};
 test "environment lookup and redefine are late-bound" {
-    var environment = Env.init(std.testing.allocator);
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var environment = try Env.init(host.cleanup());
     defer environment.deinit();
     const name = try intern.trustedNamespace("env-test");
     var building = environment.beginCoreBuild();
     try building.installCore(name, .{ .value = .{ .int = 1 } });
     building.finish();
-    var core = (environment.core.resolveDirect(intern.namespaceId(name))).?;
-    defer core.deinit(std.testing.allocator);
+    var core = (environment.coreView().resolveDirect(intern.namespaceId(name))).?;
+    defer core.deinit();
     try std.testing.expectEqual(@as(i64, 1), core.binding.value.int);
     try environment.define(name, .{ .value = .{ .int = 2 } });
-    var local = (environment.session.resolveDirect(intern.namespaceId(name))).?;
-    defer local.deinit(std.testing.allocator);
+    var local = (environment.sessionView().resolveDirect(intern.namespaceId(name))).?;
+    defer local.deinit();
     try std.testing.expectEqual(@as(i64, 2), local.binding.value.int);
-    try std.testing.expect(environment.session.resolveDirect(99) == null);
+    try std.testing.expect(environment.sessionView().resolveDirect(99) == null);
 }
 test "env: same-name rebind preserves cell identity and shape" {
-    var environment = Environment.init(std.testing.allocator);
-    defer environment.deinit();
+    var host = heap.HostOwner.init(std.testing.allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+    var environment = Environment.init(std.testing.allocator, releases);
+    defer testing.deinitEnvironment(&environment);
     var scope = Scope.direct(std.testing.allocator, .{ .session = &environment }, null);
-    defer scope.deinit();
+    defer testing.deinitScope(&scope, releases);
     const name = try intern.trustedNamespace("cell-test");
     const first = try scope.publishTop(name, .{ .value = .{ .int = 1 } });
     const generation = environment.generation();
@@ -1234,9 +1589,23 @@ test "env: same-name rebind preserves cell identity and shape" {
     try std.testing.expectEqual(first, second);
     try std.testing.expectEqual(generation, environment.generation());
     var lease = (environment.resolveDirect(intern.namespaceId(name))).?;
-    defer lease.deinit(std.testing.allocator);
+    defer lease.deinit();
     try std.testing.expectEqual(@as(i64, 2), lease.binding.value.int);
 }
 test "environment definition propagates every allocation failure" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, definitionFailureProbe, .{});
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var host = heap.HostOwner.init(allocator);
+            const releases = host.domain();
+            defer host.cleanup().drain();
+            var environment = try Env.init(host.cleanup());
+            defer environment.deinit();
+            const body = try @import("list.zig").fromValuesGeneric(allocator, &.{.{ .int = 7 }});
+            defer releases.releaseValue(body);
+            const name = try intern.trustedNamespace("failure-probe");
+            try environment.define(name, .{ .word = .{ .body = quotation(body.list).? } });
+            try environment.define(name, .{ .value = .{ .int = 9 } });
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }

@@ -354,14 +354,17 @@ const StringBuilder = struct {
             .char_spans = .init(allocator),
         };
     }
-    fn deinit(self: *StringBuilder) void {
-        if (self.materializer) |*materializer| materializer.deinit();
+    fn deinit(self: *StringBuilder, releases: *heap.ReleaseDomain) void {
+        self.retire(releases);
+    }
+    fn retire(self: *StringBuilder, releases: *heap.ReleaseDomain) void {
+        if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.span_writer) |*writer| writer.deinit();
-        if (self.result) |item| heap.releaseValue(self.allocator, item);
+        if (self.result) |item| releases.releaseValue(item);
         if (self.codepoint_array) |items| self.allocator.free(items);
         if (self.span_array) |items| self.allocator.free(items);
-        self.codepoints.deinit();
-        self.char_spans.deinit();
+        self.codepoints.retire(releases);
+        self.char_spans.retire(releases);
         self.* = undefined;
     }
     fn bump(self: *StringBuilder) u21 {
@@ -567,9 +570,9 @@ const ScalarBuilder = union(enum) {
     atom: AtomBuilder,
     string: StringBuilder,
     character: CharacterBuilder,
-    fn deinit(self: *ScalarBuilder) void {
+    fn deinit(self: *ScalarBuilder, releases: *heap.ReleaseDomain) void {
         switch (self.*) {
-            .string => |*builder| builder.deinit(),
+            .string => |*builder| builder.deinit(releases),
             .atom, .character => {},
         }
         self.* = undefined;
@@ -598,14 +601,19 @@ const ContainerKind = enum {
 };
 
 const Context = struct {
+    const BinderState = union(enum) {
+        unavailable,
+        unchecked,
+        body,
+        names: Span,
+        body_with_binder,
+    };
+
     kind: ContainerKind,
     start: Span,
     body: FormList,
     names: NameList,
-    binder_checked: bool = false,
-    parsing_binder: bool = false,
-    has_binder: bool = false,
-    binder_span: Span = .{},
+    binder: BinderState,
 
     fn init(allocator: std.mem.Allocator, kind: ContainerKind, start: Span) Context {
         return .{
@@ -613,14 +621,20 @@ const Context = struct {
             .start = start,
             .body = .init(allocator),
             .names = .init(allocator),
-            .binder_checked = kind == .dictionary,
+            .binder = if (kind == .dictionary) .unavailable else .unchecked,
         };
     }
-    fn deinit(self: *Context, allocator: std.mem.Allocator) void {
-        var forms = self.body.iterator();
-        while (forms.next()) |form| heap.releaseValue(allocator, form.value);
-        self.body.deinit();
-        self.names.deinit();
+    fn hasBinder(self: *const Context) bool {
+        return self.binder == .body_with_binder;
+    }
+    fn deinit(self: *Context, releases: *heap.ReleaseDomain) void {
+        self.body.retire(releases);
+        self.names.retire(releases);
+        self.* = undefined;
+    }
+    fn retire(self: *Context, releases: *heap.ReleaseDomain) void {
+        self.body.retire(releases);
+        self.names.retire(releases);
         self.* = undefined;
     }
 };
@@ -628,6 +642,7 @@ const Context = struct {
 const CollectionProgress = union(enum) { pending, complete: binder.SpannedValue };
 const CollectionBuilder = struct {
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     context: Context,
     spans: *reader.SpanTable,
     diag: *reader.Diag,
@@ -652,6 +667,7 @@ const CollectionBuilder = struct {
     names: ?[]binder.Name = null,
     name_iterator: ?NameList.Iterator = null,
     lowered: ?[]binder.SpannedValue = null,
+    lowered_values: ?heap.OwnedValueBuffer = null,
     lowerer: ?binder.LowerCursor = null,
     lowered_span_index: usize = 0,
     generated_span_writer: ?reader.SpanTable.PutCursor = null,
@@ -667,32 +683,37 @@ const CollectionBuilder = struct {
 
     fn init(
         allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
         context: Context,
         spans: *reader.SpanTable,
         diag: *reader.Diag,
     ) CollectionBuilder {
-        return .{ .allocator = allocator, .context = context, .spans = spans, .diag = diag };
+        return .{
+            .allocator = allocator,
+            .releases = releases,
+            .context = context,
+            .spans = spans,
+            .diag = diag,
+        };
     }
-    fn releaseForms(self: *CollectionBuilder, forms: []const binder.SpannedValue) void {
-        for (forms) |form| heap.releaseValue(self.allocator, form.value);
+    fn deinit(self: *CollectionBuilder, releases: *heap.ReleaseDomain) void {
+        self.retire(releases);
     }
-    fn deinit(self: *CollectionBuilder) void {
+    fn retire(self: *CollectionBuilder, releases: *heap.ReleaseDomain) void {
         if (self.lowerer) |*lowerer| lowerer.deinit();
         if (self.generated_span_writer) |*writer| writer.deinit();
-        if (self.materializer) |*materializer| materializer.deinit();
+        if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.span_writer) |*writer| writer.deinit();
-        if (self.dict_materializer) |*materializer| materializer.deinit();
-        if (self.result) |item| heap.releaseValue(self.allocator, item);
-        if (self.lowered) |forms| {
-            self.releaseForms(forms);
-            self.allocator.free(forms);
-        }
+        if (self.dict_materializer) |*materializer| materializer.retire(releases);
+        if (self.result) |item| releases.releaseValue(item);
+        if (self.lowered_values) |*values| values.deinit();
+        if (self.lowered) |forms| self.allocator.free(forms);
         if (self.body) |forms| self.allocator.free(forms);
         if (self.names) |names| self.allocator.free(names);
         if (self.values) |values| self.allocator.free(values);
         if (self.element_spans) |spans| self.allocator.free(spans);
         if (self.pairs) |pairs| self.allocator.free(pairs);
-        self.context.deinit(self.allocator);
+        self.context.retire(releases);
         self.* = undefined;
     }
     fn elements(self: *const CollectionBuilder) []const binder.SpannedValue {
@@ -712,7 +733,7 @@ const CollectionBuilder = struct {
                 break :result .pending;
             } else result: {
                 self.element_index = 0;
-                self.phase = if (self.context.has_binder) .allocate_names else if (self.context.kind == .dictionary)
+                self.phase = if (self.context.hasBinder()) .allocate_names else if (self.context.kind == .dictionary)
                     .allocate_pairs
                 else
                     .allocate_elements;
@@ -732,6 +753,7 @@ const CollectionBuilder = struct {
                 self.element_index = 0;
                 self.lowerer = try .init(
                     self.allocator,
+                    self.releases,
                     self.names.?,
                     self.body.?,
                     self.context.start,
@@ -742,8 +764,9 @@ const CollectionBuilder = struct {
             },
             .lower => switch (try self.lowerer.?.advance()) {
                 .pending => .pending,
-                .complete => |forms| result: {
-                    self.lowered = forms;
+                .complete => |completed| result: {
+                    self.lowered = completed.forms;
+                    self.lowered_values = completed.values;
                     self.lowerer.?.deinit();
                     self.lowerer = null;
                     self.phase = .lowered_spans;
@@ -799,6 +822,8 @@ const CollectionBuilder = struct {
                 .complete => |item| result: {
                     self.materializer.?.deinit();
                     self.materializer = null;
+                    if (self.lowered_values) |*values| values.deinit();
+                    self.lowered_values = null;
                     self.result = item;
                     self.span_writer = .init(
                         self.spans,
@@ -866,27 +891,36 @@ const CollectionBuilder = struct {
 
 const ParseProgress = union(enum) { pending, complete, incomplete: reader.Incomplete };
 const ParserCursor = struct {
+    const State = union(enum) {
+        reading,
+        scalar: ScalarBuilder,
+        collection: CollectionBuilder,
+        complete,
+    };
+
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
+    values: heap.OwnedValueChain,
     tokens: TokenList.Iterator,
     contexts: poll.ChunkStack(Context),
     context_depth: usize = 0,
-    output: FormList,
+    output: ?FormList,
     spans: *reader.SpanTable,
     diag: *reader.Diag,
-    current: ?Token = null,
-    scalar: ?ScalarBuilder = null,
-    collection: ?CollectionBuilder = null,
-    complete: bool = false,
-    output_values_owned: bool = true,
+    state: State = .reading,
+    retirement_phase: enum { state, contexts, storage, complete } = .state,
 
     fn init(
         allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
         tokens: *const TokenList,
         spans: *reader.SpanTable,
         diag: *reader.Diag,
-    ) ParserCursor {
+    ) error{OutOfMemory}!ParserCursor {
         return .{
             .allocator = allocator,
+            .releases = releases,
+            .values = try .init(releases),
             .tokens = tokens.iterator(),
             .contexts = .init(allocator),
             .output = .init(allocator),
@@ -895,29 +929,69 @@ const ParserCursor = struct {
         };
     }
     fn deinit(self: *ParserCursor) void {
-        if (self.scalar) |*scalar| scalar.deinit();
-        if (self.collection) |*collection| collection.deinit();
+        switch (self.state) {
+            .scalar => |*scalar| scalar.deinit(self.releases),
+            .collection => |*collection| collection.deinit(self.releases),
+            .reading, .complete => {},
+        }
         while (self.contexts.pop()) |popped| {
             var context = popped;
-            context.deinit(self.allocator);
+            context.deinit(self.releases);
         }
-        self.contexts.deinit();
-        if (self.output_values_owned) {
-            var forms = self.output.iterator();
-            while (forms.next()) |form| heap.releaseValue(self.allocator, form.value);
-        }
-        self.output.deinit();
+        self.contexts.retire(self.releases);
+        if (self.output) |*output| output.deinit();
+        self.values.deinit();
         self.* = undefined;
     }
-    fn appendOwned(self: *ParserCursor, form: binder.SpannedValue) error{OutOfMemory}!void {
-        const destination = if (self.contexts.topPtr()) |context| &context.body else &self.output;
-        destination.append(form) catch |err| {
-            heap.releaseValue(self.allocator, form.value);
-            return err;
+    fn retireCompleted(self: *ParserCursor) void {
+        std.debug.assert(self.state == .complete and self.contexts.isEmpty());
+        self.contexts.retire(self.releases);
+        std.debug.assert(self.output == null);
+        self.values.deinit();
+        self.* = undefined;
+    }
+    fn advanceRetirement(self: *ParserCursor) bool {
+        return switch (self.retirement_phase) {
+            .state => result: {
+                switch (self.state) {
+                    .scalar => |*scalar| switch (scalar.*) {
+                        .string => |*builder| builder.retire(self.releases),
+                        else => scalar.deinit(self.releases),
+                    },
+                    .collection => |*collection| collection.retire(self.releases),
+                    .reading, .complete => {},
+                }
+                self.state = .complete;
+                self.retirement_phase = .contexts;
+                break :result false;
+            },
+            .contexts => if (self.contexts.pop()) |popped| result: {
+                var context = popped;
+                context.retire(self.releases);
+                break :result false;
+            } else result: {
+                self.retirement_phase = .storage;
+                break :result false;
+            },
+            .storage => result: {
+                self.contexts.retire(self.releases);
+                if (self.output) |*output| output.retire(self.releases);
+                self.output = null;
+                self.values.deinit();
+                self.retirement_phase = .complete;
+                break :result true;
+            },
+            .complete => unreachable,
         };
     }
+    fn appendOwned(self: *ParserCursor, form: binder.SpannedValue) error{OutOfMemory}!void {
+        try self.values.appendOwned(form.value);
+        const destination = if (self.contexts.topPtr()) |context| &context.body else &self.output.?;
+        try destination.append(form);
+    }
     fn beginScalar(self: *ParserCursor, token: Token) error{Parse}!void {
-        self.scalar = switch (token.kind) {
+        std.debug.assert(self.state == .reading);
+        self.state = .{ .scalar = switch (token.kind) {
             .atom => .{ .atom = .init(token, false) },
             .quoted => .{ .atom = .init(token, true) },
             .character => .{ .character = .init(token) },
@@ -931,10 +1005,14 @@ const ParserCursor = struct {
                 return error.Parse;
             },
             .open_paren, .open_square, .open_dict, .close_paren, .close_square, .close_dict => unreachable,
-        };
+        } };
     }
     fn advanceScalar(self: *ParserCursor) (error{ OutOfMemory, Parse })!ParseProgress {
-        const progress: ScalarProgress = switch (self.scalar.?) {
+        const scalar = switch (self.state) {
+            .scalar => |*scalar| scalar,
+            else => unreachable,
+        };
+        const progress: ScalarProgress = switch (scalar.*) {
             .atom => |*builder| try builder.advance(self.diag),
             .string => |*builder| try builder.advance(self.diag),
             .character => |*builder| try builder.advance(self.diag),
@@ -942,11 +1020,11 @@ const ParserCursor = struct {
         return switch (progress) {
             .pending => .pending,
             .complete => |item| result: {
-                const span = switch (self.scalar.?) {
+                const span = switch (scalar.*) {
                     inline else => |builder| builder.token.span,
                 };
-                self.scalar.?.deinit();
-                self.scalar = null;
+                scalar.deinit(self.releases);
+                self.state = .reading;
                 try self.appendOwned(.{ .value = item, .span = span });
                 break :result .pending;
             },
@@ -970,23 +1048,24 @@ const ParserCursor = struct {
     }
     fn handleBinder(self: *ParserCursor, token: Token) (error{ OutOfMemory, Parse })!bool {
         const context = self.contexts.topPtr().?;
-        if (!context.binder_checked) {
-            context.binder_checked = true;
-            if (token.kind == .bar) {
-                context.has_binder = true;
-                context.parsing_binder = true;
-                context.binder_span = token.span;
-                return true;
-            }
-            return false;
+        switch (context.binder) {
+            .unchecked => {
+                if (token.kind == .bar) {
+                    context.binder = .{ .names = token.span };
+                    return true;
+                }
+                context.binder = .body;
+                return false;
+            },
+            .unavailable, .body, .body_with_binder => return false,
+            .names => {},
         }
-        if (!context.parsing_binder) return false;
         if (token.kind == .bar) {
             if (context.names.count == 0) {
-                self.diag.set(context.binder_span, "a binder must contain at least one name");
+                self.diag.set(context.binder.names, "a binder must contain at least one name");
                 return error.Parse;
             }
-            context.parsing_binder = false;
+            context.binder = .body_with_binder;
             return true;
         }
         if (token.kind != .atom) {
@@ -1015,7 +1094,13 @@ const ParserCursor = struct {
         }
         var context = self.contexts.pop().?;
         self.context_depth -= 1;
-        self.collection = .init(self.allocator, context, self.spans, self.diag);
+        self.state = .{ .collection = .init(
+            self.allocator,
+            self.releases,
+            context,
+            self.spans,
+            self.diag,
+        ) };
         // SAFETY: CollectionBuilder owns every allocation formerly held by
         // `context`; the moved-from local is never observed again.
         context = undefined;
@@ -1036,9 +1121,9 @@ const ParserCursor = struct {
     }
     fn eof(self: *ParserCursor) ParseProgress {
         if (self.contexts.topPtr()) |context| {
-            if (context.parsing_binder) return .{ .incomplete = .{
+            if (context.binder == .names) return .{ .incomplete = .{
                 .message = "unclosed binder; expected `|`",
-                .span = context.binder_span,
+                .span = context.binder.names,
             } };
             return .{ .incomplete = .{
                 .message = switch (context.kind) {
@@ -1049,24 +1134,28 @@ const ParserCursor = struct {
                 .span = context.start,
             } };
         }
-        self.complete = true;
+        self.state = .complete;
         return .complete;
     }
     fn advance(self: *ParserCursor) (error{ OutOfMemory, Parse })!ParseProgress {
-        std.debug.assert(!self.complete);
-        if (self.scalar != null) return self.advanceScalar();
-        if (self.collection) |*collection| return switch (try collection.advance()) {
-            .pending => .pending,
-            .complete => |form| result: {
-                collection.deinit();
-                self.collection = null;
-                try self.appendOwned(form);
+        return switch (self.state) {
+            .scalar => self.advanceScalar(),
+            .collection => |*collection| switch (try collection.advance()) {
+                .pending => .pending,
+                .complete => |form| result: {
+                    collection.deinit(self.releases);
+                    self.state = .reading;
+                    try self.appendOwned(form);
+                    break :result .pending;
+                },
+            },
+            .reading => result: {
+                const token = self.tokens.next() orelse break :result self.eof();
+                try self.processToken(token.*);
                 break :result .pending;
             },
+            .complete => unreachable,
         };
-        const token = self.tokens.next() orelse return self.eof();
-        try self.processToken(token.*);
-        return .pending;
     }
 };
 
@@ -1076,6 +1165,7 @@ pub const ReadProgress = union(enum) { pending, complete: reader.ReadResult };
 /// lexical, parse, lowering, provenance, or final-copy operation.
 pub const ReadCursor = struct {
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     source_name: []const u8,
     source: []const u8,
     diag: *reader.Diag,
@@ -1084,14 +1174,17 @@ pub const ReadCursor = struct {
     tokenizer: Tokenizer,
     parser: ?ParserCursor = null,
     phase: enum { tokenize, parse, allocate, copy, source_name, finish, complete } = .tokenize,
-    forms: ?[]Value = null,
+    forms: ?heap.OwnedValueBuffer = null,
     top_spans: ?[]Span = null,
     owned_source_name: ?[]u8 = null,
     form_iterator: ?FormList.Iterator = null,
     copy_index: usize = 0,
+    span_retirement: ?reader.SpanTable.RetireCursor = null,
+    retirement_phase: enum { parser, tokens, spans, owned, complete } = .parser,
 
     pub fn init(
         allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
@@ -1100,6 +1193,7 @@ pub const ReadCursor = struct {
         diag.* = .{};
         return .{
             .allocator = allocator,
+            .releases = releases,
             .source_name = source_name,
             .source = source,
             .diag = diag,
@@ -1108,14 +1202,56 @@ pub const ReadCursor = struct {
             .spans = .init(allocator),
         };
     }
-    pub fn deinit(self: *ReadCursor) void {
+    fn deinitHost(self: *ReadCursor) void {
         if (self.parser) |*parser| parser.deinit();
-        self.tokens.deinit();
-        self.spans.deinit(self.allocator);
-        if (self.forms) |forms| self.allocator.free(forms);
+        self.tokens.retire(self.releases);
+        var spans_cursor = reader.SpanTable.RetireCursor.init(&self.spans);
+        while (spans_cursor.advance(self.releases) == .pending) {}
+        if (self.forms) |*forms| forms.deinit();
         if (self.top_spans) |spans| self.allocator.free(spans);
         if (self.owned_source_name) |name| self.allocator.free(name);
         self.* = undefined;
+    }
+    pub fn advanceRetirement(self: *ReadCursor) bool {
+        return switch (self.retirement_phase) {
+            .parser => if (self.parser) |*parser| result: {
+                if (!parser.advanceRetirement()) break :result false;
+                self.parser = null;
+                self.retirement_phase = .tokens;
+                break :result false;
+            } else result: {
+                self.retirement_phase = .tokens;
+                break :result false;
+            },
+            .tokens => result: {
+                self.tokens.retire(self.releases);
+                self.retirement_phase = .spans;
+                break :result false;
+            },
+            .spans => result: {
+                if (self.span_retirement == null)
+                    self.span_retirement = .init(&self.spans);
+                switch (self.span_retirement.?.advance(self.releases)) {
+                    .pending => break :result false,
+                    .complete => {
+                        self.span_retirement = null;
+                        self.retirement_phase = .owned;
+                        break :result false;
+                    },
+                }
+            },
+            .owned => result: {
+                if (self.forms) |*forms| forms.deinit();
+                self.forms = null;
+                if (self.top_spans) |spans| self.allocator.free(spans);
+                self.top_spans = null;
+                if (self.owned_source_name) |name| self.allocator.free(name);
+                self.owned_source_name = null;
+                self.retirement_phase = .complete;
+                break :result true;
+            },
+            .complete => unreachable,
+        };
     }
     fn incomplete(self: *ReadCursor, value_incomplete: reader.Incomplete) ReadProgress {
         self.phase = .complete;
@@ -1128,7 +1264,13 @@ pub const ReadCursor = struct {
                 .pending => .pending,
                 .incomplete => |value_incomplete| self.incomplete(value_incomplete),
                 .complete => result: {
-                    self.parser = .init(self.allocator, &self.tokens, &self.spans, self.diag);
+                    self.parser = try .init(
+                        self.allocator,
+                        self.releases,
+                        &self.tokens,
+                        &self.spans,
+                        self.diag,
+                    );
                     self.phase = .parse;
                     break :result .pending;
                 },
@@ -1142,16 +1284,16 @@ pub const ReadCursor = struct {
                 },
             },
             .allocate => result: {
-                const count = self.parser.?.output.count;
-                self.forms = try self.allocator.alloc(Value, count);
+                const count = self.parser.?.output.?.count;
+                self.forms = try .init(self.releases, count);
                 self.top_spans = try self.allocator.alloc(Span, count);
                 self.owned_source_name = try self.allocator.alloc(u8, self.source_name.len);
-                self.form_iterator = self.parser.?.output.iterator();
+                self.form_iterator = self.parser.?.output.?.iterator();
                 self.phase = .copy;
                 break :result .pending;
             },
             .copy => if (self.form_iterator.?.next()) |form| result: {
-                self.forms.?[self.copy_index] = form.value;
+                self.forms.?.appendBorrowed(form.value);
                 self.top_spans.?[self.copy_index] = form.span;
                 self.copy_index += 1;
                 break :result .pending;
@@ -1168,15 +1310,18 @@ pub const ReadCursor = struct {
                 break :result .pending;
             },
             .finish => result: {
-                self.parser.?.output_values_owned = false;
-                self.parser.?.deinit();
+                var output = self.parser.?.output.?;
+                self.parser.?.output = null;
+                output.retire(self.releases);
+                self.parser.?.retireCompleted();
                 self.parser = null;
-                self.tokens.deinit();
+                self.tokens.retire(self.releases);
                 self.spans.top = self.top_spans.?;
                 self.top_spans = null;
                 const parsed: reader.Parsed = .{
                     .allocator = self.allocator,
-                    .forms = self.forms.?,
+                    .forms = self.forms.?.take(),
+                    .releases = self.releases,
                     .spans = self.spans,
                     .source_name = self.owned_source_name.?,
                 };
@@ -1192,24 +1337,33 @@ pub const ReadCursor = struct {
 };
 
 pub fn read(
-    allocator: std.mem.Allocator,
+    host: *const heap.HostCleanup,
     source_name: []const u8,
     source: []const u8,
     diag: *reader.Diag,
-) (error{ OutOfMemory, Parse })!reader.ReadResult {
-    var cursor = ReadCursor.init(allocator, source_name, source, diag);
-    defer cursor.deinit();
+) (error{ OutOfMemory, Parse })!reader.HostReadResult {
+    const allocator = host.allocator();
+    const releases = heap.hostDomain(host);
+    var cursor = ReadCursor.init(allocator, releases, source_name, source, diag);
+    defer cursor.deinitHost();
     while (true) switch (try cursor.advance()) {
         .pending => {},
-        .complete => |result| return result,
+        .complete => |result| switch (result) {
+            .incomplete => |incomplete| return .{ .incomplete = incomplete },
+            .complete => |parsed_value| {
+                return .{ .complete = .{ .parsed = parsed_value, .host = host } };
+            },
+        },
     };
 }
 
 test "resumable reader preserves canonical forms" {
     const printer = @import("print.zig");
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
     var diag: reader.Diag = .{};
     var parsed = switch (try read(
-        std.testing.allocator,
+        host.cleanup(),
         "test",
         "1, -2 0x10 3.5 2e3 [\\a 'x \"ok\"] (|x| x x *)",
         &diag,
@@ -1222,8 +1376,8 @@ test "resumable reader preserves canonical forms" {
         "1",                                                 "-2", "16", "3.5", "2000.0", "(\\a 'x \"ok\")",
         "([] cons dup 0 at swap dup 0 at swap (*) dip pop)",
     };
-    try std.testing.expectEqual(expected.len, parsed.forms.len);
-    for (parsed.forms, expected) |form, text| {
+    try std.testing.expectEqual(expected.len, parsed.values().len);
+    for (parsed.values(), expected) |form, text| {
         const rendered = try printer.toOwnedString(std.testing.allocator, form);
         defer std.testing.allocator.free(rendered);
         try std.testing.expectEqualStrings(text, rendered);

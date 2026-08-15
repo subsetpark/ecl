@@ -179,11 +179,11 @@ fn executeSource(
         &output_writer.interface,
         &diagnostic_writer.interface,
         init.environ_map.get("ECL_PATH"),
-        .{ .worker_count = worker_count },
+        .{ .worker_pool = worker_count },
     );
     defer session.deinit();
     const outcome = try session.runUnit(source_name, source);
-    if (session.requested_exit) |status| return status;
+    if (session.requestedExit()) |status| return status;
     switch (outcome) {
         .ok => {
             if (print_stack) try printStack(init, &session);
@@ -196,7 +196,7 @@ fn executeSource(
             .{ .source_name = source_name, .span = incomplete.span },
         ),
         .err => |error_value| {
-            defer ecl.heap.releaseValue(init.gpa, error_value);
+            defer session.release(error_value);
             try printSessionError(init, &session, error_value);
             return 1;
         },
@@ -214,7 +214,7 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
         &output_writer.interface,
         &diagnostic_writer.interface,
         init.environ_map.get("ECL_PATH"),
-        .{ .worker_count = worker_count },
+        .{ .worker_pool = worker_count },
     );
     defer session.deinit();
     var pending: std.ArrayList(u8) = .empty;
@@ -247,7 +247,7 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
         try pending.appendSlice(init.gpa, line_bytes);
         if (has_delimiter) try pending.append(init.gpa, '\n');
         const outcome = try session.runUnit("<repl>", pending.items);
-        if (session.requested_exit) |status| return status;
+        if (session.requestedExit()) |status| return status;
         switch (outcome) {
             .incomplete => continuation = true,
             .ok => {
@@ -256,7 +256,7 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
                 continuation = false;
             },
             .err => |error_value| {
-                defer ecl.heap.releaseValue(init.gpa, error_value);
+                defer session.release(error_value);
                 try printSessionError(init, &session, error_value);
                 pending.clearRetainingCapacity();
                 continuation = false;
@@ -279,7 +279,7 @@ fn emitIncompleteAtEof(
         ),
         .ok => 0,
         .err => |error_value| status: {
-            defer ecl.heap.releaseValue(init.gpa, error_value);
+            defer session.release(error_value);
             try printSessionError(init, session, error_value);
             break :status 1;
         },
@@ -297,10 +297,19 @@ fn emitSyntheticError(
     message: []const u8,
     location: ?ecl.spans.LocatedSpan,
 ) AppError!u8 {
+    var host = ecl.heap.HostOwner.init(init.gpa);
+    const releases = host.domain();
+    defer host.cleanup().drain();
     var language_error = ecl.machine.EclErr.init(kind, message);
-    defer language_error.deinit(init.gpa);
-    const error_value = try ecl.machine.errorValue(init.gpa, &language_error, &.{}, location);
-    defer ecl.heap.releaseValue(init.gpa, error_value);
+    defer language_error.retire(releases);
+    const error_value = try ecl.machine.errorValue(
+        init.gpa,
+        releases,
+        &language_error,
+        &.{},
+        location,
+    );
+    defer releases.releaseValue(error_value);
     try printError(init, error_value);
     return 1;
 }

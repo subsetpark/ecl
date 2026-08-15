@@ -23,7 +23,7 @@ const Execution = struct {
     failure: ?ecl.value.Value,
 
     fn deinit(self: *Execution) void {
-        if (self.failure) |failure| ecl.heap.releaseValue(allocator, failure);
+        if (self.failure) |failure| ecl.heap.testing.releaseValue(allocator, failure);
         self.runtime.deinit();
     }
 };
@@ -31,7 +31,7 @@ const Execution = struct {
 fn execute(source: []const u8, mode: ecl.machine.IdiomMode) !Execution {
     var runtime = try ecl.session.Session.init(allocator, &.{});
     errdefer runtime.deinit();
-    runtime.idiom_mode = mode;
+    runtime.setIdiomMode(mode);
     const failure = switch (try runtime.runUnit("<idiom-differential>", source)) {
         .ok => null,
         .incomplete => return error.TestUnexpectedResult,
@@ -45,8 +45,8 @@ fn compareExecutions(source: []const u8) !void {
     defer automatic.deinit();
     var generic = try execute(source, .generic_only);
     defer generic.deinit();
-    try std.testing.expectEqual(@as(u64, 1), automatic.runtime.last_idiom_hits);
-    try std.testing.expectEqual(@as(u64, 0), generic.runtime.last_idiom_hits);
+    try std.testing.expectEqual(@as(u64, 1), automatic.runtime.lastIdiomHits());
+    try std.testing.expectEqual(@as(u64, 0), generic.runtime.lastIdiomHits());
     try std.testing.expectEqual(generic.failure != null, automatic.failure != null);
     if (automatic.failure) |failure| {
         const automatic_display = try ecl.print.toOwnedString(allocator, failure);
@@ -56,7 +56,7 @@ fn compareExecutions(source: []const u8) !void {
         try std.testing.expectEqualStrings(generic_display, automatic_display);
         try expectValueIdentical(failure, generic.failure.?);
     } else {
-        try expectStacksIdentical(automatic.runtime.stack.items, generic.runtime.stack.items);
+        try expectStacksIdentical(automatic.runtime.stackItems(), generic.runtime.stackItems());
         const automatic_display = try automatic.runtime.stackDisplay();
         defer allocator.free(automatic_display);
         const generic_display = try generic.runtime.stackDisplay();

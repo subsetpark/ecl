@@ -7,7 +7,7 @@ fn runOk(runtime: *session.Session, source: []const u8) !void {
         .ok => {},
         .incomplete => return error.UnexpectedIncomplete,
         .err => |failure| {
-            defer heap.releaseValue(runtime.allocator, failure);
+            defer runtime.release(failure);
             return error.UnexpectedLanguageError;
         },
     }
@@ -18,7 +18,7 @@ fn display(runtime: *session.Session) ![]u8 {
 }
 
 test "concurrency: cold sessions start no threads and spawn starts the fixed pool" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
@@ -26,8 +26,35 @@ test "concurrency: cold sessions start no threads and spawn starts the fixed poo
     try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
     const actual = try display(&runtime);
-    defer runtime.allocator.free(actual);
+    defer runtime.hostAllocator().free(actual);
     try std.testing.expectEqualStrings("{'ok [3]}", actual);
+}
+
+test "concurrency: cooperative sessions preserve public task behavior without worker threads" {
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .cooperative);
+    defer runtime.deinit();
+    try runOk(&runtime, "(1 2 +) spawn await");
+    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
+    const actual = try display(&runtime);
+    defer runtime.hostAllocator().free(actual);
+    try std.testing.expectEqualStrings("{'ok [3]}", actual);
+}
+
+test "concurrency: cooperative ready work cannot starve bounded retirement" {
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
+        defer runtime.deinit();
+        counting.requested_memory_limit = counting.total_requested_bytes + 512 * 1024;
+        try runOk(
+            &runtime,
+            "((1) () while) spawn 'spinner set " ++
+                "(0 (dup 4096 <) (1 + [1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16] pop) while pop) " ++
+                "spawn await pop spinner cancel spinner await pop",
+        );
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
 }
 
 test "concurrency: default sessions use the build-configured worker count" {
@@ -37,13 +64,33 @@ test "concurrency: default sessions use the build-configured worker count" {
     try std.testing.expectEqual(session.default_worker_count, runtime.schedulerWorkerThreadCount());
 }
 
+test "concurrency: relocating a session handle preserves live runtime links" {
+    var original = try session.Session.initWithConfig(
+        std.testing.allocator,
+        &.{},
+        .{ .worker_pool = 1 },
+    );
+    try runOk(&original, "((1) () while) spawn 'relocated-task set");
+
+    // Session is deliberately a movable handle. The live task, root scope, and
+    // environment must point only into the heap-stable core after this copy.
+    var runtime = original;
+    original = undefined;
+    defer runtime.deinit();
+
+    try runOk(&runtime, "relocated-task dup cancel await");
+    const actual = try display(&runtime);
+    defer runtime.hostAllocator().free(actual);
+    try std.testing.expect(std.mem.indexOf(u8, actual, "'kind 'cancelled") != null);
+}
+
 test "concurrency: task identity rendering dict keys and cached await are observable" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 2 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 2 });
     defer runtime.deinit();
     try runOk(&runtime, "(7) spawn dup str");
     {
         const actual = try display(&runtime);
-        defer runtime.allocator.free(actual);
+        defer runtime.hostAllocator().free(actual);
         try std.testing.expectEqualStrings("<task:1> \"<task:1>\"", actual);
     }
     try runOk(
@@ -54,27 +101,27 @@ test "concurrency: task identity rendering dict keys and cached await are observ
     );
     {
         const actual = try display(&runtime);
-        defer runtime.allocator.free(actual);
+        defer runtime.hostAllocator().free(actual);
         try std.testing.expectEqualStrings("'task 1 1", actual);
     }
     try runOk(&runtime, "pop pop pop (2 3 +) spawn dup await pop await");
     {
         const actual = try display(&runtime);
-        defer runtime.allocator.free(actual);
+        defer runtime.hostAllocator().free(actual);
         try std.testing.expectEqualStrings("{'ok [5]}", actual);
     }
 }
 
 test "concurrency: two parked waiters share one cached outcome with one worker" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(
         &runtime,
         "(42) spawn 'shared-task set " ++
-            "(shared-task await) spawn (shared-task await) spawn pair task-join",
+            "shared-task shared-task 2 pack (await) par-each",
     );
     const actual = try display(&runtime);
-    defer runtime.allocator.free(actual);
+    defer runtime.hostAllocator().free(actual);
     try std.testing.expectEqualStrings("({'ok [42]} {'ok [42]})", actual);
 }
 
@@ -82,29 +129,59 @@ test "concurrency: runtime task markers cannot be parsed bare or nested" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     const bare = (try runtime.runUnit("marker.ecl", "\"<task:4>\" parse")).err;
-    heap.releaseValue(runtime.allocator, bare);
+    runtime.release(bare);
     const nested = (try runtime.runUnit("marker.ecl", "\"(<task:4>)\" parse")).err;
-    heap.releaseValue(runtime.allocator, nested);
+    runtime.release(nested);
     try runOk(&runtime, "\"\\\"<task:4>\\\"\" parse");
 }
 
 test "concurrency: cancellation timeout and later await remain distinct" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(&runtime, "((1) () while) spawn dup 1 await-for swap cancel");
     try std.testing.expectEqual(@as(usize, 1), runtime.schedulerTimerThreadCount());
     var actual = try display(&runtime);
     try std.testing.expect(std.mem.indexOf(u8, actual, "'kind 'timeout") != null);
-    runtime.allocator.free(actual);
+    runtime.hostAllocator().free(actual);
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerEntryCount());
     try runOk(&runtime, "pop ((1) () while) spawn dup cancel await");
     actual = try display(&runtime);
     try std.testing.expect(std.mem.indexOf(u8, actual, "'kind 'cancelled") != null);
-    runtime.allocator.free(actual);
+    runtime.hostAllocator().free(actual);
+}
+
+test "concurrency: cancellation wins before a ready literal task dispatches" {
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    defer runtime.deinit();
+    // The outer task occupies the sole worker until it parks. Its child is
+    // therefore published and cancelled while still ready in the queue.
+    try runOk(&runtime, "((1) spawn dup cancel await) spawn await");
+    const actual = try display(&runtime);
+    defer runtime.hostAllocator().free(actual);
+    try std.testing.expect(std.mem.indexOf(u8, actual, "'kind 'cancelled") != null);
+    try std.testing.expect(std.mem.indexOf(u8, actual, "'ok [1]") == null);
+}
+
+test "concurrency: terminal deadline waits do not start the timer thread" {
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    defer runtime.deinit();
+    try runOk(&runtime, "(1) spawn dup await pop 1000000 await-for pop");
+    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
+}
+
+test "concurrency: an already-expired pending deadline resolves without a timer thread" {
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .cooperative);
+    defer runtime.deinit();
+    try runOk(&runtime, "((1) () while) spawn dup 0 await-for");
+    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
+    const actual = try display(&runtime);
+    try std.testing.expect(std.mem.indexOf(u8, actual, "'kind 'timeout") != null);
+    runtime.hostAllocator().free(actual);
+    try runOk(&runtime, "pop dup cancel await pop");
 }
 
 test "concurrency: cancelling a deadline waiter unlinks its far-future timer" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -116,7 +193,7 @@ test "concurrency: cancelling a deadline waiter unlinks its far-future timer" {
 }
 
 test "concurrency: timer heap spans fixed chunks and drains every entry" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -128,17 +205,17 @@ test "concurrency: timer heap spans fixed chunks and drains every entry" {
 }
 
 test "concurrency: tasks persist across units and structured close reaches quiescence" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(&runtime, "((1) () while) spawn");
     try runOk(&runtime, "tasks first cancel await");
     const actual = try display(&runtime);
-    defer runtime.allocator.free(actual);
+    defer runtime.hostAllocator().free(actual);
     try std.testing.expect(std.mem.indexOf(u8, actual, "'kind 'cancelled") != null);
 }
 
 test "concurrency: tasks snapshots include pending descendants in spawn preorder" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -146,15 +223,15 @@ test "concurrency: tasks snapshots include pending descendants in spawn preorder
     );
     var actual = try display(&runtime);
     try std.testing.expectEqualStrings("<task:1> 2", actual);
-    runtime.allocator.free(actual);
+    runtime.hostAllocator().free(actual);
     try runOk(&runtime, "pop dup cancel await pop");
     actual = try display(&runtime);
-    defer runtime.allocator.free(actual);
+    defer runtime.hostAllocator().free(actual);
     try std.testing.expectEqualStrings("", actual);
 }
 
 test "concurrency: one-worker kernel safe points let another unit progress" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(
         &runtime,
@@ -163,41 +240,79 @@ test "concurrency: one-worker kernel safe points let another unit progress" {
             "(7) spawn pair await-any pop",
     );
     const actual = try display(&runtime);
-    defer runtime.allocator.free(actual);
+    defer runtime.hostAllocator().free(actual);
     try std.testing.expectEqualStrings("1", actual);
 }
 
 test "concurrency: large task outcomes materialize across scheduler slices" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(&runtime, "([1] 70000 take call) spawn await 'ok at len");
     const actual = try display(&runtime);
-    defer runtime.allocator.free(actual);
+    defer runtime.hostAllocator().free(actual);
     try std.testing.expectEqualStrings("70000", actual);
 }
 
 test "concurrency: task-join failure cancellation reaches sibling descendants" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(
         &runtime,
         "([([1] 70000 take sum pop missing) " ++
             "(((1) () while) spawn pop (1) () while)] " ++
-            "(spawn) each task-join) attempt pop",
+            "(call) par-each) attempt pop",
     );
 }
 
 test "concurrency: await-any ties and source par-each preserve program order" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 8 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 8 });
     defer runtime.deinit();
     try runOk(&runtime, "(10) spawn dup await pop dup pair await-any pop");
     var actual = try display(&runtime);
     try std.testing.expectEqualStrings("0", actual);
-    runtime.allocator.free(actual);
+    runtime.hostAllocator().free(actual);
     try runOk(&runtime, "pop [1 2 3] (dup *) par-each");
     actual = try display(&runtime);
     try std.testing.expectEqualStrings("[1 4 9]", actual);
-    runtime.allocator.free(actual);
+    runtime.hostAllocator().free(actual);
+}
+
+test "concurrency: source await-all is ordered outcome fan-in" {
+    const quotation_lists = [_][]const u8{
+        "[]",
+        "[()]",
+        "[(1)]",
+        "[() (1) (1 2) (missing)]",
+        "[(0 70000 (1 +) times) (20) (30 31) (also-missing) (50)]",
+    };
+    for ([_]usize{ 1, 8 }) |worker_count| {
+        var runtime = try session.Session.initWithConfig(
+            std.testing.allocator,
+            &.{},
+            .{ .worker_pool = worker_count },
+        );
+        defer runtime.deinit();
+        for (quotation_lists) |quotations| {
+            var source_bytes: [512]u8 = undefined;
+            const source = try std.fmt.bufPrint(
+                &source_bytes,
+                "{s} (spawn) each dup await-all swap (await) each match",
+                .{quotations},
+            );
+            try runOk(&runtime, source);
+            const actual = try display(&runtime);
+            defer runtime.hostAllocator().free(actual);
+            try std.testing.expectEqualStrings("1", actual);
+            try runOk(&runtime, "pop");
+        }
+        try runOk(&runtime, "'await-all doc");
+        const documentation = try display(&runtime);
+        defer runtime.hostAllocator().free(documentation);
+        try std.testing.expectEqualStrings(
+            "\"Wait for every task and return its outcome in input order.\"",
+            documentation,
+        );
+    }
 }
 
 test "concurrency: complete console calls do not interleave bytes" {
@@ -205,15 +320,35 @@ test "concurrency: complete console calls do not interleave bytes" {
     var writer = std.Io.Writer.fixed(&bytes);
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &writer);
     defer runtime.deinit();
-    try runOk(&runtime, "[(\"aaaa\" prin 0) (\"bbbb\" prin 0)] (spawn) each task-join pop");
+    try runOk(&runtime, "[(\"aaaa\" prin 0) (\"bbbb\" prin 0)] (call) par-each pop");
     const written = writer.buffered();
     try std.testing.expect(std.mem.eql(u8, written, "aaaabbbb") or
         std.mem.eql(u8, written, "bbbbaaaa"));
 }
 
+test "concurrency: task-join remains internal to source par-each" {
+    var output_bytes: [4096]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_bytes);
+    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output);
+    defer runtime.deinit();
+    const direct = try runtime.runUnit("concurrency.ecl", "task-join");
+    switch (direct) {
+        .err => |failure| runtime.release(failure),
+        .ok, .incomplete => return error.ExpectedLanguageError,
+    }
+    const indirect = try runtime.runUnit("concurrency.ecl", "1 (task-join) keep");
+    switch (indirect) {
+        .err => |failure| runtime.release(failure),
+        .ok, .incomplete => return error.ExpectedLanguageError,
+    }
+    try runOk(&runtime, "words");
+    try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "await-all") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "task-join") == null);
+}
+
 test "concurrency: exit is root-owned outside attempt" {
-    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_count = 1 });
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(&runtime, "(7 exit) attempt (7 exit) spawn await");
-    try std.testing.expectEqual(@as(?u8, null), runtime.requested_exit);
+    try std.testing.expectEqual(@as(?u8, null), runtime.requestedExit());
 }

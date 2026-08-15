@@ -23,17 +23,19 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 
 fn cmpPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const right = try evaluator.popOwned();
-    var right_owned = true;
-    defer if (right_owned) heap.releaseValue(evaluator.allocator(), right);
-    const left = try evaluator.popOwned();
-    var left_owned = true;
-    defer if (left_owned) heap.releaseValue(evaluator.allocator(), left);
+    var right = try evaluator.popValue();
+    defer right.deinit();
+    var left = try evaluator.popValue();
+    defer left.deinit();
     const driver = try evaluator.allocator().create(CompareDriver);
-    driver.* = .{ .left = left, .right = right, .cursor = .init(left, right) };
-    left_owned = false;
-    right_owned = false;
-    evaluator.installWorkDriver(driver, CompareDriver.advance, CompareDriver.destroy);
+    driver.* = .{
+        .left = left.borrow(),
+        .right = right.borrow(),
+        .cursor = .init(left.borrow(), right.borrow()),
+    };
+    _ = left.take();
+    _ = right.take();
+    evaluator.installWorkDriver(driver);
 }
 
 fn gradePrimitive(evaluator: *Machine) MachineError!void {
@@ -41,24 +43,22 @@ fn gradePrimitive(evaluator: *Machine) MachineError!void {
 }
 
 fn startGrade(evaluator: *Machine, sorted_values: bool) MachineError!void {
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a comparable list");
-    const count: usize = @intCast(collection.list.length());
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a comparable list");
+    const count: usize = @intCast(collection.borrow().list.length());
     const indices = try evaluator.allocator().alloc(usize, count);
     errdefer evaluator.allocator().free(indices);
     const scratch = try evaluator.allocator().alloc(usize, count);
     errdefer evaluator.allocator().free(scratch);
     const driver = try evaluator.allocator().create(GradeDriver);
     driver.* = .{
-        .collection = collection,
+        .collection = collection.take(),
         .sorted_values = sorted_values,
         .indices = indices,
         .scratch = scratch,
     };
-    collection_owned = false;
-    evaluator.installWorkDriver(driver, GradeDriver.advance, GradeDriver.destroy);
+    evaluator.installWorkDriver(driver);
 }
 
 pub fn gradePrimitiveForIdiom() env.PrimitiveImpl {
@@ -79,7 +79,7 @@ const CompareCursor = struct {
         return .{ .left = left, .right = right };
     }
 
-    fn advance(self: *CompareCursor, budget: usize) CompareProgress {
+    pub fn advance(self: *CompareCursor, budget: usize) CompareProgress {
         if (self.left.isString() and self.right.isString()) {
             const left_count: usize = @intCast(self.left.list.length());
             const right_count: usize = @intCast(self.right.list.length());
@@ -109,26 +109,21 @@ const CompareDriver = struct {
     left: Value,
     right: Value,
     cursor: CompareCursor,
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *CompareDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *CompareDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (self.cursor.advance(machine.kernel_poll_quantum)) {
             .pending => .yielded,
             .not_comparable => evaluator.typeError("two comparable numbers, chars, or strings"),
-            .complete => |ordering| completed: {
-                try evaluator.pushOwned(.{ .int = switch (ordering) {
-                    .lt => -1,
-                    .eq => 0,
-                    .gt => 1,
-                } });
-                break :completed .completed;
-            },
+            .complete => |ordering| .{ .output = .{ .int = switch (ordering) {
+                .lt => -1,
+                .eq => 0,
+                .gt => 1,
+            } } },
         };
     }
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *CompareDriver = @ptrCast(@alignCast(raw));
-        heap.releaseValue(allocator, self.left);
-        heap.releaseValue(allocator, self.right);
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *CompareDriver) void {
+        releases.releaseValue(self.left);
+        releases.releaseValue(self.right);
         allocator.destroy(self);
     }
 };
@@ -155,8 +150,7 @@ const GradeDriver = struct {
     i64_materializer: ?storage.I64Materializer = null,
     value_materializer: ?storage.ValueMaterializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *GradeDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *GradeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
@@ -293,26 +287,21 @@ const GradeDriver = struct {
                 };
                 return switch (progress) {
                     .pending => .yielded,
-                    .complete => |result| completed: {
-                        errdefer heap.releaseValue(evaluator.allocator(), result);
-                        try evaluator.pushOwned(result);
-                        break :completed .completed;
-                    },
+                    .complete => |result| .{ .output = result },
                 };
             },
         };
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *GradeDriver = @ptrCast(@alignCast(raw));
-        if (self.i64_materializer) |*materializer| materializer.deinit();
-        if (self.value_materializer) |*materializer| materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *GradeDriver) void {
+        if (self.i64_materializer) |*materializer| materializer.retire(releases);
+        if (self.value_materializer) |*materializer| materializer.retire(releases);
         if (self.integers) |integers| allocator.free(integers);
         if (self.values) |values| allocator.free(values);
         allocator.free(self.indices);
         allocator.free(self.scratch);
-        heap.releaseValue(allocator, self.collection);
+        releases.releaseValue(self.collection);
         allocator.destroy(self);
     }
 };
@@ -326,17 +315,15 @@ fn lessIndex(collection: Value, left: usize, right: usize) error{NotComparable}!
 }
 
 fn distinctPrimitive(evaluator: *Machine) MachineError!void {
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a list");
-    const count: usize = @intCast(collection.list.length());
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a list");
+    const count: usize = @intCast(collection.borrow().list.length());
     const results = try evaluator.allocator().alloc(Value, count);
     errdefer evaluator.allocator().free(results);
     const driver = try evaluator.allocator().create(DistinctDriver);
-    driver.* = .{ .collection = collection, .results = results };
-    collection_owned = false;
-    evaluator.installWorkDriver(driver, DistinctDriver.advance, DistinctDriver.destroy);
+    driver.* = .{ .collection = collection.take(), .results = results };
+    evaluator.installWorkDriver(driver);
 }
 
 const DistinctDriver = struct {
@@ -348,8 +335,7 @@ const DistinctDriver = struct {
     matcher: ?equal.MatchCursor = null,
     materializer: ?storage.ValueMaterializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *DistinctDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *DistinctDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) {
@@ -359,9 +345,7 @@ const DistinctDriver = struct {
                     .complete => |result| completed: {
                         materializer.deinit();
                         self.materializer = null;
-                        errdefer heap.releaseValue(evaluator.allocator(), result);
-                        try evaluator.pushOwned(result);
-                        break :completed .completed;
+                        break :completed .{ .output = result };
                     },
                 };
             }
@@ -401,25 +385,22 @@ const DistinctDriver = struct {
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *DistinctDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *DistinctDriver) void {
         if (self.matcher) |*matcher| matcher.deinit();
-        if (self.materializer) |*materializer| materializer.deinit();
+        if (self.materializer) |*materializer| materializer.retire(releases);
         allocator.free(self.results);
-        heap.releaseValue(allocator, self.collection);
+        releases.releaseValue(self.collection);
         allocator.destroy(self);
     }
 };
 
 fn groupPrimitive(evaluator: *Machine) MachineError!void {
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a list");
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a list");
     const driver = try evaluator.allocator().create(GroupDriver);
-    driver.* = .{ .collection = collection };
-    collection_owned = false;
-    evaluator.installWorkDriver(driver, GroupDriver.advance, GroupDriver.destroy);
+    driver.* = .{ .collection = collection.take() };
+    evaluator.installWorkDriver(driver);
 }
 
 const GroupDriver = struct {
@@ -431,7 +412,7 @@ const GroupDriver = struct {
     cursors: ?[]usize = null,
     indices: ?[]i64 = null,
     pairs: ?[]dict.Pair = null,
-    phase: enum { allocate, scan, offsets, cursors, scatter, groups, dictionary, release } = .allocate,
+    phase: enum { allocate, scan, offsets, cursors, scatter, groups, dictionary } = .allocate,
     item_index: usize = 0,
     key_count: usize = 0,
     candidate: usize = 0,
@@ -439,11 +420,10 @@ const GroupDriver = struct {
     matcher: ?equal.MatchCursor = null,
     group_materializer: ?storage.I64Materializer = null,
     dict_materializer: ?storage.DictMaterializer = null,
-    initialized_pairs: usize = 0,
-    released_pairs: usize = 0,
-    result: ?Value = null,
+    group_values: ?heap.OwnedValueBuffer = null,
 
-    fn allocate(self: *GroupDriver, allocator: std.mem.Allocator) error{OutOfMemory}!void {
+    fn allocate(self: *GroupDriver, evaluator: *Machine) error{OutOfMemory}!void {
+        const allocator = evaluator.allocator();
         const count: usize = @intCast(self.collection.list.length());
         self.keys = try allocator.alloc(Value, count);
         self.assignments = try allocator.alloc(usize, count);
@@ -452,16 +432,16 @@ const GroupDriver = struct {
         self.cursors = try allocator.alloc(usize, count);
         self.indices = try allocator.alloc(i64, count);
         self.pairs = try allocator.alloc(dict.Pair, count);
+        self.group_values = try .init(evaluator.releaseDomain(), count);
         self.offsets.?[0] = 0;
         self.phase = .scan;
     }
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *GroupDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *GroupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
-            .allocate => try self.allocate(evaluator.allocator()),
+            .allocate => try self.allocate(evaluator),
             .scan => {
                 const count: usize = @intCast(self.collection.list.length());
                 if (self.item_index == count) {
@@ -552,7 +532,7 @@ const GroupDriver = struct {
                         self.group_materializer.?.deinit();
                         self.group_materializer = null;
                         self.pairs.?[self.index] = .{ self.keys.?[self.index], group };
-                        self.initialized_pairs += 1;
+                        self.group_values.?.appendOwned(group);
                         self.index += 1;
                         return .yielded;
                     },
@@ -564,45 +544,28 @@ const GroupDriver = struct {
                 .complete => |result| {
                     self.dict_materializer.?.deinit();
                     self.dict_materializer = null;
-                    self.result = result;
-                    self.phase = .release;
-                    self.index = 0;
+                    self.group_values.?.deinit();
+                    self.group_values = null;
+                    return .{ .output = result };
                 },
-            },
-            .release => {
-                if (self.released_pairs == self.initialized_pairs) {
-                    const result = self.result.?;
-                    self.result = null;
-                    errdefer heap.releaseValue(evaluator.allocator(), result);
-                    try evaluator.pushOwned(result);
-                    return .completed;
-                }
-                heap.releaseValue(evaluator.allocator(), self.pairs.?[self.released_pairs][1]);
-                self.released_pairs += 1;
-                budget -= 1;
             },
         };
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *GroupDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *GroupDriver) void {
         if (self.matcher) |*matcher| matcher.deinit();
-        if (self.group_materializer) |*materializer| materializer.deinit();
-        if (self.dict_materializer) |*materializer| materializer.deinit();
-        if (self.result) |result| heap.releaseValue(allocator, result);
-        if (self.pairs) |pairs| {
-            for (pairs[self.released_pairs..self.initialized_pairs]) |pair|
-                heap.releaseValue(allocator, pair[1]);
-            allocator.free(pairs);
-        }
+        if (self.group_materializer) |*materializer| materializer.retire(releases);
+        if (self.dict_materializer) |*materializer| materializer.retire(releases);
+        if (self.group_values) |*groups| groups.deinit();
+        if (self.pairs) |pairs| allocator.free(pairs);
         if (self.keys) |items| allocator.free(items);
         if (self.assignments) |items| allocator.free(items);
         if (self.frequencies) |items| allocator.free(items);
         if (self.offsets) |items| allocator.free(items);
         if (self.cursors) |items| allocator.free(items);
         if (self.indices) |items| allocator.free(items);
-        heap.releaseValue(allocator, self.collection);
+        releases.releaseValue(self.collection);
         allocator.destroy(self);
     }
 };
@@ -610,7 +573,7 @@ const GroupDriver = struct {
 test "order comparator breaks equal values by original position" {
     const allocator = std.testing.allocator;
     const collection = try list.fromI64Slice(allocator, &.{ 2, 1, 2, 1 });
-    defer heap.releaseValue(allocator, collection);
+    defer heap.testing.releaseValue(allocator, collection);
     try std.testing.expect(try lessIndex(collection, 1, 3));
     try std.testing.expect(!try lessIndex(collection, 3, 1));
 }

@@ -11,7 +11,7 @@ fn expectStack(runtime: *session.Session, source: []const u8, expected: []const 
         .ok => {},
         .incomplete => return error.TestUnexpectedResult,
         .err => |failure| {
-            defer heap.releaseValue(allocator, failure);
+            defer heap.testing.releaseValue(allocator, failure);
             return error.TestUnexpectedResult;
         },
     }
@@ -30,27 +30,27 @@ fn expectCancelledAfterSetup(
     switch (try runtime.runUnit("<combinator-setup>", setup)) {
         .ok => {},
         .err => |failure| {
-            heap.releaseValue(allocator, failure);
+            heap.testing.releaseValue(allocator, failure);
             return error.TestUnexpectedResult;
         },
         .incomplete => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(usize, 1), runtime.stack.items.len);
-    runtime.idiom_mode = mode;
-    runtime.cancelled.store(true, .release);
+    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
+    runtime.setIdiomMode(mode);
+    runtime.requestCancellation();
     const failure = switch (try runtime.runUnit("<combinator-cancel>", source)) {
         .err => |item| item,
         .ok, .incomplete => return error.TestUnexpectedResult,
     };
-    defer heap.releaseValue(allocator, failure);
+    defer heap.testing.releaseValue(allocator, failure);
     try support.expectLanguageError(failure, .{
         .name = source,
         .source = source,
         .kind = "cancelled",
         .message = "unit cancelled",
     });
-    try std.testing.expect(runtime.last_polls >= 1);
-    try std.testing.expectEqual(@as(usize, 1), runtime.stack.items.len);
+    try std.testing.expect(runtime.lastPolls() >= 1);
+    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
 }
 
 test "combinators: isolated iteration broadcast reduction and infra" {
@@ -178,12 +178,12 @@ test "inline times cond and case prevalidate and select" {
 test "empty inline iterations remain cancellable and bounded-frame" {
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
-    runtime.cancelled.store(true, .release);
+    runtime.requestCancellation();
     const failure = switch (try runtime.runUnit("<combinator-cancel>", "70000 () times")) {
         .err => |item| item,
         .ok, .incomplete => return error.TestUnexpectedResult,
     };
-    defer heap.releaseValue(allocator, failure);
+    defer heap.testing.releaseValue(allocator, failure);
     try support.expectLanguageError(failure, .{
         .name = "cancelled times",
         .source = "70000 () times",
@@ -191,8 +191,8 @@ test "empty inline iterations remain cancellable and bounded-frame" {
         .word = "times",
         .message = "unit cancelled",
     });
-    try std.testing.expect(runtime.last_polls >= 1);
-    try std.testing.expect(runtime.last_max_frames <= 2);
+    try std.testing.expect(runtime.lastPolls() >= 1);
+    try std.testing.expect(runtime.lastMaxFrames() <= 2);
 }
 
 test "combinators: loops guards reductions and result materialization stay cancellable" {
@@ -209,16 +209,16 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     var automatic = try session.Session.init(allocator, &.{});
     defer automatic.deinit();
     try expectStack(&automatic, "[1 2 3] (neg) each", "[-1 -2 -3]");
-    try std.testing.expectEqual(@as(u64, 1), automatic.last_idiom_hits);
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
     var generic = try session.Session.init(allocator, &.{});
     defer generic.deinit();
-    generic.idiom_mode = .generic_only;
+    generic.setIdiomMode(.generic_only);
     try expectStack(&generic, "[1 2 3] (neg) each", "[-1 -2 -3]");
-    try std.testing.expectEqual(@as(u64, 0), generic.last_idiom_hits);
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
 
     try expectStack(&automatic, "pop [3 1 2] sort", "[1 2 3]");
-    try std.testing.expectEqual(@as(u64, 1), automatic.last_idiom_hits);
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
     var fallback = try session.Session.init(allocator, &.{});
     defer fallback.deinit();
@@ -226,25 +226,25 @@ test "idioms: automatic hits and forced generic preserves behavior" {
         .err => |item| item,
         .ok, .incomplete => return error.TestUnexpectedResult,
     };
-    defer heap.releaseValue(allocator, failure);
-    try std.testing.expectEqual(@as(u64, 0), fallback.last_idiom_hits);
+    defer heap.testing.releaseValue(allocator, failure);
+    try std.testing.expectEqual(@as(u64, 0), fallback.lastIdiomHits());
 
     var executable_form = try session.Session.init(allocator, &.{});
     defer executable_form.deinit();
     try expectStack(&executable_form, "[1 2 3] (dup *) each", "[1 4 9]");
-    try std.testing.expectEqual(@as(u64, 0), executable_form.last_idiom_hits);
+    try std.testing.expectEqual(@as(u64, 0), executable_form.lastIdiomHits());
 }
 
 test "idioms: late binding defeats recognition" {
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
     try expectStack(&runtime, "(pop pop 42) '+ def [1 2 3] 0 (+) fold", "42");
-    try std.testing.expectEqual(@as(u64, 0), runtime.last_idiom_hits);
+    try std.testing.expectEqual(@as(u64, 0), runtime.lastIdiomHits());
 
     var direct_sort = try session.Session.init(allocator, &.{});
     defer direct_sort.deinit();
     try expectStack(&direct_sort, "(pop [0]) 'grade def [3 1 2] sort", "[3]");
-    try std.testing.expectEqual(@as(u64, 0), direct_sort.last_idiom_hits);
+    try std.testing.expectEqual(@as(u64, 0), direct_sort.lastIdiomHits());
 
     var used_sort = try session.Session.init(allocator, &.{});
     defer used_sort.deinit();
@@ -253,7 +253,7 @@ test "idioms: late binding defeats recognition" {
         "'m ((pop [0]) (a -- b) 'grade def) module 'm use [3 1 2] sort",
         "[3]",
     );
-    try std.testing.expectEqual(@as(u64, 0), used_sort.last_idiom_hits);
+    try std.testing.expectEqual(@as(u64, 0), used_sort.lastIdiomHits());
 
     var between_applications = try session.Session.init(allocator, &.{});
     defer between_applications.deinit();
@@ -262,5 +262,5 @@ test "idioms: late binding defeats recognition" {
         "[1 2] (dup 1 = ('m ((pop 42) (a -- b) 'f def) module) () if m.f) each",
         "[42 42]",
     );
-    try std.testing.expectEqual(@as(u64, 0), between_applications.last_idiom_hits);
+    try std.testing.expectEqual(@as(u64, 0), between_applications.lastIdiomHits());
 }

@@ -240,6 +240,7 @@ pushes its elements.)
 | [P] | `await-any` | `( l -- i outcome )` | nonempty all-task list; lowest already-done index, otherwise first completion |
 | [P] | `cancel`    | `( task -- )` | no-op if done |
 | [P] | `tasks`     | `( -- l )` | pending descendants in deterministic spawn preorder |
+| [E] | `await-all` | `( tasks -- outcomes )` | await every task; ordinary outcomes in input order; never re-raise task failures |
 | [E] | `par-each`  | `( l q -- l' )` | one task per element; ordered results; indexed one-result contract; re-raise leftmost `'err` after sibling quiescence |
 
 ## IO

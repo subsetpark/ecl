@@ -6,6 +6,7 @@ const env = @import("../env.zig");
 const modules = @import("../modules.zig");
 const spans = @import("../spans.zig");
 const intern = @import("../intern.zig");
+const heap = @import("../heap.zig");
 
 test "embedded prelude exposes source bodies and derived dataflow" {
     try support.expectStacks(&.{
@@ -85,17 +86,19 @@ test "all embedded vocabulary entries expose bodies and nonempty documentation" 
 
 fn expectInvalidPrelude(source: []const u8) !void {
     const allocator = std.testing.allocator;
-    var environment = env.Env.init(allocator);
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
+    var environment = try env.Env.init(host.cleanup());
     defer environment.deinit();
     var building = environment.beginCoreBuild();
     try prims.install(&building);
-    var registry = modules.Registry.init(allocator);
+    var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
-    var archive = spans.SpanArchive.init(allocator);
+    var archive = try spans.SpanArchive.init(host.cleanup());
     defer archive.deinit();
     var cancelled: std.atomic.Value(bool) = .init(false);
     try std.testing.expectError(error.InvalidPrelude, prelude.installSource(
-        allocator,
+        host.cleanup(),
         &building,
         &registry,
         &archive,

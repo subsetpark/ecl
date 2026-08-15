@@ -41,11 +41,11 @@ const Annotation = struct {
     effect: ?env.Effect = null,
     effect_value: ?Value = null,
     doc_value: ?*env.DocumentationString = null,
-    doc_owned: ?Value = null,
+    doc_source: ?Value = null,
 
-    fn deinit(self: *Annotation, allocator: std.mem.Allocator) void {
-        if (self.effect_value) |item| heap.releaseValue(allocator, item);
-        if (self.doc_owned) |item| heap.releaseValue(allocator, item);
+    fn deinit(self: *Annotation, releases: *heap.ReleaseDomain) void {
+        if (self.effect_value) |item| releases.releaseValue(item);
+        if (self.doc_source) |item| releases.releaseValue(item);
         self.* = undefined;
     }
 };
@@ -57,29 +57,21 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
     const scope = evaluator.currentScope();
     const module_root = scope.kind() == .module_root;
     if (private and !module_root) return evaluator.fail(.domain, "defp/setp are legal only in a module root");
-    const name_value = try evaluator.popOwned();
-    const name = switch (name_value) {
-        .symbol => |id| id,
-        else => {
-            heap.releaseValue(evaluator.allocator(), name_value);
-            return evaluator.typeError("a symbol name");
-        },
-    };
-    const item = try evaluator.popOwned();
-    var item_owned = true;
-    defer if (item_owned) heap.releaseValue(evaluator.allocator(), item);
+    const name = try popSymbol(evaluator);
+    var item = try evaluator.popValue();
+    defer item.deinit();
     const driver = try evaluator.allocator().create(DefineDriver);
     driver.* = .{
         .mode = mode,
         .scope = scope,
         .name = name,
-        .item = item,
+        .item = item.borrow(),
         .separator = try intern.intern("--"),
         .colon = try intern.intern(":"),
-        .phase = if (word_binding and item == .list) .scan_annotation else .validate_name,
+        .phase = if (word_binding and item.borrow() == .list) .scan_annotation else .validate_name,
     };
-    item_owned = false;
-    evaluator.installWorkDriver(driver, DefineDriver.advance, DefineDriver.destroy);
+    _ = item.take();
+    evaluator.installWorkDriver(driver);
 }
 
 const DefineDriver = struct {
@@ -108,8 +100,7 @@ const DefineDriver = struct {
         return evaluator.fail(.domain, "malformed definition annotation");
     }
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *DefineDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *DefineDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
@@ -160,7 +151,8 @@ const DefineDriver = struct {
                 self.annotation_source = self.item;
                 self.item = null;
                 try evaluator.require(1);
-                self.item = try evaluator.popOwned();
+                var item = try evaluator.popValue();
+                self.item = item.take();
                 self.index = 0;
                 if (self.document) |document| {
                     self.normalizer = try .init(evaluator.allocator(), document);
@@ -175,7 +167,7 @@ const DefineDriver = struct {
                 .complete => |normalized| {
                     self.normalizer.?.deinit();
                     self.normalizer = null;
-                    self.annotation.doc_owned = normalized;
+                    self.annotation.doc_source = normalized;
                     self.annotation.doc_value = env.documentation(normalized.list) orelse
                         return malformed(evaluator);
                     if (self.separator_at != null) {
@@ -224,7 +216,7 @@ const DefineDriver = struct {
                 if (self.scope.kind() == .module_root) {
                     self.qualified = try .init(
                         evaluator.allocator(),
-                        intern.namespaceId(evaluator.currentHome().?.name),
+                        intern.namespaceId(evaluator.currentHome().?.name()),
                         self.name,
                     );
                     self.phase = .qualify_name;
@@ -277,27 +269,26 @@ const DefineDriver = struct {
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *DefineDriver = @ptrCast(@alignCast(raw));
-        if (self.normalizer) |*normalizer| normalizer.deinit();
-        if (self.effect_materializer) |*materializer| materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *DefineDriver) void {
+        if (self.normalizer) |*normalizer| normalizer.retire(releases);
+        if (self.effect_materializer) |*materializer| materializer.retire(releases);
         if (self.qualified) |*qualified| qualified.deinit();
         if (self.publisher) |*publisher| publisher.deinit();
         if (self.effect_items) |items| allocator.free(items);
-        self.annotation.deinit(allocator);
-        if (self.annotation_source) |item| heap.releaseValue(allocator, item);
-        if (self.item) |item| heap.releaseValue(allocator, item);
+        self.annotation.deinit(releases);
+        if (self.annotation_source) |item| releases.releaseValue(item);
+        if (self.item) |item| releases.releaseValue(item);
         allocator.destroy(self);
     }
 };
 
 fn body(evaluator: *Machine) MachineError!void {
-    const requested = try symbolValue(evaluator, try evaluator.popOwned());
+    const requested = try popSymbol(evaluator);
     return installLookup(evaluator, requested, .body);
 }
 
 fn doc(evaluator: *Machine) MachineError!void {
-    const requested = try symbolValue(evaluator, try evaluator.popOwned());
+    const requested = try popSymbol(evaluator);
     return installLookup(evaluator, requested, .doc);
 }
 
@@ -305,14 +296,13 @@ const LookupMode = enum { body, doc };
 fn installLookup(evaluator: *Machine, requested: u32, mode: LookupMode) MachineError!void {
     const driver = try evaluator.allocator().create(LookupDriver);
     driver.* = .{ .requested = requested, .mode = mode, .resolution = .init(evaluator, requested) };
-    evaluator.installWorkDriver(driver, LookupDriver.advance, LookupDriver.destroy);
+    evaluator.installWorkDriver(driver);
 }
 const LookupDriver = struct {
     requested: u32,
     mode: LookupMode,
     resolution: machine.ResolutionCursor,
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *LookupDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *LookupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) switch (self.resolution.advance()) {
@@ -337,21 +327,20 @@ const LookupDriver = struct {
         };
         return .yielded;
     }
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *LookupDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *LookupDriver) void {
         self.resolution.deinit();
         allocator.destroy(self);
     }
 };
 
 fn which(evaluator: *Machine) MachineError!void {
-    const requested = try symbolValue(evaluator, try evaluator.popOwned());
+    const requested = try popSymbol(evaluator);
     const driver = try evaluator.allocator().create(WhichDriver);
     driver.* = .{
         .requested = requested,
         .resolution = .init(evaluator, requested),
     };
-    evaluator.installWorkDriver(driver, WhichDriver.advance, WhichDriver.destroy);
+    evaluator.installWorkDriver(driver);
 }
 
 const WhichDriver = struct {
@@ -385,7 +374,7 @@ const WhichDriver = struct {
         self.add(.{ .bytes = @tagName(self.resolved.?.lease.visibility) });
         if (self.resolved.?.home) |home| {
             self.add(.{ .bytes = " generation " });
-            self.add(.{ .value = .{ .int = @intCast(home.generation) } });
+            self.add(.{ .value = .{ .int = @intCast(home.generationNumber()) } });
         }
         if (self.resolved.?.lease.effect) |effect| {
             self.add(.{ .bytes = " " });
@@ -393,8 +382,7 @@ const WhichDriver = struct {
         }
         self.initialized = true;
     }
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *WhichDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *WhichDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.resolved == null) {
             var budget: usize = machine.kernel_poll_quantum;
@@ -454,8 +442,7 @@ const WhichDriver = struct {
         output.flush() catch return evaluator.fail(.io, "standard output flush failed");
         return .completed;
     }
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *WhichDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *WhichDriver) void {
         if (self.resolution) |*cursor| cursor.deinit();
         if (self.shadow_cursor) |*cursor| cursor.deinit();
         if (self.plan) |*plan| plan.deinit();
@@ -468,10 +455,10 @@ const WhichDriver = struct {
 };
 
 fn see(evaluator: *Machine) MachineError!void {
-    const requested = try symbolValue(evaluator, try evaluator.popOwned());
+    const requested = try popSymbol(evaluator);
     const driver = try evaluator.allocator().create(SeeDriver);
     driver.* = .{ .requested = requested, .resolution = .init(evaluator, requested) };
-    evaluator.installWorkDriver(driver, SeeDriver.advance, SeeDriver.destroy);
+    evaluator.installWorkDriver(driver);
 }
 
 const SeeDriver = struct {
@@ -515,8 +502,7 @@ const SeeDriver = struct {
         self.plan = .init(allocator, self.actions[0..self.action_count]);
     }
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *SeeDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *SeeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.resolved == null) {
             var budget: usize = machine.kernel_poll_quantum;
@@ -584,26 +570,24 @@ const SeeDriver = struct {
         return .completed;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *SeeDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *SeeDriver) void {
         if (self.resolution) |*cursor| cursor.deinit();
-        if (self.annotation_materializer) |*materializer| materializer.deinit();
+        if (self.annotation_materializer) |*materializer| materializer.retire(releases);
         if (self.plan) |*plan| plan.deinit();
         if (self.rendered) |rendered| allocator.free(rendered);
-        if (self.annotation) |annotation| heap.releaseValue(allocator, annotation);
+        if (self.annotation) |annotation| releases.releaseValue(annotation);
         if (self.annotation_items) |items| allocator.free(items);
         if (self.resolved) |*resolved| resolved.deinit(allocator);
         allocator.destroy(self);
     }
 };
 
-fn symbolValue(evaluator: *Machine, item: Value) MachineError!u32 {
-    return switch (item) {
+fn popSymbol(evaluator: *Machine) MachineError!u32 {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    return switch (item.borrow()) {
         .symbol => |id| id,
-        else => {
-            heap.releaseValue(evaluator.allocator(), item);
-            return evaluator.typeError("a symbol name");
-        },
+        else => evaluator.typeError("a symbol name"),
     };
 }
 

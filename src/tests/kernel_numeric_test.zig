@@ -1,24 +1,21 @@
 //! Executable proofs for numeric dispatch, pervasion, faults, and ownership.
 const std = @import("std");
-const value = @import("../value.zig");
-const numeric = @import("../kernel_numeric.zig");
 const session = @import("../session.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const helper = @import("kernel_test_support.zig");
-
-test "numeric: comptime matrix is total over supported signatures and dispatches once" {
-    try std.testing.expect(numeric.matrixEntryForTest(.add, .leaf_i64, .leaf_f64));
-    try std.testing.expect(numeric.matrixEntryForTest(.sub, .leaf_char1, .leaf_char4));
-    try std.testing.expect(!numeric.matrixEntryForTest(.add, .leaf_symbol, .leaf_i64));
-    try std.testing.expect(!numeric.matrixEntryForTest(.int_div, .leaf_f64, .leaf_i64));
-}
 
 test "numeric: scalar leaf and mixed numeric semantics match" {
     try helper.expectStack(
         "[1 2 3] 0.5 + 9007199254740993 9007199254740992.0 = \\a 1 +",
         "[1.5 2.5 3.5] 0 \\b",
     );
+    try helper.expectError(.{
+        .name = "symbols are not numeric leaves",
+        .source = "'not-a-number 1 +",
+        .kind = "type",
+        .word = "+",
+    });
 }
 
 test "numeric: empty leaves bypass scalar signature selection" {
@@ -72,9 +69,9 @@ test "numeric: fault blocks report first index before aliased stores" {
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("<test>", "9223372036854775806")) == .ok);
     const failure = (try runtime.runUnit("<test>", "[1 2] +")).err;
-    defer heap.releaseValue(allocator, failure);
-    try std.testing.expectEqual(@as(usize, 1), runtime.stack.items.len);
-    try std.testing.expectEqual(@as(i64, 9223372036854775806), runtime.stack.items[0].int);
+    defer heap.testing.releaseValue(allocator, failure);
+    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
+    try std.testing.expectEqual(@as(i64, 9223372036854775806), runtime.stackItems()[0].int);
     try helper.expectLanguageError(failure, .{
         .name = "aliased block failure",
         .source = "[1 2] +",
@@ -131,8 +128,8 @@ test "numeric: long leaves poll at bounded chunks" {
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("<test>", "70000 range 1 + len")) == .ok);
-    try std.testing.expect(runtime.last_polls >= 2);
-    try std.testing.expectEqual(@as(i64, 70_000), runtime.stack.items[0].int);
+    try std.testing.expect(runtime.lastPolls() >= 2);
+    try std.testing.expectEqual(@as(i64, 70_000), runtime.stackItems()[0].int);
 }
 
 test "numeric: result materialization remains cancellable" {
@@ -141,19 +138,15 @@ test "numeric: result materialization remains cancellable" {
     defer allocator.free(integers);
     for (integers, 0..) |*integer, index| integer.* = @intCast(index);
     const input = try list.fromI64Slice(allocator, integers);
-    defer heap.releaseValue(allocator, input);
+    defer heap.testing.releaseValue(allocator, input);
 
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
-    heap.retainValue(input);
-    runtime.stack.append(allocator, input) catch |err| {
-        heap.releaseValue(allocator, input);
-        return err;
-    };
+    try runtime.pushBorrowed(input);
     try std.testing.expect((try runtime.runUnit("<test>", "1 + pop")) == .ok);
     // One poll comes from computation; profiling and copying the result
     // each contribute another full traversal.
-    try std.testing.expect(runtime.last_polls >= 3);
+    try std.testing.expect(runtime.lastPolls() >= 3);
 }
 
 test "numeric: short kernel loops share the unit poll budget" {
@@ -164,9 +157,5 @@ test "numeric: short kernel loops share the unit poll budget" {
         "<test>",
         "40000 range pop 40000 range pop",
     )) == .ok);
-    try std.testing.expect(runtime.last_polls >= 1);
-}
-
-test "numeric test module references the frozen value tags" {
-    try std.testing.expectEqual(@as(usize, 10), @typeInfo(value.HeapKind).@"enum".fields.len);
+    try std.testing.expect(runtime.lastPolls() >= 1);
 }

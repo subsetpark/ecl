@@ -14,9 +14,14 @@ const Entry = struct {
     root: value.Value,
     spans: reader.SpanTable,
     source_name: []u8,
-    fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
-        self.spans.deinit(allocator);
-        heap.releaseValue(allocator, self.root);
+    fn deinit(
+        self: *Entry,
+        allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
+    ) void {
+        var spans_cursor = reader.SpanTable.RetireCursor.init(&self.spans);
+        while (spans_cursor.advance(releases) == .pending) {}
+        releases.releaseValue(self.root);
         allocator.free(self.source_name);
         self.* = undefined;
     }
@@ -24,20 +29,49 @@ const Entry = struct {
 /// Span tables retain their source code roots. Besides keeping definitions'
 /// provenance alive, this prevents a freed header address from being reused
 /// while a stale identity key remains in the archive.
-pub const SpanArchive = struct {
-    allocator: std.mem.Allocator,
+const SpanArchiveState = struct {
+    host: *const heap.HostCleanup,
     mutex: std.Io.Mutex = .init,
     entries: poll.ChunkList(Entry),
-    pub fn init(allocator: std.mem.Allocator) SpanArchive {
-        return .{ .allocator = allocator, .entries = .init(allocator) };
+};
+
+pub const SpanArchive = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn privateState(self: *const SpanArchive) *SpanArchiveState {
+        std.debug.assert(self.* != .consumed);
+        return @ptrFromInt(@intFromEnum(self.*));
+    }
+
+    pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!SpanArchive {
+        const owner_allocator = host.allocator();
+        const backing = try owner_allocator.create(SpanArchiveState);
+        backing.* = .{
+            .host = host,
+            .entries = .init(owner_allocator),
+        };
+        return @enumFromInt(@intFromPtr(backing));
+    }
+
+    fn allocator(self: *const SpanArchive) std.mem.Allocator {
+        return self.privateState().host.allocator();
+    }
+
+    fn releaseDomain(self: *const SpanArchive) *heap.ReleaseDomain {
+        return heap.hostDomain(self.privateState().host);
     }
     pub fn deinit(self: *SpanArchive) void {
-        std.Io.Threaded.mutexLock(&self.mutex);
-        var entries = self.entries.iterator();
-        while (entries.next()) |entry| @constCast(entry).deinit(self.allocator);
-        self.entries.deinit();
-        std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.* = undefined;
+        const backing = self.privateState();
+        const owner_allocator = backing.host.allocator();
+        std.Io.Threaded.mutexLock(&backing.mutex);
+        var entries = backing.entries.iterator();
+        while (entries.next()) |entry| @constCast(entry).deinit(self.allocator(), self.releaseDomain());
+        backing.entries.retire(self.releaseDomain());
+        std.Io.Threaded.mutexUnlock(&backing.mutex);
+        backing.host.drain();
+        owner_allocator.destroy(backing);
+        self.* = .consumed;
     }
     /// Moves `parsed`'s provenance and source name into the archive and takes
     /// ownership of `root`. The caller still owns both on allocation failure.
@@ -64,7 +98,7 @@ pub const SpanArchive = struct {
                 .archive = archive,
                 .parsed = parsed,
                 .root = root,
-                .writer = .init(&parsed.spans, archive.allocator, root.list, parsed.spans.top),
+                .writer = .init(&parsed.spans, archive.allocator(), root.list, parsed.spans.top),
             };
         }
         pub fn deinit(self: *AbsorbCursor) void {
@@ -78,21 +112,22 @@ pub const SpanArchive = struct {
                     .complete => result: {
                         self.writer.deinit();
                         if (self.parsed.spans.top.len != 0)
-                            self.archive.allocator.free(self.parsed.spans.top);
+                            self.archive.allocator().free(self.parsed.spans.top);
                         self.parsed.spans.top = &.{};
                         self.phase = .publish;
                         break :result .pending;
                     },
                 },
                 .publish => result: {
-                    std.Io.Threaded.mutexLock(&self.archive.mutex);
-                    defer std.Io.Threaded.mutexUnlock(&self.archive.mutex);
-                    try self.archive.entries.append(.{
+                    const backing = self.archive.privateState();
+                    std.Io.Threaded.mutexLock(&backing.mutex);
+                    defer std.Io.Threaded.mutexUnlock(&backing.mutex);
+                    try backing.entries.append(.{
                         .root = self.root,
                         .spans = self.parsed.spans,
                         .source_name = self.parsed.source_name,
                     });
-                    self.parsed.spans = .init(self.archive.allocator);
+                    self.parsed.spans = .init(self.archive.allocator());
                     self.parsed.source_name = &.{};
                     self.phase = .complete;
                     break :result .complete;
@@ -110,7 +145,7 @@ pub const SpanArchive = struct {
     }
     pub fn locate(
         self: *const SpanArchive,
-        header: *const value.Header,
+        header: *value.ListHandle,
         index: usize,
     ) ?LocatedSpan {
         var cursor = self.locateCursor(header, index);
@@ -122,7 +157,7 @@ pub const SpanArchive = struct {
     pub const LocateProgress = union(enum) { pending, complete: ?LocatedSpan };
     pub const LocateCursor = struct {
         entries: poll.ChunkList(Entry).ReverseIterator,
-        header: *const value.Header,
+        header: *value.ListHandle,
         index: usize,
         active: ?struct {
             entry: *const Entry,
@@ -152,25 +187,31 @@ pub const SpanArchive = struct {
     };
     pub fn locateCursor(
         self: *const SpanArchive,
-        header: *const value.Header,
+        header: *value.ListHandle,
         index: usize,
     ) LocateCursor {
-        std.Io.Threaded.mutexLock(&@constCast(self).mutex);
-        defer std.Io.Threaded.mutexUnlock(&@constCast(self).mutex);
-        return .{ .entries = self.entries.reverseIterator(), .header = header, .index = index };
+        const backing = self.privateState();
+        std.Io.Threaded.mutexLock(&backing.mutex);
+        defer std.Io.Threaded.mutexUnlock(&backing.mutex);
+        return .{ .entries = backing.entries.reverseIterator(), .header = header, .index = index };
     }
 };
+comptime {
+    heap.requireOpaqueHostRoot(SpanArchive, SpanArchiveState);
+}
 test "span archive owns roots and moved provenance" {
     const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
     var diag: lexer.Diag = .{};
-    const result = try reader.read(allocator, "fixture.ecl", "(1 missing)", &diag);
+    const result = try reader.read(host.cleanup(), "fixture.ecl", "(1 missing)", &diag);
     var parsed = result.complete;
-    const nested = parsed.forms[0].list;
-    const root = try list.fromValuesGeneric(allocator, parsed.forms);
+    const nested = parsed.values()[0].list;
+    const root = try list.fromValuesGeneric(allocator, parsed.values());
     const root_header = root.list;
-    var archive = SpanArchive.init(allocator);
+    var archive = try SpanArchive.init(host.cleanup());
     defer archive.deinit();
-    try archive.absorb(&parsed, root);
+    try archive.absorb(parsed.borrow(), root);
     parsed.deinit();
     try std.testing.expectEqual(lexer.Span{ .line = 1, .col = 1 }, archive.locate(root_header, 0).?.span);
     const location = archive.locate(nested, 1).?;

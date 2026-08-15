@@ -6,6 +6,7 @@ const heap = @import("heap.zig");
 
 pub const Value = value.Value;
 pub const Header = value.Header;
+pub const ListHandle = value.ListHandle;
 pub const HeapKind = value.HeapKind;
 
 pub const Error = error{ OutOfMemory, NotAList, IndexOutOfBounds };
@@ -52,18 +53,18 @@ pub fn fromI64Slice(
     allocator: std.mem.Allocator,
     source: []const i64,
 ) error{OutOfMemory}!Value {
-    const header = try heap.allocHeader(allocator, .leaf_i64, source.len, initialCapacity(source.len));
-    @memcpy(heap.initI64s(header)[0..source.len], source);
-    return .{ .list = heap.publish(header) };
+    var builder = try heap.ListBuilder(.leaf_i64).init(allocator, source.len, initialCapacity(source.len));
+    @memcpy(builder.items()[0..source.len], source);
+    return .{ .list = builder.finish() };
 }
 
 pub fn fromF64Slice(
     allocator: std.mem.Allocator,
     source: []const f64,
 ) error{OutOfMemory}!Value {
-    const header = try heap.allocHeader(allocator, .leaf_f64, source.len, initialCapacity(source.len));
-    @memcpy(heap.initF64s(header)[0..source.len], source);
-    return .{ .list = heap.publish(header) };
+    var builder = try heap.ListBuilder(.leaf_f64).init(allocator, source.len, initialCapacity(source.len));
+    @memcpy(builder.items()[0..source.len], source);
+    return .{ .list = builder.finish() };
 }
 
 pub fn fromCodepoints(
@@ -74,34 +75,35 @@ pub fn fromCodepoints(
     for (source) |codepoint| max_codepoint = @max(max_codepoint, codepoint);
     const cap = initialCapacity(source.len);
     if (max_codepoint <= std.math.maxInt(u8)) {
-        const header = try heap.allocHeader(allocator, .leaf_char1, source.len, cap);
-        for (source, 0..) |codepoint, index| heap.initChars8(header)[index] = @intCast(codepoint);
-        return .{ .list = heap.publish(header) };
+        var builder = try heap.ListBuilder(.leaf_char1).init(allocator, source.len, cap);
+        for (source, 0..) |codepoint, index| builder.items()[index] = @intCast(codepoint);
+        return .{ .list = builder.finish() };
     }
     if (max_codepoint <= std.math.maxInt(u16)) {
-        const header = try heap.allocHeader(allocator, .leaf_char2, source.len, cap);
-        for (source, 0..) |codepoint, index| heap.initChars16(header)[index] = @intCast(codepoint);
-        return .{ .list = heap.publish(header) };
+        var builder = try heap.ListBuilder(.leaf_char2).init(allocator, source.len, cap);
+        for (source, 0..) |codepoint, index| builder.items()[index] = @intCast(codepoint);
+        return .{ .list = builder.finish() };
     }
-    const header = try heap.allocHeader(allocator, .leaf_char4, source.len, cap);
-    @memcpy(heap.initChars32(header)[0..source.len], source);
-    return .{ .list = heap.publish(header) };
+    var builder = try heap.ListBuilder(.leaf_char4).init(allocator, source.len, cap);
+    @memcpy(builder.items()[0..source.len], source);
+    return .{ .list = builder.finish() };
 }
 
 pub fn emptyLike(
     allocator: std.mem.Allocator,
     source: Value,
 ) error{ OutOfMemory, NotAList }!Value {
-    return .{ .list = heap.publish(try heap.allocHeader(allocator, (try listHeader(source)).kind(), 0, 0)) };
+    var builder = try heap.AnyListBuilder.init(allocator, (try listHeader(source)).kind(), 0, 0);
+    return .{ .list = builder.finish() };
 }
 
 pub fn fromSymbolIds(
     allocator: std.mem.Allocator,
     source: []const u32,
 ) error{OutOfMemory}!Value {
-    const header = try heap.allocHeader(allocator, .leaf_symbol, source.len, initialCapacity(source.len));
-    @memcpy(heap.initSymbols(header)[0..source.len], source);
-    return .{ .list = heap.publish(header) };
+    var builder = try heap.ListBuilder(.leaf_symbol).init(allocator, source.len, initialCapacity(source.len));
+    @memcpy(builder.items()[0..source.len], source);
+    return .{ .list = builder.finish() };
 }
 
 pub fn len(collection: Value) error{NotAList}!usize {
@@ -132,21 +134,21 @@ pub fn atUnchecked(collection: Value, index: usize) Value {
     };
 }
 
-/// Functional-update ownership contract: `collection` remains owned by the
-/// caller. If the result has the same header, ownership is unchanged; if it
-/// has a different header, the caller owns that additional result.
+/// `collection` remains owned by the caller. The result tag states whether
+/// that owner was updated or an additional root was returned.
 pub fn append(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     collection: Value,
     item: Value,
-) Error!Value {
+) Error!heap.UpdateResult {
     const header = try listHeader(collection);
-    const unique = heap.claimUnique(header) orelse
-        return rebuildWithItem(allocator, collection, item, false);
+    const unique = heap.claimUniqueList(header) orelse
+        return rebuildWithItem(allocator, releases, collection, item, false);
 
     const used: usize = @intCast(header.length());
     if (used == 0 and header.kind() == .generic_spine) {
-        return rebuildWithItem(allocator, collection, item, true);
+        return rebuildWithItem(allocator, releases, collection, item, true);
     }
 
     const same_kind = switch (header.kind()) {
@@ -159,7 +161,7 @@ pub fn append(
         .leaf_symbol => item == .symbol,
         .dict, .task, .reserved_mask => return error.NotAList,
     };
-    if (!same_kind) return rebuildWithItem(allocator, collection, item, true);
+    if (!same_kind) return rebuildWithItem(allocator, releases, collection, item, true);
 
     if (used == heap.capacity(header)) {
         const new_capacity = growCapacity(used + 1);
@@ -168,16 +170,16 @@ pub fn append(
     switch (header.kind()) {
         .generic_spine => {
             heap.retainValue(item);
-            heap.writeUnique(unique, used, item);
+            heap.writeUniqueList(unique, used, item);
         },
-        .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => heap.writeUnique(unique, used, item),
+        .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => heap.writeUniqueList(unique, used, item),
         .dict, .task, .reserved_mask => return error.NotAList,
     }
-    heap.setUniqueLength(unique, used + 1);
-    return collection;
+    heap.setUniqueListLength(unique, used + 1);
+    return .{ .in_place = collection };
 }
 
-fn listHeader(collection: Value) error{NotAList}!*Header {
+fn listHeader(collection: Value) error{NotAList}!*ListHandle {
     return switch (collection) {
         .list => |header| switch (header.kind()) {
             .generic_spine,
@@ -217,15 +219,15 @@ fn profile(source: []const Value) Profile {
 }
 
 fn fromIntValues(allocator: std.mem.Allocator, source: []const Value) !Value {
-    const header = try heap.allocHeader(allocator, .leaf_i64, source.len, initialCapacity(source.len));
-    for (source, 0..) |item, index| heap.initI64s(header)[index] = item.int;
-    return .{ .list = heap.publish(header) };
+    var builder = try heap.ListBuilder(.leaf_i64).init(allocator, source.len, initialCapacity(source.len));
+    for (source, 0..) |item, index| builder.items()[index] = item.int;
+    return .{ .list = builder.finish() };
 }
 
 fn fromFloatValues(allocator: std.mem.Allocator, source: []const Value) !Value {
-    const header = try heap.allocHeader(allocator, .leaf_f64, source.len, initialCapacity(source.len));
-    for (source, 0..) |item, index| heap.initF64s(header)[index] = item.float;
-    return .{ .list = heap.publish(header) };
+    var builder = try heap.ListBuilder(.leaf_f64).init(allocator, source.len, initialCapacity(source.len));
+    for (source, 0..) |item, index| builder.items()[index] = item.float;
+    return .{ .list = builder.finish() };
 }
 
 fn fromCharValues(
@@ -235,59 +237,59 @@ fn fromCharValues(
 ) !Value {
     const cap = initialCapacity(source.len);
     if (max_codepoint <= std.math.maxInt(u8)) {
-        const header = try heap.allocHeader(allocator, .leaf_char1, source.len, cap);
-        for (source, 0..) |item, index| heap.initChars8(header)[index] = @intCast(item.char);
-        return .{ .list = heap.publish(header) };
+        var builder = try heap.ListBuilder(.leaf_char1).init(allocator, source.len, cap);
+        for (source, 0..) |item, index| builder.items()[index] = @intCast(item.char);
+        return .{ .list = builder.finish() };
     }
     if (max_codepoint <= std.math.maxInt(u16)) {
-        const header = try heap.allocHeader(allocator, .leaf_char2, source.len, cap);
-        for (source, 0..) |item, index| heap.initChars16(header)[index] = @intCast(item.char);
-        return .{ .list = heap.publish(header) };
+        var builder = try heap.ListBuilder(.leaf_char2).init(allocator, source.len, cap);
+        for (source, 0..) |item, index| builder.items()[index] = @intCast(item.char);
+        return .{ .list = builder.finish() };
     }
-    const header = try heap.allocHeader(allocator, .leaf_char4, source.len, cap);
-    for (source, 0..) |item, index| heap.initChars32(header)[index] = item.char;
-    return .{ .list = heap.publish(header) };
+    var builder = try heap.ListBuilder(.leaf_char4).init(allocator, source.len, cap);
+    for (source, 0..) |item, index| builder.items()[index] = item.char;
+    return .{ .list = builder.finish() };
 }
 
 fn fromSymbolValues(allocator: std.mem.Allocator, source: []const Value) !Value {
-    const header = try heap.allocHeader(allocator, .leaf_symbol, source.len, initialCapacity(source.len));
-    for (source, 0..) |item, index| heap.initSymbols(header)[index] = item.symbol;
-    return .{ .list = heap.publish(header) };
+    var builder = try heap.ListBuilder(.leaf_symbol).init(allocator, source.len, initialCapacity(source.len));
+    for (source, 0..) |item, index| builder.items()[index] = item.symbol;
+    return .{ .list = builder.finish() };
 }
 
 fn fromGenericValues(allocator: std.mem.Allocator, source: []const Value) !Value {
-    const header = try heap.allocHeader(
+    var builder = try heap.ListBuilder(.generic_spine).init(
         allocator,
-        .generic_spine,
         source.len,
         initialCapacity(source.len),
     );
     for (source, 0..) |item, index| {
         heap.retainValue(item);
-        heap.initValues(header)[index] = item;
+        builder.items()[index] = item;
     }
-    return .{ .list = heap.publish(header) };
+    return .{ .list = builder.finish() };
 }
 
 fn rebuildWithItem(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     collection: Value,
     item: Value,
     adopt: bool,
-) Error!Value {
+) Error!heap.UpdateResult {
     const old_len = try len(collection);
     const materialized = try allocator.alloc(Value, old_len + 1);
     defer allocator.free(materialized);
     for (0..old_len) |index| materialized[index] = try at(collection, index);
     materialized[old_len] = item;
     const replacement = try fromValues(allocator, materialized);
-    if (!adopt) return replacement;
-    heap.adoptRepresentation(
-        allocator,
-        heap.claimUnique(collection.list).?,
-        heap.claimUnique(replacement.list).?,
+    if (!adopt) return .{ .replacement = replacement };
+    heap.adoptListRepresentationDeferred(
+        releases,
+        heap.claimUniqueList(collection.list).?,
+        heap.claimUniqueList(replacement.list).?,
     );
-    return collection;
+    return .{ .in_place = collection };
 }
 
 fn initialCapacity(used: usize) usize {
@@ -302,26 +304,28 @@ fn growCapacity(minimum: usize) usize {
 
 fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
     const child = try fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
-    defer heap.releaseValue(allocator, child);
+    defer heap.testing.releaseValue(allocator, child);
     const parent = try fromValues(allocator, &.{ child, .{ .word = 7 } });
-    defer heap.releaseValue(allocator, parent);
+    defer heap.testing.releaseValue(allocator, parent);
     const generic = try fromValuesGeneric(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
-    defer heap.releaseValue(allocator, generic);
+    defer heap.testing.releaseValue(allocator, generic);
     const ints = try fromI64Slice(allocator, &.{ 1, 2 });
-    defer heap.releaseValue(allocator, ints);
+    defer heap.testing.releaseValue(allocator, ints);
     const floats = try fromF64Slice(allocator, &.{ 1.0, 2.0 });
-    defer heap.releaseValue(allocator, floats);
+    defer heap.testing.releaseValue(allocator, floats);
     const chars = try fromCodepoints(allocator, &.{ 'a', 0x100, 0x10000 });
-    defer heap.releaseValue(allocator, chars);
+    defer heap.testing.releaseValue(allocator, chars);
     const symbols = try fromSymbolIds(allocator, &.{ 1, 2 });
-    defer heap.releaseValue(allocator, symbols);
+    defer heap.testing.releaseValue(allocator, symbols);
 }
 
 fn appendFailureProbe(allocator: std.mem.Allocator) !void {
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     const original = try fromValues(allocator, &.{ .{ .char = 'a' }, .{ .char = 'b' } });
-    defer heap.releaseValue(allocator, original);
-    const result = try append(allocator, original, .{ .int = 3 });
-    if (result.list != original.list) heap.releaseValue(allocator, result);
+    defer heap.testing.releaseValue(allocator, original);
+    const result = try append(allocator, cleanup.domain(), original, .{ .int = 3 });
+    if (result == .replacement) heap.testing.releaseValue(allocator, result.value());
 }
 
 test "construction specializes every homogeneous profile" {
@@ -335,7 +339,7 @@ test "construction specializes every homogeneous profile" {
     };
     for (cases) |case| {
         const collection = try fromValues(allocator, case.values);
-        defer heap.releaseValue(allocator, collection);
+        defer heap.testing.releaseValue(allocator, collection);
         try std.testing.expectEqual(case.kind, collection.list.kind());
         for (case.values, 0..) |expected, index| {
             try std.testing.expectEqual(expected, try at(collection, index));
@@ -345,16 +349,23 @@ test "construction specializes every homogeneous profile" {
 
 test "unique append uses slack while shared append copies" {
     const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
     const unique = try fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
-    defer heap.releaseValue(allocator, unique);
-    const unique_result = try append(allocator, unique, .{ .int = 3 });
+    defer heap.testing.releaseValue(allocator, unique);
+    const unique_update = try append(allocator, releases, unique, .{ .int = 3 });
+    try std.testing.expect(unique_update == .in_place);
+    const unique_result = unique_update.value();
     try std.testing.expectEqual(unique.list, unique_result.list);
     try std.testing.expectEqual(@as(i64, 3), (try at(unique_result, 2)).int);
 
     heap.incRef(unique.list);
-    defer heap.decRef(allocator, unique.list);
-    const shared_result = try append(allocator, unique, .{ .int = 4 });
-    defer heap.releaseValue(allocator, shared_result);
+    defer heap.testing.decRef(allocator, unique.list);
+    const shared_update = try append(allocator, releases, unique, .{ .int = 4 });
+    try std.testing.expect(shared_update == .replacement);
+    const shared_result = shared_update.value();
+    defer heap.testing.releaseValue(allocator, shared_result);
     try std.testing.expect(unique.list != shared_result.list);
     try std.testing.expectEqual(@as(usize, 3), try len(unique));
     try std.testing.expectEqual(@as(i64, 4), (try at(shared_result, 3)).int);
@@ -362,13 +373,16 @@ test "unique append uses slack while shared append copies" {
 
 test "char append promotes width then generalizes on type mismatch" {
     const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
     const chars = try fromValues(allocator, &.{.{ .char = 'a' }});
-    defer heap.releaseValue(allocator, chars);
-    _ = try append(allocator, chars, .{ .char = 0x100 });
+    defer heap.testing.releaseValue(allocator, chars);
+    _ = try append(allocator, releases, chars, .{ .char = 0x100 });
     try std.testing.expectEqual(HeapKind.leaf_char2, chars.list.kind());
-    _ = try append(allocator, chars, .{ .char = 0x10000 });
+    _ = try append(allocator, releases, chars, .{ .char = 0x10000 });
     try std.testing.expectEqual(HeapKind.leaf_char4, chars.list.kind());
-    _ = try append(allocator, chars, .{ .word = 7 });
+    _ = try append(allocator, releases, chars, .{ .word = 7 });
     try std.testing.expectEqual(HeapKind.generic_spine, chars.list.kind());
 }
 

@@ -31,13 +31,17 @@ const WalkFrame = struct {
 
 pub const LowerProgress = union(enum) {
     pending,
-    complete: []SpannedValue,
+    complete: struct {
+        forms: []SpannedValue,
+        values: heap.OwnedValueBuffer,
+    },
 };
 
 /// Resumable binder validation and lowering. One call performs at most one
 /// token byte, hash-table probe, nested-list edge, or output operation.
 pub const LowerCursor = struct {
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     names: []const Name,
     body: []const SpannedValue,
     binder_span: Span,
@@ -61,6 +65,7 @@ pub const LowerCursor = struct {
     word_index: usize = 0,
     output_count: usize = 2,
     output: ?[]SpannedValue = null,
+    output_values: ?heap.OwnedValueBuffer = null,
     output_index: usize = 0,
     emit_body_index: usize = 0,
     emit_step: usize = 0,
@@ -72,6 +77,7 @@ pub const LowerCursor = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
         names: []const Name,
         body: []const SpannedValue,
         binder_span: Span,
@@ -79,6 +85,7 @@ pub const LowerCursor = struct {
     ) error{OutOfMemory}!LowerCursor {
         return .{
             .allocator = allocator,
+            .releases = releases,
             .names = names,
             .body = body,
             .binder_span = binder_span,
@@ -92,12 +99,10 @@ pub const LowerCursor = struct {
     pub fn deinit(self: *LowerCursor) void {
         self.locals_init.deinit();
         if (self.locals) |*locals| locals.deinit();
-        if (self.empty_materializer) |*materializer| materializer.deinit();
-        if (self.wrapper_materializer) |*materializer| materializer.deinit();
-        if (self.output) |output| {
-            for (output[0..self.output_index]) |form| heap.releaseValue(self.allocator, form.value);
-            self.allocator.free(output);
-        }
+        if (self.empty_materializer) |*materializer| materializer.retire(self.releases);
+        if (self.wrapper_materializer) |*materializer| materializer.retire(self.releases);
+        if (self.output_values) |*values| values.deinit();
+        if (self.output) |output| self.allocator.free(output);
         self.allocator.free(self.local_indices);
         self.walk.deinit();
         self.* = undefined;
@@ -256,6 +261,7 @@ pub const LowerCursor = struct {
 
     fn append(self: *LowerCursor, form: SpannedValue) void {
         self.output.?[self.output_index] = form;
+        self.output_values.?.appendOwned(form.value);
         self.output_index += 1;
     }
 
@@ -268,8 +274,10 @@ pub const LowerCursor = struct {
             self.atom(.{ .word = self.words[5] });
             const output = self.output.?;
             self.output = null;
+            const values = self.output_values.?.take();
+            self.output_values = null;
             self.phase = .complete;
-            return .{ .complete = output };
+            return .{ .complete = .{ .forms = output, .values = values } };
         }
         if (self.local_indices[self.emit_body_index]) |index| {
             switch (self.emit_step) {
@@ -349,6 +357,7 @@ pub const LowerCursor = struct {
                 self.output_count = std.math.add(usize, self.output_count, self.names.len) catch
                     return error.OutOfMemory;
                 self.output = try self.allocator.alloc(SpannedValue, self.output_count);
+                self.output_values = try .init(self.releases, self.output_count);
                 self.empty_materializer = .init(self.allocator, &.{});
                 self.phase = .empty;
                 break :result .pending;
@@ -381,32 +390,41 @@ pub const LowerCursor = struct {
 /// Borrows `body` and returns a newly-owned slice whose heap values each own
 /// one reference. The caller frees the slice and releases those values.
 pub fn lower(
-    allocator: std.mem.Allocator,
+    host: *const heap.HostCleanup,
     names: []const Name,
     body: []const SpannedValue,
     binder_span: Span,
     diag: *Diag,
 ) Error![]SpannedValue {
-    var cursor = try LowerCursor.init(allocator, names, body, binder_span, diag);
+    const allocator = host.allocator();
+    const releases = heap.hostDomain(host);
+    defer host.drain();
+    var cursor = try LowerCursor.init(allocator, releases, names, body, binder_span, diag);
     defer cursor.deinit();
     while (true) switch (try cursor.advance()) {
         .pending => {},
-        .complete => |forms| return forms,
+        .complete => |completed| {
+            for (completed.forms) |form| heap.retainValue(form.value);
+            var values = completed.values;
+            values.deinit();
+            return completed.forms;
+        },
     };
 }
 
 fn releaseForms(allocator: std.mem.Allocator, forms: []const SpannedValue) void {
-    for (forms) |form| heap.releaseValue(allocator, form.value);
+    for (forms) |form| heap.testing.releaseValue(allocator, form.value);
 }
 
 test "canonical lowering fixture" {
     const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
     const printer = @import("print.zig");
     const x = try intern.intern("x");
     const multiply = try intern.intern("*");
     var diag: Diag = .{};
     const lowered = try lower(
-        allocator,
+        host.cleanup(),
         &.{.{ .bytes = "x", .span = .{} }},
         &.{
             .{ .value = .{ .word = x }, .span = .{} },
@@ -422,7 +440,7 @@ test "canonical lowering fixture" {
     defer allocator.free(values);
     for (lowered, 0..) |form, index| values[index] = form.value;
     const quotation = try list.fromValues(allocator, values);
-    defer heap.releaseValue(allocator, quotation);
+    defer heap.testing.releaseValue(allocator, quotation);
     const rendered = try printer.toOwnedString(allocator, quotation);
     defer allocator.free(rendered);
     try std.testing.expectEqualStrings(
@@ -433,10 +451,11 @@ test "canonical lowering fixture" {
 
 test "name validation errors" {
     const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
     var diag: Diag = .{};
-    try std.testing.expectError(error.Parse, lower(allocator, &.{}, &.{}, .{}, &diag));
+    try std.testing.expectError(error.Parse, lower(host.cleanup(), &.{}, &.{}, .{}, &diag));
     try std.testing.expectError(error.Parse, lower(
-        allocator,
+        host.cleanup(),
         &.{
             .{ .bytes = "x", .span = .{} },
             .{ .bytes = "x", .span = .{ .col = 4 } },
@@ -446,7 +465,7 @@ test "name validation errors" {
         &diag,
     ));
     try std.testing.expectError(error.Parse, lower(
-        allocator,
+        host.cleanup(),
         &.{.{ .bytes = "module.x", .span = .{} }},
         &.{},
         .{},
@@ -456,12 +475,13 @@ test "name validation errors" {
 
 test "boundary-crossing rejection" {
     const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
     const x = try intern.intern("x");
     const nested = try list.fromValues(allocator, &.{.{ .word = x }});
-    defer heap.releaseValue(allocator, nested);
+    defer heap.testing.releaseValue(allocator, nested);
     var diag: Diag = .{};
     try std.testing.expectError(error.Parse, lower(
-        allocator,
+        host.cleanup(),
         &.{.{ .bytes = "x", .span = .{} }},
         &.{.{ .value = nested, .span = .{ .col = 6 } }},
         .{},

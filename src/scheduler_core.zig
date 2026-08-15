@@ -70,6 +70,7 @@ pub const UnitEvent = union(enum) {
 pub const UnitCommand = union(enum) {
     none,
     enqueue,
+    cancel_before_dispatch,
     register_wait,
     race_cancellation,
     close_scope,
@@ -90,7 +91,13 @@ pub fn decideUnit(before: Unit, event: UnitEvent) TransitionError!UnitDecision {
             else => error.InvalidTransition,
         },
         .ready => |active| switch (event) {
-            .dispatch => .{ .next = .{ .running = active }, .command = .none },
+            .dispatch => .{
+                .next = .{ .running = active },
+                .command = if (active.cancellation_requested)
+                    .cancel_before_dispatch
+                else
+                    .none,
+            },
             .cancel => .{
                 .next = .{ .ready = .{ .cancellation_requested = true } },
                 .command = .none,
@@ -352,7 +359,10 @@ pub fn decideScope(before: Scope, event: ScopeEvent) TransitionError!ScopeDecisi
             .close => .{ .next = before, .command = .none },
         },
         .closed => switch (event) {
-            .register_child => error.InvalidTransition,
+            .register_child => .{
+                .next = .{ .closing = 1 },
+                .command = .cancel_arriving_child,
+            },
             .close => .{ .next = before, .command = .notify_quiescent },
             .child_terminal => error.InvalidTransition,
         },

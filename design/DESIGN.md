@@ -387,8 +387,8 @@ are preserved. Nothing below is constrained by compatibility.
 20. **Concurrency: tasks (structured futures), not actors.** Target scope
     is REPL / one-off CLI / scripting — the actor runtime (mailboxes,
     selective receive, named processes, supervisors) serves long-lived
-    stateful servers, which ecl does not target. Four primitives;
-    everything else is stdlib.
+    stateful servers, which ecl does not target. Six primitives;
+    `await-all` and `par-each` are stdlib.
     - `spawn` `( q -- task )`: runs a self-contained quotation (`attempt`'s
       contract — inputs via `literal` plus `compose`/env, never ambient stack) on its own
       share-nothing substack, concurrently. Immutability makes sharing
@@ -404,6 +404,11 @@ are preserved. Nothing below is constrained by compatibility.
       `{'err {'kind 'cancelled}}`, no-op if done). Cancellation is
       unconditional and safe *because* tasks are transactions — killing
       one discards an isolated substack and leaves nothing.
+    - `await-all` `( tasks -- outcomes )` is source-defined ordered fan-in:
+      it waits for every task and preserves each ordinary outcome as data.
+      Task failure neither raises nor cancels siblings. `par-each` separately
+      enforces one result per child, cancels the suffix after the leftmost
+      failure, waits for quiescence, and re-raises that failure.
     - **`attempt` ≡ `spawn await`.** The error model is the synchronous
       degenerate case of the concurrency model.
     - **Structured lifetime:** a dying unit cancels its unawaited tasks
@@ -411,8 +416,8 @@ are preserved. Nothing below is constrained by compatibility.
       handles are cancelled at scope end — no detached daemons; the REPL
       session is the root scope; a `tasks` word lists pending descendants in
       spawn preorder.
-    - **Determinism:** await order is program order, so gathered results
-      and `par-each`'s leftmost-error rule are deterministic.
+    - **Determinism:** await order is program order, so `await-all` outcomes,
+      gathered results, and `par-each`'s leftmost-error rule are deterministic.
       Nondeterminism enters only where chosen (`await-any`) and at IO
       interleaving across concurrent tasks (within a task IO is ordered;
       across tasks, unspecified).

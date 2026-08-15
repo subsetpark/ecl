@@ -102,19 +102,30 @@ pub fn build(b: *std.Build) void {
         worker_step.dependOn(&run_worker_e2e.step);
     }
 
-    // Zig 0.16's TSan runtime crashes at process startup on macOS (including
-    // for an empty test binary). SourceHut runs this step on Linux, where the
-    // instrumentation is enabled; other hosts still compile and run the same
-    // concurrency suite through this named step.
+    // Keep TSan focused on genuinely threaded behavior. The ordinary suite owns
+    // exhaustive property and allocator-failure coverage; instrumenting those
+    // single-threaded cases turns this race detector into a multi-minute stress
+    // test without increasing its race coverage.
+    const tsan_supported = target.result.os.tag == .linux or target.result.os.tag == .macos;
     const tsan_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .sanitize_thread = target.result.os.tag == .linux,
+        .sanitize_thread = tsan_supported,
     });
     tsan_mod.addOptions("session_options", test_options);
     tsan_mod.addImport("minish", minish);
-    const tsan_tests = b.addTest(.{ .root_module = tsan_mod });
+    const tsan_tests = b.addTest(.{
+        .root_module = tsan_mod,
+        .filters = &.{
+            "concurrency:",
+            "reference counting remains exact across threads",
+            "concurrent interning publishes stable lock-free reads",
+            "env: concurrent cell publication is lease-safe and TSan-clean",
+            "env: concurrent readers writers and retirement reclaim production snapshots",
+            "registry: concurrent commits are linearized without lost names",
+        },
+    });
     const run_tsan_tests = b.addRunArtifact(tsan_tests);
     const tsan_step = b.step("test-tsan", "Run tests under ThreadSanitizer");
     tsan_step.dependOn(&run_tsan_tests.step);

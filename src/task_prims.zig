@@ -20,12 +20,12 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "tasks", .primitive = tasks },
         .{ .name = "await-any", .primitive = awaitAny },
         .{ .name = "await-for", .primitive = awaitFor },
-        .{ .name = "task-join", .primitive = taskJoin },
     };
     try core.installBuiltins(definitions);
+    try core.installInternalBuiltin("task-join", taskJoin);
 }
 
-fn scheduler(evaluator: *Machine) *scheduler_api.Scheduler {
+fn scheduler(evaluator: *Machine) *const scheduler_api.WorkerScheduler {
     return @ptrCast(@alignCast(evaluator.unit.scheduler.?));
 }
 
@@ -34,14 +34,14 @@ fn scope(evaluator: *Machine) *scheduler_api.TaskScope {
 }
 
 fn spawn(evaluator: *Machine) MachineError!void {
-    const quotation = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), quotation);
-    if (quotation != .list) return evaluator.typeError("a quotation/list");
+    var quotation = try evaluator.popValue();
+    defer quotation.deinit();
+    if (quotation.borrow() != .list) return evaluator.typeError("a quotation/list");
     const task = scheduler(evaluator).spawn(scope(evaluator), .{
         .parent_unit = evaluator.unit,
         .parent_scope = evaluator.currentScope(),
         .parent_home = evaluator.currentHome(),
-        .quotation = quotation.list,
+        .quotation = quotation.borrow().list,
     }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Io => return evaluator.fail(.io, "could not start scheduler worker threads"),
@@ -50,25 +50,17 @@ fn spawn(evaluator: *Machine) MachineError!void {
 }
 
 fn await(evaluator: *Machine) MachineError!void {
-    const task = try evaluator.popOwned();
-    if (task != .task) {
-        heap.releaseValue(evaluator.allocator(), task);
-        return evaluator.typeError("a task");
-    }
-    std.debug.assert(evaluator.unit.park_request == null);
-    evaluator.unit.park_request = .{ .task = task };
+    var task = try evaluator.popValue();
+    defer task.deinit();
+    if (task.borrow() != .task) return evaluator.typeError("a task");
+    evaluator.unit.installParkRequest(.{ .task = task.take() });
 }
 
 fn cancel(evaluator: *Machine) MachineError!void {
-    const task = try evaluator.popOwned();
-    if (task != .task) {
-        heap.releaseValue(evaluator.allocator(), task);
-        return evaluator.typeError("a task");
-    }
-    scheduler(evaluator).cancelOwned(evaluator, task) catch |err| {
-        heap.releaseValue(evaluator.allocator(), task);
-        return err;
-    };
+    var task = try evaluator.popValue();
+    defer task.deinit();
+    if (task.borrow() != .task) return evaluator.typeError("a task");
+    scheduler(evaluator).cancelOwned(task.take());
 }
 
 fn tasks(evaluator: *Machine) MachineError!void {
@@ -76,9 +68,9 @@ fn tasks(evaluator: *Machine) MachineError!void {
 }
 
 fn awaitAny(evaluator: *Machine) MachineError!void {
-    const task_list = try evaluator.popOwned();
-    var task_list_owned = true;
-    defer if (task_list_owned) heap.releaseValue(evaluator.allocator(), task_list);
+    var tasks_value = try evaluator.popValue();
+    defer tasks_value.deinit();
+    const task_list = tasks_value.borrow();
     if (task_list != .list) {
         return evaluator.typeError("a nonempty list of tasks");
     }
@@ -87,63 +79,57 @@ fn awaitAny(evaluator: *Machine) MachineError!void {
         return evaluator.fail(.domain, "await-any requires a nonempty list");
     }
     const driver = try evaluator.allocator().create(TaskListDriver);
-    driver.* = .{ .tasks = task_list, .mode = .await_any };
-    task_list_owned = false;
-    evaluator.installWorkDriver(driver, TaskListDriver.advance, TaskListDriver.destroy);
+    driver.* = .{ .tasks = tasks_value.take(), .mode = .await_any };
+    evaluator.installWorkDriver(driver);
 }
 
 fn awaitFor(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const duration = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), duration);
-    const task = try evaluator.popOwned();
-    if (task != .task) {
-        heap.releaseValue(evaluator.allocator(), task);
-        return evaluator.typeError("a task followed by milliseconds");
-    }
-    if (duration != .int) {
-        heap.releaseValue(evaluator.allocator(), task);
-        return evaluator.typeError("an integer millisecond duration");
-    }
-    if (duration.int < 0) {
-        heap.releaseValue(evaluator.allocator(), task);
-        return evaluator.fail(.domain, "await-for duration must be nonnegative");
-    }
-    std.debug.assert(evaluator.unit.park_request == null);
-    evaluator.unit.park_request = .{ .deadline = .{
-        .task = task,
-        .milliseconds = duration.int,
-    } };
+    var duration = try evaluator.popValue();
+    defer duration.deinit();
+    var task = try evaluator.popValue();
+    defer task.deinit();
+    if (task.borrow() != .task) return evaluator.typeError("a task followed by milliseconds");
+    if (duration.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
+    if (duration.borrow().int < 0) return evaluator.fail(.domain, "await-for duration must be nonnegative");
+    evaluator.unit.installParkRequest(.{ .deadline = .{
+        .task = task.take(),
+        .milliseconds = duration.borrow().int,
+    } });
 }
 
 fn taskJoin(evaluator: *Machine) MachineError!void {
-    const task_list = try evaluator.popOwned();
-    var task_list_owned = true;
-    defer if (task_list_owned) heap.releaseValue(evaluator.allocator(), task_list);
+    var tasks_value = try evaluator.popValue();
+    defer tasks_value.deinit();
+    const task_list = tasks_value.borrow();
     if (task_list != .list) return evaluator.typeError("a list of tasks");
-    const driver = try evaluator.allocator().create(TaskListDriver);
-    driver.* = .{ .tasks = task_list, .mode = .join };
-    task_list_owned = false;
-    evaluator.installWorkDriver(driver, TaskListDriver.advance, TaskListDriver.destroy);
+    const driver = evaluator.allocator().create(TaskListDriver) catch {
+        evaluator.beginTaskJoinInputCleanupOwned(tasks_value.take());
+        return error.OutOfMemory;
+    };
+    driver.* = .{ .tasks = tasks_value.take(), .mode = .join };
+    evaluator.installWorkDriver(driver);
 }
 
 const TaskListDriver = struct {
-    tasks: value.Value,
+    tasks: ?value.Value,
     mode: enum { await_any, join },
     index: usize = 0,
-    owned: bool = true,
 
-    fn advance(
+    pub fn advance(
         evaluator: *Machine,
-        raw: *anyopaque,
+        self: *TaskListDriver,
     ) MachineError!machine.WorkProgress {
-        const self: *TaskListDriver = @ptrCast(@alignCast(raw));
-        try evaluator.pollKernel();
-        const count: usize = @intCast(self.tasks.list.length());
+        evaluator.pollKernel() catch |err| {
+            self.abandonJoinInput(evaluator);
+            return err;
+        };
+        const task_values = self.tasks.?;
+        const count: usize = @intCast(task_values.list.length());
         const end = @min(self.index + machine.kernel_poll_quantum, count);
         while (self.index != end) : (self.index += 1) {
-            if (list.atUnchecked(self.tasks, self.index) != .task) {
-                return evaluator.failAtIndex(
+            if (list.atUnchecked(task_values, self.index) != .task) {
+                const failure = evaluator.failAtIndex(
                     .type,
                     if (self.mode == .await_any)
                         "await-any expected only tasks"
@@ -151,28 +137,48 @@ const TaskListDriver = struct {
                         "task-join expected only tasks",
                     self.index,
                 );
+                self.abandonJoinInput(evaluator);
+                return failure;
             }
         }
         if (self.index != count) return .yielded;
-        const task_values = self.tasks;
-        self.owned = false;
         switch (self.mode) {
             .await_any => {
-                std.debug.assert(evaluator.unit.park_request == null);
-                evaluator.unit.park_request = .{ .any = task_values };
+                self.tasks = null;
+                evaluator.detachWorkDriver(self);
+                TaskListDriver.destroy(evaluator.releaseDomain(), evaluator.allocator(), self);
+                evaluator.unit.installParkRequest(.{ .any = task_values });
+                return .detached;
             },
-            .join => try evaluator.beginTaskJoinOwned(
-                task_values,
-                try intern.intern("ok"),
-                try intern.intern("err"),
-            ),
+            .join => {
+                const ok_id = intern.intern("ok") catch |err| {
+                    self.abandonJoinInput(evaluator);
+                    return err;
+                };
+                const err_id = intern.intern("err") catch |err| {
+                    self.abandonJoinInput(evaluator);
+                    return err;
+                };
+                self.tasks = null;
+                evaluator.detachWorkDriver(self);
+                TaskListDriver.destroy(evaluator.releaseDomain(), evaluator.allocator(), self);
+                try evaluator.beginTaskJoinOwned(task_values, ok_id, err_id);
+                return .detached;
+            },
         }
-        return .completed;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *TaskListDriver = @ptrCast(@alignCast(raw));
-        if (self.owned) heap.releaseValue(allocator, self.tasks);
+    fn abandonJoinInput(self: *TaskListDriver, evaluator: *Machine) void {
+        if (self.mode != .join) return;
+        const task_values = self.tasks orelse return;
+        self.tasks = null;
+        evaluator.detachWorkDriver(self);
+        TaskListDriver.destroy(evaluator.releaseDomain(), evaluator.allocator(), self);
+        evaluator.beginTaskJoinInputCleanupOwned(task_values);
+    }
+
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *TaskListDriver) void {
+        if (self.tasks) |task_values| releases.releaseValue(task_values);
         allocator.destroy(self);
     }
 };

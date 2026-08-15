@@ -1,17 +1,10 @@
 //! Per-session module registry with typed names and atomic generation publication.
 const std = @import("std");
 const env = @import("env.zig");
+const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const poll = @import("poll.zig");
-const snapshot_core = @import("snapshot_core.zig");
-
-fn readerDecision(
-    before: snapshot_core.Reader,
-    event: snapshot_core.ReaderEvent,
-) snapshot_core.ReaderDecision {
-    return snapshot_core.decideReader(before, event) catch
-        @panic("invalid registry reader transition");
-}
+const snapshot_api = @import("snapshot.zig");
 
 pub const ModuleGeneration = struct {
     allocator: std.mem.Allocator,
@@ -20,9 +13,16 @@ pub const ModuleGeneration = struct {
     generation: u64 = 0,
     environment: env.Environment,
     scope: env.Scope,
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    retirement_state: union(enum) {
+        live,
+        scope: env.Scope.EmbeddedTeardownCursor,
+        environment: env.Environment.TeardownCursor,
+    } = .live,
 
     pub fn create(
         allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
         name: intern.NamespaceName,
     ) error{OutOfMemory}!*ModuleGeneration {
         const result = try allocator.create(ModuleGeneration);
@@ -30,8 +30,10 @@ pub const ModuleGeneration = struct {
         result.refs = .init(1);
         result.name = name;
         result.generation = 0;
-        result.environment = env.Environment.init(allocator);
+        result.environment = env.Environment.init(allocator, releases);
         result.scope = env.Scope.moduleRoot(allocator, &result.environment, name);
+        result.retirement = .{};
+        result.retirement_state = .live;
         return result;
     }
 
@@ -45,13 +47,28 @@ pub const ModuleGeneration = struct {
         std.debug.assert(old != 0);
         if (old != 1) return;
         _ = self.refs.load(.acquire);
-        self.environment.deinit();
-        self.allocator.destroy(self);
+        self.retirement_state = .{ .scope = .init(&self.scope) };
+        self.environment.releases.retire(self, &self.retirement);
     }
 
-    pub fn destroy(self: *ModuleGeneration) void {
-        std.debug.assert(self.refs.load(.acquire) == 1);
-        self.release();
+    pub fn advanceRetirement(
+        _: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *ModuleGeneration,
+    ) bool {
+        return switch (self.retirement_state) {
+            .live => unreachable,
+            .scope => |*scope| result: {
+                if (!scope.advance()) break :result false;
+                self.retirement_state = .{ .environment = .init(&self.environment) };
+                break :result false;
+            },
+            .environment => |*environment| {
+                if (!environment.advance()) return false;
+                allocator.destroy(self);
+                return true;
+            },
+        };
     }
 
     pub fn resolve(
@@ -72,9 +89,11 @@ pub const ModuleGeneration = struct {
         allocator: std.mem.Allocator,
         public_only: bool,
         lookup: env.DirectLookupCursor,
+        pin: GenerationPin,
 
         pub fn deinit(self: *ResolveCursor) void {
             self.lookup.deinit();
+            self.pin.deinit();
             self.* = undefined;
         }
         pub fn advance(self: *ResolveCursor) ResolveProgress {
@@ -83,7 +102,7 @@ pub const ModuleGeneration = struct {
                 .complete => |maybe_lease| result: {
                     var lease = maybe_lease orelse break :result .{ .complete = null };
                     if (self.public_only and lease.visibility == .private) {
-                        lease.deinit(self.allocator);
+                        lease.deinit();
                         break :result .{ .complete = null };
                     }
                     break :result .{ .complete = lease };
@@ -96,10 +115,12 @@ pub const ModuleGeneration = struct {
         id: u32,
         public_only: bool,
     ) ResolveCursor {
+        const home = ModuleHome.init(@constCast(self));
         return .{
             .allocator = self.allocator,
             .public_only = public_only,
             .lookup = self.environment.directLookupCursor(id),
+            .pin = home.pinInternal(),
         };
     }
 
@@ -108,7 +129,7 @@ pub const ModuleGeneration = struct {
         allocator: std.mem.Allocator,
     ) error{OutOfMemory}![]u32 {
         var visible = poll.ChunkList(u32).init(allocator);
-        defer visible.deinit();
+        defer visible.retire(self.environment.releases);
         var cursor = self.publicNameCursor();
         defer cursor.deinit();
         while (true) switch (cursor.advance()) {
@@ -128,8 +149,10 @@ pub const ModuleGeneration = struct {
     pub const PublicNameCursor = struct {
         allocator: std.mem.Allocator,
         inner: env.NameCursor,
+        pin: GenerationPin,
         pub fn deinit(self: *PublicNameCursor) void {
             self.inner.deinit();
+            self.pin.deinit();
             self.* = undefined;
         }
         pub fn advance(self: *PublicNameCursor) PublicNameProgress {
@@ -138,7 +161,7 @@ pub const ModuleGeneration = struct {
                 .complete => .complete,
                 .entry => |entry| result: {
                     var lease = entry.lease;
-                    defer lease.deinit(self.allocator);
+                    defer lease.deinit();
                     break :result if (lease.visibility == .public)
                         .{ .name = entry.name }
                     else
@@ -148,27 +171,46 @@ pub const ModuleGeneration = struct {
         }
     };
     pub fn publicNameCursor(self: *const ModuleGeneration) PublicNameCursor {
-        return .{ .allocator = self.allocator, .inner = self.environment.nameCursor() };
+        const home = ModuleHome.init(@constCast(self));
+        return .{
+            .allocator = self.allocator,
+            .inner = self.environment.nameCursor(),
+            .pin = home.pinInternal(),
+        };
     }
 };
 
+const GenerationPublisher = snapshot_api.Publisher(ModuleGeneration);
 const ModuleSlot = struct {
-    current: std.atomic.Value(?*ModuleGeneration) = .init(null),
-    readers: std.atomic.Value(u32) = .init(0),
+    publisher: GenerationPublisher = .init(null),
 
     fn destroy(self: *ModuleSlot, allocator: std.mem.Allocator) void {
-        if (self.current.load(.acquire)) |generation| generation.release();
+        if (self.publisher.currentOwned()) |generation| generation.release();
         allocator.destroy(self);
     }
 };
 
 const Directory = struct {
-    const ModuleMap = poll.U32Map(*ModuleSlot);
-    const AliasMap = poll.U32Map(u32);
+    const ModuleMap = poll.FixedMap(intern.NamespaceName, *ModuleSlot);
+    const AliasMap = poll.FixedMap(intern.NamespaceName, intern.NamespaceName);
 
     modules: ModuleMap,
     aliases: AliasMap,
     previous: ?*Directory,
+    retirement: heap.ReleaseDomain.Retirement = .{},
+
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *Directory,
+    ) bool {
+        const previous = self.previous;
+        self.modules.deinit();
+        self.aliases.deinit();
+        allocator.destroy(self);
+        if (previous) |next| releases.retire(next, &next.retirement);
+        return true;
+    }
 
     fn destroy(self: *Directory, allocator: std.mem.Allocator) void {
         self.modules.deinit();
@@ -184,32 +226,149 @@ const Directory = struct {
         }
     }
 };
+const DirectoryPublisher = snapshot_api.Publisher(Directory);
 
 const DirectoryLease = struct {
     registry: *const Registry,
+    lease: DirectoryPublisher.Lease,
     directory: ?*const Directory,
-    protocol: snapshot_core.Reader,
 
     fn deinit(self: *DirectoryLease) void {
         const registry = @constCast(self.registry);
-        const left = readerDecision(self.protocol, .leave);
-        self.protocol = left.next;
-        std.debug.assert(left.command == .leave);
-        if (registry.directory_readers.fetchSub(1, .seq_cst) == 1) {
+        if (self.lease.deinit()) {
             registry.lockBlocking();
-            registry.reclaimDirectories();
+            const retired = registry.detachRetiredDirectories();
             registry.unlock();
+            if (retired) |first| registry.releaseDomain().retire(first, &first.retirement);
         }
         self.* = undefined;
     }
 };
 
-/// Owns one generation reference; callers must call `deinit`.
-pub const GenerationLease = struct {
-    generation: *ModuleGeneration,
+/// Session-owned authority required to turn observation state into frame
+/// execution state. Session and Unit storage own the seal; registered native
+/// callbacks never receive it.
+pub const ExecutionAccess = opaque {};
+
+/// Narrow identity used by executing frames. Observation leases never expose
+/// this pointer; only code holding the Session's execution authority can
+/// obtain its scope or create another lifetime pin.
+pub const ModuleHome = opaque {
+    fn init(module_generation: *ModuleGeneration) *ModuleHome {
+        return @ptrCast(module_generation);
+    }
+    fn generation(self: *const ModuleHome) *ModuleGeneration {
+        return @ptrCast(@alignCast(@constCast(self)));
+    }
+    pub fn scope(self: *const ModuleHome, _: *const ExecutionAccess) *env.Scope {
+        return &self.generation().scope;
+    }
+    pub fn name(self: *const ModuleHome) intern.NamespaceName {
+        return self.generation().name;
+    }
+    pub fn generationNumber(self: *const ModuleHome) u64 {
+        return self.generation().generation;
+    }
+    fn pinInternal(self: *const ModuleHome) GenerationPin {
+        const retained = self.generation();
+        retained.retain();
+        return .initRetained(retained);
+    }
+    pub fn pin(self: *const ModuleHome, _: *const ExecutionAccess) GenerationPin {
+        return self.pinInternal();
+    }
+};
+
+/// An owned generation reference. The raw generation is never exposed, so a
+/// pin can only be consumed by `deinit` and cannot invoke retirement directly.
+pub const GenerationPin = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn initRetained(generation: *ModuleGeneration) GenerationPin {
+        return @enumFromInt(@intFromPtr(generation));
+    }
+    fn home(self: GenerationPin) *ModuleHome {
+        std.debug.assert(self != .consumed);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    pub fn deinit(self: *GenerationPin) void {
+        if (self.* == .consumed) return;
+        self.home().generation().release();
+        self.* = .consumed;
+    }
+    pub fn matches(
+        self: GenerationPin,
+        expected_home: *const ModuleHome,
+        _: *const ExecutionAccess,
+    ) bool {
+        return self.home() == expected_home;
+    }
+};
+
+/// Opaque observation capability owning one generation reference.
+pub const GenerationLease = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn initRetained(retained_generation: *ModuleGeneration) GenerationLease {
+        return @enumFromInt(@intFromPtr(retained_generation));
+    }
+    fn generation(self: GenerationLease) *ModuleGeneration {
+        std.debug.assert(self != .consumed);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    pub fn generationNumber(self: GenerationLease) u64 {
+        return self.generation().generation;
+    }
+    pub fn name(self: GenerationLease) intern.NamespaceName {
+        return self.generation().name;
+    }
+    pub fn resolveCursor(self: GenerationLease, id: u32, public_only: bool) ModuleGeneration.ResolveCursor {
+        return self.generation().resolveCursor(id, public_only);
+    }
+    pub fn publicNameCursor(self: GenerationLease) ModuleGeneration.PublicNameCursor {
+        return self.generation().publicNameCursor();
+    }
+    pub fn enterExecution(
+        self: *GenerationLease,
+        _: *const ExecutionAccess,
+    ) ExecutionGeneration {
+        const generation_ptr = self.generation();
+        self.* = .consumed;
+        return .initRetained(generation_ptr);
+    }
     pub fn deinit(self: *GenerationLease) void {
-        self.generation.release();
-        self.* = undefined;
+        if (self.* == .consumed) return;
+        self.generation().release();
+        self.* = .consumed;
+    }
+};
+
+/// Session-gated execution capability. Observation can be transferred into
+/// execution only by code holding the Session-private authority, and
+/// the raw generation remains hidden on both sides of the transition.
+pub const ExecutionGeneration = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn initRetained(generation_ptr: *ModuleGeneration) ExecutionGeneration {
+        return @enumFromInt(@intFromPtr(generation_ptr));
+    }
+    fn generation(self: ExecutionGeneration) *ModuleGeneration {
+        std.debug.assert(self != .consumed);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    pub fn home(
+        self: ExecutionGeneration,
+        _: *const ExecutionAccess,
+    ) *ModuleHome {
+        return .init(self.generation());
+    }
+    pub fn deinit(self: *ExecutionGeneration) void {
+        if (self.* == .consumed) return;
+        self.generation().release();
+        self.* = .consumed;
     }
 };
 
@@ -222,9 +381,28 @@ pub const OwnedCandidate = enum(usize) {
     fn init(generation: *ModuleGeneration) OwnedCandidate {
         return @enumFromInt(@intFromPtr(generation));
     }
-    pub fn borrow(self: *const OwnedCandidate) *ModuleGeneration {
+    fn borrow(self: *const OwnedCandidate) *ModuleGeneration {
         std.debug.assert(self.* != .consumed);
         return @ptrFromInt(@intFromEnum(self.*));
+    }
+    pub fn executionHome(
+        self: *const OwnedCandidate,
+        _: *const ExecutionAccess,
+    ) *ModuleHome {
+        return .init(self.borrow());
+    }
+    pub fn executionScope(
+        self: *const OwnedCandidate,
+        _: *const ExecutionAccess,
+    ) *env.Scope {
+        return &self.borrow().scope;
+    }
+    pub fn publishDefinition(
+        self: *const OwnedCandidate,
+        name: intern.NamespaceName,
+        publication: env.ModulePublication,
+    ) env.BindError!*env.BindingCell {
+        return self.borrow().scope.publishModule(name, publication);
     }
     pub fn move(self: *OwnedCandidate) OwnedCandidate {
         const result = self.*;
@@ -234,7 +412,11 @@ pub const OwnedCandidate = enum(usize) {
     }
     pub fn deinit(self: *OwnedCandidate) void {
         if (self.* == .consumed) return;
-        self.borrow().destroy();
+        // The provisional owner is one lifetime guard, not a uniqueness
+        // assertion. Tasks spawned before commit hold independent generation
+        // pins, so rollback drops only this capability and the generation
+        // remains alive until those tasks and their child scopes quiesce.
+        self.borrow().release();
         self.* = .consumed;
     }
     fn publish(self: *OwnedCandidate) *ModuleGeneration {
@@ -310,71 +492,92 @@ pub const LoadingLease = enum(usize) {
 const RetiredGeneration = struct {
     slot: *ModuleSlot,
     generation: ?*ModuleGeneration,
+    next_free: ?*RetiredGeneration = null,
 };
 
-pub const Registry = struct {
-    allocator: std.mem.Allocator,
+const RegistryState = struct {
+    host: *const heap.HostCleanup,
     writer: std.Io.Mutex = .init,
-    directory: std.atomic.Value(?*Directory) = .init(null),
-    directory_readers: std.atomic.Value(u32) = .init(0),
+    directories: DirectoryPublisher,
     slots: poll.ChunkList(*ModuleSlot),
     retired: poll.ChunkList(RetiredGeneration),
+    retired_free: ?*RetiredGeneration = null,
     loading: std.atomic.Value(?*LoadingNode) = .init(null),
+};
 
-    pub fn init(allocator: std.mem.Allocator) Registry {
-        return .{
-            .allocator = allocator,
-            .slots = .init(allocator),
-            .retired = .init(allocator),
+pub const Registry = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn privateState(self: *const Registry) *RegistryState {
+        std.debug.assert(self.* != .consumed);
+        return @ptrFromInt(@intFromEnum(self.*));
+    }
+
+    pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!Registry {
+        const owner_allocator = host.allocator();
+        const backing = try owner_allocator.create(RegistryState);
+        backing.* = .{
+            .host = host,
+            .directories = .init(null),
+            .slots = .init(owner_allocator),
+            .retired = .init(owner_allocator),
         };
+        return @enumFromInt(@intFromPtr(backing));
+    }
+
+    fn allocator(self: *const Registry) std.mem.Allocator {
+        return self.privateState().host.allocator();
+    }
+
+    fn releaseDomain(self: *const Registry) *heap.ReleaseDomain {
+        return heap.hostDomain(self.privateState().host);
     }
 
     pub fn deinit(self: *Registry) void {
-        std.debug.assert(self.directory_readers.load(.acquire) == 0);
-        Directory.destroyChain(self.directory.load(.acquire), self.allocator);
-        var slots = self.slots.iterator();
-        while (slots.next()) |slot| slot.*.destroy(self.allocator);
-        self.slots.deinit();
-        var retired = self.retired.iterator();
+        const backing = self.privateState();
+        const owner_allocator = backing.host.allocator();
+        std.debug.assert(backing.directories.quiescent());
+        Directory.destroyChain(backing.directories.currentOwned(), self.allocator());
+        var slots = backing.slots.iterator();
+        while (slots.next()) |slot| slot.*.destroy(self.allocator());
+        backing.slots.retire(self.releaseDomain());
+        var retired = backing.retired.iterator();
         while (retired.next()) |entry| if (entry.generation) |generation| generation.release();
-        self.retired.deinit();
-        var loading = self.loading.load(.acquire);
+        backing.retired.retire(self.releaseDomain());
+        var loading = backing.loading.load(.acquire);
         while (loading) |node| {
             loading = node.next;
-            self.allocator.destroy(node);
+            self.allocator().destroy(node);
         }
-        self.* = undefined;
+        backing.host.drain();
+        owner_allocator.destroy(backing);
+        self.* = .consumed;
     }
 
     fn lockBlocking(self: *Registry) void {
-        std.Io.Threaded.mutexLock(&self.writer);
+        std.Io.Threaded.mutexLock(&self.privateState().writer);
     }
 
     fn unlock(self: *Registry) void {
-        std.Io.Threaded.mutexUnlock(&self.writer);
+        std.Io.Threaded.mutexUnlock(&self.privateState().writer);
     }
 
     fn acquireDirectory(self: *const Registry) DirectoryLease {
-        const announced = readerDecision(.idle, .announce);
-        std.debug.assert(announced.command == .announce);
-        _ = @constCast(self).directory_readers.fetchAdd(1, .seq_cst);
+        const lease = self.privateState().directories.acquire();
         return .{
             .registry = self,
-            .directory = self.directory.load(.acquire),
-            .protocol = announced.next,
+            .directory = lease.snapshot,
+            .lease = lease,
         };
     }
 
-    fn reclaimDirectories(self: *Registry) void {
-        const current = self.directory.load(.acquire) orelse return;
-        const retired_count: usize = @intFromBool(current.previous != null);
-        if (snapshot_core.decideReclamation(
-            self.directory_readers.load(.seq_cst),
-            retired_count,
-        ) == .keep) return;
+    fn detachRetiredDirectories(self: *Registry) ?*Directory {
+        if (!self.privateState().directories.quiescent()) return null;
+        const current = self.privateState().directories.currentOwned() orelse return null;
         const retired = current.previous;
         current.previous = null;
-        Directory.destroyChain(retired, self.allocator);
+        return retired;
     }
 
     const ReclaimProgress = enum { pending, complete };
@@ -389,11 +592,9 @@ pub const Registry = struct {
             };
             const entry = @constCast(entry_const);
             const generation = if (entry.generation) |candidate| reclaim: {
-                if (snapshot_core.decideReclamation(
-                    entry.slot.readers.load(.seq_cst),
-                    1,
-                ) == .keep) break :reclaim null;
+                if (!entry.slot.publisher.quiescent()) break :reclaim null;
                 entry.generation = null;
+                self.registry.recycleRetired(entry);
                 break :reclaim candidate;
             } else null;
             self.registry.unlock();
@@ -404,222 +605,318 @@ pub const Registry = struct {
     fn reclaimCursor(self: *Registry) ReclaimCursor {
         self.lockBlocking();
         defer self.unlock();
-        return .{ .registry = self, .iterator = self.retired.iterator() };
+        return .{ .registry = self, .iterator = self.privateState().retired.iterator() };
+    }
+
+    fn retireGeneration(
+        self: *Registry,
+        slot: *ModuleSlot,
+        generation: *ModuleGeneration,
+    ) error{OutOfMemory}!*RetiredGeneration {
+        const backing = self.privateState();
+        const entry = if (backing.retired_free) |recycled| entry: {
+            backing.retired_free = recycled.next_free;
+            break :entry recycled;
+        } else try backing.retired.appendPtr(.{ .slot = slot, .generation = generation });
+        entry.* = .{ .slot = slot, .generation = generation };
+        return entry;
+    }
+
+    fn recycleRetired(self: *Registry, entry: *RetiredGeneration) void {
+        std.debug.assert(entry.generation == null);
+        entry.next_free = self.privateState().retired_free;
+        self.privateState().retired_free = entry;
     }
 
     pub fn createCandidate(
         self: *Registry,
         name: intern.NamespaceName,
     ) error{OutOfMemory}!OwnedCandidate {
-        return .init(try ModuleGeneration.create(self.allocator, name));
+        return .init(try ModuleGeneration.create(self.allocator(), self.releaseDomain(), name));
     }
 
     pub const CommitProgress = union(enum) { pending, complete: u64 };
     pub const CommitCursor = struct {
+        const ModuleBuilder = union(enum) {
+            initialize: Directory.ModuleMap.InitCursor,
+            clone: Directory.ModuleMap.CloneCursor,
+
+            fn deinit(self: *ModuleBuilder) void {
+                switch (self.*) {
+                    inline else => |*cursor| cursor.deinit(),
+                }
+            }
+        };
+        const AliasBuilder = union(enum) {
+            initialize: Directory.AliasMap.InitCursor,
+            clone: Directory.AliasMap.CloneCursor,
+
+            fn deinit(self: *AliasBuilder) void {
+                switch (self.*) {
+                    inline else => |*cursor| cursor.deinit(),
+                }
+            }
+        };
+        const Snapshot = struct {
+            directory: DirectoryLease,
+            old: ?*const Directory,
+        };
+        const NewBuild = struct {
+            snapshot: Snapshot,
+            modules: Directory.ModuleMap,
+            aliases: Directory.AliasMap,
+            slot: *ModuleSlot,
+        };
+        const State = union(enum) {
+            reclaim: ReclaimCursor,
+            snapshot,
+            alias: struct {
+                snapshot: Snapshot,
+                cursor: Directory.AliasMap.RawLookupCursor,
+            },
+            module: struct {
+                snapshot: Snapshot,
+                cursor: ?Directory.ModuleMap.RawLookupCursor,
+            },
+            modules: struct {
+                snapshot: Snapshot,
+                builder: ModuleBuilder,
+            },
+            aliases: struct {
+                snapshot: Snapshot,
+                modules: Directory.ModuleMap,
+                builder: AliasBuilder,
+            },
+            prepare_insert: struct {
+                snapshot: Snapshot,
+                modules: Directory.ModuleMap,
+                aliases: Directory.AliasMap,
+            },
+            insert: struct {
+                build: *NewBuild,
+                cursor: Directory.ModuleMap.PutCursor,
+            },
+            commit_existing: *ModuleSlot,
+            commit_new: *NewBuild,
+            complete,
+        };
+
         registry: *Registry,
         owned: *OwnedCandidate,
-        reclaimer: ReclaimCursor,
-        directory: ?DirectoryLease = null,
-        old: ?*const Directory = null,
-        alias_lookup: ?Directory.AliasMap.RawLookupCursor = null,
-        module_lookup: ?Directory.ModuleMap.RawLookupCursor = null,
-        existing: ?*ModuleSlot = null,
-        module_cloner: ?Directory.ModuleMap.CloneCursor = null,
-        module_initializer: ?Directory.ModuleMap.InitCursor = null,
-        modules_map: ?Directory.ModuleMap = null,
-        alias_cloner: ?Directory.AliasMap.CloneCursor = null,
-        alias_initializer: ?Directory.AliasMap.InitCursor = null,
-        aliases_map: ?Directory.AliasMap = null,
-        slot: ?*ModuleSlot = null,
-        insertion: ?Directory.ModuleMap.PutCursor = null,
-        phase: enum { reclaim, snapshot, alias, module, modules_map, aliases_map, insert, commit_existing, commit_new, complete } = .reclaim,
+        state: State,
 
         pub fn init(registry: *Registry, owned: *OwnedCandidate) CommitCursor {
-            return .{ .registry = registry, .owned = owned, .reclaimer = registry.reclaimCursor() };
+            return .{
+                .registry = registry,
+                .owned = owned,
+                .state = .{ .reclaim = registry.reclaimCursor() },
+            };
         }
         pub fn deinit(self: *CommitCursor) void {
-            self.resetBuild();
-            if (self.directory) |*directory| directory.deinit();
-            if (self.slot) |slot| self.registry.allocator.destroy(slot);
+            switch (self.state) {
+                .alias => |*state| state.snapshot.directory.deinit(),
+                .module => |*state| state.snapshot.directory.deinit(),
+                .modules => |*state| {
+                    state.builder.deinit();
+                    state.snapshot.directory.deinit();
+                },
+                .aliases => |*state| {
+                    state.builder.deinit();
+                    state.modules.deinit();
+                    state.snapshot.directory.deinit();
+                },
+                .prepare_insert => |*state| {
+                    state.modules.deinit();
+                    state.aliases.deinit();
+                    state.snapshot.directory.deinit();
+                },
+                .insert => |state| self.destroyBuild(state.build),
+                .commit_new => |build| self.destroyBuild(build),
+                .reclaim, .snapshot, .commit_existing, .complete => {},
+            }
             self.* = undefined;
         }
-        fn resetBuild(self: *CommitCursor) void {
-            if (self.module_cloner) |*cursor| cursor.deinit();
-            self.module_cloner = null;
-            if (self.module_initializer) |*cursor| cursor.deinit();
-            self.module_initializer = null;
-            if (self.modules_map) |*map| map.deinit();
-            self.modules_map = null;
-            if (self.alias_cloner) |*cursor| cursor.deinit();
-            self.alias_cloner = null;
-            if (self.alias_initializer) |*cursor| cursor.deinit();
-            self.alias_initializer = null;
-            if (self.aliases_map) |*map| map.deinit();
-            self.aliases_map = null;
-            self.insertion = null;
-        }
-        fn retry(self: *CommitCursor) void {
-            self.resetBuild();
-            self.directory.?.deinit();
-            self.directory = null;
-            self.old = null;
-            self.alias_lookup = null;
-            self.module_lookup = null;
-            self.existing = null;
-            self.phase = .snapshot;
+        fn destroyBuild(self: *CommitCursor, build: *NewBuild) void {
+            build.modules.deinit();
+            build.aliases.deinit();
+            self.registry.allocator().destroy(build.slot);
+            build.snapshot.directory.deinit();
+            self.registry.allocator().destroy(build);
         }
         pub fn advance(self: *CommitCursor) RegistryError!CommitProgress {
             const candidate = self.owned.borrow();
-            const name = intern.namespaceId(candidate.name);
-            return switch (self.phase) {
-                .reclaim => switch (self.reclaimer.advance()) {
+            const name = candidate.name;
+            return switch (self.state) {
+                .reclaim => |*reclaimer| switch (reclaimer.advance()) {
                     .pending => .pending,
                     .complete => result: {
-                        self.phase = .snapshot;
+                        self.state = .snapshot;
                         break :result .pending;
                     },
                 },
                 .snapshot => result: {
-                    self.directory = self.registry.acquireDirectory();
-                    self.old = self.directory.?.directory;
-                    if (self.old) |old| {
-                        self.alias_lookup = old.aliases.rawLookup(name);
-                        self.phase = .alias;
+                    const directory = self.registry.acquireDirectory();
+                    const snapshot = Snapshot{
+                        .old = directory.directory,
+                        .directory = directory,
+                    };
+                    if (snapshot.old) |old| {
+                        self.state = .{ .alias = .{
+                            .snapshot = snapshot,
+                            .cursor = old.aliases.rawLookup(name),
+                        } };
                     } else {
-                        self.phase = .module;
+                        self.state = .{ .module = .{
+                            .snapshot = snapshot,
+                            .cursor = null,
+                        } };
                     }
                     break :result .pending;
                 },
-                .alias => switch (self.alias_lookup.?.advance()) {
+                .alias => |*state| switch (state.cursor.advance()) {
                     .pending => .pending,
                     .complete => |existing_alias| result: {
                         if (existing_alias != null) return error.NameConflict;
-                        self.module_lookup = self.old.?.modules.rawLookup(name);
-                        self.phase = .module;
+                        self.state = .{ .module = .{
+                            .snapshot = state.snapshot,
+                            .cursor = state.snapshot.old.?.modules.rawLookup(name),
+                        } };
                         break :result .pending;
                     },
                 },
-                .module => if (self.module_lookup) |*lookup| switch (lookup.advance()) {
+                .module => |*state| if (state.cursor) |*lookup| switch (lookup.advance()) {
                     .pending => .pending,
                     .complete => |maybe_slot| result: {
                         if (maybe_slot) |slot| {
-                            self.existing = slot;
-                            self.phase = .commit_existing;
+                            state.snapshot.directory.deinit();
+                            self.state = .{ .commit_existing = slot };
                         } else {
-                            self.module_cloner = self.old.?.modules.cloneCursor(1);
-                            self.phase = .modules_map;
+                            self.state = .{ .modules = .{
+                                .snapshot = state.snapshot,
+                                .builder = .{ .clone = state.snapshot.old.?.modules.cloneCursor(1) },
+                            } };
                         }
                         break :result .pending;
                     },
                 } else result: {
-                    self.module_initializer = Directory.ModuleMap.initCursor(self.registry.allocator, 1);
-                    self.phase = .modules_map;
+                    self.state = .{ .modules = .{
+                        .snapshot = state.snapshot,
+                        .builder = .{ .initialize = Directory.ModuleMap.initCursor(
+                            self.registry.allocator(),
+                            1,
+                        ) },
+                    } };
                     break :result .pending;
                 },
-                .modules_map => if (self.module_cloner) |*cloner| switch (try cloner.advance()) {
-                    .pending => .pending,
-                    .complete => |map| result: {
-                        cloner.deinit();
-                        self.module_cloner = null;
-                        self.modules_map = map;
-                        self.alias_cloner = self.old.?.aliases.cloneCursor(0);
-                        self.phase = .aliases_map;
-                        break :result .pending;
-                    },
-                } else switch (try self.module_initializer.?.advance()) {
-                    .pending => .pending,
-                    .complete => |map| result: {
-                        self.module_initializer.?.deinit();
-                        self.module_initializer = null;
-                        self.modules_map = map;
-                        self.alias_initializer = Directory.AliasMap.initCursor(self.registry.allocator, 0);
-                        self.phase = .aliases_map;
-                        break :result .pending;
-                    },
-                },
-                .aliases_map => if (self.alias_cloner) |*cloner| switch (try cloner.advance()) {
-                    .pending => .pending,
-                    .complete => |map| result: {
-                        cloner.deinit();
-                        self.alias_cloner = null;
-                        self.aliases_map = map;
-                        self.phase = .insert;
-                        break :result .pending;
-                    },
-                } else switch (try self.alias_initializer.?.advance()) {
-                    .pending => .pending,
-                    .complete => |map| result: {
-                        self.alias_initializer.?.deinit();
-                        self.alias_initializer = null;
-                        self.aliases_map = map;
-                        self.phase = .insert;
-                        break :result .pending;
-                    },
-                },
-                .insert => result: {
-                    if (self.slot == null) {
-                        self.slot = try self.registry.allocator.create(ModuleSlot);
-                        self.slot.?.* = .{};
-                    }
-                    if (self.insertion == null)
-                        self.insertion = self.modules_map.?.putCursor(name, self.slot.?);
-                    switch (self.insertion.?.advance()) {
-                        .pending => {},
-                        .complete => {
-                            self.insertion = null;
-                            self.phase = .commit_new;
+                .modules => |*state| switch (state.builder) {
+                    inline else => |*builder| switch (try builder.advance()) {
+                        .pending => .pending,
+                        .complete => |modules| result: {
+                            builder.deinit();
+                            const alias_builder: AliasBuilder = if (state.snapshot.old) |old|
+                                .{ .clone = old.aliases.cloneCursor(0) }
+                            else
+                                .{ .initialize = Directory.AliasMap.initCursor(
+                                    self.registry.allocator(),
+                                    0,
+                                ) };
+                            self.state = .{ .aliases = .{
+                                .snapshot = state.snapshot,
+                                .modules = modules,
+                                .builder = alias_builder,
+                            } };
+                            break :result .pending;
                         },
-                    }
+                    },
+                },
+                .aliases => |*state| switch (state.builder) {
+                    inline else => |*builder| switch (try builder.advance()) {
+                        .pending => .pending,
+                        .complete => |aliases| result: {
+                            builder.deinit();
+                            self.state = .{ .prepare_insert = .{
+                                .snapshot = state.snapshot,
+                                .modules = state.modules,
+                                .aliases = aliases,
+                            } };
+                            break :result .pending;
+                        },
+                    },
+                },
+                .prepare_insert => |*state| result: {
+                    const build = try self.registry.allocator().create(NewBuild);
+                    const slot = self.registry.allocator().create(ModuleSlot) catch |err| {
+                        self.registry.allocator().destroy(build);
+                        return err;
+                    };
+                    slot.* = .{};
+                    build.* = .{
+                        .snapshot = state.snapshot,
+                        .modules = state.modules,
+                        .aliases = state.aliases,
+                        .slot = slot,
+                    };
+                    self.state = .{ .insert = .{
+                        .build = build,
+                        .cursor = build.modules.putCursor(name, slot),
+                    } };
                     break :result .pending;
                 },
-                .commit_existing => result: {
+                .insert => |*state| switch (state.cursor.advance()) {
+                    .pending => .pending,
+                    .complete => result: {
+                        self.state = .{ .commit_new = state.build };
+                        break :result .pending;
+                    },
+                },
+                .commit_existing => |slot| result: {
                     self.registry.lockBlocking();
-                    defer self.registry.unlock();
-                    const slot = self.existing.?;
-                    const prior = slot.current.load(.acquire).?;
-                    const retired = try self.registry.retired.appendPtr(.{ .slot = slot, .generation = prior });
+                    const prior = slot.publisher.currentOwned().?;
+                    const retired = self.registry.retireGeneration(slot, prior) catch |err| {
+                        self.registry.unlock();
+                        return err;
+                    };
                     candidate.generation = prior.generation + 1;
                     candidate.scope.freezeModule();
-                    slot.current.store(self.owned.publish(), .seq_cst);
-                    if (slot.readers.load(.seq_cst) == 0) {
+                    slot.publisher.publish(self.owned.publish());
+                    const release_prior = slot.publisher.quiescent();
+                    if (release_prior) {
                         retired.generation = null;
-                        prior.release();
+                        self.registry.recycleRetired(retired);
                     }
-                    self.phase = .complete;
+                    self.registry.unlock();
+                    if (release_prior) prior.release();
+                    self.state = .complete;
                     break :result .{ .complete = candidate.generation };
                 },
-                .commit_new => result: {
-                    const next = try self.registry.allocator.create(Directory);
+                .commit_new => |build| result: {
+                    const next = try self.registry.allocator().create(Directory);
                     self.registry.lockBlocking();
-                    if (self.registry.directory.load(.acquire) != self.old) {
+                    if (!self.registry.privateState().directories.isCurrent(build.snapshot.old)) {
                         self.registry.unlock();
-                        self.registry.allocator.destroy(next);
-                        self.retry();
+                        self.registry.allocator().destroy(next);
+                        self.destroyBuild(build);
+                        self.state = .snapshot;
                         break :result .pending;
                     }
                     next.* = .{
-                        .modules = self.modules_map.?,
-                        .aliases = self.aliases_map.?,
-                        .previous = @constCast(self.old),
+                        .modules = build.modules,
+                        .aliases = build.aliases,
+                        .previous = @constCast(build.snapshot.old),
                     };
-                    self.modules_map = null;
-                    self.aliases_map = null;
-                    self.registry.slots.append(self.slot.?) catch {
-                        self.modules_map = next.modules;
-                        self.aliases_map = next.aliases;
+                    self.registry.privateState().slots.append(build.slot) catch {
                         self.registry.unlock();
-                        self.registry.allocator.destroy(next);
+                        self.registry.allocator().destroy(next);
                         return error.OutOfMemory;
                     };
-                    const slot = self.slot.?;
-                    self.slot = null;
                     candidate.generation = 1;
                     candidate.scope.freezeModule();
-                    slot.current.store(self.owned.publish(), .seq_cst);
-                    self.registry.directory.store(next, .release);
-                    self.registry.reclaimDirectories();
+                    build.slot.publisher.publish(self.owned.publish());
+                    self.registry.privateState().directories.publish(next);
                     self.registry.unlock();
-                    self.phase = .complete;
+                    build.snapshot.directory.deinit();
+                    self.registry.allocator().destroy(build);
+                    self.state = .complete;
                     break :result .{ .complete = 1 };
                 },
                 .complete => unreachable,
@@ -633,14 +930,14 @@ pub const Registry = struct {
     pub const AliasProgress = enum { pending, complete };
     pub const AliasCursor = struct {
         registry: *Registry,
-        short: u32,
-        target: u32,
+        short: intern.NamespaceName,
+        target: intern.NamespaceName,
         directory: ?DirectoryLease = null,
         old: ?*const Directory = null,
         lookup: ?Directory.ModuleMap.RawLookupCursor = null,
         alias_lookup: ?Directory.AliasMap.RawLookupCursor = null,
-        canonical_target: u32 = 0,
-        existing_short: ?u32 = null,
+        canonical_target: ?intern.NamespaceName = null,
+        existing_short: ?intern.NamespaceName = null,
         modules_cloner: ?Directory.ModuleMap.CloneCursor = null,
         modules_map: ?Directory.ModuleMap = null,
         aliases_cloner: ?Directory.AliasMap.CloneCursor = null,
@@ -649,7 +946,7 @@ pub const Registry = struct {
         phase: enum { snapshot, short_module, target_module, target_alias, short_alias, modules_map, aliases_map, insert, commit, complete } = .snapshot,
 
         pub fn init(registry: *Registry, short: intern.NamespaceName, target: intern.NamespaceName) AliasCursor {
-            return .{ .registry = registry, .short = intern.namespaceId(short), .target = intern.namespaceId(target) };
+            return .{ .registry = registry, .short = short, .target = target };
         }
         pub fn deinit(self: *AliasCursor) void {
             if (self.directory) |*directory| directory.deinit();
@@ -722,7 +1019,7 @@ pub const Registry = struct {
                     .pending => .pending,
                     .complete => |existing| result: {
                         self.existing_short = existing;
-                        if (existing != null and existing.? == self.canonical_target) {
+                        if (existing != null and existing == self.canonical_target) {
                             self.phase = .complete;
                             break :result .complete;
                         }
@@ -750,7 +1047,10 @@ pub const Registry = struct {
                         self.aliases_cloner.?.deinit();
                         self.aliases_cloner = null;
                         self.aliases_map = map;
-                        self.insertion = self.aliases_map.?.putCursor(self.short, self.canonical_target);
+                        self.insertion = self.aliases_map.?.putCursor(
+                            self.short,
+                            self.canonical_target.?,
+                        );
                         self.phase = .insert;
                         break :result .pending;
                     },
@@ -764,11 +1064,11 @@ pub const Registry = struct {
                     },
                 },
                 .commit => result: {
-                    const next = try self.registry.allocator.create(Directory);
+                    const next = try self.registry.allocator().create(Directory);
                     self.registry.lockBlocking();
-                    if (self.registry.directory.load(.acquire) != self.old) {
+                    if (!self.registry.privateState().directories.isCurrent(self.old)) {
                         self.registry.unlock();
-                        self.registry.allocator.destroy(next);
+                        self.registry.allocator().destroy(next);
                         self.retry();
                         break :result .pending;
                     }
@@ -779,8 +1079,7 @@ pub const Registry = struct {
                     };
                     self.modules_map = null;
                     self.aliases_map = null;
-                    self.registry.directory.store(next, .release);
-                    self.registry.reclaimDirectories();
+                    self.registry.privateState().directories.publish(next);
                     self.registry.unlock();
                     self.phase = .complete;
                     break :result .complete;
@@ -823,7 +1122,7 @@ pub const Registry = struct {
                             return .{ .complete = self.name };
                         } else {
                             const directory = self.directory.directory.?;
-                            self.alias_lookup = directory.aliases.rawLookup(self.name);
+                            self.alias_lookup = directory.aliases.rawLookup(@enumFromInt(self.name));
                             self.phase = .alias;
                         },
                     }
@@ -832,7 +1131,10 @@ pub const Registry = struct {
                     .pending => return .pending,
                     .complete => |canonical_name| {
                         self.phase = .complete;
-                        return .{ .complete = canonical_name };
+                        return .{ .complete = if (canonical_name) |found|
+                            intern.namespaceId(found)
+                        else
+                            null };
                     },
                 },
                 .complete => unreachable,
@@ -845,7 +1147,7 @@ pub const Registry = struct {
             .directory = directory,
             .name = name,
             .module_lookup = if (directory.directory) |current|
-                current.modules.rawLookup(name)
+                current.modules.rawLookup(@enumFromInt(name))
             else
                 null,
         };
@@ -892,7 +1194,7 @@ pub const Registry = struct {
                             return self.acceptSlot(found);
                         } else {
                             const directory = self.directory.directory.?;
-                            self.alias_lookup = directory.aliases.rawLookup(self.name);
+                            self.alias_lookup = directory.aliases.rawLookup(@enumFromInt(self.name));
                             self.phase = .alias;
                         },
                     }
@@ -934,7 +1236,7 @@ pub const Registry = struct {
             .directory = directory,
             .name = name,
             .module_lookup = if (directory.directory) |current|
-                current.modules.rawLookup(name)
+                current.modules.rawLookup(@enumFromInt(name))
             else
                 null,
         };
@@ -946,23 +1248,14 @@ pub const Registry = struct {
     };
     fn leaseSlot(self: *const Registry, slot: *ModuleSlot) LeaseSlotResult {
         _ = self;
-        var protocol: snapshot_core.Reader = .idle;
-        const announced = readerDecision(protocol, .announce);
-        protocol = announced.next;
-        std.debug.assert(announced.command == .announce);
-        _ = slot.readers.fetchAdd(1, .seq_cst);
-        const generation = slot.current.load(.seq_cst);
+        var snapshot_lease = slot.publisher.acquire();
+        const generation = snapshot_lease.snapshot;
         if (generation) |present| {
-            const protected = readerDecision(protocol, .protect);
-            protocol = protected.next;
-            std.debug.assert(protected.command == .retain_payload);
-            present.retain();
+            @constCast(present).retain();
         }
-        const left = readerDecision(protocol, .leave);
-        std.debug.assert(left.command == .leave and left.next == .idle);
-        const final_reader = slot.readers.fetchSub(1, .seq_cst) == 1;
+        const final_reader = snapshot_lease.deinit();
         return .{
-            .lease = if (generation) |present| .{ .generation = present } else null,
+            .lease = if (generation) |present| GenerationLease.initRetained(@constCast(present)) else null,
             .needs_reclaim = final_reader,
         };
     }
@@ -1090,16 +1383,16 @@ pub const Registry = struct {
                 .commit => result: {
                     self.registry.lockBlocking();
                     defer self.registry.unlock();
-                    const current = self.registry.loading.load(.acquire);
+                    const current = self.registry.privateState().loading.load(.acquire);
                     if (current != self.observed_head) {
                         self.observed_head = current;
                         self.cursor = current;
                         self.phase = .scan;
                         break :result .pending;
                     }
-                    const node = try self.registry.allocator.create(LoadingNode);
+                    const node = try self.registry.allocator().create(LoadingNode);
                     node.* = .{ .registry = self.registry, .name = self.name, .next = current };
-                    self.registry.loading.store(node, .release);
+                    self.registry.privateState().loading.store(node, .release);
                     self.phase = .complete;
                     break :result .{ .complete = .init(node) };
                 },
@@ -1108,13 +1401,18 @@ pub const Registry = struct {
         }
     };
     pub fn beginLoadingCursor(self: *Registry, name: u32) BeginLoadingCursor {
-        const head = self.loading.load(.acquire);
+        const head = self.privateState().loading.load(.acquire);
         return .{ .registry = self, .name = name, .observed_head = head, .cursor = head };
     }
 };
+comptime {
+    heap.requireOpaqueHostRoot(Registry, RegistryState);
+}
 
 test "registry replacement is monotone and old generations survive" {
-    var registry = Registry.init(std.testing.allocator);
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var registry = try Registry.init(host.cleanup());
     defer registry.deinit();
     const name = try intern.trustedNamespace("test-module");
     var first = try registry.createCandidate(name);
@@ -1125,8 +1423,37 @@ test "registry replacement is monotone and old generations survive" {
     var second = try registry.createCandidate(name);
     defer second.deinit();
     try std.testing.expectEqual(@as(u64, 2), try registry.commit(&second));
-    try std.testing.expectEqual(@as(u64, 1), old.generation.generation);
+    try std.testing.expectEqual(@as(u64, 1), old.generationNumber());
     var current = registry.acquire(intern.namespaceId(name)).?;
     defer current.deinit();
-    try std.testing.expectEqual(@as(u64, 2), current.generation.generation);
+    try std.testing.expectEqual(@as(u64, 2), current.generationNumber());
+}
+
+test "registry reload memory is bounded by live generations" {
+    var debug_allocator: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    defer std.testing.expect(debug_allocator.deinit() == .ok) catch @panic("leak");
+    const allocator = debug_allocator.allocator();
+    var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+    var registry = try Registry.init(host.cleanup());
+    defer registry.deinit();
+    const name = try intern.trustedNamespace("bounded-reload-module");
+
+    for (0..10) |_| {
+        var candidate = try registry.createCandidate(name);
+        defer candidate.deinit();
+        _ = try registry.commit(&candidate);
+        _ = releases.advance(256);
+    }
+    host.cleanup().drain();
+    const warmed_bytes = debug_allocator.total_requested_bytes;
+    for (0..700) |_| {
+        var candidate = try registry.createCandidate(name);
+        defer candidate.deinit();
+        _ = try registry.commit(&candidate);
+        _ = releases.advance(256);
+    }
+    host.cleanup().drain();
+    try std.testing.expect(debug_allocator.total_requested_bytes <= warmed_bytes);
 }

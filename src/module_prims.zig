@@ -28,36 +28,36 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 }
 fn moduleWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const body = try quotationHeader(evaluator, try evaluator.popOwned());
-    errdefer heap.decRef(evaluator.allocator(), body);
-    const name = try symbolValue(evaluator, try evaluator.popOwned());
+    var body = try evaluator.popValue();
+    defer body.deinit();
+    if (body.borrow() != .list) return evaluator.typeError("a quotation/list");
+    const name = try popSymbol(evaluator);
     const driver = try evaluator.allocator().create(ModuleStartDriver);
-    driver.* = .{ .body = body, .validation = .init(name) };
-    evaluator.installWorkDriver(driver, ModuleStartDriver.advance, ModuleStartDriver.destroy);
+    driver.* = .{ .body = body.take().list, .validation = .init(name) };
+    evaluator.installWorkDriver(driver);
 }
 fn useModule(evaluator: *Machine) MachineError!void {
-    const name = try symbolValue(evaluator, try evaluator.popOwned());
+    const name = try popSymbol(evaluator);
     const driver = try evaluator.allocator().create(UseNameDriver);
     driver.* = .{ .name = name, .dot = intern.dotCursor(intern.get(name)) };
-    evaluator.installWorkDriver(driver, UseNameDriver.advance, UseNameDriver.destroy);
+    evaluator.installWorkDriver(driver);
 }
 fn aliasModule(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const target = try symbolValue(evaluator, try evaluator.popOwned());
-    const short = try symbolValue(evaluator, try evaluator.popOwned());
+    const target = try popSymbol(evaluator);
+    const short = try popSymbol(evaluator);
     const driver = try evaluator.allocator().create(AliasDriver);
     driver.* = .{
         .short_validation = .init(short),
         .target_validation = .init(target),
     };
-    evaluator.installWorkDriver(driver, AliasDriver.advance, AliasDriver.destroy);
+    evaluator.installWorkDriver(driver);
 }
 
 const ModuleStartDriver = struct {
-    body: ?*value.Header,
+    body: ?*value.ListHandle,
     validation: intern.NamespaceCursor,
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *ModuleStartDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *ModuleStartDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) switch (self.validation.advance()) {
@@ -75,9 +75,8 @@ const ModuleStartDriver = struct {
         };
         return .yielded;
     }
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *ModuleStartDriver = @ptrCast(@alignCast(raw));
-        if (self.body) |body| heap.decRef(allocator, body);
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *ModuleStartDriver) void {
+        if (self.body) |body| releases.releaseHeader(body);
         allocator.destroy(self);
     }
 };
@@ -85,8 +84,7 @@ const ModuleStartDriver = struct {
 const UseNameDriver = struct {
     name: u32,
     dot: intern.DotCursor,
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *UseNameDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *UseNameDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) switch (self.dot.advance()) {
@@ -94,7 +92,7 @@ const UseNameDriver = struct {
             .complete => |dot| {
                 if (dot != null) return evaluator.fail(.domain, "use requires an unqualified name");
                 const name = self.name;
-                evaluator.unit.work_driver = null;
+                evaluator.detachWorkDriver(self);
                 evaluator.allocator().destroy(self);
                 try evaluator.useOrLoad(name);
                 return .detached;
@@ -102,8 +100,8 @@ const UseNameDriver = struct {
         };
         return .yielded;
     }
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        allocator.destroy(@as(*UseNameDriver, @ptrCast(@alignCast(raw))));
+    pub fn destroy(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *UseNameDriver) void {
+        allocator.destroy(self);
     }
 };
 
@@ -113,8 +111,7 @@ const AliasDriver = struct {
     short: ?intern.NamespaceName = null,
     target: ?intern.NamespaceName = null,
     cursor: ?modules.Registry.AliasCursor = null,
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *AliasDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *AliasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) {
@@ -154,25 +151,23 @@ const AliasDriver = struct {
         }
         return .yielded;
     }
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *AliasDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *AliasDriver) void {
         if (self.cursor) |*cursor| cursor.deinit();
         allocator.destroy(self);
     }
 };
-fn symbolValue(evaluator: *Machine, item: Value) MachineError!u32 {
-    return switch (item) {
+fn popSymbol(evaluator: *Machine) MachineError!u32 {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    return switch (item.borrow()) {
         .symbol => |id| id,
-        else => {
-            heap.releaseValue(evaluator.allocator(), item);
-            return evaluator.typeError("a symbol name");
-        },
+        else => evaluator.typeError("a symbol name"),
     };
 }
 fn words(evaluator: *Machine) MachineError!void {
     const driver = try evaluator.allocator().create(WordsDriver);
     driver.* = .init(evaluator);
-    evaluator.installWorkDriver(driver, WordsDriver.advance, WordsDriver.destroy);
+    evaluator.installWorkDriver(driver);
 }
 
 const WordsDriver = struct {
@@ -211,7 +206,7 @@ const WordsDriver = struct {
     }
     fn nextScope(self: *WordsDriver, evaluator: *Machine) void {
         const current = self.scope orelse {
-            self.direct = evaluator.currentEnv().core.nameCursor();
+            self.direct = evaluator.currentEnv().coreView().nameCursor();
             self.phase = .core;
             return;
         };
@@ -233,8 +228,7 @@ const WordsDriver = struct {
         self.use_ordinal = 0;
         self.phase = .uses;
     }
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *WordsDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *WordsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) switch (self.phase) {
@@ -244,8 +238,8 @@ const WordsDriver = struct {
                 .complete => self.beginUses(evaluator),
                 .entry => |entry| {
                     var lease = entry.lease;
-                    defer lease.deinit(self.allocator);
-                    try self.append(entry.name);
+                    defer lease.deinit();
+                    if (lease.visibility == .public) try self.append(entry.name);
                 },
             },
             .uses => {
@@ -267,7 +261,7 @@ const WordsDriver = struct {
                     self.acquisition = null;
                     self.generation = maybe_generation;
                     if (self.generation) |lease| {
-                        self.exports = lease.generation.publicNameCursor();
+                        self.exports = lease.publicNameCursor();
                         self.phase = .exports;
                     } else self.phase = .uses;
                 },
@@ -294,8 +288,8 @@ const WordsDriver = struct {
                 },
                 .entry => |entry| {
                     var lease = entry.lease;
-                    defer lease.deinit(self.allocator);
-                    try self.append(entry.name);
+                    defer lease.deinit();
+                    if (lease.visibility == .public) try self.append(entry.name);
                 },
             },
             .materialize => if (self.found_iterator.?.next()) |name| {
@@ -364,8 +358,7 @@ const WordsDriver = struct {
         };
         return .yielded;
     }
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *WordsDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *WordsDriver) void {
         if (self.direct) |*cursor| cursor.deinit();
         if (self.use_shape) |*shape| shape.deinit();
         if (self.acquisition) |*cursor| cursor.deinit();
@@ -376,7 +369,7 @@ const WordsDriver = struct {
         if (self.rendered) |rendered| allocator.free(rendered);
         if (self.actions) |actions| allocator.free(actions);
         if (self.names) |names| allocator.free(names);
-        self.found.deinit();
+        self.found.retire(releases);
         allocator.destroy(self);
     }
 };
@@ -387,21 +380,22 @@ fn writeFailure(evaluator: *Machine) MachineError {
     return evaluator.fail(.io, "standard output write failed");
 }
 fn load(evaluator: *Machine) MachineError!void {
-    const path_value = try evaluator.popOwned();
-    if (!path_value.isString()) {
-        heap.releaseValue(evaluator.allocator(), path_value);
-        return evaluator.typeError("a string path");
-    }
+    var path_value = try evaluator.popValue();
+    defer path_value.deinit();
+    if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
     const driver = try evaluator.allocator().create(LoadPathDriver);
-    driver.* = .{ .path_value = path_value, .encoder = .init(evaluator.allocator(), path_value) };
-    evaluator.installWorkDriver(driver, LoadPathDriver.advance, LoadPathDriver.destroy);
+    driver.* = .{
+        .path_value = path_value.borrow(),
+        .encoder = .init(evaluator.allocator(), path_value.borrow()),
+    };
+    _ = path_value.take();
+    evaluator.installWorkDriver(driver);
 }
 const LoadPathDriver = struct {
     path_value: ?Value,
     encoder: kernel_storage.ToUtf8Cursor,
     path: ?[]u8 = null,
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *LoadPathDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *LoadPathDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.path == null) switch (self.encoder.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -414,29 +408,19 @@ const LoadPathDriver = struct {
         const path_value = self.path_value.?;
         self.path = null;
         self.path_value = null;
-        evaluator.unit.work_driver = null;
-        LoadPathDriver.destroy(evaluator.allocator(), self);
+        evaluator.detachWorkDriver(self);
+        LoadPathDriver.destroy(evaluator.releaseDomain(), evaluator.allocator(), self);
         evaluator.loadFileOwned(path, path_value) catch |err| {
             evaluator.allocator().free(path);
-            heap.releaseValue(evaluator.allocator(), path_value);
+            evaluator.releaseDomain().releaseValue(path_value);
             return err;
         };
         return .detached;
     }
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *LoadPathDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *LoadPathDriver) void {
         if (self.path) |path| allocator.free(path);
         self.encoder.deinit();
-        if (self.path_value) |path_value| heap.releaseValue(allocator, path_value);
+        if (self.path_value) |path_value| releases.releaseValue(path_value);
         allocator.destroy(self);
     }
 };
-fn quotationHeader(evaluator: *Machine, item: Value) MachineError!*value.Header {
-    return switch (item) {
-        .list => |header| header,
-        else => {
-            heap.releaseValue(evaluator.allocator(), item);
-            return evaluator.typeError("a quotation/list");
-        },
-    };
-}

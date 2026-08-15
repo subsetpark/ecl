@@ -8,7 +8,7 @@ const dict = @import("dict.zig");
 const equal = @import("equal.zig");
 
 const Value = value.Value;
-const Header = value.Header;
+const Header = value.DictHandle;
 
 const ProfileKind = enum { empty, int, float, char, symbol, mixed };
 const Profile = struct { kind: ProfileKind, max_codepoint: u32 = 0 };
@@ -30,14 +30,18 @@ pub const Utf8Materializer = struct {
     value_index: usize = 0,
     count: usize = 0,
     max_codepoint: u32 = 0,
-    header: ?*heap.InitializingHeader = null,
+    builder: ?heap.AnyListBuilder = null,
 
     pub fn init(allocator: std.mem.Allocator, bytes: []const u8) Utf8Materializer {
         return .{ .allocator = allocator, .bytes = bytes };
     }
 
     pub fn deinit(self: *Utf8Materializer) void {
-        if (self.header) |header| heap.decRef(self.allocator, heap.publish(header));
+        std.debug.assert(self.builder == null);
+        self.* = undefined;
+    }
+    pub fn retire(self: *Utf8Materializer, releases: *heap.ReleaseDomain) void {
+        if (self.builder) |*builder| builder.retirePartial(releases);
         self.* = undefined;
     }
 
@@ -62,12 +66,7 @@ pub const Utf8Materializer = struct {
                 .fill => {
                     if (self.byte_index == self.bytes.len) return self.finish();
                     const codepoint = try decodeUtf8Codepoint(self.bytes, &self.byte_index);
-                    switch (heap.publish(self.header.?).kind()) {
-                        .leaf_char1 => heap.initChars8(self.header.?)[self.value_index] = @intCast(codepoint),
-                        .leaf_char2 => heap.initChars16(self.header.?)[self.value_index] = @intCast(codepoint),
-                        .leaf_char4 => heap.initChars32(self.header.?)[self.value_index] = codepoint,
-                        else => unreachable,
-                    }
+                    self.builder.?.writeCodepoint(self.value_index, codepoint);
                     self.value_index += 1;
                     remaining -= 1;
                 },
@@ -86,23 +85,23 @@ pub const Utf8Materializer = struct {
             .leaf_char2
         else
             .leaf_char4;
-        self.header = try heap.allocHeader(self.allocator, kind, self.count, initialCapacity(self.count));
+        self.builder = try .init(self.allocator, kind, self.count, initialCapacity(self.count));
         self.phase = .fill;
         self.byte_index = 0;
     }
 
     fn finish(self: *Utf8Materializer) Utf8MaterializeResult {
-        const header = self.header.?;
-        self.header = null;
+        const header = self.builder.?.finish();
+        self.builder = null;
         self.phase = .complete;
-        return .{ .complete = .{ .list = heap.publish(header) } };
+        return .{ .complete = .{ .list = header } };
     }
 };
 
 pub const ByteStringMaterializer = struct {
     allocator: std.mem.Allocator,
     bytes: []const u8,
-    header: ?*heap.InitializingHeader = null,
+    builder: ?heap.ListBuilder(.leaf_char1) = null,
     index: usize = 0,
     complete: bool = false,
 
@@ -110,25 +109,28 @@ pub const ByteStringMaterializer = struct {
         return .{ .allocator = allocator, .bytes = bytes };
     }
     pub fn deinit(self: *ByteStringMaterializer) void {
-        if (self.header) |header| heap.decRef(self.allocator, heap.publish(header));
+        std.debug.assert(self.builder == null);
+        self.* = undefined;
+    }
+    pub fn retire(self: *ByteStringMaterializer, releases: *heap.ReleaseDomain) void {
+        if (self.builder) |*builder| builder.retirePartial(releases);
         self.* = undefined;
     }
     pub fn advance(self: *ByteStringMaterializer, budget: usize) error{OutOfMemory}!Utf8MaterializeResult {
         std.debug.assert(budget != 0 and !self.complete);
-        if (self.header == null) self.header = try heap.allocHeader(
+        if (self.builder == null) self.builder = try heap.ListBuilder(.leaf_char1).init(
             self.allocator,
-            .leaf_char1,
             self.bytes.len,
             initialCapacity(self.bytes.len),
         );
         const end = @min(self.index + budget, self.bytes.len);
-        @memcpy(heap.initChars8(self.header.?)[self.index..end], self.bytes[self.index..end]);
+        @memcpy(self.builder.?.items()[self.index..end], self.bytes[self.index..end]);
         self.index = end;
         if (self.index != self.bytes.len) return .pending;
-        const header = self.header.?;
-        self.header = null;
+        const header = self.builder.?.finish();
+        self.builder = null;
         self.complete = true;
-        return .{ .complete = .{ .list = heap.publish(header) } };
+        return .{ .complete = .{ .list = header } };
     }
 };
 
@@ -137,30 +139,42 @@ pub const ByteStringMaterializer = struct {
 pub const TextMaterializer = struct {
     allocator: std.mem.Allocator,
     bytes: []const u8,
-    utf8: ?Utf8Materializer,
-    raw: ?ByteStringMaterializer = null,
+    state: union(enum) {
+        utf8: Utf8Materializer,
+        raw: ByteStringMaterializer,
+    },
 
     pub fn init(allocator: std.mem.Allocator, bytes: []const u8) TextMaterializer {
-        return .{ .allocator = allocator, .bytes = bytes, .utf8 = .init(allocator, bytes) };
+        return .{
+            .allocator = allocator,
+            .bytes = bytes,
+            .state = .{ .utf8 = .init(allocator, bytes) },
+        };
     }
     pub fn deinit(self: *TextMaterializer) void {
-        if (self.utf8) |*materializer| materializer.deinit();
-        if (self.raw) |*materializer| materializer.deinit();
+        switch (self.state) {
+            inline else => |*materializer| materializer.deinit(),
+        }
+        self.* = undefined;
+    }
+    pub fn retire(self: *TextMaterializer, releases: *heap.ReleaseDomain) void {
+        switch (self.state) {
+            inline else => |*materializer| materializer.retire(releases),
+        }
         self.* = undefined;
     }
     pub fn advance(self: *TextMaterializer, budget: usize) error{OutOfMemory}!Utf8MaterializeResult {
-        if (self.utf8) |*materializer| {
-            return materializer.advance(budget) catch |err| switch (err) {
+        return switch (self.state) {
+            .utf8 => |*materializer| materializer.advance(budget) catch |err| switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.InvalidUtf8 => result: {
                     materializer.deinit();
-                    self.utf8 = null;
-                    self.raw = .init(self.allocator, self.bytes);
+                    self.state = .{ .raw = .init(self.allocator, self.bytes) };
                     break :result .pending;
                 },
-            };
-        }
-        return self.raw.?.advance(budget);
+            },
+            .raw => |*materializer| materializer.advance(budget),
+        };
     }
 };
 
@@ -238,14 +252,18 @@ pub const CodepointMaterializer = struct {
     phase: enum { profile, fill, complete } = .profile,
     index: usize = 0,
     max_codepoint: u32 = 0,
-    header: ?*heap.InitializingHeader = null,
+    builder: ?heap.AnyListBuilder = null,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u32) CodepointMaterializer {
         return .{ .allocator = allocator, .source = source };
     }
 
     pub fn deinit(self: *CodepointMaterializer) void {
-        if (self.header) |header| heap.decRef(self.allocator, heap.publish(header));
+        std.debug.assert(self.builder == null);
+        self.* = undefined;
+    }
+    pub fn retire(self: *CodepointMaterializer, releases: *heap.ReleaseDomain) void {
+        if (self.builder) |*builder| builder.retirePartial(releases);
         self.* = undefined;
     }
 
@@ -261,7 +279,7 @@ pub const CodepointMaterializer = struct {
                         .leaf_char2
                     else
                         .leaf_char4;
-                    self.header = try heap.allocHeader(
+                    self.builder = try .init(
                         self.allocator,
                         kind,
                         self.source.len,
@@ -278,12 +296,7 @@ pub const CodepointMaterializer = struct {
             .fill => {
                 if (self.index == self.source.len) return self.finish();
                 const codepoint = self.source[self.index];
-                switch (heap.publish(self.header.?).kind()) {
-                    .leaf_char1 => heap.initChars8(self.header.?)[self.index] = @intCast(codepoint),
-                    .leaf_char2 => heap.initChars16(self.header.?)[self.index] = @intCast(codepoint),
-                    .leaf_char4 => heap.initChars32(self.header.?)[self.index] = codepoint,
-                    else => unreachable,
-                }
+                self.builder.?.writeCodepoint(self.index, codepoint);
                 self.index += 1;
                 remaining -= 1;
             },
@@ -294,17 +307,17 @@ pub const CodepointMaterializer = struct {
     }
 
     fn finish(self: *CodepointMaterializer) MaterializeResult {
-        const header = self.header.?;
-        self.header = null;
+        const header = self.builder.?.finish();
+        self.builder = null;
         self.phase = .complete;
-        return .{ .complete = .{ .list = heap.publish(header) } };
+        return .{ .complete = .{ .list = header } };
     }
 };
 
 pub const I64Materializer = struct {
     allocator: std.mem.Allocator,
     source: []const i64,
-    header: ?*heap.InitializingHeader = null,
+    builder: ?heap.ListBuilder(.leaf_i64) = null,
     index: usize = 0,
     complete: bool = false,
 
@@ -313,26 +326,29 @@ pub const I64Materializer = struct {
     }
 
     pub fn deinit(self: *I64Materializer) void {
-        if (self.header) |header| heap.decRef(self.allocator, heap.publish(header));
+        std.debug.assert(self.builder == null);
+        self.* = undefined;
+    }
+    pub fn retire(self: *I64Materializer, releases: *heap.ReleaseDomain) void {
+        if (self.builder) |*builder| builder.retirePartial(releases);
         self.* = undefined;
     }
 
     pub fn advance(self: *I64Materializer, budget: usize) error{OutOfMemory}!I64MaterializeResult {
         std.debug.assert(budget != 0 and !self.complete);
-        if (self.header == null) self.header = try heap.allocHeader(
+        if (self.builder == null) self.builder = try heap.ListBuilder(.leaf_i64).init(
             self.allocator,
-            .leaf_i64,
             self.source.len,
             initialCapacity(self.source.len),
         );
         const end = @min(self.index + budget, self.source.len);
-        @memcpy(heap.initI64s(self.header.?)[self.index..end], self.source[self.index..end]);
+        @memcpy(self.builder.?.items()[self.index..end], self.source[self.index..end]);
         self.index = end;
         if (self.index != self.source.len) return .pending;
-        const header = self.header.?;
-        self.header = null;
+        const header = self.builder.?.finish();
+        self.builder = null;
         self.complete = true;
-        return .{ .complete = .{ .list = heap.publish(header) } };
+        return .{ .complete = .{ .list = header } };
     }
 };
 
@@ -345,23 +361,30 @@ pub const DictMaterializeProgress = union(enum) {
 /// Resumable dictionary construction. Hashing, optional duplicate checking,
 /// and each exact-size child materialization preserve their own cursors.
 pub const DictMaterializer = struct {
+    const State = union(enum) {
+        hash: struct {
+            index: usize = 0,
+            cursor: ?equal.HashCursor = null,
+        },
+        duplicate: struct {
+            index: usize,
+            candidate: usize = 0,
+            cursor: ?equal.MatchCursor = null,
+        },
+        keys: ValueMaterializer,
+        vals: struct { keys: Value, materializer: ValueMaterializer },
+        hashes: struct { keys: Value, vals: Value, materializer: I64Materializer },
+        finish: struct { keys: Value, vals: Value, hashes: Value },
+        complete,
+    };
+
     allocator: std.mem.Allocator,
     pairs: []const dict.Pair,
     check_duplicates: bool,
     keys: []Value,
     vals: []Value,
     hashes: []i64,
-    phase: enum { hash, duplicate, keys, vals, hashes, finish, complete } = .hash,
-    index: usize = 0,
-    candidate: usize = 0,
-    hash_cursor: ?equal.HashCursor = null,
-    match_cursor: ?equal.MatchCursor = null,
-    keys_materializer: ?ValueMaterializer = null,
-    vals_materializer: ?ValueMaterializer = null,
-    hashes_materializer: ?I64Materializer = null,
-    keys_value: ?Value = null,
-    vals_value: ?Value = null,
-    hashes_value: ?Value = null,
+    state: State = .{ .hash = .{} },
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -385,14 +408,33 @@ pub const DictMaterializer = struct {
     }
 
     pub fn deinit(self: *DictMaterializer) void {
-        if (self.hash_cursor) |*cursor| cursor.deinit();
-        if (self.match_cursor) |*cursor| cursor.deinit();
-        if (self.keys_materializer) |*materializer| materializer.deinit();
-        if (self.vals_materializer) |*materializer| materializer.deinit();
-        if (self.hashes_materializer) |*materializer| materializer.deinit();
-        if (self.keys_value) |item| heap.releaseValue(self.allocator, item);
-        if (self.vals_value) |item| heap.releaseValue(self.allocator, item);
-        if (self.hashes_value) |item| heap.releaseValue(self.allocator, item);
+        std.debug.assert(self.state == .complete);
+        self.allocator.free(self.keys);
+        self.allocator.free(self.vals);
+        self.allocator.free(self.hashes);
+        self.* = undefined;
+    }
+    pub fn retire(self: *DictMaterializer, releases: *heap.ReleaseDomain) void {
+        switch (self.state) {
+            .hash => |*state| if (state.cursor) |*cursor| cursor.deinit(),
+            .duplicate => |*state| if (state.cursor) |*cursor| cursor.deinit(),
+            .keys => |*materializer| materializer.retire(releases),
+            .vals => |*state| {
+                state.materializer.retire(releases);
+                releases.releaseValue(state.keys);
+            },
+            .hashes => |*state| {
+                state.materializer.retire(releases);
+                releases.releaseValue(state.keys);
+                releases.releaseValue(state.vals);
+            },
+            .finish => |state| {
+                releases.releaseValue(state.keys);
+                releases.releaseValue(state.vals);
+                releases.releaseValue(state.hashes);
+            },
+            .complete => {},
+        }
         self.allocator.free(self.keys);
         self.allocator.free(self.vals);
         self.allocator.free(self.hashes);
@@ -403,107 +445,100 @@ pub const DictMaterializer = struct {
         self: *DictMaterializer,
         budget: usize,
     ) error{OutOfMemory}!DictMaterializeProgress {
-        std.debug.assert(budget != 0 and self.phase != .complete);
-        while (true) switch (self.phase) {
-            .hash => {
-                if (self.index == self.pairs.len) {
-                    self.keys_materializer = .init(self.allocator, self.keys);
-                    self.phase = .keys;
+        std.debug.assert(budget != 0 and self.state != .complete);
+        while (true) switch (self.state) {
+            .hash => |*state| {
+                if (state.index == self.pairs.len) {
+                    self.state = .{ .keys = .init(self.allocator, self.keys) };
                     continue;
                 }
-                if (self.hash_cursor == null)
-                    self.hash_cursor = try .init(self.allocator, self.pairs[self.index][0]);
-                switch (try self.hash_cursor.?.advance(budget)) {
+                if (state.cursor == null)
+                    state.cursor = try .init(self.allocator, self.pairs[state.index][0]);
+                switch (try state.cursor.?.advance(budget)) {
                     .pending => return .pending,
                     .complete => |computed| {
-                        self.hash_cursor.?.deinit();
-                        self.hash_cursor = null;
-                        self.keys[self.index] = self.pairs[self.index][0];
-                        self.vals[self.index] = self.pairs[self.index][1];
-                        self.hashes[self.index] = @bitCast(computed);
-                        if (self.check_duplicates and self.index != 0) {
-                            self.candidate = 0;
-                            self.phase = .duplicate;
-                        } else self.index += 1;
+                        state.cursor.?.deinit();
+                        state.cursor = null;
+                        self.keys[state.index] = self.pairs[state.index][0];
+                        self.vals[state.index] = self.pairs[state.index][1];
+                        self.hashes[state.index] = @bitCast(computed);
+                        if (self.check_duplicates and state.index != 0)
+                            self.state = .{ .duplicate = .{ .index = state.index } }
+                        else
+                            state.index += 1;
                         return .pending;
                     },
                 }
             },
-            .duplicate => {
+            .duplicate => |*state| {
                 var remaining = budget;
-                while (remaining != 0 and self.candidate != self.index) {
-                    if (self.hashes[self.candidate] != self.hashes[self.index]) {
-                        self.candidate += 1;
+                while (remaining != 0 and state.candidate != state.index) {
+                    if (self.hashes[state.candidate] != self.hashes[state.index]) {
+                        state.candidate += 1;
                         remaining -= 1;
                         continue;
                     }
-                    if (self.match_cursor == null) self.match_cursor = try .init(
+                    if (state.cursor == null) state.cursor = try .init(
                         self.allocator,
-                        self.keys[self.candidate],
-                        self.keys[self.index],
+                        self.keys[state.candidate],
+                        self.keys[state.index],
                     );
-                    switch (try self.match_cursor.?.advance(remaining)) {
+                    switch (try state.cursor.?.advance(remaining)) {
                         .pending => return .pending,
                         .complete => |matches| {
-                            self.match_cursor.?.deinit();
-                            self.match_cursor = null;
+                            state.cursor.?.deinit();
+                            state.cursor = null;
                             if (matches) return .duplicate_key;
-                            self.candidate += 1;
+                            state.candidate += 1;
                             return .pending;
                         },
                     }
                 }
-                if (self.candidate != self.index) return .pending;
-                self.index += 1;
-                self.phase = .hash;
+                if (state.candidate != state.index) return .pending;
+                self.state = .{ .hash = .{ .index = state.index + 1 } };
                 return .pending;
             },
-            .keys => switch (try self.keys_materializer.?.advance(budget)) {
+            .keys => |*materializer| switch (try materializer.advance(budget)) {
                 .pending => return .pending,
                 .complete => |item| {
-                    self.keys_value = item;
-                    self.vals_materializer = .init(self.allocator, self.vals);
-                    self.phase = .vals;
+                    self.state = .{ .vals = .{
+                        .keys = item,
+                        .materializer = .init(self.allocator, self.vals),
+                    } };
                     return .pending;
                 },
             },
-            .vals => switch (try self.vals_materializer.?.advance(budget)) {
+            .vals => |*state| switch (try state.materializer.advance(budget)) {
                 .pending => return .pending,
                 .complete => |item| {
-                    self.vals_value = item;
-                    self.hashes_materializer = .init(self.allocator, self.hashes);
-                    self.phase = .hashes;
+                    self.state = .{ .hashes = .{
+                        .keys = state.keys,
+                        .vals = item,
+                        .materializer = .init(self.allocator, self.hashes),
+                    } };
                     return .pending;
                 },
             },
-            .hashes => switch (try self.hashes_materializer.?.advance(budget)) {
+            .hashes => |*state| switch (try state.materializer.advance(budget)) {
                 .pending => return .pending,
                 .complete => |item| {
-                    self.hashes_value = item;
-                    self.phase = .finish;
+                    self.state = .{ .finish = .{
+                        .keys = state.keys,
+                        .vals = state.vals,
+                        .hashes = item,
+                    } };
                     continue;
                 },
             },
-            .finish => {
-                const header = try heap.allocHeader(
-                    self.allocator,
-                    .dict,
-                    self.pairs.len,
-                    self.pairs.len,
-                );
-                heap.initDictStorage(header).* = .{
-                    .payload = .{
-                        .keys = self.keys_value.?.list,
-                        .vals = self.vals_value.?.list,
-                        .hashes = self.hashes_value.?.list,
-                    },
-                    .initialized = true,
-                };
-                self.keys_value = null;
-                self.vals_value = null;
-                self.hashes_value = null;
-                self.phase = .complete;
-                return .{ .complete = .{ .dict = heap.publish(header) } };
+            .finish => |state| {
+                var builder = try heap.DictBuilder.init(self.allocator, self.pairs.len);
+                const header = builder.finish(.{
+                    .keys = state.keys.list,
+                    .vals = state.vals.list,
+                    .hashes = state.hashes.list,
+                }, null);
+                self.state = .complete;
+                return .{ .complete = .{ .dict = header } };
             },
             .complete => unreachable,
         };
@@ -529,7 +564,6 @@ pub const DictFindCursor = struct {
     }
 
     pub fn initHeader(allocator: std.mem.Allocator, header: *Header, key: Value) DictFindCursor {
-        std.debug.assert(header.kind() == .dict);
         return .{ .allocator = allocator, .header = header, .key = key };
     }
 
@@ -594,7 +628,7 @@ pub const ValueMaterializer = struct {
     phase: Phase = .profile,
     index: usize = 0,
     item_profile: Profile = .{ .kind = .empty },
-    header: ?*heap.InitializingHeader = null,
+    builder: ?heap.AnyListBuilder = null,
 
     const Phase = enum { profile, fill, complete };
 
@@ -603,8 +637,20 @@ pub const ValueMaterializer = struct {
     }
 
     pub fn deinit(self: *ValueMaterializer) void {
-        if (self.header) |header| heap.decRef(self.allocator, heap.publish(header));
+        std.debug.assert(self.builder == null);
         self.* = undefined;
+    }
+    pub fn retire(self: *ValueMaterializer, releases: *heap.ReleaseDomain) void {
+        if (self.builder) |*builder| builder.retirePartial(releases);
+        self.* = undefined;
+    }
+
+    /// Transfers an incomplete destination to scheduler-owned release work.
+    pub fn takePartial(self: *ValueMaterializer) ?Value {
+        if (self.builder == null) return null;
+        const header = self.builder.?.finish();
+        self.builder = null;
+        return .{ .list = header };
     }
 
     pub fn advance(self: *ValueMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
@@ -680,41 +726,30 @@ pub const ValueMaterializer = struct {
                 .leaf_char4,
             .symbol => .leaf_symbol,
         };
-        const header = try heap.allocHeader(
+        var builder = try heap.AnyListBuilder.init(
             self.allocator,
             kind,
             self.source.len,
             initialCapacity(self.source.len),
         );
-        if (kind == .generic_spine) heap.setInitializingLength(header, 0);
-        self.header = header;
+        if (kind == .generic_spine) switch (builder) {
+            .generic => |*generic| generic.setLen(0),
+            else => unreachable,
+        };
+        self.builder = builder;
         self.phase = .fill;
         self.index = 0;
     }
 
     fn fillOne(self: *ValueMaterializer, item: Value, index: usize) void {
-        const header = self.header.?;
-        switch (heap.publish(header).kind()) {
-            .generic_spine => {
-                heap.retainValue(item);
-                heap.initValues(header)[index] = item;
-                heap.setInitializingLength(header, index + 1);
-            },
-            .leaf_i64 => heap.initI64s(header)[index] = item.int,
-            .leaf_f64 => heap.initF64s(header)[index] = item.float,
-            .leaf_char1 => heap.initChars8(header)[index] = @intCast(item.char),
-            .leaf_char2 => heap.initChars16(header)[index] = @intCast(item.char),
-            .leaf_char4 => heap.initChars32(header)[index] = item.char,
-            .leaf_symbol => heap.initSymbols(header)[index] = item.symbol,
-            .dict, .task, .reserved_mask => unreachable,
-        }
+        self.builder.?.writeValue(index, item);
     }
 
     fn finish(self: *ValueMaterializer) MaterializeResult {
-        const header = self.header.?;
-        self.header = null;
+        const header = self.builder.?.finish();
+        self.builder = null;
         self.phase = .complete;
-        return .{ .complete = .{ .list = heap.publish(header) } };
+        return .{ .complete = .{ .list = header } };
     }
 };
 
@@ -724,7 +759,7 @@ pub const ValueMaterializer = struct {
 pub const GenericValueMaterializer = struct {
     allocator: std.mem.Allocator,
     source: []const Value,
-    header: ?*heap.InitializingHeader = null,
+    builder: ?heap.ListBuilder(.generic_spine) = null,
     index: usize = 0,
     complete: bool = false,
 
@@ -732,32 +767,35 @@ pub const GenericValueMaterializer = struct {
         return .{ .allocator = allocator, .source = source };
     }
     pub fn deinit(self: *GenericValueMaterializer) void {
-        if (self.header) |header| heap.decRef(self.allocator, heap.publish(header));
+        std.debug.assert(self.builder == null);
+        self.* = undefined;
+    }
+    pub fn retire(self: *GenericValueMaterializer, releases: *heap.ReleaseDomain) void {
+        if (self.builder) |*builder| builder.retirePartial(releases);
         self.* = undefined;
     }
     pub fn advance(self: *GenericValueMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
         std.debug.assert(budget != 0 and !self.complete);
-        if (self.header == null) {
-            self.header = try heap.allocHeader(
+        if (self.builder == null) {
+            self.builder = try heap.ListBuilder(.generic_spine).init(
                 self.allocator,
-                .generic_spine,
                 self.source.len,
                 initialCapacity(self.source.len),
             );
-            heap.setInitializingLength(self.header.?, 0);
+            self.builder.?.setLen(0);
         }
         const end = @min(self.index + budget, self.source.len);
         while (self.index != end) : (self.index += 1) {
             const item = self.source[self.index];
             heap.retainValue(item);
-            heap.initValues(self.header.?)[self.index] = item;
-            heap.setInitializingLength(self.header.?, self.index + 1);
+            self.builder.?.items()[self.index] = item;
+            self.builder.?.setLen(self.index + 1);
         }
         if (self.index != self.source.len) return .pending;
-        const header = self.header.?;
-        self.header = null;
+        const header = self.builder.?.finish();
+        self.builder = null;
         self.complete = true;
-        return .{ .complete = .{ .list = heap.publish(header) } };
+        return .{ .complete = .{ .list = header } };
     }
 };
 
@@ -847,7 +885,7 @@ test "list materializers expose bounded profiling and copy transitions" {
             .complete => |item| break item,
         }
     };
-    defer heap.releaseValue(std.testing.allocator, values);
+    defer heap.testing.releaseValue(std.testing.allocator, values);
     try std.testing.expectEqual(@as(usize, 6), value_steps);
 
     var integer_builder = I64Materializer.init(std.testing.allocator, &.{ 1, 2, 3 });
@@ -860,7 +898,7 @@ test "list materializers expose bounded profiling and copy transitions" {
             .complete => |item| break item,
         }
     };
-    defer heap.releaseValue(std.testing.allocator, integers);
+    defer heap.testing.releaseValue(std.testing.allocator, integers);
     try std.testing.expectEqual(@as(usize, 3), integer_steps);
 
     var text_builder = CodepointMaterializer.init(std.testing.allocator, &.{ 'a', 0x100, 0x10000 });
@@ -873,6 +911,6 @@ test "list materializers expose bounded profiling and copy transitions" {
             .complete => |item| break item,
         }
     };
-    defer heap.releaseValue(std.testing.allocator, text);
+    defer heap.testing.releaseValue(std.testing.allocator, text);
     try std.testing.expectEqual(@as(usize, 6), text_steps);
 }

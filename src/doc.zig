@@ -1,6 +1,7 @@
 //! Canonical prose normalization for reflective definition documentation.
 const std = @import("std");
 const value = @import("value.zig");
+const heap = @import("heap.zig");
 const list = @import("list.zig");
 const lexer = @import("lexer.zig");
 const storage = @import("kernel_storage.zig");
@@ -77,6 +78,13 @@ pub const NormalizeCursor = struct {
 
     pub fn deinit(self: *NormalizeCursor) void {
         if (self.materializer) |*materializer| materializer.deinit();
+        if (self.output) |output| self.allocator.free(output);
+        self.allocator.free(self.lines);
+        self.* = undefined;
+    }
+
+    pub fn retire(self: *NormalizeCursor, releases: *heap.ReleaseDomain) void {
+        if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.output) |output| self.allocator.free(output);
         self.allocator.free(self.lines);
         self.* = undefined;

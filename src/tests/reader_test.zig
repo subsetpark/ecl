@@ -9,6 +9,10 @@ const lexer = @import("../lexer.zig");
 const reader = @import("../reader.zig");
 const testgen = @import("testgen.zig");
 
+fn retireReadCursor(cursor: *reader.ReadCursor, releases: *heap.ReleaseDomain) void {
+    while (!cursor.advanceRetirement()) _ = releases.advance(256);
+}
+
 fn repeatedSource(
     allocator: std.mem.Allocator,
     prefix: []const u8,
@@ -32,8 +36,11 @@ fn repeatedSource(
 
 fn expectReadNeedsSteps(source: []const u8, minimum: usize) !void {
     var diag: lexer.Diag = .{};
-    var cursor = reader.ReadCursor.init(std.testing.allocator, "<reader-yield>", source, &diag);
-    defer cursor.deinit();
+    var host = heap.HostOwner.init(std.testing.allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+    var cursor = reader.ReadCursor.init(std.testing.allocator, releases, "<reader-yield>", source, &diag);
+    defer retireReadCursor(&cursor, releases);
     for (0..minimum) |_| try std.testing.expect((try cursor.advance()) == .pending);
     while (true) switch (try cursor.advance()) {
         .pending => {},
@@ -42,7 +49,8 @@ fn expectReadNeedsSteps(source: []const u8, minimum: usize) !void {
                 .complete => |complete| complete,
                 .incomplete => return error.TestUnexpectedResult,
             };
-            parsed.deinit();
+            var retirement = reader.Parsed.RetireCursor.init(&parsed);
+            while (!retirement.advance()) {}
             return;
         },
     };
@@ -50,23 +58,25 @@ fn expectReadNeedsSteps(source: []const u8, minimum: usize) !void {
 
 fn expectRoundTrip(original: testgen.Value) !void {
     const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
     const source = try printer.toOwnedString(allocator, original);
     defer allocator.free(source);
     var diag: lexer.Diag = .{};
-    var parsed = switch (try reader.read(allocator, "<round-trip>", source, &diag)) {
+    var parsed = switch (try reader.read(host.cleanup(), "<round-trip>", source, &diag)) {
         .complete => |complete| complete,
         .incomplete => return error.TestUnexpectedResult,
     };
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 1), parsed.forms.len);
-    try std.testing.expect(equal.match(original, parsed.forms[0]));
-    try std.testing.expectEqual(equal.hash(original), equal.hash(parsed.forms[0]));
+    try std.testing.expectEqual(@as(usize, 1), parsed.values().len);
+    try std.testing.expect(equal.match(original, parsed.values()[0]));
+    try std.testing.expectEqual(equal.hash(original), equal.hash(parsed.values()[0]));
 }
 
 fn dictFreeRoundTrip(recipe: testgen.ValueRecipe) !void {
     const allocator = std.testing.allocator;
     const original = try testgen.valueFromRecipe(allocator, recipe, 4, .excluded, 0x00);
-    defer heap.releaseValue(allocator, original);
+    defer heap.testing.releaseValue(allocator, original);
     try expectRoundTrip(original);
 }
 
@@ -81,7 +91,7 @@ test "parse-print identity for arbitrary dict-free values shrinks structurally" 
 fn dictRoundTrip(recipe: testgen.ValueRecipe) !void {
     const allocator = std.testing.allocator;
     const original = try testgen.dictFromRecipe(allocator, recipe, 3, 0x5d);
-    defer heap.releaseValue(allocator, original);
+    defer heap.testing.releaseValue(allocator, original);
     try expectRoundTrip(original);
 }
 
@@ -95,6 +105,8 @@ test "parse-print identity for arbitrary dict values shrinks structurally" {
 
 test "reader fixtures remain byte-for-byte anchors" {
     const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
     const Fixture = struct { source: []const u8, expected: []const []const u8 };
     const fixtures = [_]Fixture{
         .{
@@ -112,13 +124,13 @@ test "reader fixtures remain byte-for-byte anchors" {
     };
     for (fixtures) |fixture| {
         var diag: lexer.Diag = .{};
-        var parsed = switch (try reader.read(allocator, "test", fixture.source, &diag)) {
+        var parsed = switch (try reader.read(host.cleanup(), "test", fixture.source, &diag)) {
             .complete => |complete| complete,
             .incomplete => return error.TestUnexpectedResult,
         };
         defer parsed.deinit();
-        try std.testing.expectEqual(fixture.expected.len, parsed.forms.len);
-        for (parsed.forms, fixture.expected) |form, expected| {
+        try std.testing.expectEqual(fixture.expected.len, parsed.values().len);
+        for (parsed.values(), fixture.expected) |form, expected| {
             const rendered = try printer.toOwnedString(allocator, form);
             defer allocator.free(rendered);
             try std.testing.expectEqualStrings(expected, rendered);
@@ -126,12 +138,12 @@ test "reader fixtures remain byte-for-byte anchors" {
     }
 
     var diag: lexer.Diag = .{};
-    try std.testing.expect((try reader.read(allocator, "<repl>", "1 (2", &diag)) == .incomplete);
-    try std.testing.expectError(error.Parse, reader.read(allocator, "test", "[1 2)", &diag));
-    try std.testing.expectError(error.Parse, reader.read(allocator, "test", "(|x| (x))", &diag));
+    try std.testing.expect((try reader.read(host.cleanup(), "<repl>", "1 (2", &diag)) == .incomplete);
+    try std.testing.expectError(error.Parse, reader.read(host.cleanup(), "test", "[1 2)", &diag));
+    try std.testing.expectError(error.Parse, reader.read(host.cleanup(), "test", "(|x| (x))", &diag));
     try std.testing.expectError(
         error.Parse,
-        reader.read(allocator, "test", "9223372036854775808", &diag),
+        reader.read(host.cleanup(), "test", "9223372036854775808", &diag),
     );
 }
 
@@ -209,8 +221,11 @@ test "reader bounds long classification and post-growth materialization" {
     const task_marker = try repeatedSource(allocator, "<task:", "0", 70_000, ">");
     defer allocator.free(task_marker);
     var diag: lexer.Diag = .{};
-    var cursor = reader.ReadCursor.init(allocator, "<task-marker>", task_marker, &diag);
-    defer cursor.deinit();
+    var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+    var cursor = reader.ReadCursor.init(allocator, releases, "<task-marker>", task_marker, &diag);
+    defer retireReadCursor(&cursor, releases);
     for (0..task_marker.len * 2) |_| try std.testing.expect((try cursor.advance()) == .pending);
     var rejected = false;
     while (!rejected) {
@@ -224,9 +239,11 @@ test "reader bounds long classification and post-growth materialization" {
 }
 
 fn readFailureProbe(allocator: std.mem.Allocator) !void {
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
     var diag: lexer.Diag = .{};
     var parsed = switch (try reader.read(
-        allocator,
+        host.cleanup(),
         "oom.ecl",
         "1 -2 0x10 3.5 2e3 [\\a 'x \"ok\\u{3bb}\"] " ++
             "{'answer [40 2 +]} (|x y| x y +)",

@@ -13,9 +13,9 @@ fn expectOk(runtime: *session.Session, source: []const u8) !void {
         .ok => {},
         .incomplete => return error.UnexpectedIncomplete,
         .err => |failure| {
-            defer heap.releaseValue(runtime.allocator, failure);
-            const rendered = try printer.toOwnedString(runtime.allocator, failure);
-            defer runtime.allocator.free(rendered);
+            defer runtime.release(failure);
+            const rendered = try printer.toOwnedString(runtime.hostAllocator(), failure);
+            defer runtime.hostAllocator().free(rendered);
             std.log.err("unexpected language error: {s}", .{rendered});
             return error.UnexpectedLanguageError;
         },
@@ -27,9 +27,9 @@ fn expectErrorContains(runtime: *session.Session, source: []const u8, text: []co
         .err => |item| item,
         .ok, .incomplete => return error.ExpectedLanguageError,
     };
-    defer heap.releaseValue(runtime.allocator, failure);
-    const rendered = try printer.toOwnedString(runtime.allocator, failure);
-    defer runtime.allocator.free(rendered);
+    defer runtime.release(failure);
+    const rendered = try printer.toOwnedString(runtime.hostAllocator(), failure);
+    defer runtime.hostAllocator().free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, text) != null);
 }
 
@@ -57,24 +57,24 @@ test "definition annotations support all top-level forms and dynamic data" {
 
 test "every primitive exposes meaningful reflective documentation" {
     const names = [_][]const u8{
-        "dup",       "swap",    "pop",     "over",  "cons",      "compose",
-        "match",     "type",    "str",     "parse", "dict-of",   "attempt",
-        "raise",     "pp",      "prin",    "args",  "exit",      "dip",
-        "call",      "if",      "while",   "times", "cond",      "each",
-        "each2",     "for",     "fold",    "scan",  "infra",     "def",
-        "set",       "defp",    "setp",    "body",  "doc",       "which",
-        "see",       "module",  "use",     "alias", "words",     "load",
-        "spawn",     "await",   "cancel",  "tasks", "await-any", "await-for",
-        "task-join", "+",       "-",       "*",     "/",         "div",
-        "mod",       "pow",     "atan2",   "min",   "max",       "=",
-        "<>",        "<",       ">",       "<=",    ">=",        "and",
-        "or",        "neg",     "abs",     "sqrt",  "floor",     "ceil",
-        "round",     "exp",     "log",     "sin",   "cos",       "not",
-        "at",        "where",   "in",      "raze",  "cat",       "take",
-        "drop",      "reverse", "first",   "rest",  "range",     "shape",
-        "len",       "flip",    "reshape", "cmp",   "grade",     "distinct",
-        "group",     "keys",    "vals",    "put",   "to-dict",   "del",
-        "merge",     "has?",    "split",   "join",  "format",
+        "dup",     "swap",    "pop",    "over",    "cons",      "compose",
+        "match",   "type",    "str",    "parse",   "dict-of",   "attempt",
+        "raise",   "pp",      "prin",   "args",    "exit",      "dip",
+        "call",    "if",      "while",  "times",   "cond",      "each",
+        "each2",   "for",     "fold",   "scan",    "infra",     "def",
+        "set",     "defp",    "setp",   "body",    "doc",       "which",
+        "see",     "module",  "use",    "alias",   "words",     "load",
+        "spawn",   "await",   "cancel", "tasks",   "await-any", "await-for",
+        "+",       "-",       "*",      "/",       "div",       "mod",
+        "pow",     "atan2",   "min",    "max",     "=",         "<>",
+        "<",       ">",       "<=",     ">=",      "and",       "or",
+        "neg",     "abs",     "sqrt",   "floor",   "ceil",      "round",
+        "exp",     "log",     "sin",    "cos",     "not",       "at",
+        "where",   "in",      "raze",   "cat",     "take",      "drop",
+        "reverse", "first",   "rest",   "range",   "shape",     "len",
+        "flip",    "reshape", "cmp",    "grade",   "distinct",  "group",
+        "keys",    "vals",    "put",    "to-dict", "del",       "merge",
+        "has?",    "split",   "join",   "format",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
@@ -95,7 +95,7 @@ test "every primitive exposes meaningful reflective documentation" {
     defer runtime.deinit();
     try expectOk(&runtime, source.written());
     const display = try runtime.stackDisplay();
-    defer runtime.allocator.free(display);
+    defer runtime.hostAllocator().free(display);
     try std.testing.expectEqualStrings(expected.written(), display);
     try expectOk(&runtime, "'over see 'call see");
     try std.testing.expectEqualStrings(
@@ -128,7 +128,7 @@ test "module annotations retain contracts documentation qualification and shadow
         "'public doc \"Session shadow.\" match " ++
         "'m.public doc \"Public module word.\" match");
     const display = try runtime.stackDisplay();
-    defer runtime.allocator.free(display);
+    defer runtime.hostAllocator().free(display);
     try std.testing.expectEqualStrings("1 1 1 1", display);
     try expectErrorContains(&runtime, "'m.private doc", "'kind 'undefined-word");
     try expectErrorContains(&runtime, "'bad ((1) (: \"Documentation only.\") 'f def) module", "'kind 'domain");
@@ -145,7 +145,7 @@ test "multiline documentation is normalized and see is canonical and re-readable
         "(1) (: \"  First line wraps\n    softly.\n\n  - One\n    continues\n  - Two.\") 'multiline def " ++
         "'multiline doc \"First line wraps softly.\n\n- One continues\n- Two.\" match " ++
         "'square see 'answer see");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stack.items[0].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqualStrings(
         "(dup *) (x -- y : \"Square a numeric value.\") 'square def\n" ++
             "[42] (: \"Only docs.\") 'answer def\n",
@@ -158,37 +158,20 @@ test "multiline documentation is normalized and see is canonical and re-readable
     try expectOk(&reread, "4 square 'square doc \"Square a numeric value.\" match " ++
         "answer 'answer doc \"Only docs.\" match");
     const display = try reread.stackDisplay();
-    defer reread.allocator.free(display);
+    defer reread.hostAllocator().free(display);
     try std.testing.expectEqualStrings("16 1 42 1", display);
 }
 
-test "redefinition and set clear metadata while old leases remain valid" {
+test "redefinition and set replace behavior and clear metadata" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     try expectOk(&runtime, "(1) (-- n : \"Old metadata.\") 'lease-target def");
-    const id = try intern.intern("lease-target");
-    var old = (runtime.environment.session.resolveDirect(id)).?;
-    defer old.deinit(runtime.allocator);
-    try std.testing.expect(old.effect != null and old.doc != null);
-    const old_body = old.binding.word;
-    const old_effect = old.effect.?.quotation;
-    const old_doc = old.doc.?;
-
     try expectOk(&runtime, "(2) 'lease-target def");
-    var current = (runtime.environment.session.resolveDirect(id)).?;
-    defer current.deinit(runtime.allocator);
-    try std.testing.expect(current.effect == null and current.doc == null);
-    try std.testing.expectEqual(old_body, old.binding.word);
-    try std.testing.expectEqual(old_effect, old.effect.?.quotation);
-    try std.testing.expectEqual(old_doc, old.doc.?);
+    try expectOk(&runtime, "lease-target 2 match");
     try expectErrorContains(&runtime, "'lease-target doc", "'kind 'domain");
 
     try expectOk(&runtime, "(3) (-- n : \"Temporary.\") 'set-target def 9 'set-target set");
-    const set_id = try intern.intern("set-target");
-    var replaced = (runtime.environment.session.resolveDirect(set_id)).?;
-    defer replaced.deinit(runtime.allocator);
-    try std.testing.expect(replaced.binding == .value);
-    try std.testing.expect(replaced.effect == null and replaced.doc == null);
+    try expectOk(&runtime, "set-target 9 match");
     try expectErrorContains(&runtime, "'set-target doc", "'kind 'domain");
 }
 
@@ -250,7 +233,7 @@ test "long annotation traversal and reflection observe cancellation" {
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
     const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    try runtime.stack.append(allocator, body);
+    try runtime.pushOwned(body);
     const marker = try intern.intern("--");
     const name = try intern.intern("value");
     const items = try allocator.alloc(value.Value, 70_000);
@@ -258,57 +241,55 @@ test "long annotation traversal and reflection observe cancellation" {
     @memset(items, .{ .word = name });
     items[0] = .{ .word = marker };
     const annotation = try list.fromValuesGeneric(allocator, items);
-    try runtime.stack.append(allocator, annotation);
-    runtime.cancelled.store(true, .release);
+    try runtime.pushOwned(annotation);
+    runtime.requestCancellation();
     try expectErrorContains(&runtime, "'cancelled-definition def", "unit cancelled");
-    try std.testing.expect(runtime.last_polls >= 1);
-    try std.testing.expect(runtime.environment.session.resolveDirect(
-        try intern.intern("cancelled-definition"),
-    ) == null);
+    try std.testing.expect(runtime.lastPolls() >= 1);
+    runtime.clearCancellation();
+    try expectErrorContains(&runtime, "cancelled-definition", "'kind 'undefined-word");
 
     var doc_runtime = try session.Session.init(allocator, &.{});
     defer doc_runtime.deinit();
     const doc_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    try doc_runtime.stack.append(allocator, doc_body);
+    try doc_runtime.pushOwned(doc_body);
     const doc_codepoints = try allocator.alloc(u32, 70_000);
     defer allocator.free(doc_codepoints);
     @memset(doc_codepoints, 'd');
     const cancellable_doc = try list.fromCodepoints(allocator, doc_codepoints);
-    defer heap.releaseValue(allocator, cancellable_doc);
+    defer heap.testing.releaseValue(allocator, cancellable_doc);
     const doc_annotation = try list.fromValuesGeneric(allocator, &.{
         .{ .word = try intern.intern(":") },
         cancellable_doc,
     });
-    try doc_runtime.stack.append(allocator, doc_annotation);
-    doc_runtime.cancelled.store(true, .release);
+    try doc_runtime.pushOwned(doc_annotation);
+    doc_runtime.requestCancellation();
     try expectErrorContains(&doc_runtime, "'cancelled-doc def", "unit cancelled");
-    try std.testing.expect(doc_runtime.last_polls >= 1);
-    try std.testing.expect(doc_runtime.environment.session.resolveDirect(
-        try intern.intern("cancelled-doc"),
-    ) == null);
+    try std.testing.expect(doc_runtime.lastPolls() >= 1);
+    doc_runtime.clearCancellation();
+    try expectErrorContains(&doc_runtime, "cancelled-doc", "'kind 'undefined-word");
 
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var reflection_runtime = try session.Session.initWithOutput(allocator, &.{}, &output.writer);
     defer reflection_runtime.deinit();
     const long_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    defer heap.releaseValue(allocator, long_body);
+    defer heap.testing.releaseValue(allocator, long_body);
     const codepoints = try allocator.alloc(u32, 70_000);
     defer allocator.free(codepoints);
     @memset(codepoints, 'd');
     const long_doc = try list.fromCodepoints(allocator, codepoints);
-    defer heap.releaseValue(allocator, long_doc);
+    defer heap.testing.releaseValue(allocator, long_doc);
     const long_id = try intern.intern("long-doc");
-    try reflection_runtime.environment.define(
+    try reflection_runtime.define(
         try intern.namespaceName(long_id),
         .{ .word = .{
             .body = env.quotation(long_body.list).?,
             .doc = env.documentation(long_doc.list).?,
         } },
     );
-    reflection_runtime.cancelled.store(true, .release);
+    reflection_runtime.requestCancellation();
     try expectErrorContains(&reflection_runtime, "'long-doc see", "unit cancelled");
-    try std.testing.expect(reflection_runtime.last_polls >= 1);
+    try std.testing.expect(reflection_runtime.lastPolls() >= 1);
 
     var name_runtime = try session.Session.init(allocator, &.{});
     defer name_runtime.deinit();
@@ -316,10 +297,13 @@ test "long annotation traversal and reflection observe cancellation" {
     defer allocator.free(name_bytes);
     @memset(name_bytes, 'n');
     const long_name = try intern.intern(name_bytes);
-    try name_runtime.stack.append(allocator, try list.fromValuesGeneric(allocator, &.{}));
-    try name_runtime.stack.append(allocator, .{ .symbol = long_name });
-    name_runtime.cancelled.store(true, .release);
+    try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
+    try name_runtime.pushOwned(.{ .symbol = long_name });
+    name_runtime.requestCancellation();
     try expectErrorContains(&name_runtime, "def", "unit cancelled");
-    try std.testing.expect(name_runtime.last_polls >= 1);
-    try std.testing.expect(name_runtime.environment.session.resolveDirect(long_name) == null);
+    try std.testing.expect(name_runtime.lastPolls() >= 1);
+    name_runtime.clearCancellation();
+    const lookup_source = try std.fmt.allocPrint(allocator, "'{s} body", .{name_bytes});
+    defer allocator.free(lookup_source);
+    try expectErrorContains(&name_runtime, lookup_source, "'kind 'undefined-word");
 }

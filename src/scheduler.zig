@@ -11,6 +11,8 @@ const core = @import("scheduler_core.zig");
 
 const Value = value.Value;
 const Header = value.Header;
+const ListHandle = value.ListHandle;
+const TaskHandle = value.TaskHandle;
 
 fn blockingIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
@@ -36,16 +38,23 @@ fn scopeDecision(before: core.Scope, event: core.ScopeEvent) core.ScopeDecision 
     return core.decideScope(before, event) catch @panic("invalid scheduler scope transition");
 }
 
-pub const Config = struct {
-    worker_count: usize,
+pub const Config = union(enum) {
+    cooperative,
+    worker_pool: usize,
 
     pub fn validate(self: Config) error{InvalidWorkerCount}!void {
-        if (self.worker_count == 0) return error.InvalidWorkerCount;
+        switch (self) {
+            .cooperative => {},
+            .worker_pool => |count| if (count == 0) return error.InvalidWorkerCount,
+        }
+    }
+
+    fn isCooperative(self: Config) bool {
+        return self == .cooperative;
     }
 };
 
-const CellState = union(enum) {
-    pending,
+const TerminalState = union(enum) {
     outcome: Value,
     oom,
 };
@@ -53,8 +62,49 @@ const CellState = union(enum) {
 const WaitKind = enum { one, any, deadline };
 const Finish = enum { success, language_error, oom };
 
+const FinishingWork = union(enum) {
+    out_of_memory,
+    language_error,
+    success_unstarted,
+    success_materializing: kernel_storage.ValueMaterializer,
+    ready: TerminalState,
+};
+
+const ExecutionPhase = union(enum) {
+    evaluating,
+    finishing: FinishingWork,
+};
+
+const TaskExecution = struct {
+    unit: machine.Unit,
+    phase: ExecutionPhase = .evaluating,
+};
+
+/// Owns either an unpublished execution or a terminal result. The execution's
+/// worker-private phase may advance without mutating the publication tag that
+/// waiters inspect under the cell lock.
+const TaskPublication = union(enum) {
+    constructing,
+    active: *TaskExecution,
+    published: TerminalState,
+};
+
+const TaskHeaderState = union(enum) {
+    unpublished,
+    published: *TaskHandle,
+};
+
+const ParentMembership = union(enum) {
+    detached: *TaskScope,
+    linked: struct {
+        scope: *TaskScope,
+        previous: ?*TaskCell = null,
+        next: ?*TaskCell = null,
+    },
+};
+
 const RootWaiter = struct {
-    scheduler: *Scheduler,
+    scheduler: *const WorkerScheduler,
     unit: *machine.Unit,
     ready: std.atomic.Value(bool) = .init(false),
 };
@@ -66,32 +116,26 @@ const WaitOwner = union(enum) {
 
 const QueueItem = union(enum) {
     task: *TaskCell,
+    cancellation: *TaskCell,
     wait: *WaitSet,
-    release: *ReleaseJob,
 };
 
 const QueueEntry = struct {
-    next: ?*QueueEntry = null,
-    item: ?QueueItem = null,
+    item: QueueItem,
+    membership: union(enum) { detached, linked: ?*QueueEntry } = .detached,
 };
 
-const ReleaseJob = struct {
-    allocator: std.mem.Allocator,
-    scheduler: *Scheduler,
-    queue: QueueEntry = .{},
-    cursor: ?heap.ReleaseCursor = null,
+const ExecutorArbitration = struct {
+    const Turn = enum { ready, retirement };
+    next: Turn = .ready,
 
-    fn start(self: *ReleaseJob, header: *Header) void {
-        std.debug.assert(self.cursor == null);
-        self.cursor = heap.ReleaseCursor.initHeader(self.allocator, header);
-        self.scheduler.enqueueRelease(self);
-    }
-
-    fn advance(self: *ReleaseJob) bool {
-        if (!self.cursor.?.advance(machine.kernel_poll_quantum)) return false;
-        self.cursor = null;
-        self.allocator.destroy(self);
-        return true;
+    fn choose(self: *ExecutorArbitration, ready: bool, retirement: bool) ?Turn {
+        if (!ready and !retirement) return null;
+        if (!ready) return .retirement;
+        if (!retirement) return .ready;
+        const selected = self.next;
+        self.next = if (selected == .ready) .retirement else .ready;
+        return selected;
     }
 };
 
@@ -122,10 +166,9 @@ const WaitRegistration = struct {
 const TimerNode = struct {
     wait: *WaitSet,
     deadline: std.Io.Timestamp = .zero,
-    heap_index: usize = no_timer_index,
+    membership: union(enum) { detached, linked: usize } = .detached,
 };
 
-const no_timer_index = std.math.maxInt(usize);
 const timer_chunk_capacity = 64;
 const TimerChunk = [timer_chunk_capacity]?*TimerNode;
 
@@ -150,7 +193,7 @@ const TimerHeap = struct {
         allocator: std.mem.Allocator,
         node: *TimerNode,
     ) error{OutOfMemory}!void {
-        std.debug.assert(node.heap_index == no_timer_index);
+        std.debug.assert(node.membership == .detached);
         if (self.len == self.chunks.items.len * timer_chunk_capacity) {
             const chunk = try allocator.create(TimerChunk);
             errdefer allocator.destroy(chunk);
@@ -160,21 +203,24 @@ const TimerHeap = struct {
         const index = self.len;
         self.len += 1;
         self.set(index, node);
-        node.heap_index = index;
+        node.membership = .{ .linked = index };
         self.siftUp(index);
     }
 
     fn remove(self: *TimerHeap, node: *TimerNode) void {
-        const index = node.heap_index;
+        const index = switch (node.membership) {
+            .linked => |linked| linked,
+            .detached => unreachable,
+        };
         std.debug.assert(index < self.len and self.get(index) == node);
         const last_index = self.len - 1;
         const last = self.get(last_index);
         self.set(last_index, null);
         self.len = last_index;
-        node.heap_index = no_timer_index;
+        node.membership = .detached;
         if (index == last_index) return;
         self.set(index, last);
-        last.heap_index = index;
+        last.membership = .{ .linked = index };
         if (index > 0 and earlier(last, self.get((index - 1) / 2)))
             self.siftUp(index)
         else
@@ -212,8 +258,8 @@ const TimerHeap = struct {
         const right_node = self.get(right);
         self.set(left, right_node);
         self.set(right, left_node);
-        left_node.heap_index = right;
-        right_node.heap_index = left;
+        left_node.membership = .{ .linked = right };
+        right_node.membership = .{ .linked = left };
     }
 
     fn get(self: *const TimerHeap, index: usize) *TimerNode {
@@ -231,13 +277,13 @@ const TimerHeap = struct {
 
 const WaitSet = struct {
     allocator: std.mem.Allocator,
-    scheduler: *Scheduler,
+    scheduler: *const WorkerScheduler,
     owner: WaitOwner,
     kind: WaitKind,
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
     policy: core.Wait = .registering,
-    queue: QueueEntry = .{},
+    queue: QueueEntry,
     registrations: []WaitRegistration,
     canonical: []CanonicalSlot,
     initialized: usize = 0,
@@ -245,7 +291,6 @@ const WaitSet = struct {
     wake_handles: usize = 0,
     awaiting_handles: bool = false,
     request: ?machine.ParkRequest,
-    request_release: ?heap.ReleaseCursor = null,
     setup_phase: SetupPhase = .initialize,
     setup_index: usize = 0,
     probe_index: usize = 0,
@@ -256,8 +301,8 @@ const WaitSet = struct {
     park_result: ?machine.ParkResume = null,
     cleanup_index: usize = 0,
     cell_release_index: usize = 0,
-    cell_release: ?heap.ReleaseCursor = null,
     timer: TimerNode,
+    absolute_deadline: ?std.Io.Timestamp = null,
 
     const SetupPhase = enum {
         initialize,
@@ -278,25 +323,25 @@ const WaitSet = struct {
     const DeliveryProgress = enum { yielded, waiting, complete };
 
     fn create(
-        scheduler: *Scheduler,
+        scheduler: *const WorkerScheduler,
         owner: WaitOwner,
-        kind: WaitKind,
-        count: usize,
         request: machine.ParkRequest,
     ) error{OutOfMemory}!*WaitSet {
-        const self = try scheduler.allocator.create(WaitSet);
-        errdefer scheduler.allocator.destroy(self);
-        const registrations = try scheduler.allocator.alloc(WaitRegistration, count);
-        errdefer scheduler.allocator.free(registrations);
+        const kind = requestKind(request);
+        const count = request.taskCount();
+        const self = try scheduler.allocator().create(WaitSet);
+        errdefer scheduler.allocator().destroy(self);
+        const registrations = try scheduler.allocator().alloc(WaitRegistration, count);
+        errdefer scheduler.allocator().free(registrations);
         const canonical_capacity = if (kind == .any) capacity: {
             const doubled = std.math.mul(usize, count, 2) catch return error.OutOfMemory;
             break :capacity std.math.ceilPowerOfTwo(usize, @max(doubled, 2)) catch
                 return error.OutOfMemory;
         } else 0;
-        const canonical = try scheduler.allocator.alloc(CanonicalSlot, canonical_capacity);
-        errdefer scheduler.allocator.free(canonical);
+        const canonical = try scheduler.allocator().alloc(CanonicalSlot, canonical_capacity);
+        errdefer scheduler.allocator().free(canonical);
         self.* = .{
-            .allocator = scheduler.allocator,
+            .allocator = scheduler.allocator(),
             .scheduler = scheduler,
             .owner = owner,
             .kind = kind,
@@ -304,8 +349,8 @@ const WaitSet = struct {
             .canonical = canonical,
             .request = request,
             .timer = .{ .wait = self },
+            .queue = .{ .item = .{ .wait = self } },
         };
-        self.queue.item = .{ .wait = self };
         return self;
     }
 
@@ -320,11 +365,11 @@ const WaitSet = struct {
         if (old != 1) return;
         _ = self.refs.load(.acquire);
         std.debug.assert(self.wake_handles == 0);
-        std.debug.assert(self.timer.heap_index == no_timer_index);
+        std.debug.assert(self.timer.membership == .detached);
         std.debug.assert(self.registrations.len == 0);
         std.debug.assert(self.canonical.len == 0);
-        std.debug.assert(self.request == null and self.request_release == null);
-        std.debug.assert(self.cancel_cursor == null and self.cell_release == null);
+        std.debug.assert(self.request == null);
+        std.debug.assert(self.cancel_cursor == null);
         self.allocator.destroy(self);
     }
 
@@ -348,18 +393,36 @@ const WaitSet = struct {
         self.retain();
         defer self.release();
         std.Io.Threaded.mutexLock(&self.mutex);
+        const arbitrated = self.arbitrateDeadlineLocked(candidate);
         const decision = waitDecision(
             self.policy,
-            .{ .candidate = candidate },
+            .{ .candidate = arbitrated },
         );
         self.policy = decision.next;
         std.Io.Threaded.mutexUnlock(&self.mutex);
         self.performWaitCommand(decision.command);
     }
 
+    fn arbitrateDeadlineLocked(
+        self: *WaitSet,
+        candidate: core.WakeReason,
+    ) core.WakeReason {
+        const deadline = self.absolute_deadline orelse return candidate;
+        return switch (self.policy) {
+            .registering, .active => if (std.Io.Clock.awake.now(blockingIo()).nanoseconds >= deadline.nanoseconds)
+                .timeout
+            else
+                candidate,
+            .selected, .delivered => candidate,
+        };
+    }
+
     fn addTimer(self: *WaitSet, milliseconds: i64) error{ Io, OutOfMemory }!void {
-        try self.scheduler.ensureTimer();
-        self.timer.deadline = std.Io.Clock.awake.now(blockingIo()).addDuration(
+        // The wait's semantic deadline starts before lazy infrastructure work.
+        // A deadline that expires while the timer thread is being created is
+        // resolved here while selectors are excluded, so startup latency can
+        // neither extend the timeout nor let a later completion overtake it.
+        const deadline = std.Io.Clock.awake.now(blockingIo()).addDuration(
             .fromMilliseconds(milliseconds),
         );
         std.Io.Threaded.mutexLock(&self.mutex);
@@ -367,16 +430,46 @@ const WaitSet = struct {
             std.Io.Threaded.mutexUnlock(&self.mutex);
             return;
         }
-        std.Io.Threaded.mutexLock(&self.scheduler.timer_mutex);
-        self.scheduler.timer_heap.insert(self.scheduler.allocator, &self.timer) catch {
-            std.Io.Threaded.mutexUnlock(&self.scheduler.timer_mutex);
+        self.absolute_deadline = deadline;
+        if (std.Io.Clock.awake.now(blockingIo()).nanoseconds >= deadline.nanoseconds) {
+            const decision = waitDecision(self.policy, .{ .candidate = .timeout });
+            self.policy = decision.next;
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            self.performWaitCommand(decision.command);
+            return;
+        }
+        self.scheduler.ensureTimer() catch |err| {
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            return err;
+        };
+        if (std.Io.Clock.awake.now(blockingIo()).nanoseconds >= deadline.nanoseconds) {
+            const decision = waitDecision(self.policy, .{ .candidate = .timeout });
+            self.policy = decision.next;
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            self.performWaitCommand(decision.command);
+            return;
+        }
+        self.timer.deadline = deadline;
+        const scheduler_state = self.scheduler.privateState();
+        std.Io.Threaded.mutexLock(&scheduler_state.timer_mutex);
+        scheduler_state.timer_heap.insert(self.scheduler.allocator(), &self.timer) catch {
+            std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
             std.Io.Threaded.mutexUnlock(&self.mutex);
             return error.OutOfMemory;
         };
+        if (std.Io.Clock.awake.now(blockingIo()).nanoseconds >= deadline.nanoseconds) {
+            scheduler_state.timer_heap.remove(&self.timer);
+            const decision = waitDecision(self.policy, .{ .candidate = .timeout });
+            self.policy = decision.next;
+            std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
+            std.Io.Threaded.mutexUnlock(&self.mutex);
+            self.performWaitCommand(decision.command);
+            return;
+        }
         self.retain();
-        std.Io.Threaded.mutexUnlock(&self.scheduler.timer_mutex);
+        std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
         std.Io.Threaded.mutexUnlock(&self.mutex);
-        self.scheduler.timer_wake.set(blockingIo());
+        scheduler_state.timer_wake.set(blockingIo());
     }
 
     fn activate(self: *WaitSet) void {
@@ -413,8 +506,8 @@ const WaitSet = struct {
         return switch (reason) {
             .task => |index| outcome: {
                 const cell = self.registrations[index].cell.?;
-                const value_owned = cell.terminalOwned() catch break :outcome .out_of_memory;
-                const outcome_value = value_owned orelse unreachable;
+                const terminal_value = cell.terminalOwned() catch break :outcome .out_of_memory;
+                const outcome_value = terminal_value orelse unreachable;
                 break :outcome switch (self.kind) {
                     .one, .deadline => .{ .outcome = outcome_value },
                     .any => .{ .indexed = .{ .index = index, .outcome = outcome_value } },
@@ -535,16 +628,10 @@ const WaitSet = struct {
                 self.setup_phase = .release_request;
             },
             .release_request => {
-                if (self.request_release == null) {
-                    self.request_release = heap.ReleaseCursor.initValue(
-                        self.allocator,
-                        requestOwnedValue(self.request.?),
-                    );
-                    self.request = null;
-                }
-                if (!self.request_release.?.advance(budget)) return false;
-                self.request_release = null;
+                self.scheduler.releaseDomain().releaseValue(self.request.?.ownedValue().?);
+                self.request = null;
                 self.setup_phase = .activate;
+                budget -= 1;
             },
             .activate => {
                 self.activate();
@@ -557,13 +644,7 @@ const WaitSet = struct {
     }
 
     fn requestCell(self: *WaitSet, index: usize) *TaskCell {
-        return taskCell(switch (self.request.?) {
-            .task => |task| task,
-            .deadline => |deadline| deadline.task,
-            .any => |tasks| list.atUnchecked(tasks, index),
-            .join => |join| list.atUnchecked(join.tasks, join.index),
-            .close_scope => unreachable,
-        }).?;
+        return taskCell(self.request.?.taskAt(index)).?;
     }
 
     fn registerCell(
@@ -577,11 +658,12 @@ const WaitSet = struct {
         std.debug.assert(registration.cell == null);
         registration.cell = cell;
         registration.index = wake_index;
-        heap.incRef(cell.header);
+        heap.incRef(cell.handle());
         std.Io.Threaded.mutexLock(&cell.mutex);
-        const terminal = switch (cell.state) {
-            .pending => false,
-            .outcome, .oom => true,
+        const terminal = switch (cell.publication) {
+            .constructing => unreachable,
+            .active => false,
+            .published => true,
         };
         if (!terminal and link) {
             const linked = registrationDecision(registration.phase, .link);
@@ -627,20 +709,10 @@ const WaitSet = struct {
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
         var release_budget: usize = machine.kernel_poll_quantum;
-        while (self.cell_release_index != self.initialized and release_budget != 0) {
-            if (self.cell_release == null) {
-                const registration = &self.registrations[self.cell_release_index];
-                const cell = registration.cell orelse {
-                    self.cell_release_index += 1;
-                    continue;
-                };
-                registration.cell = null;
-                self.cell_release = heap.ReleaseCursor.initHeader(self.allocator, cell.header);
-            }
-            const released = self.cell_release.?.advanceCounted(release_budget);
-            release_budget -= @max(released.consumed, 1);
-            if (!released.complete) return .yielded;
-            self.cell_release = null;
+        while (self.cell_release_index != self.initialized and release_budget != 0) : (release_budget -= 1) {
+            const registration = &self.registrations[self.cell_release_index];
+            if (registration.cell) |cell| self.scheduler.releaseDomain().releaseHeader(cell.handle());
+            registration.cell = null;
             self.cell_release_index += 1;
         }
         if (self.cell_release_index != self.initialized) return .yielded;
@@ -656,15 +728,8 @@ const WaitSet = struct {
     }
 
     fn advanceDiscard(self: *WaitSet) DeliveryProgress {
-        if (self.request_release == null) {
-            self.request_release = heap.ReleaseCursor.initValue(
-                self.allocator,
-                requestOwnedValue(self.request.?),
-            );
-            self.request = null;
-        }
-        if (!self.request_release.?.advance(machine.kernel_poll_quantum)) return .yielded;
-        self.request_release = null;
+        self.scheduler.releaseDomain().releaseValue(self.request.?.ownedValue().?);
+        self.request = null;
         self.allocator.free(self.registrations);
         self.registrations = &.{};
         self.allocator.free(self.canonical);
@@ -674,12 +739,13 @@ const WaitSet = struct {
     }
 
     fn removeTimer(self: *WaitSet) void {
-        std.Io.Threaded.mutexLock(&self.scheduler.timer_mutex);
-        const owned = self.timer.heap_index != no_timer_index;
-        if (owned) self.scheduler.timer_heap.remove(&self.timer);
-        std.Io.Threaded.mutexUnlock(&self.scheduler.timer_mutex);
+        const scheduler_state = self.scheduler.privateState();
+        std.Io.Threaded.mutexLock(&scheduler_state.timer_mutex);
+        const owned = self.timer.membership == .linked;
+        if (owned) scheduler_state.timer_heap.remove(&self.timer);
+        std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
         if (owned) {
-            self.scheduler.timer_wake.set(blockingIo());
+            scheduler_state.timer_wake.set(blockingIo());
             self.release();
         }
     }
@@ -692,11 +758,12 @@ const WaitSet = struct {
         switch (self.owner) {
             .task => |cell| {
                 std.Io.Threaded.mutexLock(&cell.mutex);
-                std.debug.assert(cell.waitset == self and cell.unit.?.park_resume == null);
+                const unit = cell.evaluatingUnit();
+                std.debug.assert(cell.waitset == self);
                 const decision = unitDecision(cell.policy, .{ .wake = reason });
                 cell.policy = decision.next;
                 cell.waitset = null;
-                cell.unit.?.park_resume = park_result;
+                unit.installParkResume(park_result);
                 std.Io.Threaded.mutexUnlock(&cell.mutex);
                 std.debug.assert(decision.command == .enqueue);
                 self.scheduler.enqueueTask(cell);
@@ -708,19 +775,19 @@ const WaitSet = struct {
                 // stack slot while an old selector still dereferences it.
                 const scheduler = root.scheduler;
                 const unit = root.unit;
-                std.debug.assert(root.unit.park_resume == null);
-                unit.park_resume = park_result;
-                std.Io.Threaded.mutexLock(&scheduler.queue_mutex);
+                const scheduler_state = scheduler.privateState();
+                unit.installParkResume(park_result);
+                std.Io.Threaded.mutexLock(&scheduler_state.queue_mutex);
                 root.ready.store(true, .release);
-                scheduler.queue_condition.broadcast(blockingIo());
-                std.Io.Threaded.mutexUnlock(&scheduler.queue_mutex);
+                scheduler_state.queue_condition.broadcast(blockingIo());
+                std.Io.Threaded.mutexUnlock(&scheduler_state.queue_mutex);
             },
         }
     }
 };
 
 pub const TaskScope = struct {
-    scheduler: *Scheduler,
+    scheduler: *const WorkerScheduler,
     mutex: std.Io.Mutex = .init,
     quiescent: std.Io.Condition = .init,
     first: ?*TaskCell = null,
@@ -730,7 +797,7 @@ pub const TaskScope = struct {
     cancellation_walk_active: bool = false,
     owner: ?*TaskCell = null,
 
-    pub fn init(scheduler: *Scheduler) TaskScope {
+    pub fn init(scheduler: *const WorkerScheduler) TaskScope {
         return .{ .scheduler = scheduler };
     }
 
@@ -741,44 +808,38 @@ pub const TaskScope = struct {
     }
 };
 
+const CancellationWork = union(enum) {
+    none,
+    task: CancellationCursor,
+    external: CancellationCursor,
+};
+
 const TaskCell = struct {
     allocator: std.mem.Allocator,
-    scheduler: *Scheduler,
-    header: *Header,
-    retirement: *ReleaseJob,
+    scheduler: *const WorkerScheduler,
+    header_state: TaskHeaderState = .unpublished,
     mutex: std.Io.Mutex = .init,
-    state: CellState = .pending,
     policy: core.Unit = .constructing,
     cancelled: std.atomic.Value(bool) = .init(false),
-    unit: ?*machine.Unit,
+    publication: TaskPublication = .constructing,
     scope: TaskScope,
-    parent: *TaskScope,
-    parent_previous: ?*TaskCell = null,
-    parent_next: ?*TaskCell = null,
-    parent_linked: bool = false,
-    queue: QueueEntry = .{},
+    parent_membership: ParentMembership,
+    queue: QueueEntry,
+    cancellation_queue: QueueEntry,
     waiter_first: ?*WaitRegistration = null,
     waiter_last: ?*WaitRegistration = null,
     waitset: ?*WaitSet = null,
-    finish_disposition: ?Finish = null,
-    terminal_ready: ?CellState = null,
-    result_materializer: ?kernel_storage.ValueMaterializer = null,
-    unit_release: ?heap.ReleaseCursor = null,
-    cancellation_cursor: ?CancellationCursor = null,
-    publication_started: bool = false,
+    cancellation: CancellationWork = .none,
 
-    fn destroy(allocator: std.mem.Allocator, payload: *anyopaque) ?Value {
-        const self: *TaskCell = @ptrCast(@alignCast(payload));
-        std.debug.assert(self.unit == null and !self.parent_linked);
-        std.debug.assert(self.terminal_ready == null);
-        std.debug.assert(self.result_materializer == null);
-        std.debug.assert(self.unit_release == null);
-        std.debug.assert(self.cancellation_cursor == null);
-        std.debug.assert(self.publication_started);
-        const child = switch (self.state) {
-            .pending => unreachable,
-            .outcome => |outcome| outcome,
-            .oom => null,
+    pub fn destroy(allocator: std.mem.Allocator, self: *TaskCell) ?Value {
+        std.debug.assert(self.parent_membership == .detached);
+        std.debug.assert(self.cancellation == .none);
+        const child = switch (self.publication) {
+            .constructing, .active => unreachable,
+            .published => |terminal| switch (terminal) {
+                .outcome => |outcome| outcome,
+                .oom => null,
+            },
         };
         allocator.destroy(self);
         return child;
@@ -787,13 +848,31 @@ const TaskCell = struct {
     fn terminalOwned(self: *TaskCell) error{OutOfMemory}!?Value {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return switch (self.state) {
-            .pending => null,
-            .outcome => |outcome| owned: {
-                heap.retainValue(outcome);
-                break :owned outcome;
+        return switch (self.publication) {
+            .constructing, .active => null,
+            .published => |terminal| switch (terminal) {
+                .outcome => |outcome| owned: {
+                    heap.retainValue(outcome);
+                    break :owned outcome;
+                },
+                .oom => error.OutOfMemory,
             },
-            .oom => error.OutOfMemory,
+        };
+    }
+
+    fn evaluatingUnit(self: *TaskCell) *machine.Unit {
+        const execution = switch (self.publication) {
+            .active => |execution| execution,
+            .constructing, .published => unreachable,
+        };
+        std.debug.assert(execution.phase == .evaluating);
+        return &execution.unit;
+    }
+
+    fn handle(self: *const TaskCell) *TaskHandle {
+        return switch (self.header_state) {
+            .unpublished => unreachable,
+            .published => |header| header,
         };
     }
 };
@@ -811,11 +890,12 @@ const CancellationCursor = struct {
     observed_epoch: u64 = 0,
     started: bool = false,
 
-    fn advance(self: *CancellationCursor) bool {
+    pub fn advance(self: *CancellationCursor) bool {
         const scheduler = self.root.scheduler;
+        const scheduler_state = scheduler.privateState();
         const old_retained = self.retained_next;
-        std.Io.Threaded.mutexLock(&scheduler.tree_mutex);
-        var current = if (self.started and self.observed_epoch == scheduler.tree_epoch)
+        std.Io.Threaded.mutexLock(&scheduler_state.tree_mutex);
+        var current = if (self.started and self.observed_epoch == scheduler_state.tree_epoch)
             old_retained
         else
             self.root.first;
@@ -823,70 +903,37 @@ const CancellationCursor = struct {
         while (current != null and visited < cancellation_tree_quantum) : (visited += 1) {
             const cell = current.?;
             const following = nextDescendant(self.root, cell);
-            cancelOne(cell);
+            _ = cancelOne(cell);
             current = following;
         }
-        if (current) |next| heap.incRef(next.header);
+        if (current) |next| heap.incRef(next.handle());
         self.retained_next = current;
-        self.observed_epoch = scheduler.tree_epoch;
+        self.observed_epoch = scheduler_state.tree_epoch;
         self.started = true;
-        std.Io.Threaded.mutexUnlock(&scheduler.tree_mutex);
-        if (old_retained) |old| heap.decRef(old.allocator, old.header);
+        std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
+        if (old_retained) |old| scheduler.releaseDomain().releaseHeader(old.handle());
         notifyCancellation(scheduler);
         return current == null;
     }
 
     fn deinit(self: *CancellationCursor) void {
-        if (self.retained_next) |cell| heap.decRef(cell.allocator, cell.header);
+        if (self.retained_next) |cell| cell.scheduler.releaseDomain().releaseHeader(cell.handle());
         self.* = undefined;
-    }
-};
-
-const CancelDriver = struct {
-    task: Value,
-    cursor: CancellationCursor,
-    owner_cancelled: bool = false,
-
-    fn advance(
-        evaluator: *machine.Machine,
-        raw: *anyopaque,
-    ) machine.MachineError!machine.WorkProgress {
-        const self: *CancelDriver = @ptrCast(@alignCast(raw));
-        if (!self.owner_cancelled) {
-            const cell = taskCell(self.task).?;
-            std.Io.Threaded.mutexLock(&cell.scheduler.tree_mutex);
-            cancelOne(cell);
-            std.Io.Threaded.mutexUnlock(&cell.scheduler.tree_mutex);
-            notifyCancellation(cell.scheduler);
-            self.owner_cancelled = true;
-        }
-        if (!self.cursor.advance()) return .yielded;
-        // Cancellation is cleanup-critical: if this unit cancelled itself or
-        // an ancestor, finish propagating the tree before observing its own
-        // flag. The cursor still returns to the scheduler after every slice.
-        try evaluator.pollKernel();
-        return .completed;
-    }
-
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *CancelDriver = @ptrCast(@alignCast(raw));
-        self.cursor.deinit();
-        heap.releaseValue(allocator, self.task);
-        allocator.destroy(self);
     }
 };
 
 pub const SpawnRequest = struct {
     parent_unit: *machine.Unit,
     parent_scope: *env.Scope,
-    parent_home: ?*modules.ModuleGeneration,
-    quotation: *Header,
+    parent_home: ?*modules.ModuleHome,
+    quotation: *ListHandle,
 };
 
 pub const SpawnError = error{ OutOfMemory, Io };
 
-pub const Scheduler = struct {
+const WorkerState = struct {
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     config: Config,
     start_mutex: std.Io.Mutex = .init,
     queue_mutex: std.Io.Mutex = .init,
@@ -896,6 +943,7 @@ pub const Scheduler = struct {
     queue_first: ?*QueueEntry = null,
     queue_last: ?*QueueEntry = null,
     stopping: bool = false,
+    started: bool = false,
     threads: []std.Thread = &.{},
     worker_threads: std.atomic.Value(usize) = .init(0),
     timer_thread: ?std.Thread = null,
@@ -905,94 +953,125 @@ pub const Scheduler = struct {
     timer_heap: TimerHeap = .{},
     timer_threads: std.atomic.Value(usize) = .init(0),
     next_identity: std.atomic.Value(u64) = .init(1),
+    cooperative_arbitration: ExecutorArbitration = .{},
+};
 
-    pub fn init(allocator: std.mem.Allocator, config: Config) Scheduler {
-        config.validate() catch @panic("scheduler worker count must be positive");
-        return .{ .allocator = allocator, .config = config };
+pub const WorkerScheduler = enum(usize) {
+    invalid = 0,
+    _,
+
+    fn privateState(self: *const WorkerScheduler) *WorkerState {
+        std.debug.assert(self.* != .invalid);
+        return @ptrFromInt(@intFromEnum(self.*));
     }
 
-    pub fn deinit(self: *Scheduler, root_scope: *TaskScope) void {
+    fn allocator(self: *const WorkerScheduler) std.mem.Allocator {
+        return self.privateState().allocator;
+    }
+
+    fn releaseDomain(self: *const WorkerScheduler) *heap.ReleaseDomain {
+        return self.privateState().releases;
+    }
+
+    pub fn wakeRetirement(self: *const WorkerScheduler) void {
+        const state_ = self.privateState();
+        std.Io.Threaded.mutexLock(&state_.queue_mutex);
+        state_.queue_condition.broadcast(blockingIo());
+        std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+    }
+
+    fn shutdown(self: *const WorkerScheduler, root_scope: *TaskScope) void {
+        const state_ = self.privateState();
         self.closeRootScope(root_scope);
-        std.Io.Threaded.mutexLock(&self.timer_mutex);
-        self.timer_stopping = true;
-        std.Io.Threaded.mutexUnlock(&self.timer_mutex);
-        self.timer_wake.set(blockingIo());
-        if (self.timer_thread) |thread| thread.join();
-        self.timer_thread = null;
-        self.timer_heap.deinit(self.allocator);
+        std.Io.Threaded.mutexLock(&state_.timer_mutex);
+        state_.timer_stopping = true;
+        std.Io.Threaded.mutexUnlock(&state_.timer_mutex);
+        state_.timer_wake.set(blockingIo());
+        if (state_.timer_thread) |thread| thread.join();
+        state_.timer_thread = null;
+        state_.timer_heap.deinit(self.allocator());
 
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
-        self.stopping = true;
-        self.queue_condition.broadcast(blockingIo());
-        std.Io.Threaded.mutexUnlock(&self.queue_mutex);
-        for (self.threads) |thread| thread.join();
-        if (self.threads.len > 0) self.allocator.free(self.threads);
-        self.threads = &.{};
-        std.debug.assert(self.queue_first == null);
-        self.* = undefined;
+        std.Io.Threaded.mutexLock(&state_.queue_mutex);
+        state_.stopping = true;
+        state_.queue_condition.broadcast(blockingIo());
+        std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+        for (state_.threads) |thread| thread.join();
+        if (state_.threads.len > 0) self.allocator().free(state_.threads);
+        state_.threads = &.{};
+        if (state_.config.isCooperative()) {
+            while (self.runNextCooperative()) {}
+        }
+        std.debug.assert(state_.queue_first == null);
     }
 
-    pub fn workerThreadCount(self: *const Scheduler) usize {
-        return self.worker_threads.load(.acquire);
-    }
-
-    pub fn timerThreadCount(self: *const Scheduler) usize {
-        return self.timer_threads.load(.acquire);
-    }
-
-    pub fn timerEntryCount(self: *Scheduler) usize {
-        std.Io.Threaded.mutexLock(&self.timer_mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.timer_mutex);
-        return self.timer_heap.len;
-    }
-
-    fn ensureStarted(self: *Scheduler) SpawnError!void {
-        std.Io.Threaded.mutexLock(&self.start_mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.start_mutex);
-        if (self.threads.len != 0) return;
-        const threads = try self.allocator.alloc(std.Thread, self.config.worker_count);
+    fn ensureStarted(self: *const WorkerScheduler) SpawnError!void {
+        const state_ = self.privateState();
+        std.Io.Threaded.mutexLock(&state_.start_mutex);
+        defer std.Io.Threaded.mutexUnlock(&state_.start_mutex);
+        if (state_.started) return;
+        if (state_.config.isCooperative()) {
+            state_.started = true;
+            return;
+        }
+        const threads = try self.allocator().alloc(std.Thread, state_.config.worker_pool);
         var started: usize = 0;
         errdefer {
-            std.Io.Threaded.mutexLock(&self.queue_mutex);
-            self.stopping = true;
-            self.queue_condition.broadcast(blockingIo());
-            std.Io.Threaded.mutexUnlock(&self.queue_mutex);
+            std.Io.Threaded.mutexLock(&state_.queue_mutex);
+            state_.stopping = true;
+            state_.queue_condition.broadcast(blockingIo());
+            std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
             for (threads[0..started]) |thread| thread.join();
-            self.stopping = false;
-            self.allocator.free(threads);
+            state_.stopping = false;
+            self.allocator().free(threads);
         }
         while (started < threads.len) : (started += 1) {
             threads[started] = std.Thread.spawn(.{}, workerMain, .{self}) catch return error.Io;
         }
-        self.threads = threads;
-        self.worker_threads.store(threads.len, .release);
+        state_.threads = threads;
+        state_.started = true;
+        state_.worker_threads.store(threads.len, .release);
     }
 
-    fn ensureTimer(self: *Scheduler) error{Io}!void {
-        std.Io.Threaded.mutexLock(&self.start_mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.start_mutex);
-        if (self.timer_thread != null) return;
-        self.timer_thread = std.Thread.spawn(.{}, timerMain, .{self}) catch return error.Io;
-        self.timer_threads.store(1, .release);
+    fn ensureTimer(self: *const WorkerScheduler) error{Io}!void {
+        const state_ = self.privateState();
+        std.Io.Threaded.mutexLock(&state_.start_mutex);
+        defer std.Io.Threaded.mutexUnlock(&state_.start_mutex);
+        if (state_.timer_thread != null) return;
+        state_.timer_thread = std.Thread.spawn(.{}, timerMain, .{self}) catch return error.Io;
+        state_.timer_threads.store(1, .release);
     }
 
-    pub fn spawn(self: *Scheduler, parent: *TaskScope, request: SpawnRequest) SpawnError!Value {
+    pub fn spawn(self: *const WorkerScheduler, parent: *TaskScope, request: SpawnRequest) SpawnError!Value {
         try self.ensureStarted();
-        const unit = try self.allocator.create(machine.Unit);
-        errdefer self.allocator.destroy(unit);
-        unit.* = machine.Unit.init(
-            self.allocator,
+        const state_ = self.privateState();
+        const cell = try self.allocator().create(TaskCell);
+        errdefer self.allocator().destroy(cell);
+        cell.* = .{
+            .allocator = self.allocator(),
+            .scheduler = self,
+            .scope = TaskScope.init(self),
+            .parent_membership = .{ .detached = parent },
+            .queue = .{ .item = .{ .task = cell } },
+            .cancellation_queue = .{ .item = .{ .cancellation = cell } },
+        };
+        cell.scope.owner = cell;
+
+        const execution = try self.allocator().create(TaskExecution);
+        errdefer self.allocator().destroy(execution);
+        execution.* = .{ .unit = machine.Unit.init(
+            self.allocator(),
+            self.releaseDomain(),
+            request.parent_unit.module_access,
             .empty,
             request.parent_unit.environment,
             request.parent_unit.archive,
             request.parent_unit.output,
             request.parent_unit.arguments,
-            // SAFETY: The child cannot run until publication below, and its
-            // cancellation pointer is installed from the owning TaskCell first.
-            undefined,
-        );
+            &cell.cancelled,
+        ) };
+        const unit = &execution.unit;
         errdefer unit.deinit();
-        unit.root_scope = env.Scope.lazy(self.allocator, request.parent_scope);
+        unit.replaceRootScope(env.Scope.lazy(self.allocator(), request.parent_scope));
         unit.registry = request.parent_unit.registry;
         unit.diagnostics = request.parent_unit.diagnostics;
         unit.console = request.parent_unit.console;
@@ -1001,137 +1080,142 @@ pub const Scheduler = struct {
         unit.idiom_mode = request.parent_unit.idiom_mode;
         unit.phrase_recognizer = request.parent_unit.phrase_recognizer;
         unit.scheduler = self;
+        unit.task_scope = &cell.scope;
         unit.is_root_unit = false;
         if (request.parent_home) |generation| try unit.pinGeneration(generation);
-
-        const cell = try self.allocator.create(TaskCell);
-        errdefer self.allocator.destroy(cell);
-        const retirement = try self.allocator.create(ReleaseJob);
-        errdefer self.allocator.destroy(retirement);
-        retirement.* = .{ .allocator = self.allocator, .scheduler = self };
-        retirement.queue.item = .{ .release = retirement };
-        cell.* = .{
-            .allocator = self.allocator,
-            .scheduler = self,
-            // SAFETY: Header publication requires this stable cell address;
-            // no observer can reach the cell until the header is installed.
-            .header = undefined,
-            .retirement = retirement,
-            .unit = unit,
-            .scope = TaskScope.init(self),
-            .parent = parent,
-        };
-        cell.queue.item = .{ .task = cell };
-        cell.scope.owner = cell;
-        unit.cancelled = &cell.cancelled;
-        unit.task_scope = &cell.scope;
-        const identity = self.next_identity.fetchAdd(1, .monotonic);
-        const initializing = try heap.allocTaskHeader(
-            self.allocator,
-            identity,
-            cell,
-            TaskCell.destroy,
-        );
-        const header = heap.publish(initializing);
-        cell.header = header;
+        const identity = state_.next_identity.fetchAdd(1, .monotonic);
+        const header = try heap.createTask(TaskCell, self.allocator(), identity, cell);
+        cell.header_state = .{ .published = header };
         machine.initialize(unit, request.quotation);
+        cell.publication = .{ .active = execution };
 
-        std.Io.Threaded.mutexLock(&self.tree_mutex);
+        std.Io.Threaded.mutexLock(&state_.tree_mutex);
         std.Io.Threaded.mutexLock(&parent.mutex);
-        const scope_decision = scopeDecision(parent.policy, .register_child);
-        parent.policy = scope_decision.next;
-        if (parent.last) |last| {
-            last.parent_next = cell;
-            cell.parent_previous = last;
-        } else parent.first = cell;
-        parent.last = cell;
-        cell.parent_linked = true;
-        self.tree_epoch +%= 1;
-        heap.incRef(header);
-        const kill_on_arrival = scope_decision.command == .cancel_arriving_child;
-        std.Io.Threaded.mutexUnlock(&parent.mutex);
-        std.Io.Threaded.mutexUnlock(&self.tree_mutex);
-
-        heap.incRef(header);
         std.Io.Threaded.mutexLock(&cell.mutex);
         const publish = unitDecision(cell.policy, .publish);
         cell.policy = publish.next;
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         std.debug.assert(publish.command == .enqueue);
-        if (kill_on_arrival) cancelArriving(cell);
+        const scope_decision = scopeDecision(parent.policy, .register_child);
+        parent.policy = scope_decision.next;
+        if (parent.last) |last| {
+            switch (last.parent_membership) {
+                .linked => |*membership| membership.next = cell,
+                .detached => unreachable,
+            }
+            cell.parent_membership = .{ .linked = .{ .scope = parent, .previous = last } };
+        } else parent.first = cell;
+        if (parent.last == null)
+            cell.parent_membership = .{ .linked = .{ .scope = parent } };
+        parent.last = cell;
+        state_.tree_epoch +%= 1;
+        heap.incRef(header);
+        const kill_on_arrival = scope_decision.command == .cancel_arriving_child;
+        if (kill_on_arrival) _ = cancelOne(cell);
+        std.Io.Threaded.mutexUnlock(&parent.mutex);
+        std.Io.Threaded.mutexUnlock(&state_.tree_mutex);
+
+        heap.incRef(header);
+        if (kill_on_arrival) notifyCancellation(self);
         self.enqueueTask(cell);
         return .{ .task = header };
     }
 
     pub fn runRoot(
-        self: *Scheduler,
+        self: *const WorkerScheduler,
         unit: *machine.Unit,
-        code: *Header,
+        code: *ListHandle,
     ) machine.MachineError!void {
+        const state_ = self.privateState();
         machine.initialize(unit, code);
-        while (true) switch (try machine.runSlice(unit)) {
-            .completed => return,
-            .yielded => std.Thread.yield() catch @panic("scheduler root yield failed"),
-            .parked => try self.handleRootPark(unit),
-        };
+        while (true) {
+            const status = machine.runSlice(unit) catch |err| {
+                if (err == error.OutOfMemory) self.drainAbandonedRootWork(unit);
+                return err;
+            };
+            _ = self.releaseDomain().advance(machine.kernel_poll_quantum);
+            switch (status) {
+                .completed => {
+                    if (unit.exit_status != null)
+                        while (!unit.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete) {
+                            _ = self.releaseDomain().tryAdvance(machine.kernel_poll_quantum);
+                        };
+                    return;
+                },
+                .yielded => if (!state_.config.isCooperative() or !self.runNextCooperative())
+                    std.Thread.yield() catch @panic("scheduler root yield failed"),
+                .parked => self.handleRootPark(unit) catch |err| {
+                    self.drainAbandonedRootWork(unit);
+                    return err;
+                },
+            }
+        }
     }
 
-    fn handleRootPark(self: *Scheduler, unit: *machine.Unit) error{OutOfMemory}!void {
-        const request = unit.park_request.?;
+    fn drainAbandonedRootWork(self: *const WorkerScheduler, unit: *machine.Unit) void {
+        while (!unit.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete) {
+            _ = self.releaseDomain().tryAdvance(machine.kernel_poll_quantum);
+            std.Thread.yield() catch @panic("root teardown yield failed");
+        }
+    }
+
+    fn handleRootPark(self: *const WorkerScheduler, unit: *machine.Unit) error{OutOfMemory}!void {
+        const state_ = self.privateState();
+        const request = unit.parkRequest().?;
         if (request == .close_scope) {
             const status = request.close_scope;
-            unit.park_request = null;
+            _ = unit.takeParkRequest();
             self.closeRootScope(@ptrCast(@alignCast(unit.task_scope.?)));
-            unit.park_resume = .{ .scope_closed = status };
+            unit.installParkResume(.{ .scope_closed = status });
             return;
         }
         var root = RootWaiter{ .scheduler = self, .unit = unit };
         const wait = try WaitSet.create(
             self,
             .{ .root = &root },
-            requestKind(request),
-            requestCount(request),
             request,
         );
-        unit.park_request = null;
+        _ = unit.takeParkRequest();
         while (!wait.advanceSetup()) std.Thread.yield() catch
             @panic("scheduler root wait setup yield failed");
         while (!root.ready.load(.acquire)) {
-            std.Io.Threaded.mutexLock(&self.queue_mutex);
-            if (!root.ready.load(.acquire) and self.queue_first == null and !self.stopping) {
-                self.queue_condition.waitUncancelable(blockingIo(), &self.queue_mutex);
+            if (state_.config.isCooperative()) {
+                if (!self.runNextCooperative())
+                    std.Thread.yield() catch @panic("cooperative scheduler yield failed");
+                continue;
             }
-            std.Io.Threaded.mutexUnlock(&self.queue_mutex);
+            std.Io.Threaded.mutexLock(&state_.queue_mutex);
+            if (!root.ready.load(.acquire) and state_.queue_first == null and !state_.stopping) {
+                state_.queue_condition.waitUncancelable(blockingIo(), &state_.queue_mutex);
+            }
+            std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
         }
     }
 
     pub fn cancelOwned(
-        self: *Scheduler,
-        evaluator: *machine.Machine,
+        self: *const WorkerScheduler,
         task: Value,
-    ) error{OutOfMemory}!void {
-        _ = self;
+    ) void {
         const cell = taskCell(task).?;
-        const driver = try evaluator.allocator().create(CancelDriver);
-        driver.* = .{
-            .task = task,
-            .cursor = .{ .root = &cell.scope },
-        };
-        evaluator.installWorkDriver(driver, CancelDriver.advance, CancelDriver.destroy);
+        std.debug.assert(cell.scheduler == self);
+        const enqueue_cancellation = beginExternalCancellation(cell);
+        self.releaseDomain().releaseValue(task);
+        if (enqueue_cancellation) self.enqueueCancellation(cell);
+        notifyCancellation(self);
     }
 
     pub fn installTasksDriver(
-        self: *Scheduler,
+        self: *const WorkerScheduler,
         evaluator: *machine.Machine,
         scope: *TaskScope,
     ) error{OutOfMemory}!void {
-        const driver = try self.allocator.create(TasksDriver);
+        const driver = try self.allocator().create(TasksDriver);
         driver.* = .{ .scheduler = self, .scope = scope };
-        evaluator.installWorkDriver(driver, TasksDriver.advance, TasksDriver.destroy);
+        evaluator.installWorkDriver(driver);
     }
 
-    fn closeRootScope(self: *Scheduler, scope: *TaskScope) void {
-        _ = self;
+    fn closeRootScope(self: *const WorkerScheduler, scope: *TaskScope) void {
+        const state_ = self.privateState();
         std.debug.assert(scope.owner == null);
         std.Io.Threaded.mutexLock(&scope.mutex);
         const decision = scopeDecision(scope.policy, .close);
@@ -1141,42 +1225,89 @@ pub const Scheduler = struct {
         if (cancel_children) cancelScopeTree(scope);
         std.Io.Threaded.mutexLock(&scope.mutex);
         while (scope.policy.childCount() != 0) {
-            scope.quiescent.waitUncancelable(blockingIo(), &scope.mutex);
+            if (state_.config.isCooperative()) {
+                std.Io.Threaded.mutexUnlock(&scope.mutex);
+                if (!self.runNextCooperative())
+                    std.Thread.yield() catch @panic("cooperative scope-close yield failed");
+                std.Io.Threaded.mutexLock(&scope.mutex);
+            } else scope.quiescent.waitUncancelable(blockingIo(), &scope.mutex);
         }
         std.Io.Threaded.mutexUnlock(&scope.mutex);
     }
 
-    fn enqueueTask(self: *Scheduler, cell: *TaskCell) void {
+    fn enqueueTask(self: *const WorkerScheduler, cell: *TaskCell) void {
         self.enqueue(&cell.queue);
     }
 
-    fn enqueueWait(self: *Scheduler, wait: *WaitSet) void {
+    fn enqueueCancellation(self: *const WorkerScheduler, cell: *TaskCell) void {
+        self.enqueue(&cell.cancellation_queue);
+    }
+
+    fn enqueueWait(self: *const WorkerScheduler, wait: *WaitSet) void {
         self.enqueue(&wait.queue);
     }
 
-    fn enqueueRelease(self: *Scheduler, release: *ReleaseJob) void {
-        self.enqueue(&release.queue);
+    fn enqueue(self: *const WorkerScheduler, entry: *QueueEntry) void {
+        const state_ = self.privateState();
+        std.Io.Threaded.mutexLock(&state_.queue_mutex);
+        std.debug.assert(entry.membership == .detached);
+        if (state_.queue_last) |last| switch (last.membership) {
+            .linked => |*next| next.* = entry,
+            .detached => unreachable,
+        } else state_.queue_first = entry;
+        entry.membership = .{ .linked = null };
+        state_.queue_last = entry;
+        state_.queue_condition.signal(blockingIo());
+        std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
     }
 
-    fn enqueue(self: *Scheduler, entry: *QueueEntry) void {
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
-        std.debug.assert(entry.next == null);
-        if (self.queue_last) |last| last.next = entry else self.queue_first = entry;
-        self.queue_last = entry;
-        self.queue_condition.signal(blockingIo());
-        std.Io.Threaded.mutexUnlock(&self.queue_mutex);
-    }
-
-    fn popLocked(self: *Scheduler) ?*QueueEntry {
-        const entry = self.queue_first orelse return null;
-        self.queue_first = entry.next;
-        if (self.queue_first == null) self.queue_last = null;
-        entry.next = null;
+    fn popLocked(self: *const WorkerScheduler) ?*QueueEntry {
+        const state_ = self.privateState();
+        const entry = state_.queue_first orelse return null;
+        state_.queue_first = switch (entry.membership) {
+            .linked => |next| next,
+            .detached => unreachable,
+        };
+        if (state_.queue_first == null) state_.queue_last = null;
+        entry.membership = .detached;
         return entry;
     }
 
-    fn execute(self: *Scheduler, cell: *TaskCell) void {
-        const unit = cell.unit.?;
+    fn runNextCooperative(self: *const WorkerScheduler) bool {
+        const state_ = self.privateState();
+        std.debug.assert(state_.config.isCooperative());
+        return self.runArbitrated(&state_.cooperative_arbitration);
+    }
+
+    fn runArbitrated(self: *const WorkerScheduler, arbitration: *ExecutorArbitration) bool {
+        const state_ = self.privateState();
+        const retirement_ready = self.releaseDomain().hasPending();
+        std.Io.Threaded.mutexLock(&state_.queue_mutex);
+        const turn = arbitration.choose(state_.queue_first != null, retirement_ready) orelse {
+            std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+            return false;
+        };
+        const entry = if (turn == .ready) self.popLocked() else null;
+        std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+        if (entry) |ready| {
+            self.runEntry(ready);
+            return true;
+        }
+        if (self.releaseDomain().tryAdvance(machine.kernel_poll_quantum) == null)
+            std.Thread.yield() catch @panic("scheduler retirement arbitration yield failed");
+        return true;
+    }
+
+    fn runEntry(self: *const WorkerScheduler, entry: *QueueEntry) void {
+        switch (entry.item) {
+            .task => |cell| self.runQueued(cell),
+            .cancellation => |cell| self.runCancellation(cell),
+            .wait => |wait| self.runWait(wait),
+        }
+    }
+
+    fn execute(self: *const WorkerScheduler, cell: *TaskCell) void {
+        const unit = cell.evaluatingUnit();
         const result = machine.runSlice(unit);
         if (result) |status| switch (status) {
             .yielded => {
@@ -1196,17 +1327,15 @@ pub const Scheduler = struct {
         }
     }
 
-    fn parkTask(self: *Scheduler, cell: *TaskCell) void {
-        const unit = cell.unit.?;
-        const request = unit.park_request.?;
+    fn parkTask(self: *const WorkerScheduler, cell: *TaskCell) void {
+        const unit = cell.evaluatingUnit();
+        const request = unit.parkRequest().?;
         const wait = WaitSet.create(
             self,
             .{ .task = cell },
-            requestKind(request),
-            requestCount(request),
             request,
         ) catch return self.finish(cell, .oom);
-        unit.park_request = null;
+        _ = unit.takeParkRequest();
 
         std.Io.Threaded.mutexLock(&cell.mutex);
         const parking = unitDecision(cell.policy, .park);
@@ -1215,7 +1344,7 @@ pub const Scheduler = struct {
         std.Io.Threaded.mutexUnlock(&cell.mutex);
 
         if (parking.command == .enqueue) {
-            unit.park_resume = .cancelled;
+            unit.installParkResume(.cancelled);
             wait.discard();
             self.enqueueTask(cell);
             return;
@@ -1224,12 +1353,12 @@ pub const Scheduler = struct {
         if (!wait.advanceSetup()) self.enqueueTask(cell);
     }
 
-    fn advanceParkSetup(self: *Scheduler, cell: *TaskCell) void {
+    fn advanceParkSetup(self: *const WorkerScheduler, cell: *TaskCell) void {
         const wait = cell.waitset.?;
         if (!wait.advanceSetup()) self.enqueueTask(cell);
     }
 
-    fn finish(self: *Scheduler, cell: *TaskCell, disposition: Finish) void {
+    fn finish(self: *const WorkerScheduler, cell: *TaskCell, disposition: Finish) void {
         const completion: core.Completion = switch (disposition) {
             .success => .success,
             .language_error => .language_error,
@@ -1238,14 +1367,24 @@ pub const Scheduler = struct {
         std.Io.Threaded.mutexLock(&cell.mutex);
         const finishing = unitDecision(cell.policy, .{ .body_finished = completion });
         cell.policy = finishing.next;
-        cell.finish_disposition = disposition;
+        const execution = switch (cell.publication) {
+            .active => |execution| execution,
+            .constructing, .published => unreachable,
+        };
+        std.debug.assert(execution.phase == .evaluating);
+        execution.phase = .{ .finishing = switch (disposition) {
+            .success => .success_unstarted,
+            .language_error => .language_error,
+            .oom => .out_of_memory,
+        } };
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         std.debug.assert(finishing.command == .close_scope);
         self.beginTaskClose(cell);
     }
 
-    fn beginTaskClose(self: *Scheduler, cell: *TaskCell) void {
-        std.Io.Threaded.mutexLock(&self.tree_mutex);
+    fn beginTaskClose(self: *const WorkerScheduler, cell: *TaskCell) void {
+        const state_ = self.privateState();
+        std.Io.Threaded.mutexLock(&state_.tree_mutex);
         std.Io.Threaded.mutexLock(&cell.scope.mutex);
         const decision = scopeDecision(cell.scope.policy, .close);
         cell.scope.policy = decision.next;
@@ -1254,29 +1393,35 @@ pub const Scheduler = struct {
             std.debug.assert(cell.scope.closing_owner == null);
             cell.scope.closing_owner = cell;
         }
-        if (decision.command == .cancel_children) {
+        const start_cancellation = !ready and
+            cell.scope.policy == .closing and
+            !cell.scope.cancellation_walk_active;
+        if (start_cancellation) {
             std.debug.assert(!cell.scope.cancellation_walk_active);
             cell.scope.cancellation_walk_active = true;
-            std.debug.assert(cell.cancellation_cursor == null);
-            cell.cancellation_cursor = .{ .root = &cell.scope };
+            std.debug.assert(cell.cancellation == .none);
+            cell.cancellation = .{ .task = .{ .root = &cell.scope } };
         }
         std.Io.Threaded.mutexUnlock(&cell.scope.mutex);
-        std.Io.Threaded.mutexUnlock(&self.tree_mutex);
-        if (decision.command == .cancel_children) {
+        std.Io.Threaded.mutexUnlock(&state_.tree_mutex);
+        if (start_cancellation) {
             self.enqueueTask(cell);
             return;
         }
         if (ready) self.publishFinished(cell);
     }
 
-    fn advanceTaskClose(self: *Scheduler, cell: *TaskCell) void {
-        if (!cell.cancellation_cursor.?.advance()) {
+    fn advanceTaskClose(self: *const WorkerScheduler, cell: *TaskCell) void {
+        const state_ = self.privateState();
+        std.debug.assert(cell.cancellation == .task);
+        const cursor = &cell.cancellation.task;
+        if (!cursor.advance()) {
             self.enqueueTask(cell);
             return;
         }
-        cell.cancellation_cursor.?.deinit();
-        cell.cancellation_cursor = null;
-        std.Io.Threaded.mutexLock(&self.tree_mutex);
+        cursor.deinit();
+        cell.cancellation = .none;
+        std.Io.Threaded.mutexLock(&state_.tree_mutex);
         std.Io.Threaded.mutexLock(&cell.scope.mutex);
         cell.scope.cancellation_walk_active = false;
         const closing_owner = if (cell.scope.policy == .closed)
@@ -1285,102 +1430,101 @@ pub const Scheduler = struct {
             null;
         if (closing_owner != null) cell.scope.closing_owner = null;
         std.Io.Threaded.mutexUnlock(&cell.scope.mutex);
-        std.Io.Threaded.mutexUnlock(&self.tree_mutex);
+        std.Io.Threaded.mutexUnlock(&state_.tree_mutex);
         if (closing_owner) |owner| self.publishFinished(owner);
     }
 
-    fn publishFinished(self: *Scheduler, cell: *TaskCell) void {
-        if (!cell.publication_started) {
-            if (cell.terminal_ready == null) {
-                cell.terminal_ready = self.materializeTerminal(cell) orelse {
-                    self.enqueueTask(cell);
-                    return;
-                };
-            }
-            if (!self.advanceFinishedUnitCleanup(cell)) {
-                self.enqueueTask(cell);
-                return;
-            }
-            const terminal = cell.terminal_ready.?;
-            cell.terminal_ready = null;
-            const unit = cell.unit.?;
-            unit.deinit();
-            self.allocator.destroy(unit);
-            cell.unit = null;
-            cell.finish_disposition = null;
-            std.Io.Threaded.mutexLock(&cell.mutex);
-            std.debug.assert(cell.state == .pending);
-            const completed = unitDecision(cell.policy, .scope_quiescent);
-            cell.policy = completed.next;
-            std.debug.assert(completed.command == .publish);
-            cell.state = terminal;
-            cell.publication_started = true;
-            std.Io.Threaded.mutexUnlock(&cell.mutex);
+    fn publishFinished(self: *const WorkerScheduler, cell: *TaskCell) void {
+        const execution = switch (cell.publication) {
+            .constructing => unreachable,
+            .active => |execution| execution,
+            .published => return self.advancePublication(cell),
+        };
+        const finishing = switch (execution.phase) {
+            .evaluating => unreachable,
+            .finishing => |*work| work,
+        };
+        if (!self.advanceTerminalMaterialization(execution)) {
+            self.enqueueTask(cell);
+            return;
         }
+        if (!self.advanceFinishedUnitCleanup(&execution.unit)) {
+            self.enqueueTask(cell);
+            return;
+        }
+        const terminal = switch (finishing.*) {
+            .ready => |ready| ready,
+            else => unreachable,
+        };
+        execution.unit.deinit();
+        std.Io.Threaded.mutexLock(&cell.mutex);
+        const completed = unitDecision(cell.policy, .scope_quiescent);
+        cell.policy = completed.next;
+        std.debug.assert(completed.command == .publish);
+        cell.publication = .{ .published = terminal };
+        std.Io.Threaded.mutexUnlock(&cell.mutex);
+        self.allocator().destroy(execution);
         self.advancePublication(cell);
     }
 
-    fn advanceFinishedUnitCleanup(self: *Scheduler, cell: *TaskCell) bool {
-        const unit = cell.unit.?;
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) {
-            if (cell.unit_release) |*release| {
-                const progress = release.advanceCounted(budget);
-                budget -= @max(progress.consumed, 1);
-                if (!progress.complete) return false;
-                cell.unit_release = null;
-                continue;
-            }
-            if (unit.park_request) |request| {
-                unit.park_request = null;
-                cell.unit_release = heap.ReleaseCursor.initValue(
-                    self.allocator,
-                    requestOwnedValue(request),
-                );
-                continue;
-            }
-            const item = unit.stack.pop() orelse return true;
-            cell.unit_release = heap.ReleaseCursor.initValue(self.allocator, item);
-        }
-        return false;
+    fn advanceFinishedUnitCleanup(_: *const WorkerScheduler, unit: *machine.Unit) bool {
+        return unit.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete;
     }
 
-    fn materializeTerminal(self: *Scheduler, cell: *TaskCell) ?CellState {
-        const unit = cell.unit.?;
-        const disposition = cell.finish_disposition.?;
-        return switch (disposition) {
-            .oom => .oom,
-            .language_error => outcome: {
-                const failure = unit.takeError().?;
-                const wrapped = machine.outcomeDict(self.allocator, "err", failure) catch break :outcome .oom;
-                break :outcome .{ .outcome = wrapped };
+    fn advanceTerminalMaterialization(
+        self: *const WorkerScheduler,
+        execution: *TaskExecution,
+    ) bool {
+        const work = switch (execution.phase) {
+            .evaluating => unreachable,
+            .finishing => |*pending| pending,
+        };
+        while (true) switch (work.*) {
+            .out_of_memory => {
+                work.* = .{ .ready = .oom };
+                return true;
             },
-            .success => outcome: {
-                if (cell.result_materializer == null) {
-                    cell.result_materializer = kernel_storage.ValueMaterializer.init(
-                        self.allocator,
-                        unit.stack.items,
-                    );
-                }
-                const materialized = cell.result_materializer.?.advance(machine.kernel_poll_quantum) catch {
-                    cell.result_materializer.?.deinit();
-                    cell.result_materializer = null;
-                    break :outcome .oom;
+            .language_error => {
+                const failure = execution.unit.takeError().?;
+                const wrapped = machine.outcomeDict(self.allocator(), self.releaseDomain(), "err", failure) catch {
+                    work.* = .{ .ready = .oom };
+                    return true;
+                };
+                work.* = .{ .ready = .{ .outcome = wrapped } };
+                return true;
+            },
+            .success_unstarted => {
+                work.* = .{
+                    .success_materializing = kernel_storage.ValueMaterializer.init(
+                        self.allocator(),
+                        execution.unit.stack.items,
+                    ),
+                };
+            },
+            .success_materializing => |*materializer| {
+                const materialized = materializer.advance(machine.kernel_poll_quantum) catch {
+                    materializer.retire(self.releaseDomain());
+                    work.* = .{ .ready = .oom };
+                    return true;
                 };
                 const results = switch (materialized) {
-                    .pending => return null,
+                    .pending => return false,
                     .complete => |complete| complete,
                 };
-                cell.result_materializer.?.deinit();
-                cell.result_materializer = null;
-                const wrapped = machine.outcomeDict(self.allocator, "ok", results) catch
-                    break :outcome .oom;
-                break :outcome .{ .outcome = wrapped };
+                materializer.retire(self.releaseDomain());
+                const wrapped = machine.outcomeDict(self.allocator(), self.releaseDomain(), "ok", results) catch {
+                    work.* = .{ .ready = .oom };
+                    return true;
+                };
+                work.* = .{ .ready = .{ .outcome = wrapped } };
+                return true;
             },
+            .ready => return true,
         };
     }
 
-    fn advancePublication(self: *Scheduler, cell: *TaskCell) void {
+    fn advancePublication(self: *const WorkerScheduler, cell: *TaskCell) void {
+        const state_ = self.privateState();
         var delivered: usize = 0;
         while (delivered != task_waiter_quantum) : (delivered += 1) {
             std.Io.Threaded.mutexLock(&cell.mutex);
@@ -1411,71 +1555,171 @@ pub const Scheduler = struct {
             return;
         }
 
-        std.Io.Threaded.mutexLock(&self.tree_mutex);
+        std.Io.Threaded.mutexLock(&state_.tree_mutex);
         const closing_parent = unlinkParent(cell);
-        std.Io.Threaded.mutexUnlock(&self.tree_mutex);
-        std.Io.Threaded.mutexLock(&self.queue_mutex);
-        self.queue_condition.broadcast(blockingIo());
-        std.Io.Threaded.mutexUnlock(&self.queue_mutex);
-        const retirement = cell.retirement;
-        const header = cell.header;
+        std.Io.Threaded.mutexUnlock(&state_.tree_mutex);
+        std.Io.Threaded.mutexLock(&state_.queue_mutex);
+        state_.queue_condition.broadcast(blockingIo());
+        std.Io.Threaded.mutexUnlock(&state_.queue_mutex);
+        const header = cell.handle();
         if (closing_parent) |parent| self.enqueueTask(parent);
-        retirement.start(header);
+        self.releaseDomain().releaseHeader(header);
     }
 
-    fn runQueued(self: *Scheduler, cell: *TaskCell) void {
+    fn runQueued(self: *const WorkerScheduler, cell: *TaskCell) void {
         std.Io.Threaded.mutexLock(&cell.mutex);
         const phase = cell.policy.phase();
         std.Io.Threaded.mutexUnlock(&cell.mutex);
         switch (phase) {
             .ready => {
-                dispatch(cell);
+                const command = dispatch(cell);
+                if (command == .cancel_before_dispatch)
+                    machine.armCancellationBeforeDispatch(cell.evaluatingUnit());
                 self.execute(cell);
             },
-            .closing => if (cell.cancellation_cursor != null)
-                self.advanceTaskClose(cell)
-            else
-                self.publishFinished(cell),
+            .closing => switch (cell.cancellation) {
+                .task => self.advanceTaskClose(cell),
+                .external => {},
+                .none => self.publishFinished(cell),
+            },
             .parked => self.advanceParkSetup(cell),
             .done => self.advancePublication(cell),
             .constructing, .running => unreachable,
         }
     }
 
-    fn runWait(self: *Scheduler, wait: *WaitSet) void {
+    fn runWait(self: *const WorkerScheduler, wait: *WaitSet) void {
         switch (wait.advanceDelivery()) {
             .yielded => self.enqueueWait(wait),
             .waiting, .complete => {},
         }
     }
 
-    fn runRelease(self: *Scheduler, release: *ReleaseJob) void {
-        if (!release.advance()) self.enqueueRelease(release);
+    fn runCancellation(self: *const WorkerScheduler, cell: *TaskCell) void {
+        const state_ = self.privateState();
+        std.debug.assert(cell.cancellation == .external);
+        const cursor = &cell.cancellation.external;
+        if (!cursor.advance()) {
+            self.enqueueCancellation(cell);
+            return;
+        }
+        cursor.deinit();
+        cell.cancellation = .none;
+        std.Io.Threaded.mutexLock(&state_.tree_mutex);
+        std.Io.Threaded.mutexLock(&cell.scope.mutex);
+        cell.scope.cancellation_walk_active = false;
+        const closing_owner = if (cell.scope.policy == .closed)
+            cell.scope.closing_owner
+        else
+            null;
+        if (closing_owner != null) cell.scope.closing_owner = null;
+        std.Io.Threaded.mutexUnlock(&cell.scope.mutex);
+        std.Io.Threaded.mutexUnlock(&state_.tree_mutex);
+        if (closing_owner) |owner| self.publishFinished(owner);
+        self.releaseDomain().releaseHeader(cell.handle());
     }
 };
+
+const SchedulerState = struct {
+    host: *const heap.HostCleanup,
+    worker_facade: WorkerScheduler,
+    worker: WorkerState,
+};
+
+/// Host-side scheduler lifecycle authority. Executing units receive only the
+/// `WorkerScheduler` facade, which cannot drain or destroy the host domain.
+pub const Scheduler = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn privateState(self: *const Scheduler) *SchedulerState {
+        std.debug.assert(self.* != .consumed);
+        return @ptrFromInt(@intFromEnum(self.*));
+    }
+
+    pub fn init(host: *const heap.HostCleanup, config: Config) error{OutOfMemory}!Scheduler {
+        config.validate() catch @panic("scheduler worker count must be positive when using a pool");
+        const backing = try host.allocator().create(SchedulerState);
+        backing.* = .{
+            .host = host,
+            .worker_facade = .invalid,
+            .worker = .{
+                .allocator = host.allocator(),
+                .releases = heap.hostDomain(host),
+                .config = config,
+            },
+        };
+        backing.worker_facade = @enumFromInt(@intFromPtr(&backing.worker));
+        return @enumFromInt(@intFromPtr(backing));
+    }
+
+    fn workerMutable(self: *Scheduler) *WorkerScheduler {
+        return &self.privateState().worker_facade;
+    }
+
+    pub fn worker(self: *const Scheduler) *const WorkerScheduler {
+        return &self.privateState().worker_facade;
+    }
+
+    /// Installs the wake capability only after the scheduler has reached its
+    /// stable SessionCore address.
+    pub fn attachRetirement(self: *Scheduler) void {
+        const facade = self.workerMutable();
+        facade.releaseDomain().attachWake(facade);
+    }
+
+    pub fn deinit(self: *Scheduler, root_scope: *TaskScope) void {
+        const backing = self.privateState();
+        const owner_allocator = backing.host.allocator();
+        const facade = self.workerMutable();
+        facade.shutdown(root_scope);
+        backing.host.drain();
+        facade.releaseDomain().detachWake();
+        owner_allocator.destroy(backing);
+        self.* = .consumed;
+    }
+
+    pub fn runRoot(
+        self: *Scheduler,
+        unit: *machine.Unit,
+        code: *ListHandle,
+    ) machine.MachineError!void {
+        return self.worker().runRoot(unit, code);
+    }
+
+    /// A blocking mutation turn is a settlement barrier, not merely a wakeup.
+    /// It waits behind an active worker retirement slice, then drains every
+    /// causally enqueued successor before returning to the host.
+    pub fn settleRootRetirement(self: *Scheduler) void {
+        self.privateState().host.drain();
+    }
+
+    pub fn workerThreadCount(self: *const Scheduler) usize {
+        return self.privateState().worker.worker_threads.load(.acquire);
+    }
+
+    pub fn timerThreadCount(self: *const Scheduler) usize {
+        return self.privateState().worker.timer_threads.load(.acquire);
+    }
+
+    pub fn timerEntryCount(self: *Scheduler) usize {
+        const execution = &self.privateState().worker;
+        std.Io.Threaded.mutexLock(&execution.timer_mutex);
+        defer std.Io.Threaded.mutexUnlock(&execution.timer_mutex);
+        return execution.timer_heap.len;
+    }
+};
+
+comptime {
+    heap.requireOpaqueWorkerFacade(WorkerScheduler, WorkerState);
+    heap.requireOpaqueHostRoot(Scheduler, SchedulerState);
+}
 
 fn requestKind(request: machine.ParkRequest) WaitKind {
     return switch (request) {
         .task, .join => .one,
         .any => .any,
         .deadline => .deadline,
-        .close_scope => unreachable,
-    };
-}
-
-fn requestCount(request: machine.ParkRequest) usize {
-    return switch (request) {
-        .task, .deadline, .join => 1,
-        .any => |task_list| @intCast(task_list.list.length()),
-        .close_scope => unreachable,
-    };
-}
-
-fn requestOwnedValue(request: machine.ParkRequest) Value {
-    return switch (request) {
-        .task, .any => |item| item,
-        .deadline => |deadline| deadline.task,
-        .join => |join| join.tasks,
         .close_scope => unreachable,
     };
 }
@@ -1494,80 +1738,115 @@ fn taskCell(task: Value) ?*TaskCell {
 
 const task_snapshot_quantum = 256;
 
+const TaskSnapshotPass = struct {
+    tree_epoch: u64,
+    position: union(enum) {
+        start,
+        retained: *TaskCell,
+    } = .start,
+
+    fn releaseRetained(self: TaskSnapshotPass, releases: *heap.ReleaseDomain) void {
+        switch (self.position) {
+            .start => {},
+            .retained => |next| releases.releaseHeader(next.handle()),
+        }
+    }
+};
+
 /// Two-pass, generic-list snapshot of pending descendants. Only the cursor's
 /// next cell is retained between slices; collected task ownership moves
 /// directly into the exact-capacity result header.
 const TasksDriver = struct {
-    scheduler: *Scheduler,
+    scheduler: *const WorkerScheduler,
     scope: *TaskScope,
-    next: ?*TaskCell = null,
-    started: bool = false,
+    pass: ?TaskSnapshotPass = null,
     phase: enum { count, collect } = .count,
     count: usize = 0,
-    result: ?*heap.InitializingHeader = null,
+    result: ?heap.ListBuilder(.generic_spine) = null,
     filled: usize = 0,
 
-    fn advance(
+    pub fn advance(
         evaluator: *machine.Machine,
-        raw: *anyopaque,
+        self: *TasksDriver,
     ) machine.MachineError!machine.WorkProgress {
-        const self: *TasksDriver = @ptrCast(@alignCast(raw));
         try evaluator.pollKernel();
-        const old_next = self.next;
-        std.Io.Threaded.mutexLock(&self.scheduler.tree_mutex);
-        var current = if (self.started) old_next else self.scope.first;
+        const old_pass = self.pass;
+        const scheduler_state = self.scheduler.privateState();
+        std.Io.Threaded.mutexLock(&scheduler_state.tree_mutex);
+        if (old_pass) |pass| if (pass.tree_epoch != scheduler_state.tree_epoch) {
+            self.pass = null;
+            self.count = 0;
+            self.filled = 0;
+            self.phase = .count;
+            if (self.result) |*result| {
+                result.retirePartial(self.scheduler.releaseDomain());
+                self.result = null;
+            }
+            std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
+            pass.releaseRetained(self.scheduler.releaseDomain());
+            return .yielded;
+        };
+        const pass_epoch = if (old_pass) |pass| pass.tree_epoch else scheduler_state.tree_epoch;
+        var current = if (old_pass) |pass| switch (pass.position) {
+            .start => self.scope.first,
+            .retained => |next| next,
+        } else self.scope.first;
         var visited: usize = 0;
         while (current != null and visited < task_snapshot_quantum) : (visited += 1) {
             const cell = current.?;
             current = nextDescendant(self.scope, cell);
-            if (cell.state != .pending) continue;
+            std.Io.Threaded.mutexLock(&cell.mutex);
+            const pending = switch (cell.publication) {
+                .constructing => unreachable,
+                .active => true,
+                .published => false,
+            };
+            std.Io.Threaded.mutexUnlock(&cell.mutex);
+            if (!pending) continue;
             switch (self.phase) {
                 .count => self.count = std.math.add(usize, self.count, 1) catch {
-                    std.Io.Threaded.mutexUnlock(&self.scheduler.tree_mutex);
+                    std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
                     return error.OutOfMemory;
                 },
                 .collect => if (self.filled != self.count) {
-                    heap.incRef(cell.header);
-                    heap.initValues(self.result.?)[self.filled] = .{ .task = cell.header };
+                    heap.incRef(cell.handle());
+                    self.result.?.items()[self.filled] = .{ .task = cell.handle() };
                     self.filled += 1;
-                    heap.setInitializingLength(self.result.?, self.filled);
+                    self.result.?.setLen(self.filled);
                 },
             }
         }
-        if (current) |following| heap.incRef(following.header);
-        self.next = current;
-        self.started = true;
-        std.Io.Threaded.mutexUnlock(&self.scheduler.tree_mutex);
-        if (old_next) |old| heap.decRef(self.scheduler.allocator, old.header);
+        self.pass = .{ .tree_epoch = pass_epoch };
+        if (current) |following| {
+            heap.incRef(following.handle());
+            self.pass.?.position = .{ .retained = following };
+        }
+        std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
+        if (old_pass) |pass| pass.releaseRetained(self.scheduler.releaseDomain());
         if (current != null) return .yielded;
         switch (self.phase) {
             .count => {
                 if (self.count >= std.math.maxInt(u32)) return error.OutOfMemory;
-                self.result = try heap.allocHeader(
-                    self.scheduler.allocator,
-                    .generic_spine,
+                self.result = try heap.ListBuilder(.generic_spine).init(
+                    self.scheduler.allocator(),
                     0,
                     self.count,
                 );
                 self.phase = .collect;
-                self.next = null;
-                self.started = false;
                 return .yielded;
             },
             .collect => {
-                const result: Value = .{ .list = heap.publish(self.result.?) };
+                const result: Value = .{ .list = self.result.?.finish() };
                 self.result = null;
-                errdefer heap.releaseValue(self.scheduler.allocator, result);
-                try evaluator.pushOwned(result);
-                return .completed;
+                self.pass = null;
+                return .{ .output = result };
             },
         }
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *TasksDriver = @ptrCast(@alignCast(raw));
-        if (self.next) |cell| heap.decRef(allocator, cell.header);
-        if (self.result) |result| heap.decRef(allocator, heap.publish(result));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *TasksDriver) void {
+        if (self.pass) |pass| pass.releaseRetained(releases);
+        if (self.result) |*result| result.retirePartial(releases);
         allocator.destroy(self);
     }
 };
@@ -1576,9 +1855,13 @@ fn nextDescendant(root: *const TaskScope, cell: *TaskCell) ?*TaskCell {
     if (cell.scope.first) |child| return child;
     var current = cell;
     while (true) {
-        if (current.parent_next) |sibling| return sibling;
-        if (current.parent == root) return null;
-        current = current.parent.owner.?;
+        const membership = switch (current.parent_membership) {
+            .linked => |membership| membership,
+            .detached => unreachable,
+        };
+        if (membership.next) |sibling| return sibling;
+        if (membership.scope == root) return null;
+        current = membership.scope.owner.?;
     }
 }
 
@@ -1602,10 +1885,32 @@ fn unlinkRegistrationLocked(registration: *WaitRegistration) void {
 }
 
 fn cancelArriving(cell: *TaskCell) void {
-    std.Io.Threaded.mutexLock(&cell.scheduler.tree_mutex);
-    cancelOne(cell);
-    std.Io.Threaded.mutexUnlock(&cell.scheduler.tree_mutex);
+    const scheduler_state = cell.scheduler.privateState();
+    std.Io.Threaded.mutexLock(&scheduler_state.tree_mutex);
+    _ = cancelOne(cell);
+    std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
     notifyCancellation(cell.scheduler);
+}
+
+fn beginExternalCancellation(cell: *TaskCell) bool {
+    const scheduler = cell.scheduler;
+    const scheduler_state = scheduler.privateState();
+    std.Io.Threaded.mutexLock(&scheduler_state.tree_mutex);
+    const close_command = cancelOne(cell);
+    var enqueue = false;
+    if (close_command == .cancel_children) {
+        std.Io.Threaded.mutexLock(&cell.scope.mutex);
+        if (!cell.scope.cancellation_walk_active) {
+            cell.scope.cancellation_walk_active = true;
+            std.debug.assert(cell.cancellation == .none);
+            cell.cancellation = .{ .external = .{ .root = &cell.scope } };
+            heap.incRef(cell.handle());
+            enqueue = true;
+        }
+        std.Io.Threaded.mutexUnlock(&cell.scope.mutex);
+    }
+    std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
+    return enqueue;
 }
 
 fn cancelScopeTree(scope: *TaskScope) void {
@@ -1615,7 +1920,7 @@ fn cancelScopeTree(scope: *TaskScope) void {
         @panic("scheduler cancellation yield failed");
 }
 
-fn cancelOne(cell: *TaskCell) void {
+fn cancelOne(cell: *TaskCell) core.ScopeCommand {
     _ = cell.cancelled.swap(true, .release);
     std.Io.Threaded.mutexLock(&cell.mutex);
     const decision = unitDecision(cell.policy, .cancel);
@@ -1632,21 +1937,33 @@ fn cancelOne(cell: *TaskCell) void {
     const closing = scopeDecision(cell.scope.policy, .close);
     cell.scope.policy = closing.next;
     std.Io.Threaded.mutexUnlock(&cell.scope.mutex);
+    return closing.command;
 }
 
-fn notifyCancellation(scheduler: *Scheduler) void {
-    std.Io.Threaded.mutexLock(&scheduler.queue_mutex);
-    scheduler.queue_condition.broadcast(blockingIo());
-    std.Io.Threaded.mutexUnlock(&scheduler.queue_mutex);
+fn notifyCancellation(scheduler: *const WorkerScheduler) void {
+    const scheduler_state = scheduler.privateState();
+    std.Io.Threaded.mutexLock(&scheduler_state.queue_mutex);
+    scheduler_state.queue_condition.broadcast(blockingIo());
+    std.Io.Threaded.mutexUnlock(&scheduler_state.queue_mutex);
 }
 
 fn unlinkParent(cell: *TaskCell) ?*TaskCell {
-    const parent = cell.parent;
+    const membership = switch (cell.parent_membership) {
+        .linked => |membership| membership,
+        .detached => unreachable,
+    };
+    const parent = membership.scope;
     std.Io.Threaded.mutexLock(&parent.mutex);
-    if (cell.parent_previous) |previous| previous.parent_next = cell.parent_next else parent.first = cell.parent_next;
-    if (cell.parent_next) |next| next.parent_previous = cell.parent_previous else parent.last = cell.parent_previous;
-    cell.parent_linked = false;
-    cell.scheduler.tree_epoch +%= 1;
+    if (membership.previous) |previous| switch (previous.parent_membership) {
+        .linked => |*previous_link| previous_link.next = membership.next,
+        .detached => unreachable,
+    } else parent.first = membership.next;
+    if (membership.next) |next| switch (next.parent_membership) {
+        .linked => |*next_link| next_link.previous = membership.previous,
+        .detached => unreachable,
+    } else parent.last = membership.previous;
+    cell.parent_membership = .{ .detached = parent };
+    cell.scheduler.privateState().tree_epoch +%= 1;
     const decision = scopeDecision(parent.policy, .child_terminal);
     parent.policy = decision.next;
     const closing_owner = if (decision.command == .notify_quiescent and !parent.cancellation_walk_active)
@@ -1656,66 +1973,68 @@ fn unlinkParent(cell: *TaskCell) ?*TaskCell {
     if (closing_owner != null) parent.closing_owner = null;
     if (decision.command == .notify_quiescent) parent.quiescent.broadcast(blockingIo());
     std.Io.Threaded.mutexUnlock(&parent.mutex);
-    heap.decRef(cell.allocator, cell.header);
+    cell.scheduler.releaseDomain().releaseHeader(cell.handle());
     return closing_owner;
 }
 
-fn workerMain(scheduler: *Scheduler) void {
+fn workerMain(scheduler: *const WorkerScheduler) void {
+    const scheduler_state = scheduler.privateState();
+    var arbitration = ExecutorArbitration{};
     while (true) {
-        std.Io.Threaded.mutexLock(&scheduler.queue_mutex);
-        while (scheduler.queue_first == null and !scheduler.stopping) {
-            scheduler.queue_condition.waitUncancelable(blockingIo(), &scheduler.queue_mutex);
+        if (scheduler.runArbitrated(&arbitration)) continue;
+        std.Io.Threaded.mutexLock(&scheduler_state.queue_mutex);
+        while (scheduler_state.queue_first == null and
+            !scheduler.releaseDomain().hasPending() and
+            !scheduler_state.stopping)
+        {
+            scheduler_state.queue_condition.waitUncancelable(blockingIo(), &scheduler_state.queue_mutex);
         }
-        if (scheduler.stopping and scheduler.queue_first == null) {
-            std.Io.Threaded.mutexUnlock(&scheduler.queue_mutex);
+        if (scheduler_state.stopping and scheduler_state.queue_first == null) {
+            std.Io.Threaded.mutexUnlock(&scheduler_state.queue_mutex);
             return;
         }
-        const entry = scheduler.popLocked().?;
-        std.Io.Threaded.mutexUnlock(&scheduler.queue_mutex);
-        switch (entry.item.?) {
-            .task => |cell| scheduler.runQueued(cell),
-            .wait => |wait| scheduler.runWait(wait),
-            .release => |release| scheduler.runRelease(release),
-        }
+        std.Io.Threaded.mutexUnlock(&scheduler_state.queue_mutex);
     }
 }
 
-fn dispatch(cell: *TaskCell) void {
+fn dispatch(cell: *TaskCell) core.UnitCommand {
     std.Io.Threaded.mutexLock(&cell.mutex);
     const decision = unitDecision(cell.policy, .dispatch);
     cell.policy = decision.next;
     std.Io.Threaded.mutexUnlock(&cell.mutex);
-    std.debug.assert(decision.command == .none);
+    std.debug.assert(decision.command == .none or decision.command == .cancel_before_dispatch);
+    return decision.command;
 }
 
-fn timerMain(scheduler: *Scheduler) void {
+fn timerMain(scheduler: *const WorkerScheduler) void {
     const io = blockingIo();
+    const scheduler_state = scheduler.privateState();
     while (true) {
-        scheduler.timer_wake.reset();
-        std.Io.Threaded.mutexLock(&scheduler.timer_mutex);
-        if (scheduler.timer_stopping) {
-            std.Io.Threaded.mutexUnlock(&scheduler.timer_mutex);
+        scheduler_state.timer_wake.reset();
+        std.Io.Threaded.mutexLock(&scheduler_state.timer_mutex);
+        if (scheduler_state.timer_stopping) {
+            std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
             return;
         }
-        const first = scheduler.timer_heap.peek();
+        const first = scheduler_state.timer_heap.peek();
         var next_deadline: ?std.Io.Timestamp = null;
         if (first) |node| {
             const now = std.Io.Clock.awake.now(io);
             if (now.nanoseconds >= node.deadline.nanoseconds) {
-                scheduler.timer_heap.remove(node);
-                std.Io.Threaded.mutexUnlock(&scheduler.timer_mutex);
+                scheduler_state.timer_heap.remove(node);
+                std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
                 node.wait.select(.timeout);
                 node.wait.release();
                 continue;
             }
             next_deadline = node.deadline;
         }
-        std.Io.Threaded.mutexUnlock(&scheduler.timer_mutex);
+        std.Io.Threaded.mutexUnlock(&scheduler_state.timer_mutex);
         if (next_deadline) |deadline| {
-            scheduler.timer_wake.waitTimeout(io, .{ .deadline = deadline.withClock(.awake) }) catch |err| switch (err) {
+            scheduler_state.timer_wake.waitTimeout(io, .{ .deadline = deadline.withClock(.awake) }) catch |err| switch (err) {
                 error.Timeout => {},
                 error.Canceled => @panic("uncancelable scheduler timer wait was canceled"),
             };
-        } else scheduler.timer_wake.waitUncancelable(io);
+        } else scheduler_state.timer_wake.waitUncancelable(io);
     }
 }

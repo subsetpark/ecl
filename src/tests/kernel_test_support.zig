@@ -98,7 +98,7 @@ fn expectStackCase(case: StackCase) !void {
         .ok => {},
         .incomplete => return error.TestUnexpectedResult,
         .err => |failure| {
-            defer heap.releaseValue(allocator, failure);
+            defer heap.testing.releaseValue(allocator, failure);
             const rendered = try printer.toOwnedString(allocator, failure);
             defer allocator.free(rendered);
             std.log.err("unexpected language error: {s}", .{rendered});
@@ -117,7 +117,7 @@ fn expectErrorCase(case: ErrorCase) !void {
         .ok, .incomplete => return error.TestUnexpectedResult,
         .err => |item| item,
     };
-    defer heap.releaseValue(allocator, failure);
+    defer heap.testing.releaseValue(allocator, failure);
     try expectLanguageError(failure, case);
 }
 

@@ -145,6 +145,8 @@ test "dict-text: format enforces braces placeholders and canonical values" {
 
 test "dict-text: large updates yield through the public runtime" {
     const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
 
@@ -152,14 +154,10 @@ test "dict-text: large updates yield through the public runtime" {
     defer allocator.free(integers);
     for (integers, 0..) |*integer, index| integer.* = @intCast(index);
     const sequence = try list.fromI64Slice(allocator, integers);
-    defer heap.releaseValue(allocator, sequence);
-    heap.retainValue(sequence);
-    runtime.stack.append(allocator, sequence) catch |err| {
-        heap.releaseValue(allocator, sequence);
-        return err;
-    };
+    defer heap.testing.releaseValue(allocator, sequence);
+    try runtime.pushBorrowed(sequence);
     try std.testing.expect((try runtime.runUnit("<test>", "69999 1 put pop")) == .ok);
-    try std.testing.expect(runtime.last_polls >= 1);
+    try std.testing.expect(runtime.lastPolls() >= 1);
 
     const pairs = try allocator.alloc(dict.Pair, 70_000);
     defer allocator.free(pairs);
@@ -167,30 +165,18 @@ test "dict-text: large updates yield through the public runtime" {
         .{ .int = @intCast(index) },
         .{ .int = @intCast(index) },
     };
-    const dictionary = try dict.fromUniquePairs(allocator, pairs);
-    defer heap.releaseValue(allocator, dictionary);
+    const dictionary = try dict.fromUniquePairs(allocator, cleanup.domain(), pairs);
+    defer heap.testing.releaseValue(allocator, dictionary);
 
-    heap.retainValue(dictionary);
-    runtime.stack.append(allocator, dictionary) catch |err| {
-        heap.releaseValue(allocator, dictionary);
-        return err;
-    };
+    try runtime.pushBorrowed(dictionary);
     try std.testing.expect((try runtime.runUnit("<test>", "70000 1 put pop")) == .ok);
-    try std.testing.expect(runtime.last_polls >= 1);
+    try std.testing.expect(runtime.lastPolls() >= 1);
 
-    heap.retainValue(dictionary);
-    runtime.stack.append(allocator, dictionary) catch |err| {
-        heap.releaseValue(allocator, dictionary);
-        return err;
-    };
+    try runtime.pushBorrowed(dictionary);
     try std.testing.expect((try runtime.runUnit("<test>", "69999 del pop")) == .ok);
-    try std.testing.expect(runtime.last_polls >= 1);
+    try std.testing.expect(runtime.lastPolls() >= 1);
 
-    heap.retainValue(dictionary);
-    runtime.stack.append(allocator, dictionary) catch |err| {
-        heap.releaseValue(allocator, dictionary);
-        return err;
-    };
+    try runtime.pushBorrowed(dictionary);
     try std.testing.expect((try runtime.runUnit("<test>", "{70000 1} merge pop")) == .ok);
-    try std.testing.expect(runtime.last_polls >= 1);
+    try std.testing.expect(runtime.lastPolls() >= 1);
 }

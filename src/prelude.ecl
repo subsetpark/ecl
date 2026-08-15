@@ -226,6 +226,12 @@
  "Return the first matching index, or the sequence length when no element matches.")
 'find def
 
+### def await-all
+((await) each)
+(tasks -- outcomes :
+ "Wait for every task and return its outcome in input order.")
+'await-all def
+
 ### def par-each
 (|l q|
  l type 'list match ({'kind 'type 'msg "par-each expected a list"} raise) unless

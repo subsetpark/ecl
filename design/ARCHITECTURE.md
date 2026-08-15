@@ -23,30 +23,44 @@ Decision 21's doctrine becomes two enforced rules:
    Only shipped business-logic Zig is counted, including kernels, the CLI, and
    the formatter. Tests (including inline `test` declarations), fixtures,
    build/source-audit verification tooling, and all target-language ECL source
-   are excluded from every ceiling. Excluded Zig remains exactly classified and
-   is reported separately by the audit:
+   are excluded from every ceiling and from line measurement. Source coverage
+   still classifies first-party Zig so production files cannot evade the
+   architectural checks, but test and tooling line totals are not a metric:
 
    | component | budget | measured |
    |---|---|---|
-   | values + RC (value, heap, intern, list, equal, dict, print, poll) | 3,500 | 2,828 |
-   | reader (lexer, binder, reader) | 1,900 | 1,433 |
-   | machine (machine, spans, prims, root) | 3,000 | 2,246 |
-   | modules and registry (env, modules, module_prims, reflection, session) | 2,600 | 1,680 |
-   | bootstrap prelude loader | 150 | 80 |
-   | combinators | 1,200 | 703 |
-   | definition annotations and doc normalization | 1,000 | 602 |
-   | CLI and source formatter | 1,900 | 1,374 |
-   | kernels and idioms | 5,500 | 4,069 |
-   | **business-logic Zig total** | **22,000** | **15,015** |
+   | values + RC | 4,200 | 3,731 |
+   | reader | 3,300 | 2,451 |
+   | machine | 5,600 | 5,495 |
+   | modules and registry | 4,400 | 4,176 |
+   | bootstrap prelude loader | 150 | 86 |
+   | combinators | 1,200 | 748 |
+   | definition annotations and doc normalization | 1,000 | 901 |
+   | primitive documentation | 300 | 158 |
+   | CLI and source formatter | 1,900 | 1,428 |
+   | kernels and idioms | 8,500 | 5,590 |
+   | scheduler and concurrency | 3,500 | 2,639 |
+   | **business-logic Zig total** | **30,000** | **27,403** |
 
-   These ceilings were raised specifically so nominal IDs, opaque heap
-   capabilities, validated publication types, tagged application/scope modes,
-   typestate, and mandatory work cursors can remain
-   explicit. A limit must not incentivize weakening a type boundary. The audit
-   recursively enumerates `src/**/*.zig` and requires every file to belong to exactly one
-   business-logic component or uncapped verification input; adding an
-   unclassified file fails.
+   The M7 recalibration supersedes the earlier 22,000 total and 5,500 kernel
+   ceilings. Scheduler-safe kernels, task joins, failure unwinding, snapshot
+   reclamation, and failed-result release now represent user-sized work with
+   nominal cursor/ownership states instead of native-stack traversal. Keeping
+   the earlier limits would require recombining those states or restoring
+   synchronous teardown, contrary to the structural and scheduler-quantum
+   invariants. The 30,000 total and 8,500 kernel ceilings preserve room for
+   those explicit boundaries; they are enforced ceilings, not growth targets.
+   A limit must not incentivize weakening a type boundary. The audit
+   recursively enumerates `src/**/*.zig`, `test/**/*.zig`, and root-level Zig
+   build inputs and requires every file to belong to exactly one business-logic
+   component or uncapped verification manifest; adding an unclassified file
+   anywhere in those first-party roots fails.
    `src/prelude.ecl` and other ECL code are intentionally not line-counted.
+   Within mixed production files, the AST-aware counter starts at exported,
+   comptime, and entry declarations and follows top-level identifier
+   references. It excludes inline `test` declarations, declarations gated by
+   `builtin.is_test`, and private top-level helpers reachable only from
+   verification code.
    Runtime sources remain directly under `src/`; test suites and helpers are
    grouped in `src/tests/`, while substantive build-only checks live in
    `src/tools/` behind package-root entrypoints required by Zig.
@@ -173,7 +187,12 @@ publication critical sections.
   cannot carry one, and the module-root scope supplies the single coherent home.
 - An unpublished module generation is held by an opaque, consumable
   `OwnedCandidate`. Registry publication consumes that capability; rollback
-  destroys it. Attempt and module boundaries are distinct tagged-union states,
+  releases only the provisional guard. Tasks spawned before commit carry
+  independent generation pins, so rollback cannot destroy the embedded module
+  scope until those tasks and their child scopes quiesce. Unit and generation
+  lifetime use the same nominal embedded-scope teardown cursor, which retains
+  its owner until dependent child scopes have propagated their releases.
+  Attempt and module boundaries are distinct tagged-union states,
   so candidate ownership no longer depends on nullable pointers or side-band
   booleans.
 - Auto-loading likewise owns a consumable `LoadingLease`. Removal consumes it
@@ -183,16 +202,43 @@ publication critical sections.
   select another traversal implementation.
 - Public native callbacks return `PrimitiveOutcome`, which atomically carries
   either success or the complete language-failure payload. Trusted builtins use
-  a separate callback variant, so public registration cannot return a detached
-  `error.Ecl` and crash the dispatcher.
+  a separate callback variant. Registered callbacks receive an opaque
+  `NativeMachine` exposing only semantic stack operations; they cannot obtain a
+  `Unit`, module home, generation pin, or reclamation domain. Public
+  registration therefore cannot return a detached `error.Ecl`, manufacture an
+  independently escaping generation lifetime, or mutate scheduler reclamation.
 - Core construction is a `BuildingEnv` typestate capability consumed by
   `finish`. Session, core-build, module-root, lazy-local, and owned-local scope
   storage are a tagged union rather than correlated environment/ownership flags.
+- Dictionary storage is `initializing | ready`, and the ready payload always
+  carries keys, values, and hashes plus one optional owned index slice. There is
+  no separately mutable initialized bit, nullable payload, or pointer/length
+  pair for reclamation and lookup to reconcile.
+- Heap values carry nominal `ListHandle`, `DictHandle`, and `TaskHandle`
+  pointers. Allocation returns kind-specific initializing capabilities and
+  publication consumes the matching capability, so a list cannot be passed to
+  task storage or a constructing dictionary observed through a ready handle.
+- Native continuation ownership retained across a yield is represented by an
+  optional or tagged owner (`Accumulator` distinguishes borrowed, owned, and
+  transferred). Driver teardown does not consult a side-band transferred or
+  owned boolean. Short-lived transfers use the same `OwnedValue` capability as
+  long-lived continuations.
+- Operand removal exposes only `popValue() -> OwnedValue` to evaluators. Raw
+  stack extraction is reserved for stopped-unit scheduler cleanup, and the
+  source audit rejects its use by primitives or kernels.
 - Quotation applications use a validated `StackWindow` and tagged in-place or
   isolated mode. The continuation frame owns its trace and immutable driver;
   callbacks return only the next `ApplicationStep`, so they cannot substitute a
   context or destructor. The stronger frame is 80 bytes (formerly 48), an
   intentional ceiling increase for representational safety.
+- Fallible continuation insertion consumes an `OwnedFrame` capability only
+  after storage growth succeeds. Failure leaves the same capability with the
+  caller, eliminating the prior implicit "append also deinitializes" contract.
+- Task result publication exposes only `constructing`, a stable active
+  `TaskExecution`, or a published terminal outcome/OOM state. The execution's
+  evaluating/finishing union is worker-private, so advancing a materialization
+  cursor cannot race a waiter reading the cell's publication tag. No phase can
+  carry an unrelated unit, materializer, or terminal payload.
 
 ## Reference-counting discipline (Perceus-on-a-stack)
 
@@ -279,20 +325,44 @@ publication critical sections.
   Shared structures (core, module envs, registry) publish immutable
   snapshots via atomic pointer swap (arc-swap/RCU discipline);
   unit-local scopes are unsynchronized by ownership.
-- **Snapshot retention (M4 as-built; bounded reclamation is a v1
-  obligation).** Superseded environment shapes and registry directories
-  are currently retained until session teardown — that is what lets the
-  lock-free read path dereference them without hazard pointers. Cost
-  therefore scales with distinct-name insertions, use-list edits, and
-  module commits (rebinds swap cell interiors and retain nothing).
-  Acceptable at REPL scale; unbounded for a long-lived session that
-  keeps defining names or re-registering modules. v1 must add some
-  degree of control before the acceptance milestone: quiescent-point
-  reclamation (compact superseded shapes/directories when no unit is
-  executing — trivial while single-threaded, epoch/lease-gated once M7
-  workers exist) and/or a session word that reports and compacts
-  retained snapshots. Binding-cell snapshot chains already reclaim at
-  readers==0 and need nothing.
+- **Snapshot reclamation (M7 as-built).** Binding snapshots, environment
+  shapes, and registry directories use announced reader leases. Pointer
+  publication, reader announcement, and the writer's zero-reader check are
+  sequentially consistent, placing the handoff in one total order: a reader
+  either protects the old snapshot before reclamation or observes the new
+  pointer. The last departing reader detaches a retired chain under the writer
+  lock and publishes its head to the shared retirement domain after unlocking;
+  it never walks or frees that chain. Each retirement turn destroys one typed
+  snapshot/directory record and requeues its successor. Superseded chains are
+  therefore reclaimed once their announced readers drain without imposing
+  history-sized work on the final reader or writer. One generated property
+  drives the production `snapshot.Publisher` through arbitrary acquire,
+  publication, observation, and release traces. A barrier-controlled
+  reader/writer/reclaimer proof first holds an old production binding lease
+  while publications replace it, then acquires another production cursor before
+  a barrier-released publication and advances the actual shared retirement
+  domain while that cursor remains live. All three participants continue in
+  concurrent loops; the instrumented TSan step covers acquisition, publication, and reclamation
+  together, while the test observes stable binding values through public
+  leases. A counting-allocator property
+  then holds a real environment shape lease and a real registry `Directory`
+  lease while exercising use-order changes, alias churn, and distinct-module
+  publication; after those leases drain, live bytes remain bounded by current
+  state rather than update count. Module slots use the same handoff for
+  generation leases; reclaimed generation records return to a registry-owned
+  free list, bounding both record storage and later commit scans by peak
+  simultaneously retired generations rather than total reloads.
+  `GenerationLease` is a narrow nominal observation capability: it exposes
+  identity metadata and cursor factories, not the mutable environment, scope,
+  reference count, or retirement operations. Session execution may consume it
+  into a distinct `ExecutionGeneration` only with the Session-private
+  `ExecutionAccess` capability; neither observation type returns a raw
+  `ModuleHome`. Only a `Unit` lifetime guard can turn that execution home into
+  an independent `GenerationPin`, registered native callbacks receive no such
+  authority, and Session shutdown joins/tears down every Unit before destroying
+  the issuing host domain. Each resolve/name cursor takes
+  its own `GenerationPin`, so releasing the originating lease cannot retire
+  the generation while the cursor still holds an environment snapshot.
 
 - **Definition annotations:** `definition_prims.zig` recognizes only direct
   top-level word markers in the candidate quotation, validates the entire
@@ -464,6 +534,109 @@ out). Kernels never own threads.
   stack. Attempt, task-outcome, and join-result list construction use the same
   exact-size resumable materializer. Raised-error field lookup and trace
   validation are likewise scheduler-visible cursor work. No signals, ever.
+- **One owned stack handoff:** a `WorkDriver` cannot mutate the operand stack
+  with its result. It returns `WorkProgress.output`, transferring the value to
+  the evaluator, which destroys the producer and performs the sole fallible
+  stack commit through `pushOwned`. That operation consumes the value whether
+  append succeeds or fails: success transfers it to the stack; append OOM
+  retires it directly into the allocator-scoped `ReleaseDomain`. It never
+  destroys the graph on the failing native stack or creates a second cleanup
+  owner. Known multi-output
+  resumptions reserve their complete stack window before transferring either
+  output. The parsed source audit identifies driver functions by their
+  `WorkProgress` return type and rejects direct stack pushes, a second
+  result-push API, or synchronous release inside `pushOwned`. All other
+  production components receive a `StackReservation` for exact-size,
+  non-fallible writes or call the machine's consuming stack API; the source
+  audit rejects direct operand-stack mutation outside `machine.zig`.
+- **Parking payload ownership is defined by the request type.** `ParkRequest`
+  and `ParkResume` expose the sole projections for their owned value graph and,
+  for requests, their selected task sequence. Wait registration, abandonment,
+  and deinitialization do not repeat tag-to-payload ownership switches.
+- **Join result teardown owns one heap root:** task-join accumulation uses an
+  exact-capacity `OwnedValueBuffer`. Abandonment retires the buffer's single
+  generic-spine root, and the shared release domain traverses its results later;
+  the fixed tagged teardown state sequences only the task input, result root,
+  optional raised value, and terminal disposition. No result-sized loop
+  survives.
+- **Runtime retirement has one allocator-scoped owner.** `ReleaseDomain` is the
+  sole value-graph walker and bounded external-retirement scheduler. Dropping `OwnedValue` performs only the refcount
+  transition and intrusively queues a zero-count object; scheduler/root turns
+  drain that queue in fixed chunks. `OwnedValueBuffer` gives partially filled,
+  exact-capacity result construction the same constant-time abandonment rule;
+  `OwnedValueChain` links fixed generic-spine chunks for unknown-size reader
+  results while preserving a single retirement root.
+  Typed intrusive retirement nodes also own snapshot chains, fixed reader
+  chunks, abandoned source drivers, binding cells, environments, scopes, and
+  module generations; their generated adapter advances one bounded cleanup
+  step and requeues unfinished work without allocating. Final generation
+  release changes typestate and enqueues work; it never destroys an environment
+  or releases a parent scope under the registry publication lock. Unit and
+  `ModuleGeneration` use the same `Scope.EmbeddedTeardownCursor`: its
+  `waiting_for_children` phase retains the embedded owner's stable reference
+  until every heap child has propagated its parent release, then its typed
+  retirement phase advances the scope and environment before final owner
+  destruction. Queued cleanup therefore cannot retain a pointer into freed
+  unit or generation storage.
+  Work-driver, application-frame, and fallback destructors receive the domain
+  explicitly, and reader/binder/kernel materializers retire into it on
+  abandonment. Unit OOM/exit teardown pops continuations and operands through
+  a scheduler-owned cursor instead of looping on the evaluator stack. Blocking
+  teardown does not accept a free-standing cleanup argument. Root-owned
+  `Env`, `Registry`, `SpanArchive`, and `Scheduler` expose only opaque,
+  consumable root identities. Each identity points to module-private backing
+  state containing the one `HostCleanup` issued at construction; no public
+  root field can replace that capability after allocation. Their constructors
+  derive both the allocator and retirement domain from the private capability,
+  and teardown destroys the backing through the same owner before consuming
+  the identity. They expose no independently mutable allocator/domain/host
+  triple. A compile-time root-shape check requires the opaque handle/private
+  state split and the single host capability. Synchronous
+  reader, binder, prelude, and formatter entry points use the same seam rather
+  than accepting a second allocator and validating it dynamically. Scopes and
+  reader cursors expose
+  resumable retirement, and chunk stores obtain their allocator from their own
+  storage rather than from a caller. None exposes a `(target, arbitrary host)`
+  pair. The mismatched-owner state therefore cannot be formed at a teardown
+  call, in any optimization mode. Scheduler-owned
+  destructors receive only the domain. Production has no synchronous
+  `releaseValue`/`decRef` adapter that can pair an arbitrary value with an
+  unrelated host; owned values retire through their construction domain.
+  Allocator-only compatibility cleanup exists solely in test builds. The
+  synchronous reader likewise requires caller-supplied host authority and
+  returns `HostParsed` bound to that exact authority.
+  `HostParsed.deinit` derives and drains its issuing owner, while cursor and
+  scheduler code receive `Parsed`, whose API exposes only `RetireCursor`.
+  Blocking versus resumable parsed teardown is therefore selected by type.
+  Copy-on-write replacement swaps the destination's old representation into
+  the consumed source wrapper and retires that wrapper through the caller's
+  shared domain; representation adoption has no allocator-only blocking
+  adapter. Every classified production file passes the
+  same AST-aware ownership/destructor checks; adding a component cannot omit it
+  through a second hand-maintained list. The audit rejects legacy `_owned`
+  identifiers, any reintroduced `ReleaseCursor`, and a blocking-cleanup
+  capability or synchronous value drop in release-capable destructors, while
+  the type signatures catch indirect blocking container destruction. The
+  classification-driven audit rejects `HostOwner` in production outside the
+  Session, CLI, formatter, and heap host boundaries and rejects every
+  production function outside the heap authority factory that combines
+  `HostCleanup` with an erased pointer cast. Behavioral tests may
+  create a host explicitly; allocator-only compatibility cleanup is compiled
+  only into test builds.
+- **Observation and execution capabilities do not expose host ownership.**
+  `Env` returns a copyable opaque `EnvironmentView`, never a mutable
+  `*Environment`; its API is limited to snapshot leases, lookup/name cursors,
+  generation observation, and owned name materialization. Snapshot leases
+  carry the same observation identity rather than exporting their environment
+  pointer. Scheduler host state and worker execution state are distinct:
+  `Scheduler` alone retains `HostCleanup` and owns settlement, shutdown, wake
+  detachment, and backing destruction, while units, task scopes, and OS
+  threads receive only `*const WorkerScheduler`. The worker facade has private
+  allocator/domain execution resources but neither host cleanup authority nor
+  a lifecycle method. `SessionCore` likewise stores only its `HostOwner` and
+  derives allocator and release-domain borrows; compile-time representation
+  checks reject cached correlated fields, host authority in worker state, or
+  lifecycle methods on the worker facade.
 - **Task cells:** write-once, multi-waiter (handles are dup-able
   values), under a small per-cell mutex in v1. `await` parks the unit
   (never blocks a worker); completion moves waiters to run queues.
@@ -498,20 +671,50 @@ out). Kernels never own threads.
   old wake from observing a later root wait at the same stack address.
   Cancellation walks keep a retained next-cell cursor, validate it with a tree
   epoch, and release the tree mutex every 256 cells; mutations restart the
-  idempotent walk. Root teardown waits on a scope-owned condition using the
+  idempotent walk. Two-pass task snapshots retain a pass epoch independently
+  of their optional next-cell cursor, including the yield between count and
+  collection; any intervening spawn or unlink restarts the whole snapshot.
+  The session root environment scope is a lazily allocated stable handle, not
+  inline optional storage: child reference-count traffic therefore never
+  aliases the session thread's write-once root-handle read, and moving the
+  `Session` value cannot invalidate a child scope parent.
+  Root teardown waits on a scope-owned condition using the
   same scope mutex as the child-count predicate, so final-child notification
   cannot be lost between the predicate check and sleep.
+- **One fair work contract:** cooperative execution and every worker use the
+  same persistent `ExecutorArbitration` state. When ready and retirement work
+  coexist it alternates one queue entry with one retirement quantum, and a
+  contending worker never blocks behind the active retirement cursor. Ready
+  tasks, cancellation walks, wait delivery, unit teardown, value graphs,
+  reader chunks, and snapshot records therefore share progress without either
+  queue starving the other. `Session` stores an opaque state handle rather
+  than exposing raw mutable `Environment` or `Registry` aliases. Its public
+  API does not return environment or generation leases coupled to its private
+  reclamation domain. Every public definition/module/alias mutation owns a
+  guard that acquires blocking host authority and settles root retirement on
+  all exits, even while the only worker is occupied; cold native registration,
+  public definition, and root evaluation therefore cannot return an idle
+  Session with a stranded backlog.
 - **Timers:** one lazy timer thread + an indexed binary heap whose pointer
   slots grow in fixed chunks; embedded wait nodes never relocate and removal
   is allocation-free (timing wheels are a scale problem ecl doesn't have).
+  `await-for` captures its absolute monotonic deadline before lazy timer startup
+  and stores it in the `WaitSet`'s arbitration state. Every later completion or
+  cancellation candidate is reclassified as timeout once that deadline has
+  passed. A final timestamp check after heap insertion removes an expired node
+  before the wait mutex is released, so allocation, lock contention, and thread
+  creation can neither extend a short timeout nor let a later candidate win.
   **IO:** direct on workers in v1 (scripting
   scale); the committed evolution is the blocking-pool split reusing the
   await machinery unchanged. Console writes take the stdout lock per
   call — whole-write atomicity, satisfying d.11/d.20's interleaving
   contract.
 - **Determinism lives at join points**, never in scheduling: program-
-  order await and leftmost-error are schedule-invariant; the only
-  sanctioned nondeterminism is `await-any` and cross-unit IO
+  order `await-all` outcomes and `par-each` leftmost-error are
+  schedule-invariant. `await-all` is the source-defined `(await) each` fan-in;
+  the private task-join capability exists only for `par-each`'s one-result,
+  suffix-cancellation, and re-raise contract. The only sanctioned
+  nondeterminism is `await-any` and cross-unit IO
   interleaving. Enforced by running the suite at 1 and N workers.
 - **Cold start is a budget** (the soul test: `ecl '3 4 +'` answers
   instantly): no worker threads or timer thread until first `spawn`;
@@ -540,7 +743,14 @@ coverage is one consolidated probe in the separate ReleaseSafe
 `zig build test-oom` gate. That probe crosses kernels, primitives, session
 services, reflection, loading, modules, and definition replacement in one
 deterministic lifetime, so each injected failure index pays for the embedded
-prelude bootstrap once. `checkAllAllocationFailures` supplies exact
+prelude bootstrap once. Its tagged cooperative scheduler mode executes the
+same queue, wait-set, cancellation, publication, and reclamation transitions
+on the root thread while starting no worker pool. This makes ordinal failure
+injection a total order instead of depending on which allocator call wins a
+thread race; the 1/N-worker suites and TSan separately validate the threaded
+executor. Deadline setup remains in the sweep through a pending task selected
+before a far deadline, while public scheduler tests cover actual timeout
+selection. `checkAllAllocationFailures` supplies exact
 allocated/freed accounting over the standard backing allocator; the debug
 test allocator is deliberately not nested underneath this already exhaustive
 wrapper.

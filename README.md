@@ -145,19 +145,22 @@ identity handle. `await` parks the calling unit and returns the child's cached
 waiters observe the same result. `cancel` recursively flags a task tree,
 `tasks` snapshots pending descendants in spawn preorder, `await-any` selects
 one indexed completion, and `await-for` limits a wait without cancelling the
-task. Task displays such as `<task:1>` are intentionally rejected by the
-reader because they are live Session capabilities, not serializable values.
+task. Source-defined `await-all` waits for a list of tasks and returns every
+ordinary outcome in input order without re-raising task failures. Task
+displays such as `<task:1>` are intentionally rejected by the reader because
+they are live Session capabilities, not serializable values.
 Large native operations, result publication, joins, and cancellation walks
 resume in bounded scheduler slices; no task runs another task recursively on
 its suspended native stack.
 
-`par-each` is source-defined and joins in input order, so successful results
-and the leftmost failure are stable across worker counts. Cross-task console
-calls and genuinely concurrent `await-any` completions may reorder. Use
-`par-each` for coarse independent work; ordinary pervasive array kernels are
-the efficient choice for element-wise arithmetic. `ECL_WORKERS` accepts only a
-positive base-10 integer and defaults to the available CPU count. Workers and
-the single timer thread are both started lazily.
+`par-each` is source-defined and uses a private join capability for its
+one-result-per-child, suffix-cancellation, and leftmost-failure contract.
+Successful results and the leftmost failure are stable across worker counts.
+Cross-task console calls and genuinely concurrent `await-any` completions may
+reorder. Use `par-each` for coarse independent work; ordinary pervasive array
+kernels are the efficient choice for element-wise arithmetic. `ECL_WORKERS`
+accepts only a positive base-10 integer and defaults to the available CPU
+count. Workers and the single timer thread are both started lazily.
 
 Scheduler policy is an allocation-free functional core; the threaded runtime
 is its imperative shell. Minish checks both generated core interleavings and

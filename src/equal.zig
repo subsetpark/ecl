@@ -7,12 +7,12 @@ const list = @import("list.zig");
 const poll = @import("poll.zig");
 
 pub const Value = value.Value;
-pub const Header = value.Header;
+pub const DictHandle = value.DictHandle;
 
 const Pair = struct { a: Value, b: Value };
 const DictSearch = struct {
-    a: *Header,
-    b: *Header,
+    a: *DictHandle,
+    b: *DictHandle,
     entry: usize,
     candidate: usize,
 };
@@ -27,14 +27,14 @@ const Action = union(enum) {
     },
     dict_search: DictSearch,
     dict_after_key: struct {
-        a: *Header,
-        b: *Header,
+        a: *DictHandle,
+        b: *DictHandle,
         entry: usize,
         candidate: usize,
     },
     dict_after_value: struct {
-        a: *Header,
-        b: *Header,
+        a: *DictHandle,
+        b: *DictHandle,
         entry: usize,
     },
 };
@@ -341,12 +341,12 @@ const HashAction = union(enum) {
         state: u64,
     },
     dict_after_key: struct {
-        header: *Header,
+        header: *DictHandle,
         index: usize,
         state: u64,
     },
     dict_after_value: struct {
-        header: *Header,
+        header: *DictHandle,
         index: usize,
         state: u64,
         key_hash: u64,
@@ -528,8 +528,8 @@ fn intFloatEqual(integer: i64, floating: f64) bool {
     return @as(i64, @intFromFloat(floating)) == integer;
 }
 
-fn dictItem(header: *Header, keys: bool, index: usize) Value {
-    const payload = heap.dictStorageConst(header).payload.?;
+fn dictItem(header: *DictHandle, keys: bool, index: usize) Value {
+    const payload = heap.dictStorageConst(header).payload().*;
     const child = Value{ .list = if (keys) payload.keys else payload.vals };
     return list.atUnchecked(child, index);
 }
@@ -571,13 +571,13 @@ fn allocationFailureProbe(allocator: std.mem.Allocator) !void {
         .{ .float = 2.0 },
         .{ .word = 3 },
     });
-    defer heap.releaseValue(allocator, left);
+    defer heap.testing.releaseValue(allocator, left);
     const right = try list.fromValuesGeneric(allocator, &.{
         .{ .float = 1.0 },
         .{ .int = 2 },
         .{ .word = 3 },
     });
-    defer heap.releaseValue(allocator, right);
+    defer heap.testing.releaseValue(allocator, right);
     _ = try matchWithAllocator(allocator, left, right);
     _ = try hashWithAllocator(allocator, left);
 }
@@ -590,9 +590,9 @@ test "ledger equality fixtures are representation independent" {
 
     const chars = [_]Value{ .{ .char = 'a' }, .{ .char = 'b' } };
     const leaf = try list.fromValues(allocator, &chars);
-    defer heap.releaseValue(allocator, leaf);
+    defer heap.testing.releaseValue(allocator, leaf);
     const spine = try list.fromValuesGeneric(allocator, &chars);
-    defer heap.releaseValue(allocator, spine);
+    defer heap.testing.releaseValue(allocator, spine);
     try std.testing.expect(match(leaf, spine));
     try std.testing.expectEqual(hash(leaf), hash(spine));
 }
@@ -688,14 +688,14 @@ test "deep structural identity uses explicit worklists" {
     var right = Value{ .float = 1.0 };
     for (0..100_000) |_| {
         const next_left = try list.fromValuesGeneric(allocator, &.{left});
-        if (left.heapHeader()) |_| heap.releaseValue(allocator, left);
+        if (left.heapHeader()) |_| heap.testing.releaseValue(allocator, left);
         left = next_left;
         const next_right = try list.fromValuesGeneric(allocator, &.{right});
-        if (right.heapHeader()) |_| heap.releaseValue(allocator, right);
+        if (right.heapHeader()) |_| heap.testing.releaseValue(allocator, right);
         right = next_right;
     }
-    defer heap.releaseValue(allocator, left);
-    defer heap.releaseValue(allocator, right);
+    defer heap.testing.releaseValue(allocator, left);
+    defer heap.testing.releaseValue(allocator, right);
     try std.testing.expect(match(left, right));
     try std.testing.expectEqual(hash(left), hash(right));
 }
@@ -706,9 +706,9 @@ test "hash and equality cursors expose bounded nested transitions" {
     defer allocator.free(numbers);
     for (numbers, 0..) |*number, index| number.* = @intCast(index);
     const left = try list.fromI64Slice(allocator, numbers);
-    defer heap.releaseValue(allocator, left);
+    defer heap.testing.releaseValue(allocator, left);
     const right = try list.fromI64Slice(allocator, numbers);
-    defer heap.releaseValue(allocator, right);
+    defer heap.testing.releaseValue(allocator, right);
 
     var hash_cursor = try HashCursor.init(allocator, left);
     defer hash_cursor.deinit();

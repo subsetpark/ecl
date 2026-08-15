@@ -60,8 +60,6 @@ const entries = [_]Metadata{
     .{ .name = "tasks", .effect = "-- tasks", .text = "Return pending descendant tasks in deterministic spawn order." },
     .{ .name = "await-any", .effect = "tasks -- index outcome", .text = "Wait for any task in a nonempty list and return its index and outcome." },
     .{ .name = "await-for", .effect = "task milliseconds -- outcome", .text = "Wait up to a nonnegative number of milliseconds for a task outcome." },
-    .{ .name = "task-join", .effect = "tasks -- results", .text = "Await tasks in input order, collect their single results, and re-raise the leftmost failure." },
-
     .{ .name = "+", .effect = "x y -- z", .text = "Add numeric values or conforming numeric arrays pervasively." },
     .{ .name = "-", .effect = "x y -- z", .text = "Subtract numeric or character values or conforming arrays pervasively." },
     .{ .name = "*", .effect = "x y -- z", .text = "Multiply numeric values or conforming numeric arrays pervasively." },

@@ -478,10 +478,10 @@ kill-on-arrival and waiter-list removal, structured lifetime with
 wait-for-quiescence at scope close, cancelled outcomes as
 `{'err {'kind 'cancelled …}}`, one timer thread + binary heap for
 `await-for`, stdout whole-write lock. Vocabulary: `spawn await
-await-any await-for cancel tasks` [P] and `par-each` [E] (with the
-chunking license, d.23). The determinism suite runs the full test
-corpus at 1 worker and N workers asserting identical outcomes. The soul
-test still spawns zero threads. Before parallel parsing is enabled, the
+await-any await-for cancel tasks` [P] and `await-all par-each` [E]
+(`par-each` retains the chunking license, d.23). The determinism suite runs
+the full test corpus at 1 worker and N workers asserting identical outcomes.
+The soul test still spawns zero threads. Before parallel parsing is enabled, the
 M1 intern table's tryLock spin loop is replaced with a blocking mutex so
 contending intern writers do not burn worker cores. **Snapshot
 reclamation (v1 obligation recorded at M4):** superseded environment
@@ -508,6 +508,16 @@ root Unit outside `attempt`: `exit` in a spawned Unit or inside `attempt`
 raises an ordinary catchable `'domain`, while an allowed root exit
 closes, cancels, and quiesces the root task scope before exposing its
 status to the CLI.
+
+Value destruction is one of those user-sized traversals. M7 now has one
+allocator-scoped `ReleaseDomain`: `OwnedValue` drops only make the
+reference-count transition and enqueue zero-count objects, exact-capacity
+partial buffers retire as one domain-owned heap root, unknown reader output is
+held by a fixed-chunk `OwnedValueChain` with one root, and scheduler/root turns
+drain the domain in fixed chunks. Work-driver and continuation teardown receive
+that domain explicitly. The evaluator exposes only `OwnedValue` for live stack
+pops. Blocking host helpers drain a local domain but do not implement another
+graph walker, and no operation allocates an independent release cursor.
 
 **Why this is a safe pause point**: The language surface of DESIGN.md
 is complete; only scope-ruled stdlib and REPL polish remain.
@@ -610,11 +620,22 @@ aggregate → emit) — the awk/sed/jq positioning made literal.
 The terminal acceptance suite below is implemented as a CI job
 (fixtures + expect scripts where interactive) and green. README rewritten
 around the real binary (install, tour, module guide). The d.23 line
-budget is audited by a CI check (the recalibrated per-component budget:
-classified shipped business-logic Zig ≤ 22,000 including kernels but excluding
-tests, fixtures, build/source-audit verification tooling, and target-language
-ECL source; kernels ≤ 5,500). Snapshot retention is bounded (the M7 reclamation
-obligation): a soak fixture that defines and re-registers in a loop
+budget is audited by a CI check. Its complete budget domain is the classified
+production/core-business-logic Zig components listed in ARCHITECTURE.md:
+their total is ≤ 30,000 lines and the kernel component is ≤ 8,500. Tests,
+fixtures, inline `test` declarations, build/source-audit verification tooling,
+and target-language ECL are outside LOC measurement and control; their
+classification exists only to keep the first-party source manifest exhaustive.
+Private top-level helpers reachable only from inline tests are excluded by the
+same AST reachability pass, so co-location does not turn test support into
+measured business logic.
+Line figures in earlier executed-milestone status paragraphs are historical
+measurements, not active v1 ceilings or policy for verification code.
+The prior 22,000/5,500 ceilings assumed
+native-stack traversal; the replacement headroom preserves the nominal resumable
+ownership, snapshot, reclamation, and task-join states required by M7 rather
+than compressing those boundaries. Snapshot retention is bounded (the M7
+reclamation obligation): a soak fixture that defines and re-registers in a loop
 shows stable memory. A `v1.0` tag exists.
 
 **Why this is a safe pause point**: It is the end; the tag is the
@@ -987,9 +1008,13 @@ script in CI.
 
 - **DoD-18 — spawn/await outcome protocol**
   - **Assert**: `spawn`+`await` delivers the same outcome shape as
-    `attempt`; `await` is idempotent.
-  - **Verify by** `cmd`: `ecl '(1 2 +) spawn dup await pop await or-raise call'`.
-  - **Expected**: `3`.
+    `attempt`; `await` is idempotent; source-defined `await-all` returns
+    every ordinary outcome in input order without re-raising failures.
+  - **Verify by** `cmd`: `ecl '(1 2 +) spawn dup await pop await or-raise call'`
+    and a mixed success/failure task-list fixture comparing `await-all` with
+    `(await) each` at 1 and 8 workers.
+  - **Expected**: `3`; the two ordered outcome lists match at both worker
+    counts.
   - **Traces to**: Milestone 7 — task cells.
 
 - **DoD-19 — cancellation and timeout**
@@ -1134,18 +1159,25 @@ script in CI.
   - **Traces to**: Milestone 9 — embedded stdlib registration (mechanism Milestone 4).
 
 - **DoD-30 — line budget**
-  - **Assert**: classified shipped business-logic Zig (including kernels but
-    excluding tests, fixtures, build/source-audit verification tooling, and all
-    target-language ECL source) ≤ 22,000 lines and every budgeted component
-    inside its ARCHITECTURE.md row; kernels ≤ 5,500. Business logic excludes
-    `test` blocks wherever they appear and excludes every test-only source.
-    Verification Zig remains exactly classified and is reported separately but
-    has no line ceiling.
+  - **Assert**: only classified production/core-business-logic Zig is in the
+    line-budget domain: its total is ≤ 30,000 lines, every such component is
+    inside its ARCHITECTURE.md row, and kernels are ≤ 8,500. These M7 ceilings
+    replace 22,000/5,500 so scheduler-safe user-sized work retains explicit
+    cursor and ownership states instead of synchronous native-stack cleanup.
+    Tests, fixtures, inline `test` declarations, test-only sources,
+    build/source-audit tooling, and target-language ECL are outside LOC
+    measurement and control.
+    Top-level declarations gated by `builtin.is_test` and private declarations
+    reachable only from tests are likewise excluded by AST reachability rather
+    than conservatively charged to the containing production component.
+    Source coverage still classifies first-party test and tooling files solely
+    to make the manifest exhaustive; DoD-30 neither measures nor reports their
+    line totals and imposes no line ceiling on them.
   - **Verify by** `cmd`: `zig build source-audit` (the dedicated audit in
-    `src/tools/source_audit.zig` prints the split and fails the build when a
+    `src/tools/source_audit.zig` prints the business-logic split and fails the build when a
     component exceeds its row); `zig build test` depends on this audit.
-  - **Expected**: exit 0 with per-component business-logic counts and separate
-    uncapped verification counts printed.
+  - **Expected**: exit 0 with per-component business-logic counts; no test or
+    tooling line total is part of the contract.
   - **Traces to**: Milestone 10 — the source audit (budget: d.23,
     re-derived for the Zig host 2026-08-12).
 

@@ -76,7 +76,7 @@ fn runOk(runtime: *session.Session, name: []const u8, source: []const u8) !void 
         .ok => {},
         .incomplete => return error.UnexpectedIncomplete,
         .err => |failure| {
-            heap.releaseValue(runtime.allocator, failure);
+            runtime.release(failure);
             return error.UnexpectedLanguageError;
         },
     }
@@ -89,13 +89,14 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
     var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
-    var runtime = try session.Session.initWithHost(
+    var runtime = try session.Session.initWithHostConfig(
         thread_safe_allocator,
         &.{"argument"},
         std.testing.io,
         &output,
         &diagnostics,
         "test/acceptance/modules",
+        .cooperative,
     );
     defer runtime.deinit();
 
@@ -133,7 +134,8 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-combinators.ecl",
-        "[1 2 3] (dup 'each-local set each-local *) each pop " ++
+        "[(1) (111) (222)] cond pop " ++
+            "[1 2 3] (dup 'each-local set each-local *) each pop " ++
             "[1] [2] (pop dup 'each2-local set each2-local pop) each2 pop " ++
             "[1] (dup 'for-local set pop) for " ++
             "[1] 0 (+ dup 'fold-local set) fold pop " ++
@@ -145,8 +147,10 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-concurrency.ecl",
         "([1 2 3] str) spawn await pop " ++
             "(1) spawn dup pair await-any pop pop " ++
-            "(1) spawn 0 await-for pop " ++
+            "(1) spawn dup await pop 0 await-for pop " ++
+            "(1) spawn 1000000 await-for pop " ++
             "((1) () while) spawn dup cancel await pop " ++
+            "[(1) (missing) (2 3)] (spawn) each await-all pop " ++
             "[1 2 3] (dup *) par-each pop",
     );
     try runOk(
@@ -165,31 +169,27 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "'allocation-module (2 'x setp (x) ( -- n ) 'get def) module get pop " ++
             "('bad ((dup) 'f def) module) attempt pop",
     );
-
     try runOk(
         &runtime,
         "oom-definition-initial.ecl",
         "(1) (-- n : \"Old.\") 'allocation-target def",
     );
-    const id = try intern.intern("allocation-target");
-    var old = (runtime.environment.session.resolveDirect(id)).?;
-    defer old.deinit(thread_safe_allocator);
     const outcome = runtime.runUnit(
         "oom-definition-replacement.ecl",
         "(2) (input -- output : \"Replacement.\") 'allocation-target def",
     ) catch |err| {
-        var current = (runtime.environment.session.resolveDirect(id)).?;
-        defer current.deinit(thread_safe_allocator);
-        try std.testing.expectEqual(old.binding.word, current.binding.word);
-        try std.testing.expectEqual(old.effect.?.quotation, current.effect.?.quotation);
-        try std.testing.expectEqual(old.doc.?, current.doc.?);
+        try runOk(
+            &runtime,
+            "oom-definition-preserved.ecl",
+            "allocation-target 1 match 'allocation-target doc \"Old.\" match",
+        );
         return err;
     };
     switch (outcome) {
         .ok => {},
         .incomplete => return error.UnexpectedIncomplete,
         .err => |failure| {
-            heap.releaseValue(thread_safe_allocator, failure);
+            runtime.release(failure);
             return error.UnexpectedLanguageError;
         },
     }

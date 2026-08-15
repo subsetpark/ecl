@@ -367,13 +367,18 @@ const Annotation = struct {
 };
 const NestedDoc = struct { doc: *const Doc, has_content: bool, trailing_comment: bool };
 const Formatter = struct {
-    allocator: std.mem.Allocator,
+    host: *const heap.HostCleanup,
     docs: DocBuilder,
+
+    fn allocator(self: *const Formatter) std.mem.Allocator {
+        return self.host.allocator();
+    }
+
     fn root(self: *Formatter, sequence: Sequence) Error!*const Doc {
         var output: std.ArrayList(*const Doc) = .empty;
         var line: std.ArrayList(*const Doc) = .empty;
-        defer output.deinit(self.allocator);
-        defer line.deinit(self.allocator);
+        defer output.deinit(self.allocator());
+        defer line.deinit(self.allocator());
         var have_content = false;
         var previous_comment = false;
         var pending_definition: ?usize = null;
@@ -384,7 +389,7 @@ const Formatter = struct {
                 .comment => {
                     if (existingDefinitionHeader(sequence, part_index, trivia.bytes)) |header| {
                         if (have_content) try self.rootBreak(&output, &line, 2);
-                        try line.append(self.allocator, try self.definitionHeader(header.name));
+                        try line.append(self.allocator(), try self.definitionHeader(header.name));
                         have_content = true;
                         previous_comment = true;
                         pending_definition = header.part;
@@ -394,7 +399,7 @@ const Formatter = struct {
                     if (attachedDefinitionAfterComment(sequence, part_index)) |header| {
                         if (pending_definition != header.part) {
                             if (have_content) try self.rootBreak(&output, &line, 2);
-                            try line.append(self.allocator, try self.definitionHeader(header.name));
+                            try line.append(self.allocator(), try self.definitionHeader(header.name));
                             have_content = true;
                             previous_comment = true;
                             pending_definition = header.part;
@@ -404,9 +409,9 @@ const Formatter = struct {
                     if (have_content) {
                         if (previous_comment or newlines > 0) {
                             try self.rootBreak(&output, &line, @min(@max(newlines, 1), 2));
-                        } else try line.append(self.allocator, try self.docs.text(" "));
+                        } else try line.append(self.allocator(), try self.docs.text(" "));
                     }
-                    try line.append(self.allocator, try self.docs.text(trivia.bytes));
+                    try line.append(self.allocator(), try self.docs.text(trivia.bytes));
                     have_content = true;
                     previous_comment = true;
                     newlines = 0;
@@ -417,22 +422,22 @@ const Formatter = struct {
                 const name = if (pending_definition == part_index) null else definitionName(sequence, part_index);
                 if (name) |definition_name| {
                     if (have_content) try self.rootBreak(&output, &line, 2);
-                    try line.append(self.allocator, try self.definitionHeader(definition_name));
+                    try line.append(self.allocator(), try self.definitionHeader(definition_name));
                     try self.rootBreak(&output, &line, 1);
                 } else if (have_content) {
                     if (previous_comment or newlines > 0) {
                         try self.rootBreak(&output, &line, @min(@max(newlines, 1), 2));
                     } else {
-                        try line.append(self.allocator, try self.docs.softline());
+                        try line.append(self.allocator(), try self.docs.softline());
                         fill_pair = true;
                     }
                 }
-                try line.append(self.allocator, try self.form(sequence, part_index));
+                try line.append(self.allocator(), try self.form(sequence, part_index));
                 if (fill_pair) {
                     const start = line.items.len - 3;
                     const pair = try self.docs.group(try self.docs.concat(line.items[start..]));
                     line.shrinkRetainingCapacity(start);
-                    try line.append(self.allocator, pair);
+                    try line.append(self.allocator(), pair);
                 }
                 have_content = true;
                 previous_comment = false;
@@ -441,7 +446,7 @@ const Formatter = struct {
             },
         };
         try self.flushRootLine(&output, &line);
-        if (have_content) try output.append(self.allocator, try self.docs.hardline());
+        if (have_content) try output.append(self.allocator(), try self.docs.hardline());
         return self.docs.concat(output.items);
     }
     fn rootBreak(
@@ -451,7 +456,7 @@ const Formatter = struct {
         count: usize,
     ) Error!void {
         try self.flushRootLine(output, line);
-        for (0..count) |_| try output.append(self.allocator, try self.docs.hardline());
+        for (0..count) |_| try output.append(self.allocator(), try self.docs.hardline());
     }
     fn flushRootLine(
         self: *Formatter,
@@ -459,7 +464,7 @@ const Formatter = struct {
         line: *std.ArrayList(*const Doc),
     ) Error!void {
         if (line.items.len == 0) return;
-        try output.append(self.allocator, try self.docs.concat(line.items));
+        try output.append(self.allocator(), try self.docs.concat(line.items));
         line.clearRetainingCapacity();
     }
     fn form(self: *Formatter, parent: Sequence, part_index: usize) Error!*const Doc {
@@ -487,16 +492,16 @@ const Formatter = struct {
             return self.docs.concat(&.{ try self.docs.text(delimited.open), try self.docs.text(delimited.close) });
         }
         var pieces: std.ArrayList(*const Doc) = .empty;
-        defer pieces.deinit(self.allocator);
-        try pieces.append(self.allocator, try self.docs.text(delimited.open));
-        try pieces.append(self.allocator, try self.docs.aligned(nested_doc.doc));
-        if (nested_doc.trailing_comment) try pieces.append(self.allocator, try self.docs.hardline());
-        try pieces.append(self.allocator, try self.docs.text(delimited.close));
+        defer pieces.deinit(self.allocator());
+        try pieces.append(self.allocator(), try self.docs.text(delimited.open));
+        try pieces.append(self.allocator(), try self.docs.aligned(nested_doc.doc));
+        if (nested_doc.trailing_comment) try pieces.append(self.allocator(), try self.docs.hardline());
+        try pieces.append(self.allocator(), try self.docs.text(delimited.close));
         return self.docs.group(try self.docs.aligned(try self.docs.concat(pieces.items)));
     }
     fn nested(self: *Formatter, sequence: Sequence) Error!NestedDoc {
         var output: std.ArrayList(*const Doc) = .empty;
-        defer output.deinit(self.allocator);
+        defer output.deinit(self.allocator());
         const binder = binderBounds(sequence);
         var have_content = false;
         var previous_comment = false;
@@ -509,7 +514,7 @@ const Formatter = struct {
                 .comment => {
                     if (existingDefinitionHeader(sequence, part_index, trivia.bytes)) |header| {
                         try self.appendHardlines(&output, if (have_content) 2 else 1);
-                        try output.append(self.allocator, try self.definitionHeader(header.name));
+                        try output.append(self.allocator(), try self.definitionHeader(header.name));
                         have_content = true;
                         previous_comment = true;
                         pending_definition = header.part;
@@ -519,7 +524,7 @@ const Formatter = struct {
                     if (attachedDefinitionAfterComment(sequence, part_index)) |header| {
                         if (pending_definition != header.part) {
                             try self.appendHardlines(&output, if (have_content) 2 else 1);
-                            try output.append(self.allocator, try self.definitionHeader(header.name));
+                            try output.append(self.allocator(), try self.definitionHeader(header.name));
                             have_content = true;
                             previous_comment = true;
                             pending_definition = header.part;
@@ -529,9 +534,9 @@ const Formatter = struct {
                     if (have_content) {
                         if (previous_comment or newlines > 0) {
                             try self.appendHardlines(&output, @min(@max(newlines, 1), 2));
-                        } else try output.append(self.allocator, try self.docs.text(" "));
+                        } else try output.append(self.allocator(), try self.docs.text(" "));
                     }
-                    try output.append(self.allocator, try self.docs.text(trivia.bytes));
+                    try output.append(self.allocator(), try self.docs.text(trivia.bytes));
                     have_content = true;
                     previous_comment = true;
                     newlines = 0;
@@ -542,8 +547,8 @@ const Formatter = struct {
                 const name = if (pending_definition == part_index) null else definitionName(sequence, part_index);
                 if (name) |definition_name| {
                     if (!have_content) try self.appendHardlines(&output, 1) else try self.appendHardlines(&output, 2);
-                    try output.append(self.allocator, try self.definitionHeader(definition_name));
-                    try output.append(self.allocator, try self.docs.hardline());
+                    try output.append(self.allocator(), try self.definitionHeader(definition_name));
+                    try output.append(self.allocator(), try self.docs.hardline());
                 } else if (have_content) {
                     if (previous_comment) {
                         try self.appendHardlines(&output, @min(@max(newlines, 1), 2));
@@ -551,7 +556,7 @@ const Formatter = struct {
                         if (newlines > 0) {
                             try self.appendHardlines(&output, @min(newlines, 2));
                         } else {
-                            try output.append(self.allocator, try self.docs.softline());
+                            try output.append(self.allocator(), try self.docs.softline());
                             fill_pair = true;
                         }
                     }
@@ -560,16 +565,16 @@ const Formatter = struct {
                 }
                 if (binder) |bounds| {
                     if (part_index == bounds.open) {
-                        try output.append(self.allocator, try self.formatBinder(sequence, bounds));
+                        try output.append(self.allocator(), try self.formatBinder(sequence, bounds));
                     } else if (part_index > bounds.close) {
-                        try output.append(self.allocator, try self.form(sequence, part_index));
+                        try output.append(self.allocator(), try self.form(sequence, part_index));
                     }
-                } else try output.append(self.allocator, try self.form(sequence, part_index));
+                } else try output.append(self.allocator(), try self.form(sequence, part_index));
                 if (fill_pair) {
                     const start = output.items.len - 3;
                     const pair = try self.docs.group(try self.docs.concat(output.items[start..]));
                     output.shrinkRetainingCapacity(start);
-                    try output.append(self.allocator, pair);
+                    try output.append(self.allocator(), pair);
                 }
                 have_content = true;
                 previous_comment = false;
@@ -586,15 +591,15 @@ const Formatter = struct {
         };
     }
     fn appendHardlines(self: *Formatter, output: *std.ArrayList(*const Doc), count: usize) Error!void {
-        for (0..count) |_| try output.append(self.allocator, try self.docs.hardline());
+        for (0..count) |_| try output.append(self.allocator(), try self.docs.hardline());
     }
     fn formatBinder(self: *Formatter, sequence: Sequence, bounds: BinderBounds) Error!*const Doc {
         var names: std.ArrayList(*const Doc) = .empty;
-        defer names.deinit(self.allocator);
+        defer names.deinit(self.allocator());
         for (sequence.parts[bounds.open + 1 .. bounds.close]) |part| switch (part) {
             .trivia => {},
             .form => |form_item| try names.append(
-                self.allocator,
+                self.allocator(),
                 try self.docs.text(form_item.kind.atom),
             ),
         };
@@ -621,7 +626,7 @@ const Formatter = struct {
             .form => count += 1,
             .trivia => |trivia| if (trivia.kind == .comment) return null,
         };
-        const forms = try self.allocator.alloc(*Form, count);
+        const forms = try self.allocator().alloc(*Form, count);
         var next: usize = 0;
         for (delimited.contents.parts) |part| switch (part) {
             .form => |item| {
@@ -658,9 +663,12 @@ const Formatter = struct {
     }
     fn formatAnnotation(self: *Formatter, annotation_info: Annotation) Error!*const Doc {
         const token = annotation_info.document.kind.string;
-        const document = try decodeAndNormalize(self.allocator, token);
-        defer heap.releaseValue(self.allocator, document);
-        const quoted = try self.quotedDocument(document);
+        var document = heap.OwnedValue.init(
+            heap.hostDomain(self.host),
+            try decodeAndNormalize(self.host, token),
+        );
+        defer document.deinit();
+        const quoted = try self.quotedDocument(document.borrow());
         if (annotation_info.separator == null) {
             return self.docs.group(try self.docs.aligned(try self.docs.concat(&.{
                 try self.docs.text(annotation_info.open),
@@ -669,7 +677,7 @@ const Formatter = struct {
                 try self.docs.text(annotation_info.close),
             })));
         }
-        const header_items = try self.allocator.alloc(*const Doc, annotation_info.colon + 1);
+        const header_items = try self.allocator().alloc(*const Doc, annotation_info.colon + 1);
         for (annotation_info.forms[0 .. annotation_info.colon + 1], 0..) |item, index| {
             header_items[index] = try self.docs.text(wordBytes(item).?);
         }
@@ -695,12 +703,12 @@ const Formatter = struct {
     fn documentContent(self: *Formatter, document: Value) Error!*const Doc {
         const count: usize = @intCast(document.list.length());
         var output: std.ArrayList(*const Doc) = .empty;
-        defer output.deinit(self.allocator);
+        defer output.deinit(self.allocator());
         var start: usize = 0;
         while (start < count) {
             var end = start;
             while (end < count and charAt(document, end) != '\n') end += 1;
-            try output.append(self.allocator, try self.documentLine(
+            try output.append(self.allocator(), try self.documentLine(
                 document,
                 start,
                 end,
@@ -709,7 +717,7 @@ const Formatter = struct {
             if (end == count) break;
             var breaks: usize = 0;
             while (end < count and charAt(document, end) == '\n') : (end += 1) breaks += 1;
-            try output.append(self.allocator, try self.docs.node(.{ .docline = breaks }));
+            try output.append(self.allocator(), try self.docs.node(.{ .docline = breaks }));
             start = end;
         }
         return self.docs.concat(output.items);
@@ -725,18 +733,18 @@ const Formatter = struct {
             (start + 1 == end or charAt(document, start + 1) == ' ');
         const word_start = start + @as(usize, if (bullet and start + 1 < end) 2 else 0);
         var words: std.ArrayList([]const u8) = .empty;
-        defer words.deinit(self.allocator);
+        defer words.deinit(self.allocator());
         var cursor = word_start;
         while (cursor < end) {
             while (cursor < end and charAt(document, cursor) == ' ') cursor += 1;
             if (cursor == end) break;
             var word_end = cursor;
             while (word_end < end and charAt(document, word_end) != ' ') word_end += 1;
-            try words.append(self.allocator, try escapedWord(self.allocator, document, cursor, word_end));
+            try words.append(self.allocator(), try escapedWord(self.allocator(), document, cursor, word_end));
             cursor = word_end;
         }
         const fill = try self.docs.node(.{ .fill_sep = .{
-            .words = try self.allocator.dupe([]const u8, words.items),
+            .words = try self.allocator().dupe([]const u8, words.items),
             .final_reserve = reserve,
         } });
         if (!bullet) return fill;
@@ -747,22 +755,29 @@ const Formatter = struct {
 /// Parses source without evaluating it, formats its CST, and returns owned UTF-8.
 pub fn format(allocator: std.mem.Allocator, source: []const u8) Error![]u8 {
     if (!std.unicode.utf8ValidateSlice(source)) return error.InvalidUtf8;
-    try validateSource(allocator, source);
+    var validation_host = heap.HostOwner.init(allocator);
+    defer validation_host.cleanup().drain();
+    try validateSource(validation_host.cleanup(), source);
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
+    var formatting_host = heap.HostOwner.init(arena);
+    defer formatting_host.cleanup().drain();
     var parser = SyntaxParser{ .allocator = arena, .source = source };
     const syntax = try parser.parse();
-    var formatter = Formatter{ .allocator = arena, .docs = .{ .allocator = arena } };
+    var formatter = Formatter{
+        .host = formatting_host.cleanup(),
+        .docs = .{ .allocator = arena },
+    };
     try formatter.prepare(syntax);
     const document = try formatter.root(syntax.root);
     var renderer = Renderer{ .allocator = allocator };
     defer renderer.deinit();
     return renderer.render(document);
 }
-fn validateSource(allocator: std.mem.Allocator, source: []const u8) Error!void {
+fn validateSource(host: *const heap.HostCleanup, source: []const u8) Error!void {
     var diag: reader.Diag = .{};
-    const result = reader.read(allocator, "<fmt>", source, &diag) catch |err| switch (err) {
+    const result = reader.read(host, "<fmt>", source, &diag) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Parse => return error.InvalidSource,
     };
@@ -898,9 +913,13 @@ fn wordBytes(form_item: *const Form) ?[]const u8 {
         else => null,
     };
 }
-fn decodeAndNormalize(allocator: std.mem.Allocator, token: []const u8) Error!Value {
+fn decodeAndNormalize(
+    host: *const heap.HostCleanup,
+    token: []const u8,
+) Error!Value {
+    const allocator = host.allocator();
     var diag: reader.Diag = .{};
-    const result = reader.read(allocator, "<fmt-doc>", token, &diag) catch |err| switch (err) {
+    const result = reader.read(host, "<fmt-doc>", token, &diag) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Parse => return error.InvalidSource,
     };
@@ -909,8 +928,8 @@ fn decodeAndNormalize(allocator: std.mem.Allocator, token: []const u8) Error!Val
         .incomplete => return error.InvalidSource,
     };
     defer parsed.deinit();
-    if (parsed.forms.len != 1 or !parsed.forms[0].isString()) return error.InvalidSource;
-    return doc_text.normalize(allocator, parsed.forms[0]);
+    if (parsed.values().len != 1 or !parsed.values()[0].isString()) return error.InvalidSource;
+    return doc_text.normalize(allocator, parsed.values()[0]);
 }
 fn escapedWord(
     allocator: std.mem.Allocator,

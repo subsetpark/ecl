@@ -88,22 +88,25 @@ fn primitive(evaluator: *Machine, operation: Op) MachineError!void {
 
 fn atPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const index = try evaluator.popOwned();
-    var index_owned = true;
-    defer if (index_owned) heap.releaseValue(evaluator.allocator(), index);
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
+    var index = try evaluator.popValue();
+    defer index.deinit();
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
     const driver = try evaluator.allocator().create(IndexDriver);
     errdefer evaluator.allocator().destroy(driver);
     driver.* = .{
-        .collection = collection,
-        .index = index,
-        .cursor = try .init(evaluator.allocator(), collection, index),
+        .collection = collection.borrow(),
+        .index = index.borrow(),
+        .cursor = try .init(
+            evaluator.releaseDomain(),
+            evaluator.allocator(),
+            collection.borrow(),
+            index.borrow(),
+        ),
     };
-    collection_owned = false;
-    index_owned = false;
-    evaluator.installWorkDriver(driver, IndexDriver.advance, IndexDriver.destroy);
+    _ = collection.take();
+    _ = index.take();
+    evaluator.installWorkDriver(driver);
 }
 
 pub fn atPrimitiveForIdiom() env.PrimitiveImpl {
@@ -118,23 +121,17 @@ const IndexDriver = struct {
     collection: Value,
     index: Value,
     cursor: IndexCursor,
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *IndexDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *IndexDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.advance(evaluator, machine.kernel_poll_quantum)) {
             .pending => .yielded,
-            .complete => |result| completed: {
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
-            },
+            .complete => |result| .{ .output = result },
         };
     }
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *IndexDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *IndexDriver) void {
         self.cursor.deinit();
-        heap.releaseValue(allocator, self.collection);
-        heap.releaseValue(allocator, self.index);
+        releases.releaseValue(self.collection);
+        releases.releaseValue(self.index);
         allocator.destroy(self);
     }
 };
@@ -146,27 +143,37 @@ const IndexCursor = struct {
         collection: Value,
         indices: Value,
         depth: usize,
-        values: []Value,
+        values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
         materializer: ?storage.ValueMaterializer = null,
         result: ?Value = null,
-        release_index: usize = 0,
     };
     const Frame = union(enum) { node: Node, build: Build, find: storage.DictFindCursor };
+    releases: *heap.ReleaseDomain,
     allocator: std.mem.Allocator,
     frames: @import("poll.zig").ChunkStack(Frame),
     last: ?Value = null,
 
-    fn init(allocator: std.mem.Allocator, collection: Value, index: Value) error{OutOfMemory}!IndexCursor {
+    fn init(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        collection: Value,
+        index: Value,
+    ) error{OutOfMemory}!IndexCursor {
         var frames = @import("poll.zig").ChunkStack(Frame).init(allocator);
         errdefer frames.deinit();
         try frames.push(.{ .node = .{ .collection = collection, .index = index, .depth = 0 } });
-        return .{ .allocator = allocator, .frames = frames };
+        return .{ .releases = releases, .allocator = allocator, .frames = frames };
     }
     fn deinit(self: *IndexCursor) void {
-        if (self.last) |last| heap.releaseValue(self.allocator, last);
-        while (self.frames.pop()) |frame_value| switch (frame_value) {
+        if (self.last) |last| self.releases.releaseValue(last);
+        while (self.frames.pop()) |frame_value| self.deinitFrame(frame_value);
+        self.frames.deinit();
+        self.* = undefined;
+    }
+    fn deinitFrame(self: *IndexCursor, frame_value: Frame) void {
+        switch (frame_value) {
             .node => {},
             .find => |cursor_value| {
                 var cursor = cursor_value;
@@ -174,16 +181,13 @@ const IndexCursor = struct {
             },
             .build => |build_value| {
                 var build = build_value;
-                if (build.materializer) |*materializer| materializer.deinit();
-                releaseValues(self.allocator, build.values[build.release_index..build.index]);
-                self.allocator.free(build.values);
-                if (build.result) |result| heap.releaseValue(self.allocator, result);
+                if (build.materializer) |*materializer| materializer.retire(self.releases);
+                build.values.deinit();
+                if (build.result) |result| self.releases.releaseValue(result);
             },
-        };
-        self.frames.deinit();
-        self.* = undefined;
+        }
     }
-    fn advance(self: *IndexCursor, evaluator: *Machine, budget: usize) MachineError!IndexProgress {
+    pub fn advance(self: *IndexCursor, evaluator: *Machine, budget: usize) MachineError!IndexProgress {
         var remaining = budget;
         while (remaining != 0) : (remaining -= 1) {
             var frame = self.frames.pop() orelse {
@@ -191,6 +195,7 @@ const IndexCursor = struct {
                 self.last = null;
                 return .{ .complete = result };
             };
+            errdefer self.deinitFrame(frame);
             switch (frame) {
                 .node => |node| {
                     if (node.depth >= support.max_depth and node.index == .list)
@@ -204,12 +209,17 @@ const IndexCursor = struct {
                     } else {
                         if (node.collection != .list) return evaluator.typeError("a list or dict");
                         if (node.index == .list) {
-                            const values = try self.allocator.alloc(Value, @intCast(node.index.list.length()));
-                            try self.frames.push(.{ .build = .{
+                            var values = try heap.OwnedValueBuffer.init(
+                                self.releases,
+                                @intCast(node.index.list.length()),
+                            );
+                            errdefer values.deinit();
+                            try self.frames.reserve(1);
+                            self.frames.pushReserved(.{ .build = .{
                                 .collection = node.collection,
                                 .indices = node.index,
                                 .depth = node.depth,
-                                .values = values,
+                                .values = values.take(),
                             } });
                         } else {
                             if (node.index != .int) return evaluator.typeError("an integer index");
@@ -230,37 +240,32 @@ const IndexCursor = struct {
                         return .pending;
                     },
                     .complete => |maybe_result| {
-                        find.deinit();
                         const result = maybe_result orelse
                             return evaluator.fail(.domain, "at could not find the dict key");
+                        find.deinit();
                         heap.retainValue(result);
                         self.last = result;
                     },
                 },
                 .build => |*build| {
                     if (build.result) |result| {
-                        if (build.release_index != build.index) {
-                            heap.releaseValue(self.allocator, build.values[build.release_index]);
-                            build.release_index += 1;
-                            try self.frames.push(.{ .build = build.* });
-                            continue;
-                        }
-                        self.allocator.free(build.values);
+                        build.values.deinit();
                         build.result = null;
                         self.last = result;
                         continue;
                     }
                     if (build.waiting) {
-                        build.values[build.index] = self.last.?;
+                        build.values.appendOwned(self.last.?);
                         self.last = null;
                         build.index += 1;
                         build.waiting = false;
                     }
-                    if (build.index != build.values.len) {
+                    if (build.index != build.values.capacity()) {
                         const index = build.index;
                         build.waiting = true;
-                        try self.frames.push(.{ .build = build.* });
-                        try self.frames.push(.{ .node = .{
+                        try self.frames.reserve(2);
+                        self.frames.pushReserved(.{ .build = build.* });
+                        self.frames.pushReserved(.{ .node = .{
                             .collection = build.collection,
                             .index = list.atUnchecked(build.indices, index),
                             .depth = build.depth + 1,
@@ -268,15 +273,16 @@ const IndexCursor = struct {
                         continue;
                     }
                     if (build.materializer == null)
-                        build.materializer = .init(self.allocator, build.values);
+                        build.materializer = .init(self.allocator, build.values.values());
+                    try self.frames.reserve(1);
                     switch (try build.materializer.?.advance(remaining)) {
                         .pending => {
-                            try self.frames.push(.{ .build = build.* });
+                            self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
                         },
                         .complete => |result| {
                             build.result = result;
-                            try self.frames.push(.{ .build = build.* });
+                            self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
                         },
                     }
@@ -288,14 +294,12 @@ const IndexCursor = struct {
 };
 
 fn wherePrimitive(evaluator: *Machine) MachineError!void {
-    const counts = try evaluator.popOwned();
-    var counts_owned = true;
-    defer if (counts_owned) heap.releaseValue(evaluator.allocator(), counts);
-    if (counts != .list) return evaluator.typeError("a non-negative integer count list");
+    var counts = try evaluator.popValue();
+    defer counts.deinit();
+    if (counts.borrow() != .list) return evaluator.typeError("a non-negative integer count list");
     const driver = try evaluator.allocator().create(WhereDriver);
-    driver.* = .{ .counts = counts };
-    counts_owned = false;
-    evaluator.installWorkDriver(driver, WhereDriver.advance, WhereDriver.destroy);
+    driver.* = .{ .counts = counts.take() };
+    evaluator.installWorkDriver(driver);
 }
 
 const WhereDriver = struct {
@@ -308,8 +312,7 @@ const WhereDriver = struct {
     repetition: usize = 0,
     materializer: ?storage.I64Materializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *WhereDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *WhereDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.counts.list.length());
         var budget = machine.kernel_poll_quantum;
@@ -366,67 +369,59 @@ const WhereDriver = struct {
             },
             .materialize => return switch (try self.materializer.?.advance(budget)) {
                 .pending => .yielded,
-                .complete => |result| completed: {
-                    errdefer heap.releaseValue(evaluator.allocator(), result);
-                    try evaluator.pushOwned(result);
-                    break :completed .completed;
-                },
+                .complete => |result| .{ .output = result },
             },
         };
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *WhereDriver = @ptrCast(@alignCast(raw));
-        if (self.materializer) |*materializer| materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *WhereDriver) void {
+        if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.indices) |indices| allocator.free(indices);
-        heap.releaseValue(allocator, self.counts);
+        releases.releaseValue(self.counts);
         allocator.destroy(self);
     }
 };
 
 fn inPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    const needle = try evaluator.popOwned();
-    var needle_owned = true;
-    defer if (needle_owned) heap.releaseValue(evaluator.allocator(), needle);
-    if (collection != .list) return evaluator.typeError("a list haystack");
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    var needle = try evaluator.popValue();
+    defer needle.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a list haystack");
     const driver = try evaluator.allocator().create(MembershipDriver);
     errdefer evaluator.allocator().destroy(driver);
     driver.* = .{
-        .needle = needle,
-        .collection = collection,
-        .cursor = try .init(evaluator.allocator(), needle, collection),
+        .needle = needle.borrow(),
+        .collection = collection.borrow(),
+        .cursor = try .init(
+            evaluator.releaseDomain(),
+            evaluator.allocator(),
+            needle.borrow(),
+            collection.borrow(),
+        ),
     };
-    needle_owned = false;
-    collection_owned = false;
-    evaluator.installWorkDriver(driver, MembershipDriver.advance, MembershipDriver.destroy);
+    _ = needle.take();
+    _ = collection.take();
+    evaluator.installWorkDriver(driver);
 }
 
 const MembershipDriver = struct {
     needle: Value,
     collection: Value,
     cursor: MembershipCursor,
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *MembershipDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *MembershipDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.advance(evaluator, machine.kernel_poll_quantum)) {
             .pending => .yielded,
-            .complete => |result| completed: {
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
-            },
+            .complete => |result| .{ .output = result },
         };
     }
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *MembershipDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *MembershipDriver) void {
         self.cursor.deinit();
-        heap.releaseValue(allocator, self.needle);
-        heap.releaseValue(allocator, self.collection);
+        releases.releaseValue(self.needle);
+        releases.releaseValue(self.collection);
         allocator.destroy(self);
     }
 };
@@ -441,28 +436,38 @@ const MembershipCursor = struct {
     const Build = struct {
         needle: Value,
         depth: usize,
-        values: []Value,
+        values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
         materializer: ?storage.ValueMaterializer = null,
         result: ?Value = null,
-        release_index: usize = 0,
     };
     const Frame = union(enum) { node: Node, search: Search, build: Build };
+    releases: *heap.ReleaseDomain,
     allocator: std.mem.Allocator,
     collection: Value,
     frames: @import("poll.zig").ChunkStack(Frame),
     last: ?Value = null,
 
-    fn init(allocator: std.mem.Allocator, needle: Value, collection: Value) error{OutOfMemory}!MembershipCursor {
+    fn init(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        needle: Value,
+        collection: Value,
+    ) error{OutOfMemory}!MembershipCursor {
         var frames = @import("poll.zig").ChunkStack(Frame).init(allocator);
         errdefer frames.deinit();
         try frames.push(.{ .node = .{ .needle = needle, .depth = 0 } });
-        return .{ .allocator = allocator, .collection = collection, .frames = frames };
+        return .{ .releases = releases, .allocator = allocator, .collection = collection, .frames = frames };
     }
     fn deinit(self: *MembershipCursor) void {
-        if (self.last) |last| heap.releaseValue(self.allocator, last);
-        while (self.frames.pop()) |frame_value| switch (frame_value) {
+        if (self.last) |last| self.releases.releaseValue(last);
+        while (self.frames.pop()) |frame_value| self.deinitFrame(frame_value);
+        self.frames.deinit();
+        self.* = undefined;
+    }
+    fn deinitFrame(self: *MembershipCursor, frame_value: Frame) void {
+        switch (frame_value) {
             .node => {},
             .search => |search_value| if (search_value.match) |cursor_value| {
                 var cursor = cursor_value;
@@ -470,16 +475,13 @@ const MembershipCursor = struct {
             },
             .build => |build_value| {
                 var build = build_value;
-                if (build.materializer) |*materializer| materializer.deinit();
-                releaseValues(self.allocator, build.values[build.release_index..build.index]);
-                self.allocator.free(build.values);
-                if (build.result) |result| heap.releaseValue(self.allocator, result);
+                if (build.materializer) |*materializer| materializer.retire(self.releases);
+                build.values.deinit();
+                if (build.result) |result| self.releases.releaseValue(result);
             },
-        };
-        self.frames.deinit();
-        self.* = undefined;
+        }
     }
-    fn advance(self: *MembershipCursor, evaluator: *Machine, budget: usize) MachineError!IndexProgress {
+    pub fn advance(self: *MembershipCursor, evaluator: *Machine, budget: usize) MachineError!IndexProgress {
         var remaining = budget;
         while (remaining != 0) : (remaining -= 1) {
             var frame = self.frames.pop() orelse {
@@ -487,6 +489,7 @@ const MembershipCursor = struct {
                 self.last = null;
                 return .{ .complete = result };
             };
+            errdefer self.deinitFrame(frame);
             switch (frame) {
                 .node => |node| {
                     if (node.depth >= support.max_depth and node.needle == .list)
@@ -494,11 +497,16 @@ const MembershipCursor = struct {
                     if (node.needle != .list) {
                         try self.frames.push(.{ .search = .{ .needle = node.needle } });
                     } else {
-                        const values = try self.allocator.alloc(Value, @intCast(node.needle.list.length()));
-                        try self.frames.push(.{ .build = .{
+                        var values = try heap.OwnedValueBuffer.init(
+                            self.releases,
+                            @intCast(node.needle.list.length()),
+                        );
+                        errdefer values.deinit();
+                        try self.frames.reserve(1);
+                        self.frames.pushReserved(.{ .build = .{
                             .needle = node.needle,
                             .depth = node.depth,
-                            .values = values,
+                            .values = values.take(),
                         } });
                     }
                 },
@@ -533,43 +541,39 @@ const MembershipCursor = struct {
                 },
                 .build => |*build| {
                     if (build.result) |result| {
-                        if (build.release_index != build.index) {
-                            heap.releaseValue(self.allocator, build.values[build.release_index]);
-                            build.release_index += 1;
-                            try self.frames.push(.{ .build = build.* });
-                            continue;
-                        }
-                        self.allocator.free(build.values);
+                        build.values.deinit();
                         build.result = null;
                         self.last = result;
                         continue;
                     }
                     if (build.waiting) {
-                        build.values[build.index] = self.last.?;
+                        build.values.appendOwned(self.last.?);
                         self.last = null;
                         build.index += 1;
                         build.waiting = false;
                     }
-                    if (build.index != build.values.len) {
+                    if (build.index != build.values.capacity()) {
                         const index = build.index;
                         build.waiting = true;
-                        try self.frames.push(.{ .build = build.* });
-                        try self.frames.push(.{ .node = .{
+                        try self.frames.reserve(2);
+                        self.frames.pushReserved(.{ .build = build.* });
+                        self.frames.pushReserved(.{ .node = .{
                             .needle = list.atUnchecked(build.needle, index),
                             .depth = build.depth + 1,
                         } });
                         continue;
                     }
                     if (build.materializer == null)
-                        build.materializer = .init(self.allocator, build.values);
+                        build.materializer = .init(self.allocator, build.values.values());
+                    try self.frames.reserve(1);
                     switch (try build.materializer.?.advance(remaining)) {
                         .pending => {
-                            try self.frames.push(.{ .build = build.* });
+                            self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
                         },
                         .complete => |result| {
                             build.result = result;
-                            try self.frames.push(.{ .build = build.* });
+                            self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
                         },
                     }
@@ -581,14 +585,12 @@ const MembershipCursor = struct {
 };
 
 fn razePrimitive(evaluator: *Machine) MachineError!void {
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a list");
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a list");
     const driver = try evaluator.allocator().create(RazeDriver);
-    driver.* = .{ .collection = collection };
-    collection_owned = false;
-    evaluator.installWorkDriver(driver, RazeDriver.advance, RazeDriver.destroy);
+    driver.* = .{ .collection = collection.take() };
+    evaluator.installWorkDriver(driver);
 }
 
 const RazeDriver = struct {
@@ -601,8 +603,7 @@ const RazeDriver = struct {
     destination: usize = 0,
     materializer: ?storage.ValueMaterializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *RazeDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *RazeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const count: usize = @intCast(self.collection.list.length());
         var budget = machine.kernel_poll_quantum;
@@ -645,87 +646,78 @@ const RazeDriver = struct {
             },
             .materialize => return switch (try self.materializer.?.advance(budget)) {
                 .pending => .yielded,
-                .complete => |result| completed: {
-                    errdefer heap.releaseValue(evaluator.allocator(), result);
-                    try evaluator.pushOwned(result);
-                    break :completed .completed;
-                },
+                .complete => |result| .{ .output = result },
             },
         };
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *RazeDriver = @ptrCast(@alignCast(raw));
-        if (self.materializer) |*materializer| materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *RazeDriver) void {
+        if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.values) |values| allocator.free(values);
-        heap.releaseValue(allocator, self.collection);
+        releases.releaseValue(self.collection);
         allocator.destroy(self);
     }
 };
 
 fn catPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const right = try evaluator.popOwned();
-    var right_owned = true;
-    defer if (right_owned) heap.releaseValue(evaluator.allocator(), right);
-    const left = try evaluator.popOwned();
-    var left_owned = true;
-    defer if (left_owned) heap.releaseValue(evaluator.allocator(), left);
-    if (left != .list or right != .list) return evaluator.typeError("two lists");
-    const left_count: usize = @intCast(left.list.length());
-    const right_count: usize = @intCast(right.list.length());
-    if (left_count == 0 and right_count == 0 and (left.isString() or right.isString())) {
+    var right = try evaluator.popValue();
+    defer right.deinit();
+    var left = try evaluator.popValue();
+    defer left.deinit();
+    if (left.borrow() != .list or right.borrow() != .list) return evaluator.typeError("two lists");
+    const left_count: usize = @intCast(left.borrow().list.length());
+    const right_count: usize = @intCast(right.borrow().list.length());
+    if (left_count == 0 and right_count == 0 and (left.borrow().isString() or right.borrow().isString())) {
         return evaluator.pushOwned(try emptyLike(
             evaluator.allocator(),
-            if (left.isString()) left else right,
+            if (left.borrow().isString()) left.borrow() else right.borrow(),
         ));
     }
-    try ListCopyDriver.installCat(evaluator, left, right, left_count, right_count);
-    left_owned = false;
-    right_owned = false;
+    try ListCopyDriver.installCat(evaluator, left.borrow(), right.borrow(), left_count, right_count);
+    _ = left.take();
+    _ = right.take();
 }
 
 fn firstPrimitive(evaluator: *Machine) MachineError!void {
-    const collection = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a list");
-    if (collection.list.length() == 0) return evaluator.fail(.domain, "first requires a non-empty list");
-    try evaluator.pushBorrowed(list.atUnchecked(collection, 0));
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a list");
+    if (collection.borrow().list.length() == 0) return evaluator.fail(.domain, "first requires a non-empty list");
+    try evaluator.pushBorrowed(list.atUnchecked(collection.borrow(), 0));
 }
 
 fn restPrimitive(evaluator: *Machine) MachineError!void {
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a list");
-    const count: usize = @intCast(collection.list.length());
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a list");
+    const count: usize = @intCast(collection.borrow().list.length());
     if (count == 0) return evaluator.fail(.domain, "rest requires a non-empty list");
-    if (count == 1) return evaluator.pushOwned(try emptyLike(evaluator.allocator(), collection));
-    try ListCopyDriver.installOne(evaluator, collection, 1, count, false);
-    collection_owned = false;
+    if (count == 1) return evaluator.pushOwned(try emptyLike(evaluator.allocator(), collection.borrow()));
+    try ListCopyDriver.installOne(evaluator, collection.borrow(), 1, count, false);
+    _ = collection.take();
 }
 
 fn takePrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const count_value = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), count_value);
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list or count_value != .int) {
+    var count_value = try evaluator.popValue();
+    defer count_value.deinit();
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list or count_value.borrow() != .int) {
         return evaluator.typeError("a list and an integer count");
     }
-    const source_count: usize = @intCast(collection.list.length());
-    const result_count = std.math.cast(usize, unsignedMagnitude(count_value.int)) orelse
+    const source_count: usize = @intCast(collection.borrow().list.length());
+    const result_count = std.math.cast(usize, unsignedMagnitude(count_value.borrow().int)) orelse
         return evaluator.fail(.overflow, "take length exceeds addressable size");
     if (result_count == 0) {
-        return evaluator.pushOwned(try emptyLike(evaluator.allocator(), collection));
+        return evaluator.pushOwned(try emptyLike(evaluator.allocator(), collection.borrow()));
     }
     if (result_count != 0 and source_count == 0) {
         return evaluator.fail(.domain, "take cannot cycle an empty list");
     }
-    const start = if (result_count == 0 or count_value.int >= 0)
+    const start = if (result_count == 0 or count_value.borrow().int >= 0)
         0
     else
         (source_count - (result_count % source_count)) % source_count;
@@ -734,14 +726,13 @@ fn takePrimitive(evaluator: *Machine) MachineError!void {
     const values = try evaluator.allocator().alloc(Value, result_count);
     errdefer evaluator.allocator().free(values);
     state.* = .{
-        .collection = collection,
+        .collection = collection.take(),
         .values = values,
         .source_index = start,
         .source_count = source_count,
         .materializer = storage.ValueMaterializer.init(evaluator.allocator(), values),
     };
-    collection_owned = false;
-    evaluator.installWorkDriver(state, TakeDriver.advance, TakeDriver.destroy);
+    evaluator.installWorkDriver(state);
 }
 
 const TakeDriver = struct {
@@ -753,11 +744,10 @@ const TakeDriver = struct {
     materializing: bool = false,
     materializer: storage.ValueMaterializer,
 
-    fn advance(
+    pub fn advance(
         evaluator: *Machine,
-        raw: *anyopaque,
+        self: *TakeDriver,
     ) MachineError!machine.WorkProgress {
-        const self: *TakeDriver = @ptrCast(@alignCast(raw));
         try evaluator.pollKernel();
         var budget = machine.kernel_poll_quantum;
         while (!self.materializing and budget != 0 and self.result_index < self.values.len) {
@@ -772,54 +762,47 @@ const TakeDriver = struct {
         if (budget == 0) return .yielded;
         return switch (try self.materializer.advance(budget)) {
             .pending => .yielded,
-            .complete => |result| completed: {
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
-            },
+            .complete => |result| .{ .output = result },
         };
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *TakeDriver = @ptrCast(@alignCast(raw));
-        self.materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *TakeDriver) void {
+        self.materializer.retire(releases);
         allocator.free(self.values);
-        heap.releaseValue(allocator, self.collection);
+        releases.releaseValue(self.collection);
         allocator.destroy(self);
     }
 };
 
 fn dropPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const count_value = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), count_value);
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list or count_value != .int) {
+    var count_value = try evaluator.popValue();
+    defer count_value.deinit();
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list or count_value.borrow() != .int) {
         return evaluator.typeError("a list and an integer count");
     }
-    const count: usize = @intCast(collection.list.length());
-    const magnitude: usize = @intCast(@min(unsignedMagnitude(count_value.int), count));
-    const bounds: struct { start: usize, end: usize } = if (count_value.int >= 0)
+    const count: usize = @intCast(collection.borrow().list.length());
+    const magnitude: usize = @intCast(@min(unsignedMagnitude(count_value.borrow().int), count));
+    const bounds: struct { start: usize, end: usize } = if (count_value.borrow().int >= 0)
         .{ .start = magnitude, .end = count }
     else
         .{ .start = 0, .end = count - magnitude };
     if (bounds.start == bounds.end)
-        return evaluator.pushOwned(try emptyLike(evaluator.allocator(), collection));
-    try ListCopyDriver.installOne(evaluator, collection, bounds.start, bounds.end, false);
-    collection_owned = false;
+        return evaluator.pushOwned(try emptyLike(evaluator.allocator(), collection.borrow()));
+    try ListCopyDriver.installOne(evaluator, collection.borrow(), bounds.start, bounds.end, false);
+    _ = collection.take();
 }
 
 fn reversePrimitive(evaluator: *Machine) MachineError!void {
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a list");
-    const count: usize = @intCast(collection.list.length());
-    if (count == 0) return evaluator.pushOwned(try emptyLike(evaluator.allocator(), collection));
-    try ListCopyDriver.installOne(evaluator, collection, 0, count, true);
-    collection_owned = false;
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a list");
+    const count: usize = @intCast(collection.borrow().list.length());
+    if (count == 0) return evaluator.pushOwned(try emptyLike(evaluator.allocator(), collection.borrow()));
+    try ListCopyDriver.installOne(evaluator, collection.borrow(), 0, count, true);
+    _ = collection.take();
 }
 
 const ListCopyDriver = struct {
@@ -851,7 +834,7 @@ const ListCopyDriver = struct {
             .values = values,
             .materializer = .init(evaluator.allocator(), values),
         };
-        evaluator.installWorkDriver(driver, ListCopyDriver.advance, ListCopyDriver.destroy);
+        evaluator.installWorkDriver(driver);
     }
 
     fn installCat(
@@ -873,11 +856,10 @@ const ListCopyDriver = struct {
             .values = values,
             .materializer = .init(evaluator.allocator(), values),
         };
-        evaluator.installWorkDriver(driver, ListCopyDriver.advance, ListCopyDriver.destroy);
+        evaluator.installWorkDriver(driver);
     }
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *ListCopyDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *ListCopyDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget = machine.kernel_poll_quantum;
         while (budget != 0 and self.index != self.values.len) : (budget -= 1) {
@@ -895,20 +877,15 @@ const ListCopyDriver = struct {
         if (self.index != self.values.len or budget == 0) return .yielded;
         return switch (try self.materializer.advance(budget)) {
             .pending => .yielded,
-            .complete => |result| completed: {
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
-            },
+            .complete => |result| .{ .output = result },
         };
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *ListCopyDriver = @ptrCast(@alignCast(raw));
-        self.materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *ListCopyDriver) void {
+        self.materializer.retire(releases);
         allocator.free(self.values);
-        heap.releaseValue(allocator, self.left);
-        if (self.right) |right| heap.releaseValue(allocator, right);
+        releases.releaseValue(self.left);
+        if (self.right) |right| releases.releaseValue(right);
         allocator.destroy(self);
     }
 };
@@ -921,11 +898,11 @@ fn emptyLike(allocator: std.mem.Allocator, collection: Value) MachineError!Value
 }
 
 fn rangePrimitive(evaluator: *Machine) MachineError!void {
-    const count_value = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), count_value);
-    if (count_value != .int) return evaluator.typeError("a non-negative integer");
-    if (count_value.int < 0) return evaluator.fail(.domain, "range requires a non-negative integer");
-    const count = std.math.cast(usize, count_value.int) orelse
+    var count_value = try evaluator.popValue();
+    defer count_value.deinit();
+    if (count_value.borrow() != .int) return evaluator.typeError("a non-negative integer");
+    if (count_value.borrow().int < 0) return evaluator.fail(.domain, "range requires a non-negative integer");
+    const count = std.math.cast(usize, count_value.borrow().int) orelse
         return evaluator.fail(.overflow, "range length exceeds addressable size");
     const values = try evaluator.allocator().alloc(i64, count);
     errdefer evaluator.allocator().free(values);
@@ -934,7 +911,7 @@ fn rangePrimitive(evaluator: *Machine) MachineError!void {
         .values = values,
         .materializer = .init(evaluator.allocator(), values),
     };
-    evaluator.installWorkDriver(driver, RangeDriver.advance, RangeDriver.destroy);
+    evaluator.installWorkDriver(driver);
 }
 
 const RangeDriver = struct {
@@ -942,8 +919,7 @@ const RangeDriver = struct {
     index: usize = 0,
     materializer: storage.I64Materializer,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *RangeDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *RangeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         const end = @min(self.index + machine.kernel_poll_quantum, self.values.len);
         while (self.index != end) : (self.index += 1)
@@ -951,27 +927,22 @@ const RangeDriver = struct {
         if (self.index != self.values.len) return .yielded;
         return switch (try self.materializer.advance(machine.kernel_poll_quantum)) {
             .pending => .yielded,
-            .complete => |result| completed: {
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
-            },
+            .complete => |result| .{ .output = result },
         };
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *RangeDriver = @ptrCast(@alignCast(raw));
-        self.materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *RangeDriver) void {
+        self.materializer.retire(releases);
         allocator.free(self.values);
         allocator.destroy(self);
     }
 };
 
 fn lenPrimitive(evaluator: *Machine) MachineError!void {
-    const collection = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a list");
-    try evaluator.pushOwned(.{ .int = @intCast(collection.list.length()) });
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a list");
+    try evaluator.pushOwned(.{ .int = @intCast(collection.borrow().list.length()) });
 }
 
 const ShapeProgress = union(enum) { pending, complete: []usize, ragged, too_deep };
@@ -999,7 +970,7 @@ const ShapeCursor = struct {
         self.* = undefined;
     }
 
-    fn advance(self: *ShapeCursor, budget: usize) error{OutOfMemory}!ShapeProgress {
+    pub fn advance(self: *ShapeCursor, budget: usize) error{OutOfMemory}!ShapeProgress {
         for (0..budget) |_| {
             const action = self.actions.pop() orelse {
                 const result = try self.allocator.alloc(usize, self.rank);
@@ -1053,15 +1024,17 @@ const ShapeCursor = struct {
 };
 
 fn shapePrimitive(evaluator: *Machine) MachineError!void {
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a list");
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a list");
     const driver = try evaluator.allocator().create(ShapeDriver);
     errdefer evaluator.allocator().destroy(driver);
-    driver.* = .{ .collection = collection, .cursor = try .init(evaluator.allocator(), collection) };
-    collection_owned = false;
-    evaluator.installWorkDriver(driver, ShapeDriver.advance, ShapeDriver.destroy);
+    driver.* = .{
+        .collection = collection.borrow(),
+        .cursor = try .init(evaluator.allocator(), collection.borrow()),
+    };
+    _ = collection.take();
+    evaluator.installWorkDriver(driver);
 }
 
 const ShapeDriver = struct {
@@ -1071,8 +1044,7 @@ const ShapeDriver = struct {
     values: ?[]i64 = null,
     materializer: ?storage.I64Materializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *ShapeDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *ShapeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.materializer == null) {
             if (self.dimensions == null) switch (try self.cursor.advance(machine.kernel_poll_quantum)) {
@@ -1089,35 +1061,32 @@ const ShapeDriver = struct {
         }
         return switch (try self.materializer.?.advance(machine.kernel_poll_quantum)) {
             .pending => .yielded,
-            .complete => |result| completed: {
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
-            },
+            .complete => |result| .{ .output = result },
         };
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *ShapeDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *ShapeDriver) void {
         self.cursor.deinit();
-        if (self.materializer) |*materializer| materializer.deinit();
+        if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.values) |values| allocator.free(values);
         if (self.dimensions) |dimensions| allocator.free(dimensions);
-        heap.releaseValue(allocator, self.collection);
+        releases.releaseValue(self.collection);
         allocator.destroy(self);
     }
 };
 
 fn flipPrimitive(evaluator: *Machine) MachineError!void {
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list) return evaluator.typeError("a rectangular list");
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list) return evaluator.typeError("a rectangular list");
     const driver = try evaluator.allocator().create(FlipDriver);
     errdefer evaluator.allocator().destroy(driver);
-    driver.* = .{ .collection = collection, .shape = try .init(evaluator.allocator(), collection) };
-    collection_owned = false;
-    evaluator.installWorkDriver(driver, FlipDriver.advance, FlipDriver.destroy);
+    driver.* = .{
+        .collection = collection.borrow(),
+        .shape = try .init(evaluator.allocator(), collection.borrow()),
+    };
+    _ = collection.take();
+    evaluator.installWorkDriver(driver);
 }
 
 const FlipDriver = struct {
@@ -1126,16 +1095,14 @@ const FlipDriver = struct {
     dimensions: ?[]usize = null,
     rows: usize = 0,
     columns: usize = 0,
-    result_rows: ?[]Value = null,
+    result_rows: ?heap.OwnedValueBuffer = null,
     cells: ?[]Value = null,
     column: usize = 0,
     row: usize = 0,
-    initialized: usize = 0,
     inner: ?storage.ValueMaterializer = null,
     outer: ?storage.ValueMaterializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *FlipDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *FlipDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.dimensions == null) switch (try self.shape.advance(machine.kernel_poll_quantum)) {
             .pending => return .yielded,
@@ -1153,30 +1120,25 @@ const FlipDriver = struct {
                     .shape,
                     "flip cannot retain trailing axes after a transposed zero dimension",
                 );
-                self.result_rows = try evaluator.allocator().alloc(Value, self.columns);
+                self.result_rows = try .init(evaluator.releaseDomain(), self.columns);
                 self.cells = try evaluator.allocator().alloc(Value, self.rows);
                 return .yielded;
             },
         };
         if (self.outer) |*outer| return switch (try outer.advance(machine.kernel_poll_quantum)) {
             .pending => .yielded,
-            .complete => |result| completed: {
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
-            },
+            .complete => |result| .{ .output = result },
         };
         if (self.inner) |*inner| switch (try inner.advance(machine.kernel_poll_quantum)) {
             .pending => return .yielded,
             .complete => |row_value| {
                 inner.deinit();
                 self.inner = null;
-                self.result_rows.?[self.column] = row_value;
-                self.initialized += 1;
+                self.result_rows.?.appendOwned(row_value);
                 self.column += 1;
                 self.row = 0;
                 if (self.column == self.columns) {
-                    self.outer = .init(evaluator.allocator(), self.result_rows.?);
+                    self.outer = .init(evaluator.allocator(), self.result_rows.?.values());
                 }
                 return .yielded;
             },
@@ -1190,34 +1152,28 @@ const FlipDriver = struct {
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *FlipDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *FlipDriver) void {
         self.shape.deinit();
-        if (self.inner) |*inner| inner.deinit();
-        if (self.outer) |*outer| outer.deinit();
-        if (self.result_rows) |rows| {
-            for (rows[0..self.initialized]) |row| heap.releaseValue(allocator, row);
-            allocator.free(rows);
-        }
+        if (self.inner) |*inner| inner.retire(releases);
+        if (self.outer) |*outer| outer.retire(releases);
+        if (self.result_rows) |*rows| rows.deinit();
         if (self.cells) |cells| allocator.free(cells);
         if (self.dimensions) |dimensions| allocator.free(dimensions);
-        heap.releaseValue(allocator, self.collection);
+        releases.releaseValue(self.collection);
         allocator.destroy(self);
     }
 };
 
 fn reshapePrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const shape_value = try evaluator.popOwned();
-    var shape_owned = true;
-    defer if (shape_owned) heap.releaseValue(evaluator.allocator(), shape_value);
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    if (collection != .list or shape_value != .list) {
+    var shape_value = try evaluator.popValue();
+    defer shape_value.deinit();
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    if (collection.borrow() != .list or shape_value.borrow() != .list) {
         return evaluator.typeError("a list and a non-empty integer shape");
     }
-    const rank: usize = @intCast(shape_value.list.length());
+    const rank: usize = @intCast(shape_value.borrow().list.length());
     if (rank == 0) return evaluator.fail(.shape, "reshape requires a non-empty shape");
     if (rank > support.max_depth) return evaluator.fail(.shape, "reshape rank exceeds 256");
     const dimensions = try evaluator.allocator().alloc(usize, rank);
@@ -1225,14 +1181,14 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
     const driver = try evaluator.allocator().create(ReshapeDriver);
     errdefer evaluator.allocator().destroy(driver);
     driver.* = .{
-        .collection = collection,
-        .shape_value = shape_value,
+        .collection = collection.borrow(),
+        .shape_value = shape_value.borrow(),
         .dimensions = dimensions,
-        .ravel = try .init(evaluator.allocator(), collection, null),
+        .ravel = try .init(evaluator.allocator(), collection.borrow(), null),
     };
-    collection_owned = false;
-    shape_owned = false;
-    evaluator.installWorkDriver(driver, ReshapeDriver.advance, ReshapeDriver.destroy);
+    _ = collection.take();
+    _ = shape_value.take();
+    evaluator.installWorkDriver(driver);
 }
 
 const RavelProgress = union(enum) { pending, complete: usize, too_deep };
@@ -1256,7 +1212,7 @@ const RavelCursor = struct {
         self.actions.deinit();
         self.* = undefined;
     }
-    fn advance(self: *RavelCursor, budget: usize) error{OutOfMemory}!RavelProgress {
+    pub fn advance(self: *RavelCursor, budget: usize) error{OutOfMemory}!RavelProgress {
         for (0..budget) |_| {
             const action = self.actions.pop() orelse return .{ .complete = self.count };
             switch (action) {
@@ -1294,13 +1250,13 @@ const RavelCursor = struct {
 const ReshapeBuildCursor = struct {
     const Frame = struct {
         axis: usize,
-        values: []Value,
+        values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
         materializer: ?storage.ValueMaterializer = null,
         result: ?Value = null,
-        release_index: usize = 0,
     };
+    releases: *heap.ReleaseDomain,
     allocator: std.mem.Allocator,
     dimensions: []const usize,
     flat: []const Value,
@@ -1308,29 +1264,39 @@ const ReshapeBuildCursor = struct {
     flat_index: usize = 0,
     last: ?Value = null,
 
-    fn init(allocator: std.mem.Allocator, dimensions: []const usize, flat: []const Value) error{OutOfMemory}!ReshapeBuildCursor {
+    fn init(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        dimensions: []const usize,
+        flat: []const Value,
+    ) error{OutOfMemory}!ReshapeBuildCursor {
         var frames = @import("poll.zig").ChunkStack(Frame).init(allocator);
         errdefer frames.deinit();
-        const values = try allocator.alloc(Value, dimensions[0]);
-        errdefer allocator.free(values);
-        try frames.push(.{ .axis = 0, .values = values });
-        return .{ .allocator = allocator, .dimensions = dimensions, .flat = flat, .frames = frames };
+        var values = try heap.OwnedValueBuffer.init(releases, dimensions[0]);
+        errdefer values.deinit();
+        try frames.reserve(1);
+        frames.pushReserved(.{ .axis = 0, .values = values.take() });
+        return .{
+            .releases = releases,
+            .allocator = allocator,
+            .dimensions = dimensions,
+            .flat = flat,
+            .frames = frames,
+        };
     }
     fn deinit(self: *ReshapeBuildCursor) void {
-        if (self.last) |last| heap.releaseValue(self.allocator, last);
+        if (self.last) |last| self.releases.releaseValue(last);
         while (self.frames.pop()) |frame| self.deinitFrame(frame);
         self.frames.deinit();
         self.* = undefined;
     }
     fn deinitFrame(self: *ReshapeBuildCursor, frame_value: Frame) void {
         var frame = frame_value;
-        if (frame.materializer) |*materializer| materializer.deinit();
-        if (frame.axis + 1 < self.dimensions.len)
-            releaseValues(self.allocator, frame.values[frame.release_index..frame.index]);
-        self.allocator.free(frame.values);
-        if (frame.result) |result| heap.releaseValue(self.allocator, result);
+        if (frame.materializer) |*materializer| materializer.retire(self.releases);
+        frame.values.deinit();
+        if (frame.result) |result| self.releases.releaseValue(result);
     }
-    fn advance(self: *ReshapeBuildCursor, budget: usize) error{OutOfMemory}!PervadeResult {
+    pub fn advance(self: *ReshapeBuildCursor, budget: usize) error{OutOfMemory}!PervadeResult {
         var remaining = budget;
         while (remaining != 0) : (remaining -= 1) {
             var frame = self.frames.pop() orelse {
@@ -1341,51 +1307,48 @@ const ReshapeBuildCursor = struct {
             errdefer self.deinitFrame(frame);
             const owns_children = frame.axis + 1 < self.dimensions.len;
             if (frame.result) |result| {
-                if (owns_children and frame.release_index != frame.index) {
-                    heap.releaseValue(self.allocator, frame.values[frame.release_index]);
-                    frame.release_index += 1;
-                    try self.frames.reserve(1);
-                    try self.frames.push(frame);
-                    continue;
-                }
-                self.allocator.free(frame.values);
+                frame.values.deinit();
                 frame.result = null;
                 self.last = result;
                 continue;
             }
             if (frame.waiting) {
-                frame.values[frame.index] = self.last.?;
+                frame.values.appendOwned(self.last.?);
                 self.last = null;
                 frame.index += 1;
                 frame.waiting = false;
             }
-            if (frame.index != frame.values.len) {
+            if (frame.index != frame.values.capacity()) {
                 if (!owns_children) {
-                    frame.values[frame.index] = self.flat[self.flat_index % self.flat.len];
+                    frame.values.appendBorrowed(self.flat[self.flat_index % self.flat.len]);
                     self.flat_index += 1;
                     frame.index += 1;
                     try self.frames.reserve(1);
-                    try self.frames.push(frame);
+                    self.frames.pushReserved(frame);
                     continue;
                 }
                 frame.waiting = true;
-                const child_values = try self.allocator.alloc(Value, self.dimensions[frame.axis + 1]);
-                errdefer self.allocator.free(child_values);
+                var child_values = try heap.OwnedValueBuffer.init(
+                    self.releases,
+                    self.dimensions[frame.axis + 1],
+                );
+                errdefer child_values.deinit();
                 try self.frames.reserve(2);
-                try self.frames.push(frame);
-                try self.frames.push(.{ .axis = frame.axis + 1, .values = child_values });
+                self.frames.pushReserved(frame);
+                self.frames.pushReserved(.{ .axis = frame.axis + 1, .values = child_values.take() });
                 continue;
             }
-            if (frame.materializer == null) frame.materializer = .init(self.allocator, frame.values);
+            if (frame.materializer == null)
+                frame.materializer = .init(self.allocator, frame.values.values());
             try self.frames.reserve(1);
             switch (try frame.materializer.?.advance(remaining)) {
                 .pending => {
-                    try self.frames.push(frame);
+                    self.frames.pushReserved(frame);
                     return .pending;
                 },
                 .complete => |result| {
                     frame.result = result;
-                    try self.frames.push(frame);
+                    self.frames.pushReserved(frame);
                     return .pending;
                 },
             }
@@ -1407,8 +1370,7 @@ const ReshapeDriver = struct {
     ravel_filling: bool = false,
     builder: ?ReshapeBuildCursor = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *ReshapeDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *ReshapeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.dimension_index != self.dimensions.len) {
             const end = @min(self.dimension_index + machine.kernel_poll_quantum, self.dimensions.len);
@@ -1440,11 +1402,7 @@ const ReshapeDriver = struct {
         }
         if (self.builder) |*builder| return switch (try builder.advance(machine.kernel_poll_quantum)) {
             .pending => .yielded,
-            .complete => |result| completed: {
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
-            },
+            .complete => |result| .{ .output = result },
         };
         switch (try self.ravel.advance(machine.kernel_poll_quantum)) {
             .pending => return .yielded,
@@ -1463,20 +1421,24 @@ const ReshapeDriver = struct {
                     .domain,
                     "reshape cannot fill a non-empty shape from empty data",
                 );
-                self.builder = try .init(evaluator.allocator(), self.dimensions, self.flat.?);
+                self.builder = try .init(
+                    evaluator.releaseDomain(),
+                    evaluator.allocator(),
+                    self.dimensions,
+                    self.flat.?,
+                );
                 return .yielded;
             },
         }
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *ReshapeDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *ReshapeDriver) void {
         self.ravel.deinit();
         if (self.builder) |*builder| builder.deinit();
         if (self.flat) |flat| allocator.free(flat);
         allocator.free(self.dimensions);
-        heap.releaseValue(allocator, self.collection);
-        heap.releaseValue(allocator, self.shape_value);
+        releases.releaseValue(self.collection);
+        releases.releaseValue(self.shape_value);
         allocator.destroy(self);
     }
 };
@@ -1484,10 +1446,6 @@ const ReshapeDriver = struct {
 fn unsignedMagnitude(integer: i64) u64 {
     if (integer >= 0) return @intCast(integer);
     return @as(u64, @intCast(-(integer + 1))) + 1;
-}
-
-fn releaseValues(allocator: std.mem.Allocator, values: []const Value) void {
-    for (values) |item| heap.releaseValue(allocator, item);
 }
 
 test "sequence unsigned magnitude includes minInt" {

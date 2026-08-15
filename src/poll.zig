@@ -1,12 +1,14 @@
 //! Fixed-storage cursors for resumable, non-relocating traversals.
 const std = @import("std");
+const heap = @import("heap.zig");
 
 /// Exact-capacity, non-rehashing map used by runtime publication snapshots.
-/// Construction, cloning, and probing expose their continuation explicitly.
-pub fn U32Map(comptime V: type) type {
+/// Its key remains nominal in entries and cursors; conversion to an integer is
+/// confined to the hash-slot adapter.
+pub fn FixedMap(comptime K: type, comptime V: type) type {
     return struct {
         const Self = @This();
-        const Entry = struct { key: u32, value: V };
+        const Entry = struct { key: K, value: V };
 
         allocator: std.mem.Allocator,
         slots: []?Entry,
@@ -39,7 +41,7 @@ pub fn U32Map(comptime V: type) type {
         pub const RawLookupProgress = union(enum) { pending, complete: ?V };
         pub const RawLookupCursor = struct {
             map: *const Self,
-            key: u32,
+            key: K,
             index: usize,
             remaining: usize,
             pub fn advance(self: *RawLookupCursor) RawLookupProgress {
@@ -51,7 +53,7 @@ pub fn U32Map(comptime V: type) type {
                 return if (entry.key == self.key) .{ .complete = entry.value } else .pending;
             }
         };
-        pub fn rawLookup(self: *const Self, key: u32) RawLookupCursor {
+        pub fn rawLookup(self: *const Self, key: K) RawLookupCursor {
             return .{
                 .map = self,
                 .key = key,
@@ -100,7 +102,7 @@ pub fn U32Map(comptime V: type) type {
         pub const PutProgress = union(enum) { pending, complete: bool };
         pub const PutCursor = struct {
             map: *Self,
-            key: u32,
+            key: K,
             value: V,
             index: usize,
             remaining: usize,
@@ -121,7 +123,7 @@ pub fn U32Map(comptime V: type) type {
                 return .pending;
             }
         };
-        pub fn putCursor(self: *Self, key: u32, value: V) PutCursor {
+        pub fn putCursor(self: *Self, key: K, value: V) PutCursor {
             return .{
                 .map = self,
                 .key = key,
@@ -180,10 +182,19 @@ pub fn U32Map(comptime V: type) type {
             };
         }
 
-        fn slot(key: u32, capacity: usize) usize {
-            return @as(usize, key *% 0x9e37_79b9) & (capacity - 1);
+        fn slot(key: K, capacity: usize) usize {
+            const raw: u32 = switch (@typeInfo(K)) {
+                .int => @intCast(key),
+                .@"enum" => @intFromEnum(key),
+                else => @compileError("FixedMap keys must be u32-compatible integers or enums"),
+            };
+            return @as(usize, raw *% 0x9e37_79b9) & (capacity - 1);
         }
     };
+}
+
+pub fn U32Map(comptime V: type) type {
+    return FixedMap(u32, V);
 }
 
 /// A LIFO worklist whose fixed-size chunks are linked rather than relocated.
@@ -193,9 +204,21 @@ pub fn ChunkStack(comptime T: type) type {
         const Self = @This();
         const chunk_len = 256;
         const Chunk = struct {
+            retirement: heap.ReleaseDomain.Retirement = .{},
             previous: ?*Chunk,
             len: usize,
             items: [chunk_len]T,
+
+            pub fn advanceRetirement(
+                releases: *heap.ReleaseDomain,
+                allocator: std.mem.Allocator,
+                self: *Chunk,
+            ) bool {
+                const previous = self.previous;
+                allocator.destroy(self);
+                if (previous) |next| releases.retire(next, &next.retirement);
+                return true;
+            }
         };
 
         allocator: std.mem.Allocator,
@@ -210,6 +233,10 @@ pub fn ChunkStack(comptime T: type) type {
                 self.top = chunk.previous;
                 self.allocator.destroy(chunk);
             }
+        }
+        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
+            if (self.top) |top| releases.retire(top, &top.retirement);
+            self.top = null;
         }
 
         pub fn push(self: *Self, item: T) error{OutOfMemory}!void {
@@ -237,6 +264,14 @@ pub fn ChunkStack(comptime T: type) type {
             // initializes the corresponding element.
             chunk.* = .{ .previous = self.top, .len = 0, .items = undefined };
             self.top = chunk;
+        }
+
+        /// Commits one item after `reserve`; ownership transfer cannot fail.
+        pub fn pushReserved(self: *Self, item: T) void {
+            const chunk = self.top.?;
+            std.debug.assert(chunk.len != chunk_len);
+            chunk.items[chunk.len] = item;
+            chunk.len += 1;
         }
 
         pub fn pop(self: *Self) ?T {
@@ -269,10 +304,22 @@ pub fn ChunkList(comptime T: type) type {
         const Self = @This();
         const chunk_len = 256;
         const Chunk = struct {
+            retirement: heap.ReleaseDomain.Retirement = .{},
             next: ?*Chunk = null,
             previous: ?*Chunk = null,
             len: usize = 0,
             items: [chunk_len]T,
+
+            pub fn advanceRetirement(
+                releases: *heap.ReleaseDomain,
+                allocator: std.mem.Allocator,
+                self: *Chunk,
+            ) bool {
+                const next = self.next;
+                allocator.destroy(self);
+                if (next) |following| releases.retire(following, &following.retirement);
+                return true;
+            }
         };
         pub const Iterator = struct {
             chunk: ?*const Chunk,
@@ -317,6 +364,10 @@ pub fn ChunkList(comptime T: type) type {
                 current = chunk.next;
                 self.allocator.destroy(chunk);
             }
+            self.* = .{ .allocator = self.allocator };
+        }
+        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
+            if (self.first) |first| releases.retire(first, &first.retirement);
             self.* = .{ .allocator = self.allocator };
         }
         pub fn append(self: *Self, item: T) error{OutOfMemory}!void {

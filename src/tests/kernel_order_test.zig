@@ -162,15 +162,15 @@ test "order: distinct charges nested structural hash and equality work" {
     for (integers, 0..) |*integer, index| integer.* = @intCast(index);
 
     const left = try list.fromI64Slice(allocator, integers);
-    defer heap.releaseValue(allocator, left);
+    defer heap.testing.releaseValue(allocator, left);
     const right = try list.fromI64Slice(allocator, integers);
-    defer heap.releaseValue(allocator, right);
+    defer heap.testing.releaseValue(allocator, right);
     const outer = try list.fromValuesGeneric(allocator, &.{ left, right });
     var outer_owned = true;
-    defer if (outer_owned) heap.releaseValue(allocator, outer);
-    try runtime.stack.append(allocator, outer);
+    defer if (outer_owned) heap.testing.releaseValue(allocator, outer);
+    try runtime.pushOwned(outer);
     outer_owned = false;
 
     try std.testing.expect((try runtime.runUnit("<test>", "distinct pop")) == .ok);
-    try std.testing.expect(runtime.last_polls >= 2);
+    try std.testing.expect(runtime.lastPolls() >= 2);
 }

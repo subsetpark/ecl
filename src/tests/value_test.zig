@@ -16,9 +16,9 @@ const Value = value.Value;
 fn valueLaws(recipe: testgen.ValueRecipe) !void {
     const allocator = std.testing.allocator;
     const a = try testgen.valueFromRecipe(allocator, recipe, 4, .allowed, 0x00);
-    defer heap.releaseValue(allocator, a);
+    defer heap.testing.releaseValue(allocator, a);
     const b = try testgen.valueFromRecipe(allocator, recipe, 4, .allowed, 0xa7);
-    defer heap.releaseValue(allocator, b);
+    defer heap.testing.releaseValue(allocator, b);
 
     try std.testing.expect(equal.match(a, a));
     try std.testing.expectEqual(equal.match(a, b), equal.match(b, a));
@@ -55,9 +55,9 @@ fn specializationLaws(encoded: u64) !void {
     }
 
     const leaf = try list.fromValues(allocator, items);
-    defer heap.releaseValue(allocator, leaf);
+    defer heap.testing.releaseValue(allocator, leaf);
     const spine = try list.fromValuesGeneric(allocator, items);
-    defer heap.releaseValue(allocator, spine);
+    defer heap.testing.releaseValue(allocator, spine);
     if (use_chars) {
         try std.testing.expect(leaf.isString());
     } else {
@@ -96,7 +96,7 @@ fn resumableMaterializationLaw(encoded: u64) !void {
     }
 
     const expected = try list.fromValues(allocator, items);
-    defer heap.releaseValue(allocator, expected);
+    defer heap.testing.releaseValue(allocator, expected);
     var materializer = storage.ValueMaterializer.init(allocator, items);
     defer materializer.deinit();
     const budget: usize = @intCast((encoded >> 48) % 9 + 1);
@@ -104,7 +104,7 @@ fn resumableMaterializationLaw(encoded: u64) !void {
         .pending => continue,
         .complete => |complete| break complete,
     };
-    defer heap.releaseValue(allocator, actual);
+    defer heap.testing.releaseValue(allocator, actual);
     try std.testing.expectEqual(expected.list.kind(), actual.list.kind());
     try std.testing.expect(equal.match(expected, actual));
 }
@@ -119,6 +119,8 @@ test "resumable list materialization preserves specialization under arbitrary sl
 
 fn numericAndDictLaws(encoded: u64) !void {
     const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     const integer: i32 = @bitCast(@as(u32, @truncate(encoded)));
     const int_value = Value{ .int = integer };
     const float_value = Value{ .float = @floatFromInt(integer) };
@@ -131,10 +133,10 @@ fn numericAndDictLaws(encoded: u64) !void {
         .{ .{ .int = 3 }, .{ .word = try testgen.internedId(@truncate(encoded >> 40)) } },
     };
     const reversed = [_]dict.Pair{ pairs[2], pairs[1], pairs[0] };
-    const first = try dict.fromPairs(allocator, &pairs);
-    defer heap.releaseValue(allocator, first);
-    const second = try dict.fromPairs(allocator, &reversed);
-    defer heap.releaseValue(allocator, second);
+    const first = try dict.fromPairs(allocator, cleanup.domain(), &pairs);
+    defer heap.testing.releaseValue(allocator, first);
+    const second = try dict.fromPairs(allocator, cleanup.domain(), &reversed);
+    defer heap.testing.releaseValue(allocator, second);
     try std.testing.expect(equal.match(first, second));
     try std.testing.expectEqual(equal.hash(first), equal.hash(second));
 }
@@ -149,26 +151,34 @@ test "numeric and dict ordering laws shrink to integers" {
 
 fn appendSharingLaws(encoded: u64) !void {
     const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     const original = try list.fromValues(allocator, &.{
         .{ .int = @as(i32, @bitCast(@as(u32, @truncate(encoded)))) },
         .{ .int = @as(i32, @bitCast(@as(u32, @truncate(encoded >> 16)))) },
     });
-    defer heap.releaseValue(allocator, original);
-    const unique = try list.append(
+    defer heap.testing.releaseValue(allocator, original);
+    const unique_update = try list.append(
         allocator,
+        cleanup.domain(),
         original,
         .{ .int = @as(i32, @bitCast(@as(u32, @truncate(encoded >> 32)))) },
     );
+    try std.testing.expect(unique_update == .in_place);
+    const unique = unique_update.value();
     try std.testing.expectEqual(original.list, unique.list);
 
     heap.incRef(original.list);
-    defer heap.decRef(allocator, original.list);
-    const copied = try list.append(
+    defer heap.testing.decRef(allocator, original.list);
+    const copied_update = try list.append(
         allocator,
+        cleanup.domain(),
         original,
         .{ .int = @as(i32, @bitCast(@as(u32, @truncate(encoded >> 48)))) },
     );
-    defer heap.releaseValue(allocator, copied);
+    try std.testing.expect(copied_update == .replacement);
+    const copied = copied_update.value();
+    defer heap.testing.releaseValue(allocator, copied);
     try std.testing.expect(original.list != copied.list);
     try std.testing.expectEqual(@as(usize, 3), try list.len(original));
     try std.testing.expectEqual(@as(usize, 4), try list.len(copied));

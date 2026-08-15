@@ -10,14 +10,16 @@ const support = @import("kernel_test_support.zig");
 const allocator = std.testing.allocator;
 
 test "documentation normalization folds physical prose lines" {
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
     var diag: reader.Diag = .{};
-    var parsed = switch (try reader.read(allocator, "doc.ecl", "\"a\n    b\n\n    - one\n      more\"", &diag)) {
+    var parsed = switch (try reader.read(host.cleanup(), "doc.ecl", "\"a\n    b\n\n    - one\n      more\"", &diag)) {
         .complete => |complete| complete,
         .incomplete => return error.UnexpectedIncomplete,
     };
     defer parsed.deinit();
-    const normalized = try doc_text.normalize(allocator, parsed.forms[0]);
-    defer heap.releaseValue(allocator, normalized);
+    const normalized = try doc_text.normalize(allocator, parsed.values()[0]);
+    defer heap.testing.releaseValue(allocator, normalized);
     const rendered = try printer.toOwnedString(allocator, normalized);
     defer allocator.free(rendered);
     try std.testing.expectEqualStrings("\"a b\\n\\n- one more\"", rendered);
@@ -33,22 +35,24 @@ fn expectFormat(source: []const u8, expected: []const u8) !void {
 }
 
 fn expectParseEquivalent(source: []const u8) !void {
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
     const formatted = try formatter.format(allocator, source);
     defer allocator.free(formatted);
     var original_diag: reader.Diag = .{};
     var formatted_diag: reader.Diag = .{};
-    var original = switch (try reader.read(allocator, "original.ecl", source, &original_diag)) {
+    var original = switch (try reader.read(host.cleanup(), "original.ecl", source, &original_diag)) {
         .complete => |parsed| parsed,
         .incomplete => return error.UnexpectedIncomplete,
     };
     defer original.deinit();
-    var reparsed = switch (try reader.read(allocator, "formatted.ecl", formatted, &formatted_diag)) {
+    var reparsed = switch (try reader.read(host.cleanup(), "formatted.ecl", formatted, &formatted_diag)) {
         .complete => |parsed| parsed,
         .incomplete => return error.UnexpectedIncomplete,
     };
     defer reparsed.deinit();
-    try std.testing.expectEqual(original.forms.len, reparsed.forms.len);
-    for (original.forms, reparsed.forms) |before, after| {
+    try std.testing.expectEqual(original.values().len, reparsed.values().len);
+    for (original.values(), reparsed.values()) |before, after| {
         try std.testing.expect(try equal.matchWithAllocator(allocator, before, after));
     }
 }

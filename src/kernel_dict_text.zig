@@ -28,39 +28,37 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 }
 
 fn keysPrimitive(evaluator: *Machine) MachineError!void {
-    const dictionary = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), dictionary);
-    if (dictionary != .dict) return evaluator.typeError("a dict");
-    const keys = dict.keysOf(dictionary) catch return evaluator.typeError("a dict");
+    var dictionary = try evaluator.popValue();
+    defer dictionary.deinit();
+    if (dictionary.borrow() != .dict) return evaluator.typeError("a dict");
+    const keys = dict.keysOf(dictionary.borrow()) catch return evaluator.typeError("a dict");
     try evaluator.pushBorrowed(keys);
 }
 
 fn valsPrimitive(evaluator: *Machine) MachineError!void {
-    const dictionary = try evaluator.popOwned();
-    defer heap.releaseValue(evaluator.allocator(), dictionary);
-    if (dictionary != .dict) return evaluator.typeError("a dict");
-    const values = dict.valsOf(dictionary) catch return evaluator.typeError("a dict");
+    var dictionary = try evaluator.popValue();
+    defer dictionary.deinit();
+    if (dictionary.borrow() != .dict) return evaluator.typeError("a dict");
+    const values = dict.valsOf(dictionary.borrow()) catch return evaluator.typeError("a dict");
     try evaluator.pushBorrowed(values);
 }
 
 fn hasPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const key = try evaluator.popOwned();
-    var key_owned = true;
-    defer if (key_owned) heap.releaseValue(evaluator.allocator(), key);
-    const dictionary = try evaluator.popOwned();
-    var dictionary_owned = true;
-    defer if (dictionary_owned) heap.releaseValue(evaluator.allocator(), dictionary);
-    if (dictionary != .dict) return evaluator.typeError("a dict");
+    var key = try evaluator.popValue();
+    defer key.deinit();
+    var dictionary = try evaluator.popValue();
+    defer dictionary.deinit();
+    if (dictionary.borrow() != .dict) return evaluator.typeError("a dict");
     const driver = try evaluator.allocator().create(HasDriver);
     driver.* = .{
-        .dictionary = dictionary,
-        .key = key,
-        .cursor = storage.DictFindCursor.initHeader(evaluator.allocator(), dictionary.dict, key),
+        .dictionary = dictionary.borrow(),
+        .key = key.borrow(),
+        .cursor = storage.DictFindCursor.initHeader(evaluator.allocator(), dictionary.borrow().dict, key.borrow()),
     };
-    key_owned = false;
-    dictionary_owned = false;
-    evaluator.installWorkDriver(driver, HasDriver.advance, HasDriver.destroy);
+    _ = key.take();
+    _ = dictionary.take();
+    evaluator.installWorkDriver(driver);
 }
 
 const HasDriver = struct {
@@ -68,77 +66,69 @@ const HasDriver = struct {
     key: Value,
     cursor: storage.DictFindCursor,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *HasDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *HasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.advance(machine.kernel_poll_quantum)) {
             .pending => .yielded,
-            .complete => |found| completed: {
-                try evaluator.pushOwned(.{ .int = @intFromBool(found != null) });
-                break :completed .completed;
-            },
+            .complete => |found| .{ .output = .{ .int = @intFromBool(found != null) } },
         };
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *HasDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *HasDriver) void {
         self.cursor.deinit();
-        heap.releaseValue(allocator, self.dictionary);
-        heap.releaseValue(allocator, self.key);
+        releases.releaseValue(self.dictionary);
+        releases.releaseValue(self.key);
         allocator.destroy(self);
     }
 };
 
 fn putPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(3);
-    const new_value = try evaluator.popOwned();
-    var value_owned = true;
-    defer if (value_owned) heap.releaseValue(evaluator.allocator(), new_value);
-    const key = try evaluator.popOwned();
-    var key_owned = true;
-    defer if (key_owned) heap.releaseValue(evaluator.allocator(), key);
-    const collection = try evaluator.popOwned();
-    var collection_owned = true;
-    defer if (collection_owned) heap.releaseValue(evaluator.allocator(), collection);
-    switch (collection) {
+    var new_value = try evaluator.popValue();
+    defer new_value.deinit();
+    var key = try evaluator.popValue();
+    defer key.deinit();
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    switch (collection.borrow()) {
         .dict => {
             const driver = try evaluator.allocator().create(DictPutDriver);
             driver.* = .{
-                .dictionary = collection,
-                .key = key,
-                .new_value = new_value,
+                .dictionary = collection.borrow(),
+                .key = key.borrow(),
+                .new_value = new_value.borrow(),
                 .finder = storage.DictFindCursor.initHeader(
                     evaluator.allocator(),
-                    collection.dict,
-                    key,
+                    collection.borrow().dict,
+                    key.borrow(),
                 ),
             };
-            evaluator.installWorkDriver(driver, DictPutDriver.advance, DictPutDriver.destroy);
+            evaluator.installWorkDriver(driver);
         },
         .list => {
-            if (key != .int) return evaluator.typeError("an integer list index");
-            if (key.int < 0) return evaluator.fail(.domain, "put index is negative");
-            const index = std.math.cast(usize, key.int) orelse
+            if (key.borrow() != .int) return evaluator.typeError("an integer list index");
+            if (key.borrow().int < 0) return evaluator.fail(.domain, "put index is negative");
+            const index = std.math.cast(usize, key.borrow().int) orelse
                 return evaluator.fail(.domain, "put index is out of bounds");
-            const count: usize = @intCast(collection.list.length());
+            const count: usize = @intCast(collection.borrow().list.length());
             if (index >= count) return evaluator.fail(.domain, "put index is out of bounds");
             const values = try evaluator.allocator().alloc(Value, count);
             errdefer evaluator.allocator().free(values);
             const driver = try evaluator.allocator().create(ListPutDriver);
             driver.* = .{
-                .collection = collection,
-                .key = key,
-                .new_value = new_value,
+                .collection = collection.borrow(),
+                .key = key.borrow(),
+                .new_value = new_value.borrow(),
                 .replace_index = index,
                 .values = values,
             };
-            evaluator.installWorkDriver(driver, ListPutDriver.advance, ListPutDriver.destroy);
+            evaluator.installWorkDriver(driver);
         },
         .int, .float, .char, .symbol, .word, .task => return evaluator.typeError("a list or dict"),
     }
-    collection_owned = false;
-    key_owned = false;
-    value_owned = false;
+    _ = collection.take();
+    _ = key.take();
+    _ = new_value.take();
 }
 
 const ListPutDriver = struct {
@@ -150,8 +140,7 @@ const ListPutDriver = struct {
     index: usize = 0,
     materializer: ?storage.ValueMaterializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *ListPutDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *ListPutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         if (self.materializer == null) {
@@ -172,20 +161,17 @@ const ListPutDriver = struct {
             .complete => |result| completed: {
                 self.materializer.?.deinit();
                 self.materializer = null;
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
+                break :completed .{ .output = result };
             },
         };
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *ListPutDriver = @ptrCast(@alignCast(raw));
-        if (self.materializer) |*materializer| materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *ListPutDriver) void {
+        if (self.materializer) |*materializer| materializer.retire(releases);
         allocator.free(self.values);
-        heap.releaseValue(allocator, self.collection);
-        heap.releaseValue(allocator, self.key);
-        heap.releaseValue(allocator, self.new_value);
+        releases.releaseValue(self.collection);
+        releases.releaseValue(self.key);
+        releases.releaseValue(self.new_value);
         allocator.destroy(self);
     }
 };
@@ -200,8 +186,7 @@ const DictPutDriver = struct {
     index: usize = 0,
     materializer: ?storage.DictMaterializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *DictPutDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *DictPutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         if (self.finder) |*finder| switch (try finder.advance(budget)) {
@@ -246,45 +231,38 @@ const DictPutDriver = struct {
             .complete => |result| completed: {
                 self.materializer.?.deinit();
                 self.materializer = null;
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
+                break :completed .{ .output = result };
             },
         };
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *DictPutDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *DictPutDriver) void {
         if (self.finder) |*finder| finder.deinit();
-        if (self.materializer) |*materializer| materializer.deinit();
+        if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.pairs) |pairs| allocator.free(pairs);
-        heap.releaseValue(allocator, self.dictionary);
-        heap.releaseValue(allocator, self.key);
-        heap.releaseValue(allocator, self.new_value);
+        releases.releaseValue(self.dictionary);
+        releases.releaseValue(self.key);
+        releases.releaseValue(self.new_value);
         allocator.destroy(self);
     }
 };
 
 fn toDictPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const values = try evaluator.popOwned();
-    var values_owned = true;
-    defer if (values_owned) heap.releaseValue(evaluator.allocator(), values);
-    const keys = try evaluator.popOwned();
-    var keys_owned = true;
-    defer if (keys_owned) heap.releaseValue(evaluator.allocator(), keys);
-    if (keys != .list or values != .list) return evaluator.typeError("two lists");
-    const count: usize = @intCast(keys.list.length());
-    if (values.list.length() != keys.list.length()) {
+    var values = try evaluator.popValue();
+    defer values.deinit();
+    var keys = try evaluator.popValue();
+    defer keys.deinit();
+    if (keys.borrow() != .list or values.borrow() != .list) return evaluator.typeError("two lists");
+    const count: usize = @intCast(keys.borrow().list.length());
+    if (values.borrow().list.length() != keys.borrow().list.length()) {
         return evaluator.fail(.shape, "to-dict requires equal key and value lengths");
     }
     const pairs = try evaluator.allocator().alloc(dict.Pair, count);
     errdefer evaluator.allocator().free(pairs);
     const driver = try evaluator.allocator().create(ToDictDriver);
-    driver.* = .{ .keys = keys, .values = values, .pairs = pairs };
-    keys_owned = false;
-    values_owned = false;
-    evaluator.installWorkDriver(driver, ToDictDriver.advance, ToDictDriver.destroy);
+    driver.* = .{ .keys = keys.take(), .values = values.take(), .pairs = pairs };
+    evaluator.installWorkDriver(driver);
 }
 
 const ToDictDriver = struct {
@@ -294,8 +272,7 @@ const ToDictDriver = struct {
     index: usize = 0,
     materializer: ?storage.DictMaterializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *ToDictDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *ToDictDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         if (self.materializer == null) {
@@ -315,41 +292,40 @@ const ToDictDriver = struct {
             .complete => |result| completed: {
                 self.materializer.?.deinit();
                 self.materializer = null;
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
+                break :completed .{ .output = result };
             },
         };
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *ToDictDriver = @ptrCast(@alignCast(raw));
-        if (self.materializer) |*materializer| materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *ToDictDriver) void {
+        if (self.materializer) |*materializer| materializer.retire(releases);
         allocator.free(self.pairs);
-        heap.releaseValue(allocator, self.keys);
-        heap.releaseValue(allocator, self.values);
+        releases.releaseValue(self.keys);
+        releases.releaseValue(self.values);
         allocator.destroy(self);
     }
 };
 
 fn delPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const key = try evaluator.popOwned();
-    var key_owned = true;
-    defer if (key_owned) heap.releaseValue(evaluator.allocator(), key);
-    const dictionary = try evaluator.popOwned();
-    var dictionary_owned = true;
-    defer if (dictionary_owned) heap.releaseValue(evaluator.allocator(), dictionary);
-    if (dictionary != .dict) return evaluator.typeError("a dict");
+    var key = try evaluator.popValue();
+    defer key.deinit();
+    var dictionary = try evaluator.popValue();
+    defer dictionary.deinit();
+    if (dictionary.borrow() != .dict) return evaluator.typeError("a dict");
     const driver = try evaluator.allocator().create(DelDriver);
     driver.* = .{
-        .dictionary = dictionary,
-        .key = key,
-        .finder = storage.DictFindCursor.initHeader(evaluator.allocator(), dictionary.dict, key),
+        .dictionary = dictionary.borrow(),
+        .key = key.borrow(),
+        .finder = storage.DictFindCursor.initHeader(
+            evaluator.allocator(),
+            dictionary.borrow().dict,
+            key.borrow(),
+        ),
     };
-    dictionary_owned = false;
-    key_owned = false;
-    evaluator.installWorkDriver(driver, DelDriver.advance, DelDriver.destroy);
+    _ = dictionary.take();
+    _ = key.take();
+    evaluator.installWorkDriver(driver);
 }
 
 const DelDriver = struct {
@@ -362,8 +338,7 @@ const DelDriver = struct {
     destination_index: usize = 0,
     materializer: ?storage.DictMaterializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *DelDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *DelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         if (self.finder) |*finder| switch (try finder.advance(budget)) {
@@ -374,8 +349,7 @@ const DelDriver = struct {
                 self.finder = null;
                 if (self.removed_index == null) {
                     heap.retainValue(self.dictionary);
-                    try evaluator.pushOwned(self.dictionary);
-                    return .completed;
+                    return .{ .output = self.dictionary };
                 }
                 const count: usize = @intCast(self.dictionary.dict.length());
                 self.pairs = try evaluator.allocator().alloc(dict.Pair, count - 1);
@@ -403,42 +377,40 @@ const DelDriver = struct {
             .complete => |result| completed: {
                 self.materializer.?.deinit();
                 self.materializer = null;
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
+                break :completed .{ .output = result };
             },
         };
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *DelDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *DelDriver) void {
         if (self.finder) |*finder| finder.deinit();
-        if (self.materializer) |*materializer| materializer.deinit();
+        if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.pairs) |pairs| allocator.free(pairs);
-        heap.releaseValue(allocator, self.dictionary);
-        heap.releaseValue(allocator, self.key);
+        releases.releaseValue(self.dictionary);
+        releases.releaseValue(self.key);
         allocator.destroy(self);
     }
 };
 
 fn mergePrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const right = try evaluator.popOwned();
-    var right_owned = true;
-    defer if (right_owned) heap.releaseValue(evaluator.allocator(), right);
-    const left = try evaluator.popOwned();
-    var left_owned = true;
-    defer if (left_owned) heap.releaseValue(evaluator.allocator(), left);
-    if (left != .dict or right != .dict) return evaluator.typeError("two dicts");
-    const left_count: usize = @intCast(left.dict.length());
-    const right_count: usize = @intCast(right.dict.length());
+    var right = try evaluator.popValue();
+    defer right.deinit();
+    var left = try evaluator.popValue();
+    defer left.deinit();
+    if (left.borrow() != .dict or right.borrow() != .dict) return evaluator.typeError("two dicts");
+    const left_count: usize = @intCast(left.borrow().dict.length());
+    const right_count: usize = @intCast(right.borrow().dict.length());
     const pairs = try evaluator.allocator().alloc(dict.Pair, left_count + right_count);
     errdefer evaluator.allocator().free(pairs);
     const driver = try evaluator.allocator().create(MergeDriver);
-    driver.* = .{ .left = left, .right = right, .pairs = pairs, .pair_count = left_count };
-    left_owned = false;
-    right_owned = false;
-    evaluator.installWorkDriver(driver, MergeDriver.advance, MergeDriver.destroy);
+    driver.* = .{
+        .left = left.take(),
+        .right = right.take(),
+        .pairs = pairs,
+        .pair_count = left_count,
+    };
+    evaluator.installWorkDriver(driver);
 }
 
 const MergeDriver = struct {
@@ -451,8 +423,7 @@ const MergeDriver = struct {
     finder: ?storage.DictFindCursor = null,
     materializer: ?storage.DictMaterializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *MergeDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *MergeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
@@ -511,56 +482,53 @@ const MergeDriver = struct {
                 .complete => |result| completed: {
                     self.materializer.?.deinit();
                     self.materializer = null;
-                    errdefer heap.releaseValue(evaluator.allocator(), result);
-                    try evaluator.pushOwned(result);
-                    break :completed .completed;
+                    break :completed .{ .output = result };
                 },
             },
         };
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *MergeDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *MergeDriver) void {
         if (self.finder) |*finder| finder.deinit();
-        if (self.materializer) |*materializer| materializer.deinit();
+        if (self.materializer) |*materializer| materializer.retire(releases);
         allocator.free(self.pairs);
-        heap.releaseValue(allocator, self.left);
-        heap.releaseValue(allocator, self.right);
+        releases.releaseValue(self.left);
+        releases.releaseValue(self.right);
         allocator.destroy(self);
     }
 };
 
 fn splitPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const separator = try evaluator.popOwned();
-    var separator_owned = true;
-    defer if (separator_owned) heap.releaseValue(evaluator.allocator(), separator);
-    const text = try evaluator.popOwned();
-    var text_owned = true;
-    defer if (text_owned) heap.releaseValue(evaluator.allocator(), text);
-    if (!text.isString() or !separator.isString()) return evaluator.typeError("two strings");
-    const text_len: usize = @intCast(text.list.length());
-    const separator_len: usize = @intCast(separator.list.length());
+    var separator = try evaluator.popValue();
+    defer separator.deinit();
+    var text = try evaluator.popValue();
+    defer text.deinit();
+    if (!text.borrow().isString() or !separator.borrow().isString()) return evaluator.typeError("two strings");
+    const text_len: usize = @intCast(text.borrow().list.length());
+    const separator_len: usize = @intCast(separator.borrow().list.length());
     const capacity = if (separator_len == 0)
         std.math.add(usize, text_len, 2) catch
             return evaluator.fail(.overflow, "split result is too large")
     else
         text_len + 1;
-    const parts = try evaluator.allocator().alloc(Value, capacity);
-    errdefer evaluator.allocator().free(parts);
+    var parts = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), capacity);
+    defer parts.deinit();
     const driver = try evaluator.allocator().create(SplitDriver);
-    driver.* = .{ .text = text, .separator = separator, .parts = parts };
-    text_owned = false;
-    separator_owned = false;
-    evaluator.installWorkDriver(driver, SplitDriver.advance, SplitDriver.destroy);
+    driver.* = .{
+        .text = text.take(),
+        .separator = separator.take(),
+        .parts = parts.take(),
+    };
+    evaluator.installWorkDriver(driver);
 }
 
 const SplitDriver = struct {
     text: Value,
     separator: Value,
-    parts: []Value,
-    phase: enum { scan, fill_part, materialize_part, materialize_result, release } = .scan,
+    parts: heap.OwnedValueBuffer,
+    phase: enum { scan, fill_part, materialize_part, materialize_result } = .scan,
     cursor: usize = 0,
     start: usize = 0,
     match_index: usize = 0,
@@ -571,10 +539,8 @@ const SplitDriver = struct {
     codepoints: ?[]u32 = null,
     codepoint_index: usize = 0,
     part_count: usize = 0,
-    released_parts: usize = 0,
     part_materializer: ?storage.CodepointMaterializer = null,
     result_materializer: ?storage.ValueMaterializer = null,
-    result: ?Value = null,
 
     fn beginPart(self: *SplitDriver, start: usize, end: usize) void {
         self.part_start = start;
@@ -583,8 +549,7 @@ const SplitDriver = struct {
         self.phase = .fill_part;
     }
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *SplitDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *SplitDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
@@ -594,7 +559,7 @@ const SplitDriver = struct {
                 if (self.scan_complete) {
                     self.result_materializer = .init(
                         evaluator.allocator(),
-                        self.parts[0..self.part_count],
+                        self.parts.values(),
                     );
                     self.phase = .materialize_result;
                     continue;
@@ -660,7 +625,7 @@ const SplitDriver = struct {
                     self.part_materializer = null;
                     evaluator.allocator().free(self.codepoints.?);
                     self.codepoints = null;
-                    self.parts[self.part_count] = part;
+                    self.parts.appendOwned(part);
                     self.part_count += 1;
                     self.phase = .scan;
                     return .yielded;
@@ -671,56 +636,37 @@ const SplitDriver = struct {
                 .complete => |result| {
                     self.result_materializer.?.deinit();
                     self.result_materializer = null;
-                    self.result = result;
-                    self.phase = .release;
+                    self.parts.deinit();
+                    return .{ .output = result };
                 },
-            },
-            .release => {
-                if (self.released_parts == self.part_count) {
-                    const result = self.result.?;
-                    self.result = null;
-                    errdefer heap.releaseValue(evaluator.allocator(), result);
-                    try evaluator.pushOwned(result);
-                    return .completed;
-                }
-                heap.releaseValue(evaluator.allocator(), self.parts[self.released_parts]);
-                self.released_parts += 1;
-                budget -= 1;
             },
         };
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *SplitDriver = @ptrCast(@alignCast(raw));
-        if (self.part_materializer) |*materializer| materializer.deinit();
-        if (self.result_materializer) |*materializer| materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *SplitDriver) void {
+        if (self.part_materializer) |*materializer| materializer.retire(releases);
+        if (self.result_materializer) |*materializer| materializer.retire(releases);
         if (self.codepoints) |codepoints| allocator.free(codepoints);
-        if (self.result) |result| heap.releaseValue(allocator, result);
-        for (self.parts[self.released_parts..self.part_count]) |part| heap.releaseValue(allocator, part);
-        allocator.free(self.parts);
-        heap.releaseValue(allocator, self.text);
-        heap.releaseValue(allocator, self.separator);
+        self.parts.deinit();
+        releases.releaseValue(self.text);
+        releases.releaseValue(self.separator);
         allocator.destroy(self);
     }
 };
 
 fn joinPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const separator = try evaluator.popOwned();
-    var separator_owned = true;
-    defer if (separator_owned) heap.releaseValue(evaluator.allocator(), separator);
-    const parts = try evaluator.popOwned();
-    var parts_owned = true;
-    defer if (parts_owned) heap.releaseValue(evaluator.allocator(), parts);
-    if (parts != .list or !separator.isString()) {
+    var separator = try evaluator.popValue();
+    defer separator.deinit();
+    var parts = try evaluator.popValue();
+    defer parts.deinit();
+    if (parts.borrow() != .list or !separator.borrow().isString()) {
         return evaluator.typeError("a list of strings and a string separator");
     }
     const driver = try evaluator.allocator().create(JoinDriver);
-    driver.* = .{ .parts = parts, .separator = separator };
-    parts_owned = false;
-    separator_owned = false;
-    evaluator.installWorkDriver(driver, JoinDriver.advance, JoinDriver.destroy);
+    driver.* = .{ .parts = parts.take(), .separator = separator.take() };
+    evaluator.installWorkDriver(driver);
 }
 
 const JoinDriver = struct {
@@ -735,8 +681,7 @@ const JoinDriver = struct {
     separator_mode: bool = false,
     materializer: ?storage.CodepointMaterializer = null,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *JoinDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *JoinDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
@@ -796,62 +741,64 @@ const JoinDriver = struct {
                 .complete => |result| completed: {
                     self.materializer.?.deinit();
                     self.materializer = null;
-                    errdefer heap.releaseValue(evaluator.allocator(), result);
-                    try evaluator.pushOwned(result);
-                    break :completed .completed;
+                    break :completed .{ .output = result };
                 },
             },
         };
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *JoinDriver = @ptrCast(@alignCast(raw));
-        if (self.materializer) |*materializer| materializer.deinit();
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *JoinDriver) void {
+        if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.codepoints) |codepoints| allocator.free(codepoints);
-        heap.releaseValue(allocator, self.parts);
-        heap.releaseValue(allocator, self.separator);
+        releases.releaseValue(self.parts);
+        releases.releaseValue(self.separator);
         allocator.destroy(self);
     }
 };
 
 fn formatPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const template = try evaluator.popOwned();
-    var template_owned = true;
-    defer if (template_owned) heap.releaseValue(evaluator.allocator(), template);
-    const values = try evaluator.popOwned();
-    var values_owned = true;
-    defer if (values_owned) heap.releaseValue(evaluator.allocator(), values);
-    if (values != .list or !template.isString()) {
+    var template = try evaluator.popValue();
+    defer template.deinit();
+    var values = try evaluator.popValue();
+    defer values.deinit();
+    if (values.borrow() != .list or !template.borrow().isString()) {
         return evaluator.typeError("a value list and a template string");
     }
-    const value_count: usize = @intCast(values.list.length());
+    const value_count: usize = @intCast(values.borrow().list.length());
     const replacements = try evaluator.allocator().alloc(RenderedReplacement, value_count);
     errdefer evaluator.allocator().free(replacements);
+    var replacement_values = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), value_count);
+    errdefer replacement_values.deinit();
     const driver = try evaluator.allocator().create(FormatDriver);
-    driver.* = .{ .values = values, .template = template, .replacements = replacements };
-    values_owned = false;
-    template_owned = false;
-    evaluator.installWorkDriver(driver, FormatDriver.advance, FormatDriver.destroy);
+    driver.* = .{
+        .values = values.take(),
+        .template = template.take(),
+        .replacements = replacements,
+        .replacement_values = replacement_values.take(),
+    };
+    evaluator.installWorkDriver(driver);
 }
 
-const RenderedReplacement = struct { bytes: []u8, codepoints: usize = 0 };
+const RenderedReplacement = struct { text: Value };
 
 const FormatDriver = struct {
     values: Value,
     template: Value,
     replacements: []RenderedReplacement,
-    phase: enum { scan, render, count_rendered, fill, materialize } = .scan,
+    replacement_values: heap.OwnedValueBuffer,
+    phase: enum { scan, render, materialize_replacement, fill, materialize } = .scan,
     cursor: usize = 0,
     replacement_index: usize = 0,
-    stored_replacements: usize = 0,
-    byte_index: usize = 0,
+    replacement_cursor: usize = 0,
     output_count: usize = 0,
     output: ?[]u32 = null,
     output_index: usize = 0,
     filling_replacement: bool = false,
     renderer: ?printer.OwnedStringCursor = null,
+    rendered: ?[]u8 = null,
+    replacement_materializer: ?storage.Utf8Materializer = null,
     materializer: ?storage.CodepointMaterializer = null,
 
     fn templatePair(self: *const FormatDriver) struct { codepoint: u32, next: ?u32 } {
@@ -865,8 +812,7 @@ const FormatDriver = struct {
         };
     }
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *FormatDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *FormatDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
@@ -911,38 +857,43 @@ const FormatDriver = struct {
                 .complete => |bytes| {
                     self.renderer.?.deinit();
                     self.renderer = null;
-                    self.replacements[self.replacement_index] = .{ .bytes = bytes };
-                    self.stored_replacements = self.replacement_index + 1;
-                    self.byte_index = 0;
-                    self.phase = .count_rendered;
+                    self.rendered = bytes;
+                    self.replacement_materializer = .init(evaluator.allocator(), bytes);
+                    self.phase = .materialize_replacement;
                     return .yielded;
                 },
             },
-            .count_rendered => {
-                const replacement = &self.replacements[self.replacement_index];
-                if (self.byte_index == replacement.bytes.len) {
-                    try addFormatCount(evaluator, &self.output_count, replacement.codepoints);
+            .materialize_replacement => switch (self.replacement_materializer.?.advance(budget) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidUtf8 => return evaluator.fail(.domain, "rendered value is not valid UTF-8"),
+            }) {
+                .pending => return .yielded,
+                .complete => |text| {
+                    self.replacement_materializer.?.deinit();
+                    self.replacement_materializer = null;
+                    evaluator.allocator().free(self.rendered.?);
+                    self.rendered = null;
+                    self.replacements[self.replacement_index] = .{ .text = text };
+                    self.replacement_values.appendOwned(text);
+                    try addFormatCount(evaluator, &self.output_count, @intCast(text.list.length()));
                     self.replacement_index += 1;
                     self.phase = .scan;
-                    continue;
-                }
-                _ = storage.decodeUtf8Codepoint(replacement.bytes, &self.byte_index) catch
-                    return evaluator.fail(.domain, "rendered value is not valid UTF-8");
-                replacement.codepoints += 1;
-                budget -= 1;
+                    return .yielded;
+                },
             },
             .fill => {
                 if (self.filling_replacement) {
                     const replacement = self.replacements[self.replacement_index];
-                    if (self.byte_index == replacement.bytes.len) {
+                    if (self.replacement_cursor == replacement.text.list.length()) {
                         self.filling_replacement = false;
                         self.replacement_index += 1;
                         continue;
                     }
-                    self.output.?[self.output_index] = storage.decodeUtf8Codepoint(
-                        replacement.bytes,
-                        &self.byte_index,
-                    ) catch return evaluator.fail(.domain, "rendered value is not valid UTF-8");
+                    self.output.?[self.output_index] = list.atUnchecked(
+                        replacement.text,
+                        self.replacement_cursor,
+                    ).char;
+                    self.replacement_cursor += 1;
                     self.output_index += 1;
                     budget -= 1;
                     continue;
@@ -963,7 +914,7 @@ const FormatDriver = struct {
                     self.cursor += 2;
                 } else if (pair.codepoint == '{' and pair.next == '}') {
                     self.filling_replacement = true;
-                    self.byte_index = 0;
+                    self.replacement_cursor = 0;
                     self.cursor += 2;
                 } else {
                     self.output.?[self.output_index] = pair.codepoint;
@@ -977,25 +928,23 @@ const FormatDriver = struct {
                 .complete => |result| completed: {
                     self.materializer.?.deinit();
                     self.materializer = null;
-                    errdefer heap.releaseValue(evaluator.allocator(), result);
-                    try evaluator.pushOwned(result);
-                    break :completed .completed;
+                    break :completed .{ .output = result };
                 },
             },
         };
         return .yielded;
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *FormatDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *FormatDriver) void {
         if (self.renderer) |*renderer| renderer.deinit();
-        if (self.materializer) |*materializer| materializer.deinit();
-        for (self.replacements[0..self.stored_replacements]) |replacement|
-            allocator.free(replacement.bytes);
+        if (self.replacement_materializer) |*materializer| materializer.retire(releases);
+        if (self.materializer) |*materializer| materializer.retire(releases);
+        if (self.rendered) |rendered| allocator.free(rendered);
+        self.replacement_values.deinit();
         allocator.free(self.replacements);
         if (self.output) |output| allocator.free(output);
-        heap.releaseValue(allocator, self.values);
-        heap.releaseValue(allocator, self.template);
+        releases.releaseValue(self.values);
+        releases.releaseValue(self.template);
         allocator.destroy(self);
     }
 };

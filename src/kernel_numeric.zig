@@ -26,7 +26,7 @@ const heap_kind_count = std.meta.fields(HeapKind).len;
 const BinaryMatrix = [binary_op_count][heap_kind_count][heap_kind_count]?ScalarBinary;
 
 const binary_matrix: BinaryMatrix = blk: {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(100_000);
     var matrix = std.mem.zeroes(BinaryMatrix);
     for (std.meta.fields(BinaryOp)) |operation_field| {
         const operation: BinaryOp = @enumFromInt(operation_field.value);
@@ -45,8 +45,28 @@ const binary_matrix: BinaryMatrix = blk: {
             }
         }
     }
+    validateBinaryMatrix(matrix);
     break :blk matrix;
 };
+
+fn validateBinaryMatrix(comptime matrix: BinaryMatrix) void {
+    @setEvalBranchQuota(100_000);
+    for (std.meta.fields(BinaryOp)) |operation_field| {
+        const operation: BinaryOp = @enumFromInt(operation_field.value);
+        for (std.meta.fields(HeapKind)) |left_field| {
+            const left: HeapKind = @enumFromInt(left_field.value);
+            for (std.meta.fields(HeapKind)) |right_field| {
+                const right: HeapKind = @enumFromInt(right_field.value);
+                const left_sample = leafSample(left);
+                const right_sample = leafSample(right);
+                const expected = left_sample != null and right_sample != null and
+                    supports(operation, left_sample.?, right_sample.?);
+                if ((matrix[operation_field.value][left_field.value][right_field.value] != null) != expected)
+                    @compileError("numeric dispatch matrix does not match its supported scalar signatures");
+            }
+        }
+    }
+}
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(BinaryOp)) |field| {
@@ -95,37 +115,45 @@ pub fn scalarUnaryForIdiom(operation: UnaryOp, operand: Value) ?Value {
 
 fn binaryPrimitive(evaluator: *Machine, operation: BinaryOp) MachineError!void {
     try evaluator.require(2);
-    const right = try evaluator.popOwned();
-    var right_owned = true;
-    defer if (right_owned) heap.releaseValue(evaluator.allocator(), right);
-    const left = try evaluator.popOwned();
-    var left_owned = true;
-    defer if (left_owned) heap.releaseValue(evaluator.allocator(), left);
+    var right = try evaluator.popValue();
+    defer right.deinit();
+    var left = try evaluator.popValue();
+    defer left.deinit();
 
     const driver = try evaluator.allocator().create(PervadeDriver);
     errdefer evaluator.allocator().destroy(driver);
     driver.* = .{
-        .left = left,
-        .right = right,
-        .cursor = try PervadeCursor.initBinary(evaluator.allocator(), operation, left, right),
+        .left = left.borrow(),
+        .right = right.borrow(),
+        .cursor = try PervadeCursor.initBinary(
+            evaluator.releaseDomain(),
+            evaluator.allocator(),
+            operation,
+            left.borrow(),
+            right.borrow(),
+        ),
     };
-    left_owned = false;
-    right_owned = false;
-    evaluator.installWorkDriver(driver, PervadeDriver.advance, PervadeDriver.destroy);
+    _ = left.take();
+    _ = right.take();
+    evaluator.installWorkDriver(driver);
 }
 
 fn unaryPrimitive(evaluator: *Machine, operation: UnaryOp) MachineError!void {
-    const operand = try evaluator.popOwned();
-    var operand_owned = true;
-    defer if (operand_owned) heap.releaseValue(evaluator.allocator(), operand);
+    var operand = try evaluator.popValue();
+    defer operand.deinit();
     const driver = try evaluator.allocator().create(PervadeDriver);
     errdefer evaluator.allocator().destroy(driver);
     driver.* = .{
-        .left = operand,
-        .cursor = try PervadeCursor.initUnary(evaluator.allocator(), operation, operand),
+        .left = operand.borrow(),
+        .cursor = try PervadeCursor.initUnary(
+            evaluator.releaseDomain(),
+            evaluator.allocator(),
+            operation,
+            operand.borrow(),
+        ),
     };
-    operand_owned = false;
-    evaluator.installWorkDriver(driver, PervadeDriver.advance, PervadeDriver.destroy);
+    _ = operand.take();
+    evaluator.installWorkDriver(driver);
 }
 
 const PervadeDriver = struct {
@@ -133,24 +161,18 @@ const PervadeDriver = struct {
     right: ?Value = null,
     cursor: PervadeCursor,
 
-    fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!machine.WorkProgress {
-        const self: *PervadeDriver = @ptrCast(@alignCast(raw));
+    pub fn advance(evaluator: *Machine, self: *PervadeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.advance(evaluator, machine.kernel_poll_quantum)) {
             .pending => .yielded,
-            .complete => |result| completed: {
-                errdefer heap.releaseValue(evaluator.allocator(), result);
-                try evaluator.pushOwned(result);
-                break :completed .completed;
-            },
+            .complete => |result| .{ .output = result },
         };
     }
 
-    fn destroy(allocator: std.mem.Allocator, raw: *anyopaque) void {
-        const self: *PervadeDriver = @ptrCast(@alignCast(raw));
+    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *PervadeDriver) void {
         self.cursor.deinit();
-        heap.releaseValue(allocator, self.left);
-        if (self.right) |right| heap.releaseValue(allocator, right);
+        releases.releaseValue(self.left);
+        if (self.right) |right| releases.releaseValue(right);
         allocator.destroy(self);
     }
 };
@@ -158,6 +180,7 @@ const PervadeDriver = struct {
 pub const PervadeProgress = union(enum) { pending, complete: Value };
 
 pub const PervadeCursor = struct {
+    releases: *heap.ReleaseDomain,
     allocator: std.mem.Allocator,
     frames: poll.ChunkStack(Frame),
     last: ?Value = null,
@@ -182,18 +205,16 @@ pub const PervadeCursor = struct {
         left_scalar: bool,
         right_scalar: bool,
         depth: usize,
-        values: []Value,
+        values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
         materializer: ?storage.ValueMaterializer = null,
         result: ?Value = null,
-        release_index: usize = 0,
 
-        fn deinit(self: *ListFrame, allocator: std.mem.Allocator) void {
-            if (self.materializer) |*materializer| materializer.deinit();
-            for (self.values[self.release_index..self.index]) |item| heap.releaseValue(allocator, item);
-            allocator.free(self.values);
-            if (self.result) |result| heap.releaseValue(allocator, result);
+        fn deinit(self: *ListFrame, releases: *heap.ReleaseDomain) void {
+            if (self.materializer) |*materializer| materializer.retire(releases);
+            self.values.deinit();
+            if (self.result) |result| releases.releaseValue(result);
         }
     };
     const DictMode = union(enum) {
@@ -208,6 +229,7 @@ pub const PervadeCursor = struct {
         right: ?Value,
         depth: usize,
         pairs: []dict.Pair,
+        values: heap.OwnedValueBuffer,
         phase: enum { left, right, materialize, release } = .left,
         index: usize = 0,
         candidate: usize = 0,
@@ -216,15 +238,13 @@ pub const PervadeCursor = struct {
         match_cursor: ?equal.MatchCursor = null,
         materializer: ?storage.DictMaterializer = null,
         result: ?Value = null,
-        release_index: usize = 0,
 
-        fn deinit(self: *DictFrame, allocator: std.mem.Allocator) void {
+        fn deinit(self: *DictFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
             if (self.match_cursor) |*cursor| cursor.deinit();
-            if (self.materializer) |*materializer| materializer.deinit();
-            for (self.pairs[self.release_index..self.pair_count]) |pair|
-                heap.releaseValue(allocator, pair[1]);
+            if (self.materializer) |*materializer| materializer.retire(releases);
+            self.values.deinit();
             allocator.free(self.pairs);
-            if (self.result) |result| heap.releaseValue(allocator, result);
+            if (self.result) |result| releases.releaseValue(result);
         }
     };
     const Frame = union(enum) {
@@ -233,16 +253,17 @@ pub const PervadeCursor = struct {
         list: ListFrame,
         dictionary: DictFrame,
 
-        fn deinit(self: *Frame, allocator: std.mem.Allocator) void {
+        fn deinit(self: *Frame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
             switch (self.*) {
                 .binary, .unary => {},
-                .list => |*frame| frame.deinit(allocator),
-                .dictionary => |*frame| frame.deinit(allocator),
+                .list => |*frame| frame.deinit(releases),
+                .dictionary => |*frame| frame.deinit(releases, allocator),
             }
         }
     };
 
     pub fn initBinary(
+        releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
         operation: BinaryOp,
         left: Value,
@@ -257,10 +278,11 @@ pub const PervadeCursor = struct {
             .depth = 0,
             .logical_index = null,
         } });
-        return .{ .allocator = allocator, .frames = frames };
+        return .{ .releases = releases, .allocator = allocator, .frames = frames };
     }
 
     pub fn initUnary(
+        releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
         operation: UnaryOp,
         operand: Value,
@@ -273,14 +295,14 @@ pub const PervadeCursor = struct {
             .depth = 0,
             .logical_index = null,
         } });
-        return .{ .allocator = allocator, .frames = frames };
+        return .{ .releases = releases, .allocator = allocator, .frames = frames };
     }
 
     pub fn deinit(self: *PervadeCursor) void {
-        if (self.last) |last| heap.releaseValue(self.allocator, last);
+        if (self.last) |last| self.releases.releaseValue(last);
         while (self.frames.pop()) |frame_value| {
             var frame = frame_value;
-            frame.deinit(self.allocator);
+            frame.deinit(self.releases, self.allocator);
         }
         self.frames.deinit();
         self.* = undefined;
@@ -327,16 +349,17 @@ pub const PervadeCursor = struct {
             if (node.left == .list and node.right == .list and left_count != right_count)
                 return evaluator.conformError(left_count, right_count);
             const count = if (node.left == .list) left_count else right_count;
-            const values = try self.allocator.alloc(Value, count);
-            errdefer self.allocator.free(values);
-            try self.frames.push(.{ .list = .{
+            var values = try heap.OwnedValueBuffer.init(self.releases, count);
+            errdefer values.deinit();
+            try self.frames.reserve(1);
+            self.frames.pushReserved(.{ .list = .{
                 .operation = .{ .binary = node.operation },
                 .left = node.left,
                 .right = node.right,
                 .left_scalar = node.left != .list,
                 .right_scalar = node.right != .list,
                 .depth = node.depth,
-                .values = values,
+                .values = values.take(),
             } });
             return;
         }
@@ -351,27 +374,32 @@ pub const PervadeCursor = struct {
             const count: usize = @intCast(node.operand.dict.length());
             const pairs = try self.allocator.alloc(dict.Pair, count);
             errdefer self.allocator.free(pairs);
-            try self.frames.push(.{ .dictionary = .{
+            var values = try heap.OwnedValueBuffer.init(self.releases, count);
+            errdefer values.deinit();
+            try self.frames.reserve(1);
+            self.frames.pushReserved(.{ .dictionary = .{
                 .mode = .{ .unary = node.operation },
                 .left = node.operand,
                 .right = null,
                 .depth = node.depth,
                 .pairs = pairs,
+                .values = values.take(),
             } });
             return;
         }
         if (node.operand == .list) {
             const count: usize = @intCast(node.operand.list.length());
-            const values = try self.allocator.alloc(Value, count);
-            errdefer self.allocator.free(values);
-            try self.frames.push(.{ .list = .{
+            var values = try heap.OwnedValueBuffer.init(self.releases, count);
+            errdefer values.deinit();
+            try self.frames.reserve(1);
+            self.frames.pushReserved(.{ .list = .{
                 .operation = .{ .unary = node.operation },
                 .left = node.operand,
                 .right = null,
                 .left_scalar = false,
                 .right_scalar = false,
                 .depth = node.depth,
-                .values = values,
+                .values = values.take(),
             } });
             return;
         }
@@ -385,40 +413,33 @@ pub const PervadeCursor = struct {
         frame: *ListFrame,
         budget: usize,
     ) MachineError!bool {
-        errdefer frame.deinit(self.allocator);
+        errdefer frame.deinit(self.releases);
         if (frame.result) |result| {
-            if (frame.release_index != frame.index) {
-                heap.releaseValue(self.allocator, frame.values[frame.release_index]);
-                frame.release_index += 1;
-                try self.frames.reserve(1);
-                try self.frames.push(.{ .list = frame.* });
-                return true;
-            }
-            self.allocator.free(frame.values);
+            frame.values.deinit();
             frame.result = null;
             self.last = result;
             return true;
         }
         if (frame.waiting) {
-            frame.values[frame.index] = self.last.?;
+            frame.values.appendOwned(self.last.?);
             self.last = null;
             frame.index += 1;
             frame.waiting = false;
         }
-        if (frame.index != frame.values.len) {
+        if (frame.index != frame.values.capacity()) {
             const index = frame.index;
             frame.waiting = true;
             try self.frames.reserve(2);
-            try self.frames.push(.{ .list = frame.* });
+            self.frames.pushReserved(.{ .list = frame.* });
             switch (frame.operation) {
-                .binary => |operation| try self.frames.push(.{ .binary = .{
+                .binary => |operation| self.frames.pushReserved(.{ .binary = .{
                     .operation = operation,
                     .left = if (frame.left_scalar) frame.left else list.atUnchecked(frame.left, index),
                     .right = if (frame.right_scalar) frame.right.? else list.atUnchecked(frame.right.?, index),
                     .depth = frame.depth + 1,
                     .logical_index = index,
                 } }),
-                .unary => |operation| try self.frames.push(.{ .unary = .{
+                .unary => |operation| self.frames.pushReserved(.{ .unary = .{
                     .operation = operation,
                     .operand = list.atUnchecked(frame.left, index),
                     .depth = frame.depth + 1,
@@ -428,16 +449,16 @@ pub const PervadeCursor = struct {
             return true;
         }
         if (frame.materializer == null)
-            frame.materializer = .init(self.allocator, frame.values);
+            frame.materializer = .init(self.allocator, frame.values.values());
         try self.frames.reserve(1);
         switch (try frame.materializer.?.advance(budget)) {
             .pending => {
-                try self.frames.push(.{ .list = frame.* });
+                self.frames.pushReserved(.{ .list = frame.* });
                 return false;
             },
             .complete => |result| {
                 frame.result = result;
-                try self.frames.push(.{ .list = frame.* });
+                self.frames.pushReserved(.{ .list = frame.* });
                 return false;
             },
         }
@@ -452,7 +473,10 @@ pub const PervadeCursor = struct {
             @intCast(dictionary.dict.length());
         const pairs = try self.allocator.alloc(dict.Pair, capacity);
         errdefer self.allocator.free(pairs);
-        try self.frames.push(.{ .dictionary = .{
+        var values = try heap.OwnedValueBuffer.init(self.releases, capacity);
+        errdefer values.deinit();
+        try self.frames.reserve(1);
+        self.frames.pushReserved(.{ .dictionary = .{
             .mode = if (both)
                 .{ .both = node.operation }
             else if (node.left == .dict)
@@ -463,6 +487,7 @@ pub const PervadeCursor = struct {
             .right = node.right,
             .depth = node.depth,
             .pairs = pairs,
+            .values = values.take(),
         } });
     }
 
@@ -472,15 +497,9 @@ pub const PervadeCursor = struct {
         frame: *DictFrame,
         budget: usize,
     ) MachineError!bool {
-        errdefer frame.deinit(self.allocator);
+        errdefer frame.deinit(self.releases, self.allocator);
         if (frame.phase == .release) {
-            if (frame.release_index != frame.pair_count) {
-                heap.releaseValue(self.allocator, frame.pairs[frame.release_index][1]);
-                frame.release_index += 1;
-                try self.frames.reserve(1);
-                try self.frames.push(.{ .dictionary = frame.* });
-                return true;
-            }
+            frame.values.deinit();
             self.allocator.free(frame.pairs);
             const result = frame.result.?;
             frame.result = null;
@@ -488,6 +507,7 @@ pub const PervadeCursor = struct {
             return true;
         }
         if (frame.waiting) {
+            frame.values.appendOwned(self.last.?);
             frame.pairs[frame.pair_count][1] = self.last.?;
             self.last = null;
             frame.pair_count += 1;
@@ -504,7 +524,7 @@ pub const PervadeCursor = struct {
             try self.frames.reserve(1);
             switch (try frame.materializer.?.advance(budget)) {
                 .pending => {
-                    try self.frames.push(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame.* });
                     return false;
                 },
                 .duplicate_key => unreachable,
@@ -513,7 +533,7 @@ pub const PervadeCursor = struct {
                     frame.materializer = null;
                     frame.result = result;
                     frame.phase = .release;
-                    try self.frames.push(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame.* });
                     return false;
                 },
             }
@@ -529,29 +549,29 @@ pub const PervadeCursor = struct {
                 if (frame.index == count) {
                     frame.phase = .materialize;
                     try self.frames.reserve(1);
-                    try self.frames.push(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame.* });
                     return true;
                 }
                 const index = frame.index;
                 frame.pairs[frame.pair_count][0] = dict.keyAt(dictionary.dict, index);
                 frame.waiting = true;
                 try self.frames.reserve(2);
-                try self.frames.push(.{ .dictionary = frame.* });
+                self.frames.pushReserved(.{ .dictionary = frame.* });
                 switch (frame.mode) {
-                    .unary => |operation| try self.frames.push(.{ .unary = .{
+                    .unary => |operation| self.frames.pushReserved(.{ .unary = .{
                         .operation = operation,
                         .operand = dict.valueAt(dictionary.dict, index),
                         .depth = frame.depth + 1,
                         .logical_index = index,
                     } }),
-                    .left => |operation| try self.frames.push(.{ .binary = .{
+                    .left => |operation| self.frames.pushReserved(.{ .binary = .{
                         .operation = operation,
                         .left = dict.valueAt(dictionary.dict, index),
                         .right = frame.right.?,
                         .depth = frame.depth + 1,
                         .logical_index = index,
                     } }),
-                    .right => |operation| try self.frames.push(.{ .binary = .{
+                    .right => |operation| self.frames.pushReserved(.{ .binary = .{
                         .operation = operation,
                         .left = frame.left,
                         .right = dict.valueAt(dictionary.dict, index),
@@ -576,19 +596,19 @@ pub const PervadeCursor = struct {
                         frame.candidate = 0;
                     } else frame.phase = .materialize;
                     try self.frames.reserve(1);
-                    try self.frames.push(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame.* });
                     return true;
                 }
                 if (frame.candidate == other_count) {
                     const key = dict.keyAt(source.dict, frame.index);
                     const item = dict.valueAt(source.dict, frame.index);
-                    heap.retainValue(item);
+                    frame.values.appendBorrowed(item);
                     frame.pairs[frame.pair_count] = .{ key, item };
                     frame.pair_count += 1;
                     frame.index += 1;
                     frame.candidate = 0;
                     try self.frames.reserve(1);
-                    try self.frames.push(.{ .dictionary = frame.* });
+                    self.frames.pushReserved(.{ .dictionary = frame.* });
                     return true;
                 }
                 if (frame.match_cursor == null) frame.match_cursor = try .init(
@@ -599,7 +619,7 @@ pub const PervadeCursor = struct {
                 try self.frames.reserve(2);
                 switch (try frame.match_cursor.?.advance(budget)) {
                     .pending => {
-                        try self.frames.push(.{ .dictionary = frame.* });
+                        self.frames.pushReserved(.{ .dictionary = frame.* });
                         return false;
                     },
                     .complete => |matches| {
@@ -607,21 +627,21 @@ pub const PervadeCursor = struct {
                         frame.match_cursor = null;
                         if (!matches) {
                             frame.candidate += 1;
-                            try self.frames.push(.{ .dictionary = frame.* });
+                            self.frames.pushReserved(.{ .dictionary = frame.* });
                             return false;
                         }
                         if (frame.phase == .right) {
                             frame.index += 1;
                             frame.candidate = 0;
-                            try self.frames.push(.{ .dictionary = frame.* });
+                            self.frames.pushReserved(.{ .dictionary = frame.* });
                             return false;
                         }
                         const index = frame.index;
                         const candidate = frame.candidate;
                         frame.pairs[frame.pair_count][0] = dict.keyAt(frame.left.dict, index);
                         frame.waiting = true;
-                        try self.frames.push(.{ .dictionary = frame.* });
-                        try self.frames.push(.{ .binary = .{
+                        self.frames.pushReserved(.{ .dictionary = frame.* });
+                        self.frames.pushReserved(.{ .binary = .{
                             .operation = operation,
                             .left = dict.valueAt(frame.left.dict, index),
                             .right = dict.valueAt(frame.right.?.dict, candidate),
@@ -638,10 +658,6 @@ pub const PervadeCursor = struct {
 
 fn selectLeafBinary(operation: BinaryOp, left: HeapKind, right: HeapKind) ?ScalarBinary {
     return binary_matrix[@intFromEnum(operation)][@intFromEnum(left)][@intFromEnum(right)];
-}
-
-pub fn matrixEntryForTest(operation: BinaryOp, left: HeapKind, right: HeapKind) bool {
-    return selectLeafBinary(operation, left, right) != null;
 }
 
 fn selectScalar(operation: BinaryOp) ScalarBinary {
@@ -911,12 +927,6 @@ fn isAtom(item: Value) bool {
         .int, .float, .char, .symbol, .word => true,
         .list, .dict, .task => false,
     };
-}
-
-test "numeric dispatch matrix rejects symbols explicitly" {
-    try std.testing.expect(selectLeafBinary(.add, .leaf_i64, .leaf_f64) != null);
-    try std.testing.expect(selectLeafBinary(.add, .leaf_symbol, .leaf_i64) == null);
-    try std.testing.expect(selectLeafBinary(.sub, .leaf_char1, .leaf_char4) != null);
 }
 
 test "numeric scalar semantics include exact mixed comparison and chars" {
