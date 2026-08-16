@@ -12,8 +12,8 @@ test "embedded prelude exposes source bodies and derived dataflow" {
     try support.expectStacks(&.{
         .{
             .name = "source bodies",
-            .source = "'wrap body 'literal body 'pair body 'sort body 'pack body",
-            .expected = "(() cons) (wrap (first) cons) (() cons cons) (dup grade at) (() swap (cons) times)",
+            .source = "'wrap body 'literal body 'partial body 'pair body 'sort body 'pack body",
+            .expected = "(() cons) (wrap (first) cons) (swap literal swap compose) (() cons cons) (dup grade at) (() swap (cons) times)",
         },
         .{ .name = "pack", .source = "1 2 3 4 4 pack", .expected = "[1 2 3 4]" },
         .{ .name = "partition", .source = "[1 2 3 4] (2 >) partition", .expected = "[3 4] [1 2]" },
@@ -34,6 +34,11 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .source = "(foo) first literal dup type",
             .expected = "((foo) first) 'list",
         },
+        .{
+            .name = "partial application",
+            .source = "3 (2 *) partial call (foo) first (type) partial call",
+            .expected = "6 'word",
+        },
         .{ .name = "outcomes", .source = "(2 3 +) attempt ok? (2 3 +) attempt or-raise (missing) attempt 9 or-else", .expected = "1 [5] 9" },
         .{
             .name = "cleaves",
@@ -51,8 +56,10 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         .{
             .name = "sequence construction",
             .source = "[1 2 3] last 7 wrap 7 8 pair 1 2 3 3 pack [1 2] 3 append " ++
-                "[] empty? [1] empty? [1 2] [3 4] zip [3 1 2] sort",
-            .expected = "3 [7] [7 8] [1 2 3] [1 2 3] 1 0 ([1 3] [2 4]) [1 2 3]",
+                "[1 2 3] uncons [1 2 3] unappend [] empty? [1] empty? " ++
+                "[1 2] [3 4] zip [3 1 2] sort",
+            .expected = "3 [7] [7 8] [1 2 3] [1 2 3] 1 [2 3] [1 2] 3 " ++
+                "1 0 ([1 3] [2 4]) [1 2 3]",
         },
         .{
             .name = "selection and aggregation",
@@ -65,13 +72,13 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose bodies and nonempty documentation" {
     const names = [_][]const u8{
-        "nip",     "keep",      "bi",      "tri",    "bi2",    "both",
-        "when",    "unless",    "case",    "signum", "clamp",  "last",
-        "wrap",    "literal",   "pair",    "pack",   "append", "empty?",
-        "zip",     "min-of",    "max-of",  "sort",   "at-or",  "pairs",
-        "filter",  "partition", "any?",    "all?",   "sum",    "prod",
-        "mean",    "print",     "inspect", "fail",   "ok?",    "or-raise",
-        "or-else", "find",
+        "nip",    "keep",     "bi",       "tri",     "bi2",       "both",
+        "when",   "unless",   "case",     "signum",  "clamp",     "last",
+        "wrap",   "literal",  "partial",  "pair",    "pack",      "append",
+        "uncons", "unappend", "empty?",   "zip",     "min-of",    "max-of",
+        "sort",   "at-or",    "pairs",    "filter",  "partition", "any?",
+        "all?",   "sum",      "prod",     "mean",    "print",     "inspect",
+        "fail",   "ok?",      "or-raise", "or-else", "find",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(

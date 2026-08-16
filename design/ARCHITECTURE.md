@@ -32,15 +32,15 @@ Decision 21's doctrine becomes two enforced rules:
    | values + RC | 4,200 | 3,731 |
    | reader | 3,300 | 2,451 |
    | machine | 5,600 | 5,495 |
-   | modules and registry | 4,400 | 4,176 |
+   | modules and registry | 4,400 | 4,203 |
    | bootstrap prelude loader | 150 | 86 |
    | combinators | 1,200 | 748 |
    | definition annotations and doc normalization | 1,000 | 901 |
-   | primitive documentation | 300 | 158 |
+   | primitive documentation | 300 | 159 |
    | CLI and source formatter | 1,900 | 1,428 |
    | kernels and idioms | 8,500 | 5,590 |
-   | scheduler and concurrency | 3,500 | 2,639 |
-   | **business-logic Zig total** | **30,000** | **27,403** |
+   | scheduler and concurrency | 3,500 | 2,662 |
+   | **business-logic Zig total** | **30,000** | **27,454** |
 
    The M7 recalibration supersedes the earlier 22,000 total and 5,500 kernel
    ceilings. Scheduler-safe kernels, task joins, failure unwinding, snapshot
@@ -287,7 +287,10 @@ publication critical sections.
   id/fn pointer; core is the outermost env. This kills string-match
   dispatch, makes shadowing uniform, and gives d.9's module hardening one
   representation to bind against. Each word resolves exactly once per
-  execution.
+  execution. Host-registered primitives must carry both a validated effect
+  and nonempty documentation; registration normalizes and copies the borrowed
+  documentation into the same immutable binding snapshot used by `doc`,
+  `which`, and `see`.
 
 ## Environments and late binding
 
@@ -553,12 +556,24 @@ out). Kernels never own threads.
   and `ParkResume` expose the sole projections for their owned value graph and,
   for requests, their selected task sequence. Wait registration, abandonment,
   and deinitialization do not repeat tag-to-payload ownership switches.
-- **Join result teardown owns one heap root:** task-join accumulation uses an
-  exact-capacity `OwnedValueBuffer`. Abandonment retires the buffer's single
+- **Join result teardown owns one heap root:** evaluator-owned join
+  accumulation uses an exact-capacity `OwnedValueBuffer`. Abandonment retires
+  the buffer's single
   generic-spine root, and the shared release domain traverses its results later;
   the fixed tagged teardown state sequences only the task input, result root,
-  optional raised value, and terminal disposition. No result-sized loop
-  survives.
+  optional raised value, and terminal disposition. That disposition
+  distinguishes continuation from OOM. A terminal language failure consumes
+  those same fixed roots through one bounded cleanup advance before leaving
+  the evaluator; abandoned Units use the scheduler teardown cursor. No
+  result-sized loop survives.
+- **`par-each` owns construction and joining without dictionary authority.**
+  Its public primitive installs a `WorkDriver` that owns the input sequence,
+  quotation, and exact task buffer. Each slice publishes the unchanged
+  quotation with an explicit borrowed seed; initialization retains that seed
+  as the child's sole initial stack value. Completion transfers the task list
+  into the evaluator's ordered join state. The join state is a private tagged
+  machine representation, not a private binding, and name resolution has no
+  privileged core-access mode.
 - **Runtime retirement has one allocator-scoped owner.** `ReleaseDomain` is the
   sole value-graph walker and bounded external-retirement scheduler. Dropping `OwnedValue` performs only the refcount
   transition and intrusively queues a zero-count object; scheduler/root turns
@@ -712,8 +727,9 @@ out). Kernels never own threads.
 - **Determinism lives at join points**, never in scheduling: program-
   order `await-all` outcomes and `par-each` leftmost-error are
   schedule-invariant. `await-all` is the source-defined `(await) each` fan-in;
-  the private task-join capability exists only for `par-each`'s one-result,
-  suffix-cancellation, and re-raise contract. The only sanctioned
+  the public `par-each` primitive transfers its tasks directly into the
+  evaluator's ordered one-result, suffix-cancellation, and re-raise state.
+  No internal join word exists. The only sanctioned
   nondeterminism is `await-any` and cross-unit IO
   interleaving. Enforced by running the suite at 1 and N workers.
 - **Cold start is a budget** (the soul test: `ecl '3 4 +'` answers

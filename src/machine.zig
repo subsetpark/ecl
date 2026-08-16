@@ -744,14 +744,12 @@ pub fn stringValue(
         .complete => |item| return item,
     };
 }
-const CoreAccess = enum { public, task_join };
 const Eval = struct {
     code: *Header,
     ip: u32,
     scope: *env.Scope,
     home: ?*modules.ModuleHome,
     traced_word: u32,
-    core_access: CoreAccess,
 };
 const BoundaryMode = union(enum) {
     attempt: *env.Scope,
@@ -2371,7 +2369,6 @@ pub const Machine = struct {
                                 .scope = scope,
                                 .home = home,
                                 .traced_word = no_word,
-                                .core_access = .public,
                             };
                         },
                     }
@@ -2643,11 +2640,17 @@ pub const Machine = struct {
     pub fn beginTaskJoinOwned(
         self: *Machine,
         tasks: Value,
-        ok_id: u32,
-        err_id: u32,
     ) MachineError!void {
         std.debug.assert(tasks == .list);
         std.debug.assert(self.unit.native == .idle);
+        const ok_id = intern.intern("ok") catch {
+            self.beginTaskJoinInputCleanup(tasks, .out_of_memory);
+            return;
+        };
+        const err_id = intern.intern("err") catch {
+            self.beginTaskJoinInputCleanup(tasks, .out_of_memory);
+            return;
+        };
         const count: usize = @intCast(tasks.list.length());
         const results = heap.OwnedValueBuffer.init(self.unit.releases, count) catch {
             self.beginTaskJoinInputCleanup(tasks, .out_of_memory);
@@ -2665,9 +2668,6 @@ pub const Machine = struct {
             .request => |index| requestTaskJoin(self, index, null),
             .finish => try finishTaskJoin(self),
         }
-    }
-    pub fn beginTaskJoinInputCleanupOwned(self: *Machine, tasks: Value) void {
-        self.beginTaskJoinInputCleanup(tasks, .continue_evaluation);
     }
     fn beginTaskJoinInputCleanup(
         self: *Machine,
@@ -2813,7 +2813,6 @@ pub const Machine = struct {
     pub fn callOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
         const scope = self.unit.current.?.scope;
         const home = self.unit.current.?.home;
-        const core_access = self.unit.current.?.core_access;
         const inherited_trace = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
@@ -2824,7 +2823,6 @@ pub const Machine = struct {
             .scope = scope,
             .home = home,
             .traced_word = inherited_trace,
-            .core_access = core_access,
         };
     }
     /// Consumes both values and restores `protected` after the quotation.
@@ -2835,7 +2833,6 @@ pub const Machine = struct {
     ) error{OutOfMemory}!void {
         const scope = self.unit.current.?.scope;
         const home = self.unit.current.?.home;
-        const core_access = self.unit.current.?.core_access;
         const inherited_trace = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(quotation);
             self.releaseDomain().releaseValue(protected);
@@ -2853,7 +2850,6 @@ pub const Machine = struct {
             .scope = scope,
             .home = home,
             .traced_word = inherited_trace,
-            .core_access = core_access,
         };
     }
     /// Starts one quotation application behind a base-index stack barrier.
@@ -2929,7 +2925,6 @@ pub const Machine = struct {
             .scope = child orelse application.parent_scope,
             .home = application.home,
             .traced_word = inherited_trace,
-            .core_access = .public,
         };
     }
     pub fn attemptOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
@@ -2981,7 +2976,6 @@ pub const Machine = struct {
             .scope = generation_scope,
             .home = home,
             .traced_word = no_word,
-            .core_access = .public,
         };
     }
     pub fn raiseOwned(self: *Machine, raised: Value) MachineError {
@@ -3033,7 +3027,6 @@ pub const Machine = struct {
             .scope = child,
             .home = home,
             .traced_word = no_word,
-            .core_access = .public,
         };
     }
     fn appendFrame(self: *Machine, owned: *OwnedFrame) error{OutOfMemory}!void {
@@ -3101,10 +3094,24 @@ pub const NativeMachine = opaque {
 };
 pub const RunStatus = enum { completed, yielded, parked };
 
-pub fn initialize(unit: *Unit, code: *Header) void {
+pub const InitialStack = union(enum) {
+    empty,
+    /// The caller keeps its reference through initialization; the Unit
+    /// retains an independent stack-owned reference before returning.
+    borrowed_seed: Value,
+};
+
+pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
     std.debug.assert(unit.frames.items.len == 0);
     std.debug.assert(unit.pending == null and unit.last_error == null);
     std.debug.assert(unit.current == null);
+    switch (initial_stack) {
+        .empty => {},
+        .borrowed_seed => |seed| {
+            try unit.stack.append(unit.allocator, seed);
+            heap.retainValue(seed);
+        },
+    }
     heap.incRef(code);
     unit.current = .{
         .code = code,
@@ -3112,7 +3119,6 @@ pub fn initialize(unit: *Unit, code: *Header) void {
         .scope = unit.execution_scope orelse unit.rootScope(),
         .home = null,
         .traced_word = no_word,
-        .core_access = .public,
     };
 }
 
@@ -3131,7 +3137,7 @@ pub fn armCancellationBeforeDispatch(unit: *Unit) void {
 }
 
 pub fn run(unit: *Unit, code: *Header) MachineError!void {
-    initialize(unit, code);
+    try initialize(unit, code, .empty);
     while (true) {
         const status = try runSlice(unit);
         _ = unit.releases.advance(kernel_poll_quantum);
@@ -3195,6 +3201,11 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 .detached => continue,
                 .failed => {
                     clearWorkDriver(self.unit);
+                    if (self.unit.native == .task_join_cleanup) {
+                        const cleanup = self.unit.advanceTaskJoinCleanup(kernel_poll_quantum);
+                        std.debug.assert(cleanup.complete);
+                        std.debug.assert(cleanup.disposition.? == .continue_evaluation);
+                    }
                     return error.Ecl;
                 },
             }
@@ -3543,7 +3554,6 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 resolved.trace_word,
                 resolved.home,
                 if (cross_home) resolved.lease.effect else null,
-                .public,
             );
         },
         .primitive => |primitive| {
@@ -3583,11 +3593,7 @@ const DirectWordFallback = struct {
     body: *Header,
     word: u32,
     pub fn run(evaluator: *Machine, self: *DirectWordFallback) MachineError!void {
-        const access: CoreAccess = if (std.mem.eql(u8, intern.get(self.word), "par-each"))
-            .task_join
-        else
-            .public;
-        return scheduleWord(evaluator, self.body, self.word, null, null, access);
+        return scheduleWord(evaluator, self.body, self.word, null, null);
     }
     pub fn destroy(
         releases: *heap.ReleaseDomain,
@@ -3649,7 +3655,6 @@ pub const ResolutionCursor = struct {
     acquisition: ?modules.Registry.AcquireCursor = null,
     generation: ?modules.GenerationLease = null,
     export_lookup: ?modules.ModuleGeneration.ResolveCursor = null,
-    allow_private_core: bool,
 
     pub fn init(evaluator: *Machine, word: u32) ResolutionCursor {
         const spelling = intern.get(word);
@@ -3663,7 +3668,6 @@ pub const ResolutionCursor = struct {
             .spelling = spelling,
             .dot = intern.dotCursor(spelling),
             .scope = evaluator.unit.current.?.scope,
-            .allow_private_core = evaluator.unit.current.?.core_access == .task_join,
         };
     }
 
@@ -3860,9 +3864,7 @@ pub const ResolutionCursor = struct {
                     self.direct = null;
                     self.phase = .complete;
                     var lease = maybe_lease orelse break :result .{ .complete = null };
-                    const permitted_private = self.allow_private_core and
-                        std.mem.eql(u8, self.spelling, "task-join");
-                    if (lease.visibility == .private and !permitted_private) {
+                    if (lease.visibility == .private) {
                         lease.deinit();
                         break :result .{ .complete = null };
                     }
@@ -4064,7 +4066,6 @@ fn scheduleWord(
     word: u32,
     resolved_home: ?*modules.ModuleHome,
     effect: ?env.Effect,
-    core_access: CoreAccess,
 ) MachineError!void {
     const scope = if (resolved_home) |home| home.scope(self.unit.module_access) else self.unit.current.?.scope;
     const home = resolved_home orelse self.unit.current.?.home;
@@ -4083,7 +4084,6 @@ fn scheduleWord(
         .scope = scope,
         .home = home,
         .traced_word = word,
-        .core_access = core_access,
     };
 }
 fn prepareEffectCheck(

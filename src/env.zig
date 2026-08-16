@@ -172,6 +172,7 @@ pub const ModulePublication = union(enum) {
         callback: Primitive,
         visibility: Visibility,
         effect: ValidatedEffect,
+        doc: *DocumentationString,
     },
 };
 
@@ -215,6 +216,7 @@ const BindingSpec = struct {
                 .visibility = primitive.visibility,
                 .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
                 .effect = primitive.effect,
+                .doc = primitive.doc,
             },
         };
     }
@@ -1497,17 +1499,6 @@ pub const BuildingEnv = struct {
         inline for (definitions) |definition| {
             try self.installBuiltin(definition.name, definition.primitive);
         }
-    }
-    pub fn installInternalBuiltin(
-        self: *BuildingEnv,
-        comptime name: []const u8,
-        primitive: PrimitiveImpl,
-    ) error{OutOfMemory}!void {
-        comptime assertStaticNamespace(name);
-        try self.target.installCoreSpec(
-            try intern.trustedNamespace(name),
-            .{ .binding = .{ .builtin = primitive }, .visibility = .private },
-        );
     }
     pub fn runtime(self: *BuildingEnv) *Env {
         return self.target;

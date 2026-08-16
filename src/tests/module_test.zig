@@ -462,6 +462,7 @@ test "public native machine exposes a complete semantic stack capability" {
             .name = try intern.trustedNamespace("exercise"),
             .callback = nativeMachineSurface,
             .effect = effect,
+            .doc = "Exercise the complete native stack capability.",
         } }},
     );
 
@@ -484,6 +485,7 @@ test "public native failures carry their payload atomically" {
             .name = try intern.trustedNamespace("fail"),
             .callback = nativeFailure,
             .effect = effect,
+            .doc = "Return a native language failure.",
         } }},
     );
     try expectErrorContains(&runtime, "failing-native.fail", &.{
@@ -493,7 +495,7 @@ test "public native failures carry their payload atomically" {
     });
 }
 
-test "registry: native modules share ordinary generations and effects" {
+test "registry: native primitives expose ordinary reflective metadata" {
     const allocator = std.testing.allocator;
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();
@@ -519,17 +521,35 @@ test "registry: native modules share ordinary generations and effects" {
     const module_name = try intern.trustedNamespace("native");
     const answer_name = try intern.trustedNamespace("answer");
     try std.testing.expectEqual(@as(u64, 1), try runtime.registerNativeModule(module_name, &.{.{
-        .primitive = .{ .name = answer_name, .callback = nativeAnswer, .effect = effect },
+        .primitive = .{
+            .name = answer_name,
+            .callback = nativeAnswer,
+            .effect = effect,
+            .doc = "Return the native\nanswer.",
+        },
     }}));
-    try expectOk(&runtime, "native.answer 'native use answer 'n 'native alias n.answer 'native.answer which 'native.answer see");
-    for (runtime.stackItems()) |item| try std.testing.expectEqual(@as(i64, 42), item.int);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "native.answer") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- n)") != null);
+    try expectOk(&runtime, "native.answer 'native use answer 'n 'native alias n.answer " ++
+        "'native.answer doc \"Return the native answer.\" match " ++
+        "'native.answer which 'native.answer see");
+    for (runtime.stackItems()[0..3]) |item| try std.testing.expectEqual(@as(i64, 42), item.int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[3].int);
+    try std.testing.expectEqualStrings(
+        "native.answer -> native.answer primitive public generation 1 (-- n)\n" ++
+            "<primitive> (-- n : \"Return the native answer.\") 'native.answer def\n",
+        output.written(),
+    );
     try std.testing.expectEqual(@as(u64, 2), try runtime.registerNativeModule(module_name, &.{.{
-        .primitive = .{ .name = answer_name, .callback = nativeAnswerReloaded, .effect = effect },
+        .primitive = .{
+            .name = answer_name,
+            .callback = nativeAnswerReloaded,
+            .effect = effect,
+            .doc = "Return the reloaded native answer.",
+        },
     }}));
-    try expectOk(&runtime, "native.answer answer n.answer");
-    for (runtime.stackItems()[3..]) |item| try std.testing.expectEqual(@as(i64, 43), item.int);
+    try expectOk(&runtime, "native.answer answer n.answer " ++
+        "'native.answer doc \"Return the reloaded native answer.\" match");
+    for (runtime.stackItems()[4..7]) |item| try std.testing.expectEqual(@as(i64, 43), item.int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[7].int);
     try std.testing.expectError(
         error.InvalidName,
         intern.internNamespace("invalid.module"),
@@ -540,6 +560,15 @@ test "registry: native modules share ordinary generations and effects" {
         invalid_effect.list,
         separator,
     )) == null);
+    try std.testing.expectError(error.InvalidDefinition, runtime.registerNativeModule(
+        try intern.trustedNamespace("undocumented-native"),
+        &.{.{ .primitive = .{
+            .name = answer_name,
+            .callback = nativeAnswer,
+            .effect = effect,
+            .doc = " \n ",
+        } }},
+    ));
 }
 
 const EnvThreadContext = struct {
@@ -1240,6 +1269,9 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     defer heap.testing.releaseValue(allocator, effect_value);
     const separator = try intern.intern("--");
     const effect = (env.ValidatedEffect.parse(effect_value.list, separator)).?;
+    const document_value = try list.fromCodepoints(allocator, &.{ 'N', 'a', 't', 'i', 'v', 'e', '.' });
+    defer heap.testing.releaseValue(allocator, document_value);
+    const document = env.documentation(document_value.list).?;
     const first_name = try intern.trustedNamespace("allocation-module");
     const alias_name = try intern.trustedNamespace("allocation-alias");
     const second_name = try intern.trustedNamespace("allocation-native");
@@ -1250,6 +1282,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .callback = nativeAnswer,
         .visibility = .public,
         .effect = effect,
+        .doc = document,
     } });
     _ = try registry.commit(&first);
     try registry.alias(alias_name, first_name);
@@ -1261,12 +1294,14 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .callback = nativeAnswer,
         .visibility = .public,
         .effect = effect,
+        .doc = document,
     } });
     _ = try registry.commit(&second);
     _ = try registry.registerNative(second_name, &.{.{ .primitive = .{
         .name = word_name,
         .callback = nativeAnswer,
         .effect = effect,
+        .doc = "Native allocation probe.",
     } }});
 }
 

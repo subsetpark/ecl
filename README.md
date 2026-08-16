@@ -153,8 +153,11 @@ Large native operations, result publication, joins, and cancellation walks
 resume in bounded scheduler slices; no task runs another task recursively on
 its suspended native stack.
 
-`par-each` is source-defined and uses a private join capability for its
-one-result-per-child, suffix-cancellation, and leftmost-failure contract.
+`par-each` is a public primitive backed by a bounded native driver. It spawns
+each child with the element as an explicit initial stack value, then transfers
+the exact task list into the evaluator's ordered join state. That state
+enforces the one-result-per-child, suffix-cancellation, and leftmost-failure
+contract; it is not a word and grants no private dictionary authority.
 Successful results and the leftmost failure are stable across worker counts.
 Cross-task console calls and genuinely concurrent `await-any` completions may
 reorder. Use `par-each` for coarse independent work; ordinary pervasive array

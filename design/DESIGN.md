@@ -108,13 +108,14 @@ are preserved. Nothing below is constrained by compatibility.
    leases retain their old body and metadata safely. No Thunk concept.
 
 6. **No closures, ever.** A quotation is a plain inspectable list. Safe
-   arbitrary-value capture is `literal` plus `compose`, producing visible
-   structure (`3 literal (+) compose` → `((3) first +)`). `cons` remains raw
+   arbitrary-value partial application is `partial`, defined transparently
+   from `literal` plus `compose` and producing visible structure
+   (`3 (+) partial` → `((3) first +)`). `cons` remains raw
    structural prepend/form insertion; a word inserted into executable code
    will execute when that code is called.
    Locals are definition-site sugar that desugars to point-free code before
    storage; head-position only; not permitted across quotation boundaries in
-   v1 (the error suggests `literal` plus `compose`). Spelling: `(|lo hi| …)`,
+   v1 (the error suggests `partial`). Spelling: `(|lo hi| …)`,
    Rust/Ruby-style — see GRAMMAR.md. The locals sugar does not invoke `set`;
    they are unrelated mechanisms.
 
@@ -222,7 +223,8 @@ are preserved. Nothing below is constrained by compatibility.
 
 11. **Effects/IO: plain impure words.** Sequential combinators guarantee
     left-to-right order, so IO inside `each`/`for` is well-defined.
-    `par-each` is stdlib over `spawn`/`await` (decision 20): result order
+    `par-each` is a scheduler primitive over the same task machinery as
+    `spawn`/`await` (decision 20): result order
     and leftmost-error are deterministic today; the deferred static
     checker's purity checking (decision 9) later *upgrades* it to full
     observational equivalence
@@ -256,7 +258,7 @@ are preserved. Nothing below is constrained by compatibility.
       leading axis, exactly one result per element; result specializes when
       rectangular. Depth composes by nesting: `((q) each) each`.
     - `each2`: requires `( a b -- c )`; zip with broadcast conformability.
-      Each-left/right are derived via `literal` plus `compose`, not primitives.
+      Each-left/right are derived via `partial`, not primitives.
     - `for`: requires `( a -- )`; the ordered effect loop, collects nothing.
     - `fold`/`scan`: require `( acc a -- acc )`.
     There is no collect-all `map` (result length would be a dynamic property
@@ -387,10 +389,10 @@ are preserved. Nothing below is constrained by compatibility.
 20. **Concurrency: tasks (structured futures), not actors.** Target scope
     is REPL / one-off CLI / scripting — the actor runtime (mailboxes,
     selective receive, named processes, supervisors) serves long-lived
-    stateful servers, which ecl does not target. Six primitives;
-    `await-all` and `par-each` are stdlib.
+    stateful servers, which ecl does not target. Seven public primitives;
+    `await-all` is stdlib.
     - `spawn` `( q -- task )`: runs a self-contained quotation (`attempt`'s
-      contract — inputs via `literal` plus `compose`/env, never ambient stack) on its own
+      contract — inputs via `partial`/env, never ambient stack) on its own
       share-nothing substack, concurrently. Immutability makes sharing
       safe with no copying or serialization.
     - `await` `( task -- outcome )`: parks its green unit without occupying a
@@ -406,9 +408,12 @@ are preserved. Nothing below is constrained by compatibility.
       one discards an isolated substack and leaves nothing.
     - `await-all` `( tasks -- outcomes )` is source-defined ordered fan-in:
       it waits for every task and preserves each ordinary outcome as data.
-      Task failure neither raises nor cancels siblings. `par-each` separately
+      Task failure neither raises nor cancels siblings. `par-each`
+      `( sequence quotation -- results )` is a public primitive with a bounded
+      seeded-spawn driver and an evaluator-owned ordered join state. It
       enforces one result per child, cancels the suffix after the leftmost
-      failure, waits for quiescence, and re-raises that failure.
+      failure, waits for quiescence, and re-raises that failure. The join state
+      is not installed in the dictionary at all.
     - **`attempt` ≡ `spawn await`.** The error model is the synchronous
       degenerate case of the concurrency model.
     - **Structured lifetime:** a dying unit cancels its unawaited tasks
@@ -629,8 +634,9 @@ implementation matter, not a design matter.
       never routed through the scheduler.
     - **par-each guarantees no cross-element rendezvous:** elements may
       run fully serially or chunked; a program whose elements must run
-      concurrently to progress is already broken. This licenses a
-      chunking [P] override of the prelude definition.
+      concurrently to progress is already broken. Its [P] driver publishes
+      tasks with explicit one-value initial stacks in bounded chunks before
+      entering the ordered join state.
     - **Line budget (recalibrated 2026-08-14 for strong type boundaries):**
       classified shipped business-logic Zig ≤ 22k lines including kernels,
       while tests, fixtures, build/source-audit verification tooling, and all

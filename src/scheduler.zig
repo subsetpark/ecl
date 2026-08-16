@@ -927,6 +927,7 @@ pub const SpawnRequest = struct {
     parent_scope: *env.Scope,
     parent_home: ?*modules.ModuleHome,
     quotation: *ListHandle,
+    initial_stack: machine.InitialStack = .empty,
 };
 
 pub const SpawnError = error{ OutOfMemory, Io };
@@ -1083,10 +1084,10 @@ pub const WorkerScheduler = enum(usize) {
         unit.task_scope = &cell.scope;
         unit.is_root_unit = false;
         if (request.parent_home) |generation| try unit.pinGeneration(generation);
+        try machine.initialize(unit, request.quotation, request.initial_stack);
         const identity = state_.next_identity.fetchAdd(1, .monotonic);
         const header = try heap.createTask(TaskCell, self.allocator(), identity, cell);
         cell.header_state = .{ .published = header };
-        machine.initialize(unit, request.quotation);
         cell.publication = .{ .active = execution };
 
         std.Io.Threaded.mutexLock(&state_.tree_mutex);
@@ -1127,7 +1128,7 @@ pub const WorkerScheduler = enum(usize) {
         code: *ListHandle,
     ) machine.MachineError!void {
         const state_ = self.privateState();
-        machine.initialize(unit, code);
+        try machine.initialize(unit, code, .empty);
         while (true) {
             const status = machine.runSlice(unit) catch |err| {
                 if (err == error.OutOfMemory) self.drainAbandonedRootWork(unit);

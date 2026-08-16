@@ -22,6 +22,8 @@ test "concurrency: cold sessions start no threads and spawn starts the fixed poo
     defer runtime.deinit();
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
+    try runOk(&runtime, "[] (missing) par-each pop");
+    try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     try runOk(&runtime, "(1 2 +) spawn await");
     try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
     try std.testing.expectEqual(@as(usize, 0), runtime.schedulerTimerThreadCount());
@@ -253,7 +255,7 @@ test "concurrency: large task outcomes materialize across scheduler slices" {
     try std.testing.expectEqualStrings("70000", actual);
 }
 
-test "concurrency: task-join failure cancellation reaches sibling descendants" {
+test "concurrency: par-each failure cancellation reaches sibling descendants" {
     var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(
@@ -264,7 +266,7 @@ test "concurrency: task-join failure cancellation reaches sibling descendants" {
     );
 }
 
-test "concurrency: await-any ties and source par-each preserve program order" {
+test "concurrency: await-any ties and par-each preserve program order" {
     var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 8 });
     defer runtime.deinit();
     try runOk(&runtime, "(10) spawn dup await pop dup pair await-any pop");
@@ -275,6 +277,15 @@ test "concurrency: await-any ties and source par-each preserve program order" {
     actual = try display(&runtime);
     try std.testing.expectEqualStrings("[1 4 9]", actual);
     runtime.hostAllocator().free(actual);
+}
+
+test "concurrency: par-each seeds children without resolving capture helpers" {
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    defer runtime.deinit();
+    try runOk(&runtime, "(pop 99) (x -- y) 'first def [1 2 3] () par-each");
+    const actual = try display(&runtime);
+    defer runtime.hostAllocator().free(actual);
+    try std.testing.expectEqualStrings("[1 2 3]", actual);
 }
 
 test "concurrency: source await-all is ordered outcome fan-in" {
@@ -326,7 +337,7 @@ test "concurrency: complete console calls do not interleave bytes" {
         std.mem.eql(u8, written, "bbbbaaaa"));
 }
 
-test "concurrency: task-join remains internal to source par-each" {
+test "concurrency: primitive par-each is reflective and task-join is absent" {
     var output_bytes: [4096]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_bytes);
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output);
@@ -341,9 +352,44 @@ test "concurrency: task-join remains internal to source par-each" {
         .err => |failure| runtime.release(failure),
         .ok, .incomplete => return error.ExpectedLanguageError,
     }
-    try runOk(&runtime, "words");
+    try runOk(
+        &runtime,
+        "'par-each doc " ++
+            "\"Apply a quotation concurrently to every list element and return one result per element in input order.\" match " ++
+            "'par-each which 'par-each see words",
+    );
+    const reflected = try display(&runtime);
+    defer runtime.hostAllocator().free(reflected);
+    try std.testing.expectEqualStrings("1", reflected);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output.buffered(),
+        "par-each -> par-each primitive public (sequence quotation -- results)\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        output.buffered(),
+        "<primitive> (sequence quotation -- results : \"Apply a quotation concurrently to every list element and return one result per element in input order.\") 'par-each def\n",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "await-all") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "par-each") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "task-join") == null);
+}
+
+test "concurrency: terminal par-each child errors settle join cleanup" {
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    defer runtime.deinit();
+    for ([_][]const u8{ "[1] (dup) par-each", "[1] (missing) par-each" }) |source| {
+        switch (try runtime.runUnit("concurrency.ecl", source)) {
+            .err => |failure| runtime.release(failure),
+            .ok, .incomplete => return error.ExpectedLanguageError,
+        }
+        try runOk(&runtime, "tasks len");
+        const actual = try display(&runtime);
+        try std.testing.expectEqualStrings("0", actual);
+        runtime.hostAllocator().free(actual);
+        try runOk(&runtime, "pop");
+    }
 }
 
 test "concurrency: exit is root-owned outside attempt" {

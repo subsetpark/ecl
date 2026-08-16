@@ -56,7 +56,7 @@
     # Extract the even key slots, compare the captured subject with each,
     # and let find's len-on-miss result select the final else quotation.
     clauses dup len 2 div range 2 * at
-    subject literal (match) compose each 1 find at call)
+    subject (match) partial each 1 find at call)
    call)
   (pop pop {'kind 'shape 'msg "case requires a nonempty odd clause list ending in else"} raise)
   if)
@@ -95,6 +95,12 @@
 (value -- quotation : "Return a quotation that pushes the exact value as inert data when called.")
 'literal def
 
+### def partial
+(swap literal swap compose)
+(value quotation -- quotation :
+ "Return a quotation that pushes an inert captured value before running another quotation.")
+'partial def
+
 ### def pair
 (() cons cons)
 (first second -- list : "Collect two stack values into a two-element list in stack order.")
@@ -109,6 +115,16 @@
 (wrap cat)
 (sequence value -- sequence : "Append one value to the end of a sequence.")
 'append def
+
+### def uncons
+(dup first swap rest)
+(list -- first rest : "Split a nonempty list into its first element and remaining elements.")
+'uncons def
+
+### def unappend
+(reverse uncons reverse swap)
+(list -- initial last : "Split a nonempty list into its initial elements and last element.")
+'unappend def
 
 ### def empty?
 (len 0 =)
@@ -218,7 +234,7 @@
 'or-else def
 
 ### def find
-(|sequence needle| sequence needle literal (match) compose each dup where swap len swap dup len 0 =
+(|sequence needle| sequence needle (match) partial each dup where swap len swap dup len 0 =
  (pop)
  (first nip)
  if)
@@ -231,13 +247,3 @@
 (tasks -- outcomes :
  "Wait for every task and return its outcome in input order.")
 'await-all def
-
-### def par-each
-(|l q|
- l type 'list match ({'kind 'type 'msg "par-each expected a list"} raise) unless
- q type 'list match ({'kind 'type 'msg "par-each expected a quotation"} raise) unless
- l (literal) q literal compose (compose spawn) compose each
- task-join)
-(sequence quotation -- results :
- "Apply a quotation concurrently to every element and return one result per element in input order.")
-'par-each def

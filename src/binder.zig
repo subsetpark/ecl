@@ -193,7 +193,7 @@ pub const LowerCursor = struct {
                     if (found != null) {
                         self.diag.setFmt(
                             self.body[self.body_index].span,
-                            "local `{s}` crosses a quotation boundary; capture it explicitly with `literal` and `compose`",
+                            "local `{s}` crosses a quotation boundary; capture it explicitly with `partial`",
                             .{intern.get(matched_id)},
                         );
                         return error.Parse;
@@ -488,7 +488,7 @@ test "boundary-crossing rejection" {
         &diag,
     ));
     try std.testing.expectEqualStrings(
-        "local `x` crosses a quotation boundary; capture it explicitly with `literal` and `compose`",
+        "local `x` crosses a quotation boundary; capture it explicitly with `partial`",
         diag.text(),
     );
 }

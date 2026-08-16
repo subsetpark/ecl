@@ -39,9 +39,10 @@ proof that the language can build itself).
 | | word | effect | |
 |---|---|---|---|
 | [P] | `call`    | `( q -- … )` | inline application (Joy's `i`) |
-| [P] | `cons`    | `( x l -- l' )` | raw structural prepend. On data: `1 [2 3] cons` → `[1 2 3]`. On code it inserts a form: a prepended word executes when the result is called, so `cons` is not universally safe partial application. Factor's `curry` instead preserves a captured word as literal data |
+| [P] | `cons`    | `( x l -- l' )` | raw structural prepend. On data: `1 [2 3] cons` → `[1 2 3]`. On code it inserts a form: a prepended word executes when the result is called, so `cons` is not universally safe partial application |
 | [P] | `compose` | `( q r -- qr )` | concatenate quotations |
-| [E] | `literal` | `( x -- q )` | build the plain, inspectable quotation `((x) first)` as `wrap (first) cons`; calling it pushes the exact captured value without executing or resolving it. Use `literal` plus `compose` for safe arbitrary-value capture |
+| [E] | `literal` | `( x -- q )` | build the plain, inspectable quotation `((x) first)` as `wrap (first) cons`; calling it pushes the exact captured value without executing or resolving it |
+| [E] | `partial` | `( x q -- q' )` | safe partial application: capture `x` inertly, then run `q`; defined as `swap literal swap compose`, so even a captured word remains data |
 | [P] | `if`      | `( bool then else -- … )` | inline; branches run on current stack |
 | [E] | `when`    | `( bool then -- … )` | `() if` |
 | [E] | `unless`  | `( bool else -- … )` | `() swap if` |
@@ -149,6 +150,7 @@ Indexing is **0-based** throughout (K convention): `range` counts from
 | [P] | `first`    | `( l -- x )` | |
 | [E] | `last`     | `( l -- x )` | |
 | [P] | `rest`     | `( l -- l' )` | |
+| [E] | `uncons`   | `( l -- x l' )` | split a nonempty list into its first element and remaining elements |
 | [P] | `take`     | `( l n -- l' )` | negative n: from the end; n beyond len cycles the data (K) — ruled 2026-08-12 |
 | [P] | `drop`     | `( l n -- l' )` | sequence drop (K sense); stack word is `pop` |
 | [P] | `at`       | `( l i -- x )` | index; pervasive over `i` (index vectors select) |
@@ -161,6 +163,7 @@ Indexing is **0-based** throughout (K convention): `range` counts from
 | [E] | `pair`     | `( x y -- l )` | two-element list |
 | [E] | `pack`     | `( x₁ … xₙ n -- l )` | collect the top nonnegative `n` values in original order; `() swap (cons) times`; literal `n` is checker-inferable, dynamic `n` is an unknown-effect escape hatch (d.9) |
 | [E] | `append`   | `( l x -- l' )` | `wrap cat` (K `,`) |
+| [E] | `unappend` | `( l -- l' x )` | inverse of single-value `append`; split a nonempty list into its initial elements and last element |
 | [E] | `empty?`   | `( l -- bool )` | `len 0 =` |
 | [E] | `zip`      | `( l m -- l' )` | `(pair) each2` |
 | [E] | `min-of`   | `( l -- x )` | `dup first (min) fold` (K `&/`) |
@@ -241,7 +244,7 @@ pushes its elements.)
 | [P] | `cancel`    | `( task -- )` | no-op if done |
 | [P] | `tasks`     | `( -- l )` | pending descendants in deterministic spawn preorder |
 | [E] | `await-all` | `( tasks -- outcomes )` | await every task; ordinary outcomes in input order; never re-raise task failures |
-| [E] | `par-each`  | `( l q -- l' )` | one task per element; ordered results; indexed one-result contract; re-raise leftmost `'err` after sibling quiescence |
+| [P] | `par-each`  | `( l q -- l' )` | bounded native task construction; one task per element; ordered results; indexed one-result contract; re-raise leftmost `'err` after sibling quiescence |
 
 ## IO
 
@@ -272,6 +275,24 @@ pushes its elements.)
  "Return a quotation that pushes the exact value as inert data when called.")
 'literal def
 
+### def partial
+(swap literal swap compose)
+(value quotation -- quotation :
+ "Return a quotation that pushes an inert captured value before running another quotation.")
+'partial def
+
+### def uncons
+(dup first swap rest)
+(list -- first rest :
+ "Split a nonempty list into its first element and remaining elements.")
+'uncons def
+
+### def unappend
+(reverse uncons reverse swap)
+(list -- initial last :
+ "Split a nonempty list into its initial elements and last element.")
+'unappend def
+
 ### def pack
 (() swap (cons) times)
 (: "Collect the requested number of preceding stack values into a list, preserving their order.")
@@ -289,7 +310,7 @@ selection pipeline is intentionally shown in readable, commented form in
 prelude definition follows the same `### def <name>` navigation convention and
 exposes a meaningful nonempty string through `doc`.
 
-Counts: roughly 80 primitives and 38 prelude words. The kernel surface
+Counts: 107 primitives and 42 prelude words. The kernel surface
 (decision 21's optimization target) is the pervasive arithmetic plus
 the [P] list/dict words plus the iteration combinators — about forty
 loops.

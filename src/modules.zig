@@ -5,6 +5,9 @@ const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const poll = @import("poll.zig");
 const snapshot_api = @import("snapshot.zig");
+const storage = @import("kernel_storage.zig");
+const doc_text = @import("doc.zig");
+const value = @import("value.zig");
 
 pub const ModuleGeneration = struct {
     allocator: std.mem.Allocator,
@@ -430,6 +433,8 @@ pub const NativePrimitive = struct {
     name: intern.NamespaceName,
     callback: env.Primitive,
     effect: env.ValidatedEffect,
+    /// Borrowed on every exit; a successful registration owns a normalized copy.
+    doc: []const u8,
     visibility: env.Visibility = .public,
 };
 pub const NativeWord = struct {
@@ -1312,14 +1317,20 @@ pub const Registry = enum(usize) {
         var candidate = try self.createCandidate(name);
         errdefer candidate.deinit();
         for (definitions) |definition| {
+            var document_value: ?value.Value = null;
+            defer if (document_value) |document| self.releaseDomain().releaseValue(document);
             const publication: env.ModulePublication, const definition_name = switch (definition) {
-                .primitive => |primitive| .{ .{
-                    .primitive = .{
-                        .callback = primitive.callback,
-                        .visibility = primitive.visibility,
-                        .effect = primitive.effect,
-                    },
-                }, primitive.name },
+                .primitive => |primitive| publication: {
+                    document_value = try self.nativeDocumentation(primitive.doc);
+                    break :publication .{ .{
+                        .primitive = .{
+                            .callback = primitive.callback,
+                            .visibility = primitive.visibility,
+                            .effect = primitive.effect,
+                            .doc = env.documentation(document_value.?.list).?,
+                        },
+                    }, primitive.name };
+                },
                 .word => |word| .{ .{
                     .word = .{
                         .body = word.body,
@@ -1340,6 +1351,31 @@ pub const Registry = enum(usize) {
             };
         }
         return self.commit(&candidate);
+    }
+
+    fn nativeDocumentation(
+        self: *Registry,
+        source: []const u8,
+    ) RegistryError!value.Value {
+        var materializer = storage.TextMaterializer.init(self.allocator(), source);
+        defer materializer.retire(self.releaseDomain());
+        const document = while (true) switch (try materializer.advance(1024)) {
+            .pending => {},
+            .complete => |complete| break complete,
+        };
+        defer self.releaseDomain().releaseValue(document);
+
+        var normalizer = try doc_text.NormalizeCursor.init(self.allocator(), document);
+        defer normalizer.retire(self.releaseDomain());
+        const normalized = while (true) switch (try normalizer.advance(1024)) {
+            .pending => {},
+            .complete => |complete| break complete,
+        };
+        if (normalized.list.length() == 0) {
+            self.releaseDomain().releaseValue(normalized);
+            return error.InvalidDefinition;
+        }
+        return normalized;
     }
 
     pub fn beginLoading(

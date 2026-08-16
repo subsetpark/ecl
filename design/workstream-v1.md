@@ -478,8 +478,11 @@ kill-on-arrival and waiter-list removal, structured lifetime with
 wait-for-quiescence at scope close, cancelled outcomes as
 `{'err {'kind 'cancelled …}}`, one timer thread + binary heap for
 `await-for`, stdout whole-write lock. Vocabulary: `spawn await
-await-any await-for cancel tasks` [P] and `await-all par-each` [E]
-(`par-each` retains the chunking license, d.23). The determinism suite runs
+await-any await-for cancel tasks par-each` [P] and `await-all` [E]. The
+bounded `par-each` driver represents each captured element directly as the
+child Unit's one-value initial stack, publishes tasks without synthesizing or
+copying quotations, and transfers them to an evaluator-owned ordered join
+state. No private join word is installed. The determinism suite runs
 the full test corpus at 1 worker and N workers asserting identical outcomes.
 The soul test still spawns zero threads. Before parallel parsing is enabled, the
 M1 intern table's tryLock spin loop is replaced with a blocking mutex so
@@ -1186,13 +1189,16 @@ script in CI.
     registration; a declared effect is enforced dynamically when a call
     enters from outside its home module; same-home calls are unbracketed;
     optional documentation shares the same annotation and is visible via
-    `doc`/`see`.
+    `doc`/`see`. Host-registered primitives require nonempty documentation,
+    normalize and copy it during registration, and expose that metadata through
+    `doc`, `which`, and `see` like ordinary primitive bindings.
   - **Verify by** `cmd`: `ecl -e "'m ( (dup +) 'bad def ) module"`;
     `ecl -e "'m ( (dup +) ( a -- b c ) 'lies def ) module 1 m.lies"`;
     `ecl -e "'m ( (dup +) ( a -- b : \"Double.\" ) 'dbl def ) module 'm.dbl see 'm.dbl doc"`;
     and `zig build test`, whose
     `module: effect shape cross-home contract and same-home TCO` fixture compares
-    20- and 20,000-deep module countdowns.
+    20- and 20,000-deep module countdowns and whose native-module fixture checks
+    all three reflection commands plus metadata replacement on reload.
   - **Expected**: exit ≠ 0 with `'kind 'domain` (missing declaration);
     exit ≠ 0 with `'kind 'contract` (observed `( a -- b )` ≠ declared
     `( a -- b c )`); `see` output includes
