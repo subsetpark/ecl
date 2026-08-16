@@ -6,6 +6,7 @@ packages:
   # compilation requires the Linux UAPI headers (linux/futex.h et al.).
   - linux-headers
   - cargo
+  - expect
 sources:
   - https://git.sr.ht/~subsetpark/ecl
 tasks:
@@ -28,6 +29,15 @@ tasks:
   - test-fast: |
       cd ecl
       zig build test -Doptimize=ReleaseFast
+  - test-repl: |
+      cd ecl
+      zig build test-repl
+      zig build test-repl -Doptimize=ReleaseSafe
+  - fuzz: |
+      cd ecl
+      for target in reader formatter editor completion history scheduler; do
+        zig build "fuzz-$target" --fuzz=100
+      done
   - test-workers: |
       cd ecl
       zig build test-workers -Doptimize=ReleaseSafe

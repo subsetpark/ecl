@@ -15,9 +15,9 @@ fn expectStack(runtime: *session.Session, source: []const u8, expected: []const 
             return error.TestUnexpectedResult;
         },
     }
-    const display = try runtime.stackDisplay();
-    defer allocator.free(display);
-    try std.testing.expectEqualStrings(expected, display);
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings(expected, display.bytes());
 }
 
 fn expectCancelledAfterSetup(

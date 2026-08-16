@@ -478,9 +478,12 @@ const PpDriver = struct {
             .pending => .yielded,
             .complete => |rendered| completed: {
                 defer evaluator.allocator().free(rendered);
-                var locked = if (evaluator.unit.console) |console| console.lockOutput() else null;
-                defer if (locked) |*lease| lease.deinit();
-                const output = if (locked) |*lease| lease.writer else evaluator.unit.output.?;
+                if (evaluator.unit.console) |console| {
+                    console.writeOutput(rendered, true) catch
+                        return evaluator.fail(.io, "standard output write failed");
+                    break :completed .completed;
+                }
+                const output = evaluator.unit.output.?;
                 output.writeAll(rendered) catch
                     return evaluator.fail(.io, "standard output write failed");
                 output.writeByte('\n') catch
@@ -527,9 +530,12 @@ const PrinDriver = struct {
             .pending => .yielded,
             .complete => |encoded| completed: {
                 defer evaluator.allocator().free(encoded);
-                var locked = if (evaluator.unit.console) |console| console.lockOutput() else null;
-                defer if (locked) |*lease| lease.deinit();
-                const output = if (locked) |*lease| lease.writer else evaluator.unit.output.?;
+                if (evaluator.unit.console) |console| {
+                    console.writeOutput(encoded, false) catch
+                        return evaluator.fail(.io, "standard output write failed");
+                    break :completed .completed;
+                }
+                const output = evaluator.unit.output.?;
                 output.writeAll(encoded) catch
                     return evaluator.fail(.io, "standard output write failed");
                 output.flush() catch

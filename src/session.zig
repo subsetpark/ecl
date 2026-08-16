@@ -13,6 +13,8 @@ const prelude = @import("prelude.zig");
 const idioms = @import("idioms.zig");
 const printer = @import("print.zig");
 const intern = @import("intern.zig");
+const poll = @import("poll.zig");
+const reflection = @import("reflection.zig");
 const scheduler_api = @import("scheduler.zig");
 const console_api = @import("console.zig");
 const session_options = @import("session_options");
@@ -36,6 +38,88 @@ pub const Config = union(enum) {
     }
 };
 pub const default_worker_count: usize = session_options.default_worker_count;
+
+const CompletionBacking = struct {
+    allocator: std.mem.Allocator,
+    candidates: [][]const u8,
+    bytes: []u8,
+};
+
+/// Owned rendered completion candidates. Candidate slices borrow from this
+/// result and remain valid independently of the Session until `deinit`.
+pub const CompletionSet = enum(usize) {
+    consumed = 0,
+    empty = 1,
+    _,
+
+    fn fromBacking(owned: *CompletionBacking) CompletionSet {
+        return @enumFromInt(@intFromPtr(owned));
+    }
+    fn backing(self: CompletionSet) *CompletionBacking {
+        std.debug.assert(self != .consumed and self != .empty);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    pub fn items(self: CompletionSet) []const []const u8 {
+        std.debug.assert(self != .consumed);
+        return if (self == .empty) &.{} else self.backing().candidates;
+    }
+    pub fn deinit(self: *CompletionSet) void {
+        if (self.* == .consumed) return;
+        if (self.* != .empty) {
+            const owned = self.backing();
+            const allocator = owned.allocator;
+            allocator.free(owned.bytes);
+            allocator.free(owned.candidates);
+            allocator.destroy(owned);
+        }
+        self.* = .consumed;
+    }
+};
+
+const RenderedTextBacking = struct {
+    allocator: std.mem.Allocator,
+    bytes: []u8,
+};
+
+/// Opaque owned rendering. Bytes remain valid independently of the Session
+/// until `deinit`, while the allocator and reclamation root stay private.
+pub const RenderedText = enum(usize) {
+    consumed = 0,
+    empty = 1,
+    _,
+
+    fn fromOwned(allocator: std.mem.Allocator, owned_bytes: []u8) error{OutOfMemory}!RenderedText {
+        if (owned_bytes.len == 0) {
+            allocator.free(owned_bytes);
+            return .empty;
+        }
+        const owned = allocator.create(RenderedTextBacking) catch |err| {
+            allocator.free(owned_bytes);
+            return err;
+        };
+        owned.* = .{ .allocator = allocator, .bytes = owned_bytes };
+        return @enumFromInt(@intFromPtr(owned));
+    }
+    fn backing(self: RenderedText) *RenderedTextBacking {
+        std.debug.assert(self != .consumed and self != .empty);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    pub fn bytes(self: RenderedText) []const u8 {
+        std.debug.assert(self != .consumed);
+        return if (self == .empty) "" else self.backing().bytes;
+    }
+    pub fn deinit(self: *RenderedText) void {
+        if (self.* == .consumed) return;
+        if (self.* != .empty) {
+            const owned = self.backing();
+            const allocator = owned.allocator;
+            allocator.free(owned.bytes);
+            allocator.destroy(owned);
+        }
+        self.* = .consumed;
+    }
+};
+
 const SessionCore = struct {
     module_access_seal: u8 = 0,
     host_owner: *heap.HostOwner,
@@ -313,7 +397,7 @@ pub const Session = enum(usize) {
         };
         return .ok;
     }
-    pub fn stackDisplay(self: *const Session) error{OutOfMemory}![]u8 {
+    pub fn stackDisplay(self: *const Session) error{OutOfMemory}!RenderedText {
         const core = self.coreState();
         var allocating = std.Io.Writer.Allocating.init(core.allocator());
         defer allocating.deinit();
@@ -322,21 +406,102 @@ pub const Session = enum(usize) {
             printer.printWithAllocator(core.allocator(), item, &allocating.writer) catch
                 return error.OutOfMemory;
         }
-        return allocating.toOwnedSlice();
+        return .fromOwned(core.allocator(), try allocating.toOwnedSlice());
+    }
+    pub fn renderValue(self: *const Session, item: Value) error{OutOfMemory}!RenderedText {
+        const allocator = self.coreState().allocator();
+        return .fromOwned(allocator, try printer.toOwnedString(allocator, item));
+    }
+    /// Runs one blocking observation turn without exposing environment,
+    /// registry, or reclamation authority. The rendered result owns no lease
+    /// and can therefore outlive this Session.
+    pub fn completionCandidates(
+        self: *Session,
+        prefix: []const u8,
+    ) error{OutOfMemory}!CompletionSet {
+        const core = self.coreState();
+        var turn = BlockingMutationTurn{ .scheduler = &core.scheduler };
+        defer turn.deinit();
+        var found = poll.ChunkList(u32).init(core.allocator());
+        defer found.retire(core.releaseDomain());
+
+        const dot = firstDot(prefix);
+        if (dot) |separator| {
+            if (separator == 0 or firstDot(prefix[separator + 1 ..]) != null) return .empty;
+            const namespace_bytes = prefix[0..separator];
+            const word_prefix = prefix[separator + 1 ..];
+            const namespace_id = lookupInterned(namespace_bytes) orelse return .empty;
+            if (!validNamespace(namespace_id)) return .empty;
+            var acquisition = core.registry.acquireCursor(namespace_id);
+            defer acquisition.deinit();
+            const maybe_generation: ?modules.GenerationLease = acquisition_loop: {
+                while (true) switch (acquisition.advance()) {
+                    .pending => {},
+                    .complete => |candidate| break :acquisition_loop candidate,
+                };
+            };
+            const generation = maybe_generation orelse return .empty;
+            var generation_lease = generation;
+            defer generation_lease.deinit();
+            var names = generation_lease.publicNameCursor();
+            defer names.deinit();
+            while (true) switch (names.advance()) {
+                .pending => {},
+                .complete => break,
+                .name => |name| if (std.mem.startsWith(u8, intern.get(name), word_prefix))
+                    try found.append(name),
+            };
+            return materializeCompletion(core.allocator(), &found, namespace_bytes);
+        }
+
+        const root: reflection.VisibleNameRoot = if (core.root_scope) |scope|
+            .{ .scope = scope }
+        else
+            .{ .environment = core.environment.sessionView() };
+        var visible = reflection.VisibleNameCursor.init(
+            root,
+            core.environment.coreView(),
+            &core.registry,
+        );
+        defer visible.deinit();
+        while (true) switch (visible.advance()) {
+            .pending => {},
+            .complete => break,
+            .name => |name| if (std.mem.startsWith(u8, intern.get(name), prefix))
+                try found.append(name),
+        };
+        var namespaces = core.registry.namespaceCursor();
+        defer namespaces.deinit();
+        while (true) switch (namespaces.advance()) {
+            .pending => {},
+            .complete => break,
+            .name => |name| {
+                const id = intern.namespaceId(name);
+                if (std.mem.startsWith(u8, intern.get(id), prefix)) try found.append(id);
+            },
+        };
+        return materializeCompletion(core.allocator(), &found, null);
     }
     pub fn writeOutput(self: *Session, bytes: []const u8) error{WriteFailed}!void {
-        var lease = self.coreState().console.lockOutput() orelse return error.WriteFailed;
-        defer lease.deinit();
-        lease.writer.writeAll(bytes) catch return error.WriteFailed;
-        lease.writer.flush() catch return error.WriteFailed;
+        return self.coreState().console.writeOutput(bytes, false);
+    }
+    /// Capabilities the REPL editor is given. It never receives the Session,
+    /// the console, a writer, or a byte slice it could turn into a control
+    /// sequence; the operations it can perform are the ones on these types.
+    ///
+    /// Both are rooted in the heap-stable core rather than in this handle,
+    /// which is explicitly movable. A capability that captured the handle's
+    /// address would dangle the moment the Session value was moved.
+    pub fn editorTerminal(self: *const Session) EditorTerminal {
+        return @enumFromInt(@intFromEnum(self.*));
+    }
+    pub fn completionObserve(self: *const Session) CompletionObserve {
+        return @enumFromInt(@intFromEnum(self.*));
     }
     /// Releases a value returned by this Session into its reclamation domain.
     /// The value must not be used afterward; traversal remains scheduler-owned.
     pub fn release(self: *Session, item: Value) void {
         self.coreState().releaseDomain().releaseValue(item);
-    }
-    pub fn hostAllocator(self: *const Session) std.mem.Allocator {
-        return self.coreState().allocator();
     }
     pub fn stackItems(self: *const Session) []const Value {
         return self.coreState().stack.items;
@@ -378,24 +543,13 @@ pub const Session = enum(usize) {
         return self.coreState().last_idiom_hits;
     }
     pub fn writeOutputLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
-        var lease = self.coreState().console.lockOutput() orelse return error.WriteFailed;
-        defer lease.deinit();
-        lease.writer.writeAll(bytes) catch return error.WriteFailed;
-        lease.writer.writeByte('\n') catch return error.WriteFailed;
-        lease.writer.flush() catch return error.WriteFailed;
+        return self.coreState().console.writeOutput(bytes, true);
     }
     pub fn writeDiagnostics(self: *Session, bytes: []const u8) error{WriteFailed}!void {
-        var lease = self.coreState().console.lockDiagnostics() orelse return error.WriteFailed;
-        defer lease.deinit();
-        lease.writer.writeAll(bytes) catch return error.WriteFailed;
-        lease.writer.flush() catch return error.WriteFailed;
+        return self.coreState().console.writeDiagnostics(bytes, false);
     }
     pub fn writeDiagnosticsLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
-        var lease = self.coreState().console.lockDiagnostics() orelse return error.WriteFailed;
-        defer lease.deinit();
-        lease.writer.writeAll(bytes) catch return error.WriteFailed;
-        lease.writer.writeByte('\n') catch return error.WriteFailed;
-        lease.writer.flush() catch return error.WriteFailed;
+        return self.coreState().console.writeDiagnostics(bytes, true);
     }
     pub fn registerNativeModule(
         self: *Session,
@@ -427,6 +581,204 @@ pub const Session = enum(usize) {
         return self.coreState().scheduler.timerEntryCount();
     }
 };
+
+/// Terminal authority for the line editor: prompts, named effects, candidate
+/// lists, and — only where the row can actually be measured — single-row
+/// redraw. There is no operation that emits program output or accepts
+/// caller-supplied control bytes, so their absence is a fact about the type
+/// rather than a rule someone has to remember.
+///
+/// The payload is the heap-stable core, which is what makes the capability
+/// outlive moves of the Session handle that minted it.
+pub const EditorTerminal = enum(usize) {
+    _,
+
+    fn owner(self: EditorTerminal) Session {
+        return @enumFromInt(@intFromEnum(self));
+    }
+    /// Single-row editing needs a measured row. Null means the caller must use
+    /// the canonical reader; no width is ever invented on its behalf.
+    pub fn row(self: EditorTerminal) ?RowTerminal {
+        return switch (console_api.geometry()) {
+            .known => |columns| .{ .terminal = self, .columns = columns },
+            .unavailable => null,
+        };
+    }
+    pub fn writePrompt(self: EditorTerminal, prompt: console_api.Prompt) error{WriteFailed}!void {
+        var session = self.owner();
+        return session.coreState().console.writePrompt(prompt);
+    }
+    pub fn signal(self: EditorTerminal, action: console_api.TerminalAction) error{WriteFailed}!void {
+        var session = self.owner();
+        return session.coreState().console.signal(action);
+    }
+    pub fn writeCandidates(
+        self: EditorTerminal,
+        candidates: []const []const u8,
+    ) error{WriteFailed}!void {
+        var session = self.owner();
+        return session.coreState().console.writeCandidates(candidates);
+    }
+};
+
+/// Row drawing, reachable only from a measured row width.
+pub const RowTerminal = struct {
+    terminal: EditorTerminal,
+    columns: console_api.Columns,
+
+    pub fn redraw(
+        self: RowTerminal,
+        prompt: console_api.Prompt,
+        view: console_api.DisplayView,
+    ) error{WriteFailed}!void {
+        var session = self.terminal.owner();
+        return session.coreState().console.redraw(self.columns, prompt, view);
+    }
+};
+
+/// Name observation for completion. It can render matching names and nothing
+/// else: no environment, registry, intern, or reclamation authority.
+pub const CompletionObserve = enum(usize) {
+    _,
+
+    pub fn candidates(
+        self: CompletionObserve,
+        prefix: []const u8,
+    ) error{OutOfMemory}!CompletionSet {
+        var session: Session = @enumFromInt(@intFromEnum(self));
+        return session.completionCandidates(prefix);
+    }
+};
+
+fn sessionReturnExposesAuthority(comptime T: type, comptime depth: u8) bool {
+    if (T == std.mem.Allocator or
+        T == std.Io or
+        T == std.Io.Writer or
+        T == SessionCore or
+        T == OpaqueSessionCore or
+        T == heap.HostOwner or
+        T == heap.ReleaseDomain or
+        T == env.Env or
+        T == env.EnvironmentView or
+        T == modules.Registry or
+        T == machine.Unit or
+        T == scheduler_api.Scheduler or
+        T == console_api.Console)
+        return true;
+    if (depth == 0) return false;
+    return switch (@typeInfo(T)) {
+        .optional => |optional| sessionReturnExposesAuthority(optional.child, depth - 1),
+        .pointer => |pointer| sessionReturnExposesAuthority(pointer.child, depth - 1),
+        .array => |array| sessionReturnExposesAuthority(array.child, depth - 1),
+        .vector => |vector| sessionReturnExposesAuthority(vector.child, depth - 1),
+        .error_union => |error_union| sessionReturnExposesAuthority(error_union.payload, depth - 1),
+        .@"struct" => |structure| exposed: {
+            inline for (structure.fields) |field|
+                if (sessionReturnExposesAuthority(field.type, depth - 1)) break :exposed true;
+            break :exposed false;
+        },
+        .@"union" => |union_info| exposed: {
+            inline for (union_info.fields) |field|
+                if (sessionReturnExposesAuthority(field.type, depth - 1)) break :exposed true;
+            break :exposed false;
+        },
+        else => false,
+    };
+}
+
+comptime {
+    for (std.meta.declarations(Session)) |declaration| {
+        const declaration_info = @typeInfo(@TypeOf(@field(Session, declaration.name)));
+        if (declaration_info != .@"fn") continue;
+        const return_type = declaration_info.@"fn".return_type orelse continue;
+        if (sessionReturnExposesAuthority(return_type, 8))
+            @compileError("public Session return exposes owner authority: " ++ declaration.name);
+    }
+}
+
+fn firstDot(bytes: []const u8) ?usize {
+    var cursor = intern.dotCursor(bytes);
+    while (true) switch (cursor.advance()) {
+        .pending => {},
+        .complete => |index| return index,
+    };
+}
+
+fn lookupInterned(bytes: []const u8) ?u32 {
+    var cursor = intern.lookupCursor(bytes);
+    while (true) switch (cursor.advance()) {
+        .pending => {},
+        .complete => |id| return id,
+    };
+}
+
+fn validNamespace(id: u32) bool {
+    var cursor = intern.NamespaceCursor.init(id);
+    while (true) switch (cursor.advance()) {
+        .pending => {},
+        .complete => |name| return name != null,
+    };
+}
+
+fn materializeCompletion(
+    allocator: std.mem.Allocator,
+    found: *poll.ChunkList(u32),
+    qualifier: ?[]const u8,
+) error{OutOfMemory}!CompletionSet {
+    if (found.count == 0) return .empty;
+    const names = try allocator.alloc(u32, found.count);
+    defer allocator.free(names);
+    var iterator = found.iterator();
+    var index: usize = 0;
+    while (iterator.next()) |name| : (index += 1) names[index] = name.*;
+    if (names.len > 1) {
+        var sorter = try reflection.NameSortCursor.init(allocator, names);
+        defer sorter.deinit();
+        while (sorter.advance(256) == .pending) {}
+    }
+    var unique_count: usize = 0;
+    var byte_count: usize = 0;
+    var previous: ?u32 = null;
+    for (names) |name| {
+        if (previous != null and previous.? == name) continue;
+        previous = name;
+        unique_count += 1;
+        byte_count = std.math.add(usize, byte_count, intern.get(name).len) catch
+            return error.OutOfMemory;
+        if (qualifier) |namespace| {
+            byte_count = std.math.add(usize, byte_count, namespace.len + 1) catch
+                return error.OutOfMemory;
+        }
+    }
+    const backing = try allocator.create(CompletionBacking);
+    errdefer allocator.destroy(backing);
+    const candidates = try allocator.alloc([]const u8, unique_count);
+    errdefer allocator.free(candidates);
+    const bytes = try allocator.alloc(u8, byte_count);
+    errdefer allocator.free(bytes);
+    var written: usize = 0;
+    var candidate_index: usize = 0;
+    previous = null;
+    for (names) |name| {
+        if (previous != null and previous.? == name) continue;
+        previous = name;
+        const start = written;
+        if (qualifier) |namespace| {
+            @memcpy(bytes[written..][0..namespace.len], namespace);
+            written += namespace.len;
+            bytes[written] = '.';
+            written += 1;
+        }
+        const atom = intern.get(name);
+        @memcpy(bytes[written..][0..atom.len], atom);
+        written += atom.len;
+        candidates[candidate_index] = bytes[start..written];
+        candidate_index += 1;
+    }
+    backing.* = .{ .allocator = allocator, .candidates = candidates, .bytes = bytes };
+    return .fromBacking(backing);
+}
+
 fn restoreCheckpoint(unit: *machine.Unit, checkpoint: []const Value) void {
     unit.restoreStackBorrowedAssumeCapacity(checkpoint);
 }
@@ -460,9 +812,9 @@ test "session runs the soul test" {
     var session = try Session.init(allocator, &.{});
     defer session.deinit();
     try std.testing.expect((try session.runUnit("<test>", "3 4 +")) == .ok);
-    const display = try session.stackDisplay();
-    defer allocator.free(display);
-    try std.testing.expectEqualStrings("7", display);
+    var display = try session.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("7", display.bytes());
 }
 test "failed units roll back stack while definitions survive" {
     const allocator = std.testing.allocator;

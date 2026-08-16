@@ -435,9 +435,11 @@ const WhichDriver = struct {
             .pending => return .yielded,
             .complete => |bytes| self.rendered = bytes,
         };
-        var locked = if (evaluator.unit.console) |console| console.lockOutput() else null;
-        defer if (locked) |*lease| lease.deinit();
-        const output = if (locked) |*lease| lease.writer else try outputWriter(evaluator);
+        if (evaluator.unit.console) |console| {
+            console.writeOutput(self.rendered.?, false) catch return writeFailure(evaluator);
+            return .completed;
+        }
+        const output = try outputWriter(evaluator);
         output.writeAll(self.rendered.?) catch return writeFailure(evaluator);
         output.flush() catch return evaluator.fail(.io, "standard output flush failed");
         return .completed;
@@ -562,9 +564,11 @@ const SeeDriver = struct {
             .pending => return .yielded,
             .complete => |bytes| self.rendered = bytes,
         };
-        var locked = if (evaluator.unit.console) |console| console.lockOutput() else null;
-        defer if (locked) |*lease| lease.deinit();
-        const output = if (locked) |*lease| lease.writer else try outputWriter(evaluator);
+        if (evaluator.unit.console) |console| {
+            console.writeOutput(self.rendered.?, false) catch return writeFailure(evaluator);
+            return .completed;
+        }
+        const output = try outputWriter(evaluator);
         output.writeAll(self.rendered.?) catch return writeFailure(evaluator);
         output.flush() catch return evaluator.fail(.io, "standard output flush failed");
         return .completed;

@@ -1,0 +1,336 @@
+#!/usr/bin/expect -f
+encoding system utf-8
+set timeout 15
+# Single-row editing requires a measurable row, and an Expect pty has no size
+# unless one is set. Without this the interpreter correctly falls back to the
+# canonical reader, so give the test terminal real geometry.
+set stty_init "rows 24 columns 80"
+set binary [lindex $argv 0]
+if {$binary eq ""} {
+    puts stderr "usage: repl.exp /path/to/ecl"
+    exit 2
+}
+set temporary [exec mktemp -d]
+
+proc fail_case {name message} {
+    puts stderr "FAIL: $name: $message"
+    exit 1
+}
+
+proc start_repl {binary home name} {
+    global spawn_id
+    spawn -noecho env HOME=$home ECL_WORKERS=1 $binary
+    expect {
+        "ecl> " {}
+        timeout { fail_case $name "primary prompt timed out" }
+        eof { fail_case $name "process exited before primary prompt" }
+    }
+}
+
+proc expect_stack {name value} {
+    expect {
+        -re "\\r\\n\[^\\r\\n\]*${value}(\\.0)?\\r?\\n" {}
+        timeout { fail_case $name "did not evaluate to $value" }
+        eof { fail_case $name "process exited before result $value" }
+    }
+    expect {
+        "ecl> " {}
+        timeout { fail_case $name "next primary prompt timed out" }
+        eof { fail_case $name "process exited before next prompt" }
+    }
+}
+
+proc clean_eof {name} {
+    send "\004"
+    expect {
+        eof {}
+        timeout { fail_case $name "Ctrl-D did not exit" }
+    }
+    set status [lindex [wait] 3]
+    if {$status != 0} { fail_case $name "Ctrl-D exit status was $status" }
+}
+
+proc expect_input_error {name label} {
+    expect {
+        -re {'kind '(parse|undefined-word)} {}
+        timeout { fail_case $name "$label did not produce a language error" }
+        eof { fail_case $name "process exited during $label" }
+    }
+    expect {
+        "ecl> " {}
+        timeout { fail_case $name "$label did not return to the primary prompt" }
+        eof { fail_case $name "process exited after $label" }
+    }
+}
+
+proc send_hex {hex} {
+    global spawn_id
+    set saved_encoding [fconfigure $spawn_id -encoding]
+    fconfigure $spawn_id -encoding binary
+    send -raw -- [binary format H* $hex]
+    fconfigure $spawn_id -encoding $saved_encoding
+}
+
+set first_turn_home [file join $temporary first-turn]
+file mkdir $first_turn_home
+set name "repl pty: first-turn completion uses the core cursor"
+start_repl $binary $first_turn_home $name
+send "9 sq\t\r"
+expect_stack $name 3
+clean_eof $name
+puts "PASS: $name"
+
+set name "repl pty: cursor editing and single-match completion"
+start_repl $binary $temporary $name
+send "13x +\033\[H\033\[C \033\[C\033\[3~\r"
+expect_stack $name 4
+send "9 sq\t\r"
+expect_stack $name 3
+send "1 λ\177 2 +\r"
+expect_stack $name 3
+clean_eof $name
+puts "PASS: $name"
+
+set name "repl pty: completion respects the pending unit's lexical state"
+start_repl $binary $temporary $name
+# The string opens on one physical line and the cursor is inside it on the
+# next, so Tab must not rewrite string data into a word name.
+send "\"hello\r"
+expect {
+    ".. " {}
+    timeout { fail_case $name "unterminated string did not continue" }
+    eof { fail_case $name "process exited before the continuation prompt" }
+}
+send "sq\t\""
+expect {
+    -re {\.\. sq"} {}
+    -re "sqrt" { fail_case $name "completion edited string data" }
+    timeout { fail_case $name "string body was not preserved" }
+    eof { fail_case $name "process exited inside the string" }
+}
+send "\r"
+expect {
+    "ecl> " {}
+    timeout { fail_case $name "next primary prompt timed out" }
+    eof { fail_case $name "process exited after the string" }
+}
+# A comment is equally inert, and code after it completes normally again.
+send "1 # sq\t\r"
+expect {
+    "ecl> " {}
+    timeout { fail_case $name "comment line did not return to the prompt" }
+    eof { fail_case $name "process exited during the comment line" }
+}
+send "9 sq\t\r"
+expect_stack $name 3
+clean_eof $name
+puts "PASS: $name"
+
+set name "repl pty: queued lines survive raw-mode transitions"
+start_repl $binary $temporary $name
+send "1 2 +\r3 4 +\r"
+expect {
+    -re {\r\n3\r?\n\recl> } {}
+    timeout { fail_case $name "first queued line was not evaluated" }
+    eof { fail_case $name "process exited after the first queued line" }
+}
+expect {
+    -re {\r\n3 7\r?\n} {}
+    timeout { fail_case $name "second queued line was discarded" }
+    eof { fail_case $name "process exited before the second queued line" }
+}
+expect {
+    "ecl> " {}
+    timeout { fail_case $name "next primary prompt timed out" }
+    eof { fail_case $name "process exited before the next primary prompt" }
+}
+clean_eof $name
+puts "PASS: $name"
+
+set corpus_home [file join $temporary byte-corpus]
+file mkdir $corpus_home
+set name "repl pty: arbitrary byte corpus preserves history and terminal"
+set corpus_shell "HOME='$corpus_home' ECL_WORKERS=1 '$binary'; status=\$?; IFS= read -r probe; if \[ \"\$probe\" = terminal-check \]; then echo TERMINAL-RESTORED; fi; exit \$status"
+spawn -noecho sh -c $corpus_shell
+expect {
+    "ecl> " {}
+    timeout { fail_case $name "corpus process did not prompt" }
+    eof { fail_case $name "corpus process exited before the prompt" }
+}
+
+# A two-byte lead followed by Enter is malformed; the second Enter submits it.
+send_hex c20d0d
+expect_input_error $name "malformed two-byte UTF-8"
+
+# Preserve a truncated three-byte prefix as source and let the reader reject it.
+send_hex e2820d0d
+expect_input_error $name "truncated three-byte UTF-8"
+
+# A lead byte followed by ESC pulls the escape into the buffer, so the redraw
+# must show it escaped instead of replaying it as a terminal command.
+send_hex c21b5b324a
+expect {
+    -re {\\x1b\[2J} {}
+    -re "\033\\\[2J" { fail_case $name "redraw replayed a control sequence" }
+    timeout { fail_case $name "escaped control bytes were not displayed" }
+    eof { fail_case $name "process exited during control-byte display" }
+}
+send_hex 0d0d
+expect_input_error $name "escaped control bytes"
+
+# Unknown escapes are consumed as terminal input rather than inserted as source.
+send "1 2\033X +\r"
+expect_stack $name 3
+
+# A CSI prefix truncated by Ctrl-D must not terminate or corrupt the edit buffer.
+send "\033\[\004"
+expect {
+    "ecl> " {}
+    timeout { fail_case $name "truncated escape did not redraw" }
+    eof { fail_case $name "truncated escape terminated the process" }
+}
+send "5 6 +\r"
+expect_stack $name 11
+
+# Exit to a parent shell and prove the PTY is canonical and echoing after errors.
+send "\004"
+expect {
+    -re {\r\n} {}
+    timeout { fail_case $name "EOF did not return to the parent shell" }
+    eof { fail_case $name "parent shell exited before restoration check" }
+}
+send "terminal-check\r"
+expect {
+    -re {terminal-check\r\n} {}
+    timeout { fail_case $name "restored terminal did not echo canonical input" }
+    eof { fail_case $name "parent shell exited before echoing input" }
+}
+expect {
+    "TERMINAL-RESTORED" {}
+    timeout { fail_case $name "terminal restoration marker was absent" }
+    eof { fail_case $name "parent shell exited without restoration marker" }
+}
+expect eof
+set status [lindex [wait] 3]
+if {$status != 0} { fail_case $name "corpus process exited $status" }
+
+# Invalid physical lines must not reach disk; the remaining file is exact UTF-8.
+set history_path [file join $corpus_home .ecl_history]
+set history_file [open $history_path r]
+fconfigure $history_file -translation binary -encoding binary
+set history_bytes [read $history_file]
+close $history_file
+if {![string equal $history_bytes "1 2 +\n5 6 +\n"]} {
+    fail_case $name "history retained malformed bytes or lost valid lines"
+}
+
+# A new process must parse that history and recall its last physical line.
+start_repl $binary $corpus_home $name
+send "\033\[A\r"
+expect_stack $name 11
+clean_eof $name
+puts "PASS: $name"
+
+set name "repl pty: dotted completion lists only public exports"
+start_repl $binary $temporary $name
+send "'stats (1 'hidden setp 2 'mean set) module 'st 'stats alias\r"
+expect {
+    -re {\r\n\recl> } {}
+    timeout { fail_case $name "module setup did not finish" }
+    eof { fail_case $name "process exited during module setup" }
+}
+send "stats.\t\r"
+expect_stack $name 2
+send "st.\t\r"
+expect_stack $name 2
+clean_eof $name
+puts "PASS: $name"
+
+set name "repl pty: persisted history recalls the previous line"
+start_repl $binary $temporary $name
+send "40 2 +\r"
+expect_stack $name 42
+clean_eof $name
+start_repl $binary $temporary $name
+send "\033\[A\r"
+expect_stack $name 42
+clean_eof $name
+puts "PASS: $name"
+
+set name "repl pty: open forms keep the continuation prompt"
+start_repl $binary $temporary $name
+send "(1 2\r"
+expect {
+    ".. " {}
+    timeout { fail_case $name "continuation prompt timed out" }
+    eof { fail_case $name "process exited before continuation" }
+}
+send "\003"
+expect {
+    "ecl> " {}
+    timeout { fail_case $name "Ctrl-C did not restore primary prompt" }
+    eof { fail_case $name "process exited after Ctrl-C" }
+}
+send "(1 2\r"
+expect {
+    ".. " {}
+    timeout { fail_case $name "second continuation prompt timed out" }
+    eof { fail_case $name "process exited before second continuation" }
+}
+send ")\r"
+expect {
+    -re {\r\n\[1 2\]\r?\n} {}
+    timeout { fail_case $name "continued unit did not evaluate" }
+    eof { fail_case $name "process exited during continued unit" }
+}
+expect "ecl> "
+clean_eof $name
+
+start_repl $binary $temporary $name
+send "(1 2\r"
+expect {
+    ".. " {}
+    timeout { fail_case $name "pending-EOF continuation prompt timed out" }
+    eof { fail_case $name "process exited before pending EOF" }
+}
+send "\004"
+expect {
+    -re {unterminated|incomplete|expected} {}
+    timeout { fail_case $name "pending Ctrl-D did not report an incomplete unit" }
+    eof { fail_case $name "pending Ctrl-D exited without a diagnostic" }
+}
+expect eof
+set status [lindex [wait] 3]
+if {$status == 0} { fail_case $name "pending Ctrl-D exited successfully" }
+
+set shell "HOME='$temporary' ECL_WORKERS=1 '$binary'; status=\$?; IFS= read -r probe; if \[ \"\$probe\" = terminal-check \]; then echo TERMINAL-RESTORED; fi; exit \$status"
+spawn -noecho sh -c $shell
+expect {
+    "ecl> " {}
+    timeout { fail_case $name "restoration process did not prompt" }
+    eof { fail_case $name "restoration process exited before prompt" }
+}
+send "\004"
+expect {
+    -re {\r\n} {}
+    timeout { fail_case $name "Ctrl-D did not return to the parent shell" }
+    eof { fail_case $name "restoration shell exited before its input check" }
+}
+send "terminal-check\r"
+expect {
+    -re {terminal-check\r\n} {}
+    timeout { fail_case $name "restored terminal did not echo canonical input" }
+    eof { fail_case $name "restoration shell exited before echoing input" }
+}
+expect {
+    "TERMINAL-RESTORED" {}
+    timeout { fail_case $name "restored terminal did not deliver a canonical line" }
+    eof { fail_case $name "terminal restoration marker was absent" }
+}
+expect eof
+set status [lindex [wait] 3]
+if {$status != 0} { fail_case $name "restoration process exited $status" }
+puts "PASS: $name"
+
+file delete -force $temporary
+puts "All REPL PTY tests passed."

@@ -17,6 +17,22 @@
 - Keep focused allocator failure sweeps in the normal suite. Consolidate exhaustive
   initialized-Session coverage in `src/tests/oom_test.zig`, run by `zig build test-oom`, so
   the embedded prelude is not bootstrapped independently for every runtime surface.
+- On macOS, run the TSan gate in the same Linux/x86_64 Alpine environment used by CI;
+  Zig 0.16's native arm64 macOS sanitizer runtime may segfault before tests start, and
+  its Linux/arm64 runtime may fail while unmapping shadow memory under Docker Desktop.
+  Keep the checkout read-only and caches container-local:
+
+  ```sh
+  docker run --rm --platform linux/amd64 \
+    -v "$PWD":/work:ro -w /work alpine:latest sh -euxc '
+      apk add --no-cache curl xz linux-headers
+      curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+      echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
+      mkdir -p /tmp/zig
+      tar -C /tmp/zig --strip-components=1 -xf /tmp/zig.tar.xz
+      /tmp/zig/zig build --cache-dir /tmp/ecl-cache --global-cache-dir /tmp/ecl-global test-tsan
+    '
+  ```
 - Treat a model-only property as specification evidence, not proof of the production
   implementation. Concurrency and reclamation acceptance must exercise the real
   publisher, leases/cursors, mutation path, and retirement domain through public or
@@ -33,6 +49,37 @@
 - Exercise every operation of an opaque public capability through its real factory,
   registration, or runtime path so Zig analyzes lazily reached method bodies. A type
   declaration compiling without any caller is not proof that its public surface works.
+- Keep line-editor coverage claims aligned with the seam actually exercised. Fuzz the
+  production edit buffer and viewport projection, and query Session completion before
+  the first Unit. Use the real Debug and ReleaseSafe artifacts under a PTY for redraw,
+  raw-mode queue preservation, EOF/error handling, history, and terminal restoration;
+  an in-process model cannot prove compiler-codegen or kernel termios behavior.
+- Put a cross-cutting rule at the boundary that owns it, not in each caller. Escaping
+  belongs to the sink that writes to the terminal, lexical state to the tokenizer that
+  parses source, and the cursor/scalar invariant to the single splice that changes
+  bytes. A policy attached to one producer will be missing from the next one, and a
+  postcondition restated in ten operations will be forgotten by one of them.
+- Enforce a repository rule in the type system, then the audit, then nowhere. A source
+  denylist naming one forbidden identifier is the weakest form: pass a capability whose
+  surface lacks the operation instead. Reserve audit checks for what the compiler cannot
+  see, and make them fail closed — parse strictly into a typed value first, because a
+  check that skips fields it cannot read reports success on exactly the inputs it
+  failed to inspect.
+- A `pub` struct with a private field type is not encapsulated: Zig's inferred struct
+  literals let external code construct it field by field. Use an opaque handle when a
+  representation must only come from its factory.
+- A container that hands out a slice of its storage and also grows that storage must
+  own every mutation argument before it writes; a caller passing a borrow back in is
+  legitimate. Put that staging in one shared storage type rather than in each container,
+  and fuzz the self-aliasing case: this defect appeared independently in two containers
+  before the primitive existed.
+- Prefer letting the terminal report its own state over modelling it. Character width is
+  data no in-process property can validate, so keep it out of any path where being wrong
+  breaks correctness rather than appearance.
+- Declare every `extern "c"` function with the same variadic shape as its C prototype.
+  A non-variadic declaration of a variadic function such as `ioctl` passes arguments
+  in registers the callee never reads on AArch64, silently corrupting unrelated
+  memory; prefer the existing `std.c` declaration over a local `extern` block.
 
 ## Embedded prelude
 

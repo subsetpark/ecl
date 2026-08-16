@@ -12,11 +12,14 @@ combinator-entry idiom recognition, and green-unit concurrency. v1 is
 slow-but-correct everywhere the architecture permits, but never violates
 the decision-21 invariants that make it evolvable to K-order later.
 Scope additions ruled in during planning: REPL line editing/completion,
-and `str`, `csv`, `json`, `table`, and `http` stdlib modules.
+the `str`, `csv`, `json`, `table`, and `http` stdlib modules, and optional
+target-specific native extension modules loaded by the stock binary. Core and
+stdlib retain the single-binary distribution guarantee; `.eclmod` artifacts
+are explicitly installed trusted dependencies, not required runtime pieces.
 
 ## Current State
 
-Verified in the checkout (2026-08-12):
+Verified in the checkout (2026-08-16):
 
 - `design/` holds the complete, internally consistent spec: DESIGN.md
   (23 decisions + implementation-agnostic runtime spec), GRAMMAR.md,
@@ -44,8 +47,9 @@ Verified in the checkout (2026-08-12):
   error dicts. Its internals are disqualified for v1 by
   ARCHITECTURE.md's disposition table (span-on-Value, boxed `Arc<[Value]>`
   lists, no leaves, no interning, RwLock-per-lookup envs, eager traces).
-- The real Zig interpreter is now implemented through M6 in the working
-  tree. Its closed data plane includes pervasive leaf kernels,
+- The real Zig interpreter is now implemented through M8 in the current
+  checkout (on the M7 base at commit `6c7c970`). Its closed data plane includes
+  pervasive leaf kernels,
   sequence/shape/order/group operations, immutable dict updates, Unicode
   text kernels, kind reflection, cycling/count-vector sequence operations,
   the awk-floor transcendentals, exact whole-value `cmp`, and the separate
@@ -53,8 +57,14 @@ Verified in the checkout (2026-08-12):
   phrase recognition, and the documented embedded target-language prelude.
   Its ordinary lists, ordered dicts, `group`, `at`, `where`, `flip`, folds,
   and pervasive kernels provide the data-plane substrate for tabular work;
-  no table module or table runtime kind exists. M7 concurrency, M8 line
-  editing, and M9 stdlib remain future milestones.
+  no table module or table runtime kind exists. M7 adds green units,
+  structured task lifetimes, cancellation/deadlines, deterministic joins,
+  bounded retirement, and one/eight-worker acceptance. The source audit
+  reports 29,184/30,000 shipped business-logic Zig lines. M8 adds scalar-safe
+  TTY editing, locked atomic 100-line history, snapshot-safe live and dotted
+  completion, continuation cancellation/EOF behavior, and a real-binary PTY
+  gate while leaving non-TTY input unchanged. M9 native extensions and M10
+  stdlib remain future milestones.
 - All derived core words now live in `src/prelude.ecl`; the loader embeds and
   evaluates that ordinary source with retained provenance before freezing the
   core. Every definition is a documented `### def <name>` block.
@@ -89,6 +99,15 @@ Verified in the checkout (2026-08-12):
   core dict operations can forge invalid candidates. Every `table.*` boundary
   therefore validates the convention; no evaluator, kernel, reflection, or
   serialization path may grow hidden table behavior.
+- **Trusted native code without an untyped host back door** — a separately
+  compiled callback cannot be preempted or made memory-safe by the VM, while a
+  dynamic ABI cannot rely on Zig's source-level layouts. The extension SDK must
+  nevertheless make effects, capabilities, ownership, continuation state,
+  module state access, publication, and teardown exact at comptime or load time;
+  expose no raw stack, environment, allocator, scheduler, or reclamation root;
+  and make the supported aggregate path obey the same bounded-work contract as
+  first-party kernels. The irreducible trust boundary and the v1 HTTP blocking
+  exception must remain visible rather than being disguised as reductions.
 
 ## Established Precedents
 
@@ -113,6 +132,16 @@ architecture panel; full groundings in
   Fuel-based safe points, two-generation hot reload semantics
   (whole-body pinning), and shared refcounted immutable buffers across
   share-nothing processes.
+- **[documentation] Erlang NIFs** — https://www.erlang.org/doc/apps/erts/erl_nif.html
+  The cautionary scheduler precedent: ordinary native code is not preempted;
+  cooperative timeslice consumption/rescheduling and dirty schedulers are
+  distinct remedies. ECL adopts a typed cooperative continuation first and
+  leaves blocking-pool offload as an additive capability.
+- **[documentation] Janet C API and native modules** — https://janet-lang.org/capi/
+  The ergonomic precedent for loading trusted native modules into a small
+  language runtime. ECL narrows that model to one Zig-authored artifact per
+  module, with generated capability and ownership adapters rather than a broad
+  mutable VM pointer.
 - **[pattern] Structured concurrency (Trio nurseries; JEP 505)** — https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/
   Scope trees, cancellation checkpoints, wait-for-quiescence at scope
   close, determinism at join points.
@@ -266,7 +295,8 @@ swap protocol. Reflection: `body`, `doc`, `words`, `which`, `see`. **New over
 the skeleton**: `load` (file as one unit) and `ECL_PATH` auto-load on
 unregistered `use`, and the native-builtin-module mechanism (modules
 pre-registered at startup whose bindings are primitive-backed — the
-substrate M9 needs). **New over the skeleton (d.9, re-ruled
+static substrate M10 reuses after M9 replaces the public callback seam).
+**New over the skeleton (d.9, re-ruled
 2026-08-12, supplemented after M6)**: module `def`/`defp` consume a body
 plus a unified annotation whose effect portion is mandatory —
 `( body ) ( a b -- c : "Documentation." ) 'name def`. The annotation is
@@ -289,7 +319,7 @@ complete module system; kernels/combinators still run the provisional
 paths.
 
 **Unlocks**: M5/M6 idiom guards (resolution identity), M8 completion
-(env enumeration), M9 stdlib modules.
+(env enumeration), M9 native module publication, and M10 stdlib modules.
 
 ---
 
@@ -432,7 +462,7 @@ provenance archive, so a later `call` reports `<parse>`. Non-string input is
 leave no partial result. Encoding, lexer/parser scans, binder lowering, and
 result/span materialization poll inside their actual traversals. This adds
 no host capability: `slurp`, `spit`, `getenv`, and the source-defined
-`lines` remain absent until M9.
+`lines` remain absent until M10.
 
 **Idiom recognition** uses one context-parameterized exact-phrase matcher,
 not a combinator-only switch plus special cases. Phrase shape may be
@@ -456,7 +486,7 @@ concurrency and stdlib; the harness guards everything behind it, and the
 derived core vocabulary now has one inspectable target-language source of
 truth rather than host-encoded bodies.
 
-**Unlocks**: M7 (par-each rides spawn), M9 (str module uses kernels +
+**Unlocks**: M7 (par-each rides spawn), M10 (str module uses kernels +
 prelude machinery).
 
 **Established Precedents** (milestone-scoped):
@@ -525,12 +555,49 @@ graph walker, and no operation allocates an independent release cursor.
 **Why this is a safe pause point**: The language surface of DESIGN.md
 is complete; only scope-ruled stdlib and REPL polish remain.
 
-**Unlocks**: M9's http module may block on worker threads; M10
-acceptance.
+**Unlocks**: M9's native `Reschedule`/state arbitration, M10's internal HTTP
+exception, and M11 acceptance.
 
 ---
 
 ### Milestone 8: repl-line-editing
+
+**Status**: executed from `gameplans/repl-line-editing.json` (2026-08-16).
+
+The as-built Session completion facade owns and settles its visibility and
+registry snapshots through phase-owned cursor variants; completion before the
+first unit reaches core names without an intermediate invalid state. Session
+renderings own their storage without exposing host allocation authority;
+production comptime validation rejects authority-bearing public Session return
+types. Console callers receive only narrow whole-write operations. The editor
+owns raw-mode restoration and a nominal line result, and keeps cursor/storage
+inside an opaque buffer whose single splice consumes an owned replacement and
+re-derives the cursor after every mutation. The editor receives capabilities
+rather than the Session: a terminal that redraws, lists candidates, and accepts
+only named prompts and named effects, and a completion observer that can render
+matching names and nothing else. The console owns terminal geometry, row
+planning, and escaping, sizes rows with an upper bound so a redraw cannot wrap,
+and lets the terminal place the cursor by rewriting the text before it. The
+reader mints the lexical checkpoint the REPL loop carries with its pending
+bytes, so completion resumes over the current line instead of rescanning the
+unit. It preserves queued input across non-flushing
+transitions, and excludes malformed physical lines from history; the history
+writer locks, rereads, merges, caps, and atomically replaces its durable file.
+Six independently wired fuzz campaigns exercise reader, formatter, editor,
+completion, history, and the real scheduler path. The editor campaign uses a
+shrinkable arbitrary-byte/action model that checks exact bytes, cursor bounds,
+the splice cursor postcondition, conditional UTF-8 boundaries, size rejection,
+owned-line cleanup, an exact independently derived window at arbitrary,
+one-cell, and oversized row widths, and that the real console can emit no
+control byte for any buffer it reaches. The
+Expect PTY suite runs against Debug and ReleaseSafe binaries and proves
+first-turn completion, editing/redraw, queued multiline input,
+malformed/truncated UTF-8 and escapes, escaped rather than replayed control
+sequences, completion declining inside a string opened on an earlier physical
+line, live/public-only dotted completion,
+exact parseable history plus cross-process recall, continuation/error/EOF
+behavior, and canonical/echo terminal restoration against the real binary.
+The source audit measures 29,184/30,000 shipped business-logic Zig lines.
 
 **Definition of Done**:
 The interactive REPL has line editing, history (persisted to
@@ -549,13 +616,179 @@ touched.
 
 ---
 
-### Milestone 9: stdlib-str-csv-json-table-http
+### Milestone 9: native-extension-abi-and-loader
+
+**Definition of Done**:
+Stock `ecl` can discover and load a precompiled Zig native extension from
+`ECL_PATH` without rebuilding or relinking the interpreter. The shipped
+`ecl-native` SDK and Zig build helper produce a target-specific
+`<module>.eclmod` on Linux and macOS. V1 supports Zig authors using the pinned
+Zig toolchain only; the generated adapter uses a stable C-shaped ABI, but that
+wire contract is not yet a supported C author API. An artifact is exactly one
+canonical ECL module, one atomic definition table, and one lifetime unit. It
+exports one ABI-v1 entry point and may publish documented native callable words
+only—no second module, ECL quotation, persistent ECL value, resource value, or
+partial registration.
+
+**Resolution and ABI are deterministic and fail closed.** For each `ECL_PATH`
+entry in order, the auto-loader tries `<name>.ecl` and then `<name>.eclmod`; the
+first existing candidate is authoritative, including its failures. The native
+descriptor must name the requested module exactly. Its sized header, ABI
+major/minor, callback table, definition count and indices, state layout,
+canonical names, UTF-8 documentation, effects, and capability ids/versions are
+validated and copied through bounded cursors before module-state initialization
+or registry publication. ABI major 1 permits additive record tails and capability
+versions: an older v1 extension continues loading on a newer v1 runtime when
+all named requirements are supported, while any breaking change requires ABI
+v2. Unsupported platforms, architectures, ABI/capability versions, malformed
+descriptors, name mismatches, duplicate words, missing documentation, invalid
+effects, or initialization failure publish nothing and produce a precise module
+load error. Opening a dynamic library is documented as arbitrary trusted-code
+execution—platform constructors may run before descriptor validation—so a
+native-bearing `ECL_PATH` is a trusted dependency path. Future first-party
+package management resolves versions and targets by constructing that ordered
+path; the runtime gains no dependency solver or separate native path.
+
+**Loading and lifetime are one consuming typestate.** A Session-owned instance
+moves through `opened -> described -> validated -> initialized -> published`,
+and every variant owns exactly the handle, copied metadata, callback table,
+opaque state storage, and rollback action valid in that phase. Native bindings
+store a nominal module-instance handle plus validated definition index, never a
+raw callback/context pair. V1 has no native hot reload or early unload. Session
+shutdown closes new native-call creation, joins/cancels all tasks, drains state
+waiters, destroys every call continuation, settles ECL retirement, invokes the
+bounded module-state destructor once, and only then closes the code image. A
+private static transport accepts the same generated descriptor for first-party
+CSV/JSON modules in M10, with a no-op image pin; it is not a public API for
+embedding ECL in Zig applications. The old general-stack `NativeMachine` and
+public `Session.registerNativeModule` seam cease to be a supported extension
+surface rather than surviving as an authority bypass.
+
+**The Zig SDK derives one unambiguous capability contract.** A callback begins
+with exactly `*ecl.Call("inputs -- outputs")`; that comptime-parsed type is the
+single source of its fixed successful effect and exposes only those immutable
+inputs while requiring exactly that many outputs. Registration supplies the
+word name, nonempty documentation, and callback. Every later callback parameter
+must be one exact SDK-owned capability type, and the return type is exactly
+`error{OutOfMemory}!Outcome`. SDK reflection rejects generic or variadic
+callbacks, optional/unknown/duplicate/conflicting capabilities, the wrong call
+or return type, a state-spec mismatch, duplicate words, malformed effects, and
+capabilities or lifetime-incompatible handles embedded recursively in declared
+state. It generates the canonical requirement manifest and uniform adapter;
+authors write no `.requires` list, callback symbol table, effect duplicate, raw
+host context, or allocator plumbing. `doc`, `which`, and `see` expose the normal
+effect/documentation plus native origin and capability requirements.
+
+**A native word is a transactional leaf call.** The runtime pins the declared
+inputs unchanged for the whole call. `ValueView` exposes only immutable O(1)
+kind/scalar/aggregate-length observation; `call.forward(i)` and `BuildValues`
+produce issuer-checked candidate outputs owned by the transaction. Completion
+first reserves the exact final stack window and then atomically replaces the
+inputs with its statically exact output tuple. Failure, cancellation, deadline
+loss, OOM, or abandonment leaves the stack unchanged and transfers all
+tentative ECL roots to bounded retirement; yield preserves the transaction.
+Native authors may return `type`, `shape`, `conform`, `overflow`, `domain`,
+`parse`, `io`, or `user` with a bounded message. Underflow, undefined-word,
+contract, cancellation, timeout, OOM, source/word attachment, and trace
+authority remain runtime-owned. The public SDK exposes no raw runtime `Value`,
+stack mutation, environment resolution, word/quotation evaluation, spawn,
+Session reentry, registry, module home, generation pin, wake control, allocator,
+or reclamation domain.
+
+**Cooperation is a composable typed capability, not a callback class.** A word
+requests `Reschedule(ContinuationSpec)`, where the spec fixes its private Zig
+state and explicit bounded destructor. The host owns its aligned storage and
+library pin. From the first invocation it advances through the production
+`WorkDriver` path with one ordinary 65,536-unit kernel budget, cancellation
+poll, scheduler requeue, and retirement turn per slice. Base value observation
+is O(1); aggregate contents are available only through budget-charging
+text/leaf/list/dict cursors, aggregate builders charge the same budget, and
+extension-local work calls `consume`. There is no whole backing slice or
+unmetered SDK iterator. Inputs and candidate values remain pinned across yield;
+complete/fail/cancel consumes the continuation exactly once. Native machine
+code itself remains non-preemptible and can deliberately ignore this contract,
+so low-overhead per-invocation duration/overrun diagnostics make violations
+observable but do not pretend to provide instruction reductions or sandboxing.
+Inline callbacks must return promptly.
+
+**Module state preserves observation/mutation authority.** Optional
+`ModuleState(T, init, deinit)` creates one instance per loaded module per
+Session in host-owned opaque storage. Its bounded, non-yielding initializer
+receives no ECL/host capabilities and either constructs the state or returns a
+bounded load-failure message; its infallible bounded destructor runs after
+quiescence. State may contain native data but no ECL value or host capability.
+Callbacks separately request `ModuleView(StateSpec)` for a turn-scoped
+immutable borrow or `ModuleUpdate(StateSpec)` for a turn-scoped exclusive
+mutable borrow. V1 may serialize both through one scheduler-integrated arbiter,
+but contention parks the Unit rather than a worker. A borrow never crosses
+yield and is reacquired on resume. Native-state and external side effects are
+not part of operand-stack rollback.
+
+**The initial capability set remains deliberately closed.** Mandatory `Call`
+plus optional `BuildValues`, `Reschedule`, `ModuleView`, and `ModuleUpdate` are
+the complete callback surface. Native resource values, persistent ECL-value
+pins in module state, package assets, external wake, blocking jobs, quotation
+evaluation, and task/runtime mutation remain future independently versioned
+capabilities. `Offload` is the expected first scheduling addition; the M10 HTTP
+builtin remains a documented internal direct-blocking exception in v1 and does
+not widen this SDK.
+
+**Proof is production-connected.** A real SDK-built shared-library fixture is
+loaded through `ECL_PATH` by the release binary and exercises every operation
+of every public capability. Compile-fail build fixtures prove malformed effects,
+callback shapes, capability duplication/conflicts, wrong state specs, forbidden
+state embeddings, duplicate words, and missing destructors/docs without tests
+that inspect implementation text. Loader cases cover source/native precedence,
+path order, first-candidate failure, name/ABI/capability mismatch, init rollback,
+all-or-nothing reflection, old-v1/new-v1 compatibility, two Sessions with
+distinct state, and exact continuation -> module-state -> library teardown.
+`fuzz-native-descriptor` drives arbitrary bounded metadata through the
+production validator with valid backing ranges. `fuzz-native-call` drives the
+real loaded adapter with randomized complete/fail/yield/cancel sequences,
+aggregate cursor budgets, candidate graphs, and view/update contention. The
+latter runs at one and eight workers and under TSan, asserting observable stack
+atomicity, cancellation progress, exclusive mutation, stable values, and
+bounded retired memory after delayed continuations release. Focused allocator
+failure sweeps remain in the ordinary suite; exhaustive initialized-Session
+native loading/call coverage is added once to `src/tests/oom_test.zig` and
+`zig build test-oom`.
+
+Before its first production patch, M9 remeasures the current source-audit
+classification and synchronously adds an honest native SDK/ABI/loader component
+ceiling, raises the machine/module/scheduler and total ceilings required by
+these nominal states, and updates `ARCHITECTURE.md`, this workstream, and the
+audit constants. The planning envelope is 4,000 shipped lines for the new
+native component and 37,000 total, leaving separate headroom for M10; the
+remeasurement must revise those figures if the strong boundaries honestly need
+it. The current 30,000-line ceiling is not relaxed in advance, and no
+implementation may compress or hide these type boundaries to fit it.
+
+**Why this is a safe pause point**: Source modules and language semantics are
+unchanged; a rejected or failed native artifact has no registry visibility, and
+every successful artifact is pinned through complete Session teardown. The
+public surface is useful for value-in/value-out native acceleration without
+committing v1 to resources, blocking pools, VM reentry, or application
+embedding.
+
+**Unlocks**: User-authored native extensions; M10's CSV/JSON modules as
+first-party consumers of the same callback protocol; additive post-v1
+`Offload`, resource, external-wake, package-asset, and evaluation capabilities.
+
+**Established Precedents** (milestone-scoped):
+- **[documentation] Erlang NIFs** — https://www.erlang.org/doc/apps/erts/erl_nif.html — ordinary NIFs demonstrate the non-preemption hazard; timeslice consumption and scheduled/dirty work motivate ECL's typed `Reschedule` now and additive `Offload` later.
+- **[documentation] Janet native modules/C API** — https://janet-lang.org/capi/ — the small-language dynamic-module ergonomics precedent, narrowed here to one generated Zig module descriptor and semantic capabilities instead of a mutable VM pointer.
+
+---
+
+### Milestone 10: stdlib-str-csv-json-table-http
 
 **Definition of Done**:
 Five stdlib modules ship inside the binary (embedded sources / native
-builtins registered lazily via the M4 mechanism, so the single-binary
-story holds; `ECL_PATH` remains for user modules). The same milestone owns
-the explicit host scripting words needed by that layer:
+descriptors registered lazily through M4 plus M9's private static transport,
+so the single-binary story holds; `ECL_PATH` remains for user modules). CSV
+and JSON are first-party consumers of the public typed callback/capability
+protocol without becoming external runtime dependencies. The same milestone
+owns the explicit host scripting words needed by that layer:
 - **`str`** — ecl source: `upper lower trim` (ASCII per d.15) and
   friends; the first real embedded-module consumer.
 - **Host scripting words** — `slurp` [P] `( path -- string )` reads one
@@ -574,14 +807,17 @@ the explicit host scripting words needed by that layer:
   strings and produces canonical CRLF-terminated RFC 4180 output, quoting
   exactly the fields that require it. Empty input maps to an empty row list;
   malformed quoting is `'parse`, non-list rows and non-string cells are
-  `'type`, and a zero-field row is `'shape`. Both user-sized traversals are
-  native, `WorkContext`-polled scanners.
+  `'type`, and a zero-field row is `'shape`. Both user-sized traversals use SDK
+  aggregate cursors and `Reschedule`, exercising the same `WorkDriver` budget
+  as external modules.
 - **`json`** — native: `json.parse` (string → value) and `json.emit`
   (value → string) per RFC 8259; integral in-range numbers → int64,
   else f64; objects → dicts (keys as strings), arrays → lists;
   emission requires string/symbol dict keys ('type error otherwise);
   the null ruling implemented per the resolved Open Question and
-  recorded in DESIGN.md as a decision addendum.
+  recorded in DESIGN.md as a decision addendum. Parsing, emission, and
+  aggregate construction use the M9 `Reschedule`/`BuildValues` path rather than
+  a privileged whole-value traversal.
 - **`table`** — ecl source over validated ordinary column dicts, never a new
   runtime kind. Its constructors and conversions are `table.from-columns`,
   `table.from-rows`, `table.from-header-rows`, `table.from-records`,
@@ -595,11 +831,13 @@ the explicit host scripting words needed by that layer:
   `( column -- value )`; joins accept explicit left/right name pairs. The
   Decisions Made policy below freezes validation, ordering, collision,
   missingness, error, and reflection behavior.
-- **`http`** — native, client only: `http.get`/`http.post`
+- **`http`** — internal native builtin, client only: `http.get`/`http.post`
   (url [headers-dict] [body] → response dict with 'status, 'headers,
-  'body), TLS included, timeouts surfacing as 'io error dicts; blocking
-  runs on the unit's worker thread (v1-acceptable per ARCHITECTURE.md
-  §Scheduler). Backend per the resolved Open Question.
+  'body), TLS included, timeouts surfacing as 'io error dicts. Its blocking
+  call runs on the unit's worker thread as the one documented first-party v1
+  exception; it is not exposed as an SDK capability and migrates to the future
+  `Offload` capability without changing its ECL value-level API. Backend per
+  the resolved Open Question.
 
 **Why this is a safe pause point**: Modules and the three explicit host
 scripting primitives are additive; evaluator and value semantics are
@@ -617,15 +855,20 @@ aggregate → emit) — the awk/sed/jq positioning made literal.
 
 ---
 
-### Milestone 10: v1-acceptance
+### Milestone 11: v1-acceptance
 
 **Definition of Done**:
 The terminal acceptance suite below is implemented as a CI job
 (fixtures + expect scripts where interactive) and green. README rewritten
-around the real binary (install, tour, module guide). The d.23 line
+around the real binary (install, tour, source-module guide, native-extension
+SDK/build/trust guide). The d.23 line
 budget is audited by a CI check. Its complete budget domain is the classified
 production/core-business-logic Zig components listed in ARCHITECTURE.md:
-their total is ≤ 30,000 lines and the kernel component is ≤ 8,500. Tests,
+their total is ≤ 37,000 lines, the native SDK/ABI/loader component is ≤ 4,000,
+and the kernel component is ≤ 8,500. These are the planning ceilings to be
+remeasured and synchronized with the source audit at M9's first production
+patch; a structurally justified revision must update all three authorities in
+that same patch. Tests,
 fixtures, inline `test` declarations, build/source-audit verification tooling,
 and target-language ECL are outside LOC measurement and control; their
 classification exists only to keep the first-party source manifest exhaustive.
@@ -634,10 +877,11 @@ same AST reachability pass, so co-location does not turn test support into
 measured business logic.
 Line figures in earlier executed-milestone status paragraphs are historical
 measurements, not active v1 ceilings or policy for verification code.
-The prior 22,000/5,500 ceilings assumed
+The prior 22,000/5,500 and pre-M9 30,000 ceilings assumed
 native-stack traversal; the replacement headroom preserves the nominal resumable
-ownership, snapshot, reclamation, and task-join states required by M7 rather
-than compressing those boundaries. Snapshot retention is bounded (the M7
+ownership, snapshot, reclamation, task-join, native transaction, capability,
+loader typestate, and state-arbitration boundaries required by M7 and M9 rather
+than compressing them. Snapshot retention is bounded (the M7
 reclamation obligation): a soak fixture that defines and re-registers in a loop
 shows stable memory. A `v1.0` tag exists.
 
@@ -658,8 +902,9 @@ from a proven baseline.
 - Milestone 6 (combinators-and-recognition) -> [4, 5]
 - Milestone 7 (scheduler-and-concurrency) -> [6]
 - Milestone 8 (repl-line-editing) -> [4]        # parallel with 5–7
-- Milestone 9 (stdlib-str-csv-json-table-http) -> [6] # http may precede 7; blocking IO is v1-legal
-- Milestone 10 (v1-acceptance) -> [7, 8, 9]
+- Milestone 9 (native-extension-abi-and-loader) -> [4, 7]
+- Milestone 10 (stdlib-str-csv-json-table-http) -> [6, 9]
+- Milestone 11 (v1-acceptance) -> [7, 8, 9, 10]
 
 ## Open Questions
 
@@ -667,7 +912,7 @@ from a proven baseline.
    line-processing of piped input, but piped stdin is currently
    consumed as *source*. A `stdin` word must coexist with the
    stdin-as-source CLI modes without ambiguity. Real design
-   conversation; owner: M9 gameplan at the latest.
+   conversation; owner: M10 gameplan at the latest.
 2. **Randomness (gap scan 2026-08-12).** No `rand`/roll/deal words
    exist. First impure-nondeterministic vocabulary: seeding must be
    ruled against d.20 units (per-session RNG, per-unit, or
@@ -676,8 +921,8 @@ from a proven baseline.
 3. **http backend (choice only; procedure is decided).** Which backend
    wins the spike — Zig `std.http.Client` + `std.crypto.tls` (pure Zig,
    no C dependency, maturity risk) or a libcurl binding (battle-tested,
-   complicates the static single binary). Resolved by the M9 spike per
-   the agreed criteria in Decisions Made. Owner: M9 gameplan.
+   complicates the static single binary). Resolved by the M10 spike per
+   the agreed criteria in Decisions Made. Owner: M10 gameplan.
 
 ## Decisions Made
 
@@ -748,6 +993,39 @@ from a proven baseline.
   post-v1, against the invariants v1 preserved.
 - **Stdlib ships embedded in the binary**, not via ECL_PATH files —
   single-binary distribution is part of the positioning (d.21).
+- **Native interop is extension-outward, not an embedding API.** Stock `ecl`
+  loads trusted target-specific `.eclmod` dependencies from the same ordered
+  `ECL_PATH` used for source modules; future package management makes resolved
+  dependencies available by constructing that path. V1 supports Zig authors
+  on the pinned toolchain, one artifact = one canonical atomically published
+  module, and Linux/macOS loading. It does not expose a public API for hosting
+  ECL inside a Zig application, a C author SDK, native hot reload, or early
+  unload.
+- **Native authority is inferred capability composition.** The callback's
+  `Call("before -- after")` type is the sole effect/arity declaration, and each
+  additional exact parameter names one capability; the SDK generates the
+  requirement manifest and stable C-shaped adapter at comptime. There are no
+  callback classes, `.requires` duplication, raw VM/context/allocator, or
+  general stack access. `BuildValues`, typed `Reschedule`, and distinct
+  `ModuleView`/`ModuleUpdate` are the initial optional capabilities; resources,
+  blocking offload, external wake, package assets, retained ECL values, and
+  evaluation are additive future capabilities.
+- **Native calls are transactional leaves but native code remains trusted.**
+  Declared inputs remain pinned, candidate outputs belong to one call, and only
+  exact completion mutates the stack; fail/cancel/timeout/OOM/abandonment do
+  not. Aggregate access is available only through `Reschedule`-budgeted cursors
+  and builders mapped to the real `WorkDriver`. The runtime cannot preempt or
+  infer reductions for arbitrary native instructions, so inline code must
+  return promptly and duration diagnostics expose violations after the fact.
+  M10 HTTP remains the sole internal direct-blocking v1 exception; `Offload` is
+  the committed first scheduling extension.
+- **Native state has explicit lifetime and authority.** Per-Session module
+  state initializes only after complete descriptor validation, contains no ECL
+  values, and is viewed immutably or updated exclusively through turn-scoped
+  capabilities which never cross yield. Session shutdown quiesces calls and
+  waiters, destroys continuations, settles ECL retirement, destroys module
+  state, and only then closes libraries. Module-state/external side effects are
+  not rolled back with the operand-stack transaction.
 - **CSV is text-preserving table interchange, not schema inference.**
   `csv.parse` returns rows of strings and treats a header, when present, as
   an ordinary first row; `csv.emit` accepts the same representation. This
@@ -829,13 +1107,13 @@ from a proven baseline.
   is untouched; arrays like `[1, null]` round-trip. Recorded in the
   ledger (d.22 addendum).
 - **http backend is chosen by spike, not by guess** (user ruling, this
-  session): at M9 planning, `std.http` wins if it handles TLS 1.3
+  session): at M10 planning, `std.http` wins if it handles TLS 1.3
   against 5 real-world hosts including redirects and chunked encoding;
   otherwise bind libcurl.
 - **Toolchain pinned: Zig 0.16.0** (resolved at M1 planning, closing the
   former open question). Pinned in `build.zig.zon`
   (`minimum_zig_version`) and by the CI tarball; revisited only at
-  milestone boundaries and at the M9 http spike.
+  milestone boundaries and at the M10 http spike.
 - **Forge and CI: sourcehut** (M1 planning ruling). The repo is
   `git.sr.ht/~subsetpark/ecl` (unlisted; flip with
   `hut git update --visibility public`); CI is builds.sr.ht via
@@ -1048,7 +1326,77 @@ script in CI.
     continuation prompt appears after `(1 2`.
   - **Traces to**: Milestone 8 — line editor + env-sourced completion.
 
-- **DoD-22 — json round-trip**
+- **DoD-22 — native artifact discovery, ABI, and reflection**
+  - **Assert**: the public Zig SDK builds one `sample.eclmod`; stock `ecl`
+    discovers it through ordered `ECL_PATH`, validates ABI/capabilities and the
+    exact module identity before initialization, publishes the complete table
+    once, and exposes ordinary effects/docs plus native capability metadata.
+    Source wins over native within one path root, path-root order wins across
+    roots, and the first existing malformed candidate fails without fallback.
+  - **Verify by** `cmd`: `zig build native-fixture`, then run the release binary
+    with only the fixture output directory on `ECL_PATH` and execute
+    `'sample use 41 sample.increment 'sample.increment doc
+    'sample.increment which 'sample.increment see`; repeat with source/native,
+    path-order, wrong-name, ABI-major, capability-version, duplicate-word,
+    missing-doc, and init-failure fixture variants.
+  - **Expected**: the valid artifact returns `42`, its nonempty documentation,
+    canonical `(n -- result)` effect, native origin, and inferred capability
+    list. Each invalid artifact reports its precise load error, leaves `sample`
+    absent from registry/reflection, and never selects a later candidate.
+  - **Traces to**: Milestone 9 — SDK descriptor generation, `ECL_PATH` native
+    transport, consuming loader typestate, atomic module publication, and ABI
+    negotiation.
+
+- **DoD-23 — transactional cooperative native calls**
+  - **Assert**: a real loaded callback sees exactly its declared immutable
+    inputs; aggregate access and construction consume the scheduler budget;
+    repeated yields preserve typed continuation and draft state; exact
+    completion commits once; and failure, cancellation, deadline expiry, OOM,
+    or abandonment exposes no partial stack or output graph. A one-worker run
+    makes progress between yielded native slices, while an intentionally
+    non-cooperative fixture demonstrates the documented non-preemption limit
+    without being mistaken for a reductions proof.
+  - **Verify by** `cmd`: `zig build test-native-runtime`,
+    `zig build fuzz-native-call`, and the release-binary fixture at
+    `ECL_WORKERS=1` and `ECL_WORKERS=8`; the fixture invokes budget-spanning
+    text/list transforms, fail-after-draft, cancel/timeout-after-yield, and
+    exact zero/one/multiple-output words through the generated adapter.
+    Initialized-Session allocation failures run once under
+    `zig build test-oom`.
+  - **Expected**: successful outputs and reflection are identical at both
+    worker counts; observer tasks advance between cooperative slices;
+    every non-success preserves the pre-call operand stack; all candidate
+    values and continuation storage retire; cancellation latency is bounded by
+    one cooperative native quantum after the callback returns; and allocator
+    accounting returns to baseline.
+  - **Traces to**: Milestone 9 — typed `Call`, `BuildValues`, `Reschedule`,
+    production `WorkDriver` integration, terminal arbitration, and bounded
+    retirement.
+
+- **DoD-24 — native state authority and shutdown lifetime**
+  - **Assert**: each Session owns a distinct module-state instance; immutable
+    views and exclusive updates are different inferred capabilities; state
+    contention parks rather than blocks workers; no borrow survives yield; and
+    shutdown orders continuation destruction, ECL retirement settlement,
+    module-state destruction, and library close exactly once. SDK-invalid
+    callback/state/capability shapes fail compilation rather than requiring a
+    runtime convention.
+  - **Verify by** `cmd`: `zig build test-native-sdk-negative`,
+    `zig build fuzz-native-descriptor`, and the production-loaded state fixture
+    under Debug, ReleaseSafe, one/eight workers, and Linux TSan. The fixture
+    records externally observable init/view/update/continuation/drop events,
+    creates two Sessions, contends and cancels stateful calls, and keeps a
+    delayed continuation alive through Session shutdown.
+  - **Expected**: Session counters never alias; mutations form one serial
+    history with no concurrent mutable borrow; ready work continues while a
+    state waiter is parked; all compile-negative fixtures are rejected by SDK
+    comptime validation; arbitrary bounded descriptor metadata never escapes
+    validation; and lifecycle events have the required order with no callback
+    after state destruction or library close.
+  - **Traces to**: Milestone 9 — `ModuleState`, `ModuleView`, `ModuleUpdate`,
+    scheduler-integrated state arbitration, library pins, and Session teardown.
+
+- **DoD-25 — json round-trip**
   - **Assert**: `json.parse` maps objects/arrays/numbers per the
     ruling; `json.emit ∘ json.parse` is identity on a canonical corpus;
     non-string-keyed dicts refuse to emit.
@@ -1057,9 +1405,9 @@ script in CI.
     numbers; plus `{1 2} json.emit` expecting `'kind 'type`.
   - **Expected**: corpus round-trips byte-identically; the emit error
     fires.
-  - **Traces to**: Milestone 9 — json native module.
+  - **Traces to**: Milestone 10 — json native module using M9 capabilities.
 
-- **DoD-23 — csv round-trip**
+- **DoD-26 — csv round-trip**
   - **Assert**: `csv.parse` preserves fields, empty cells, record widths,
     header-looking and scalar-looking text, quoted commas/newlines, and
     doubled quotes as strings; `csv.emit ∘ csv.parse` is identity on a
@@ -1075,9 +1423,9 @@ script in CI.
     canonical output matches byte-for-byte; the malformed input yields
     `'kind 'parse`, the numeric cell and non-list row yield `'kind 'type`,
     and the zero-field row yields `'kind 'shape`.
-  - **Traces to**: Milestone 9 — csv native module.
+  - **Traces to**: Milestone 10 — csv native module using M9 capabilities.
 
-- **DoD-24 — table representation and conversions**
+- **DoD-27 — table representation and conversions**
   - **Assert**: a valid table remains an ordinary dict under every core
     interface, while `table.*` constructors, row/record conversions, and
     transformations preserve its ordered equal-length-column convention.
@@ -1094,10 +1442,10 @@ script in CI.
     records round-trip while empty records are explicitly schema-less, casts
     are the only scalar coercions, and every transformation produces the
     fixture's expected ordered column dict.
-  - **Traces to**: Milestone 9 — embedded `table` module value policy and
+  - **Traces to**: Milestone 10 — embedded `table` module value policy and
     conversion/transform words.
 
-- **DoD-25 — table validation boundary**
+- **DoD-28 — table validation boundary**
   - **Assert**: invalid table candidates are never implicitly repaired or
     reclassified, and every exported `table.*` operation validates all table
     and specification inputs before executing user quotations or exposing a
@@ -1111,9 +1459,9 @@ script in CI.
     fail as `'type`, `'shape`, `'domain`, or `'contract` according to the
     frozen policy, no cast/aggregate quotation runs before complete
     prevalidation, and core `type` continues to report `'dict`.
-  - **Traces to**: Milestone 9 — embedded `table` module validators.
+  - **Traces to**: Milestone 10 — embedded `table` module validators.
 
-- **DoD-26 — table filtering and aggregation**
+- **DoD-29 — table filtering and aggregation**
   - **Assert**: CSV text can be explicitly cast, filtered, grouped by named
     columns, and aggregated with ordinary ECL quotations while preserving
     first-key occurrence order and stable rows within each group.
@@ -1125,10 +1473,10 @@ script in CI.
   - **Expected**: the grouped index dict and final region/revenue/count/mean
     column dict match the checked-in expected values exactly; no header or
     numeric inference occurs.
-  - **Traces to**: Milestone 9 — embedded `table` module grouping and
+  - **Traces to**: Milestone 10 — embedded `table` module grouping and
     aggregation words.
 
-- **DoD-27 — stable table joins and explicit missingness**
+- **DoD-30 — stable table joins and explicit missingness**
   - **Assert**: inner and filled left equijoins support named composite keys,
     expand duplicate matches many-to-many in stable left-major/right-minor
     order, reject non-key column collisions, and never invent a missing value.
@@ -1141,9 +1489,9 @@ script in CI.
     duplicates expand in the specified order, unmatched left rows use only
     caller-provided fills, collisions and incomplete fills are `'domain`, and
     a JSON `'null` value remains ordinary data when present.
-  - **Traces to**: Milestone 9 — embedded `table` module join words.
+  - **Traces to**: Milestone 10 — embedded `table` module join words.
 
-- **DoD-28 — http client**
+- **DoD-31 — http client**
   - **Assert**: `http.get` against a local fixture server returns a
     dict with `'status 200` and the body; a refused connection yields
     `'kind 'io`.
@@ -1151,22 +1499,27 @@ script in CI.
     `http.ecl` gets a known file and one dead port.
   - **Expected**: status/body asserted; the dead port errors `'io`
     without crashing the interpreter.
-  - **Traces to**: Milestone 9 — http native module.
+  - **Traces to**: Milestone 10 — internal http native module and documented
+    direct-blocking exception.
 
-- **DoD-29 — str module via embedded stdlib**
+- **DoD-32 — str module via embedded stdlib**
   - **Assert**: `'str use "hello" str.upper` works with no ECL_PATH
     set.
   - **Verify by** `cmd`: `ecl "'str use \"hello\" str.upper pp"` in an
     empty environment.
   - **Expected**: `"HELLO"`.
-  - **Traces to**: Milestone 9 — embedded stdlib registration (mechanism Milestone 4).
+  - **Traces to**: Milestone 10 — embedded stdlib registration (mechanism Milestone 4).
 
-- **DoD-30 — line budget**
+- **DoD-33 — line budget**
   - **Assert**: only classified production/core-business-logic Zig is in the
-    line-budget domain: its total is ≤ 30,000 lines, every such component is
-    inside its ARCHITECTURE.md row, and kernels are ≤ 8,500. These M7 ceilings
-    replace 22,000/5,500 so scheduler-safe user-sized work retains explicit
-    cursor and ownership states instead of synchronous native-stack cleanup.
+    line-budget domain: its total is ≤ 37,000 lines, the native
+    SDK/ABI/loader component is ≤ 4,000, every component is inside its
+    synchronized ARCHITECTURE.md row, and kernels are ≤ 8,500. M9 remeasures
+    and installs these planning ceilings before implementation (or updates all
+    authorities together when a strong representation requires a justified
+    revision), so scheduler-safe and native work retain explicit cursor,
+    ownership, transaction, typestate, and arbitration states instead of
+    synchronous native-stack cleanup or raw correlated fields.
     Tests, fixtures, inline `test` declarations, test-only sources,
     build/source-audit tooling, and target-language ECL are outside LOC
     measurement and control.
@@ -1174,41 +1527,42 @@ script in CI.
     reachable only from tests are likewise excluded by AST reachability rather
     than conservatively charged to the containing production component.
     Source coverage still classifies first-party test and tooling files solely
-    to make the manifest exhaustive; DoD-30 neither measures nor reports their
+    to make the manifest exhaustive; DoD-33 neither measures nor reports their
     line totals and imposes no line ceiling on them.
   - **Verify by** `cmd`: `zig build source-audit` (the dedicated audit in
     `src/tools/source_audit.zig` prints the business-logic split and fails the build when a
     component exceeds its row); `zig build test` depends on this audit.
   - **Expected**: exit 0 with per-component business-logic counts; no test or
     tooling line total is part of the contract.
-  - **Traces to**: Milestone 10 — the source audit (budget: d.23,
+  - **Traces to**: Milestone 11 — the source audit (budget: d.23,
     re-derived for the Zig host 2026-08-12).
 
-- **DoD-31 — module effect declarations (d.9)**
+- **DoD-34 — module effect declarations (d.9)**
   - **Assert**: a module `def` without an effect declaration fails
     registration; a declared effect is enforced dynamically when a call
     enters from outside its home module; same-home calls are unbracketed;
     optional documentation shares the same annotation and is visible via
-    `doc`/`see`. Host-registered primitives require nonempty documentation,
-    normalize and copy it during registration, and expose that metadata through
-    `doc`, `which`, and `see` like ordinary primitive bindings.
+    `doc`/`see`. SDK-loaded native words derive their validated effect from the
+    typed `Call`, require nonempty documentation at comptime and load time, and
+    expose both through `doc`, `which`, and `see` like ordinary callables.
   - **Verify by** `cmd`: `ecl -e "'m ( (dup +) 'bad def ) module"`;
     `ecl -e "'m ( (dup +) ( a -- b c ) 'lies def ) module 1 m.lies"`;
     `ecl -e "'m ( (dup +) ( a -- b : \"Double.\" ) 'dbl def ) module 'm.dbl see 'm.dbl doc"`;
-    and `zig build test`, whose
+    `zig build native-fixture`; and `zig build test`, whose
     `module: effect shape cross-home contract and same-home TCO` fixture compares
-    20- and 20,000-deep module countdowns and whose native-module fixture checks
-    all three reflection commands plus metadata replacement on reload.
+    20- and 20,000-deep module countdowns. The real loaded native fixture checks
+    all three reflection commands plus callback/effect/capability consistency.
   - **Expected**: exit ≠ 0 with `'kind 'domain` (missing declaration);
     exit ≠ 0 with `'kind 'contract` (observed `( a -- b )` ≠ declared
     `( a -- b c )`); `see` output includes
     `(a -- b : "Double.")` and `doc` returns `"Double."`; both countdown
     depths have the same bounded maximum frame count, proving no
     per-activation same-home contract checkpoint.
-  - **Traces to**: Milestone 4 — module `def`/`defp` declaration
-    validation + the cross-home d.14 dynamic enforcement hook.
+  - **Traces to**: Milestone 4 — module `def`/`defp` declaration validation and
+    the cross-home d.14 dynamic enforcement hook; Milestone 9 — native typed
+    effects and reflective metadata.
 
-- **DoD-32 — embedded target-language prelude**
+- **DoD-35 — embedded target-language prelude**
   - **Assert**: the shipped [E] core vocabulary loads without filesystem
     support, remains reflectable as ordinary ecl bodies, exposes nonempty
     documentation for every word, follows the audited `### def <name>` block

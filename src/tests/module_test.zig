@@ -14,9 +14,9 @@ fn expectOk(runtime: *session.Session, source: []const u8) !void {
         .ok => {},
         .err => |failure| {
             defer runtime.release(failure);
-            const rendered = try printer.toOwnedString(runtime.hostAllocator(), failure);
-            defer runtime.hostAllocator().free(rendered);
-            std.debug.print("unexpected ecl error: {s}\n", .{rendered});
+            var rendered = try runtime.renderValue(failure);
+            defer rendered.deinit();
+            std.debug.print("unexpected ecl error: {s}\n", .{rendered.bytes()});
             return error.UnexpectedLanguageError;
         },
         .incomplete => return error.UnexpectedIncomplete,
@@ -35,9 +35,9 @@ fn expectErrorContains(
         .incomplete => return error.UnexpectedIncomplete,
     };
     defer runtime.release(failure);
-    const rendered = try printer.toOwnedString(runtime.hostAllocator(), failure);
-    defer runtime.hostAllocator().free(rendered);
-    for (needles) |needle| try std.testing.expect(std.mem.indexOf(u8, rendered, needle) != null);
+    var rendered = try runtime.renderValue(failure);
+    defer rendered.deinit();
+    for (needles) |needle| try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), needle) != null);
 }
 
 fn commitEmptyModule(registry: *modules.Registry, name: intern.NamespaceName) !void {
@@ -319,6 +319,94 @@ test "reflection: words is sorted unique and private-safe" {
     try std.testing.expect(std.mem.indexOf(u8, rendered, "hidden") == null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "alpha").? < std.mem.indexOf(u8, rendered, "zebra").?);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "zebra"));
+}
+
+fn containsCandidate(items: []const []const u8, expected: []const u8) bool {
+    for (items) |item| if (std.mem.eql(u8, item, expected)) return true;
+    return false;
+}
+
+fn expectSortedUnique(items: []const []const u8) !void {
+    for (items[1..], items[0..items.len -| 1]) |current, previous| {
+        try std.testing.expect(std.mem.order(u8, previous, current) == .lt);
+    }
+}
+
+fn expectInternMissing(bytes: []const u8) !void {
+    var lookup = intern.lookupCursor(bytes);
+    while (true) switch (lookup.advance()) {
+        .pending => {},
+        .complete => |found| {
+            try std.testing.expectEqual(@as(?u32, null), found);
+            return;
+        },
+    };
+}
+
+test "session completion: core names are available before the first unit" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    var candidates = try runtime.completionCandidates("sq");
+    defer candidates.deinit();
+    try expectSortedUnique(candidates.items());
+    try std.testing.expectEqual(@as(usize, 1), candidates.items().len);
+    try std.testing.expectEqualStrings("sqrt", candidates.items()[0]);
+}
+
+test "session completion: live and registered names are sorted unique" {
+    const missing_prefix = "completion-prefix-that-must-not-be-interned-47f19";
+    try expectInternMissing(missing_prefix);
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    try expectOk(
+        &runtime,
+        "'completion-module (1 'hidden setp 2 'public set) module " ++
+            "'completion-module use 'cm 'completion-module alias " ++
+            "3 'repl-live set",
+    );
+    var all = try runtime.completionCandidates("");
+    defer all.deinit();
+    try expectSortedUnique(all.items());
+    try std.testing.expect(containsCandidate(all.items(), "repl-live"));
+    try std.testing.expect(containsCandidate(all.items(), "sqrt"));
+    try std.testing.expect(containsCandidate(all.items(), "public"));
+    try std.testing.expect(containsCandidate(all.items(), "completion-module"));
+    try std.testing.expect(containsCandidate(all.items(), "cm"));
+    try std.testing.expect(!containsCandidate(all.items(), "hidden"));
+
+    var missing = try runtime.completionCandidates(missing_prefix);
+    defer missing.deinit();
+    try std.testing.expectEqual(@as(usize, 0), missing.items().len);
+    try expectInternMissing(missing_prefix);
+
+    var surviving = try runtime.completionCandidates("repl-live");
+    runtime.deinit();
+    defer surviving.deinit();
+    try std.testing.expectEqualStrings("repl-live", surviving.items()[0]);
+}
+
+test "session completion: dotted aliases expose only public exports" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    try expectOk(
+        &runtime,
+        "'completion-module (1 'old-public set 2 'private-name setp) module " ++
+            "'cm 'completion-module alias " ++
+            "'completion-module (3 'new-public set 4 'new-private setp) module",
+    );
+    var canonical = try runtime.completionCandidates("completion-module.");
+    defer canonical.deinit();
+    try expectSortedUnique(canonical.items());
+    try std.testing.expectEqual(@as(usize, 1), canonical.items().len);
+    try std.testing.expectEqualStrings("completion-module.new-public", canonical.items()[0]);
+
+    var alias = try runtime.completionCandidates("cm.");
+    defer alias.deinit();
+    try std.testing.expectEqual(@as(usize, 1), alias.items().len);
+    try std.testing.expectEqualStrings("cm.new-public", alias.items()[0]);
+
+    var invalid = try runtime.completionCandidates("cm.new.");
+    defer invalid.deinit();
+    try std.testing.expectEqual(@as(usize, 0), invalid.items().len);
 }
 
 test "reflection remains cancellable across sorting and identifier output" {

@@ -186,7 +186,7 @@ fn executeSource(
     if (session.requestedExit()) |status| return status;
     switch (outcome) {
         .ok => {
-            if (print_stack) try printStack(init, &session);
+            if (print_stack) try printStack(&session);
             return 0;
         },
         .incomplete => |incomplete| return emitSyntheticError(
@@ -217,49 +217,56 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
         .{ .worker_pool = worker_count },
     );
     defer session.deinit();
-    var pending: std.ArrayList(u8) = .empty;
-    defer pending.deinit(init.gpa);
-    var input_buffer: [8192]u8 = undefined;
-    var file_reader = std.Io.File.stdin().reader(init.io, &input_buffer);
-    var continuation = false;
+    const history_path = if (init.environ_map.get("HOME")) |home|
+        std.Io.Dir.path.join(init.gpa, &.{ home, ".ecl_history" }) catch
+            return error.OutOfMemory
+    else
+        null;
+    defer if (history_path) |path| init.gpa.free(path);
+    var editor = try ecl.line_editor.Editor.init(init.gpa, init.io, history_path);
+    defer editor.deinit();
+    var pending = try ecl.reader.PendingUnit.init(init.gpa);
+    defer pending.deinit();
     while (true) {
-        session.writeOutput(if (continuation) ".. " else "ecl> ") catch return error.Io;
-        var line = std.Io.Writer.Allocating.init(init.gpa);
-        defer line.deinit();
-        const has_delimiter = has: {
-            _ = file_reader.interface.streamDelimiter(&line.writer, '\n') catch |err| switch (err) {
-                error.EndOfStream => break :has false,
-                error.WriteFailed => return error.OutOfMemory,
-                error.ReadFailed => return error.Io,
-            };
-            file_reader.interface.toss(1);
-            break :has true;
+        const result = editor.readLine(
+            session.editorTerminal(),
+            session.completionObserve(),
+            if (pending.isEmpty()) .primary else .continuation,
+            pending,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ReadFailed, error.WriteFailed, error.TerminalFailure => return error.Io,
         };
-        const line_bytes = try line.toOwnedSlice();
-        defer init.gpa.free(line_bytes);
-        if (line_bytes.len == 0 and !has_delimiter) {
-            if (pending.items.len == 0) {
-                session.writeOutput("\n") catch return error.Io;
-                return 0;
-            }
-            return emitIncompleteAtEof(init, &session, pending.items);
-        }
-        try pending.appendSlice(init.gpa, line_bytes);
-        if (has_delimiter) try pending.append(init.gpa, '\n');
-        const outcome = try session.runUnit("<repl>", pending.items);
+        if (editor.takeHistoryWarning()) |warning|
+            session.writeDiagnosticsLine(warning) catch return error.Io;
+        const line_bytes = switch (result) {
+            .cancelled => {
+                pending.clear();
+                continue;
+            },
+            .eof => {
+                if (pending.isEmpty()) return 0;
+                return emitIncompleteAtEof(init, &session, pending.source());
+            },
+            .line => |owned| bytes: {
+                var line = owned;
+                defer line.deinit();
+                try pending.appendLine(line.bytes());
+                break :bytes pending.source();
+            },
+        };
+        const outcome = try session.runUnit("<repl>", line_bytes);
         if (session.requestedExit()) |status| return status;
         switch (outcome) {
-            .incomplete => continuation = true,
+            .incomplete => {},
             .ok => {
-                try printStack(init, &session);
-                pending.clearRetainingCapacity();
-                continuation = false;
+                try printStack(&session);
+                pending.clear();
             },
             .err => |error_value| {
                 defer session.release(error_value);
                 try printSessionError(init, &session, error_value);
-                pending.clearRetainingCapacity();
-                continuation = false;
+                pending.clear();
             },
         }
     }
@@ -285,11 +292,11 @@ fn emitIncompleteAtEof(
         },
     };
 }
-fn printStack(init: std.process.Init, session: *ecl.session.Session) AppError!void {
-    const display = try session.stackDisplay();
-    defer init.gpa.free(display);
-    if (display.len == 0) return;
-    session.writeOutputLine(display) catch return error.Io;
+fn printStack(session: *ecl.session.Session) AppError!void {
+    var display = try session.stackDisplay();
+    defer display.deinit();
+    if (display.bytes().len == 0) return;
+    session.writeOutputLine(display.bytes()) catch return error.Io;
 }
 fn emitSyntheticError(
     init: std.process.Init,

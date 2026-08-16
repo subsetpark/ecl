@@ -13,6 +13,7 @@ pub const lexer = @import("lexer.zig");
 pub const binder = @import("binder.zig");
 pub const reader = @import("reader.zig");
 pub const formatter = @import("formatter.zig");
+pub const line_editor = @import("line_editor.zig");
 pub const spans = @import("spans.zig");
 pub const env = @import("env.zig");
 pub const modules = @import("modules.zig");
@@ -49,6 +50,7 @@ test {
     _ = binder;
     _ = reader;
     _ = formatter;
+    _ = line_editor;
     _ = spans;
     _ = env;
     _ = modules;
@@ -82,4 +84,6 @@ test {
     _ = @import("tests/snapshot_property_test.zig");
     _ = @import("tests/task_join_property_test.zig");
     _ = @import("tests/resolution_property_test.zig");
+    _ = @import("tests/line_editor_test.zig");
+    _ = @import("tests/fuzz_test.zig");
 }

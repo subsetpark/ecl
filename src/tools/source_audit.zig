@@ -18,13 +18,15 @@ const components = [_]Component{
     // Exact, non-rehashing map construction and resumable interning keep
     // user-sized storage work outside scheduler-native stacks.
     .{ .name = "values+RC", .budget = 4200, .files = &.{
-        "value.zig", "heap.zig", "intern.zig", "list.zig",
-        "equal.zig", "dict.zig", "print.zig",  "poll.zig",
+        "value.zig",       "heap.zig", "intern.zig", "list.zig",
+        "equal.zig",       "dict.zig", "print.zig",  "poll.zig",
+        "text_buffer.zig",
     }, .sources = &.{
-        @embedFile("../value.zig"),  @embedFile("../heap.zig"),
-        @embedFile("../intern.zig"), @embedFile("../list.zig"),
-        @embedFile("../equal.zig"),  @embedFile("../dict.zig"),
-        @embedFile("../print.zig"),  @embedFile("../poll.zig"),
+        @embedFile("../value.zig"),       @embedFile("../heap.zig"),
+        @embedFile("../intern.zig"),      @embedFile("../list.zig"),
+        @embedFile("../equal.zig"),       @embedFile("../dict.zig"),
+        @embedFile("../print.zig"),       @embedFile("../poll.zig"),
+        @embedFile("../text_buffer.zig"),
     } },
     // Tokenization, parsing, binder lowering, exact materialization, and
     // provenance publication all carry nominal resumable state. The larger
@@ -54,7 +56,10 @@ const components = [_]Component{
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
     // in cancellation-only loops.
-    .{ .name = "modules and registry", .budget = 4400, .files = &.{
+    // Completion adds Directory/Shape/generation-owning cursors plus an
+    // opaque rendered result; the higher ceiling preserves those nominal
+    // lifetime boundaries rather than folding them into Session internals.
+    .{ .name = "modules and registry", .budget = 4800, .files = &.{
         "env.zig", "modules.zig", "snapshot.zig", "snapshot_core.zig", "module_prims.zig", "reflection.zig", "session.zig",
     }, .sources = &.{
         @embedFile("../env.zig"),          @embedFile("../modules.zig"),
@@ -84,10 +89,13 @@ const components = [_]Component{
     }, .sources = &.{
         @embedFile("../primitive_docs.zig"),
     } },
-    .{ .name = "CLI and formatter", .budget = 1900, .files = &.{
-        "main.zig", "formatter.zig",
+    // The editor owns raw-terminal restoration, scalar-safe mutation, and
+    // atomic locked history as separate nominal states. Its ceiling budgets
+    // those boundaries rather than hiding them in the CLI entrypoint.
+    .{ .name = "CLI, line editor, and source formatter", .budget = 2800, .files = &.{
+        "main.zig", "formatter.zig", "line_editor.zig",
     }, .sources = &.{
-        @embedFile("../main.zig"), @embedFile("../formatter.zig"),
+        @embedFile("../main.zig"), @embedFile("../formatter.zig"), @embedFile("../line_editor.zig"),
     } },
     // Explicit continuation state is part of the kernel correctness boundary;
     // the prior ceiling assumed native-stack traversals that could not yield.
@@ -124,6 +132,7 @@ const test_files = [_][]const u8{
     "tests/concurrency_test.zig",         "tests/scheduler_property_test.zig",
     "tests/snapshot_property_test.zig",   "tests/task_join_property_test.zig",
     "tests/resolution_property_test.zig", "tests/oom_test.zig",
+    "tests/line_editor_test.zig",         "tests/fuzz_test.zig",
     "oom_root.zig",
 };
 const repository_verification_files = [_][]const u8{
@@ -749,10 +758,17 @@ fn auditTypingBoundaries() bool {
     failed = auditTokens("module nominal maps", @embedFile("../modules.zig"), &.{
         &.{ "poll", ".", "U32Map" },
     }) or failed;
-    failed = auditTokens("session lease boundary", @embedFile("../session.zig"), &.{
+    // Session may privately consume observation leases, but none may cross an
+    // exported function boundary into untrusted callers.
+    failed = auditPublicFunctionTypes("session lease boundary", @embedFile("../session.zig"), &.{
         &.{"GenerationLease"},
         &.{"BindingLease"},
     }) or failed;
+    failed = auditPublicFunctionReturnTypes(
+        "session allocation authority",
+        @embedFile("../session.zig"),
+        &.{&.{"Allocator"}},
+    ) or failed;
 
     failed = auditErasedCasts(
         "machine erased callbacks",
@@ -1072,6 +1088,74 @@ fn auditTokens(
         return true;
     }
     return hasForbiddenTokens(label, tree, 0, tree.tokens.len, forbidden);
+}
+
+fn auditPublicFunctionTypes(
+    label: []const u8,
+    source: [:0]const u8,
+    forbidden: []const []const []const u8,
+) bool {
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
+    defer tree.deinit(std.heap.page_allocator);
+    if (tree.errors.len != 0) return true;
+    var failed = false;
+    for (0..tree.nodes.len) |raw_node| {
+        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        if (tree.nodeTag(node) != .fn_decl) continue;
+        const first = tree.firstToken(node);
+        if (tree.tokenTag(first) != .keyword_pub) continue;
+        var buffer: [1]std.zig.Ast.Node.Index = undefined;
+        const function = tree.fullFnProto(&buffer, node) orelse continue;
+        var parameters = function.iterate(&tree);
+        while (parameters.next()) |parameter| {
+            const type_expr = parameter.type_expr orelse continue;
+            failed = hasForbiddenTokens(
+                label,
+                tree,
+                tree.firstToken(type_expr),
+                tree.lastToken(type_expr) + 1,
+                forbidden,
+            ) or failed;
+        }
+        if (function.ast.return_type.unwrap()) |return_type| {
+            failed = hasForbiddenTokens(
+                label,
+                tree,
+                tree.firstToken(return_type),
+                tree.lastToken(return_type) + 1,
+                forbidden,
+            ) or failed;
+        }
+    }
+    return failed;
+}
+
+fn auditPublicFunctionReturnTypes(
+    label: []const u8,
+    source: [:0]const u8,
+    forbidden: []const []const []const u8,
+) bool {
+    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
+    defer tree.deinit(std.heap.page_allocator);
+    if (tree.errors.len != 0) return true;
+    var failed = false;
+    for (0..tree.nodes.len) |raw_node| {
+        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
+        if (tree.nodeTag(node) != .fn_decl) continue;
+        const first = tree.firstToken(node);
+        if (tree.tokenTag(first) != .keyword_pub) continue;
+        var buffer: [1]std.zig.Ast.Node.Index = undefined;
+        const function = tree.fullFnProto(&buffer, node) orelse continue;
+        const return_type = function.ast.return_type.unwrap() orelse continue;
+        failed = hasForbiddenTokens(
+            label,
+            tree,
+            tree.firstToken(return_type),
+            tree.lastToken(return_type) + 1,
+            forbidden,
+        ) or failed;
+    }
+    return failed;
 }
 
 fn auditFunctionTokens(

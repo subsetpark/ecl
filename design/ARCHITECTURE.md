@@ -29,18 +29,18 @@ Decision 21's doctrine becomes two enforced rules:
 
    | component | budget | measured |
    |---|---|---|
-   | values + RC | 4,200 | 3,731 |
-   | reader | 3,300 | 2,451 |
-   | machine | 5,600 | 5,495 |
-   | modules and registry | 4,400 | 4,203 |
+   | values + RC | 4,200 | 3,798 |
+   | reader | 3,300 | 2,595 |
+   | machine | 5,600 | 5,506 |
+   | modules and registry | 4,800 | 4,760 |
    | bootstrap prelude loader | 150 | 86 |
    | combinators | 1,200 | 748 |
-   | definition annotations and doc normalization | 1,000 | 901 |
+   | definition annotations and doc normalization | 1,000 | 905 |
    | primitive documentation | 300 | 159 |
-   | CLI and source formatter | 1,900 | 1,428 |
+   | CLI, line editor, and source formatter | 2,800 | 2,148 |
    | kernels and idioms | 8,500 | 5,590 |
-   | scheduler and concurrency | 3,500 | 2,662 |
-   | **business-logic Zig total** | **30,000** | **27,454** |
+   | scheduler and concurrency | 3,500 | 2,889 |
+   | **business-logic Zig total** | **30,000** | **29,184** |
 
    The M7 recalibration supersedes the earlier 22,000 total and 5,500 kernel
    ceilings. Scheduler-safe kernels, task joins, failure unwinding, snapshot
@@ -64,6 +64,22 @@ Decision 21's doctrine becomes two enforced rules:
    Runtime sources remain directly under `src/`; test suites and helpers are
    grouped in `src/tests/`, while substantive build-only checks live in
    `src/tools/` behind package-root entrypoints required by Zig.
+
+   The native-extension milestone is scope added after this measurement. The
+   current 30,000-line ceiling remains authoritative until that milestone's
+   first patch remeasures the tree and updates this table, the exhaustive
+   source classification, the source-audit constants, and the workstream in
+   one change. That rebaseline must give the SDK/ABI/loader its own component
+   and honestly raise the machine, module, scheduler, and total ceilings needed
+   by the typed transaction, module-instance, and arbitration states below. It
+   begins from the workstream's 4,000-line native-component / 37,000-line total
+   planning envelope, but measurement and the strong representation boundary
+   take precedence over those provisional numbers.
+   The installed SDK and its author-facing build helper are shipped logic and
+   must be added to the audit's exhaustive first-party roots; only fixture and
+   verification harness code is excluded. The rebaseline may not recover space
+   by collapsing those states, moving shipped SDK logic
+   into an excluded path, or treating verification code as the budget.
 
    The same dedicated source audit lexes `src/prelude.ecl` well enough to
    distinguish comments from multiline strings. It requires each top-level
@@ -200,13 +216,14 @@ publication critical sections.
   cleanup phase. Environment and module resolution expose explicit cursors,
   including shadow and visibility checks, so runtime lookup cannot silently
   select another traversal implementation.
-- Public native callbacks return `PrimitiveOutcome`, which atomically carries
-  either success or the complete language-failure payload. Trusted builtins use
-  a separate callback variant. Registered callbacks receive an opaque
-  `NativeMachine` exposing only semantic stack operations; they cannot obtain a
-  `Unit`, module home, generation pin, or reclamation domain. Public
-  registration therefore cannot return a detached `error.Ecl`, manufacture an
-  independently escaping generation lifetime, or mutate scheduler reclamation.
+- Core builtins and host-loaded native words occupy distinct binding variants.
+  A native binding carries one nominal `NativeCallable` (module-instance handle
+  plus validated definition index), never a bare callback/context pair. The
+  external extension surface is the typed transaction described below; the
+  existing general-stack `NativeMachine`/public registration seam is not a
+  second supported extension API. Neither native bindings nor their callbacks
+  can obtain a `Unit`, mutable environment, module home, generation pin,
+  registry, host owner, wake control, or reclamation domain.
 - Core construction is a `BuildingEnv` typestate capability consumed by
   `finish`. Session, core-build, module-root, lazy-local, and owned-local scope
   storage are a tagged union rather than correlated environment/ownership flags.
@@ -239,6 +256,130 @@ publication critical sections.
   evaluating/finishing union is worker-private, so advancing a materialization
   cursor cannot race a waiter reading the cell's publication tag. No phase can
   carry an unrelated unit, materializer, or terminal payload.
+
+## Native extension boundary
+
+- **One artifact is one module and one lifetime unit.** A target-specific
+  `<name>.eclmod` contains exactly one canonical ECL module and exports one
+  SDK-generated ABI-v1 entry point. Its complete word table validates and
+  publishes atomically; an artifact cannot partially register, publish a
+  second namespace, or leave definitions behind after failed initialization.
+  `ECL_PATH` remains the only module search path: for each path entry in order,
+  resolution tries `<name>.ecl` and then `<name>.eclmod`. The first existing
+  candidate is authoritative, including its errors, and a native descriptor's
+  canonical name must equal the requested name. A future package manager owns
+  dependency solving and target selection and makes its result available by
+  ordering package roots in `ECL_PATH`; the runtime does neither job.
+- **Trusted, Zig-only authoring over a stable wire ABI.** The supported v1
+  author surface is a separately distributed `ecl-native` Zig SDK built with
+  the pinned Zig toolchain. It emits the descriptor and a target-native shared
+  object without linking or rebuilding `ecl`. The adapter alone speaks a
+  C-shaped ABI: fixed-width tags and integers, explicit pointer/length pairs,
+  sized records, callback tables, and capability id/version requirements. No
+  Zig slice, error union, enum layout, tagged union, allocator, or author type
+  crosses the library boundary. ABI major 1 permits additive record tails and
+  capability versions, so an older v1 artifact loads on a newer v1 runtime
+  whenever all of its requirements are supported; a breaking representation or
+  semantic change requires ABI v2. This binary promise does not constitute a
+  supported C author API in v1. Linux and macOS are the v1 loader targets; the
+  `.eclmod` suffix is portable naming, not a portable binary.
+- **Loading is one consuming typestate.** A Session-owned native instance moves
+  through `opened -> described -> validated -> initialized -> published`.
+  Each variant owns exactly the library handle, copied metadata, state storage,
+  callback table, and cleanup operation valid in that phase, and a failed
+  transition consumes and cleans its input. Descriptor lengths, record sizes,
+  ABI and capability versions, canonical names, UTF-8 documentation, parsed
+  effects, definition uniqueness, callback indices, state size/alignment, and
+  all counts are validated before module-state initialization or registry
+  publication can run. Validation and metadata materialization are
+  cursor-driven. Opening a
+  native library is nevertheless arbitrary-code execution at the platform
+  level—library constructors may run before ECL can inspect the descriptor—so
+  every directory in an `ECL_PATH` used for native loading is a trusted-code
+  boundary.
+- **Library lifetime is Session lifetime.** V1 performs no native hot reload or
+  early unload. A published instance pins its code image while any binding,
+  call transaction, state access, or continuation can reach a callback. Session
+  shutdown first closes new call/lifetime creation, quiesces tasks and state
+  waiters, destroys all continuations, settles their ECL retirement, runs each
+  bounded module-state destructor exactly once, and only then closes library
+  handles. An optional private static transport accepts the same generated
+  descriptor for first-party modules such as CSV and JSON, with a no-op code
+  image pin; it does not expose an ECL-in-Zig embedding API.
+- **The effect is part of the call type.** A callback's mandatory first
+  parameter is exactly `*ecl.Call("inputs -- outputs")`, where the SDK parses
+  the fixed successful effect at comptime. That type exposes only the declared
+  immutable inputs and accepts exactly the declared number of outputs. Word
+  registration adds only the name, nonempty documentation, and callback; the
+  descriptor derives its effect and arity from the call type, leaving no
+  duplicated declaration to drift. Remaining callback parameters must be
+  exact SDK-owned capability types. `@typeInfo` validation rejects generic or
+  variadic callbacks, a wrong result, optional, unknown, duplicate, or
+  conflicting capabilities, a capability/state mismatch, and duplicate word
+  names. The SDK generates the canonical capability manifest and wire adapter
+  from that one signature. Unsupported capability versions fail loading, and
+  `which`/`see` expose the validated native origin and requirements.
+- **Calls are transactional leaf operations.** `ValueView` permits immutable,
+  O(1) kind, scalar, and aggregate-length observation; it never reveals the
+  runtime `Value` or heap storage. `call.forward(i)` and `BuildValues` produce
+  issuer-checked candidate outputs owned by the call transaction. Complete
+  reserves the exact final stack window before atomically replacing the inputs
+  with the effect's output tuple. Yield preserves the inputs, candidates, and
+  transaction; deliberate failure, cancellation, deadline loss, OOM, or
+  abandonment leaves the operand stack unchanged and transfers tentative roots
+  to bounded retirement. Native failures may name only `type`, `shape`,
+  `conform`, `overflow`, `domain`, `parse`, `io`, or `user` plus one bounded
+  message. The runtime retains authority over underflow, undefined-word,
+  contract, cancellation, timeout, word/site/trace attachment, and OOM. The
+  Zig callback result is exactly `error{OutOfMemory}!Outcome`; its generated
+  adapter maps complete/failure/yield/OOM to explicit wire tags.
+- **Capability values are ephemeral authority, not a host object.** There is no
+  public capability map, lookup by string, raw host-context pointer, or
+  allocator. The adapter mints only the exact parameters named by a callback
+  for one invocation. Comptime state validation recursively rejects ephemeral
+  capabilities, `Call`, `ValueView`, and lifetime-incompatible SDK handles from
+  module or continuation state; only handles explicitly marked durable for
+  that owner may cross a turn. Runtime issuer/generation checks remain active
+  in optimized builds. Native machine code is trusted and can deliberately
+  escape Zig's safe surface, so these are strong supported-API invariants, not
+  a sandbox against malicious code.
+- **Rescheduling is a typed `WorkDriver`, not an execution class.** A callback
+  requests `Reschedule(ContinuationSpec)`, whose spec fixes its private Zig
+  state and explicit bounded destructor. The host owns aligned opaque storage
+  and a library pin for that continuation. From its first invocation the call
+  advances as the ordinary scheduler-owned driver, with one 65,536-unit kernel
+  budget per turn, the normal cancellation check, and the same ready-queue and
+  retirement arbitration as first-party cursors. Aggregate content is available
+  only through budget-charging text/leaf/list/dict cursors, aggregate builders
+  charge the same budget, and extension-local loops call `consume`. No raw
+  backing slice or unmetered SDK iterator bypasses that path. Exhaustion yields
+  with the exact state; complete/fail/cancel consumes it once. Native machine
+  code itself is not preemptible, and the runtime cannot infer instruction
+  reductions, so unrelated long computation or blocking remains a trusted-code
+  violation detected only by per-invocation duration/overrun diagnostics.
+- **Module state has distinct observation and mutation authority.** An optional
+  `ModuleState(T, init, deinit)` declaration fixes one state instance per
+  Session. Its prompt, non-yielding initializer receives no ECL, environment,
+  scheduler, registry, allocation, or package-resource capability and either
+  constructs state or returns a bounded load-failure message; its destructor
+  is infallible and bounded. State cannot retain ECL values in v1. Callbacks ask
+  separately for `ModuleView(StateSpec)` or `ModuleUpdate(StateSpec)`. The
+  former exposes a turn-scoped immutable borrow and the latter an exclusive
+  mutable borrow. V1 may serialize both through one scheduler-integrated
+  arbiter, but a contending Unit parks rather than blocking a worker. Every
+  borrow is released before complete, failure, or yield and reacquired on a
+  later turn; continuation validation rejects retained state borrows. Native
+  state and external side effects are explicitly outside operand-stack
+  rollback.
+- **V1 remains intentionally leaf-shaped.** Native callbacks cannot resolve or
+  invoke words, evaluate quotations, spawn tasks, re-enter a Session, publish
+  definitions, retain ECL values in module state, create opaque ECL resource
+  values, wait for an external wake, or submit blocking jobs. Resources,
+  `Offload`, external wake, package assets, and quotation evaluation are future
+  named capabilities, not new callback classes. The first additive scheduling
+  capability is expected to be `Offload`; until then inline callbacks must
+  return promptly. The v1 HTTP builtin is a documented first-party internal
+  blocking exception and does not broaden the extension SDK.
 
 ## Reference-counting discipline (Perceus-on-a-stack)
 
@@ -366,6 +507,29 @@ publication critical sections.
   the issuing host domain. Each resolve/name cursor takes
   its own `GenerationPin`, so releasing the originating lease cannot retire
   the generation while the cursor still holds an environment snapshot.
+
+- **Visible-name completion boundary:** `VisibleNameCursor` is the single
+  public-name traversal for both `words` and host completion. Its tagged root
+  is either one retained scope path or the pre-first-unit session environment;
+  its tagged phase variants own exactly the direct cursor, use Shape lease,
+  registry acquisition cursor, export generation/cursor pair, or core cursor
+  required in that phase. A transition constructs its successor payload in
+  one step, so the pre-first-unit environment-to-core transition cannot expose
+  a core phase without a core cursor. Registry namespace enumeration likewise
+  owns one Directory lease while yielding canonical module and alias names.
+  `Session.completionCandidates` drives those observation cursors inside a
+  retirement-settling blocking turn. Dotted prefixes use non-mutating intern
+  lookup plus a public-export cursor; arbitrary input is never inserted into
+  the process table. The public `CompletionSet` contains only sorted,
+  duplicate-free rendered bytes in allocator-owned storage. It leaks neither
+  IDs nor runtime authority and remains valid after Session teardown. The
+  same opaque `RenderedText` ownership carries stack and error renderings; no
+  Session method returns its host allocator. Production `comptime` reflection
+  recursively rejects allocator, I/O, environment, registry, Unit, scheduler,
+  console, host-owner, release-domain, and private Session state from every
+  public Session return type. The exhaustive source audit independently rejects
+  lease types in public Session signatures and allocator types in public
+  Session return positions, while permitting private Session code to own both.
 
 - **Definition annotations:** `definition_prims.zig` recognizes only direct
   top-level word markers in the candidate quotation, validates the entire
@@ -720,10 +884,14 @@ out). Kernels never own threads.
   before the wait mutex is released, so allocation, lock contention, and thread
   creation can neither extend a short timeout nor let a later candidate win.
   **IO:** direct on workers in v1 (scripting
-  scale); the committed evolution is the blocking-pool split reusing the
-  await machinery unchanged. Console writes take the stdout lock per
-  call — whole-write atomicity, satisfying d.11/d.20's interleaving
-  contract.
+  scale); the committed evolution is the `Offload` capability backed by a
+  blocking-pool split which reuses the await machinery unchanged. The v1 HTTP
+  builtin is the one documented internal blocking exception; ordinary native
+  extensions receive no blocking or external-wake capability. Console exposes
+  only narrow whole-write methods;
+  each method takes and releases its own stdout/stderr lock, so no caller can
+  retain or mismatch a writer/lock lease. This preserves whole-write atomicity
+  and satisfies d.11/d.20's interleaving contract.
 - **Determinism lives at join points**, never in scheduling: program-
   order `await-all` outcomes and `par-each` leftmost-error are
   schedule-invariant. `await-all` is the source-defined `(await) each` fan-in;
@@ -735,6 +903,156 @@ out). Kernels never own threads.
 - **Cold start is a budget** (the soul test: `ecl '3 4 +'` answers
   instantly): no worker threads or timer thread until first `spawn`;
   prelude installation stays bounded; nothing else spins up at launch.
+
+## Interactive REPL boundary
+
+TTY detection in `main.entry` is the only editor activation point. `repl`
+owns one `line_editor.Editor`; `runStdin`, explicit `-`, file, eval, and format
+paths do not construct or call it. On Linux and macOS each physical read turn
+saves termios, enters raw mode without flushing queued input, and drains output
+before restoring the saved attributes without flushing typeahead. Restoration
+precedes returning a tagged `line`, `cancelled`, or `eof` result—or any error;
+if restoration fails after line completion, the still-owned line is destroyed
+before the terminal error escapes. Other targets retain a canonical single-line
+fallback. `OwnedLine` is a nominal
+allocator-owned result, and the editor copies its bytes into the pre-existing
+pending-unit accumulator before releasing it. Ctrl-C clears that accumulator;
+Ctrl-D preserves the clean-primary and incomplete-continuation outcomes.
+
+The editor owns exactly one thing: which bytes are in the buffer and where the
+cursor sits between them. Everything else it appeared to own is held by the
+layer that can actually decide it, and each boundary is a type rather than a
+convention, because three review rounds established that a rule only an author
+remembers is not a rule.
+
+The governing rule is that correlated facts never cross a boundary separately:
+an owner-issued value either contains them or exposes the only valid transition
+over them. Every remaining defect in this area was the same decomposition —
+bytes beside an offset, a lexical state beside the source it described, a
+capability beside the handle it assumed would not move.
+
+**Terminal authority is a capability, not a Session.** `readLine` receives an
+`EditorTerminal` and a `CompletionObserve`, both opaque handles carrying the
+heap-stable session core rather than the address of the movable `Session` value
+that minted them. Between them they offer a prompt, a named terminal effect, a
+candidate list, name observation, and — only through a `RowTerminal` obtained
+from a measured row — single-row redraw. There is no operation for program
+output and none that accepts caller-supplied control bytes, so the editor
+cannot emit an unescaped byte the way a source denylist merely asked it not to.
+Prompts and effects are enums for the same reason: a runtime slice trusted by
+comment is not trusted.
+
+**The terminal boundary owns geometry, planning, and escaping together.**
+`console.zig` measures the row, chooses the window, escapes what it writes, and
+places the cursor. Escaping covers malformed, truncated, C0, DEL, and C1 — C1
+because U+0080-U+009F is well-formed two-byte UTF-8 that a terminal in UTF-8
+mode may still act on, so decodability is not what makes a scalar safe to emit.
+The cursor column is produced by writing the row, erasing, returning to column
+zero, and rewriting the prefix, which makes the terminal compute it. That is
+sound only while the row cannot wrap, so three things hold together: sizing
+uses an upper bound on every unit — printable ASCII exactly one cell, an escape
+exactly four per byte, and every other scalar charged the widest a terminal
+renders — no unit is ever forced in when it does not fit, and drawing is
+reachable only from a `Columns` value that `geometry` minted. An unmeasurable
+terminal is `Geometry.unavailable` and selects the canonical line reader; there
+is deliberately no fallback width, because guessing eighty columns on a
+narrower terminal wraps the row and moves the cursor. There is likewise no
+character-width table: a table is data, no property that consumes it can
+validate it, and the only thing it bought was showing more of a non-ASCII line.
+
+Bytes and a cursor offset never cross this boundary together. The buffer mints
+a `DisplayView` — the text either side of the cursor — which is the only place
+both facts are known, and planning narrows a view into a view. An offset that
+does not correspond to its bytes is therefore not expressible, so the console
+never slices on an index it was handed.
+
+**Byte storage owns its input, once, for everybody.** The edit buffer and the
+pending unit both hand out a slice of the bytes they hold and both grow those
+bytes, so a caller can pass a borrow of the storage straight back into a
+mutation and have it freed mid-copy. That defect appeared independently in
+both, which is what a missing shared primitive looks like from the inside — two
+correct-looking local fixes rather than one type. `TextBuffer` is now the
+storage under both: its only mutation copies every source before touching the
+storage and reserves the result's capacity before writing, so sources may be
+slices of the very bytes being replaced and a failure leaves the buffer exactly
+as it was. Transposing two scalars is consequently just a splice whose two
+sources are the bytes being replaced, in the other order.
+
+**Byte rewriting is one splice owning the whole transition.** `EditBuffer` is
+an opaque handle, not a struct with a private field type, because Zig's
+inferred struct literals let external code build the latter and hand itself a
+cursor no splice produced. Every mutation — insert, replace, delete, kill,
+transpose — routes through `splice(range, source)`, which validates, stages,
+and commits in that order. Validation belongs there and not in staging because
+whether a replacement fits depends on the range it replaces; deciding earlier
+rejects overwriting a full buffer with a single byte. Staging copies the source
+before the storage is touched, so a replacement may safely alias the very bytes
+being rewritten. The cursor is then re-derived from the result rather than
+computed, because a replacement can form a scalar across either seam: inserting
+a lead byte in front of a stranded continuation byte turns two stray bytes into
+one scalar that arithmetic would land inside.
+
+**Lexical state is minted by the reader and carried with its bytes.** The
+reader owns an opaque `PendingUnit` holding the accumulated source and the
+tokenizer state at its end. Appending copies the line and reserves capacity
+before writing anything: the unit hands out the very storage an append writes
+into, so a caller may legitimately pass a slice of it and growing would move
+that storage out from under the copy. Every failure therefore happens before
+any of it is written, and the state cannot end up describing different bytes
+than the unit holds. It extends over exactly the appended bytes, making the
+cost across a unit linear rather than quadratic. The
+checkpoint type is private: a public one was constructible from an inferred
+literal and could be paired with source that never produced it. Completion asks
+the unit itself, passing only the current line, so the editor has nothing to
+re-derive lexical state from — the duplicate scanner that used to answer this
+could disagree with the lexer that parses the source, and only ever saw one
+physical line, which is not a unit of this language.
+
+Only valid UTF-8, nonempty physical lines
+without CR/LF enter the 100-entry history; malformed bytes still reach the
+reader diagnostic but cannot corrupt durable history. When HOME is usable,
+`History` serializes writers with a sibling lock, rereads and merges
+the current UTF-8 file under that lock, and replaces `.ecl_history` atomically
+with user-only permissions. Missing or failed persistence never disables the
+editor; one stable warning is exposed to Session diagnostics. The CLI/editor
+component ceiling rises from 1,900 to 2,800 for these raw-mode, owned-line, and
+locked-history state boundaries. The modules/registry ceiling rises from
+4,400 to 4,800 for the lease-owning visibility and completion capabilities;
+the total shipped-logic ceiling remains 30,000.
+
+The editor fuzz target is a shrinkable arbitrary-byte/action state machine.
+After every operation it compares production bytes and cursor position with an
+independent byte-vector model, checks the line limit and cursor bounds, and,
+when the whole buffer is valid UTF-8, requires both slices at the cursor to be
+valid. Oversized mutations must preserve the old state, while repeated
+`takeOwned`/deinit transitions run under the leak-detecting allocator. It also
+requires, independently of whether the rest of the buffer is well-formed, that
+the cursor never sits inside a scalar — the splice postcondition stated as a
+property rather than as a comment — and it replaces the buffer with an alias of
+its own contents, which is the shape that made a naive splice copy overlap
+itself. Arbitrary and prompt-relative row widths, an unmeasurable row, a row too
+narrow for the prompt, and a row wider than any line the campaign builds all
+drive the real console after every action, into a buffer sized from the
+expectation so that writing more than expected fails rather than being skipped.
+That property is an exact byte comparison against an independently escaped
+expectation, including the framing the console owns; asserting that the output "looks printable" cannot tell a
+legitimate erase sequence from one that came out of the buffer, and it also
+confirms the selected window fits the row it was planned for. The completion
+fuzzer issues both arbitrary and known-core queries before the first Unit. The
+real PTY corpus separately covers completion before the first Unit, queued
+lines, malformed/truncated UTF-8 and escapes, a pasted control sequence that
+must be displayed escaped rather than replayed, completion declining inside a
+string that opened on an earlier physical line and inside a comment, error/EOF
+recovery, exact parseable history, cross-process recall, and canonical/echo
+restoration after errors. A seventh campaign drives the real pending unit,
+including appending a line borrowed from the unit's own source, and requires
+that scanning a unit one line at a time reaches the same lexical state as
+scanning it in a single pass.
+
+The source-audit denylist that once forbade the editor from naming the general
+console write is gone. The operations it guarded against no longer exist on the
+types the editor holds, and a capability whose surface lacks an operation is a
+stronger statement than a scan for the identifier that would have called it.
 
 ## The differential harness (named v1 deliverable, d.23)
 
@@ -757,19 +1075,76 @@ Focused constructors and other low-level allocation paths use exhaustive
 failure injection in the ordinary `zig build test` suite. Initialized-Session
 coverage is one consolidated probe in the separate ReleaseSafe
 `zig build test-oom` gate. That probe crosses kernels, primitives, session
-services, reflection, loading, modules, and definition replacement in one
-deterministic lifetime, so each injected failure index pays for the embedded
-prelude bootstrap once. Its tagged cooperative scheduler mode executes the
-same queue, wait-set, cancellation, publication, and reclamation transitions
-on the root thread while starting no worker pool. This makes ordinal failure
-injection a total order instead of depending on which allocator call wins a
-thread race; the 1/N-worker suites and TSan separately validate the threaded
-executor. Deadline setup remains in the sweep through a pending task selected
-before a far deadline, while public scheduler tests cover actual timeout
-selection. `checkAllAllocationFailures` supplies exact
+services, reflection, source and native loading, native call transactions,
+modules, and definition replacement in one deterministic lifetime, so each
+injected failure index pays for the embedded prelude bootstrap once. Native
+fixture code uses the real generated descriptor and public loader; exhaustive
+initialized-Session coverage remains here rather than independently
+bootstrapping the prelude for every capability surface. Its tagged cooperative
+scheduler mode executes the same queue, wait-set, native-state arbitration,
+cancellation, publication, and reclamation transitions on the root thread
+while starting no worker pool. This makes ordinal failure injection a total
+order instead of depending on which allocator call wins a thread race; the
+1/N-worker suites and TSan separately validate the threaded executor. Deadline
+setup remains in the sweep through a pending task selected before a far
+deadline, while public scheduler tests cover actual timeout selection.
+`checkAllAllocationFailures` supplies exact
 allocated/freed accounting over the standard backing allocator; the debug
 test allocator is deliberately not nested underneath this already exhaustive
 wrapper.
+
+## Coverage-guided fuzz topology
+
+The parser, formatter, shrinkable arbitrary-byte edit-buffer model, Session
+completion mutation path, durable-history merge path, production scheduler
+publication/join path, native-descriptor validator, and native-call transaction
+path each have a distinct named build step and exactly one selected
+`std.testing.fuzz` entry point. `zig build fuzz` executes all eight seed corpora
+as ordinary tests. Bounded campaigns invoke `fuzz-reader`, `fuzz-formatter`,
+`fuzz-editor`, `fuzz-completion`, `fuzz-history`, `fuzz-scheduler`,
+`fuzz-native-descriptor`, and `fuzz-native-call` separately, because Zig's
+coverage-guided runner selects one fuzz entry point per invocation. CI
+therefore cannot report validation of a model or metadata parser as coverage
+for the real dynamic loader, generated adapter, scheduler continuation, state
+arbiter, and retirement path.
+
+The native descriptor campaign passes arbitrary bounded metadata through the
+production validator using valid host-owned backing ranges; it varies all
+sizes, counts, offsets/indices, strings, names, effects, capability versions,
+callback-table relationships, and state layout fields without attempting to
+`dlopen` arbitrary hostile code. The native-call campaign drives a real
+SDK-built fixture through public `ECL_PATH` resolution and generates
+complete/fail/yield/cancel sequences, aggregate cursor budgets, candidate
+output graphs, and module view/update contention. Its oracle observes only ECL
+stack values, errors, reflection, fixture lifecycle events, and allocator
+counts. The same production-connected property runs with one and many workers
+under TSan; after delayed calls and state waiters quiesce, it requires bounded
+retired memory and the exact continuation -> module-state -> library shutdown
+order. A model-only callback state machine is supplementary evidence, never
+acceptance for that path.
+
+The four P1 escapes exposed four different coverage-boundary mistakes. The
+completion campaign originally ran a Unit before its mutation loop, so it never
+generated the environment-root phase that lacked a core cursor; pre-first-Unit
+arbitrary and deterministic queries now make that state part of the shrinkable
+campaign. The edit campaign stopped at `EditBuffer`, so it never reached the
+refresh slice construction or the default Debug artifact; it now drives the
+production tagged viewport projection, while the real Debug PTY remains the
+code-generation and full-call-path gate. Finally, `.FLUSH` discards bytes in the
+kernel terminal queue, state absent from any in-process byte/action model. The
+same-write multi-line PTY case is therefore the required property for raw-mode
+entry/restoration. The fourth escape was a libc ABI mismatch: `ioctl` is
+variadic, and the Darwin width query had declared a non-variadic prototype, so
+on AArch64 the `winsize` pointer went into a register the callee never reads.
+That left the queried width undefined and let the kernel write the result
+through a stale stack value that aliased the live edit buffer, zeroing the line
+under the cursor. Terminal geometry is now queried through the variadic
+`std.c.ioctl` declaration. No in-process model can contain that state either,
+because the corruption is produced by the calling convention itself. A fuzz
+result is evidence only for the exact production seam it invokes; it is not
+evidence for adjacent compiler, libc, or kernel behavior. Every foreign
+function this repository calls must be declared with the same variadic shape as
+its C prototype.
 
 ## What the d.9 hardening layer needs from v1 (the substrate contract)
 

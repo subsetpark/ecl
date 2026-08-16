@@ -35,9 +35,22 @@ zig build test -Doptimize=ReleaseFast
 zig build test-workers
 zig build test-oom
 zig build test-tsan
+zig build test-repl
+zig build test-repl -Doptimize=ReleaseSafe
+zig build fuzz
 zig build source-audit
 zig build differential
 ```
+
+`zig build fuzz` runs the seed corpus as an ordinary smoke test. Add a bounded
+coverage-guided campaign for one independently wired target, for example
+`zig build fuzz-editor --fuzz=10K`. The available suffixes are `reader`,
+`formatter`, `editor`, `completion`, `history`, and `scheduler`; CI invokes
+every target separately for 100 generated iterations so Zig's single-target
+fuzz runner cannot silently select only one surface.
+The editor target is a shrinkable arbitrary-byte/action state machine that
+checks exact byte preservation, cursor and UTF-8 boundary invariants, the line
+limit, and owned-line cleanup after every transition.
 
 `test-workers` runs the complete library and real-binary suite at one and eight
 workers. `test` keeps low-level exhaustive allocator checks alongside ordinary
@@ -70,6 +83,41 @@ ECL_WORKERS=8 ./zig-out/bin/ecl '[1 2 3] (dup *) par-each'
 ./zig-out/bin/ecl fmt src/prelude.ecl
 ./zig-out/bin/ecl fmt - < src/prelude.ecl
 ```
+
+## Interactive REPL
+
+With no arguments and a TTY on stdin, ecl uses a dependency-free single-row
+ANSI/VT100 editor. Left/Right and Ctrl-B/Ctrl-F move by UTF-8 scalar; Home/End
+and Ctrl-A/Ctrl-E move to the ends. Backspace, Delete, Ctrl-H, Ctrl-D,
+Ctrl-K, Ctrl-U, Ctrl-W, and Ctrl-T provide the usual deletion, kill, and
+transpose operations. Up/Down and Ctrl-P/Ctrl-N navigate history; Ctrl-L
+clears and redraws the screen. Editing is scalar-safe rather than
+grapheme-aware, and a physical line is limited to 1 MiB.
+
+Tab completes the current atom from live public session/core names, public
+exports of used modules, and registered module and alias names. A unique match
+is inserted. Multiple matches extend their common prefix; pressing Tab again
+prints the sorted candidates. Dotted input such as `stats.<Tab>` completes
+only public exports and preserves the namespace or alias spelling that was
+typed. Completion does not intern partial input.
+
+Every nonempty submitted physical line enters a 100-entry history. When HOME
+is available, processes share `$HOME/.ecl_history`; writers merge under a
+sibling lock and replace the UTF-8 newline-delimited file atomically. Missing,
+corrupt, oversized, locked, or unwritable history never disables the REPL and
+emits at most one warning per Session. Ctrl-C abandons both the current edit
+and an incomplete continuation. Ctrl-D deletes at a nonempty cursor, exits at
+an empty primary prompt, and retains the incomplete-at-EOF diagnostic at an
+empty continuation prompt.
+
+Raw editing is supported on Linux and macOS, with terminal attributes restored
+on every return and error path. Other targets build with canonical line input.
+Piped stdin and explicit `-` remain one-unit noninteractive modes: they do not
+load history, interpret escape keys, or request completion. The Expect-based
+PTY contract is exercised with `zig build test-repl -Doptimize=ReleaseSafe`.
+Its binary corpus includes first-turn completion, queued lines, malformed and
+truncated UTF-8/escape input, EOF/error recovery, durable-history parseability,
+and terminal restoration.
 
 `ecl fmt` parses a trivia-preserving source tree without evaluating it and
 renders through a 100-column document algebra. Delimited forms use uniform

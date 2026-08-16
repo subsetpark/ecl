@@ -2166,9 +2166,13 @@ pub const Machine = struct {
                     },
                 },
                 .write => {
-                    var locked = if (evaluator.unit.console) |console| console.lockDiagnostics() else null;
-                    defer if (locked) |*lease| lease.deinit();
-                    const output = if (locked) |*lease| lease.writer else evaluator.unit.diagnostics.?;
+                    if (evaluator.unit.console) |console| {
+                        console.writeDiagnostics(self.rendered.?, false) catch
+                            return evaluator.fail(.io, "standard error write failed");
+                        try self.beginMove();
+                        return .yielded;
+                    }
+                    const output = evaluator.unit.diagnostics.?;
                     output.writeAll(self.rendered.?) catch return evaluator.fail(.io, "standard error write failed");
                     output.flush() catch return evaluator.fail(.io, "standard error flush failed");
                     try self.beginMove();

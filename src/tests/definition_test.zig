@@ -4,7 +4,6 @@ const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const intern = @import("../intern.zig");
 const env = @import("../env.zig");
-const printer = @import("../print.zig");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 
@@ -14,9 +13,9 @@ fn expectOk(runtime: *session.Session, source: []const u8) !void {
         .incomplete => return error.UnexpectedIncomplete,
         .err => |failure| {
             defer runtime.release(failure);
-            const rendered = try printer.toOwnedString(runtime.hostAllocator(), failure);
-            defer runtime.hostAllocator().free(rendered);
-            std.log.err("unexpected language error: {s}", .{rendered});
+            var rendered = try runtime.renderValue(failure);
+            defer rendered.deinit();
+            std.log.err("unexpected language error: {s}", .{rendered.bytes()});
             return error.UnexpectedLanguageError;
         },
     }
@@ -28,9 +27,9 @@ fn expectErrorContains(runtime: *session.Session, source: []const u8, text: []co
         .ok, .incomplete => return error.ExpectedLanguageError,
     };
     defer runtime.release(failure);
-    const rendered = try printer.toOwnedString(runtime.hostAllocator(), failure);
-    defer runtime.hostAllocator().free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, text) != null);
+    var rendered = try runtime.renderValue(failure);
+    defer rendered.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), text) != null);
 }
 
 test "definition annotations support all top-level forms and dynamic data" {
@@ -94,9 +93,9 @@ test "every primitive exposes meaningful reflective documentation" {
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
     try expectOk(&runtime, source.written());
-    const display = try runtime.stackDisplay();
-    defer runtime.hostAllocator().free(display);
-    try std.testing.expectEqualStrings(expected.written(), display);
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings(expected.written(), display.bytes());
     try expectOk(&runtime, "'over see 'call see");
     try std.testing.expectEqualStrings(
         "<primitive> (x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") 'over def\n" ++
@@ -127,9 +126,9 @@ test "module annotations retain contracts documentation qualification and shadow
         "(9) (-- n : \"Session shadow.\") 'public def " ++
         "'public doc \"Session shadow.\" match " ++
         "'m.public doc \"Public module word.\" match");
-    const display = try runtime.stackDisplay();
-    defer runtime.hostAllocator().free(display);
-    try std.testing.expectEqualStrings("1 1 1 1", display);
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("1 1 1 1", display.bytes());
     try expectErrorContains(&runtime, "'m.private doc", "'kind 'undefined-word");
     try expectErrorContains(&runtime, "'bad ((1) (: \"Documentation only.\") 'f def) module", "'kind 'domain");
     try expectErrorContains(&runtime, "'lies ((dup +) (a -- b c : \"An intentionally false contract.\") 'f def) module 1 lies.f", "'kind 'contract");
@@ -157,9 +156,9 @@ test "multiline documentation is normalized and see is canonical and re-readable
     try expectOk(&reread, output.written());
     try expectOk(&reread, "4 square 'square doc \"Square a numeric value.\" match " ++
         "answer 'answer doc \"Only docs.\" match");
-    const display = try reread.stackDisplay();
-    defer reread.hostAllocator().free(display);
-    try std.testing.expectEqualStrings("16 1 42 1", display);
+    var display = try reread.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("16 1 42 1", display.bytes());
 }
 
 test "redefinition and set replace behavior and clear metadata" {

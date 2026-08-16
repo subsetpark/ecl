@@ -26,6 +26,12 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    const repl_tests = b.addSystemCommand(&.{"expect"});
+    repl_tests.addFileArg(b.path("test/repl.exp"));
+    repl_tests.addArtifactArg(exe);
+    const repl_step = b.step("test-repl", "Run the real REPL under a PTY");
+    repl_step.dependOn(&repl_tests.step);
+
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -39,6 +45,76 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
+
+    const fuzz_targets = [_]struct {
+        step_name: []const u8,
+        test_name: []const u8,
+        description: []const u8,
+    }{
+        .{
+            .step_name = "fuzz-reader",
+            .test_name = "fuzz: reader accepts arbitrary bounded input",
+            .description = "Fuzz bounded reader input",
+        },
+        .{
+            .step_name = "fuzz-formatter",
+            .test_name = "fuzz: formatter is idempotent for every accepted source",
+            .description = "Fuzz formatter acceptance and idempotence",
+        },
+        .{
+            .step_name = "fuzz-editor",
+            .test_name = "fuzz: editor action traces preserve scalar boundaries and ownership",
+            .description = "Fuzz editor actions and owned-line transitions",
+        },
+        .{
+            .step_name = "fuzz-completion",
+            .test_name = "fuzz: completion survives prefixes definitions aliases and reloads",
+            .description = "Fuzz completion across live mutation and reloads",
+        },
+        .{
+            .step_name = "fuzz-history",
+            .test_name = "fuzz: history parsing merging and corruption preservation",
+            .description = "Fuzz history parsing, merging, and corruption handling",
+        },
+        .{
+            .step_name = "fuzz-pending",
+            .test_name = "fuzz: pending unit accumulates lines and lexical state",
+            .description = "Fuzz pending-unit accumulation and incremental lexical state",
+        },
+        .{
+            .step_name = "fuzz-scheduler",
+            .test_name = "fuzz: real scheduler publication cancellation and join traces settle",
+            .description = "Fuzz production scheduler publication and cancellation traces",
+        },
+    };
+    const fuzz_step = b.step(
+        "fuzz",
+        "Run every fuzz seed corpus; use the named fuzz-* steps for bounded campaigns",
+    );
+    var fuzz_campaign_steps: [fuzz_targets.len]*std.Build.Step = undefined;
+    for (fuzz_targets, 0..) |fuzz_target, index| {
+        const fuzz_mod = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            // Zig 0.16.0's bundled fuzz runner passes builtin.StackTrace to
+            // std.debug.writeStackTrace when error-return tracing is enabled.
+            // Disable only that runner path until the upstream mismatch is fixed;
+            // panics and sanitizer crashes still retain their diagnostics.
+            .error_tracing = false,
+        });
+        fuzz_mod.addOptions("session_options", test_options);
+        fuzz_mod.addImport("minish", minish);
+        const fuzz_tests = b.addTest(.{
+            .root_module = fuzz_mod,
+            .filters = &.{fuzz_target.test_name},
+        });
+        const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
+        fuzz_step.dependOn(&run_fuzz_tests.step);
+        const campaign_step = b.step(fuzz_target.step_name, fuzz_target.description);
+        campaign_step.dependOn(&run_fuzz_tests.step);
+        fuzz_campaign_steps[index] = campaign_step;
+    }
 
     const oom_mod = b.createModule(.{
         .root_source_file = b.path("src/oom_root.zig"),
@@ -66,6 +142,9 @@ pub fn build(b: *std.Build) void {
     const run_audit = b.addRunArtifact(audit_exe);
     const audit_step = b.step("source-audit", "Check source architecture and line budgets");
     audit_step.dependOn(&run_audit.step);
+    fuzz_step.dependOn(&run_audit.step);
+    for (fuzz_campaign_steps) |campaign_step| campaign_step.dependOn(&run_audit.step);
+    repl_step.dependOn(&run_audit.step);
     test_step.dependOn(&run_audit.step);
     oom_step.dependOn(&run_audit.step);
 

@@ -577,6 +577,71 @@ pub const Registry = enum(usize) {
         };
     }
 
+    pub const NamespaceProgress = union(enum) {
+        pending,
+        complete,
+        name: intern.NamespaceName,
+    };
+    /// Snapshot-owning enumeration of canonical module and alias names. The
+    /// directory representation remains private and the lease survives until
+    /// the cursor is explicitly released, including when iteration is
+    /// abandoned early.
+    pub const NamespaceCursor = struct {
+        directory: DirectoryLease,
+        phase: enum { modules, aliases, complete } = .modules,
+        modules: ?Directory.ModuleMap.RawEntryCursor = null,
+        aliases: ?Directory.AliasMap.RawEntryCursor = null,
+
+        pub fn deinit(self: *NamespaceCursor) void {
+            self.directory.deinit();
+            self.* = undefined;
+        }
+
+        pub fn advance(self: *NamespaceCursor) NamespaceProgress {
+            while (true) switch (self.phase) {
+                .modules => {
+                    const entries = &(self.modules orelse {
+                        self.phase = .aliases;
+                        continue;
+                    });
+                    switch (entries.advance()) {
+                        .pending => return .pending,
+                        .entry => |entry| return .{ .name = entry.key },
+                        .complete => {
+                            self.modules = null;
+                            self.phase = .aliases;
+                        },
+                    }
+                },
+                .aliases => {
+                    const entries = &(self.aliases orelse {
+                        self.phase = .complete;
+                        return .complete;
+                    });
+                    switch (entries.advance()) {
+                        .pending => return .pending,
+                        .entry => |entry| return .{ .name = entry.key },
+                        .complete => {
+                            self.aliases = null;
+                            self.phase = .complete;
+                            return .complete;
+                        },
+                    }
+                },
+                .complete => return .complete,
+            };
+        }
+    };
+
+    pub fn namespaceCursor(self: *const Registry) NamespaceCursor {
+        const directory = self.acquireDirectory();
+        return .{
+            .directory = directory,
+            .modules = if (directory.directory) |current| current.modules.rawEntries() else null,
+            .aliases = if (directory.directory) |current| current.aliases.rawEntries() else null,
+        };
+    }
+
     fn detachRetiredDirectories(self: *Registry) ?*Directory {
         if (!self.privateState().directories.quiescent()) return null;
         const current = self.privateState().directories.currentOwned() orelse return null;

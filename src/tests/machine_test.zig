@@ -159,9 +159,9 @@ test "early prelude installs source-defined wrap and pair" {
         "<test>",
         "1 wrap 2 3 pair 'wrap body 'pair body",
     )) == .ok);
-    const display = try runtime.stackDisplay();
-    defer allocator.free(display);
-    try std.testing.expectEqualStrings("[1] [2 3] (() cons) (() cons cons)", display);
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("[1] [2 3] (() cons) (() cons cons)", display.bytes());
 }
 
 test "provisional scalar primitives enforce the d.22 regime" {
@@ -345,9 +345,9 @@ test "public parse reifies forms without execution and retains provenance" {
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "\"42 missing\" parse")) == null);
-    const display = try runtime.stackDisplay();
-    defer allocator.free(display);
-    try std.testing.expectEqualStrings("(42 missing)", display);
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("(42 missing)", display.bytes());
 
     const failure = (try execute(&runtime, "pop \"(missing)\" parse first call")).?;
     defer heap.testing.releaseValue(allocator, failure);

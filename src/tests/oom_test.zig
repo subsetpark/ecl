@@ -3,8 +3,6 @@
 //! Keeping these surfaces in one probe avoids replaying the embedded prelude
 //! bootstrap independently for every feature-specific failure index.
 const std = @import("std");
-const heap = @import("../heap.zig");
-const intern = @import("../intern.zig");
 const session = @import("../session.zig");
 
 const LockedAllocator = struct {
@@ -169,6 +167,9 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "'allocation-module (2 'x setp (x) ( -- n ) 'get def) module get pop " ++
             "('bad ((dup) 'f def) module) attempt pop",
     );
+    var completion = try runtime.completionCandidates("allocation-");
+    defer completion.deinit();
+    if (completion.items().len != 0) _ = completion.items()[0].len;
     try runOk(
         &runtime,
         "oom-definition-initial.ecl",

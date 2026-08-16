@@ -12,6 +12,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "THIRD_PARTY_NOTICES.md",
         "src",
     },
 }

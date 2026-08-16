@@ -57,11 +57,11 @@ fn compareExecutions(source: []const u8) !void {
         try expectValueIdentical(failure, generic.failure.?);
     } else {
         try expectStacksIdentical(automatic.runtime.stackItems(), generic.runtime.stackItems());
-        const automatic_display = try automatic.runtime.stackDisplay();
-        defer allocator.free(automatic_display);
-        const generic_display = try generic.runtime.stackDisplay();
-        defer allocator.free(generic_display);
-        try std.testing.expectEqualStrings(generic_display, automatic_display);
+        var automatic_display = try automatic.runtime.stackDisplay();
+        defer automatic_display.deinit();
+        var generic_display = try generic.runtime.stackDisplay();
+        defer generic_display.deinit();
+        try std.testing.expectEqualStrings(generic_display.bytes(), automatic_display.bytes());
     }
 }
 

@@ -11,6 +11,7 @@ const poll = @import("poll.zig");
 const reader = @import("reader_types.zig");
 const storage = @import("kernel_storage.zig");
 const dict = @import("dict.zig");
+const text_buffer = @import("text_buffer.zig");
 
 const Value = value.Value;
 const Span = lexer.Span;
@@ -38,12 +39,14 @@ const TokenKind = enum {
 const Token = struct { kind: TokenKind, bytes: []const u8 = &.{}, span: Span };
 
 const TokenizeProgress = union(enum) { pending, complete, incomplete: reader.Incomplete };
+const Mode = enum { validate, main, comment, atom, string, character, character_unicode, complete };
 const Tokenizer = struct {
     source: []const u8,
     tokens: ?*TokenList,
     cursor: lexer.Cursor,
     validate_index: usize = 0,
-    mode: enum { validate, main, comment, atom, string, character, character_unicode, complete } = .validate,
+    mode: Mode = .validate,
+    resume_mode: Mode = .main,
     token_kind: TokenKind = .atom,
     token_start: usize = 0,
     token_span: Span = .{},
@@ -54,7 +57,8 @@ const Tokenizer = struct {
         return .{ .source = source, .tokens = tokens, .cursor = .init(source) };
     }
     fn append(self: *Tokenizer, kind: TokenKind, bytes: []const u8, span: Span) error{OutOfMemory}!void {
-        try self.tokens.?.append(.{ .kind = kind, .bytes = bytes, .span = span });
+        const tokens = self.tokens orelse return;
+        try tokens.append(.{ .kind = kind, .bytes = bytes, .span = span });
     }
     fn startAtom(self: *Tokenizer, kind: TokenKind) void {
         self.token_kind = kind;
@@ -78,7 +82,7 @@ const Tokenizer = struct {
         switch (self.mode) {
             .validate => {
                 if (self.validate_index == self.source.len) {
-                    self.mode = .main;
+                    self.mode = self.resume_mode;
                     return .pending;
                 }
                 const length = std.unicode.utf8ByteSequenceLength(self.source[self.validate_index]) catch {
@@ -222,6 +226,139 @@ const Tokenizer = struct {
             },
             .complete => unreachable,
         }
+    }
+};
+
+/// The lexical state of a cursor at the end of a source prefix.
+pub const LexicalContext = union(enum) {
+    /// Inside string, character-literal, or comment text, or after source the
+    /// tokenizer rejects. Nothing may be spliced in here.
+    inert,
+    /// In code, with an atom in progress starting at this byte offset.
+    atom: usize,
+    /// In code at a token boundary, so there is no partial name.
+    boundary,
+};
+
+/// The tokenizer's state after some prefix of a unit. Private, because a
+/// checkpoint is only meaningful beside the bytes that produced it; the pair
+/// is exposed as `PendingUnit` so the two cannot be supplied separately or
+/// forged from a literal.
+const LexicalCheckpoint = union(enum) {
+    lexing: struct { mode: Mode, string_escaped: bool, character_first: bool },
+    /// The unit already contains source the reader rejects.
+    rejected,
+
+    pub const initial: LexicalCheckpoint = .{
+        .lexing = .{ .mode = .main, .string_escaped = false, .character_first = false },
+    };
+};
+
+fn resumed(checkpoint: LexicalCheckpoint, source: []const u8) ?Tokenizer {
+    const state = switch (checkpoint) {
+        .rejected => return null,
+        .lexing => |state| state,
+    };
+    var tokenizer: Tokenizer = .init(source, null);
+    tokenizer.resume_mode = if (state.mode == .complete) .main else state.mode;
+    tokenizer.string_escaped = state.string_escaped;
+    tokenizer.character_first = state.character_first;
+    return tokenizer;
+}
+
+fn snapshot(tokenizer: *const Tokenizer) LexicalCheckpoint {
+    return .{ .lexing = .{
+        .mode = if (tokenizer.mode == .complete) .main else tokenizer.mode,
+        .string_escaped = tokenizer.string_escaped,
+        .character_first = tokenizer.character_first,
+    } };
+}
+
+/// Extend a checkpoint over more of the same unit. Callers append a physical
+/// line and advance once, so the cost across a whole unit is linear in the
+/// unit rather than quadratic in the number of lines.
+fn advanceLexical(checkpoint: LexicalCheckpoint, source: []const u8) LexicalCheckpoint {
+    var diag: reader.Diag = .{};
+    var tokenizer = resumed(checkpoint, source) orelse return .rejected;
+    while (true) switch (tokenizer.advance(&diag) catch return .rejected) {
+        .pending => {},
+        .complete, .incomplete => break,
+    };
+    return snapshot(&tokenizer);
+}
+
+/// Where a cursor at the end of `source` sits, given the unit's checkpoint.
+/// The tokenizer finishes an in-progress atom when it runs out of input, so
+/// the walk stops on the step before that and reads the live mode instead.
+fn lexicalContext(checkpoint: LexicalCheckpoint, source: []const u8) LexicalContext {
+    var diag: reader.Diag = .{};
+    var tokenizer = resumed(checkpoint, source) orelse return .inert;
+    while (tokenizer.mode == .validate or tokenizer.cursor.byteIndex() != source.len) {
+        switch (tokenizer.advance(&diag) catch return .inert) {
+            .pending => {},
+            .complete, .incomplete => break,
+        }
+    }
+    return switch (tokenizer.mode) {
+        .atom => .{ .atom = tokenizer.token_start },
+        .main, .complete => .boundary,
+        else => .inert,
+    };
+}
+
+const PendingUnitBacking = struct {
+    text: text_buffer.TextBuffer,
+    checkpoint: LexicalCheckpoint = .initial,
+};
+
+/// The source accumulated for the unit being typed, together with the
+/// tokenizer state at its end. The two are one opaque value because a state
+/// paired with the wrong bytes is exactly the defect this replaces, and
+/// because only the reader can produce a state that describes them.
+pub const PendingUnit = enum(usize) {
+    _,
+
+    pub fn init(allocator: std.mem.Allocator) error{OutOfMemory}!PendingUnit {
+        const backing = try allocator.create(PendingUnitBacking);
+        backing.* = .{ .text = .init(allocator) };
+        return @enumFromInt(@intFromPtr(backing));
+    }
+    fn state(self: PendingUnit) *PendingUnitBacking {
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    pub fn deinit(self: *PendingUnit) void {
+        const owned = self.state();
+        const allocator = owned.text.allocator;
+        owned.text.deinit();
+        allocator.destroy(owned);
+        self.* = undefined;
+    }
+    pub fn source(self: PendingUnit) []const u8 {
+        return self.state().text.items();
+    }
+    pub fn isEmpty(self: PendingUnit) bool {
+        return self.state().text.len() == 0;
+    }
+    /// Append a physical line and its newline, then extend the state over
+    /// exactly those bytes. The storage owns and reserves before it writes, so
+    /// `line` may be a slice of this unit's own source and a failure leaves
+    /// the state describing exactly the bytes the unit still holds.
+    pub fn appendLine(self: PendingUnit, line: []const u8) error{OutOfMemory}!void {
+        const owned = self.state();
+        const start = owned.text.len();
+        try owned.text.splice(start, start, &.{ line, "\n" });
+        owned.checkpoint = advanceLexical(owned.checkpoint, owned.text.items()[start..]);
+    }
+    pub fn clear(self: PendingUnit) void {
+        const owned = self.state();
+        owned.text.splice(0, owned.text.len(), &.{}) catch unreachable;
+        owned.checkpoint = .initial;
+    }
+    /// Where a cursor at the end of `line_prefix` sits, continuing from this
+    /// unit. Only the new bytes are scanned, so asking costs the line rather
+    /// than everything typed before it.
+    pub fn contextAfter(self: PendingUnit, line_prefix: []const u8) LexicalContext {
+        return lexicalContext(self.state().checkpoint, line_prefix);
     }
 };
 

@@ -10,7 +10,6 @@ const definition_prims = @import("definition_prims.zig");
 const poll_api = @import("poll.zig");
 const reflection = @import("reflection.zig");
 const kernel_storage = @import("kernel_storage.zig");
-const resolution_core = @import("resolution_core.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
@@ -171,17 +170,11 @@ fn words(evaluator: *Machine) MachineError!void {
 }
 
 const WordsDriver = struct {
-    const Phase = enum { scopes, direct, uses, acquire, exports, core, materialize, unique, actions, render, write };
+    const Phase = enum { visible, materialize, unique, actions, render, write };
     allocator: std.mem.Allocator,
-    scope: ?*env.Scope,
-    phase: Phase = .scopes,
+    visible: reflection.VisibleNameCursor,
+    phase: Phase = .visible,
     found: poll_api.ChunkList(u32),
-    direct: ?env.NameCursor = null,
-    use_shape: ?env.ShapeLease = null,
-    use_ordinal: usize = 0,
-    acquisition: ?modules.Registry.AcquireCursor = null,
-    generation: ?modules.GenerationLease = null,
-    exports: ?modules.ModuleGeneration.PublicNameCursor = null,
     names: ?[]u32 = null,
     found_iterator: ?poll_api.ChunkList(u32).Iterator = null,
     materialize_index: usize = 0,
@@ -197,100 +190,29 @@ const WordsDriver = struct {
     fn init(evaluator: *Machine) WordsDriver {
         return .{
             .allocator = evaluator.allocator(),
-            .scope = evaluator.currentScope(),
+            .visible = .init(
+                .{ .scope = evaluator.currentScope() },
+                evaluator.currentEnv().coreView(),
+                evaluator.unit.registry,
+            ),
             .found = .init(evaluator.allocator()),
         };
     }
     fn append(self: *WordsDriver, name: u32) error{OutOfMemory}!void {
         try self.found.append(name);
     }
-    fn nextScope(self: *WordsDriver, evaluator: *Machine) void {
-        const current = self.scope orelse {
-            self.direct = evaluator.currentEnv().coreView().nameCursor();
-            self.phase = .core;
-            return;
-        };
-        self.scope = current.parent;
-        if (current.environmentOrNull()) |environment| {
-            self.direct = environment.nameCursor();
-            self.phase = .direct;
-        }
-    }
-    fn beginUses(self: *WordsDriver, evaluator: *Machine) void {
-        const current = self.direct.?.shape.environment;
-        self.direct.?.deinit();
-        self.direct = null;
-        if (evaluator.unit.registry == null) {
-            self.phase = .scopes;
-            return;
-        }
-        self.use_shape = current.acquireShape();
-        self.use_ordinal = 0;
-        self.phase = .uses;
-    }
     pub fn advance(evaluator: *Machine, self: *WordsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) switch (self.phase) {
-            .scopes => self.nextScope(evaluator),
-            .direct => switch (self.direct.?.advance()) {
-                .pending => {},
-                .complete => self.beginUses(evaluator),
-                .entry => |entry| {
-                    var lease = entry.lease;
-                    defer lease.deinit();
-                    if (lease.visibility == .public) try self.append(entry.name);
-                },
-            },
-            .uses => {
-                const uses = self.use_shape.?.useOrder();
-                const index = resolution_core.usedIndex(uses.len, self.use_ordinal) orelse {
-                    self.use_shape.?.deinit();
-                    self.use_shape = null;
-                    self.phase = .scopes;
-                    continue;
-                };
-                self.use_ordinal += 1;
-                self.acquisition = evaluator.unit.registry.?.acquireCursor(uses[index]);
-                self.phase = .acquire;
-            },
-            .acquire => switch (self.acquisition.?.advance()) {
-                .pending => {},
-                .complete => |maybe_generation| {
-                    self.acquisition.?.deinit();
-                    self.acquisition = null;
-                    self.generation = maybe_generation;
-                    if (self.generation) |lease| {
-                        self.exports = lease.publicNameCursor();
-                        self.phase = .exports;
-                    } else self.phase = .uses;
-                },
-            },
-            .exports => switch (self.exports.?.advance()) {
+            .visible => switch (self.visible.advance()) {
                 .pending => {},
                 .complete => {
-                    self.exports.?.deinit();
-                    self.exports = null;
-                    self.generation.?.deinit();
-                    self.generation = null;
-                    self.phase = .uses;
-                },
-                .name => |name| try self.append(name),
-            },
-            .core => switch (self.direct.?.advance()) {
-                .pending => {},
-                .complete => {
-                    self.direct.?.deinit();
-                    self.direct = null;
                     self.names = try self.allocator.alloc(u32, self.found.count);
                     self.found_iterator = self.found.iterator();
                     self.phase = .materialize;
                 },
-                .entry => |entry| {
-                    var lease = entry.lease;
-                    defer lease.deinit();
-                    if (lease.visibility == .public) try self.append(entry.name);
-                },
+                .name => |name| try self.append(name),
             },
             .materialize => if (self.found_iterator.?.next()) |name| {
                 self.names.?[self.materialize_index] = name.*;
@@ -348,9 +270,11 @@ const WordsDriver = struct {
                 },
             },
             .write => {
-                var locked = if (evaluator.unit.console) |console| console.lockOutput() else null;
-                defer if (locked) |*lease| lease.deinit();
-                const output = if (locked) |*lease| lease.writer else try outputWriter(evaluator);
+                if (evaluator.unit.console) |console| {
+                    console.writeOutput(self.rendered.?, false) catch return writeFailure(evaluator);
+                    return .completed;
+                }
+                const output = try outputWriter(evaluator);
                 output.writeAll(self.rendered.?) catch return writeFailure(evaluator);
                 output.flush() catch return evaluator.fail(.io, "standard output flush failed");
                 return .completed;
@@ -359,11 +283,7 @@ const WordsDriver = struct {
         return .yielded;
     }
     pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *WordsDriver) void {
-        if (self.direct) |*cursor| cursor.deinit();
-        if (self.use_shape) |*shape| shape.deinit();
-        if (self.acquisition) |*cursor| cursor.deinit();
-        if (self.exports) |*cursor| cursor.deinit();
-        if (self.generation) |*lease| lease.deinit();
+        self.visible.deinit();
         if (self.sorter) |*sorter| sorter.deinit();
         if (self.plan) |*plan| plan.deinit();
         if (self.rendered) |rendered| allocator.free(rendered);

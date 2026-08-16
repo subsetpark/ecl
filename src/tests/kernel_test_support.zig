@@ -105,9 +105,9 @@ fn expectStackCase(case: StackCase) !void {
             return error.TestUnexpectedResult;
         },
     }
-    const display = try runtime.stackDisplay();
-    defer allocator.free(display);
-    try std.testing.expectEqualStrings(case.expected, display);
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings(case.expected, display.bytes());
 }
 
 fn expectErrorCase(case: ErrorCase) !void {
