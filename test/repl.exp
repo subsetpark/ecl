@@ -166,7 +166,7 @@ puts "PASS: $name"
 set corpus_home [file join $temporary byte-corpus]
 file mkdir $corpus_home
 set name "repl pty: arbitrary byte corpus preserves history and terminal"
-set corpus_shell "HOME='$corpus_home' ECL_WORKERS=1 '$binary'; status=\$?; IFS= read -r probe; if \[ \"\$probe\" = terminal-check \]; then echo TERMINAL-RESTORED; fi; exit \$status"
+set corpus_shell "HOME='$corpus_home' ECL_WORKERS=1 '$binary'; status=\$?; echo ECL-SHELL-READY; IFS= read -r probe; if \[ \"\$probe\" = terminal-check \]; then echo TERMINAL-RESTORED; fi; exit \$status"
 spawn -noecho sh -c $corpus_shell
 expect {
     "ecl> " {}
@@ -211,9 +211,9 @@ expect_stack $name 11
 # Exit to a parent shell and prove the PTY is canonical and echoing after errors.
 send "\004"
 expect {
-    -re {\r\n} {}
-    timeout { fail_case $name "EOF did not return to the parent shell" }
-    eof { fail_case $name "parent shell exited before restoration check" }
+    -re {ECL-SHELL-READY\r?\n} {}
+    timeout { fail_case $name "EOF did not return control to the ready parent shell" }
+    eof { fail_case $name "parent shell exited before reporting readiness" }
 }
 send "terminal-check\r"
 expect {
@@ -319,7 +319,7 @@ expect eof
 set status [lindex [wait] 3]
 if {$status == 0} { fail_case $name "pending Ctrl-D exited successfully" }
 
-set shell "HOME='$temporary' ECL_WORKERS=1 '$binary'; status=\$?; IFS= read -r probe; if \[ \"\$probe\" = terminal-check \]; then echo TERMINAL-RESTORED; fi; exit \$status"
+set shell "HOME='$temporary' ECL_WORKERS=1 '$binary'; status=\$?; echo ECL-SHELL-READY; IFS= read -r probe; if \[ \"\$probe\" = terminal-check \]; then echo TERMINAL-RESTORED; fi; exit \$status"
 spawn -noecho sh -c $shell
 expect {
     "ecl> " {}
@@ -328,9 +328,9 @@ expect {
 }
 send "\004"
 expect {
-    -re {\r\n} {}
-    timeout { fail_case $name "Ctrl-D did not return to the parent shell" }
-    eof { fail_case $name "restoration shell exited before its input check" }
+    -re {ECL-SHELL-READY\r?\n} {}
+    timeout { fail_case $name "Ctrl-D did not return control to the ready parent shell" }
+    eof { fail_case $name "restoration shell exited before reporting readiness" }
 }
 send "terminal-check\r"
 expect {
