@@ -572,9 +572,11 @@ production comptime validation rejects authority-bearing public Session
 returns and observation-lease parameters. Console callers receive only narrow
 whole-write operations. The editor owns raw-mode restoration and a nominal
 line result, and keeps cursor/storage inside an opaque buffer whose fallible
-splice owns arbitrary replacement bytes while total non-growing transitions
-own deletion and validated adjacent-scalar transposition. Every transition
-re-derives the cursor. The editor receives capabilities
+splice owns arbitrary replacement bytes while a total non-growing transition
+owns deletion. Transposition derives adjacent editor/display units inside the
+opaque buffer and reverses them through that same alias-safe splice, including
+when either unit is a malformed byte. Every transition re-derives the cursor.
+The editor receives capabilities
 rather than the Session: a terminal that redraws, lists candidates, and accepts
 only named prompts and named effects, and a completion observer that can render
 matching names and nothing else. The console owns terminal geometry, row
@@ -794,6 +796,10 @@ All nine campaign artifacts select LLVM explicitly. On x86_64 Linux, Zig
 coverage PC table; backend selection is therefore part of the campaign proof,
 not an ambient host default. The bounded runner fails before input execution if
 the selected artifact does not publish nonempty coverage metadata.
+SourceHut task bodies explicitly enable immediate exit, unset-variable
+rejection, and pipeline failure propagation. This is load-bearing for the
+nine-target loop: a failure in any target ends the task instead of being
+replaced by the final iteration's status.
 
 M9 added the native SDK, ABI, loader, fixtures, and runtime tests to the
 source audit's exhaustive manifests. The post-implementation boundary review

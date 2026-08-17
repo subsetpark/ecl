@@ -15,7 +15,7 @@ test "line editor: edit actions preserve UTF-8 scalar boundaries" {
     try std.testing.expectEqualStrings("ab", buffer.bytes());
     try buffer.insert("界");
     buffer.moveRight();
-    buffer.transpose();
+    try buffer.transpose();
     try std.testing.expect(std.unicode.utf8ValidateSlice(buffer.bytes()));
     const expected = try std.testing.allocator.dupe(u8, buffer.bytes());
     defer std.testing.allocator.free(expected);

@@ -489,7 +489,7 @@ fn fuzzEditActions(_: void, smith: *std.testing.Smith) !void {
                 model.deleteWord();
             },
             10 => {
-                buffer.transpose();
+                try buffer.transpose();
                 model.transpose();
             },
             11 => {

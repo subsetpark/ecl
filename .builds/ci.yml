@@ -10,6 +10,8 @@ sources:
   - https://git.sr.ht/~subsetpark/ecl
 tasks:
   - toolchain: |
+      set -eu
+      set -o pipefail
       curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
       echo '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz' | sha256sum -c -
       mkdir -p "$HOME/.local"
@@ -19,45 +21,69 @@ tasks:
       # directory without first creating that directory.
       mkdir -p "$HOME/.cache/zig/tmp"
   - fmt: |
+      set -eu
+      set -o pipefail
       cd ecl
       zig fmt --check .
   - test: |
+      set -eu
+      set -o pipefail
       cd ecl
       zig build test
   - test-safe: |
+      set -eu
+      set -o pipefail
       cd ecl
       zig build test -Doptimize=ReleaseSafe
   - test-fast: |
+      set -eu
+      set -o pipefail
       cd ecl
       zig build test -Doptimize=ReleaseFast
   - test-repl: |
+      set -eu
+      set -o pipefail
       cd ecl
       zig build test-repl
       zig build test-repl -Doptimize=ReleaseSafe
   - native: |
+      set -eu
+      set -o pipefail
       cd ecl
       zig build native-fixture
       zig build test-native-sdk-negative
       zig build test-native-runtime
       zig build test-native-runtime -Doptimize=ReleaseSafe
   - fuzz: |
+      set -eu
+      set -o pipefail
       cd ecl
       for target in reader formatter editor completion history pending scheduler native-descriptor native-call; do
         zig build "fuzz-$target" --fuzz=100
       done
   - test-workers: |
+      set -eu
+      set -o pipefail
       cd ecl
       zig build test-workers -Doptimize=ReleaseSafe
   - test-oom: |
+      set -eu
+      set -o pipefail
       cd ecl
       zig build test-oom
   - differential: |
+      set -eu
+      set -o pipefail
       cd ecl
       zig build differential
   - test-tsan: |
+      set -eu
+      set -o pipefail
       cd ecl
       zig build test-tsan
   - lint: |
+      set -eu
+      set -o pipefail
       curl -fsSLo /tmp/zlint https://github.com/DonIsaac/zlint/releases/download/v0.9.1/zlint-linux-x86_64
       echo '3290bd511d37e4f6ccca3621b9894cd6c378195cdaac27520d0bd894058b2b9b  /tmp/zlint' | sha256sum -c -
       chmod +x /tmp/zlint

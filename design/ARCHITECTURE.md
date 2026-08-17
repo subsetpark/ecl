@@ -971,18 +971,19 @@ storage under both. Its fallible splice copies every source before touching
 storage and reserves the result's capacity before writing, so sources may be
 slices of the very bytes being replaced and a failure leaves the buffer exactly
 as it was. Operations that cannot fail have separate total forms: removal has
-no source and only shortens storage, while scalar transposition validates two
-adjacent UTF-8 ranges and stages at most eight bytes before a same-length
-replacement. Neither can allocate, so their signatures carry no impossible
-error.
+no source and only shortens storage. Transposition is not a second storage
+operation: the opaque edit buffer derives the two adjacent units from its own
+bytes and cursor, then passes their borrowed slices through the same staged
+splice. Malformed bytes are one-byte editor/display units, so no UTF-8-only
+precondition can contradict the buffer's arbitrary-byte contract.
 
 **Byte rewriting is one storage boundary owning the whole transition.** `EditBuffer` is
 an opaque handle, not a struct with a private field type, because Zig's
 inferred struct literals let external code build the latter and hand itself a
 cursor no storage transition produced. Growing or arbitrary replacement routes
 through `splice(range, source)`, which validates, stages, and commits in that
-order; deletion and scalar transposition use the total non-growing transitions
-above. Validation belongs at this boundary because
+order; deletion uses the total shortening transition, and transposition uses
+the same splice with two reversed adjacent sources. Validation belongs at this boundary because
 whether a replacement fits depends on the range it replaces; deciding earlier
 rejects overwriting a full buffer with a single byte. Staging copies the source
 before the storage is touched, so a replacement may safely alias the very bytes
@@ -1115,6 +1116,10 @@ coverage PC table, so relying on the host default would make backend choice an
 undeclared prerequisite for the campaign. The build graph instead requires a
 backend that supplies nonempty coverage metadata; Zig's runner rejects the
 artifact before executing inputs if that contract is not met.
+The SourceHut task itself runs with unset-variable, immediate-exit, and
+pipeline-failure handling enabled. Its per-target loop therefore cannot hide a
+middle campaign failure behind the exit status of a later successful target;
+every command is part of the blocking CI result.
 
 The native descriptor campaign passes arbitrary bounded metadata through the
 production validator using valid host-owned backing ranges. Comptime reflection

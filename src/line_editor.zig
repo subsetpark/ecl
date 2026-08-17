@@ -140,7 +140,7 @@ pub const EditBuffer = enum(usize) {
         }
         self.remove(start, owned.cursor);
     }
-    pub fn transpose(self: EditBuffer) void {
+    pub fn transpose(self: EditBuffer) error{OutOfMemory}!void {
         const owned = self.state();
         if (owned.text.len() < 2 or owned.cursor == 0) return;
         const right_start = if (owned.cursor == owned.text.len())
@@ -150,7 +150,12 @@ pub const EditBuffer = enum(usize) {
         if (right_start == 0) return;
         const left_start = right_start - console.scalarLenBefore(owned.text.items(), right_start);
         const right_end = right_start + console.scalarLenAt(owned.text.items(), right_start);
-        owned.text.transposeAdjacentScalars(left_start, right_start, right_end);
+        const current_bytes = owned.text.items();
+        try owned.text.splice(
+            left_start,
+            right_end,
+            &.{ current_bytes[right_start..right_end], current_bytes[left_start..right_start] },
+        );
         owned.cursor = scalarAligned(owned.text.items(), right_end);
     }
     pub fn takeOwned(self: EditBuffer) error{OutOfMemory}!OwnedLine {
@@ -500,7 +505,7 @@ pub const Editor = struct {
                 12 => terminal.signal(.clear_screen) catch return error.WriteFailed,
                 14 => try self.historyMove(buffer, &scratch, &history_index, false),
                 16 => try self.historyMove(buffer, &scratch, &history_index, true),
-                20 => buffer.transpose(),
+                20 => try buffer.transpose(),
                 21 => buffer.clear(),
                 23 => buffer.deleteWord(),
                 27 => try self.escape(buffer, &scratch, &history_index),
