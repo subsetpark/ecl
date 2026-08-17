@@ -8,7 +8,7 @@ const session = @import("../session.zig");
 const native_abi = @import("native-abi");
 const native_descriptor = @import("../native_descriptor.zig");
 const intern = @import("../intern.zig");
-const native_fixture = @import("native_fixture_options");
+const native_runtime = @import("native_runtime_options");
 
 const max_source_bytes = 4096;
 const max_edit_steps = 128;
@@ -324,7 +324,7 @@ fn expectEditInvariant(buffer: line_editor.EditBuffer, model: *const EditModel) 
 /// terminal write. Anything else is emitted as one escape per byte.
 fn modelPrintable(bytes: []const u8, index: usize, length: usize) bool {
     if (!modelDecodable(bytes, index, length)) return false;
-    const codepoint = std.unicode.utf8Decode(bytes[index..][0..length]) catch unreachable;
+    const codepoint = std.unicode.utf8Decode(bytes[index..][0..length]) catch return false;
     return codepoint >= 0x20 and (codepoint < 0x7f or codepoint > 0x9f);
 }
 
@@ -845,21 +845,6 @@ test "fuzz: real scheduler publication cancellation and join traces settle" {
 }
 
 fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
-    var output_buffer: [256]u8 = undefined;
-    var diagnostic_buffer: [256]u8 = undefined;
-    var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var diagnostics = std.Io.Writer.Discarding.init(&diagnostic_buffer);
-    var runtime = try session.Session.initWithHostConfig(
-        std.testing.allocator,
-        &.{},
-        std.testing.io,
-        &output.writer,
-        &diagnostics.writer,
-        native_fixture.directory,
-        .cooperative,
-    );
-    defer runtime.deinit();
-    try runOk(&runtime, "'sample use");
     const programs = [_][]const u8{
         "7 sample.forward pop",
         "7 sample.split pop pop",
@@ -868,12 +853,32 @@ fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
         "sample.cooperative pop",
         "(9 sample.yield-forever) spawn dup cancel await pop",
     };
+    var source = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer source.deinit();
+    try source.writer.writeAll("'sample use ");
     var steps: usize = 0;
-    while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1)
-        try runOk(&runtime, programs[smith.index(programs.len)]);
-    var display = try runtime.stackDisplay();
-    defer display.deinit();
-    try std.testing.expectEqualStrings("", display.bytes());
+    while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1) {
+        try source.writer.writeAll(programs[smith.index(programs.len)]);
+        try source.writer.writeByte(' ');
+    }
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("ECL_PATH", native_runtime.fixture_dir);
+    try environment.put("ECL_WORKERS", "1");
+    var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+    defer threaded.deinit();
+    const result = try std.process.run(std.testing.allocator, threaded.io(), .{
+        .argv = &.{ native_runtime.ecl_exe, "-e", source.written() },
+        .environ_map = &environment,
+    });
+    defer std.testing.allocator.free(result.stdout);
+    defer std.testing.allocator.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| try std.testing.expectEqual(@as(u8, 0), code),
+        .signal, .stopped, .unknown => return error.UnexpectedTermination,
+    }
+    try std.testing.expectEqualStrings("", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
 }
 
 test "fuzz: native call transactions stay atomic under yield and cancellation" {

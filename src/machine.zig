@@ -130,7 +130,6 @@ pub const EclErr = struct {
     pub fn retire(self: *EclErr, releases: *heap.ReleaseDomain) void {
         for (self.data[0..self.data_len]) |entry| releases.releaseValue(entry.value);
         if (self.raised) |raised| releases.releaseValue(raised);
-        self.* = undefined;
     }
     pub fn setLocation(self: *EclErr, source_name: []const u8, span: @import("lexer.zig").Span) void {
         const selected = source_name[0..@min(source_name.len, self.source.len)];
@@ -194,7 +193,6 @@ const OrdinaryErrorCursor = struct {
         if (self.source_value) |item| releases.releaseValue(item);
         if (self.data_value) |item| releases.releaseValue(item);
         if (self.trace_items) |items| self.allocator.free(items);
-        self.* = undefined;
     }
     fn nameBytes(self: *const OrdinaryErrorCursor) []const u8 {
         return switch (self.name_index) {
@@ -434,7 +432,6 @@ const RaisedErrorCursor = struct {
         if (self.trace_items) |items| self.allocator.free(items);
         if (self.data_pairs) |pairs| self.allocator.free(pairs);
         if (self.outer_pairs) |pairs| self.allocator.free(pairs);
-        self.* = undefined;
     }
     fn nameBytes(self: *const RaisedErrorCursor) []const u8 {
         const names = [_][]const u8{ "kind", "msg", "word", "trace", "data", "source", "line", "col" };
@@ -712,7 +709,6 @@ const ErrorValueCursor = union(enum) {
         switch (self.*) {
             inline else => |*cursor| cursor.retire(releases),
         }
-        self.* = undefined;
     }
     pub fn advance(self: *ErrorValueCursor) error{OutOfMemory}!ErrorValueProgress {
         return switch (self.*) {
@@ -1252,7 +1248,6 @@ pub const StackReplacement = struct {
         for (self.unit.stack.items[self.base..]) |item| self.unit.releases.releaseValue(item);
         self.unit.stack.items.len = self.base;
         for (outputs) |item| self.unit.stack.appendAssumeCapacity(item);
-        self.* = undefined;
     }
 };
 
@@ -1783,6 +1778,13 @@ pub const Machine = struct {
         const io = self.unit.inherited.host_io orelse return null;
         return std.Io.Clock.awake.now(io).nanoseconds;
     }
+
+    fn settleAdvisoryDiagnostic(result: error{WriteFailed}!void) void {
+        if (result) |_| {} else |err| switch (err) {
+            error.WriteFailed => {},
+        }
+    }
+
     /// Native code cannot be preempted. This optional observation reports a
     /// long slice after it returns; it provides no sandboxing or instruction
     /// reduction, and the default path does not sample the clock at all.
@@ -1803,10 +1805,10 @@ pub const Machine = struct {
             .{ intern.get(intern.namespaceId(instance.name())), elapsed },
         ) catch return;
         if (self.unit.inherited.console) |console| {
-            console.writeDiagnostics(line, false) catch {};
+            settleAdvisoryDiagnostic(console.writeDiagnostics(line, false));
         } else if (self.unit.inherited.diagnostics) |diagnostics| {
-            diagnostics.writeAll(line) catch {};
-            diagnostics.flush() catch {};
+            settleAdvisoryDiagnostic(diagnostics.writeAll(line));
+            settleAdvisoryDiagnostic(diagnostics.flush());
         }
     }
     pub fn currentEnv(self: *const Machine) *env.Env {

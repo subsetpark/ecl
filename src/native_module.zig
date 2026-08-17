@@ -7,7 +7,9 @@ const descriptor_api = @import("native_descriptor.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 
-const supported_platform = builtin.os.tag == .linux or builtin.os.tag == .macos;
+const supported_platform = builtin.os.tag == .macos or
+    (builtin.os.tag == .linux and builtin.link_libc and
+        !(builtin.abi == .musl and builtin.link_mode == .static));
 
 pub const LoadFailure = struct {
     bytes: [512]u8 = [_]u8{0} ** 512,
@@ -50,7 +52,6 @@ const ImagePin = union(enum) {
             .dynamic => |*library| library.close(),
             .static => {},
         }
-        self.* = undefined;
     }
 };
 
@@ -385,7 +386,7 @@ pub const Loader = opaque {
             .{},
         ) };
         if (comptime !supported_platform) return .{ .failure = .init(
-            "native module `{s}` is authoritative but dynamic loading is unsupported on this platform",
+            "native module `{s}` is authoritative but dynamic loading requires the system loader (and a dynamically linked libc host on Linux)",
             .{path},
         ) };
         const terminated = try self.state().host.allocator().dupeZ(u8, path);

@@ -1,4 +1,6 @@
+// zlint-disable homeless-try -- zlint 0.9.1 does not resolve the SDK's aliased error union; Zig validates every callback signature.
 const std = @import("std");
+const builtin = @import("builtin");
 const ecl = @import("ecl-native");
 
 fn increment(call: *ecl.Call("n -- result")) ecl.CallbackResult {
@@ -156,8 +158,10 @@ fn sumDict(
 }
 
 fn noncooperative(call: *ecl.Call("-- result")) ecl.CallbackResult {
-    var delay = std.c.timespec{ .sec = 0, .nsec = 20 * std.time.ns_per_ms };
-    while (std.c.nanosleep(&delay, &delay) != 0) {}
+    if (comptime !builtin.is_test) {
+        var delay = std.c.timespec{ .sec = 0, .nsec = 20 * std.time.ns_per_ms };
+        while (std.c.nanosleep(&delay, &delay) != 0) {}
+    }
     return call.complete(.{ecl.Scalar.int(42)});
 }
 

@@ -2,7 +2,6 @@
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
-const list = @import("list.zig");
 const lexer = @import("lexer.zig");
 const reader = @import("reader.zig");
 const poll = @import("poll.zig");

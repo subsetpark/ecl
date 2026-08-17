@@ -150,16 +150,8 @@ pub const EditBuffer = enum(usize) {
         if (right_start == 0) return;
         const left_start = right_start - console.scalarLenBefore(owned.text.items(), right_start);
         const right_end = right_start + console.scalarLenAt(owned.text.items(), right_start);
-        // Two scalars never exceed the inline replacement, so a transpose is a
-        // splice like every other byte change rather than an in-place shuffle
-        // that has to re-establish the cursor invariant on its own.
-        // Two scalars swapped is one splice of the same range, and the
-        // storage owns both sources before it writes, so they can simply be
-        // the bytes being replaced in the other order.
-        self.splice(left_start, right_end, &.{
-            owned.text.items()[right_start..right_end],
-            owned.text.items()[left_start..right_start],
-        }) catch unreachable;
+        owned.text.transposeAdjacentScalars(left_start, right_start, right_end);
+        owned.cursor = scalarAligned(owned.text.items(), right_end);
     }
     pub fn takeOwned(self: EditBuffer) error{OutOfMemory}!OwnedLine {
         const owned = self.state();
@@ -172,8 +164,9 @@ pub const EditBuffer = enum(usize) {
         return .init(line_backing);
     }
     fn remove(self: EditBuffer, start: usize, end: usize) void {
-        // Deletion never grows the buffer, so the shared splice cannot fail.
-        self.splice(start, end, &.{}) catch unreachable;
+        const owned = self.state();
+        owned.text.remove(start, end);
+        owned.cursor = scalarAligned(owned.text.items(), start);
     }
     /// The only operation that changes bytes, and the only place the line
     /// limit is decided. Validation belongs here rather than at the call

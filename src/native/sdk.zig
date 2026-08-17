@@ -29,24 +29,30 @@ pub fn Call(comptime effect_source: []const u8) type {
 
         const AdapterState = struct {
             invocation: capability.Invocation,
-            views: [EffectSpec.inputs.len]capability.ViewState,
-            list_cursors: [EffectSpec.inputs.len]capability.ListCursorState,
-            dict_cursors: [EffectSpec.inputs.len]capability.DictCursorState,
+            views: [EffectSpec.inputs.len]?capability.ViewState = .{null} ** EffectSpec.inputs.len,
+            list_cursors: [EffectSpec.inputs.len]?capability.ListCursorState = .{null} ** EffectSpec.inputs.len,
+            dict_cursors: [EffectSpec.inputs.len]?capability.DictCursorState = .{null} ** EffectSpec.inputs.len,
         };
 
         fn initAdapter(
-            adapter_state: *AdapterState,
             host: *const abi.HostTable,
             context: *anyopaque,
-        ) error{ OutOfMemory, InvalidValue }!void {
-            adapter_state.invocation = .{ .host = host, .context = context };
+        ) AdapterState {
+            return .{ .invocation = .{ .host = host, .context = context } };
+        }
+
+        fn loadInputs(adapter_state: *AdapterState) error{ OutOfMemory, InvalidValue }!void {
             for (&adapter_state.views, 0..) |*view, index| {
                 view.* = .{
                     .wire = .{ .kind = .int },
                     .invocation = &adapter_state.invocation,
                     .input_index = @intCast(index),
                 };
-                try capability.requireOk(host.input(context, @intCast(index), &view.wire));
+                try capability.requireOk(adapter_state.invocation.host.input(
+                    adapter_state.invocation.context,
+                    @intCast(index),
+                    &view.*.?.wire,
+                ));
             }
         }
 
@@ -61,13 +67,13 @@ pub fn Call(comptime effect_source: []const u8) type {
         pub fn input(self: *Self, comptime index: usize) *const ValueView {
             if (index >= EffectSpec.inputs.len)
                 @compileError("ecl-native: input index exceeds the declared effect");
-            return @ptrCast(&self.state().views[index]);
+            return @ptrCast(&self.state().views[index].?);
         }
 
         pub fn listCursor(self: *Self, comptime index: usize, start: u64) ?*ListCursor {
             if (index >= EffectSpec.inputs.len)
                 @compileError("ecl-native: list cursor input exceeds the declared effect");
-            const view = &self.state().views[index];
+            const view = &self.state().views[index].?;
             if (view.wire.kind != .list or start > view.wire.aggregate_len) return null;
             return ListCursor.initAdapter(
                 &self.state().list_cursors[index],
@@ -81,7 +87,7 @@ pub fn Call(comptime effect_source: []const u8) type {
         pub fn dictCursor(self: *Self, comptime index: usize, start: u64) ?*DictCursor {
             if (index >= EffectSpec.inputs.len)
                 @compileError("ecl-native: dictionary cursor input exceeds the declared effect");
-            const view = &self.state().views[index];
+            const view = &self.state().views[index].?;
             if (view.wire.kind != .dict or start > view.wire.aggregate_len) return null;
             return DictCursor.initAdapter(
                 &self.state().dict_cursors[index],
@@ -204,8 +210,8 @@ pub fn word(
         pub const uses_build_values = UsesBuildValues;
         pub const uses_reschedule = UsesReschedule;
 
-        pub const input_slots = makeSlots(NativeCall.effect.inputs);
-        pub const output_slots = makeSlots(NativeCall.effect.outputs);
+        var input_slots_storage = makeSlots(NativeCall.effect.inputs);
+        var output_slots_storage = makeSlots(NativeCall.effect.outputs);
 
         pub fn definition(index: u32) abi.Definition {
             return .{
@@ -214,10 +220,10 @@ pub fn word(
                 .name_len = name.len,
                 .doc_ptr = documentation.ptr,
                 .doc_len = documentation.len,
-                .input_count = input_slots.len,
-                .inputs_ptr = &input_slots,
-                .output_count = output_slots.len,
-                .outputs_ptr = &output_slots,
+                .input_count = input_slots_storage.len,
+                .inputs_ptr = &input_slots_storage,
+                .output_count = output_slots_storage.len,
+                .outputs_ptr = &output_slots_storage,
                 .continuation_size = if (uses_reschedule)
                     NativeRescheduleType.continuation_size
                 else
@@ -242,40 +248,33 @@ pub fn word(
             context: *anyopaque,
             output: *abi.InvokeResult,
         ) void {
-            var call_state: NativeCall.AdapterState = undefined;
-            NativeCall.initAdapter(&call_state, host, context) catch |err| {
+            var call_state = NativeCall.initAdapter(host, context);
+            NativeCall.loadInputs(&call_state) catch |err| {
                 writeAdapterFailure(host, context, output, err);
                 return;
             };
             const call = NativeCall.adapterPointer(&call_state);
-            var build_state: capability.BuildState = undefined;
-            const build: *BuildValues = if (uses_build_values) build: {
-                build_state = .{ .invocation = &call_state.invocation };
-                break :build @ptrCast(&build_state);
-            } else undefined;
-            var reschedule_state: if (uses_reschedule)
-                NativeRescheduleType.AdapterState
-            else
-                void = undefined;
-            const schedule: if (uses_reschedule) *NativeRescheduleType else void =
-                if (uses_reschedule) schedule: {
-                    NativeRescheduleType.initAdapter(
-                        &reschedule_state,
-                        &call_state.invocation,
-                    ) catch {
-                        output.* = .{ .tag = .fail, .adapter_status = 1 };
-                        return;
-                    };
-                    break :schedule NativeRescheduleType.adapterPointer(&reschedule_state);
-                } else {};
-            const result: CallbackResult = if (uses_build_values and uses_reschedule)
-                callback(call, build, schedule)
-            else if (uses_build_values)
-                callback(call, build)
-            else if (uses_reschedule)
-                callback(call, schedule)
-            else
-                callback(call);
+            const result: CallbackResult = if (uses_build_values and uses_reschedule) result: {
+                var build_state: capability.BuildState = .{ .invocation = &call_state.invocation };
+                const build: *BuildValues = @ptrCast(&build_state);
+                var reschedule_state = NativeRescheduleType.initAdapter(&call_state.invocation) catch {
+                    output.* = .{ .tag = .fail, .adapter_status = 1 };
+                    return;
+                };
+                const schedule = NativeRescheduleType.adapterPointer(&reschedule_state);
+                break :result callback(call, build, schedule);
+            } else if (uses_build_values) result: {
+                var build_state: capability.BuildState = .{ .invocation = &call_state.invocation };
+                const build: *BuildValues = @ptrCast(&build_state);
+                break :result callback(call, build);
+            } else if (uses_reschedule) result: {
+                var reschedule_state = NativeRescheduleType.initAdapter(&call_state.invocation) catch {
+                    output.* = .{ .tag = .fail, .adapter_status = 1 };
+                    return;
+                };
+                const schedule = NativeRescheduleType.adapterPointer(&reschedule_state);
+                break :result callback(call, schedule);
+            } else callback(call);
             const outcome = result catch |err| switch (err) {
                 error.OutOfMemory => {
                     output.* = .{ .tag = .fail, .adapter_status = 1 };
@@ -338,12 +337,12 @@ pub fn module(comptime spec: anytype) type {
         @as(usize, @intFromBool(uses_reschedule));
     return struct {
         const Self = @This();
-        pub const definitions = definitions: {
+        var definitions_storage = definitions: {
             var result: [word_count]abi.Definition = undefined;
             for (Words, 0..) |Word, index| result[index] = Word.definition(index);
             break :definitions result;
         };
-        pub const requirements = requirements: {
+        var requirements_storage = requirements: {
             var result: [requirement_count]abi.CapabilityRequirement = undefined;
             result[0] = .{ .id = @intFromEnum(abi.CapabilityId.call) };
             if (uses_build_values)
@@ -354,21 +353,23 @@ pub fn module(comptime spec: anytype) type {
                 };
             break :requirements result;
         };
-        pub const descriptor_value = abi.Descriptor{
+        // The entry point returns this graph after its stack frame is gone;
+        // mutable storage forces image-lifetime data symbols on every target.
+        var descriptor_storage = abi.Descriptor{
             .module_name_ptr = ModuleName.ptr,
             .module_name_len = ModuleName.len,
             .module_doc_ptr = ModuleDocumentation.ptr,
             .module_doc_len = ModuleDocumentation.len,
-            .definition_count = definitions.len,
-            .definitions_ptr = &definitions,
-            .capability_count = requirements.len,
-            .capabilities_ptr = &requirements,
-            .callback_count = definitions.len,
+            .definition_count = definitions_storage.len,
+            .definitions_ptr = &definitions_storage,
+            .capability_count = requirements_storage.len,
+            .capabilities_ptr = &requirements_storage,
+            .callback_count = definitions_storage.len,
             .invoke = invoke,
         };
 
         pub fn descriptor() *const abi.Descriptor {
-            return &descriptor_value;
+            return &descriptor_storage;
         }
 
         pub fn invoke(
@@ -385,7 +386,7 @@ pub fn module(comptime spec: anytype) type {
         }
 
         pub export fn ecl_module_abi_v1(output: *abi.EntryResult) callconv(.c) void {
-            output.* = .{ .status = .descriptor, .descriptor = &descriptor_value };
+            output.* = .{ .status = .descriptor, .descriptor = descriptor() };
         }
 
         comptime {

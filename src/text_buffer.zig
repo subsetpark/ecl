@@ -29,6 +29,45 @@ pub const TextBuffer = struct {
     pub fn len(self: *const TextBuffer) usize {
         return self.storage.items.len;
     }
+
+    /// Remove an existing range. This is total because shortening storage
+    /// neither stages caller bytes nor grows the allocation.
+    pub fn remove(self: *TextBuffer, start: usize, end: usize) void {
+        if (start > end or end > self.storage.items.len) @panic("invalid text removal range");
+        self.storage.replaceRangeAssumeCapacity(start, end - start, &.{});
+    }
+
+    /// Validate and swap two adjacent UTF-8 scalars without allocating. The
+    /// validated widths bound the staging buffer, and the replacement preserves
+    /// the storage length and therefore its capacity.
+    pub fn transposeAdjacentScalars(
+        self: *TextBuffer,
+        left_start: usize,
+        middle: usize,
+        right_end: usize,
+    ) void {
+        if (left_start >= middle or middle >= right_end or right_end > self.storage.items.len)
+            @panic("invalid adjacent scalar ranges");
+        const left_len = middle - left_start;
+        const right_len = right_end - middle;
+        if (left_len > 4 or right_len > 4) @panic("transpose range is not two UTF-8 scalars");
+        const left_width = std.unicode.utf8ByteSequenceLength(self.storage.items[left_start]) catch
+            @panic("transpose range does not begin with UTF-8");
+        const right_width = std.unicode.utf8ByteSequenceLength(self.storage.items[middle]) catch
+            @panic("transpose range does not contain adjacent UTF-8");
+        if (left_width != left_len or right_width != right_len or
+            !std.unicode.utf8ValidateSlice(self.storage.items[left_start..right_end]))
+            @panic("transpose range is not two UTF-8 scalars");
+        var staged: [8]u8 = undefined;
+        @memcpy(staged[0..right_len], self.storage.items[middle..right_end]);
+        @memcpy(staged[right_len..][0..left_len], self.storage.items[left_start..middle]);
+        self.storage.replaceRangeAssumeCapacity(
+            left_start,
+            right_end - left_start,
+            staged[0 .. left_len + right_len],
+        );
+    }
+
     /// Replace `items()[start..end]` with the concatenation of `sources`.
     ///
     /// Every source is copied before the storage is touched, so a source may

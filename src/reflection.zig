@@ -408,7 +408,6 @@ pub const ActionPlan = struct {
         if (self.renderer) |*renderer| renderer.deinit();
         if (self.actions) |actions| self.allocator.free(actions);
         self.pending.retire(releases);
-        self.* = undefined;
     }
 };
 

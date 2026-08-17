@@ -4,6 +4,8 @@ const native_build = @import("src/native/build_helper.zig");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const runtime_linkage: ?std.builtin.LinkMode =
+        if (target.result.os.tag == .linux) .dynamic else null;
     const minish = b.dependency("minish", .{}).module("minish");
     const ohsnap = b.dependency("ohsnap", .{
         .target = target,
@@ -22,6 +24,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    mod.link_libc = true;
     mod.addImport("native-abi", native_abi);
     const runtime_options = b.addOptions();
     runtime_options.addOption(usize, "default_worker_count", 1);
@@ -148,8 +151,15 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "ecl",
         .root_module = exe_mod,
+        .linkage = runtime_linkage,
     });
     b.installArtifact(exe);
+    const native_runtime_options = b.addOptions();
+    native_runtime_options.addOptionPath("ecl_exe", exe.getEmittedBin());
+    native_runtime_options.addOptionPath(
+        "fixture_dir",
+        fixture_files.getDirectory(),
+    );
 
     const repl_tests = b.addSystemCommand(&.{"expect"});
     repl_tests.addFileArg(b.path("test/repl.exp"));
@@ -169,7 +179,10 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("native-abi", native_abi);
     test_mod.addImport("native-sample", native_sample);
     test_mod.addOptions("native_fixture_options", native_fixture_options);
+    test_mod.addOptions("native_runtime_options", native_runtime_options);
+    test_mod.link_libc = true;
     const tests = b.addTest(.{ .root_module = test_mod });
+    tests.linkage = runtime_linkage;
     const run_tests = b.addRunArtifact(tests);
     run_tests.step.dependOn(&fixture_files.step);
     const test_step = b.step("test", "Run the ecl test suite");
@@ -178,6 +191,7 @@ pub fn build(b: *std.Build) void {
         .root_module = test_mod,
         .filters = &.{ "native:", "concurrency: native shutdown" },
     });
+    native_runtime_tests.linkage = runtime_linkage;
     const run_native_runtime_tests = b.addRunArtifact(native_runtime_tests);
     run_native_runtime_tests.step.dependOn(&fixture_files.step);
     const native_runtime_step = b.step(
@@ -185,12 +199,6 @@ pub fn build(b: *std.Build) void {
         "Run native loader and transactional-call tests",
     );
     native_runtime_step.dependOn(&run_native_runtime_tests.step);
-    const native_runtime_options = b.addOptions();
-    native_runtime_options.addOptionPath("ecl_exe", exe.getEmittedBin());
-    native_runtime_options.addOptionPath(
-        "fixture_dir",
-        fixture_files.getDirectory(),
-    );
     const native_acceptance_mod = b.createModule(.{
         .root_source_file = b.path("test/native_runtime.zig"),
         .target = target,
@@ -260,7 +268,7 @@ pub fn build(b: *std.Build) void {
     var fuzz_campaign_steps: [fuzz_targets.len]*std.Build.Step = undefined;
     for (fuzz_targets, 0..) |fuzz_target, index| {
         const fuzz_mod = b.createModule(.{
-            .root_source_file = b.path("src/root.zig"),
+            .root_source_file = b.path("src/fuzz_root.zig"),
             .target = target,
             .optimize = optimize,
             // Zig 0.16.0's bundled fuzz runner passes builtin.StackTrace to
@@ -270,10 +278,8 @@ pub fn build(b: *std.Build) void {
             .error_tracing = false,
         });
         fuzz_mod.addOptions("session_options", test_options);
-        fuzz_mod.addImport("minish", minish);
         fuzz_mod.addImport("native-abi", native_abi);
-        fuzz_mod.addImport("native-sample", native_sample);
-        fuzz_mod.addOptions("native_fixture_options", native_fixture_options);
+        fuzz_mod.addOptions("native_runtime_options", native_runtime_options);
         const fuzz_tests = b.addTest(.{
             .root_module = fuzz_mod,
             .filters = &.{fuzz_target.test_name},
@@ -294,10 +300,12 @@ pub fn build(b: *std.Build) void {
     oom_mod.addOptions("session_options", test_options);
     oom_mod.addImport("native-abi", native_abi);
     oom_mod.addOptions("native_fixture_options", native_fixture_options);
+    oom_mod.link_libc = true;
     const oom_tests = b.addTest(.{
         .root_module = oom_mod,
         .filters = &.{"oom:"},
     });
+    oom_tests.linkage = runtime_linkage;
     const run_oom_tests = b.addRunArtifact(oom_tests);
     run_oom_tests.step.dependOn(&fixture_files.step);
     const oom_step = b.step(
@@ -353,10 +361,13 @@ pub fn build(b: *std.Build) void {
         worker_test_mod.addImport("native-abi", native_abi);
         worker_test_mod.addImport("native-sample", native_sample);
         worker_test_mod.addOptions("native_fixture_options", native_fixture_options);
+        worker_test_mod.addOptions("native_runtime_options", native_runtime_options);
+        worker_test_mod.link_libc = true;
         const worker_tests = b.addTest(.{
             .root_module = worker_test_mod,
             .filters = &.{"concurrency:"},
         });
+        worker_tests.linkage = runtime_linkage;
         const run_worker_tests = b.addRunArtifact(worker_tests);
         run_worker_tests.step.dependOn(&fixture_files.step);
         worker_step.dependOn(&run_worker_tests.step);
@@ -378,6 +389,8 @@ pub fn build(b: *std.Build) void {
     tsan_mod.addImport("native-abi", native_abi);
     tsan_mod.addImport("native-sample", native_sample);
     tsan_mod.addOptions("native_fixture_options", native_fixture_options);
+    tsan_mod.addOptions("native_runtime_options", native_runtime_options);
+    tsan_mod.link_libc = true;
     const tsan_tests = b.addTest(.{
         .root_module = tsan_mod,
         .filters = &.{
@@ -388,11 +401,8 @@ pub fn build(b: *std.Build) void {
             "native:",
         },
     });
+    tsan_tests.linkage = runtime_linkage;
     const run_tsan_tests = b.addRunArtifact(tsan_tests);
-    const tsan_cwd = b.addWriteFiles();
-    tsan_cwd.mode = .tmp;
-    _ = tsan_cwd.add(".keep", "");
-    run_tsan_tests.setCwd(tsan_cwd.getDirectory());
     run_tsan_tests.step.dependOn(&fixture_files.step);
     const tsan_step = b.step("test-tsan", "Run tests under ThreadSanitizer");
     tsan_step.dependOn(&run_tsan_tests.step);

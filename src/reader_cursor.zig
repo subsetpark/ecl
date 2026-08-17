@@ -352,7 +352,7 @@ pub const PendingUnit = enum(usize) {
     }
     pub fn clear(self: PendingUnit) void {
         const owned = self.state();
-        owned.text.splice(0, owned.text.len(), &.{}) catch unreachable;
+        owned.text.remove(0, owned.text.len());
         owned.checkpoint = .initial;
     }
     /// Where a cursor at the end of `line_prefix` sits, continuing from this
@@ -503,7 +503,6 @@ const StringBuilder = struct {
         if (self.span_array) |items| self.allocator.free(items);
         self.codepoints.retire(releases);
         self.char_spans.retire(releases);
-        self.* = undefined;
     }
     fn bump(self: *StringBuilder) u21 {
         const length = std.unicode.utf8ByteSequenceLength(self.token.bytes[self.index]) catch
@@ -773,7 +772,6 @@ const Context = struct {
     fn retire(self: *Context, releases: *heap.ReleaseDomain) void {
         self.body.retire(releases);
         self.names.retire(releases);
-        self.* = undefined;
     }
 };
 
@@ -852,7 +850,6 @@ const CollectionBuilder = struct {
         if (self.element_spans) |spans| self.allocator.free(spans);
         if (self.pairs) |pairs| self.allocator.free(pairs);
         self.context.retire(releases);
-        self.* = undefined;
     }
     fn elements(self: *const CollectionBuilder) []const binder.SpannedValue {
         return self.lowered orelse self.body.?;
@@ -1086,7 +1083,6 @@ const ParserCursor = struct {
         self.contexts.retire(self.releases);
         std.debug.assert(self.output == null);
         self.values.deinit();
-        self.* = undefined;
     }
     fn advanceRetirement(self: *ParserCursor) bool {
         return switch (self.retirement_phase) {
@@ -1348,7 +1344,6 @@ pub const ReadCursor = struct {
         if (self.forms) |*forms| forms.deinit();
         if (self.top_spans) |spans| self.allocator.free(spans);
         if (self.owned_source_name) |name| self.allocator.free(name);
-        self.* = undefined;
     }
     pub fn advanceRetirement(self: *ReadCursor) bool {
         return switch (self.retirement_phase) {

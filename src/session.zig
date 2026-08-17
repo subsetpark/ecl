@@ -269,6 +269,7 @@ pub const Session = enum(usize) {
         const core = try allocator.create(SessionCore);
         errdefer allocator.destroy(core);
         const scheduler = try scheduler_api.Scheduler.init(host_owner.cleanup(), scheduler_config);
+        const root_tasks = scheduler_api.TaskScope.init(scheduler.worker());
         core.* = .{
             .host_owner = host_owner,
             .environment = environment,
@@ -282,9 +283,8 @@ pub const Session = enum(usize) {
             .arguments = argv.take(),
             .console = console_api.Console.init(output, diagnostics),
             .scheduler = scheduler,
-            .root_tasks = undefined,
+            .root_tasks = root_tasks,
         };
-        core.root_tasks = scheduler_api.TaskScope.init(core.scheduler.worker());
         core.scheduler.attachRetirement();
         return @enumFromInt(@intFromPtr(core));
     }

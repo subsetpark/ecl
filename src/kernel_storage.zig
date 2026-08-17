@@ -42,7 +42,6 @@ pub const Utf8Materializer = struct {
     }
     pub fn retire(self: *Utf8Materializer, releases: *heap.ReleaseDomain) void {
         if (self.builder) |*builder| builder.retirePartial(releases);
-        self.* = undefined;
     }
 
     pub fn advance(
@@ -123,7 +122,6 @@ fn ChunkedMaterializer(
         }
         pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
             if (self.builder) |*builder| builder.retirePartial(releases);
-            self.* = undefined;
         }
         pub fn advance(self: *Self, budget: usize) error{OutOfMemory}!MaterializeResult {
             std.debug.assert(budget != 0 and !self.complete);
@@ -181,7 +179,6 @@ pub const ByteStringMaterializer = struct {
     }
     pub fn retire(self: *ByteStringMaterializer, releases: *heap.ReleaseDomain) void {
         self.inner.retire(releases);
-        self.* = undefined;
     }
     pub fn advance(self: *ByteStringMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
         return self.inner.advance(budget);
@@ -217,7 +214,6 @@ pub const TextMaterializer = struct {
         switch (self.state) {
             inline else => |*materializer| materializer.retire(releases),
         }
-        self.* = undefined;
     }
     pub fn advance(self: *TextMaterializer, budget: usize) error{OutOfMemory}!Utf8MaterializeResult {
         return switch (self.state) {
@@ -353,7 +349,6 @@ pub const CodepointMaterializer = struct {
     }
     pub fn retire(self: *CodepointMaterializer, releases: *heap.ReleaseDomain) void {
         if (self.fill) |*fill| fill.retire(releases);
-        self.* = undefined;
     }
 
     pub fn advance(self: *CodepointMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
@@ -426,7 +421,6 @@ pub const I64Materializer = struct {
     }
     pub fn retire(self: *I64Materializer, releases: *heap.ReleaseDomain) void {
         self.inner.retire(releases);
-        self.* = undefined;
     }
     pub fn advance(self: *I64Materializer, budget: usize) error{OutOfMemory}!I64MaterializeResult {
         return self.inner.advance(budget);
@@ -539,7 +533,6 @@ pub const DictMaterializer = struct {
         self.allocator.free(self.vals);
         self.allocator.free(self.hashes);
         if (self.table) |table| self.allocator.free(table);
-        self.* = undefined;
     }
     pub fn retire(self: *DictMaterializer, releases: *heap.ReleaseDomain) void {
         switch (self.state) {
@@ -567,7 +560,6 @@ pub const DictMaterializer = struct {
         self.allocator.free(self.vals);
         self.allocator.free(self.hashes);
         if (self.table) |table| self.allocator.free(table);
-        self.* = undefined;
     }
 
     pub fn advance(
@@ -803,7 +795,6 @@ pub const ValueMaterializer = struct {
     }
     pub fn retire(self: *ValueMaterializer, releases: *heap.ReleaseDomain) void {
         if (self.builder) |*builder| builder.retirePartial(releases);
-        self.* = undefined;
     }
 
     /// Transfers an incomplete destination to scheduler-owned release work.
@@ -967,7 +958,6 @@ pub const GenericValueMaterializer = struct {
     }
     pub fn retire(self: *GenericValueMaterializer, releases: *heap.ReleaseDomain) void {
         self.inner.retire(releases);
-        self.* = undefined;
     }
     pub fn advance(self: *GenericValueMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
         return self.inner.advance(budget);

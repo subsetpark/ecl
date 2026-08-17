@@ -64,10 +64,10 @@ const Fixture = struct {
     word_doc: []const u8 = "Increment a number.",
     input_name: []const u8 = "n",
     output_name: []const u8 = "result",
-    inputs: [1]abi.EffectSlot = undefined,
-    outputs: [1]abi.EffectSlot = undefined,
-    definitions: [1]abi.Definition = undefined,
-    capabilities: [1]abi.CapabilityRequirement = undefined,
+    inputs: ?[1]abi.EffectSlot = null,
+    outputs: ?[1]abi.EffectSlot = null,
+    definitions: ?[1]abi.Definition = null,
+    capabilities: ?[1]abi.CapabilityRequirement = null,
 
     fn descriptor(self: *Fixture) abi.Descriptor {
         self.inputs = .{.{
@@ -84,10 +84,10 @@ const Fixture = struct {
             .name_len = self.word_name.len,
             .doc_ptr = self.word_doc.ptr,
             .doc_len = self.word_doc.len,
-            .input_count = self.inputs.len,
-            .inputs_ptr = &self.inputs,
-            .output_count = self.outputs.len,
-            .outputs_ptr = &self.outputs,
+            .input_count = self.inputs.?.len,
+            .inputs_ptr = &self.inputs.?,
+            .output_count = self.outputs.?.len,
+            .outputs_ptr = &self.outputs.?,
         }};
         self.capabilities = .{.{ .id = @intFromEnum(abi.CapabilityId.call) }};
         return .{
@@ -95,10 +95,10 @@ const Fixture = struct {
             .module_name_len = self.module_name.len,
             .module_doc_ptr = self.module_doc.ptr,
             .module_doc_len = self.module_doc.len,
-            .definition_count = self.definitions.len,
-            .definitions_ptr = &self.definitions,
-            .capability_count = self.capabilities.len,
-            .capabilities_ptr = &self.capabilities,
+            .definition_count = self.definitions.?.len,
+            .definitions_ptr = &self.definitions.?,
+            .capability_count = self.capabilities.?.len,
+            .capabilities_ptr = &self.capabilities.?,
             .callback_count = 1,
             .invoke = dummyInvoke,
         };
@@ -156,19 +156,19 @@ test "native: descriptor validation rejects malformed metadata before publicatio
     try expectReject(error.AbiVersionMismatch, host.cleanup(), requested, &raw);
 
     raw = fixture.descriptor();
-    fixture.capabilities[0].id = 99;
+    fixture.capabilities.?[0].id = 99;
     try expectReject(error.UnsupportedCapabilityId, host.cleanup(), requested, &raw);
 
     raw = fixture.descriptor();
-    fixture.definitions[0].callback_index = 1;
+    fixture.definitions.?[0].callback_index = 1;
     try expectReject(error.CallbackIndexOutOfRange, host.cleanup(), requested, &raw);
 
     raw = fixture.descriptor();
-    fixture.definitions[0].size = 4;
+    fixture.definitions.?[0].size = 4;
     try expectReject(error.RecordSizeMismatch, host.cleanup(), requested, &raw);
 
     raw = fixture.descriptor();
-    fixture.definitions[0].continuation_size = 8;
+    fixture.definitions.?[0].continuation_size = 8;
     try expectReject(error.InvalidContinuation, host.cleanup(), requested, &raw);
 
     raw = fixture.descriptor();
@@ -546,12 +546,12 @@ test "native: cooperative slices let another unit progress at one worker" {
     defer runtime.deinit();
     try expectOk(
         &runtime,
-        "'sample use (sample.cooperative) spawn 'native-task set " ++
-            "(7) spawn 'observer set native-task observer pair await-any",
+        "'sample use ((sample.cooperative) spawn 'native-task set " ++
+            "(7) spawn 'observer set native-task observer pair await-any) spawn await",
     );
     var display = try runtime.stackDisplay();
     defer display.deinit();
-    try std.testing.expectEqualStrings("1 {'ok [7]}", display.bytes());
+    try std.testing.expectEqualStrings("{'ok (1 {'ok [7]})}", display.bytes());
 }
 
 test "native: aggregate cursors and builders charge the scheduler budget" {

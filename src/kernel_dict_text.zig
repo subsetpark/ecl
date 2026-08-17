@@ -29,14 +29,14 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 fn keysPrimitive(evaluator: *Machine) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
-    const keys = dict.keysOf(dictionary.borrow()) catch unreachable;
+    const keys = dict.keysOf(dictionary.borrow().dict);
     try evaluator.pushBorrowed(keys);
 }
 
 fn valsPrimitive(evaluator: *Machine) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
-    const values = dict.valsOf(dictionary.borrow()) catch unreachable;
+    const values = dict.valsOf(dictionary.borrow().dict);
     try evaluator.pushBorrowed(values);
 }
 

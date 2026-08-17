@@ -286,7 +286,7 @@ pub const ValidateCursor = struct {
     host: *const heap.HostCleanup,
     requested: intern.NamespaceName,
     descriptor_ptr: *const abi.Descriptor,
-    descriptor: abi.Descriptor = undefined,
+    descriptor: ?abi.Descriptor = null,
     phase: enum {
         header,
         module_name,
@@ -306,7 +306,7 @@ pub const ValidateCursor = struct {
     capability_index: usize = 0,
     definitions: ?[]ValidatedDefinition = null,
     definition_index: usize = 0,
-    current_definition: abi.Definition = undefined,
+    current_definition: ?abi.Definition = null,
     current_name: ?intern.NamespaceName = null,
     current_doc_builder: ?DocumentBuild = null,
     current_doc: ?*env.DocumentationString = null,
@@ -355,7 +355,7 @@ pub const ValidateCursor = struct {
                 self.current_doc = self.current_doc_builder.?.take();
                 self.current_doc_builder.?.deinit();
                 self.current_doc_builder = null;
-                self.current_effect_builder = EffectBuild.init(self.host, self.current_definition) catch |err|
+                self.current_effect_builder = EffectBuild.init(self.host, self.current_definition.?) catch |err|
                     return self.reject(err, @intCast(self.definition_index));
                 self.phase = .definition_effect;
             },
@@ -367,15 +367,16 @@ pub const ValidateCursor = struct {
                     .name = self.current_name.?,
                     .doc = self.current_doc.?,
                     .effect = self.current_effect_builder.?.take(),
-                    .callback_index = self.current_definition.callback_index,
-                    .continuation_size = self.current_definition.continuation_size,
-                    .continuation_alignment = self.current_definition.continuation_alignment,
-                    .init_continuation = self.current_definition.init_continuation,
-                    .deinit_continuation = self.current_definition.deinit_continuation,
+                    .callback_index = self.current_definition.?.callback_index,
+                    .continuation_size = self.current_definition.?.continuation_size,
+                    .continuation_alignment = self.current_definition.?.continuation_alignment,
+                    .init_continuation = self.current_definition.?.init_continuation,
+                    .deinit_continuation = self.current_definition.?.deinit_continuation,
                 };
                 self.current_doc = null;
                 self.current_effect_builder.?.deinit();
                 self.current_effect_builder = null;
+                self.current_definition = null;
                 self.current_name = null;
                 self.definition_index += 1;
                 self.phase = .definition;
@@ -390,37 +391,38 @@ pub const ValidateCursor = struct {
         const declared_size = self.descriptor_ptr.size;
         try validateRecordSize(declared_size, @sizeOf(abi.Descriptor));
         self.descriptor = self.descriptor_ptr.*;
-        if (self.descriptor.abi_version != abi.abi_version) return error.AbiVersionMismatch;
-        if (self.descriptor.definition_count > max_definitions or
-            self.descriptor.capability_count > max_capabilities)
+        const descriptor = self.descriptor.?;
+        if (descriptor.abi_version != abi.abi_version) return error.AbiVersionMismatch;
+        if (descriptor.definition_count > max_definitions or
+            descriptor.capability_count > max_capabilities)
             return error.CountOverflow;
         _ = try RecordArray(abi.Definition).init(
-            self.descriptor.definitions_ptr,
-            self.descriptor.definition_count,
-            self.descriptor.definition_record_size,
+            descriptor.definitions_ptr,
+            descriptor.definition_count,
+            descriptor.definition_record_size,
         );
         _ = try RecordArray(abi.CapabilityRequirement).init(
-            self.descriptor.capabilities_ptr,
-            self.descriptor.capability_count,
-            self.descriptor.capability_record_size,
+            descriptor.capabilities_ptr,
+            descriptor.capability_count,
+            descriptor.capability_record_size,
         );
-        if (self.descriptor.callback_count != 0 and self.descriptor.invoke == null)
+        if (descriptor.callback_count != 0 and descriptor.invoke == null)
             return error.MissingInvoke;
         self.requirements = try self.host.allocator().alloc(
             abi.CapabilityRequirement,
-            self.descriptor.capability_count,
+            descriptor.capability_count,
         );
         self.definitions = try self.host.allocator().alloc(
             ValidatedDefinition,
-            self.descriptor.definition_count,
+            descriptor.definition_count,
         );
         self.phase = .module_name;
     }
 
     fn validateModuleName(self: *ValidateCursor) ValidateError!void {
         const bytes = try guestUtf8(
-            self.descriptor.module_name_ptr,
-            self.descriptor.module_name_len,
+            self.descriptor.?.module_name_ptr,
+            self.descriptor.?.module_name_len,
             max_module_name_bytes,
         );
         const name = intern.internNamespace(bytes) catch |err| switch (err) {
@@ -430,8 +432,8 @@ pub const ValidateCursor = struct {
         if (name != self.requested) return error.ModuleNameMismatch;
         self.name = name;
         const document = try guestUtf8(
-            self.descriptor.module_doc_ptr,
-            self.descriptor.module_doc_len,
+            self.descriptor.?.module_doc_ptr,
+            self.descriptor.?.module_doc_len,
             max_document_bytes,
         );
         self.module_doc_builder = .init(self.host, document);
@@ -439,14 +441,14 @@ pub const ValidateCursor = struct {
     }
 
     fn validateCapability(self: *ValidateCursor) ValidateError!void {
-        if (self.capability_index == self.descriptor.capability_count) {
+        if (self.capability_index == self.descriptor.?.capability_count) {
             self.phase = .definition;
             return;
         }
         const records = try RecordArray(abi.CapabilityRequirement).init(
-            self.descriptor.capabilities_ptr,
-            self.descriptor.capability_count,
-            self.descriptor.capability_record_size,
+            self.descriptor.?.capabilities_ptr,
+            self.descriptor.?.capability_count,
+            self.descriptor.?.capability_record_size,
         );
         const requirement = try records.read(self.capability_index);
         try validateRecordSize(requirement.size, @sizeOf(abi.CapabilityRequirement));
@@ -459,18 +461,18 @@ pub const ValidateCursor = struct {
     }
 
     fn prepareDefinition(self: *ValidateCursor) ValidateError!void {
-        if (self.definition_index == self.descriptor.definition_count) {
+        if (self.definition_index == self.descriptor.?.definition_count) {
             self.phase = .finish;
             return;
         }
         const records = try RecordArray(abi.Definition).init(
-            self.descriptor.definitions_ptr,
-            self.descriptor.definition_count,
-            self.descriptor.definition_record_size,
+            self.descriptor.?.definitions_ptr,
+            self.descriptor.?.definition_count,
+            self.descriptor.?.definition_record_size,
         );
         const definition = try records.read(self.definition_index);
         try validateRecordSize(definition.size, @sizeOf(abi.Definition));
-        if (definition.callback_index >= self.descriptor.callback_count)
+        if (definition.callback_index >= self.descriptor.?.callback_count)
             return error.CallbackIndexOutOfRange;
         const has_continuation = definition.continuation_size != 0 or
             definition.continuation_alignment != 0 or
@@ -516,7 +518,7 @@ pub const ValidateCursor = struct {
     }
 
     fn finish(self: *ValidateCursor) ValidateError!Progress {
-        const invoke = self.descriptor.invoke orelse return error.MissingInvoke;
+        const invoke = self.descriptor.?.invoke orelse return error.MissingInvoke;
         const state = try self.host.allocator().create(DescriptorState);
         state.* = .{
             .host = self.host,
@@ -525,7 +527,7 @@ pub const ValidateCursor = struct {
             .definitions = self.definitions.?,
             .requirements = self.requirements.?,
             .invoke = invoke,
-            .callback_count = self.descriptor.callback_count,
+            .callback_count = self.descriptor.?.callback_count,
         };
         self.module_doc = null;
         self.definitions = null;

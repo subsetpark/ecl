@@ -80,7 +80,6 @@ const ListBuild = struct {
         if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.source) |*source| source.retirePartial(releases);
         if (self.result) |result| releases.releaseValue(result);
-        self.* = undefined;
     }
 };
 
@@ -167,7 +166,6 @@ const DictBuild = struct {
         if (self.keys) |*keys| keys.retirePartial(releases);
         if (self.values) |*values| values.retirePartial(releases);
         if (self.result) |result| releases.releaseValue(result);
-        self.* = undefined;
     }
 };
 
@@ -291,7 +289,7 @@ const Transaction = struct {
         if (@as(u32, @truncate(wire >> 32)) != self.candidate_generation) return null;
         const low: u32 = @truncate(wire);
         if (low == 0) return null;
-        const index = @as(usize, low - 1);
+        const index: usize = low - 1;
         if (index >= self.candidates.items.len) return null;
         return &self.candidates.items[index];
     }

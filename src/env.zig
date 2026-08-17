@@ -1108,7 +1108,7 @@ pub const Scope = struct {
                     const allocation = self.scope.allocation;
                     switch (allocation) {
                         .heap => allocator.destroy(self.scope),
-                        .embedded => self.scope.* = undefined,
+                        .embedded => {},
                     }
                     self.state = .complete;
                     return true;
@@ -1231,7 +1231,6 @@ pub const Scope = struct {
         const old = self.refs.fetchSub(1, .release);
         std.debug.assert(old == 1);
         _ = self.refs.load(.acquire);
-        self.* = undefined;
     }
     fn writableEnvironment(self: *Scope) error{OutOfMemory}!*Environment {
         return switch (self.storage) {
@@ -1516,7 +1515,6 @@ pub const testing = if (builtin.is_test) struct {
     pub fn deinitEnvironment(environment: *Environment) void {
         var cursor = Environment.TeardownCursor.init(environment);
         while (!cursor.advance()) {}
-        environment.* = undefined;
     }
 
     pub fn deinitScope(scope: *Scope, releases: *heap.ReleaseDomain) void {

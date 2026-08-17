@@ -86,7 +86,7 @@ pub const ListCursor = opaque {
     }
 
     pub fn initAdapter(
-        cursor_state: *ListCursorState,
+        cursor_state: *?ListCursorState,
         invocation: *Invocation,
         input_index: u32,
         length: u64,
@@ -103,7 +103,7 @@ pub const ListCursor = opaque {
                 .input_index = input_index,
             },
         };
-        return @ptrCast(cursor_state);
+        return @ptrCast(&cursor_state.*.?);
     }
 
     pub fn next(self: *ListCursor) CursorStep {
@@ -145,7 +145,7 @@ pub const DictCursor = opaque {
     }
 
     pub fn initAdapter(
-        cursor_state: *DictCursorState,
+        cursor_state: *?DictCursorState,
         invocation: *Invocation,
         input_index: u32,
         length: u64,
@@ -164,7 +164,7 @@ pub const DictCursor = opaque {
             .key_state = empty,
             .value_state = empty,
         };
-        return @ptrCast(cursor_state);
+        return @ptrCast(&cursor_state.*.?);
     }
 
     pub fn next(self: *DictCursor) DictCursorStep {
@@ -378,10 +378,7 @@ pub fn Reschedule(comptime Spec: type) type {
             state_ptr: *anyopaque,
         };
 
-        pub fn initAdapter(
-            adapter_state: *AdapterState,
-            invocation: *Invocation,
-        ) error{OutOfMemory}!void {
+        pub fn initAdapter(invocation: *Invocation) error{OutOfMemory}!AdapterState {
             var state_ptr: ?*anyopaque = null;
             switch ((invocation.host.continuation_state orelse unreachable)(invocation.context, &state_ptr)) {
                 .ok => {},
@@ -389,7 +386,7 @@ pub fn Reschedule(comptime Spec: type) type {
                 .invalid, .yield_required => unreachable,
                 _ => unreachable,
             }
-            adapter_state.* = .{ .invocation = invocation, .state_ptr = state_ptr.? };
+            return .{ .invocation = invocation, .state_ptr = state_ptr.? };
         }
 
         pub fn adapterPointer(adapter_state: *AdapterState) *Self {

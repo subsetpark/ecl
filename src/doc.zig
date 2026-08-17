@@ -87,7 +87,6 @@ pub const NormalizeCursor = struct {
         if (self.materializer) |*materializer| materializer.retire(releases);
         if (self.output) |output| self.allocator.free(output);
         self.allocator.free(self.lines);
-        self.* = undefined;
     }
 
     pub fn advance(self: *NormalizeCursor, budget: usize) error{OutOfMemory}!NormalizeProgress {

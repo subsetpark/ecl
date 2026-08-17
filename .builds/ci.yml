@@ -15,6 +15,9 @@ tasks:
       mkdir -p "$HOME/.local"
       tar -C "$HOME/.local" -xf /tmp/zig.tar.xz
       echo 'export PATH="$HOME/.local/zig-x86_64-linux-0.16.0:$PATH"' >> "$HOME/.buildenv"
+      # Zig 0.16's ZIP fetcher creates files below the global-cache tmp
+      # directory without first creating that directory.
+      mkdir -p "$HOME/.cache/zig/tmp"
   - fmt: |
       cd ecl
       zig fmt --check .

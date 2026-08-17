@@ -10,7 +10,6 @@ const modules = @import("modules.zig");
 const core = @import("scheduler_core.zig");
 
 const Value = value.Value;
-const Header = value.Header;
 const ListHandle = value.ListHandle;
 const TaskHandle = value.TaskHandle;
 

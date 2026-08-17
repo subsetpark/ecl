@@ -196,13 +196,11 @@ pub fn merge(
     return installReplacement(releases, left, replacement);
 }
 
-pub fn keysOf(dictionary: Value) error{NotADict}!Value {
-    const header = try dictHeader(dictionary);
+pub fn keysOf(header: *DictHandle) Value {
     return .{ .list = heap.dictStorageConst(header).payload().keys };
 }
 
-pub fn valsOf(dictionary: Value) error{NotADict}!Value {
-    const header = try dictHeader(dictionary);
+pub fn valsOf(header: *DictHandle) Value {
     return .{ .list = heap.dictStorageConst(header).payload().vals };
 }
 

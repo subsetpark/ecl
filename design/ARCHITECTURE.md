@@ -245,7 +245,13 @@ publication critical sections.
   sizes and strides, the ABI version, canonical names, UTF-8 documentation,
   parsed effects, definition uniqueness, callback indices, continuation
   layout, and all counts are validated before instance initialization or registry
-  publication can run. One module-to-host text ingress owns pointer/null,
+  publication can run. The SDK places the returned descriptor in addressable
+  image-lifetime storage; an entry point never returns a pointer to a comptime
+  value materialized in its stack frame. The validator's copied descriptor and
+  current definition are optional phase-owned values rather than uninitialized
+  records; every read therefore requires a populated state. Dynamic images load through the operating
+  system loader; Linux runtime artifacts link libc dynamically rather than using
+  Zig's relocation-incomplete static ELF mapper. One module-to-host text ingress owns pointer/null,
   representability, ceiling, and UTF-8 validation for descriptor text, scalar
   symbols/words, callback failures, and entry diagnostics. Character scalars
   cross the shared `Value.unicodeScalar` factory: only U+0000 through U+10FFFF
@@ -280,7 +286,10 @@ publication critical sections.
   variadic callbacks, a wrong result, optional, unknown, duplicate, or
   conflicting capabilities, a capability/continuation mismatch, and duplicate word
   names. The SDK generates the canonical capability manifest and wire adapter
-  from that one signature. Unknown capability ids fail loading, and
+  from that one signature. Adapter inputs and cursor backing are explicit
+  optional states: the factory populates them before the opaque capability can
+  expose a pointer, so no callback observes uninitialized scratch in any build
+  mode. Unknown capability ids fail loading, and
   `which`/`see` expose the validated native origin and requirements.
 - **Calls are transactional leaf operations.** `ValueView` permits immutable,
   O(1) kind, scalar, and aggregate-length observation; it never reveals the
@@ -958,18 +967,22 @@ bytes, so a caller can pass a borrow of the storage straight back into a
 mutation and have it freed mid-copy. That defect appeared independently in
 both, which is what a missing shared primitive looks like from the inside — two
 correct-looking local fixes rather than one type. `TextBuffer` is now the
-storage under both: its only mutation copies every source before touching the
+storage under both. Its fallible splice copies every source before touching
 storage and reserves the result's capacity before writing, so sources may be
 slices of the very bytes being replaced and a failure leaves the buffer exactly
-as it was. Transposing two scalars is consequently just a splice whose two
-sources are the bytes being replaced, in the other order.
+as it was. Operations that cannot fail have separate total forms: removal has
+no source and only shortens storage, while scalar transposition validates two
+adjacent UTF-8 ranges and stages at most eight bytes before a same-length
+replacement. Neither can allocate, so their signatures carry no impossible
+error.
 
-**Byte rewriting is one splice owning the whole transition.** `EditBuffer` is
+**Byte rewriting is one storage boundary owning the whole transition.** `EditBuffer` is
 an opaque handle, not a struct with a private field type, because Zig's
 inferred struct literals let external code build the latter and hand itself a
-cursor no splice produced. Every mutation — insert, replace, delete, kill,
-transpose — routes through `splice(range, source)`, which validates, stages,
-and commits in that order. Validation belongs there and not in staging because
+cursor no storage transition produced. Growing or arbitrary replacement routes
+through `splice(range, source)`, which validates, stages, and commits in that
+order; deletion and scalar transposition use the total non-growing transitions
+above. Validation belongs at this boundary because
 whether a replacement fits depends on the range it replaces; deciding earlier
 rejects overwriting a full buffer with a single byte. Staging copies the source
 before the storage is touched, so a replacement may safely alias the very bytes
@@ -1012,7 +1025,7 @@ when the whole buffer is valid UTF-8, requires both slices at the cursor to be
 valid. Oversized mutations must preserve the old state, while repeated
 `takeOwned`/deinit transitions run under the leak-detecting allocator. It also
 requires, independently of whether the rest of the buffer is well-formed, that
-the cursor never sits inside a scalar — the splice postcondition stated as a
+the cursor never sits inside a scalar — the mutation postcondition stated as a
 property rather than as a comment — and it replaces the buffer with an alias of
 its own contents, which is the shape that made a naive splice copy overlap
 itself. Arbitrary and prompt-relative row widths, an unmeasurable row, a row too
@@ -1102,8 +1115,11 @@ varies every integer size field in the ABI records, while the campaign also
 varies selected counts, callback indices, capability ids, and module
 name length; dedicated malformed shared libraries cover entry results, strided
 records, and module-written call/scalar/error tags. The native-call fuzz target
-selects bounded sequences of public SDK-fixture calls in the cooperative
-scheduler and observes only ECL stack values and errors. Separate runtime tests
+selects bounded sequences of public SDK-fixture calls and runs them through the
+dynamically linked production CLI, observing only exit status and ECL output.
+Its coverage runner remains static because Zig 0.16 cannot map fuzz coverage in
+a dynamic-musl test process; the child still exercises the real loader,
+generated adapter, cooperative scheduler, and retirement path. Separate runtime tests
 cover one/eight-worker identity, >quantum list and dictionary construction,
 spawned-unit loading, malformed wire values, and delayed shutdown. The TSan
 gate runs those production-connected tests, and the delayed-continuation test

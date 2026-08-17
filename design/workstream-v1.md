@@ -570,10 +570,11 @@ first unit reaches core names without an intermediate invalid state. Session
 renderings own their storage without exposing host allocation authority;
 production comptime validation rejects authority-bearing public Session
 returns and observation-lease parameters. Console callers receive only narrow
-whole-write operations. The editor
-owns raw-mode restoration and a nominal line result, and keeps cursor/storage
-inside an opaque buffer whose single splice consumes an owned replacement and
-re-derives the cursor after every mutation. The editor receives capabilities
+whole-write operations. The editor owns raw-mode restoration and a nominal
+line result, and keeps cursor/storage inside an opaque buffer whose fallible
+splice owns arbitrary replacement bytes while total non-growing transitions
+own deletion and validated adjacent-scalar transposition. Every transition
+re-derives the cursor. The editor receives capabilities
 rather than the Session: a terminal that redraws, lists candidates, and accepts
 only named prompts and named effects, and a completion observer that can render
 matching names and nothing else. The console owns terminal geometry, row
@@ -665,7 +666,14 @@ and every variant owns exactly the handle, copied metadata, and rollback action
 valid in that phase. Descriptor text, scalar symbols/words, callback failures,
 and entry diagnostics all cross one bounded UTF-8 ingress rather than carrying
 per-producer validation policy. With module state deferred, `initialized` constructs the
-pinned instance from validated metadata. The host table is minted only for an
+pinned instance from validated metadata. The SDK descriptor itself occupies
+addressable image-lifetime storage, so the entry point cannot return a pointer
+to a comptime value materialized in its stack frame. Dynamic images use the operating
+system loader; Linux runtime artifacts link libc dynamically and never route extensions
+through Zig's relocation-incomplete static ELF mapper. Validator records and
+generated adapter cursor backing use explicit empty/populated states, so phase
+or capability access cannot read uninitialized storage in optimized builds.
+The host table is minted only for an
 invocation, so no artifact-stored host pointer survives a call; a future
 module-state capability can extend that variant without reshaping the typestate. Native bindings
 store a nominal module-instance handle plus validated definition index, never a
@@ -769,9 +777,11 @@ DebugAllocator baseline rather than inspecting private representation.
 production validator with valid backing ranges. Comptime reflection varies
 every integer size field; malformed shared-library fixtures separately cover
 entry results, strided records, and module-written wire tags.
-`fuzz-native-call` selects bounded sequences of public SDK-fixture programs in
-one cooperative Session and observes only ECL stack values and errors. Separate
-runtime tests exercise one/eight-worker identity, over-quantum builders,
+`fuzz-native-call` selects bounded sequences of public SDK-fixture programs and
+executes each through the dynamically linked production CLI, observing only its
+exit status and ECL output. Keeping the coverage runner static avoids Zig 0.16's
+dynamic-musl coverage-map failure without substituting an internal transaction
+model for observable behavior. Separate runtime tests exercise one/eight-worker identity, over-quantum builders,
 malformed artifacts, and spawned loading; the TSan gate runs those
 production-connected tests, while a DebugAllocator delayed-continuation test
 proves complete Session teardown. Focused allocator
