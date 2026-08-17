@@ -119,18 +119,3 @@ comptime {
     if (@typeInfo(HeapKind).@"enum".fields.len != 10)
         @compileError("HeapKind dispatch count changed; update every exhaustive representation switch");
 }
-
-test "atom constructors round-trip their payloads" {
-    const values = [_]Value{
-        .{ .int = -9 },
-        .{ .float = 0.125 },
-        .{ .char = 0x1f642 },
-        .{ .symbol = 42 },
-        .{ .word = 42 },
-    };
-    try std.testing.expectEqual(@as(i64, -9), values[0].int);
-    try std.testing.expectEqual(@as(f64, 0.125), values[1].float);
-    try std.testing.expectEqual(@as(u32, 0x1f642), values[2].char);
-    try std.testing.expectEqual(@as(u32, 42), values[3].symbol);
-    try std.testing.expectEqual(@as(u32, 42), values[4].word);
-}

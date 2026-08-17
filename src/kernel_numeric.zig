@@ -12,7 +12,6 @@ const support = @import("kernel_support.zig");
 const storage = @import("kernel_storage.zig");
 
 const Value = value.Value;
-const HeapKind = value.HeapKind;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 pub const BinaryOp = support.BinaryOp;
@@ -21,53 +20,6 @@ pub const UnaryOp = support.UnaryOp;
 const ScalarError = error{ Type, Overflow, Domain };
 const ScalarBinary = *const fn (Value, Value) ScalarError!Value;
 const ScalarUnary = *const fn (Value) ScalarError!Value;
-const binary_op_count = std.meta.fields(BinaryOp).len;
-const heap_kind_count = std.meta.fields(HeapKind).len;
-const BinaryMatrix = [binary_op_count][heap_kind_count][heap_kind_count]?ScalarBinary;
-
-const binary_matrix: BinaryMatrix = blk: {
-    @setEvalBranchQuota(100_000);
-    var matrix = std.mem.zeroes(BinaryMatrix);
-    for (std.meta.fields(BinaryOp)) |operation_field| {
-        const operation: BinaryOp = @enumFromInt(operation_field.value);
-        for (std.meta.fields(HeapKind)) |left_field| {
-            const left: HeapKind = @enumFromInt(left_field.value);
-            for (std.meta.fields(HeapKind)) |right_field| {
-                const right: HeapKind = @enumFromInt(right_field.value);
-                const left_sample = leafSample(left);
-                const right_sample = leafSample(right);
-                if (left_sample != null and right_sample != null and
-                    supports(operation, left_sample.?, right_sample.?))
-                {
-                    matrix[operation_field.value][left_field.value][right_field.value] =
-                        selectScalar(operation);
-                }
-            }
-        }
-    }
-    validateBinaryMatrix(matrix);
-    break :blk matrix;
-};
-
-fn validateBinaryMatrix(comptime matrix: BinaryMatrix) void {
-    @setEvalBranchQuota(100_000);
-    for (std.meta.fields(BinaryOp)) |operation_field| {
-        const operation: BinaryOp = @enumFromInt(operation_field.value);
-        for (std.meta.fields(HeapKind)) |left_field| {
-            const left: HeapKind = @enumFromInt(left_field.value);
-            for (std.meta.fields(HeapKind)) |right_field| {
-                const right: HeapKind = @enumFromInt(right_field.value);
-                const left_sample = leafSample(left);
-                const right_sample = leafSample(right);
-                const expected = left_sample != null and right_sample != null and
-                    supports(operation, left_sample.?, right_sample.?);
-                if ((matrix[operation_field.value][left_field.value][right_field.value] != null) != expected)
-                    @compileError("numeric dispatch matrix does not match its supported scalar signatures");
-            }
-        }
-    }
-}
-
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(BinaryOp)) |field| {
         const operation: BinaryOp = @enumFromInt(field.value);
@@ -104,16 +56,6 @@ fn bindUnary(comptime operation: UnaryOp) env.PrimitiveImpl {
 
 pub fn unaryPrimitiveFor(comptime operation: UnaryOp) env.PrimitiveImpl {
     return bindUnary(operation);
-}
-
-pub fn scalarForIdiom(operation: BinaryOp, left: Value, right: Value) ?Value {
-    if (!isAtom(left) or !isAtom(right)) return null;
-    return selectScalar(operation)(left, right) catch null;
-}
-
-pub fn scalarUnaryForIdiom(operation: UnaryOp, operand: Value) ?Value {
-    if (!isAtom(operand)) return null;
-    return selectUnary(operation)(operand) catch null;
 }
 
 fn binaryPrimitive(evaluator: *Machine, operation: BinaryOp) MachineError!void {
@@ -659,10 +601,6 @@ pub const PervadeCursor = struct {
     }
 };
 
-fn selectLeafBinary(operation: BinaryOp, left: HeapKind, right: HeapKind) ?ScalarBinary {
-    return binary_matrix[@intFromEnum(operation)][@intFromEnum(left)][@intFromEnum(right)];
-}
-
 fn selectScalar(operation: BinaryOp) ScalarBinary {
     return switch (operation) {
         inline else => |comptime_operation| struct {
@@ -900,46 +838,4 @@ fn asFloat(operand: Value) f64 {
         .float => |number| number,
         .char, .symbol, .word, .list, .dict, .task => unreachable,
     };
-}
-
-fn supports(operation: BinaryOp, left: Value, right: Value) bool {
-    return switch (operation) {
-        .add => (left.isNumber() and right.isNumber()) or
-            (left == .char and right == .int) or (left == .int and right == .char),
-        .sub => (left.isNumber() and right.isNumber()) or
-            (left == .char and (right == .char or right == .int)),
-        .mul, .div, .pow, .atan2 => left.isNumber() and right.isNumber(),
-        .int_div, .mod, .and_word, .or_word => left == .int and right == .int,
-        .min, .max, .eq, .ne, .lt, .gt, .le, .ge => (left.isNumber() and right.isNumber()) or (left == .char and right == .char),
-    };
-}
-
-fn leafSample(kind: HeapKind) ?Value {
-    return switch (kind) {
-        .leaf_i64 => .{ .int = 0 },
-        .leaf_f64 => .{ .float = 0.0 },
-        .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = 0 },
-        .leaf_symbol => .{ .symbol = 0 },
-        .generic_spine, .dict, .task, .reserved_mask => null,
-    };
-}
-
-fn isAtom(item: Value) bool {
-    return switch (item) {
-        .int, .float, .char, .symbol, .word => true,
-        .list, .dict, .task => false,
-    };
-}
-
-test "numeric scalar semantics include exact mixed comparison and chars" {
-    const large: i64 = (1 << 53) + 1;
-    try std.testing.expectEqual(
-        @as(i64, 0),
-        (try scalarBinary(.eq, .{ .int = large }, .{ .float = @floatFromInt(large - 1) })).int,
-    );
-    try std.testing.expectEqual(
-        @as(u32, 'b'),
-        (try scalarBinary(.add, .{ .char = 'a' }, .{ .int = 1 })).char,
-    );
-    try std.testing.expectError(error.Domain, scalarBinary(.div, .{ .int = 1 }, .{ .int = 0 }));
 }

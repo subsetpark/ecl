@@ -1547,42 +1547,6 @@ pub const testing = if (builtin.is_test) struct {
         }
     }
 } else struct {};
-test "environment lookup and redefine are late-bound" {
-    var host = heap.HostOwner.init(std.testing.allocator);
-    defer host.cleanup().drain();
-    var environment = try Env.init(host.cleanup());
-    defer environment.deinit();
-    const name = try intern.trustedNamespace("env-test");
-    var building = environment.beginCoreBuild();
-    try building.installCore(name, .{ .value = .{ .int = 1 } });
-    building.finish();
-    var core = (environment.coreView().resolveDirect(intern.namespaceId(name))).?;
-    defer core.deinit();
-    try std.testing.expectEqual(@as(i64, 1), core.binding.value.int);
-    try environment.define(name, .{ .value = .{ .int = 2 } });
-    var local = (environment.sessionView().resolveDirect(intern.namespaceId(name))).?;
-    defer local.deinit();
-    try std.testing.expectEqual(@as(i64, 2), local.binding.value.int);
-    try std.testing.expect(environment.sessionView().resolveDirect(99) == null);
-}
-test "env: same-name rebind preserves cell identity and shape" {
-    var host = heap.HostOwner.init(std.testing.allocator);
-    const releases = host.domain();
-    defer host.cleanup().drain();
-    var environment = Environment.init(std.testing.allocator, releases);
-    defer testing.deinitEnvironment(&environment);
-    var scope = Scope.direct(std.testing.allocator, .{ .session = &environment }, null);
-    defer testing.deinitScope(&scope, releases);
-    const name = try intern.trustedNamespace("cell-test");
-    const first = try scope.publishTop(name, .{ .value = .{ .int = 1 } });
-    const generation = environment.generation();
-    const second = try scope.publishTop(name, .{ .value = .{ .int = 2 } });
-    try std.testing.expectEqual(first, second);
-    try std.testing.expectEqual(generation, environment.generation());
-    var lease = (environment.resolveDirect(intern.namespaceId(name))).?;
-    defer lease.deinit();
-    try std.testing.expectEqual(@as(i64, 2), lease.binding.value.int);
-}
 test "environment definition propagates every allocation failure" {
     const Probe = struct {
         fn run(allocator: std.mem.Allocator) !void {

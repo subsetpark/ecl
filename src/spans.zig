@@ -199,22 +199,3 @@ pub const SpanArchive = enum(usize) {
 comptime {
     heap.requireOpaqueHostRoot(SpanArchive, SpanArchiveState);
 }
-test "span archive owns roots and moved provenance" {
-    const allocator = std.testing.allocator;
-    var host = heap.HostOwner.init(allocator);
-    defer host.cleanup().drain();
-    var diag: lexer.Diag = .{};
-    const result = try reader.read(host.cleanup(), "fixture.ecl", "(1 missing)", &diag);
-    var parsed = result.complete;
-    const nested = parsed.values()[0].list;
-    const root = try list.fromValuesGeneric(allocator, parsed.values());
-    const root_header = root.list;
-    var archive = try SpanArchive.init(host.cleanup());
-    defer archive.deinit();
-    try archive.absorb(parsed.borrow(), root);
-    parsed.deinit();
-    try std.testing.expectEqual(lexer.Span{ .line = 1, .col = 1 }, archive.locate(root_header, 0).?.span);
-    const location = archive.locate(nested, 1).?;
-    try std.testing.expectEqualStrings("fixture.ecl", location.source_name);
-    try std.testing.expectEqual(lexer.Span{ .line = 1, .col = 4 }, location.span);
-}

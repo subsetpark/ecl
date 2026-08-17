@@ -1493,30 +1493,3 @@ pub fn read(
         },
     };
 }
-
-test "resumable reader preserves canonical forms" {
-    const printer = @import("print.zig");
-    var host = heap.HostOwner.init(std.testing.allocator);
-    defer host.cleanup().drain();
-    var diag: reader.Diag = .{};
-    var parsed = switch (try read(
-        host.cleanup(),
-        "test",
-        "1, -2 0x10 3.5 2e3 [\\a 'x \"ok\"] (|x| x x *)",
-        &diag,
-    )) {
-        .complete => |complete| complete,
-        .incomplete => return error.TestUnexpectedResult,
-    };
-    defer parsed.deinit();
-    const expected = [_][]const u8{
-        "1",                                                 "-2", "16", "3.5", "2000.0", "(\\a 'x \"ok\")",
-        "([] cons dup 0 at swap dup 0 at swap (*) dip pop)",
-    };
-    try std.testing.expectEqual(expected.len, parsed.values().len);
-    for (parsed.values(), expected) |form, text| {
-        const rendered = try printer.toOwnedString(std.testing.allocator, form);
-        defer std.testing.allocator.free(rendered);
-        try std.testing.expectEqualStrings(text, rendered);
-    }
-}

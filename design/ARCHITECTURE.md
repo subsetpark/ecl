@@ -437,17 +437,15 @@ publication critical sections.
   it never walks or frees that chain. Each retirement turn destroys one typed
   snapshot/directory record and requeues its successor. Superseded chains are
   therefore reclaimed once their announced readers drain without imposing
-  history-sized work on the final reader or writer. One generated property
-  drives the production `snapshot.Publisher` through arbitrary acquire,
-  publication, observation, and release traces. A barrier-controlled
+  history-sized work on the final reader or writer. A barrier-controlled
   reader/writer/reclaimer proof first holds an old production binding lease
   while publications replace it, then acquires another production cursor before
   a barrier-released publication and advances the actual shared retirement
   domain while that cursor remains live. All three participants continue in
-  concurrent loops; the instrumented TSan step covers acquisition, publication, and reclamation
-  together, while the test observes stable binding values through public
-  leases. A counting-allocator property
-  then holds a real environment shape lease and a real registry `Directory`
+  concurrent loops; the instrumented TSan step covers acquisition,
+  publication, and reclamation together, while the test observes stable binding
+  values through public leases. A counting-allocator property then holds a real
+  environment shape lease and a real registry `Directory`
   lease while exercising use-order changes, alias churn, and distinct-module
   publication; after those leases drain, live bytes remain bounded by current
   state rather than update count. Module slots use the same handoff for
@@ -649,13 +647,11 @@ out). Kernels never own threads.
   allocation-free transition module for unit, wait, registration-ownership,
   and scope decisions. The
   threaded shell owns locks, queues, task payloads, clocks, and handlers, and
-  executes only commands returned by that core. Generated Minish traces use
-  the same transitions and shrink failing event programs while checking
-  exactly-once publication/wake, queue consistency, structured child counts,
-  safety, and cancellation-drain liveness. A second generated property drives
-  the installed CLI with shrinking scheduler scenarios and a process deadline;
-  it covers the imperative registrations and handlers that the pure model
-  deliberately cannot observe.
+  executes only commands returned by that core. Generated Minish traces drive
+  the production scheduler, and a second property drives the installed CLI with
+  shrinking scheduler scenarios and a process deadline. These paths cover the
+  imperative registrations, handlers, publication, wake, structured children,
+  and cancellation-drain behavior directly.
 - **Green units on a fixed pool** (default = cores; 1-worker degenerate
   config supported and tested). v1: one mutex-protected global run
   queue — the invariant to protect is "unit is a movable object," not

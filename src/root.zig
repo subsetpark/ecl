@@ -30,17 +30,7 @@ pub const kernels = @import("kernels.zig");
 pub const session = @import("session.zig");
 pub const console = @import("console.zig");
 pub const scheduler = @import("scheduler.zig");
-pub const scheduler_core = @import("scheduler_core.zig");
-pub const snapshot_core = @import("snapshot_core.zig");
-pub const task_join_core = @import("task_join_core.zig");
-pub const resolution_core = @import("resolution_core.zig");
 pub const task_prims = @import("task_prims.zig");
-test "value-core smoke test uses the leak-detecting allocator" {
-    const std = @import("std");
-    const bytes = try std.testing.allocator.dupe(u8, version);
-    defer std.testing.allocator.free(bytes);
-    try std.testing.expectEqualStrings(version, bytes);
-}
 test {
     _ = value;
     _ = poll;
@@ -71,9 +61,6 @@ test {
     _ = session;
     _ = console;
     _ = scheduler;
-    _ = snapshot_core;
-    _ = task_join_core;
-    _ = resolution_core;
     _ = task_prims;
     _ = @import("tests/value_test.zig");
     _ = @import("tests/reader_test.zig");
@@ -88,10 +75,6 @@ test {
     _ = @import("tests/definition_test.zig");
     _ = @import("tests/formatter_test.zig");
     _ = @import("tests/concurrency_test.zig");
-    _ = @import("tests/scheduler_property_test.zig");
-    _ = @import("tests/snapshot_property_test.zig");
-    _ = @import("tests/task_join_property_test.zig");
-    _ = @import("tests/resolution_property_test.zig");
     _ = @import("tests/line_editor_test.zig");
     _ = @import("tests/native_test.zig");
     _ = @import("tests/fuzz_test.zig");

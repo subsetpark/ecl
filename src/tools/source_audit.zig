@@ -52,12 +52,11 @@ const source_groups = [_]SourceGroup{
     // opaque rendered result rather than folding those lifetime boundaries
     // into Session internals.
     .{ .production = true, .files = &.{
-        "env.zig", "modules.zig", "snapshot.zig", "snapshot_core.zig", "module_prims.zig", "reflection.zig", "session.zig",
+        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig",
     }, .sources = &.{
-        @embedFile("../env.zig"),          @embedFile("../modules.zig"),
-        @embedFile("../snapshot.zig"),     @embedFile("../snapshot_core.zig"),
-        @embedFile("../module_prims.zig"), @embedFile("../reflection.zig"),
-        @embedFile("../session.zig"),
+        @embedFile("../env.zig"),        @embedFile("../modules.zig"),
+        @embedFile("../snapshot.zig"),   @embedFile("../module_prims.zig"),
+        @embedFile("../reflection.zig"), @embedFile("../session.zig"),
     } },
     .{ .production = true, .files = &.{
         "prelude.zig",
@@ -124,18 +123,16 @@ const source_groups = [_]SourceGroup{
 };
 
 const test_files = [_][]const u8{
-    "tests/testgen.zig",                  "tests/reader_test.zig",
-    "tests/machine_test.zig",             "tests/module_test.zig",
-    "tests/value_test.zig",               "tests/kernel_test_support.zig",
-    "tests/kernel_numeric_test.zig",      "tests/kernel_sequence_test.zig",
-    "tests/kernel_order_test.zig",        "tests/kernel_dict_text_test.zig",
-    "tests/combinator_test.zig",          "tests/prelude_test.zig",
-    "tests/definition_test.zig",          "tests/formatter_test.zig",
-    "tests/concurrency_test.zig",         "tests/scheduler_property_test.zig",
-    "tests/snapshot_property_test.zig",   "tests/task_join_property_test.zig",
-    "tests/resolution_property_test.zig", "tests/oom_test.zig",
-    "tests/line_editor_test.zig",         "tests/native_test.zig",
-    "tests/fuzz_test.zig",                "oom_root.zig",
+    "tests/testgen.zig",             "tests/reader_test.zig",
+    "tests/machine_test.zig",        "tests/module_test.zig",
+    "tests/value_test.zig",          "tests/kernel_test_support.zig",
+    "tests/kernel_numeric_test.zig", "tests/kernel_sequence_test.zig",
+    "tests/kernel_order_test.zig",   "tests/kernel_dict_text_test.zig",
+    "tests/combinator_test.zig",     "tests/prelude_test.zig",
+    "tests/definition_test.zig",     "tests/formatter_test.zig",
+    "tests/concurrency_test.zig",    "tests/oom_test.zig",
+    "tests/line_editor_test.zig",    "tests/native_test.zig",
+    "tests/fuzz_test.zig",           "oom_root.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",

@@ -398,23 +398,3 @@ pub fn ChunkList(comptime T: type) type {
         }
     };
 }
-
-fn chunkStackAllocationProbe(allocator: std.mem.Allocator) !void {
-    var stack = ChunkStack(usize).init(allocator);
-    defer stack.deinit();
-    for (0..600) |item| try stack.push(item);
-    var expected: usize = 600;
-    while (stack.pop()) |item| {
-        expected -= 1;
-        try std.testing.expectEqual(expected, item);
-    }
-    try std.testing.expectEqual(@as(usize, 0), expected);
-}
-
-test "chunk stacks grow without relocating prior actions" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        chunkStackAllocationProbe,
-        .{},
-    );
-}

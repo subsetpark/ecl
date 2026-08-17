@@ -9,23 +9,7 @@ pub const HeapKind = value.HeapKind;
 pub const Machine = machine.Machine;
 pub const MachineError = machine.MachineError;
 
-pub const fault_block: usize = 256;
-pub const poll_chunk: usize = machine.kernel_poll_quantum;
 pub const max_depth: usize = 256;
-
-pub const IndexRange = struct {
-    start: usize,
-    end: usize,
-
-    pub fn init(start: usize, end: usize) IndexRange {
-        std.debug.assert(start <= end);
-        return .{ .start = start, .end = end };
-    }
-
-    pub fn len(self: IndexRange) usize {
-        return self.end - self.start;
-    }
-};
 
 pub const BinaryOp = enum {
     add,
@@ -132,11 +116,4 @@ pub fn installPrimitive(
     primitive: env.PrimitiveImpl,
 ) error{OutOfMemory}!void {
     try core.installBuiltin(name, primitive);
-}
-
-test "kernel constants freeze bounded work contracts" {
-    try std.testing.expectEqual(@as(usize, 256), fault_block);
-    try std.testing.expectEqual(@as(usize, 65_536), poll_chunk);
-    try std.testing.expectEqual(@as(usize, 256), max_depth);
-    try std.testing.expectEqual(@as(usize, 3), IndexRange.init(4, 7).len());
 }

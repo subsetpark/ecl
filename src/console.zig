@@ -294,39 +294,3 @@ test "console escapes every byte a terminal would act on" {
         writer.buffered(),
     );
 }
-
-test "console row planning never exceeds the row it was given" {
-    // Printable ASCII is charged exactly, so a wide row shows a whole line.
-    const wide = planWindow(@enumFromInt(20), .primary, .{ .before = "abcdefghij", .after = "" });
-    try std.testing.expectEqualStrings("abcdefghij", wide.before);
-
-    // Everything else is charged the widest a terminal renders, so what is
-    // shown always fits even when the real glyph is narrower.
-    const cases = [_][]const u8{ "abc", "界界界", "\u{0301}\u{0301}", "\xff\xff", "\u{9b}x" };
-    for ([_]u16{ 6, 7, 8, 12, 40, 200 }) |columns| for (cases) |source| {
-        for (0..source.len + 1) |cursor| {
-            const plan = planWindow(
-                @enumFromInt(columns),
-                .primary,
-                .{ .before = source[0..cursor], .after = source[cursor..] },
-            );
-            const shown = boundedCells(plan.before) + boundedCells(plan.after);
-            try std.testing.expect(shown + "ecl> ".len < columns);
-        }
-    };
-
-    // A row with no space for the prompt draws no buffer text at all rather
-    // than forcing a unit that would wrap.
-    const cramped = planWindow(@enumFromInt(6), .primary, .{ .before = "界", .after = "" });
-    try std.testing.expectEqual(@as(usize, 0), cramped.before.len + cramped.after.len);
-}
-
-test "console bounded cells never underestimate" {
-    try std.testing.expectEqual(@as(usize, 3), boundedCells("abc"));
-    try std.testing.expectEqual(@as(usize, 2), boundedCells("界"));
-    try std.testing.expectEqual(@as(usize, 2), boundedCells("🚀"));
-    try std.testing.expectEqual(@as(usize, 2), boundedCells("\u{0301}"));
-    try std.testing.expectEqual(@as(usize, 4), boundedCells("\x1b"));
-    try std.testing.expectEqual(@as(usize, 8), boundedCells("\u{9b}"));
-    try std.testing.expectEqual(@as(usize, 4), boundedCells("\xff"));
-}

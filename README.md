@@ -56,14 +56,16 @@ The editor target is a shrinkable arbitrary-byte/action state machine that
 checks exact byte preservation, cursor and UTF-8 boundary invariants, the line
 limit, and owned-line cleanup after every transition.
 
-`test-workers` runs the complete library and real-binary suite at one and eight
-workers. `test` keeps low-level exhaustive allocator checks alongside ordinary
-behavioral coverage. `test-oom` is the separate ReleaseSafe gate for the
+`test-workers` runs the worker-sensitive public Session suite with build-time
+defaults of one and eight workers. CLI scheduler and native-runtime tests select
+their own one/eight-worker configurations without repeating unrelated parser,
+value, or formatter cases. `test` keeps focused allocator checks alongside
+ordinary behavioral coverage. `test-oom` is the separate ReleaseSafe gate for the
 costlier full-session sweep; it initializes one session and traverses every
 runtime surface under each injected allocation failure without repeatedly
 bootstrapping the embedded prelude.
 
-Scheduler interleavings are generated against the allocation-free policy core
+Scheduler interleavings are generated through the production scheduler and CLI
 with the pinned Minish property-testing library. Failures retain a fixed replay
 seed and are automatically shrunk to a smaller event trace.
 
@@ -283,9 +285,9 @@ accepts only a positive base-10 integer and defaults to the available CPU
 count. Workers and the single timer thread are both started lazily.
 
 Scheduler policy is an allocation-free functional core; the threaded runtime
-is its imperative shell. Minish checks both generated core interleavings and
-shrinking public-CLI scenarios under a liveness deadline, so wait-registration
-or handler bypasses are covered as well as policy transitions. The core also
+is its imperative shell. Minish drives the production scheduler and shrinking
+public-CLI scenarios under a liveness deadline, so wait-registration and handler
+paths are exercised rather than inferred from a separate model. The core also
 tracks directory, cell, detached-delivery, and retired registration ownership;
 the shell uses stable owning wake handles and publishes a root wake only as its
 final access to that stack generation.

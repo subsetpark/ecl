@@ -60,10 +60,6 @@ fn startGrade(evaluator: *Machine, sorted_values: bool) MachineError!void {
     evaluator.installWorkDriver(driver);
 }
 
-pub fn gradePrimitiveForIdiom() env.PrimitiveImpl {
-    return gradePrimitive;
-}
-
 pub fn sortForIdiom(evaluator: *Machine) MachineError!void {
     try startGrade(evaluator, true);
 }
@@ -304,14 +300,6 @@ const GradeDriver = struct {
         allocator.destroy(self);
     }
 };
-
-fn lessIndex(collection: Value, left: usize, right: usize) error{NotComparable}!bool {
-    const ordering = try equal.compareScalars(
-        list.atUnchecked(collection, left),
-        list.atUnchecked(collection, right),
-    );
-    return ordering == .lt or (ordering == .eq and left < right);
-}
 
 fn distinctPrimitive(evaluator: *Machine) MachineError!void {
     var collection = try evaluator.popValue();
@@ -572,11 +560,3 @@ const GroupDriver = struct {
         allocator.destroy(self);
     }
 };
-
-test "order comparator breaks equal values by original position" {
-    const allocator = std.testing.allocator;
-    const collection = try list.fromI64Slice(allocator, &.{ 2, 1, 2, 1 });
-    defer heap.testing.releaseValue(allocator, collection);
-    try std.testing.expect(try lessIndex(collection, 1, 3));
-    try std.testing.expect(!try lessIndex(collection, 3, 1));
-}

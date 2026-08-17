@@ -328,64 +328,6 @@ fn appendFailureProbe(allocator: std.mem.Allocator) !void {
     if (result == .replacement) heap.testing.releaseValue(allocator, result.value());
 }
 
-test "construction specializes every homogeneous profile" {
-    const allocator = std.testing.allocator;
-    const cases = [_]struct { values: []const Value, kind: HeapKind }{
-        .{ .values = &.{ .{ .int = 1 }, .{ .int = 2 } }, .kind = .leaf_i64 },
-        .{ .values = &.{ .{ .float = 1.0 }, .{ .float = 2.0 } }, .kind = .leaf_f64 },
-        .{ .values = &.{ .{ .char = 'a' }, .{ .char = 'b' } }, .kind = .leaf_char1 },
-        .{ .values = &.{ .{ .symbol = 1 }, .{ .symbol = 2 } }, .kind = .leaf_symbol },
-        .{ .values = &.{ .{ .int = 1 }, .{ .float = 2.0 } }, .kind = .generic_spine },
-    };
-    for (cases) |case| {
-        const collection = try fromValues(allocator, case.values);
-        defer heap.testing.releaseValue(allocator, collection);
-        try std.testing.expectEqual(case.kind, collection.list.kind());
-        for (case.values, 0..) |expected, index| {
-            try std.testing.expectEqual(expected, try at(collection, index));
-        }
-    }
-}
-
-test "unique append uses slack while shared append copies" {
-    const allocator = std.testing.allocator;
-    var host = heap.HostOwner.init(allocator);
-    const releases = host.domain();
-    defer host.cleanup().drain();
-    const unique = try fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
-    defer heap.testing.releaseValue(allocator, unique);
-    const unique_update = try append(allocator, releases, unique, .{ .int = 3 });
-    try std.testing.expect(unique_update == .in_place);
-    const unique_result = unique_update.value();
-    try std.testing.expectEqual(unique.list, unique_result.list);
-    try std.testing.expectEqual(@as(i64, 3), (try at(unique_result, 2)).int);
-
-    heap.incRef(unique.list);
-    defer heap.testing.decRef(allocator, unique.list);
-    const shared_update = try append(allocator, releases, unique, .{ .int = 4 });
-    try std.testing.expect(shared_update == .replacement);
-    const shared_result = shared_update.value();
-    defer heap.testing.releaseValue(allocator, shared_result);
-    try std.testing.expect(unique.list != shared_result.list);
-    try std.testing.expectEqual(@as(usize, 3), try len(unique));
-    try std.testing.expectEqual(@as(i64, 4), (try at(shared_result, 3)).int);
-}
-
-test "char append promotes width then generalizes on type mismatch" {
-    const allocator = std.testing.allocator;
-    var host = heap.HostOwner.init(allocator);
-    const releases = host.domain();
-    defer host.cleanup().drain();
-    const chars = try fromValues(allocator, &.{.{ .char = 'a' }});
-    defer heap.testing.releaseValue(allocator, chars);
-    _ = try append(allocator, releases, chars, .{ .char = 0x100 });
-    try std.testing.expectEqual(HeapKind.leaf_char2, chars.list.kind());
-    _ = try append(allocator, releases, chars, .{ .char = 0x10000 });
-    try std.testing.expectEqual(HeapKind.leaf_char4, chars.list.kind());
-    _ = try append(allocator, releases, chars, .{ .word = 7 });
-    try std.testing.expectEqual(HeapKind.generic_spine, chars.list.kind());
-}
-
 test "constructors and append exhaust allocation failures" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,

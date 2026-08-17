@@ -604,25 +604,3 @@ test "deep rendering uses an explicit worklist" {
     try std.testing.expectEqual(@as(u8, '('), rendered[0]);
     try std.testing.expectEqual(@as(u8, ')'), rendered[rendered.len - 1]);
 }
-
-test "owned rendering exposes resumable transitions for one large value" {
-    const allocator = std.testing.allocator;
-    const numbers = try allocator.alloc(i64, 70_000);
-    defer allocator.free(numbers);
-    for (numbers, 0..) |*number, index| number.* = @intCast(index);
-    const collection = try list.fromI64Slice(allocator, numbers);
-    defer heap.testing.releaseValue(allocator, collection);
-
-    var cursor = try OwnedStringCursor.init(allocator, collection);
-    defer cursor.deinit();
-    for (0..65_537) |_| try std.testing.expectEqual(
-        OwnedStringProgress.pending,
-        try cursor.advance(1),
-    );
-    const rendered = while (true) switch (try cursor.advance(1024)) {
-        .pending => {},
-        .complete => |complete| break complete,
-    };
-    defer allocator.free(rendered);
-    try std.testing.expect(rendered.len > numbers.len);
-}

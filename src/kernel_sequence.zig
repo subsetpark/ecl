@@ -110,14 +110,6 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
     evaluator.installWorkDriver(driver);
 }
 
-pub fn atPrimitiveForIdiom() env.PrimitiveImpl {
-    return bind(.at);
-}
-
-pub fn atForIdiom(evaluator: *Machine) MachineError!void {
-    return atPrimitive(evaluator);
-}
-
 const IndexDriver = struct {
     collection: Value,
     index: Value,
@@ -1459,8 +1451,4 @@ const ReshapeDriver = struct {
 fn unsignedMagnitude(integer: i64) u64 {
     if (integer >= 0) return @intCast(integer);
     return @as(u64, @intCast(-(integer + 1))) + 1;
-}
-
-test "sequence unsigned magnitude includes minInt" {
-    try std.testing.expectEqual(@as(u64, 1 << 63), unsignedMagnitude(std.math.minInt(i64)));
 }

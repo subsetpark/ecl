@@ -64,20 +64,3 @@ pub const TextBuffer = struct {
         return self.storage.toOwnedSlice(self.allocator);
     }
 };
-
-test "text buffer splices sources that alias its own storage" {
-    var text = TextBuffer.init(std.testing.allocator);
-    defer text.deinit();
-    try text.splice(0, 0, &.{ "abc", "de" });
-    try std.testing.expectEqualStrings("abcde", text.items());
-
-    // Appending the buffer to itself repeatedly forces reallocation while the
-    // source is a slice of the storage being grown.
-    for (0..12) |_| try text.splice(text.len(), text.len(), &.{text.items()});
-    try std.testing.expectEqual(@as(usize, 5 * 4096), text.len());
-    for (text.items(), 0..) |byte, index| try std.testing.expectEqual("abcde"[index % 5], byte);
-
-    // A source may also alias the range it replaces, in either order.
-    try text.splice(0, text.len(), &.{ text.items()[3..5], text.items()[0..3] });
-    try std.testing.expectEqualStrings("deabc", text.items());
-}

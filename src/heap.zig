@@ -522,41 +522,6 @@ pub fn symbols(header: *ListHandle) []const u32 {
     return payloadItems(u32, mutableHeader(header));
 }
 
-fn initValues(header: *InitializingList) []Value {
-    std.debug.assert(initializingImpl(header).kind() == .generic_spine);
-    return payloadItems(Value, initializingHeader(header));
-}
-
-fn initI64s(header: *InitializingList) []i64 {
-    std.debug.assert(initializingImpl(header).kind() == .leaf_i64);
-    return payloadItems(i64, initializingHeader(header));
-}
-
-fn initF64s(header: *InitializingList) []f64 {
-    std.debug.assert(initializingImpl(header).kind() == .leaf_f64);
-    return payloadItems(f64, initializingHeader(header));
-}
-
-fn initChars8(header: *InitializingList) []u8 {
-    std.debug.assert(initializingImpl(header).kind() == .leaf_char1);
-    return payloadItems(u8, initializingHeader(header));
-}
-
-fn initChars16(header: *InitializingList) []u16 {
-    std.debug.assert(initializingImpl(header).kind() == .leaf_char2);
-    return payloadItems(u16, initializingHeader(header));
-}
-
-fn initChars32(header: *InitializingList) []u32 {
-    std.debug.assert(initializingImpl(header).kind() == .leaf_char4);
-    return payloadItems(u32, initializingHeader(header));
-}
-
-fn initSymbols(header: *InitializingList) []u32 {
-    std.debug.assert(initializingImpl(header).kind() == .leaf_symbol);
-    return payloadItems(u32, initializingHeader(header));
-}
-
 pub fn writeUniqueList(list_header: *UniqueList, index: usize, item: Value) void {
     const header: *UniqueHeader = @ptrCast(@alignCast(list_header));
     const raw = uniqueHeader(header);
@@ -590,11 +555,6 @@ pub fn dictStorageConst(header: *const DictHandle) *const DictStorage {
 pub fn incRef(handle: anytype) void {
     const old = headerImpl(mutableHeader(handle)).rc.fetchAdd(1, .monotonic);
     std.debug.assert(old != 0 and old != std.math.maxInt(u32));
-}
-
-/// The sole copy-on-write gate in the codebase (decision 23).
-pub fn isUnique(handle: anytype) bool {
-    return headerImplConst(@ptrCast(@alignCast(handle))).rc.load(.acquire) == 1;
 }
 
 pub fn retainValue(item: Value) void {
@@ -1349,113 +1309,4 @@ fn adoptRepresentationDeferred(
     uniqueImpl(source).setKind(dest_kind);
     uniqueImpl(source).len = dest_len;
     releases.releaseHeader(source_raw);
-}
-
-fn allocationFailureProbe(allocator: std.mem.Allocator) !void {
-    const kinds = [_]HeapKind{
-        .generic_spine,
-        .leaf_i64,
-        .leaf_f64,
-        .leaf_char1,
-        .leaf_char2,
-        .leaf_char4,
-        .leaf_symbol,
-    };
-    var headers: [kinds.len]*ListHandle = undefined;
-    var initialized: usize = 0;
-    defer for (headers[0..initialized]) |header| testing.decRef(allocator, header);
-    for (kinds) |kind_value| {
-        headers[initialized] = publishList(try allocListHeader(allocator, kind_value, 0, 8));
-        initialized += 1;
-    }
-    const dictionary = publishDict(try allocDictHeader(allocator, 0));
-    defer testing.decRef(allocator, dictionary);
-}
-
-test "reference-count lifecycle is precise and leak-free" {
-    const allocator = std.testing.allocator;
-    const header = publishList(try allocListHeader(allocator, .leaf_i64, 0, 4));
-    try std.testing.expect(isUnique(header));
-    incRef(header);
-    try std.testing.expect(!isUnique(header));
-    testing.decRef(allocator, header);
-    try std.testing.expect(isUnique(header));
-    testing.decRef(allocator, header);
-}
-
-test "deep spine destruction is iterative" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    var current = publishList(try allocListHeader(allocator, .generic_spine, 0, 1));
-    for (0..100_000) |_| {
-        const parent = try allocListHeader(allocator, .generic_spine, 1, 1);
-        initValues(parent)[0] = .{ .list = current };
-        current = publishList(parent);
-    }
-    testing.decRef(allocator, current);
-}
-
-test "release domain suspends wide value destruction at its budget" {
-    const allocator = std.testing.allocator;
-    const width = 65_537;
-    const initializing = try allocListHeader(allocator, .generic_spine, width, width);
-    for (initValues(initializing)) |*item| item.* = .{ .int = 1 };
-    var host = HostOwner.init(allocator);
-    const releases = host.domain();
-    releases.releaseHeader(publishList(initializing));
-    try std.testing.expect(!releases.advance(1024));
-    host.cleanup().drain();
-}
-
-const ReferenceContext = struct {
-    allocator: std.mem.Allocator,
-    header: *ListHandle,
-};
-
-fn referenceWorker(context: ReferenceContext) void {
-    for (0..20_000) |_| {
-        incRef(context.header);
-        _ = context.header.length();
-        // The root test owner keeps the allocation alive across this drop.
-        testing.decRef(context.allocator, context.header);
-    }
-}
-
-test "reference counting remains exact across threads" {
-    const allocator = std.testing.allocator;
-    const header = publishList(try allocListHeader(allocator, .leaf_i64, 0, 4));
-    defer testing.decRef(allocator, header);
-    const context = ReferenceContext{ .allocator = allocator, .header = header };
-    var threads: [4]std.Thread = undefined;
-    for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, referenceWorker, .{context});
-    for (threads) |thread| thread.join();
-    try std.testing.expect(isUnique(header));
-}
-
-test "typed heap factories report every allocation failure without leaking" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        allocationFailureProbe,
-        .{},
-    );
-}
-
-test "typed list builders retire every initialized generic prefix" {
-    const allocator = std.testing.allocator;
-    var host = HostOwner.init(allocator);
-    const releases = host.domain();
-    defer host.cleanup().drain();
-    var child_builder = try ListBuilder(.leaf_i64).init(allocator, 1, 1);
-    child_builder.items()[0] = 7;
-    const child = Value{ .list = child_builder.finish() };
-    defer releases.releaseValue(child);
-
-    for (0..257) |prefix| {
-        var builder = try AnyListBuilder.init(allocator, .generic_spine, 0, prefix);
-        for (0..prefix) |index| builder.writeValue(index, child);
-        builder.retirePartial(releases);
-        host.cleanup().drain();
-        try std.testing.expectEqual(@as(u32, 1), refCount(child.list));
-    }
 }

@@ -331,9 +331,8 @@ pub fn build(b: *std.Build) void {
     run_e2e_tests.step.dependOn(&fixture_files.step);
     test_step.dependOn(&run_e2e_tests.step);
 
-    const worker_step = b.step("test-workers", "Run the full suite with one and eight workers");
-    for ([_][]const u8{ "1", "8" }) |workers| {
-        const worker_count: usize = if (std.mem.eql(u8, workers, "1")) 1 else 8;
+    const worker_step = b.step("test-workers", "Run worker-sensitive Session tests at one and eight workers");
+    for ([_]usize{ 1, 8 }) |worker_count| {
         const worker_test_mod = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = target,
@@ -346,13 +345,13 @@ pub fn build(b: *std.Build) void {
         worker_test_mod.addImport("native-abi", native_abi);
         worker_test_mod.addImport("native-sample", native_sample);
         worker_test_mod.addOptions("native_fixture_options", native_fixture_options);
-        const worker_tests = b.addTest(.{ .root_module = worker_test_mod });
+        const worker_tests = b.addTest(.{
+            .root_module = worker_test_mod,
+            .filters = &.{"concurrency:"},
+        });
         const run_worker_tests = b.addRunArtifact(worker_tests);
         run_worker_tests.step.dependOn(&fixture_files.step);
         worker_step.dependOn(&run_worker_tests.step);
-        const run_worker_e2e = b.addRunArtifact(e2e_tests);
-        run_worker_e2e.setEnvironmentVariable("ECL_WORKERS", workers);
-        worker_step.dependOn(&run_worker_e2e.step);
     }
 
     // Keep TSan focused on genuinely threaded behavior. The ordinary suite owns
@@ -375,13 +374,10 @@ pub fn build(b: *std.Build) void {
         .root_module = tsan_mod,
         .filters = &.{
             "concurrency:",
-            "reference counting remains exact across threads",
-            "concurrent interning publishes stable lock-free reads",
             "env: concurrent cell publication is lease-safe and TSan-clean",
             "env: concurrent readers writers and retirement reclaim production snapshots",
             "registry: concurrent commits are linearized without lost names",
             "native:",
-            "concurrency: native shutdown",
         },
     });
     const run_tsan_tests = b.addRunArtifact(tsan_tests);

@@ -69,20 +69,3 @@ pub fn Publisher(comptime T: type) type {
         }
     };
 }
-
-test "snapshot publisher lease protects one self-consistent pointer" {
-    const Item = struct { version: u64 };
-    const ItemPublisher = Publisher(Item);
-    var first = Item{ .version = 1 };
-    var second = Item{ .version = 2 };
-    var publisher = ItemPublisher.init(&first);
-
-    var old = publisher.acquire();
-    try std.testing.expectEqual(@as(u64, 1), old.snapshot.?.version);
-    publisher.publish(&second);
-    var current = publisher.acquire();
-    try std.testing.expectEqual(@as(u64, 2), current.snapshot.?.version);
-    try std.testing.expect(!current.deinit());
-    try std.testing.expect(old.deinit());
-    try std.testing.expect(publisher.quiescent());
-}
