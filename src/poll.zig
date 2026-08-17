@@ -3,9 +3,15 @@ const std = @import("std");
 const heap = @import("heap.zig");
 
 /// Exact-capacity, non-rehashing map used by runtime publication snapshots.
-/// Its key remains nominal in entries and cursors; conversion to an integer is
+/// Its key is nominal in entries and cursors; conversion to an integer is
 /// confined to the hash-slot adapter.
 pub fn FixedMap(comptime K: type, comptime V: type) type {
+    const key_info = switch (@typeInfo(K)) {
+        .@"enum" => |info| info,
+        else => @compileError("FixedMap keys must be nominal enum(u32) values"),
+    };
+    if (key_info.tag_type != u32)
+        @compileError("FixedMap keys must be nominal enum(u32) values");
     return struct {
         const Self = @This();
         const Entry = struct { key: K, value: V };
@@ -183,18 +189,10 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
         }
 
         fn slot(key: K, capacity: usize) usize {
-            const raw: u32 = switch (@typeInfo(K)) {
-                .int => @intCast(key),
-                .@"enum" => @intFromEnum(key),
-                else => @compileError("FixedMap keys must be u32-compatible integers or enums"),
-            };
+            const raw: u32 = @intFromEnum(key);
             return @as(usize, raw *% 0x9e37_79b9) & (capacity - 1);
         }
     };
-}
-
-pub fn U32Map(comptime V: type) type {
-    return FixedMap(u32, V);
 }
 
 /// A LIFO worklist whose fixed-size chunks are linked rather than relocated.

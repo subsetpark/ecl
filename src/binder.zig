@@ -23,7 +23,8 @@ pub const SpannedValue = struct {
 };
 
 pub const Error = error{ OutOfMemory, Parse };
-const LocalMap = poll.U32Map(usize);
+const LocalName = enum(u32) { _ };
+const LocalMap = poll.FixedMap(LocalName, usize);
 const WalkFrame = struct {
     item: Value,
     next_child: ?usize = null,
@@ -158,7 +159,7 @@ pub const LowerCursor = struct {
         if (self.putter == null) return switch (try self.inserter.?.advance()) {
             .pending => .pending,
             .complete => |id| result: {
-                self.putter = self.locals.?.putCursor(id, self.name_index);
+                self.putter = self.locals.?.putCursor(@enumFromInt(id), self.name_index);
                 break :result .pending;
             },
         };
@@ -207,7 +208,7 @@ pub const LowerCursor = struct {
             return switch (frame.item) {
                 .word => |id| result: {
                     self.lookup_kind = .nested;
-                    self.lookup = self.locals.?.rawLookup(id);
+                    self.lookup = self.locals.?.rawLookup(@enumFromInt(id));
                     break :result .pending;
                 },
                 .list => result: {
@@ -242,7 +243,7 @@ pub const LowerCursor = struct {
         return switch (self.body[self.body_index].value) {
             .word => |id| result: {
                 self.lookup_kind = .top;
-                self.lookup = self.locals.?.rawLookup(id);
+                self.lookup = self.locals.?.rawLookup(@enumFromInt(id));
                 break :result .pending;
             },
             .list => |header| result: {

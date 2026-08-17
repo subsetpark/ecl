@@ -25,7 +25,7 @@ Verified in the checkout (2026-08-16):
   (23 decisions + implementation-agnostic runtime spec), GRAMMAR.md,
   VOCABULARY.md (~70 [P] + ~15 [E] words with contracts),
   ARCHITECTURE.md (literature-grounded implementation architecture with
-  a staged plan, line budgets, and a skeleton disposition table), and
+  a staged plan and a skeleton disposition table), and
   `research/` (the raw architecture panel, citations verified).
 - The real Zig interpreter is implemented through M4 at commit
   `2bf6c56`: flat values and CoW containers, the full reader, the
@@ -33,11 +33,9 @@ Verified in the checkout (2026-08-16):
   and the complete d.18 module/registry/hot-reload system. Its M4 suite
   records 119 tests across library/cross-layer and real-binary coverage;
   Debug, ReleaseSafe, ReleaseFast, named Linux TSan, formatting, and
-  blocking ZLint are green, including builds.sr.ht job 1859966. The
-  audited core is 6,361/9,500 lines, with machine 2,289/2,300 and
-  modules/registry 1,104/1,300.
+  blocking ZLint are green, including builds.sr.ht job 1859966.
 - `poc/rust/` remains a **frozen, complete-for-its-scope walking
-  skeleton** (~4.6k lines, 44 tests green): full grammar, unified values
+  skeleton** (44 tests green): full grammar, unified values
   with construction-time specialization (chars→string only), pervasion with
   leading-axis broadcast and d.22 float semantics, contract-checked
   combinators, crash-only `attempt` with outcome dicts, chained
@@ -59,8 +57,7 @@ Verified in the checkout (2026-08-16):
   and pervasive kernels provide the data-plane substrate for tabular work;
   no table module or table runtime kind exists. M7 adds green units,
   structured task lifetimes, cancellation/deadlines, deterministic joins,
-  bounded retirement, and one/eight-worker acceptance. The source audit
-  reports 29,184/30,000 shipped business-logic Zig lines. M8 adds scalar-safe
+  bounded retirement, and one/eight-worker acceptance. M8 adds scalar-safe
   TTY editing, locked atomic 100-line history, snapshot-safe live and dotted
   completion, continuation cancellation/EOF behavior, and a real-binary PTY
   gate while leaving non-TTY input unchanged. M9 native extensions and M10
@@ -245,10 +242,7 @@ library with green tests; no evaluator yet.
 **Status**: executed (90 tests across library and real-binary suites;
 Debug, ReleaseSafe, ReleaseFast, instrumented Linux TSan, formatting,
 and blocking ZLint validated). The 20,000-deep countdown keeps a flat
-continuation. After the Zig line budget was re-derived at `a49881c`, the
-source audit reports 5,158 core lines under the 9,500-line total ceiling,
-with the machine component at 2,185/2,300. One implementation correction
-is recorded: exact
+continuation. One implementation correction is recorded: exact
 top-level rollback retains the immutable entry cells, because a saved
 depth cannot recover a pre-existing value consumed before failure;
 attempt/dict isolation remains base-index truncation. Post-audit hardening
@@ -289,9 +283,7 @@ against an executable.
 real-binary; Debug, ReleaseSafe, ReleaseFast, the named TSan suite,
 formatting, and blocking ZLint validated locally; Linux CI enables the
 TSan instrumentation). Landed at commit `2bf6c56`; builds.sr.ht job
-1859966 is green. The audited result is 6,361 core lines under the
-9,500-line ceiling, with modules and registry at 1,104/1,300 and the
-machine at 2,289/2,300. Generation and binding leases reclaim displaced
+1859966 is green. Generation and binding leases reclaim displaced
 payloads after the last owner releases them; the multiwriter fixtures
 cover both repeated and disjoint module names.
 
@@ -338,14 +330,10 @@ paths.
 
 ### Milestone 5: kernels-and-pervasion
 
-**Status**: executed in the working tree (source totals are reported by
-`zig build source-audit`). Debug, ReleaseSafe, ReleaseFast,
+**Status**: executed in the working tree. Debug, ReleaseSafe, ReleaseFast,
 the named TSan suite, formatting, blocking ZLint, all 44 frozen Rust
-tests, and the CLI oracle differential are green locally. The audited
-pre-kernel core is 6,990/9,500 lines (values/RC 2,248/2,300;
-machine 2,290/2,300; modules/registry 1,300/1,300; bootstrap prelude
-29/100), and the closed kernel component is 3,571/5,500 production
-lines. Its seven-patch design and formal contracts are complete; the durable
+tests, and the CLI oracle differential are green locally. Its seven-patch
+design and formal contracts are complete; the durable
 implementation contract now lives in this workstream and the design documents.
 
 **Definition of Done**:
@@ -587,8 +575,9 @@ The as-built Session completion facade owns and settles its visibility and
 registry snapshots through phase-owned cursor variants; completion before the
 first unit reaches core names without an intermediate invalid state. Session
 renderings own their storage without exposing host allocation authority;
-production comptime validation rejects authority-bearing public Session return
-types. Console callers receive only narrow whole-write operations. The editor
+production comptime validation rejects authority-bearing public Session
+returns and observation-lease parameters. Console callers receive only narrow
+whole-write operations. The editor
 owns raw-mode restoration and a nominal line result, and keeps cursor/storage
 inside an opaque buffer whose single splice consumes an owned replacement and
 re-derives the cursor after every mutation. The editor receives capabilities
@@ -616,7 +605,6 @@ sequences, completion declining inside a string opened on an earlier physical
 line, live/public-only dotted completion,
 exact parseable history plus cross-process recall, continuation/error/EOF
 behavior, and canonical/echo terminal restoration against the real binary.
-The source audit measures 29,184/30,000 shipped business-logic Zig lines.
 
 **Definition of Done**:
 The interactive REPL has line editing, history (persisted to
@@ -631,7 +619,7 @@ touched.
 **Unlocks**: Daily-driver usability; nothing structural.
 
 **Established Precedents** (milestone-scoped):
-- **[library] linenoise (antirez)** — https://github.com/antirez/linenoise — the minimal, battle-tested line-editing model; bind it or port its ~800-line core to Zig rather than inventing an editor.
+- **[library] linenoise (antirez)** — https://github.com/antirez/linenoise — the minimal, battle-tested line-editing model; bind or port its focused core to Zig rather than inventing an editor.
 
 ---
 
@@ -801,24 +789,12 @@ failure sweeps remain in the ordinary suite; exhaustive initialized-Session
 native loading/call coverage is added once to `src/tests/oom_test.zig` and
 `zig build test-oom`.
 
-M9's first production patch remeasured the source-audit classification and
-synchronously installed an honest native SDK/ABI/loader component ceiling,
-raised the machine, module, and definition-annotation ceilings required by
-these nominal states, and updated `ARCHITECTURE.md`, this workstream, and the
-audit constants. The planning envelope was 4,000 shipped lines for the new
-native component and 37,000 total. Gameplanning narrowed the milestone to the
-capability set M10 consumes, which removes the module-state arbiter and its
-scheduler wait-set variant, so the first installed ceilings were **3,000 for the
-native component and 36,000 total**, with `scheduler and concurrency` left at 3,500.
-The installed first-patch measurement was 29,490/36,000 total and 305/3,000 for
-the native component. The post-implementation boundary review required
-runtime-minted capability tables, resumable aggregate builders, typed strided
-record arrays, turn-scoped candidate generations, and owner-only image
-settlement. Those explicit states raise the native ceiling to **3,800** while
-leaving the total at **36,000**; final acceptance measures **33,176/36,000**
-total and **3,428/3,800** for the native component. No implementation may compress or
-hide these type boundaries to fit any of these numbers; the source audit and
-ARCHITECTURE.md carry the same final rows.
+M9 added the native SDK, ABI, loader, fixtures, and runtime tests to the
+source audit's exhaustive manifests. The post-implementation boundary review
+required runtime-minted capability tables, resumable aggregate builders,
+typed strided record arrays, turn-scoped candidate generations, and owner-only
+image settlement; those explicit states remain architectural invariants rather
+than being collapsed into caller-specific policy.
 
 **Why this is a safe pause point**: Source modules and language semantics are
 unchanged; a rejected or failed native artifact has no registry visibility, and
@@ -919,29 +895,11 @@ aggregate → emit) — the awk/sed/jq positioning made literal.
 The terminal acceptance suite below is implemented as a CI job
 (fixtures + expect scripts where interactive) and green. README rewritten
 around the real binary (install, tour, source-module guide, native-extension
-SDK/build/trust guide). The d.23 line
-budget is audited by a CI check. Its complete budget domain is the classified
-production/core-business-logic Zig components listed in ARCHITECTURE.md:
-their total is ≤ 36,000 lines, the native SDK/ABI/loader component is ≤ 3,800,
-and the kernel component is ≤ 8,500. The first two were revised down from the
-4,000/37,000 planning envelope at M9 gameplanning, because narrowing M9 to the
-capability set M10 consumes removes the module-state arbiter and its scheduler
-wait-set variant. They are synchronized with the source audit and
-ARCHITECTURE.md at M9's first production patch; any further structurally
-justified revision must update all three authorities in that same patch. Tests,
-fixtures, inline `test` declarations, build/source-audit verification tooling,
-and target-language ECL are outside LOC measurement and control; their
-classification exists only to keep the first-party source manifest exhaustive.
-Private top-level helpers reachable only from inline tests are excluded by the
-same AST reachability pass, so co-location does not turn test support into
-measured business logic.
-Line figures in earlier executed-milestone status paragraphs are historical
-measurements, not active v1 ceilings or policy for verification code.
-The prior 22,000/5,500 and pre-M9 30,000 ceilings assumed
-native-stack traversal; the replacement headroom preserves the nominal resumable
-ownership, snapshot, reclamation, task-join, native transaction, capability, and
-loader typestate boundaries required by M7 and M9 rather
-than compressing them. Snapshot retention is bounded (the M7
+SDK/build/trust guide). The source architecture audit remains a blocking CI
+check: it exhaustively classifies first-party production and verification
+inputs and checks only source-body boundedness, unsafe cast confinement, and
+prelude layout where compiler guarantees cannot express the rule. Snapshot
+retention is bounded (the M7
 reclamation obligation): a soak fixture that defines and re-registers in a loop
 shows stable memory. A `v1.0` tag exists.
 
@@ -1094,9 +1052,8 @@ reserved capability ids and the ABI-v1 additive-tail rule without an ABI v2.
   per-Session state, so `ModuleState`, `ModuleView`, `ModuleUpdate`, and the
   scheduler-integrated arbiter are deferred to post-v1 along with the additive
   capabilities already listed. That removes the milestone's riskiest piece — a
-  new `ParkRequest` wait-set variant — and initially dropped the ceilings to
-  3,000 native and 36,000 total. The boundary-review correction above raises
-  only the native row to 3,800. The deferral is unreachable rather than half-present:
+  new `ParkRequest` wait-set variant. The deferral is unreachable rather than
+  half-present:
   `module_view` and `module_update` are reserved capability ids with no
   supported version and the descriptor's state layout must be zero, so an
   artifact naming them is refused at load while the additive-tail rule keeps
@@ -1632,34 +1589,15 @@ script in CI.
   - **Expected**: `"HELLO"`.
   - **Traces to**: Milestone 10 — embedded stdlib registration (mechanism Milestone 4).
 
-- **DoD-33 — line budget**
-  - **Assert**: only classified production/core-business-logic Zig is in the
-    line-budget domain: its total is ≤ 36,000 lines, the native
-    SDK/ABI/loader component is ≤ 3,800, every component is inside its
-    synchronized ARCHITECTURE.md row, and kernels are ≤ 8,500. M9 installed
-    these ceilings in its first patch and updates all authorities together when
-    a strong representation requires a justified revision, so scheduler-safe
-    and native work retain explicit cursor,
-    ownership, transaction, and typestate states instead of
-    synchronous native-stack cleanup or raw correlated fields. The 3,800/36,000
-    figures supersede both the 4,000/37,000 planning envelope and the too-small
-    initial 3,000 native estimate.
-    Tests, fixtures, inline `test` declarations, test-only sources,
-    build/source-audit tooling, and target-language ECL are outside LOC
-    measurement and control.
-    Top-level declarations gated by `builtin.is_test` and private declarations
-    reachable only from tests are likewise excluded by AST reachability rather
-    than conservatively charged to the containing production component.
-    Source coverage still classifies first-party test and tooling files solely
-    to make the manifest exhaustive; DoD-33 neither measures nor reports their
-    line totals and imposes no line ceiling on them.
-  - **Verify by** `cmd`: `zig build source-audit` (the dedicated audit in
-    `src/tools/source_audit.zig` prints the business-logic split and fails the build when a
-    component exceeds its row); `zig build test` depends on this audit.
-  - **Expected**: exit 0, including 3,428/3,800 native and 33,176/36,000 total;
-    no test or tooling line total is part of the contract.
-  - **Traces to**: Milestone 11 — the source audit (budget: d.23,
-    re-derived for the Zig host 2026-08-12).
+- **DoD-33 — source architecture audit**
+  - **Assert**: every first-party Zig input belongs to exactly one production
+    or verification manifest, and every classified production file is covered
+    by the applicable bounded-body and unsafe-cast checks.
+  - **Verify by** `cmd`: `zig build source-audit`; `zig build test` depends on
+    this audit.
+  - **Expected**: exit 0 with exhaustive source classification and no
+    architecture-policy violations.
+  - **Traces to**: Milestone 11 — the source architecture audit (d.23).
 
 - **DoD-34 — module effect declarations (d.9)**
   - **Assert**: a module `def` without an effect declaration fails

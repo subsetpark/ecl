@@ -305,7 +305,7 @@ pub fn build(b: *std.Build) void {
     });
     const audit_exe = b.addExecutable(.{ .name = "ecl-source-audit", .root_module = audit_mod });
     const run_audit = b.addRunArtifact(audit_exe);
-    const audit_step = b.step("source-audit", "Check source architecture and line budgets");
+    const audit_step = b.step("source-audit", "Check source architecture");
     audit_step.dependOn(&run_audit.step);
     fuzz_step.dependOn(&run_audit.step);
     for (fuzz_campaign_steps) |campaign_step| campaign_step.dependOn(&run_audit.step);

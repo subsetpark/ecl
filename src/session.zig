@@ -666,36 +666,44 @@ pub const CompletionObserve = enum(usize) {
     }
 };
 
-fn sessionReturnExposesAuthority(comptime T: type, comptime depth: u8) bool {
-    if (T == std.mem.Allocator or
-        T == std.Io or
-        T == std.Io.Writer or
-        T == SessionCore or
-        T == OpaqueSessionCore or
-        T == heap.HostOwner or
-        T == heap.ReleaseDomain or
-        T == env.Env or
-        T == env.EnvironmentView or
-        T == modules.Registry or
-        T == machine.Unit or
-        T == scheduler_api.Scheduler or
-        T == console_api.Console)
+const SessionAuthorityPosition = enum { parameter, result };
+
+fn sessionTypeExposesAuthority(
+    comptime T: type,
+    comptime depth: u8,
+    comptime position: SessionAuthorityPosition,
+) bool {
+    if (T == env.BindingLease or T == modules.GenerationLease) return true;
+    if (position == .result and
+        (T == std.mem.Allocator or
+            T == std.Io or
+            T == std.Io.Writer or
+            T == SessionCore or
+            T == OpaqueSessionCore or
+            T == heap.HostOwner or
+            T == heap.ReleaseDomain or
+            T == env.Env or
+            T == env.EnvironmentView or
+            T == modules.Registry or
+            T == machine.Unit or
+            T == scheduler_api.Scheduler or
+            T == console_api.Console))
         return true;
     if (depth == 0) return false;
     return switch (@typeInfo(T)) {
-        .optional => |optional| sessionReturnExposesAuthority(optional.child, depth - 1),
-        .pointer => |pointer| sessionReturnExposesAuthority(pointer.child, depth - 1),
-        .array => |array| sessionReturnExposesAuthority(array.child, depth - 1),
-        .vector => |vector| sessionReturnExposesAuthority(vector.child, depth - 1),
-        .error_union => |error_union| sessionReturnExposesAuthority(error_union.payload, depth - 1),
+        .optional => |optional| sessionTypeExposesAuthority(optional.child, depth - 1, position),
+        .pointer => |pointer| sessionTypeExposesAuthority(pointer.child, depth - 1, position),
+        .array => |array| sessionTypeExposesAuthority(array.child, depth - 1, position),
+        .vector => |vector| sessionTypeExposesAuthority(vector.child, depth - 1, position),
+        .error_union => |error_union| sessionTypeExposesAuthority(error_union.payload, depth - 1, position),
         .@"struct" => |structure| exposed: {
             inline for (structure.fields) |field|
-                if (sessionReturnExposesAuthority(field.type, depth - 1)) break :exposed true;
+                if (sessionTypeExposesAuthority(field.type, depth - 1, position)) break :exposed true;
             break :exposed false;
         },
         .@"union" => |union_info| exposed: {
             inline for (union_info.fields) |field|
-                if (sessionReturnExposesAuthority(field.type, depth - 1)) break :exposed true;
+                if (sessionTypeExposesAuthority(field.type, depth - 1, position)) break :exposed true;
             break :exposed false;
         },
         else => false,
@@ -703,11 +711,18 @@ fn sessionReturnExposesAuthority(comptime T: type, comptime depth: u8) bool {
 }
 
 comptime {
+    @setEvalBranchQuota(4_000);
     for (std.meta.declarations(Session)) |declaration| {
         const declaration_info = @typeInfo(@TypeOf(@field(Session, declaration.name)));
         if (declaration_info != .@"fn") continue;
-        const return_type = declaration_info.@"fn".return_type orelse continue;
-        if (sessionReturnExposesAuthority(return_type, 8))
+        const function = declaration_info.@"fn";
+        for (function.params) |parameter| {
+            const parameter_type = parameter.type orelse continue;
+            if (sessionTypeExposesAuthority(parameter_type, 8, .parameter))
+                @compileError("public Session parameter exposes owner authority: " ++ declaration.name);
+        }
+        const return_type = function.return_type orelse continue;
+        if (sessionTypeExposesAuthority(return_type, 8, .result))
             @compileError("public Session return exposes owner authority: " ++ declaration.name);
     }
 }

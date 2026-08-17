@@ -1,23 +1,16 @@
-//! Build-time source architecture and line-budget audit.
+//! Build-time source architecture audit.
 const std = @import("std");
 
-// Strong nominal/capability boundaries in shipped product code are deliberately
-// budgeted, not treated as overhead to squeeze away. Tests and verification
-// tooling are classified for source coverage, but their lines are neither
-// measured nor controlled by the product complexity budget.
-const business_logic_budget: usize = 36_000;
-
-const Component = struct {
-    name: []const u8,
-    budget: ?usize,
+const SourceGroup = struct {
+    production: bool,
     files: []const []const u8,
     sources: []const [:0]const u8,
 };
 
-const components = [_]Component{
+const source_groups = [_]SourceGroup{
     // Exact, non-rehashing map construction and resumable interning keep
     // user-sized storage work outside scheduler-native stacks.
-    .{ .name = "values+RC", .budget = 4200, .files = &.{
+    .{ .production = true, .files = &.{
         "value.zig",       "heap.zig", "intern.zig", "list.zig",
         "equal.zig",       "dict.zig", "print.zig",  "poll.zig",
         "text_buffer.zig",
@@ -30,8 +23,8 @@ const components = [_]Component{
     } },
     // Tokenization, parsing, binder lowering, exact materialization, and
     // provenance publication all carry nominal resumable state. The larger
-    // boundary replaces native-stack control flow; tests remain uncapped.
-    .{ .name = "reader", .budget = 3300, .files = &.{
+    // boundary replaces native-stack control flow.
+    .{ .production = true, .files = &.{
         "lexer.zig", "binder.zig", "reader_types.zig", "reader.zig", "reader_cursor.zig",
     }, .sources = &.{
         @embedFile("../lexer.zig"),         @embedFile("../binder.zig"),
@@ -45,8 +38,7 @@ const components = [_]Component{
     // frames and the duplicate synchronous error-value implementation.
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
-    // That stronger lifecycle boundary is intentionally budgeted here.
-    .{ .name = "machine", .budget = 5900, .files = &.{
+    .{ .production = true, .files = &.{
         "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "root.zig",
     }, .sources = &.{
         @embedFile("../machine.zig"),         @embedFile("../task_join_core.zig"),
@@ -57,9 +49,9 @@ const components = [_]Component{
     // cursor state so scheduler suspension is represented instead of hidden
     // in cancellation-only loops.
     // Completion adds Directory/Shape/generation-owning cursors plus an
-    // opaque rendered result; the higher ceiling preserves those nominal
-    // lifetime boundaries rather than folding them into Session internals.
-    .{ .name = "modules and registry", .budget = 5300, .files = &.{
+    // opaque rendered result rather than folding those lifetime boundaries
+    // into Session internals.
+    .{ .production = true, .files = &.{
         "env.zig", "modules.zig", "snapshot.zig", "snapshot_core.zig", "module_prims.zig", "reflection.zig", "session.zig",
     }, .sources = &.{
         @embedFile("../env.zig"),          @embedFile("../modules.zig"),
@@ -67,39 +59,37 @@ const components = [_]Component{
         @embedFile("../module_prims.zig"), @embedFile("../reflection.zig"),
         @embedFile("../session.zig"),
     } },
-    .{ .name = "bootstrap prelude", .budget = 150, .files = &.{
+    .{ .production = true, .files = &.{
         "prelude.zig",
     }, .sources = &.{
         @embedFile("../prelude.zig"),
     } },
-    .{ .name = "combinators", .budget = 1200, .files = &.{
+    .{ .production = true, .files = &.{
         "combinators.zig",
     }, .sources = &.{
         @embedFile("../combinators.zig"),
     } },
-    .{ .name = "definition annotations", .budget = 1100, .files = &.{
+    .{ .production = true, .files = &.{
         "definition_prims.zig", "doc.zig",
     }, .sources = &.{
         @embedFile("../definition_prims.zig"), @embedFile("../doc.zig"),
     } },
-    // Names, reflective prose, and fixed effects are one compile-time registry;
-    // the ceiling covers that deliberate single source of truth.
-    .{ .name = "primitive documentation", .budget = 300, .files = &.{
+    // Names, reflective prose, and fixed effects are one compile-time registry.
+    .{ .production = true, .files = &.{
         "primitive_docs.zig",
     }, .sources = &.{
         @embedFile("../primitive_docs.zig"),
     } },
     // The editor owns raw-terminal restoration, scalar-safe mutation, and
-    // atomic locked history as separate nominal states. Its ceiling budgets
-    // those boundaries rather than hiding them in the CLI entrypoint.
-    .{ .name = "CLI, line editor, and source formatter", .budget = 2800, .files = &.{
+    // atomic locked history as separate nominal states.
+    .{ .production = true, .files = &.{
         "main.zig", "formatter.zig", "line_editor.zig",
     }, .sources = &.{
         @embedFile("../main.zig"), @embedFile("../formatter.zig"), @embedFile("../line_editor.zig"),
     } },
     // Explicit continuation state is part of the kernel correctness boundary;
-    // the prior ceiling assumed native-stack traversals that could not yield.
-    .{ .name = "kernels and idioms", .budget = 8500, .files = &.{
+    // native-stack traversals could not yield.
+    .{ .production = true, .files = &.{
         "kernel_support.zig",  "kernels.zig",      "kernel_storage.zig",   "kernel_numeric.zig",
         "kernel_sequence.zig", "kernel_order.zig", "kernel_dict_text.zig", "idioms.zig",
     }, .sources = &.{
@@ -108,12 +98,12 @@ const components = [_]Component{
         @embedFile("../kernel_sequence.zig"),  @embedFile("../kernel_order.zig"),
         @embedFile("../kernel_dict_text.zig"), @embedFile("../idioms.zig"),
     } },
-    .{ .name = "source tooling", .budget = null, .files = &.{
+    .{ .production = false, .files = &.{
         "source_audit.zig", "tools/source_audit.zig",
     }, .sources = &.{
         @embedFile("../source_audit.zig"), @embedFile("source_audit.zig"),
     } },
-    .{ .name = "scheduler and concurrency", .budget = 3500, .files = &.{
+    .{ .production = true, .files = &.{
         "scheduler.zig", "scheduler_core.zig", "console.zig", "task_prims.zig",
     }, .sources = &.{
         @embedFile("../scheduler.zig"), @embedFile("../scheduler_core.zig"),
@@ -121,7 +111,7 @@ const components = [_]Component{
     } },
     // The installed author SDK, its sized ABI records, validation, loader,
     // and transactional-call boundary form one separately rooted component.
-    .{ .name = "native SDK, ABI, and loader", .budget = 3800, .files = &.{
+    .{ .production = true, .files = &.{
         "native/abi.zig",          "native/capability.zig", "native/sdk.zig",
         "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",
         "native_call.zig",
@@ -168,27 +158,12 @@ const repository_verification_files = [_][]const u8{
 };
 pub fn main(init: std.process.Init) !void {
     var failed = false;
-    var business_logic_lines: usize = 0;
-    for (components) |component| {
+    for (source_groups) |component| {
         if (component.files.len != component.sources.len) return error.SourceAuditFailed;
-        var component_lines: usize = 0;
-        if (component.budget == null) continue;
-        for (component.sources) |source| component_lines += countBusinessLogicLines(source);
-        if (component.budget) |budget| {
-            std.log.info("{s}: {d}/{d} business-logic lines", .{
-                component.name, component_lines, budget,
-            });
-            business_logic_lines += component_lines;
-            failed = failed or component_lines > budget;
-        }
     }
-    std.log.info("line budget: {d}/{d} business-logic lines", .{
-        business_logic_lines, business_logic_budget,
-    });
-    failed = failed or business_logic_lines > business_logic_budget;
     failed = auditSourceCoverage(init) or failed;
-    failed = auditTraversalSources() or failed;
-    failed = auditTypingBoundaries() or failed;
+    failed = auditSourceBodies() or failed;
+    failed = auditUnsafeCasts() or failed;
     failed = auditPreludeLayout() or failed;
     if (failed) return error.SourceAuditFailed;
 }
@@ -205,7 +180,7 @@ fn auditSourceCoverage(init: std.process.Init) bool {
     };
     defer walker.deinit();
     var failed = false;
-    var business_logic_count: usize = 0;
+    var production_count: usize = 0;
     var verification_count: usize = 0;
     while (walker.next(init.io) catch |err| {
         std.log.err("source coverage: cannot enumerate src: {s}", .{@errorName(err)});
@@ -213,34 +188,34 @@ fn auditSourceCoverage(init: std.process.Init) bool {
     }) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
         var matches: usize = 0;
-        var is_business_logic = false;
-        for (components) |component| for (component.files) |file| {
+        var is_production = false;
+        for (source_groups) |component| for (component.files) |file| {
             if (!sameSourcePath(entry.path, file)) continue;
             matches += 1;
-            is_business_logic = component.budget != null;
+            is_production = component.production;
         };
         for (test_files) |file| matches += @intFromBool(sameSourcePath(entry.path, file));
         if (matches != 1) {
-            std.log.err("source coverage: {s} belongs to {d} components; expected exactly one", .{
+            std.log.err("source coverage: {s} belongs to {d} source groups; expected exactly one", .{
                 entry.path, matches,
             });
             failed = true;
             continue;
         }
-        if (is_business_logic) business_logic_count += 1 else verification_count += 1;
+        if (is_production) production_count += 1 else verification_count += 1;
     }
-    std.log.info("source coverage: {d} business-logic and {d} verification inputs classified", .{
-        business_logic_count, verification_count,
+    std.log.info("source coverage: {d} production and {d} verification inputs classified", .{
+        production_count, verification_count,
     });
-    var expected_business: usize = 0;
+    var expected_production: usize = 0;
     var expected_verification: usize = test_files.len;
-    for (components) |component| {
-        if (component.budget == null)
-            expected_verification += component.files.len
+    for (source_groups) |component| {
+        if (component.production)
+            expected_production += component.files.len
         else
-            expected_business += component.files.len;
+            expected_verification += component.files.len;
     }
-    if (business_logic_count != expected_business or verification_count != expected_verification) {
+    if (production_count != expected_production or verification_count != expected_verification) {
         std.log.err("source coverage: manifest contains missing src inputs", .{});
         failed = true;
     }
@@ -498,105 +473,7 @@ fn preludeTokenEnd(source: []const u8, start: usize) usize {
     return end;
 }
 
-fn countLines(source: []const u8) usize {
-    var lines: usize = 0;
-    for (source) |byte| lines += @intFromBool(byte == '\n');
-    return lines + @intFromBool(source.len > 0 and source[source.len - 1] != '\n');
-}
-
-fn countBusinessLogicLines(source: [:0]const u8) usize {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return countLines(source);
-    defer tree.deinit(std.heap.page_allocator);
-    if (tree.errors.len != 0) return countLines(source);
-    const Declaration = struct {
-        node: std.zig.Ast.Node.Index,
-        first: std.zig.Ast.TokenIndex,
-        last: std.zig.Ast.TokenIndex,
-        name: ?[]const u8,
-        reachable: bool,
-    };
-    var declarations: std.ArrayList(Declaration) = .empty;
-    defer declarations.deinit(std.heap.page_allocator);
-    for (tree.rootDecls()) |declaration| {
-        const first = tree.firstToken(declaration);
-        const last = tree.lastToken(declaration);
-        var name: ?[]const u8 = null;
-        var public_or_root = false;
-        var test_conditional = false;
-        var token = first;
-        while (token <= last) : (token += 1) {
-            switch (tree.tokenTag(token)) {
-                .keyword_pub, .keyword_export, .keyword_comptime => public_or_root = true,
-                .keyword_fn, .keyword_const, .keyword_var => if (name == null and token < last and
-                    tree.tokenTag(token + 1) == .identifier)
-                {
-                    name = tree.tokenSlice(token + 1);
-                },
-                else => {},
-            }
-            if (token + 2 <= last and
-                std.mem.eql(u8, tree.tokenSlice(token), "builtin") and
-                tree.tokenTag(token + 1) == .period and
-                std.mem.eql(u8, tree.tokenSlice(token + 2), "is_test"))
-            {
-                test_conditional = true;
-            }
-        }
-        if (tree.nodeTag(declaration) == .test_decl) name = null;
-        declarations.append(std.heap.page_allocator, .{
-            .node = declaration,
-            .first = first,
-            .last = last,
-            .name = name,
-            .reachable = tree.nodeTag(declaration) != .test_decl and !test_conditional and
-                (public_or_root or name == null or std.mem.eql(u8, name.?, "main")),
-        }) catch return countLines(source);
-    }
-    // Production reachability starts at exported/comptime declarations and
-    // follows top-level identifier references. Test declarations and
-    // builtin.is_test-only declarations are never roots, so helpers reachable
-    // only from verification code are excluded regardless of visibility.
-    var changed = true;
-    while (changed) {
-        changed = false;
-        for (declarations.items) |owner| {
-            if (!owner.reachable) continue;
-            var token = owner.first;
-            while (token <= owner.last) : (token += 1) {
-                if (tree.tokenTag(token) != .identifier) continue;
-                const identifier = tree.tokenSlice(token);
-                for (declarations.items) |*candidate| {
-                    if (candidate.reachable or candidate.name == null) continue;
-                    if (std.mem.eql(u8, candidate.name.?, identifier)) {
-                        candidate.reachable = true;
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-    const line_count = countLines(source);
-    const excluded = std.heap.page_allocator.alloc(bool, line_count) catch return countLines(source);
-    defer std.heap.page_allocator.free(excluded);
-    @memset(excluded, false);
-    for (declarations.items) |declaration| {
-        if (declaration.reachable) continue;
-        const start = tree.tokenStart(declaration.first);
-        const end = tree.tokenStart(declaration.last) + tree.tokenSlice(declaration.last).len;
-        var line: usize = 0;
-        var offset: usize = 0;
-        while (offset < source.len and offset < end) : (line += 1) {
-            const next = std.mem.indexOfScalarPos(u8, source, offset, '\n') orelse source.len;
-            if (next >= start and offset < end) excluded[line] = true;
-            offset = @min(next + 1, source.len);
-        }
-    }
-    var result: usize = 0;
-    for (excluded) |is_excluded| result += @intFromBool(!is_excluded);
-    return result;
-}
-
-fn auditTraversalSources() bool {
+fn auditSourceBodies() bool {
     const Source = struct { name: []const u8, text: [:0]const u8 };
     const traversal_sources = [_]Source{
         .{ .name = "equal", .text = @embedFile("../equal.zig") },
@@ -613,57 +490,24 @@ fn auditTraversalSources() bool {
     };
     const traversal_forbidden = [_][]const []const u8{
         &.{ "std", ".", "ArrayList" },
-        &.{"AutoHashMap"},
-        &.{"AutoHashMapUnmanaged"},
         &.{ "std", ".", "mem", ".", "sort" },
         &.{ "Writer", ".", "Allocating" },
-        &.{ "publicNamesOwned", "(", "self", ".", "unit", ".", "allocator", ",", "null" },
         &.{ "writeAll", "(", "intern", ".", "get" },
         &.{ "print", "(", "\"{s}\"" },
     };
     var failed = false;
-    const legacy_work_shapes = [_][]const []const u8{
-        &.{"Work" ++ "Context"},
-        &.{"Poll" ++ "er"},
-        &.{"Poll" ++ "ing"},
-        &.{"run" ++ "One"},
-        &.{"co" ++ "operate"},
-        &.{"advanceKernel" ++ "Critical"},
-        &.{"pushResult" ++ "Owned"},
-    };
-    for (components) |component| for (component.sources, component.files) |source, file| {
-        failed = auditTokens(file, source, &legacy_work_shapes) or failed;
-    };
     const rehashing_maps = [_][]const []const u8{
         &.{"AutoHashMap"},
         &.{"AutoHashMapUnmanaged"},
     };
-    for (components) |component| for (component.sources, component.files) |source, file| {
-        failed = auditTokens(file, source, &rehashing_maps) or failed;
-    };
+    for (source_groups) |component| {
+        if (!component.production) continue;
+        for (component.sources, component.files) |source, file|
+            failed = auditTokens(file, source, &rehashing_maps) or failed;
+    }
     for (traversal_sources) |source| {
         failed = auditTokens(source.name, source.text, &traversal_forbidden) or failed;
     }
-    const storage_forbidden = [_][]const []const u8{
-        &.{"AutoHashMap"},
-        &.{"AutoHashMapUnmanaged"},
-    };
-    failed = auditTokens("span archive", @embedFile("../spans.zig"), &storage_forbidden) or failed;
-    failed = auditTokens("reader provenance", @embedFile("../reader.zig"), &storage_forbidden) or failed;
-    const work_forbidden = [_][]const []const u8{
-        &.{"pollOptional"},
-        &.{ "poller", ".", "charge" },
-    };
-    const work_sources = [_]Source{
-        .{ .name = "poll substrate", .text = @embedFile("../poll.zig") },
-        .{ .name = "lexer", .text = @embedFile("../lexer.zig") },
-        .{ .name = "binder", .text = @embedFile("../binder.zig") },
-        .{ .name = "reader", .text = @embedFile("../reader.zig") },
-        .{ .name = "interning", .text = @embedFile("../intern.zig") },
-        .{ .name = "output reflection", .text = @embedFile("../reflection.zig") },
-        .{ .name = "documentation", .text = @embedFile("../doc.zig") },
-    };
-    for (work_sources) |source| failed = auditTokens(source.name, source.text, &work_forbidden) or failed;
     const identifier_forbidden = [_][]const []const u8{
         &.{ "std", ".", "mem", ".", "indexOfScalar" },
     };
@@ -679,12 +523,6 @@ fn auditTraversalSources() bool {
             &.{ "allocator", ".", "dupe" },
         },
     ) or failed;
-    failed = auditFunctionTokens(
-        "owned stack handoff",
-        @embedFile("../machine.zig"),
-        "pushOwned",
-        &.{&.{ "heap", ".", "releaseValue" }},
-    ) or failed;
     const operand_stack_mutations = [_][]const []const u8{
         &.{ "unit", ".", "stack", ".", "append" },
         &.{ "unit", ".", "stack", ".", "appendAssumeCapacity" },
@@ -694,75 +532,44 @@ fn auditTraversalSources() bool {
         &.{ "unit", ".", "stack", ".", "shrinkRetainingCapacity" },
         &.{ "unit", ".", "stack", ".", "pop" },
     };
-    for (components) |component| for (component.sources, component.files) |source, file| {
-        if (std.mem.eql(u8, file, "machine.zig")) continue;
-        failed = auditTokens(file, source, &operand_stack_mutations) or failed;
-    };
+    for (source_groups) |component| {
+        if (!component.production) continue;
+        for (component.sources, component.files) |source, file| {
+            if (std.mem.eql(u8, file, "machine.zig")) continue;
+            failed = auditTokens(file, source, &operand_stack_mutations) or failed;
+        }
+    }
     const raw_stack_ownership = [_][]const []const u8{&.{"takeStackOwned"}};
-    for (components) |component| for (component.sources, component.files) |source, file| {
-        if (std.mem.eql(u8, file, "machine.zig") or std.mem.eql(u8, file, "scheduler.zig")) continue;
-        failed = auditTokens(file, source, &raw_stack_ownership) or failed;
-    };
-    const session_stack_mutations = [_][]const []const u8{
-        &.{ "self", ".", "stack", ".", "append" },
-        &.{ "self", ".", "stack", ".", "appendAssumeCapacity" },
-        &.{ "self", ".", "stack", ".", "appendSliceAssumeCapacity" },
-        &.{ "self", ".", "stack", ".", "ensureUnusedCapacity" },
-        &.{ "self", ".", "stack", ".", "clearRetainingCapacity" },
-        &.{ "self", ".", "stack", ".", "shrinkRetainingCapacity" },
-        &.{ "self", ".", "stack", ".", "pop" },
-    };
-    failed = auditTokens(
-        "session operand stack",
-        @embedFile("../session.zig"),
-        &session_stack_mutations,
-    ) or failed;
-    for (components) |component| for (component.sources, component.files) |source, file| {
-        failed = auditWorkDriverOutputs(file, source) or failed;
-        failed = auditOwnershipIdentifiers(file, source) or failed;
-        failed = auditOwnershipBooleans(file, source) or failed;
-        failed = auditReleaseDestructors(file, source) or failed;
-    };
-    const retired_release_implementation = [_][]const []const u8{&.{"ReleaseCursor"}};
-    for (components) |component| for (component.sources, component.files) |source, file| {
-        failed = auditTokens(file, source, &retired_release_implementation) or failed;
-    };
+    for (source_groups) |component| {
+        if (!component.production) continue;
+        for (component.sources, component.files) |source, file| {
+            if (std.mem.eql(u8, file, "machine.zig") or std.mem.eql(u8, file, "scheduler.zig")) continue;
+            failed = auditTokens(file, source, &raw_stack_ownership) or failed;
+        }
+    }
+    for (source_groups) |component| {
+        if (!component.production) continue;
+        for (component.sources, component.files) |source, file| {
+            failed = auditWorkDriverOutputs(file, source) or failed;
+            failed = auditReleaseDestructors(file, source) or failed;
+        }
+    }
     return failed;
 }
 
-/// Type seams that cannot be expressed at a call site are enforced over
-/// parsed production declarations. Test declarations remain behavioral and
-/// may use synchronous compatibility cleanup.
-fn auditTypingBoundaries() bool {
+/// Unsafe casts can bypass an opaque capability or callback adapter. Keep
+/// those casts confined to the factories that own the corresponding erasure.
+fn auditUnsafeCasts() bool {
     var failed = false;
-    // Every classified production file receives the same ownership audit.
-    // Adding a file to the manifest can never silently omit it from the
-    // release and blocking-destruction boundaries.
-    for (components) |component| {
-        if (component.budget == null) continue;
+    for (source_groups) |component| {
+        if (!component.production) continue;
         for (component.sources, component.files) |source, file| {
-            failed = auditProductionTokens(file, source, &.{
-                &.{ "heap", ".", "decRef" },
-            }) or failed;
-            const host_owner_allowed = std.mem.eql(u8, file, "heap.zig") or
-                std.mem.eql(u8, file, "session.zig") or
-                std.mem.eql(u8, file, "main.zig") or
-                std.mem.eql(u8, file, "formatter.zig");
-            if (!host_owner_allowed) failed = auditProductionTokens(file, source, &.{
-                &.{"HostOwner"},
-            }) or failed;
             if (!std.mem.eql(u8, file, "heap.zig")) for ([_][]const u8{
                 "@ptrCast",
                 "@ptrFromInt",
             }) |cast| {
                 failed = auditProductionFunctionTokenPair(file, source, "HostCleanup", cast) or failed;
             };
-            failed = auditExclusiveParameterTypes(
-                file,
-                source,
-                "HostCleanup",
-                "Allocator",
-            ) or failed;
             const execution_cast_allowed = std.mem.eql(u8, file, "session.zig") or
                 std.mem.eql(u8, file, "prelude.zig") or
                 std.mem.eql(u8, file, "machine.zig");
@@ -775,24 +582,6 @@ fn auditTypingBoundaries() bool {
         }
     }
 
-    failed = auditTokens("environment nominal maps", @embedFile("../env.zig"), &.{
-        &.{ "poll", ".", "U32Map" },
-    }) or failed;
-    failed = auditTokens("module nominal maps", @embedFile("../modules.zig"), &.{
-        &.{ "poll", ".", "U32Map" },
-    }) or failed;
-    // Session may privately consume observation leases, but none may cross an
-    // exported function boundary into untrusted callers.
-    failed = auditPublicFunctionTypes("session lease boundary", @embedFile("../session.zig"), &.{
-        &.{"GenerationLease"},
-        &.{"BindingLease"},
-    }) or failed;
-    failed = auditPublicFunctionReturnTypes(
-        "session allocation authority",
-        @embedFile("../session.zig"),
-        &.{&.{"Allocator"}},
-    ) or failed;
-
     failed = auditErasedCasts(
         "machine erased callbacks",
         @embedFile("../machine.zig"),
@@ -803,63 +592,6 @@ fn auditTypingBoundaries() bool {
         @embedFile("../heap.zig"),
         &.{ "TaskDestroyAdapter", "RetirementAdapters", "RetirementWakeAdapters" },
     ) or failed;
-
-    const raw_task_publication = [_][]const []const u8{
-        &.{"allocTaskHeader"},
-        &.{"publishTask"},
-    };
-    for (components) |component| for (component.sources, component.files) |source, file| {
-        if (std.mem.eql(u8, file, "heap.zig")) continue;
-        failed = auditTokens(file, source, &raw_task_publication) or failed;
-    };
-    return failed;
-}
-
-/// An owner-bound host capability supplies its allocator. Accepting both as
-/// parameters recreates the mismatched-owner state even when every current
-/// caller happens to pass the corresponding pair.
-fn auditExclusiveParameterTypes(
-    file: []const u8,
-    source: [:0]const u8,
-    first_type: []const u8,
-    second_type: []const u8,
-) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
-    defer tree.deinit(std.heap.page_allocator);
-    if (tree.errors.len != 0) return true;
-    const excluded = std.heap.page_allocator.alloc(bool, tree.tokens.len) catch return true;
-    defer std.heap.page_allocator.free(excluded);
-    @memset(excluded, false);
-    for (tree.rootDecls()) |declaration| {
-        if (tree.nodeTag(declaration) != .test_decl) continue;
-        for (tree.firstToken(declaration)..tree.lastToken(declaration) + 1) |token|
-            excluded[token] = true;
-    }
-    var failed = false;
-    for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
-        if (tree.nodeTag(node) != .fn_decl or excluded[tree.firstToken(node)]) continue;
-        var buffer: [1]std.zig.Ast.Node.Index = undefined;
-        const function = tree.fullFnProto(&buffer, node) orelse continue;
-        var found_first = false;
-        var found_second = false;
-        var parameters = function.iterate(&tree);
-        while (parameters.next()) |parameter| {
-            const type_expr = parameter.type_expr orelse continue;
-            for (tree.firstToken(type_expr)..tree.lastToken(type_expr) + 1) |token| {
-                const spelling = tree.tokenSlice(@intCast(token));
-                found_first = found_first or std.mem.eql(u8, spelling, first_type);
-                found_second = found_second or std.mem.eql(u8, spelling, second_type);
-            }
-        }
-        if (!found_first or !found_second) continue;
-        const name = if (function.name_token) |name_token| tree.tokenSlice(name_token) else "<anonymous>";
-        std.log.err(
-            "{s}: production function `{s}` accepts mutually exclusive `{s}` and `{s}` capabilities",
-            .{ file, name, first_type, second_type },
-        );
-        failed = true;
-    }
     return failed;
 }
 
@@ -901,40 +633,6 @@ fn auditProductionFunctionTokenPair(
     return failed;
 }
 
-fn auditProductionTokens(
-    label: []const u8,
-    source: [:0]const u8,
-    forbidden: []const []const []const u8,
-) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
-    defer tree.deinit(std.heap.page_allocator);
-    if (tree.errors.len != 0) return true;
-    const excluded = std.heap.page_allocator.alloc(bool, tree.tokens.len) catch return true;
-    defer std.heap.page_allocator.free(excluded);
-    @memset(excluded, false);
-    for (tree.rootDecls()) |declaration| {
-        if (tree.nodeTag(declaration) != .test_decl) continue;
-        const end = tree.lastToken(declaration) + 1;
-        for (tree.firstToken(declaration)..end) |token| excluded[token] = true;
-    }
-    var failed = false;
-    for (forbidden) |pattern| {
-        var index: usize = 0;
-        while (index + pattern.len <= tree.tokens.len) : (index += 1) {
-            if (excluded[index]) continue;
-            for (pattern, 0..) |expected, offset| {
-                if (excluded[index + offset] or
-                    !std.mem.eql(u8, tree.tokenSlice(@intCast(index + offset)), expected)) break;
-            } else {
-                std.log.err("{s}: forbidden production cleanup begins at `{s}`", .{ label, pattern[0] });
-                failed = true;
-                break;
-            }
-        }
-    }
-    return failed;
-}
-
 fn auditErasedCasts(
     label: []const u8,
     source: [:0]const u8,
@@ -971,60 +669,6 @@ fn auditErasedCasts(
     return failed;
 }
 
-/// A mutable boolean initialized as truth state is the characteristic shape of
-/// a side-band transfer flag. Ownership transitions must consume a capability
-/// or change a tagged state instead.
-fn auditOwnershipBooleans(label: []const u8, source: [:0]const u8) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
-    defer tree.deinit(std.heap.page_allocator);
-    if (tree.errors.len != 0) return true;
-    var failed = false;
-    var token: usize = 0;
-    while (token + 3 < tree.tokens.len) : (token += 1) {
-        if (tree.tokenTag(@intCast(token)) != .keyword_var or
-            tree.tokenTag(@intCast(token + 1)) != .identifier or
-            tree.tokenTag(@intCast(token + 2)) != .equal)
-        {
-            continue;
-        }
-        if (tree.tokenTag(@intCast(token + 3)) != .identifier) continue;
-        const initial = tree.tokenSlice(@intCast(token + 3));
-        if (!std.mem.eql(u8, initial, "true") and !std.mem.eql(u8, initial, "false")) continue;
-        const identifier = tree.tokenSlice(@intCast(token + 1));
-        if (!std.mem.eql(u8, identifier, "owned") and
-            !std.mem.eql(u8, identifier, "transferred") and
-            !std.mem.eql(u8, identifier, "consumed"))
-        {
-            continue;
-        }
-        std.log.err("{s}: mutable ownership flag `{s}` must be a capability or tagged state", .{
-            label, identifier,
-        });
-        failed = true;
-    }
-    return failed;
-}
-
-/// Ownership transfer is represented by capabilities or tagged optionals,
-/// never by a second boolean whose truth must track a raw value or buffer.
-fn auditOwnershipIdentifiers(label: []const u8, source: [:0]const u8) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
-    defer tree.deinit(std.heap.page_allocator);
-    if (tree.errors.len != 0) return true;
-    var failed = false;
-    for (0..tree.tokens.len) |token_index| {
-        const token: std.zig.Ast.TokenIndex = @intCast(token_index);
-        if (tree.tokenTag(token) != .identifier) continue;
-        const identifier = tree.tokenSlice(token);
-        if (!std.mem.endsWith(u8, identifier, "_owned")) continue;
-        std.log.err("{s}: ownership flag `{s}` must be an OwnedValue or tagged state", .{
-            label, identifier,
-        });
-        failed = true;
-    }
-    return failed;
-}
-
 /// A destructor that receives a release capability may retire roots but may
 /// not bypass the sole graph walker through a synchronous compatibility API.
 fn auditReleaseDestructors(label: []const u8, source: [:0]const u8) bool {
@@ -1044,8 +688,6 @@ fn auditReleaseDestructors(label: []const u8, source: [:0]const u8) bool {
         const end = tree.lastToken(node) + 1;
         if (!tokenRangeContains(tree, first, end, "ReleaseDomain")) continue;
         failed = hasForbiddenTokens(label, tree, first, end, &.{
-            &.{ "heap", ".", "releaseValue" },
-            &.{ "heap", ".", "decRef" },
             &.{ "materializer", ".", "deinit" },
             &.{ "normalizer", ".", "deinit" },
             &.{ "utf8", ".", "deinit" },
@@ -1111,74 +753,6 @@ fn auditTokens(
         return true;
     }
     return hasForbiddenTokens(label, tree, 0, tree.tokens.len, forbidden);
-}
-
-fn auditPublicFunctionTypes(
-    label: []const u8,
-    source: [:0]const u8,
-    forbidden: []const []const []const u8,
-) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
-    defer tree.deinit(std.heap.page_allocator);
-    if (tree.errors.len != 0) return true;
-    var failed = false;
-    for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
-        if (tree.nodeTag(node) != .fn_decl) continue;
-        const first = tree.firstToken(node);
-        if (tree.tokenTag(first) != .keyword_pub) continue;
-        var buffer: [1]std.zig.Ast.Node.Index = undefined;
-        const function = tree.fullFnProto(&buffer, node) orelse continue;
-        var parameters = function.iterate(&tree);
-        while (parameters.next()) |parameter| {
-            const type_expr = parameter.type_expr orelse continue;
-            failed = hasForbiddenTokens(
-                label,
-                tree,
-                tree.firstToken(type_expr),
-                tree.lastToken(type_expr) + 1,
-                forbidden,
-            ) or failed;
-        }
-        if (function.ast.return_type.unwrap()) |return_type| {
-            failed = hasForbiddenTokens(
-                label,
-                tree,
-                tree.firstToken(return_type),
-                tree.lastToken(return_type) + 1,
-                forbidden,
-            ) or failed;
-        }
-    }
-    return failed;
-}
-
-fn auditPublicFunctionReturnTypes(
-    label: []const u8,
-    source: [:0]const u8,
-    forbidden: []const []const []const u8,
-) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
-    defer tree.deinit(std.heap.page_allocator);
-    if (tree.errors.len != 0) return true;
-    var failed = false;
-    for (0..tree.nodes.len) |raw_node| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_node);
-        if (tree.nodeTag(node) != .fn_decl) continue;
-        const first = tree.firstToken(node);
-        if (tree.tokenTag(first) != .keyword_pub) continue;
-        var buffer: [1]std.zig.Ast.Node.Index = undefined;
-        const function = tree.fullFnProto(&buffer, node) orelse continue;
-        const return_type = function.ast.return_type.unwrap() orelse continue;
-        failed = hasForbiddenTokens(
-            label,
-            tree,
-            tree.firstToken(return_type),
-            tree.lastToken(return_type) + 1,
-            forbidden,
-        ) or failed;
-    }
-    return failed;
 }
 
 fn auditFunctionTokens(

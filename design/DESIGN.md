@@ -649,26 +649,6 @@ implementation matter, not a design matter.
       concurrently to progress is already broken. Its [P] driver publishes
       tasks with explicit one-value initial stacks in bounded chunks before
       entering the ordered join state.
-    - **Line budget (recalibrated 2026-08-14 for strong type boundaries):**
-      classified shipped business-logic Zig ≤ 22k lines including kernels,
-      while tests, fixtures, build/source-audit verification tooling, and all
-      target-language ECL source are excluded; kernels remain ≤ 5.5k. Budgeted
-      per business-logic component
-      so the ceiling binds where sprawl would appear — see
-      ARCHITECTURE.md's table. Type/capability boundaries take priority over a
-      historical ceiling: raise and explain the row rather than weaken the
-      representation. The
-      superseded ~5k figure was derived from the Rust
-      skeleton's 4.6k, a baseline that does not transfer: different host
-      (Zig costs lines for explicit allocators, error unions, and `zig
-      fmt`), different data structures (the skeleton's boxed lists,
-      uninterned symbols, and assoc-vector dicts are exactly what
-      ARCHITECTURE.md disqualifies — flat leaves, interning, and precise
-      atomic RC cost 3.8x on the value layer *by design*), and half the
-      feature set (no concurrency, kernels, scheduler, modules-on-cells,
-      or stdlib). The budget's real invariant is d.21's: coarse
-      primitives, a few dozen kernels, no sprawling VM, never machine
-      code. Lines are the proxy, not the point.
     - **The differential harness is a named v1 deliverable:** every
       kernel and idiom tested against the generic path for value
       equality, representation parity (d.16 makes brackets observable),

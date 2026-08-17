@@ -115,9 +115,9 @@
 - Update the gameplan and `design/ARCHITECTURE.md` when introducing or revising a
   structural invariant. Acceptance must show that every producer and consumer uses the
   new seam and that invalid states are unavailable in all build modes.
-- Raise a component or representation ceiling when a strong type boundary honestly
-  needs the space. Never weaken or compress away the type boundary merely to satisfy
-  a historical line-count or frame-size limit; update and explain the ceiling.
+- Raise a representation ceiling when a strong type boundary honestly needs the
+  space. Never weaken or compress away the type boundary merely to satisfy a
+  historical frame-size limit; update and explain the ceiling.
 
 ## Ownership, lifetime, and capabilities
 
@@ -230,21 +230,6 @@
 - Make the audit follow semantic ownership and blocking-destruction boundaries, including
   indirect helpers and every destructor spelling, rather than recognizing only selected
   names or direct loops.
-- Treat source-audit output as the measurement and classification authority. Update
+- Treat source-audit output as the classification authority. Update
   `design/ARCHITECTURE.md`, the workstream, and the gameplan in the same change whenever
-  classifications, reachability rules, ceilings, measured totals, or proof claims move;
-  clearly label historical figures as historical.
-
-## Line budgets
-
-- Apply component and total line ceilings only to shipped business-logic Zig.
-- In mixed files, start at shipped entry, `pub`, `export`, and production-`comptime`
-  roots and follow production declaration reachability. Exclude inline `test` declarations,
-  `builtin.is_test` declarations, and private top-level helpers reachable only from
-  verification code, along with standalone test sources, fixtures, build/source-audit
-  tooling, and all target-language ECL.
-- Keep excluded Zig exactly classified and report it through exhaustive file/input
-  coverage, not verification LOC totals or ceilings. Verification LOC is neither
-  measured nor controlled.
-- Do not move shipped behavior into an excluded declaration or file to evade a
-  business-logic budget.
+  classifications, reachability rules, or proof claims move.

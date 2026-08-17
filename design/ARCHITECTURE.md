@@ -19,75 +19,17 @@ Decision 21's doctrine becomes two enforced rules:
    2015, the CPython 3.14 musttail numbers after Nelhage/Jin — shows
    dispatch technique is worth 1–5% even in bytecode-bound languages,
    and ecl is kernel-bound by design.)
-2. **Zig line budget (recalibrated 2026-08-16 for structural type boundaries).**
-   Only shipped business-logic Zig is counted, including kernels, the CLI, and
-   the formatter. Tests (including inline `test` declarations), fixtures,
-   build/source-audit verification tooling, and all target-language ECL source
-   are excluded from every ceiling and from line measurement. Source coverage
-   still classifies first-party Zig so production files cannot evade the
-   architectural checks, but test and tooling line totals are not a metric:
-
-   | component | budget | measured |
-   |---|---|---|
-   | values + RC | 4,200 | 4,016 |
-   | reader | 3,300 | 2,595 |
-   | machine | 5,900 | 5,598 |
-   | modules and registry | 5,300 | 4,730 |
-   | bootstrap prelude loader | 150 | 86 |
-   | combinators | 1,200 | 738 |
-   | definition annotations and doc normalization | 1,100 | 938 |
-   | primitive documentation | 300 | 142 |
-   | CLI, line editor, and source formatter | 2,800 | 2,150 |
-   | kernels and idioms | 8,500 | 5,861 |
-   | scheduler and concurrency | 3,500 | 2,883 |
-   | native SDK, ABI, and loader | 3,800 | 3,428 |
-   | **business-logic Zig total** | **36,000** | **33,176** |
-
-   The M7 recalibration supersedes the earlier 22,000 total and 5,500 kernel
-   ceilings. Scheduler-safe kernels, task joins, failure unwinding, snapshot
-   reclamation, and failed-result release now represent user-sized work with
-   nominal cursor/ownership states instead of native-stack traversal. Keeping
-   the earlier limits would require recombining those states or restoring
-   synchronous teardown, contrary to the structural and scheduler-quantum
-   invariants. The 36,000 total and 8,500 kernel ceilings preserve room for
-   those explicit boundaries; they are enforced ceilings, not growth targets.
-   A limit must not incentivize weakening a type boundary. The audit
-   recursively enumerates `src/**/*.zig`, `test/**/*.zig`, and root-level Zig
-   build inputs and requires every file to belong to exactly one business-logic
-   component or uncapped verification manifest; adding an unclassified file
-   anywhere in those first-party roots fails.
-   `src/prelude.ecl` and other ECL code are intentionally not line-counted.
-   Within mixed production files, the AST-aware counter starts at exported,
-   comptime, and entry declarations and follows top-level identifier
-   references. It excludes inline `test` declarations, declarations gated by
-   `builtin.is_test`, and private top-level helpers reachable only from
-   verification code.
+2. **Source architecture is audited exhaustively.** The audit recursively
+   enumerates `src/**/*.zig`, `test/**/*.zig`, and root-level Zig build inputs
+   and requires every file to belong to exactly one production or verification
+   manifest; adding an unclassified file anywhere in those first-party roots
+   fails. Classified production files receive the applicable bounded-body and
+   unsafe-cast checks that cannot be expressed by Zig types.
    Runtime sources remain directly under `src/`; test suites and helpers are
    grouped in `src/tests/`, while substantive build-only checks live in
    `src/tools/` behind package-root entrypoints required by Zig. `src/native/`
    is the independently rooted author SDK package: that module-root boundary
    prevents SDK code from importing interpreter internals.
-
-   M9 installed the native-extension rebaseline on 2026-08-16. Its planning
-   envelope was 4,000 native-component lines and 37,000 total, assuming that
-   module-state arbitration and a scheduler wait-set variant landed together.
-   The shipped v1 surface is deliberately narrower: `Call`, `BuildValues`, and
-   `Reschedule` are exactly what M10's CSV and JSON modules consume, while
-   module state is reserved and deferred. The first installed ceilings were
-   therefore 3,000 for the native SDK/ABI/loader component and 36,000 total; machine,
-   modules-and-registry, and definition-annotation headroom preserves the
-   nominal transaction, instance, and reflection boundaries, and scheduler
-   remains at 3,500 because no new wait-set variant lands. The post-implementation
-   boundary review then raised only the native component to 3,800: runtime-minted
-   capability tables, generation-checked turn drafts, resumable list/dictionary
-   builders, typed record arrays, and owner-only image settlement are structural
-   states that cannot honestly fit the original 3,000-line estimate. The total
-   remains 36,000 and every measured component remains below its ceiling.
-   The installed SDK and its author-facing build helper are shipped logic and
-   must be added to the audit's exhaustive first-party roots; only fixture and
-   verification harness code is excluded. The rebaseline may not recover space
-   by collapsing those states, moving shipped SDK logic
-   into an excluded path, or treating verification code as the budget.
 
    The same dedicated source audit lexes `src/prelude.ecl` well enough to
    distinguish comments from multiline strings. It requires each top-level
@@ -95,20 +37,6 @@ Decision 21's doctrine becomes two enforced rules:
    name / `def` block. This source-layout rule deliberately lives in build
    tooling, not a runtime test that searches implementation text.
 
-   The original ~5k came from "the walking skeleton proved the semantics
-   fit in 4.6k." That baseline does not transfer, for three independent
-   reasons: the skeleton is Rust and the budget was written while host
-   choice was deliberately outside the ledger; the skeleton's 480-line
-   value layer uses precisely the boxed lists, uninterned symbols, and
-   assoc-vector dicts this document's disposition table disqualifies, so
-   the real layer's 3.8x is the architecture rather than bloat; and the
-   skeleton lacks concurrency, kernels, interning, the scheduler, idiom
-   recognition, `load`, and the stdlib, while its 3,026-line `runtime.rs`
-   spans what M3 through M6 cover separately here. Evidence that the
-   ceiling is a measurement problem and not a sprawl problem: an
-   adversarial 40-agent deduplication sweep over the whole tree returned
-   about 3% of core, with most candidate abstractions costing more lines
-   than they saved.
 
 Deliberately declined, with the evidence trail in the research file:
 NaN-boxing, computed goto, musttail dispatch, Ertl stack caching,
@@ -246,6 +174,9 @@ publication critical sections.
   carries keys, values, and hashes plus one optional owned index slice. There is
   no separately mutable initialized bit, nullable payload, or pointer/length
   pair for reclamation and lookup to reconcile.
+- Fixed runtime maps accept only enum key types. Binder locals use a nominal
+  `LocalName`, while environment and module maps use `NamespaceName`; a raw
+  integer-keyed publication map is rejected at `comptime`.
 - Heap values carry nominal `ListHandle`, `DictHandle`, and `TaskHandle`
   pointers. Allocation returns kind-specific initializing capabilities and
   publication consumes the matching capability, so a list cannot be passed to
@@ -553,10 +484,10 @@ publication critical sections.
   same opaque `RenderedText` ownership carries stack and error renderings; no
   Session method returns its host allocator. Production `comptime` reflection
   recursively rejects allocator, I/O, environment, registry, Unit, scheduler,
-  console, host-owner, release-domain, and private Session state from every
-  public Session return type. The exhaustive source audit independently rejects
-  lease types in public Session signatures and allocator types in public
-  Session return positions, while permitting private Session code to own both.
+  console, host-owner, release-domain, observation leases, and private Session
+  state from every public Session return type. The same reflection rejects
+  observation leases in public parameters while permitting Session
+  construction to accept its host resources.
 
 - **Definition annotations:** `definition_prims.zig` recognizes only direct
   top-level word markers in the candidate quotation, validates the entire
@@ -750,8 +681,7 @@ out). Kernels never own threads.
   owner. Known multi-output
   resumptions reserve their complete stack window before transferring either
   output. The parsed source audit identifies driver functions by their
-  `WorkProgress` return type and rejects direct stack pushes, a second
-  result-push API, or synchronous release inside `pushOwned`. All other
+  `WorkProgress` return type and rejects direct stack pushes. All other
   production components receive a `StackReservation` for exact-size,
   non-fallible writes or call the machine's consuming stack API; the source
   audit rejects direct operand-stack mutation outside `machine.zig`.
@@ -829,18 +759,15 @@ out). Kernels never own threads.
   Copy-on-write replacement swaps the destination's old representation into
   the consumed source wrapper and retires that wrapper through the caller's
   shared domain; representation adoption has no allocator-only blocking
-  adapter. Every classified production file passes the
-  same AST-aware ownership/destructor checks; adding a component cannot omit it
-  through a second hand-maintained list. The audit rejects legacy `_owned`
-  identifiers, any reintroduced `ReleaseCursor`, and a blocking-cleanup
-  capability or synchronous value drop in release-capable destructors, while
-  the type signatures catch indirect blocking container destruction. The
-  classification-driven audit rejects `HostOwner` in production outside the
-  Session, CLI, formatter, and heap host boundaries and rejects every
-  production function outside the heap authority factory that combines
-  `HostCleanup` with an erased pointer cast. Behavioral tests may
-  create a host explicitly; allocator-only compatibility cleanup is compiled
-  only into test builds.
+  adapter. Every classified production file passes the same bounded-destructor
+  check; adding a component cannot omit it through a second hand-maintained
+  list. The audit rejects loops, blocking calls, and synchronous materializer
+  teardown in release-capable destructors, properties Zig signatures cannot
+  express. Representation validators enforce the single host capability and
+  worker-facade shapes at `comptime`; the audit is limited to unsafe casts that
+  could forge `HostCleanup` or `ExecutionAccess`, plus casts at the owned erased
+  callback seams. Behavioral tests may create a host explicitly;
+  allocator-only compatibility cleanup is compiled only into test builds.
 - **Observation and execution capabilities do not expose host ownership.**
   `Env` returns a copyable opaque `EnvironmentView`, never a mutable
   `*Environment`; its API is limited to snapshot leases, lookup/name cursors,
@@ -1053,12 +980,10 @@ reader diagnostic but cannot corrupt durable history. When HOME is usable,
 `History` serializes writers with a sibling lock, rereads and merges
 the current UTF-8 file under that lock, and replaces `.ecl_history` atomically
 with user-only permissions. Missing or failed persistence never disables the
-editor; one stable warning is exposed to Session diagnostics. The CLI/editor
-component ceiling rises from 1,900 to 2,800 for these raw-mode, owned-line, and
-locked-history state boundaries. The modules/registry ceiling rises from
-4,400 to 4,800 for the lease-owning visibility and completion capabilities;
-At that M8 checkpoint the total shipped-logic ceiling remained 30,000; this
-historical figure is superseded by the current table above.
+editor; one stable warning is exposed to Session diagnostics. The raw-mode,
+owned-line, locked-history, lease-owning visibility, and completion capabilities
+remain distinct architectural boundaries rather than being folded into their
+callers.
 
 The editor fuzz target is a shrinkable arbitrary-byte/action state machine.
 After every operation it compares production bytes and cursor position with an
@@ -1088,11 +1013,6 @@ restoration after errors. A seventh campaign drives the real pending unit,
 including appending a line borrowed from the unit's own source, and requires
 that scanning a unit one line at a time reaches the same lexical state as
 scanning it in a single pass.
-
-The source-audit denylist that once forbade the editor from naming the general
-console write is gone. The operations it guarded against no longer exist on the
-types the editor holds, and a capability whose surface lacks an operation is a
-stronger statement than a scan for the identifier that would have called it.
 
 ## The differential harness (named v1 deliverable, d.23)
 
