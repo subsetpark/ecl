@@ -789,6 +789,12 @@ failure sweeps remain in the ordinary suite; exhaustive initialized-Session
 native loading/call coverage is added once to `src/tests/oom_test.zig` and
 `zig build test-oom`.
 
+All nine campaign artifacts select LLVM explicitly. On x86_64 Linux, Zig
+0.16's self-hosted backend accepts `-ffuzz` while producing an empty sanitizer-
+coverage PC table; backend selection is therefore part of the campaign proof,
+not an ambient host default. The bounded runner fails before input execution if
+the selected artifact does not publish nonempty coverage metadata.
+
 M9 added the native SDK, ABI, loader, fixtures, and runtime tests to the
 source audit's exhaustive manifests. The post-implementation boundary review
 required runtime-minted capability tables, resumable aggregate builders,

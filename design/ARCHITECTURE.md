@@ -1109,6 +1109,13 @@ therefore cannot report validation of a model or metadata parser as coverage
 for the real dynamic loader, generated adapter, scheduler continuation, and
 retirement path.
 
+Every coverage-guided test artifact explicitly selects LLVM. Zig 0.16's
+x86_64 self-hosted backend accepts `-ffuzz` but emits an empty sanitizer-
+coverage PC table, so relying on the host default would make backend choice an
+undeclared prerequisite for the campaign. The build graph instead requires a
+backend that supplies nonempty coverage metadata; Zig's runner rejects the
+artifact before executing inputs if that contract is not met.
+
 The native descriptor campaign passes arbitrary bounded metadata through the
 production validator using valid host-owned backing ranges. Comptime reflection
 varies every integer size field in the ABI records, while the campaign also

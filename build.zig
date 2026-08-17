@@ -284,6 +284,11 @@ pub fn build(b: *std.Build) void {
             .root_module = fuzz_mod,
             .filters = &.{fuzz_target.test_name},
         });
+        // Zig 0.16's x86_64 self-hosted backend accepts -ffuzz but emits an
+        // empty sanitizer-coverage PC table. Select the backend that can
+        // actually provide the coverage contract instead of letting a
+        // campaign silently degrade to an uninstrumented executable.
+        fuzz_tests.use_llvm = true;
         const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
         run_fuzz_tests.step.dependOn(&fixture_files.step);
         fuzz_step.dependOn(&run_fuzz_tests.step);
