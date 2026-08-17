@@ -13,10 +13,12 @@ const Value = value.Value;
 
 fn valueLaws(recipe: testgen.ValueRecipe) !void {
     const allocator = std.testing.allocator;
-    const a = try testgen.valueFromRecipe(allocator, recipe, 4, .allowed, 0x00);
-    defer heap.testing.releaseValue(allocator, a);
-    const b = try testgen.valueFromRecipe(allocator, recipe, 4, .allowed, 0xa7);
-    defer heap.testing.releaseValue(allocator, b);
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    const a = try testgen.valueFromRecipe(allocator, cleanup.domain(), recipe, 4, .allowed, 0x00);
+    defer cleanup.releaseValue(a);
+    const b = try testgen.valueFromRecipe(allocator, cleanup.domain(), recipe, 4, .allowed, 0xa7);
+    defer cleanup.releaseValue(b);
 
     try std.testing.expect(equal.match(a, a));
     try std.testing.expectEqual(equal.match(a, b), equal.match(b, a));
@@ -54,9 +56,9 @@ fn numericAndDictLaws(encoded: u64) !void {
     };
     const reversed = [_]dict.Pair{ pairs[2], pairs[1], pairs[0] };
     const first = try dict.fromPairs(allocator, cleanup.domain(), &pairs);
-    defer heap.testing.releaseValue(allocator, first);
+    defer cleanup.releaseValue(first);
     const second = try dict.fromPairs(allocator, cleanup.domain(), &reversed);
-    defer heap.testing.releaseValue(allocator, second);
+    defer cleanup.releaseValue(second);
     try std.testing.expect(equal.match(first, second));
     try std.testing.expectEqual(equal.hash(first), equal.hash(second));
 }

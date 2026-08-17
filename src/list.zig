@@ -303,29 +303,31 @@ fn growCapacity(minimum: usize) usize {
 }
 
 fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     const child = try fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
-    defer heap.testing.releaseValue(allocator, child);
+    defer cleanup.releaseValue(child);
     const parent = try fromValues(allocator, &.{ child, .{ .word = 7 } });
-    defer heap.testing.releaseValue(allocator, parent);
+    defer cleanup.releaseValue(parent);
     const generic = try fromValuesGeneric(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
-    defer heap.testing.releaseValue(allocator, generic);
+    defer cleanup.releaseValue(generic);
     const ints = try fromI64Slice(allocator, &.{ 1, 2 });
-    defer heap.testing.releaseValue(allocator, ints);
+    defer cleanup.releaseValue(ints);
     const floats = try fromF64Slice(allocator, &.{ 1.0, 2.0 });
-    defer heap.testing.releaseValue(allocator, floats);
+    defer cleanup.releaseValue(floats);
     const chars = try fromCodepoints(allocator, &.{ 'a', 0x100, 0x10000 });
-    defer heap.testing.releaseValue(allocator, chars);
+    defer cleanup.releaseValue(chars);
     const symbols = try fromSymbolIds(allocator, &.{ 1, 2 });
-    defer heap.testing.releaseValue(allocator, symbols);
+    defer cleanup.releaseValue(symbols);
 }
 
 fn appendFailureProbe(allocator: std.mem.Allocator) !void {
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
     const original = try fromValues(allocator, &.{ .{ .char = 'a' }, .{ .char = 'b' } });
-    defer heap.testing.releaseValue(allocator, original);
+    defer cleanup.releaseValue(original);
     const result = try append(allocator, cleanup.domain(), original, .{ .int = 3 });
-    if (result == .replacement) heap.testing.releaseValue(allocator, result.value());
+    if (result == .replacement) cleanup.releaseValue(result.value());
 }
 
 test "constructors and append exhaust allocation failures" {

@@ -23,7 +23,7 @@ const Execution = struct {
     failure: ?ecl.value.Value,
 
     fn deinit(self: *Execution) void {
-        if (self.failure) |failure| ecl.heap.testing.releaseValue(allocator, failure);
+        if (self.failure) |failure| self.runtime.release(failure);
         self.runtime.deinit();
     }
 };

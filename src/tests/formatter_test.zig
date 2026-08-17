@@ -19,7 +19,7 @@ test "documentation normalization folds physical prose lines" {
     };
     defer parsed.deinit();
     const normalized = try doc_text.normalize(allocator, parsed.values()[0]);
-    defer heap.testing.releaseValue(allocator, normalized);
+    defer host.domain().releaseValue(normalized);
     const rendered = try printer.toOwnedString(allocator, normalized);
     defer allocator.free(rendered);
     try std.testing.expectEqualStrings("\"a b\\n\\n- one more\"", rendered);

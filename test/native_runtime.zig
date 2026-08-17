@@ -186,16 +186,17 @@ test "native runtime: source precedence and path-root order are observable" {
 test "native runtime: malformed artifacts are authoritative" {
     const cases = [_]struct { defect: []const u8, message: []const u8 }{
         .{ .defect = "wrong-name", .message = "ModuleNameMismatch" },
-        .{ .defect = "abi-major", .message = "AbiMajorMismatch" },
-        .{ .defect = "capability-version", .message = "UnsupportedCapabilityVersion" },
+        .{ .defect = "abi-version", .message = "AbiVersionMismatch" },
+        .{ .defect = "descriptor-size", .message = "RecordSizeMismatch" },
         .{ .defect = "duplicate-word", .message = "DuplicateDefinition" },
         .{ .defect = "missing-doc", .message = "EmptyDocumentation" },
         .{ .defect = "entry-failure", .message = "native module entry failed" },
+        .{ .defect = "entry-size", .message = "invalid result record size" },
         .{ .defect = "invalid-effect", .message = "InvalidEffect" },
-        .{ .defect = "reserved-capability", .message = "UnsupportedCapabilityVersion" },
-        .{ .defect = "reserved-state", .message = "ReservedStateLayout" },
+        .{ .defect = "unsupported-capability", .message = "UnsupportedCapabilityId" },
+        .{ .defect = "invalid-continuation", .message = "InvalidContinuation" },
         .{ .defect = "unknown-entry-status", .message = "native module entry failed" },
-        .{ .defect = "stride-overread", .message = "RecordTooShort" },
+        .{ .defect = "stride-overread", .message = "RecordSizeMismatch" },
     };
     for (cases) |case| {
         const path = try std.fs.path.join(
@@ -228,8 +229,10 @@ test "native runtime: malformed artifacts are authoritative" {
 test "native runtime: module-written wire values cannot trap or partially commit" {
     const failures = [_]struct { defect: []const u8, message: []const u8 }{
         .{ .defect = "unknown-result", .message = "unknown result tag" },
+        .{ .defect = "result-size", .message = "invalid result record size" },
         .{ .defect = "unknown-failure-kind", .message = "valid failure payload" },
         .{ .defect = "unknown-scalar-kind", .message = "valid failure payload" },
+        .{ .defect = "scalar-size", .message = "valid failure payload" },
         .{ .defect = "oversized-scalar", .message = "valid failure payload" },
         .{ .defect = "invalid-utf8-scalar", .message = "valid failure payload" },
         .{ .defect = "undeclared-yield", .message = "reschedule capability unavailable" },
@@ -269,23 +272,5 @@ test "native runtime: diagnostics are opt-in and never change results" {
         .exit_code = 0,
         .stdout = "42\n",
         .stderr_contains = &.{"native module `sample` returned after an over-quantum slice"},
-    });
-}
-
-test "native runtime: additive ABI v1 record tails preserve older artifacts" {
-    const path = try std.fs.path.join(
-        allocator,
-        &.{ build_options.fixture_dir, "old-v1" },
-    );
-    defer allocator.free(path);
-    var result = try runPath("'sample use 'sample.word which", path);
-    defer result.deinit();
-    try result.expect(.{
-        .exit_code = 0,
-        .stdout_contains = &.{
-            "sample.word -> sample.word native public generation 1",
-            "requires call",
-        },
-        .stderr = "",
     });
 }

@@ -75,8 +75,17 @@ fn expectRoundTrip(original: testgen.Value) !void {
 
 fn dictFreeRoundTrip(recipe: testgen.ValueRecipe) !void {
     const allocator = std.testing.allocator;
-    const original = try testgen.valueFromRecipe(allocator, recipe, 4, .excluded, 0x00);
-    defer heap.testing.releaseValue(allocator, original);
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    const original = try testgen.valueFromRecipe(
+        allocator,
+        cleanup.domain(),
+        recipe,
+        4,
+        .excluded,
+        0x00,
+    );
+    defer cleanup.releaseValue(original);
     try expectRoundTrip(original);
 }
 
@@ -90,8 +99,10 @@ test "parse-print identity for arbitrary dict-free values shrinks structurally" 
 
 fn dictRoundTrip(recipe: testgen.ValueRecipe) !void {
     const allocator = std.testing.allocator;
-    const original = try testgen.dictFromRecipe(allocator, recipe, 3, 0x5d);
-    defer heap.testing.releaseValue(allocator, original);
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    const original = try testgen.dictFromRecipe(allocator, cleanup.domain(), recipe, 3, 0x5d);
+    defer cleanup.releaseValue(original);
     try expectRoundTrip(original);
 }
 

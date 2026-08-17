@@ -248,26 +248,17 @@ pub const ModuleInstance = opaque {
     }
 
     pub fn hasCapability(self: *const ModuleInstance, id: abi.CapabilityId) bool {
-        return self.capabilityVersion(id) != null;
-    }
-
-    fn capabilityVersion(self: *const ModuleInstance, id: abi.CapabilityId) ?u32 {
         for (self.requirements()) |requirement|
-            if (requirement.id == @intFromEnum(id)) return requirement.version;
-        return null;
+            if (requirement.id == @intFromEnum(id)) return true;
+        return false;
     }
 
     /// Derives the only host surface passed to this instance. Optional wire
     /// operations stay null unless descriptor validation granted the matching
-    /// capability and version.
+    /// capability.
     pub fn mintHostTable(self: *const ModuleInstance, full: abi.HostTable) abi.HostTable {
         var result = full;
-        const build_version = self.capabilityVersion(.build_values) orelse 0;
-        if (build_version == 0) {
-            result.build_list = null;
-            result.build_dict = null;
-        }
-        if (build_version < 2) {
+        if (!self.hasCapability(.build_values)) {
             result.build_list_append = null;
             result.build_list_finish = null;
             result.build_dict_append = null;
@@ -439,6 +430,13 @@ pub const Loader = opaque {
         var opened = loading.opened;
         var entry_result = abi.EntryResult{ .status = .fail };
         opened.entry(&entry_result);
+        if (entry_result.size != @sizeOf(abi.EntryResult)) {
+            opened.image.close();
+            return .{ .failure = .init(
+                "native module entry failed: invalid result record size",
+                .{},
+            ) };
+        }
         const accepted = switch (entry_result.status) {
             .descriptor => entry_result.descriptor != null,
             .fail => false,
@@ -527,8 +525,6 @@ pub fn capabilityName(id: u32) []const u8 {
         .call => "call",
         .build_values => "build-values",
         .reschedule => "reschedule",
-        .module_view => "module-view",
-        .module_update => "module-update",
         _ => "unknown",
     };
 }

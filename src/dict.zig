@@ -299,7 +299,7 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
         .{ .{ .int = 1 }, .{ .word = 10 } },
         .{ .{ .float = 2.5 }, .{ .word = 20 } },
     });
-    heap.testing.releaseValue(allocator, dictionary);
+    cleanup.releaseValue(dictionary);
 }
 
 fn putFailureProbe(allocator: std.mem.Allocator) !void {
@@ -307,12 +307,12 @@ fn putFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.deinit();
     const releases = cleanup.domain();
     var dictionary = try fromPairs(allocator, releases, &.{.{ .{ .int = 1 }, .{ .word = 10 } }});
-    defer heap.testing.releaseValue(allocator, dictionary);
+    defer cleanup.releaseValue(dictionary);
     _ = try getWithAllocator(allocator, dictionary, .{ .int = 1 });
     dictionary = (try put(allocator, releases, dictionary, .{ .int = 2 }, .{ .word = 20 })).value();
     dictionary = (try del(allocator, releases, dictionary, .{ .int = 1 })).value();
     const right = try fromPairs(allocator, releases, &.{.{ .{ .int = 2 }, .{ .word = 30 } }});
-    defer heap.testing.releaseValue(allocator, right);
+    defer cleanup.releaseValue(right);
     dictionary = (try merge(allocator, releases, dictionary, right)).value();
 }
 

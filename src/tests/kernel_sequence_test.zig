@@ -2,7 +2,6 @@
 const std = @import("std");
 const helper = @import("kernel_test_support.zig");
 const session = @import("../session.zig");
-const heap = @import("../heap.zig");
 
 fn expectRoundTripDisplay(source: []const u8, expected: []const u8) !void {
     const allocator = std.testing.allocator;
@@ -12,7 +11,7 @@ fn expectRoundTripDisplay(source: []const u8, expected: []const u8) !void {
         .ok => {},
         .incomplete => return error.TestUnexpectedResult,
         .err => |failure| {
-            heap.testing.releaseValue(allocator, failure);
+            original.release(failure);
             return error.TestUnexpectedResult;
         },
     }
@@ -26,7 +25,7 @@ fn expectRoundTripDisplay(source: []const u8, expected: []const u8) !void {
         .ok => {},
         .incomplete => return error.TestUnexpectedResult,
         .err => |failure| {
-            heap.testing.releaseValue(allocator, failure);
+            reread.release(failure);
             return error.TestUnexpectedResult;
         },
     }

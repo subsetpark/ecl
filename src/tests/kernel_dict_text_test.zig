@@ -154,7 +154,7 @@ test "dict-text: large updates yield through the public runtime" {
     defer allocator.free(integers);
     for (integers, 0..) |*integer, index| integer.* = @intCast(index);
     const sequence = try list.fromI64Slice(allocator, integers);
-    defer heap.testing.releaseValue(allocator, sequence);
+    defer cleanup.releaseValue(sequence);
     try runtime.pushBorrowed(sequence);
     try std.testing.expect((try runtime.runUnit("<test>", "69999 1 put pop")) == .ok);
     try std.testing.expect(runtime.lastPolls() >= 1);
@@ -166,7 +166,7 @@ test "dict-text: large updates yield through the public runtime" {
         .{ .int = @intCast(index) },
     };
     const dictionary = try dict.fromUniquePairs(allocator, cleanup.domain(), pairs);
-    defer heap.testing.releaseValue(allocator, dictionary);
+    defer cleanup.releaseValue(dictionary);
 
     try runtime.pushBorrowed(dictionary);
     try std.testing.expect((try runtime.runUnit("<test>", "70000 1 put pop")) == .ok);

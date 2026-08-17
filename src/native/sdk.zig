@@ -263,7 +263,7 @@ pub fn word(
                         &reschedule_state,
                         &call_state.invocation,
                     ) catch {
-                        output.* = .{ .tag = .fail, .reserved = 1 };
+                        output.* = .{ .tag = .fail, .adapter_status = 1 };
                         return;
                     };
                     break :schedule NativeRescheduleType.adapterPointer(&reschedule_state);
@@ -278,7 +278,7 @@ pub fn word(
                 callback(call);
             const outcome = result catch |err| switch (err) {
                 error.OutOfMemory => {
-                    output.* = .{ .tag = .fail, .reserved = 1 };
+                    output.* = .{ .tag = .fail, .adapter_status = 1 };
                     return;
                 },
                 error.InvalidValue => {
@@ -298,11 +298,11 @@ fn writeAdapterFailure(
     err: error{ OutOfMemory, InvalidValue },
 ) void {
     switch (err) {
-        error.OutOfMemory => output.* = .{ .tag = .fail, .reserved = 1 },
+        error.OutOfMemory => output.* = .{ .tag = .fail, .adapter_status = 1 },
         error.InvalidValue => {
             const message = "native SDK capability argument was rejected";
             _ = host.fail(context, .domain, message.ptr, message.len);
-            output.* = .{ .tag = .fail, .reserved = 0 };
+            output.* = .{ .tag = .fail, .adapter_status = 0 };
         },
     }
 }
@@ -345,13 +345,12 @@ pub fn module(comptime spec: anytype) type {
         };
         pub const requirements = requirements: {
             var result: [requirement_count]abi.CapabilityRequirement = undefined;
-            result[0] = .{ .id = @intFromEnum(abi.CapabilityId.call), .version = 1 };
+            result[0] = .{ .id = @intFromEnum(abi.CapabilityId.call) };
             if (uses_build_values)
-                result[1] = .{ .id = @intFromEnum(abi.CapabilityId.build_values), .version = 2 };
+                result[1] = .{ .id = @intFromEnum(abi.CapabilityId.build_values) };
             if (uses_reschedule)
                 result[1 + @as(usize, @intFromBool(uses_build_values))] = .{
                     .id = @intFromEnum(abi.CapabilityId.reschedule),
-                    .version = 1,
                 };
             break :requirements result;
         };
@@ -382,7 +381,7 @@ pub fn module(comptime spec: anytype) type {
                 Word.invoke(host, context, output);
                 return;
             };
-            output.* = .{ .tag = .fail, .reserved = 2 };
+            output.* = .{ .tag = .fail, .adapter_status = 2 };
         }
 
         pub export fn ecl_module_abi_v1(output: *abi.EntryResult) callconv(.c) void {

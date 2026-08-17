@@ -132,27 +132,30 @@ const RecipeCursor = struct {
 
 pub fn valueFromRecipe(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     recipe: ValueRecipe,
     depth: usize,
     dicts: Dicts,
     salt: u8,
 ) error{OutOfMemory}!Value {
     var cursor = RecipeCursor{ .bytes = recipe.bytes, .salt = salt };
-    return materializeValue(allocator, &cursor, depth, dicts);
+    return materializeValue(allocator, releases, &cursor, depth, dicts);
 }
 
 pub fn dictFromRecipe(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     recipe: ValueRecipe,
     depth: usize,
     salt: u8,
 ) error{OutOfMemory}!Value {
     var cursor = RecipeCursor{ .bytes = recipe.bytes, .salt = salt };
-    return materializeDict(allocator, &cursor, depth);
+    return materializeDict(allocator, releases, &cursor, depth);
 }
 
 fn materializeValue(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     cursor: *RecipeCursor,
     depth: usize,
     dicts: Dicts,
@@ -167,14 +170,15 @@ fn materializeValue(
         2 => .{ .char = codepoint(cursor.next()) },
         3 => .{ .symbol = try internedId(cursor.next()) },
         4 => .{ .word = try internedId(cursor.next()) },
-        5 => materializeList(allocator, cursor, depth - 1, dicts),
-        6 => materializeDict(allocator, cursor, depth - 1),
+        5 => materializeList(allocator, releases, cursor, depth - 1, dicts),
+        6 => materializeDict(allocator, releases, cursor, depth - 1),
         else => unreachable,
     };
 }
 
 fn materializeList(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     cursor: *RecipeCursor,
     depth: usize,
     dicts: Dicts,
@@ -183,9 +187,9 @@ fn materializeList(
     const items = try allocator.alloc(Value, count);
     defer allocator.free(items);
     var initialized: usize = 0;
-    defer for (items[0..initialized]) |item| heap.testing.releaseValue(allocator, item);
+    defer for (items[0..initialized]) |item| releases.releaseValue(item);
     for (items) |*item| {
-        item.* = try materializeValue(allocator, cursor, depth, dicts);
+        item.* = try materializeValue(allocator, releases, cursor, depth, dicts);
         initialized += 1;
     }
     return list.fromValues(allocator, items);
@@ -193,26 +197,25 @@ fn materializeList(
 
 fn materializeDict(
     allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
     cursor: *RecipeCursor,
     depth: usize,
 ) error{OutOfMemory}!Value {
-    var cleanup = heap.testing.Cleanup.init(allocator);
-    defer cleanup.deinit();
     const count = cursor.next() % 4;
     const pairs = try allocator.alloc(dict.Pair, count);
     defer allocator.free(pairs);
     var initialized: usize = 0;
     defer for (pairs[0..initialized]) |pair| {
-        heap.testing.releaseValue(allocator, pair[0]);
-        heap.testing.releaseValue(allocator, pair[1]);
+        releases.releaseValue(pair[0]);
+        releases.releaseValue(pair[1]);
     };
     const base = signedInteger(cursor);
     for (pairs, 0..) |*pair, index| {
         pair[0] = .{ .int = base + @as(i64, @intCast(index)) };
-        pair[1] = try materializeValue(allocator, cursor, depth, .allowed);
+        pair[1] = try materializeValue(allocator, releases, cursor, depth, .allowed);
         initialized += 1;
     }
-    return dict.fromUniquePairs(allocator, cleanup.domain(), pairs);
+    return dict.fromUniquePairs(allocator, releases, pairs);
 }
 
 pub fn codepoint(encoded: u8) u32 {

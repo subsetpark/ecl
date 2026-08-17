@@ -229,6 +229,8 @@ test "reserved namespace names reject every binding surface but remain readable"
 
 test "long annotation traversal and reflection observe cancellation" {
     const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
     const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
@@ -255,7 +257,7 @@ test "long annotation traversal and reflection observe cancellation" {
     defer allocator.free(doc_codepoints);
     @memset(doc_codepoints, 'd');
     const cancellable_doc = try list.fromCodepoints(allocator, doc_codepoints);
-    defer heap.testing.releaseValue(allocator, cancellable_doc);
+    defer cleanup.releaseValue(cancellable_doc);
     const doc_annotation = try list.fromValuesGeneric(allocator, &.{
         .{ .word = try intern.intern(":") },
         cancellable_doc,
@@ -272,12 +274,12 @@ test "long annotation traversal and reflection observe cancellation" {
     var reflection_runtime = try session.Session.initWithOutput(allocator, &.{}, &output.writer);
     defer reflection_runtime.deinit();
     const long_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    defer heap.testing.releaseValue(allocator, long_body);
+    defer cleanup.releaseValue(long_body);
     const codepoints = try allocator.alloc(u32, 70_000);
     defer allocator.free(codepoints);
     @memset(codepoints, 'd');
     const long_doc = try list.fromCodepoints(allocator, codepoints);
-    defer heap.testing.releaseValue(allocator, long_doc);
+    defer cleanup.releaseValue(long_doc);
     const long_id = try intern.intern("long-doc");
     try reflection_runtime.define(
         try intern.namespaceName(long_id),

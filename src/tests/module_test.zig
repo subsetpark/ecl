@@ -250,7 +250,7 @@ test "module: use shadow notices stay within the cancellation bound" {
     try expectOk(&runtime, module_source);
     runtime.requestCancellation();
     const failure = (try runtime.runUnit("shadow-poll.ecl", "'wide use")).err;
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     const rendered = try printer.toOwnedString(allocator, failure);
     defer allocator.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "unit cancelled") != null);
@@ -427,7 +427,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     try words_runtime.define(second, .{ .value = .{ .int = 2 } });
     words_runtime.requestCancellation();
     const words_failure = (try words_runtime.runUnit("reflection-poll.ecl", "words")).err;
-    defer heap.testing.releaseValue(allocator, words_failure);
+    defer words_runtime.release(words_failure);
     const words_rendered = try printer.toOwnedString(allocator, words_failure);
     defer allocator.free(words_rendered);
     try std.testing.expect(std.mem.indexOf(u8, words_rendered, "unit cancelled") != null);
@@ -441,7 +441,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     try which_runtime.pushOwned(.{ .symbol = intern.namespaceId(first) });
     which_runtime.requestCancellation();
     const which_failure = (try which_runtime.runUnit("reflection-poll.ecl", "which")).err;
-    defer heap.testing.releaseValue(allocator, which_failure);
+    defer which_runtime.release(which_failure);
     const which_rendered = try printer.toOwnedString(allocator, which_failure);
     defer allocator.free(which_rendered);
     try std.testing.expect(std.mem.indexOf(u8, which_rendered, "unit cancelled") != null);
@@ -467,7 +467,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     try qualified_runtime.pushOwned(.{ .symbol = qualified });
     qualified_runtime.requestCancellation();
     const qualified_failure = (try qualified_runtime.runUnit("reflection-poll.ecl", "which")).err;
-    defer heap.testing.releaseValue(allocator, qualified_failure);
+    defer qualified_runtime.release(qualified_failure);
     const qualified_rendered = try printer.toOwnedString(allocator, qualified_failure);
     defer allocator.free(qualified_rendered);
     try std.testing.expect(std.mem.indexOf(u8, qualified_rendered, "unit cancelled") != null);
@@ -829,9 +829,9 @@ test "env: a replaced interior remains valid only through its binding lease" {
     defer env.testing.deinitScope(&scope, releases);
     const separator = try intern.intern("--");
     const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .word = separator }});
-    defer heap.testing.releaseValue(std.testing.allocator, body);
+    defer releases.releaseValue(body);
     const document = try list.fromCodepoints(std.testing.allocator, &.{ 'd', 'o', 'c' });
-    defer heap.testing.releaseValue(std.testing.allocator, document);
+    defer releases.releaseValue(document);
     const effect = (env.ValidatedEffect.parse(body.list, separator)).?;
     const name = try intern.trustedNamespace("leased-metadata");
     _ = try scope.publishTop(name, .{ .word = .{
@@ -914,11 +914,12 @@ test "registry: concurrent commits are linearized without lost names" {
 
 test "registry: old generation leases survive reload and reclaim after release" {
     var host = heap.HostOwner.init(std.testing.allocator);
+    const releases = host.domain();
     defer host.cleanup().drain();
     var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
     const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 7 }});
-    defer heap.testing.releaseValue(std.testing.allocator, body);
+    defer releases.releaseValue(body);
     const module_name = try intern.trustedNamespace("leased-generation");
     const value_name = try intern.trustedNamespace("leased-value");
     var first = try registry.createCandidate(module_name);
@@ -1135,7 +1136,7 @@ fn environmentAllocationProbe(allocator: std.mem.Allocator) !void {
     var scope = environment.sessionRoot(allocator);
     defer env.testing.deinitScope(&scope, releases);
     const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    defer heap.testing.releaseValue(allocator, body);
+    defer releases.releaseValue(body);
     const first = try intern.trustedNamespace("allocation-first");
     const second = try intern.trustedNamespace("allocation-second");
     const after_uses = try intern.trustedNamespace("allocation-after-uses");
@@ -1155,6 +1156,7 @@ fn environmentAllocationProbe(allocator: std.mem.Allocator) !void {
 
 fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     var host = heap.HostOwner.init(allocator);
+    const releases = host.domain();
     defer host.cleanup().drain();
     var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
@@ -1162,11 +1164,11 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .{ .word = try intern.intern("--") },
         .{ .word = try intern.intern("n") },
     });
-    defer heap.testing.releaseValue(allocator, effect_value);
+    defer releases.releaseValue(effect_value);
     const separator = try intern.intern("--");
     const effect = (env.ValidatedEffect.parse(effect_value.list, separator)).?;
     const document_value = try list.fromCodepoints(allocator, &.{ 'N', 'a', 't', 'i', 'v', 'e', '.' });
-    defer heap.testing.releaseValue(allocator, document_value);
+    defer releases.releaseValue(document_value);
     const document = env.documentation(document_value.list).?;
     const first_name = try intern.trustedNamespace("allocation-module");
     const alias_name = try intern.trustedNamespace("allocation-alias");

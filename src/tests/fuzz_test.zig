@@ -81,8 +81,7 @@ fn isSizeField(comptime name: []const u8) bool {
 }
 
 /// Keep malformed-record coverage closed over the ABI record definitions:
-/// every present and future integer size field is discovered from type info,
-/// including nested records such as Descriptor.state_layout.
+/// every present and future integer size field is discovered from type info.
 fn varyWireSizes(smith: *std.testing.Smith, record: anytype) void {
     const Pointer = @TypeOf(record);
     const T = @typeInfo(Pointer).pointer.child;
@@ -126,14 +125,13 @@ fn fuzzNativeDescriptor(_: void, smith: *std.testing.Smith) !void {
     }};
     var requirements = [_]native_abi.CapabilityRequirement{.{
         .id = smith.value(u4),
-        .version = smith.value(u3),
     }};
     varyWireSizes(smith, &definitions[0]);
     varyWireSizes(smith, &inputs[0]);
     varyWireSizes(smith, &outputs[0]);
     varyWireSizes(smith, &requirements[0]);
     var raw = native_abi.Descriptor{
-        .abi_major = if (smith.value(bool)) native_abi.abi_major else smith.value(u3),
+        .abi_version = if (smith.value(bool)) native_abi.abi_version else smith.value(u3),
         .module_name_ptr = module_name.ptr,
         .module_name_len = module_name.len,
         .module_doc_ptr = module_doc.ptr,

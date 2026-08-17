@@ -1,14 +1,12 @@
-//! Stable, C-shaped wire contract shared by ecl and the `ecl-native` SDK.
+//! Exact, C-shaped wire contract shared by ecl and the `ecl-native` SDK.
 //!
-//! ABI v1 grows only by additive record tails and capability-version bumps.
-//! Readers inspect at most `min(record.size, @sizeOf(LocalRecord))`; a change
-//! that alters an existing field's representation or meaning requires ABI v2.
+//! This pre-release contract does not negotiate record tails or capability
+//! versions. Every sized record and array stride must match this definition.
 
 const builtin = @import("builtin");
 
 pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v1";
-pub const abi_major: u32 = 1;
-pub const abi_minor: u32 = 3;
+pub const abi_version: u32 = 1;
 
 pub const max_error_message_bytes: u32 = 4096;
 pub const max_guest_scalar_bytes: u32 = 4096;
@@ -20,11 +18,6 @@ pub const CapabilityId = enum(u32) {
     call = 1,
     build_values = 2,
     reschedule = 3,
-
-    // Reserved for a later additive ABI-v1 capability version. The runtime
-    // recognizes these ids but advertises no supported version in M9.
-    module_view = 4,
-    module_update = 5,
     _,
 };
 
@@ -77,20 +70,10 @@ pub const Candidate = u64;
 pub const CapabilityRequirement = extern struct {
     size: u32 = @sizeOf(CapabilityRequirement),
     id: u32,
-    version: u32,
-    reserved: u32 = 0,
-};
-
-pub const StateLayout = extern struct {
-    record_size: u32 = @sizeOf(StateLayout),
-    alignment: u32 = 0,
-    size: u64 = 0,
-    reserved: u64 = 0,
 };
 
 pub const EffectSlot = extern struct {
     size: u32 = @sizeOf(EffectSlot),
-    reserved: u32 = 0,
     name_ptr: [*]const u8,
     name_len: u64,
 };
@@ -134,7 +117,7 @@ pub const Scalar = extern struct {
 pub const InvokeResult = extern struct {
     size: u32 = @sizeOf(InvokeResult),
     tag: CallResult,
-    reserved: u64 = 0,
+    adapter_status: u64 = 0,
 };
 
 pub const InputFn = *const fn (
@@ -150,19 +133,6 @@ pub const ForwardFn = *const fn (
 pub const ScalarFn = *const fn (
     call_context: *anyopaque,
     scalar: *const Scalar,
-    output: *Candidate,
-) callconv(.c) HostStatus;
-pub const BuildListFn = *const fn (
-    call_context: *anyopaque,
-    items: [*]const Candidate,
-    item_count: u32,
-    output: *Candidate,
-) callconv(.c) HostStatus;
-pub const BuildDictFn = *const fn (
-    call_context: *anyopaque,
-    keys: [*]const Candidate,
-    values: [*]const Candidate,
-    entry_count: u32,
     output: *Candidate,
 ) callconv(.c) HostStatus;
 pub const BuildListAppendFn = *const fn (
@@ -228,12 +198,9 @@ pub const RequestYieldFn = *const fn (call_context: *anyopaque) callconv(.c) Hos
 
 pub const HostTable = extern struct {
     size: u32 = @sizeOf(HostTable),
-    abi_minor: u32 = abi_minor,
     input: InputFn,
     forward: ForwardFn,
     scalar: ScalarFn,
-    build_list: ?BuildListFn,
-    build_dict: ?BuildDictFn,
     complete: CompleteFn,
     fail: FailFn,
     continuation_state: ?ContinuationStateFn,
@@ -256,9 +223,7 @@ pub const Invoke = *const fn (
 
 pub const Descriptor = extern struct {
     size: u32 = @sizeOf(Descriptor),
-    abi_major: u32 = abi_major,
-    abi_minor: u32 = abi_minor,
-    flags: u32 = 0,
+    abi_version: u32 = abi_version,
     module_name_ptr: [*]const u8,
     module_name_len: u64,
     module_doc_ptr: [*]const u8,
@@ -270,11 +235,7 @@ pub const Descriptor = extern struct {
     capability_record_size: u32 = @sizeOf(CapabilityRequirement),
     capabilities_ptr: [*]const CapabilityRequirement,
     callback_count: u32,
-    reserved: u32 = 0,
     invoke: ?Invoke,
-    state_layout: StateLayout = .{},
-    required_host_table_size: u32 = @sizeOf(HostTable),
-    reserved_tail: u32 = 0,
 };
 
 pub const EntryResult = extern struct {
@@ -338,15 +299,14 @@ comptime {
     @setEvalBranchQuota(4000);
     if (@sizeOf(usize) != 8) @compileError("native ABI v1 supports 64-bit targets only");
 
-    assertRecord(CapabilityRequirement, 16, 4);
-    assertRecord(StateLayout, 24, 8);
+    assertRecord(CapabilityRequirement, 8, 4);
     assertRecord(EffectSlot, 24, 8);
     assertRecord(Definition, 96, 8);
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 136, 8);
-    assertRecord(Descriptor, 128, 8);
+    assertRecord(HostTable, 120, 8);
+    assertRecord(Descriptor, 88, 8);
     assertRecord(EntryResult, 32, 8);
 
     if (@offsetOf(Definition, "callback_index") != 4 or
@@ -354,11 +314,10 @@ comptime {
         @offsetOf(Definition, "inputs_ptr") != 48 or
         @offsetOf(Definition, "outputs_ptr") != 64)
         @compileError("native ABI Definition offsets changed");
-    if (@offsetOf(Descriptor, "module_name_ptr") != 16 or
-        @offsetOf(Descriptor, "definitions_ptr") != 56 or
-        @offsetOf(Descriptor, "capabilities_ptr") != 72 or
-        @offsetOf(Descriptor, "invoke") != 88 or
-        @offsetOf(Descriptor, "state_layout") != 96)
+    if (@offsetOf(Descriptor, "module_name_ptr") != 8 or
+        @offsetOf(Descriptor, "definitions_ptr") != 48 or
+        @offsetOf(Descriptor, "capabilities_ptr") != 64 or
+        @offsetOf(Descriptor, "invoke") != 80)
         @compileError("native ABI Descriptor offsets changed");
 
     // The SDK does not import machine.zig. Keeping this list closed and

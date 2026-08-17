@@ -224,27 +224,27 @@ publication critical sections.
   canonical name must equal the requested name. A future package manager owns
   dependency solving and target selection and makes its result available by
   ordering package roots in `ECL_PATH`; the runtime does neither job.
-- **Trusted, Zig-only authoring over a stable wire ABI.** The supported v1
+- **Trusted, Zig-only authoring over an exact wire ABI.** The supported v1
   author surface is a separately distributed `ecl-native` Zig SDK built with
   the pinned Zig toolchain. It emits the descriptor and a target-native shared
   object without linking or rebuilding `ecl`. The adapter alone speaks a
   C-shaped ABI: fixed-width tags and integers, explicit pointer/length pairs,
-  sized records, callback tables, and capability id/version requirements. No
+  sized records, callback tables, and capability ids. No
   Zig slice, error union, enum layout, tagged union, allocator, or author type
-  crosses the library boundary. ABI major 1 permits additive record tails and
-  capability versions, so an older v1 artifact loads on a newer v1 runtime
-  whenever all of its requirements are supported; a breaking representation or
-  semantic change requires ABI v2. This binary promise does not constitute a
+  crosses the library boundary. This pre-release ABI accepts exactly one wire
+  version, exact record sizes and strides, and the current capability set;
+  changing any of those changes the contract rather than invoking a
+  compatibility path. This binary promise does not constitute a
   supported C author API in v1. Linux and macOS are the v1 loader targets; the
   `.eclmod` suffix is portable naming, not a portable binary.
 - **Loading is one consuming typestate.** A Session-owned native instance moves
   through `opened -> described -> validated -> initialized -> published`.
-  Each variant owns exactly the library handle, copied metadata, state storage,
-  callback table, and cleanup operation valid in that phase, and a failed
-  transition consumes and cleans its input. Descriptor lengths, record sizes,
-  ABI and capability versions, canonical names, UTF-8 documentation, parsed
-  effects, definition uniqueness, callback indices, state size/alignment, and
-  all counts are validated before module-state initialization or registry
+  Each variant owns exactly the library handle, copied metadata, callback
+  table, and cleanup operation valid in that phase, and a failed
+  transition consumes and cleans its input. Descriptor lengths, exact record
+  sizes and strides, the ABI version, canonical names, UTF-8 documentation,
+  parsed effects, definition uniqueness, callback indices, continuation
+  layout, and all counts are validated before instance initialization or registry
   publication can run. One module-to-host text ingress owns pointer/null,
   representability, ceiling, and UTF-8 validation for descriptor text, scalar
   symbols/words, callback failures, and entry diagnostics. Character scalars
@@ -259,7 +259,7 @@ publication critical sections.
   boundary.
 - **Library lifetime is Session lifetime.** V1 performs no native hot reload or
   early unload. A published instance pins its code image while any binding,
-  call transaction, state access, or continuation can reach a callback. Worker
+  call transaction, or continuation can reach a callback. Worker
   Units inherit only an opaque `Loader`; that capability can begin validation
   but has no descriptor-settlement, image-close, or owner-destruction method.
   Session consumes the distinct owner through `open -> closing -> settled`:
@@ -278,9 +278,9 @@ publication critical sections.
   duplicated declaration to drift. Remaining callback parameters must be
   exact SDK-owned capability types. `@typeInfo` validation rejects generic or
   variadic callbacks, a wrong result, optional, unknown, duplicate, or
-  conflicting capabilities, a capability/state mismatch, and duplicate word
+  conflicting capabilities, a capability/continuation mismatch, and duplicate word
   names. The SDK generates the canonical capability manifest and wire adapter
-  from that one signature. Unsupported capability versions fail loading, and
+  from that one signature. Unknown capability ids fail loading, and
   `which`/`see` expose the validated native origin and requirements.
 - **Calls are transactional leaf operations.** `ValueView` permits immutable,
   O(1) kind, scalar, and aggregate-length observation; it never reveals the
@@ -329,10 +329,9 @@ publication critical sections.
   code itself is not preemptible, and the runtime cannot infer instruction
   reductions, so unrelated long computation or blocking remains a trusted-code
   violation detected only by per-invocation duration/overrun diagnostics.
-- **Module state is reserved, not half-present.** V1 descriptors must declare a
-  zero state layout, and `module_view` and `module_update` have reserved ids but
-  no supported version. Validation rejects either form before publication.
-  A future additive capability must introduce one state instance per Session,
+- **Module state is absent, not half-present.** The descriptor and capability
+  enum expose no module-state fields or ids. A future module-state design must
+  introduce one state instance per Session,
   distinct immutable-view and exclusive-update authority, a scheduler-integrated
   arbiter, bounded initialization/destruction, and continuation validation; M9
   deliberately ships none of those factories or aliases. Native external side
@@ -342,7 +341,7 @@ publication critical sections.
   definitions, retain ECL values in module state, create opaque ECL resource
   values, wait for an external wake, or submit blocking jobs. Resources,
   `Offload`, external wake, package assets, and quotation evaluation are future
-  named capabilities, not new callback classes. The first additive scheduling
+  named capabilities, not new callback classes. The first future scheduling
   capability is expected to be `Offload`; until then inline callbacks must
   return promptly. The v1 HTTP builtin is a documented first-party internal
   blocking exception and does not broaden the extension SDK.
@@ -773,8 +772,8 @@ out). Kernels never own threads.
   call, in any optimization mode. Scheduler-owned
   destructors receive only the domain. Production has no synchronous
   `releaseValue`/`decRef` adapter that can pair an arbitrary value with an
-  unrelated host; owned values retire through their construction domain.
-  Allocator-only compatibility cleanup exists solely in test builds. The
+  unrelated host; owned values retire through their construction domain. Tests
+  likewise hold an explicit owner or `Cleanup` capability. The
   synchronous reader likewise requires caller-supplied host authority and
   returns `HostParsed` bound to that exact authority.
   `HostParsed.deinit` derives and drains its issuing owner, while cursor and
@@ -787,8 +786,8 @@ out). Kernels never own threads.
   ownership policy rather than a source scan for destructor names. The audit is
   limited to boundaries the compiler cannot represent directly, including
   unsafe casts that could forge `HostCleanup` or `ExecutionAccess` and casts at
-  the owned erased callback seams. Behavioral tests may create a host explicitly;
-  allocator-only compatibility cleanup is compiled only into test builds.
+  the owned erased callback seams. Behavioral tests create a host or explicit
+  test cleanup authority.
 - **Observation and execution capabilities do not expose host ownership.**
   `Env` returns a copyable opaque `EnvironmentView`, never a mutable
   `*Environment`; its API is limited to snapshot leases, lookup/name cursors,
@@ -1094,13 +1093,13 @@ as ordinary tests. Bounded campaigns invoke `fuzz-reader`, `fuzz-formatter`,
 `fuzz-native-descriptor`, and `fuzz-native-call` separately, because Zig's
 coverage-guided runner selects one fuzz entry point per invocation. CI
 therefore cannot report validation of a model or metadata parser as coverage
-for the real dynamic loader, generated adapter, scheduler continuation, state
-arbiter, and retirement path.
+for the real dynamic loader, generated adapter, scheduler continuation, and
+retirement path.
 
 The native descriptor campaign passes arbitrary bounded metadata through the
 production validator using valid host-owned backing ranges. Comptime reflection
 varies every integer size field in the ABI records, while the campaign also
-varies selected counts, callback indices, capability ids/versions, and module
+varies selected counts, callback indices, capability ids, and module
 name length; dedicated malformed shared libraries cover entry results, strided
 records, and module-written call/scalar/error tags. The native-call fuzz target
 selects bounded sequences of public SDK-fixture calls in the cooperative

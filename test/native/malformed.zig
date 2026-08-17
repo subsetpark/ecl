@@ -20,25 +20,32 @@ fn invoke(
     _: u32,
     output: *abi.InvokeResult,
 ) callconv(.c) void {
+    if (is("result-size")) {
+        output.* = .{ .size = 0, .tag = .fail };
+        return;
+    }
     if (is("unknown-result")) {
-        output.* = .{ .tag = @enumFromInt(99), .reserved = 0 };
+        output.* = .{ .tag = @enumFromInt(99), .adapter_status = 0 };
         return;
     }
     if (is("unknown-failure-kind")) {
         _ = host.fail(context, @enumFromInt(99), "bad kind".ptr, "bad kind".len);
-        output.* = .{ .tag = .fail, .reserved = 0 };
+        output.* = .{ .tag = .fail, .adapter_status = 0 };
         return;
     }
-    if (is("unknown-scalar-kind") or is("oversized-scalar") or is("invalid-utf8-scalar")) {
+    if (is("unknown-scalar-kind") or is("oversized-scalar") or
+        is("invalid-utf8-scalar") or is("scalar-size"))
+    {
         const invalid_utf8 = [_]u8{0xff};
         var candidate: abi.Candidate = 0;
         var scalar = abi.Scalar{
+            .size = if (is("scalar-size")) 0 else @sizeOf(abi.Scalar),
             .kind = if (is("unknown-scalar-kind")) @enumFromInt(99) else .symbol,
             .bytes_ptr = if (is("invalid-utf8-scalar")) &invalid_utf8 else "x".ptr,
             .bytes_len = if (is("oversized-scalar")) abi.max_guest_scalar_bytes + 1 else 1,
         };
         _ = host.scalar(context, &scalar, &candidate);
-        output.* = .{ .tag = .fail, .reserved = 0 };
+        output.* = .{ .tag = .fail, .adapter_status = 0 };
         return;
     }
     if (is("partial-complete")) {
@@ -49,13 +56,13 @@ fn invoke(
         _ = host.complete(context, &invalid, invalid.len);
         const valid = [_]abi.Candidate{ candidate, candidate };
         _ = host.complete(context, &valid, valid.len);
-        output.* = .{ .tag = .complete, .reserved = 0 };
+        output.* = .{ .tag = .complete, .adapter_status = 0 };
         return;
     }
     if (is("undeclared-yield")) {
         if (host.consume != null) {
             _ = host.consume.?(context, 1);
-            output.* = .{ .tag = .yield, .reserved = 0 };
+            output.* = .{ .tag = .yield, .adapter_status = 0 };
         } else {
             _ = host.fail(
                 context,
@@ -63,7 +70,7 @@ fn invoke(
                 "reschedule capability unavailable".ptr,
                 "reschedule capability unavailable".len,
             );
-            output.* = .{ .tag = .fail, .reserved = 0 };
+            output.* = .{ .tag = .fail, .adapter_status = 0 };
         }
         return;
     }
@@ -74,7 +81,7 @@ fn invoke(
         else
             "consume accepted without continuation";
         _ = host.fail(context, .user, message.ptr, message.len);
-        output.* = .{ .tag = .fail, .reserved = 0 };
+        output.* = .{ .tag = .fail, .adapter_status = 0 };
         return;
     }
     output.* = .{ .tag = .fail };
@@ -82,7 +89,6 @@ fn invoke(
 
 const definitions = [_]abi.Definition{
     .{
-        .size = if (is("old-v1")) @offsetOf(abi.Definition, "continuation_size") else @sizeOf(abi.Definition),
         .callback_index = 0,
         .name_ptr = word_name.ptr,
         .name_len = word_name.len,
@@ -92,6 +98,7 @@ const definitions = [_]abi.Definition{
         .inputs_ptr = if (is("invalid-effect")) &invalid_effect_slots else &empty_slots,
         .output_count = if (is("partial-complete")) output_slots.len else 0,
         .outputs_ptr = if (is("partial-complete")) &output_slots else &empty_slots,
+        .continuation_size = if (is("invalid-continuation")) 8 else 0,
     },
     .{
         .callback_index = 0,
@@ -108,19 +115,17 @@ const definitions = [_]abi.Definition{
 
 const requirements = [_]abi.CapabilityRequirement{
     .{
-        .id = if (is("reserved-capability"))
-            @intFromEnum(abi.CapabilityId.module_view)
+        .id = if (is("unsupported-capability"))
+            99
         else
             @intFromEnum(abi.CapabilityId.call),
-        .version = if (is("capability-version")) 2 else 1,
     },
-    .{ .id = @intFromEnum(abi.CapabilityId.reschedule), .version = 1 },
+    .{ .id = @intFromEnum(abi.CapabilityId.reschedule) },
 };
 
 const descriptor = abi.Descriptor{
-    .size = if (is("old-v1")) @offsetOf(abi.Descriptor, "required_host_table_size") else @sizeOf(abi.Descriptor),
-    .abi_major = if (is("abi-major")) abi.abi_major + 1 else abi.abi_major,
-    .abi_minor = if (is("old-v1")) 0 else abi.abi_minor,
+    .size = if (is("descriptor-size")) @sizeOf(abi.Descriptor) - 8 else @sizeOf(abi.Descriptor),
+    .abi_version = if (is("abi-version")) abi.abi_version + 1 else abi.abi_version,
     .module_name_ptr = if (is("wrong-name")) wrong_name.ptr else requested_name.ptr,
     .module_name_len = if (is("wrong-name")) wrong_name.len else requested_name.len,
     .module_doc_ptr = module_doc.ptr,
@@ -132,13 +137,13 @@ const descriptor = abi.Descriptor{
     .capabilities_ptr = &requirements,
     .callback_count = 1,
     .invoke = invoke,
-    .state_layout = if (is("reserved-state"))
-        .{ .alignment = 8, .size = 8 }
-    else
-        .{},
 };
 
 export fn ecl_module_abi_v1(output: *abi.EntryResult) callconv(.c) void {
+    if (is("entry-size")) {
+        output.* = .{ .size = 0, .status = .descriptor, .descriptor = &descriptor };
+        return;
+    }
     if (is("entry-failure") or is("unknown-entry-status")) {
         const message = "fixture entry point failure";
         output.* = .{

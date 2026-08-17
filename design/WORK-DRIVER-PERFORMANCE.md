@@ -36,7 +36,7 @@ budgets or acceptance criteria.
 An optimization must preserve all of the following:
 
 1. Every user-sized traversal has one cursor-based implementation. There is no
-   synchronous legacy implementation kept as a fast path.
+   duplicate synchronous implementation kept as a fast path.
 2. A scheduler-attached unit returns within its accounted-work quantum with
    the exact next cursor and partial-output state preserved.
 3. Resumption never repeats visible IO, publication, mutation, allocation,

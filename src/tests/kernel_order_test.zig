@@ -154,6 +154,8 @@ test "order: group maps first-seen keys to stable index leaves" {
 
 test "order: distinct charges nested structural hash and equality work" {
     const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
 
@@ -162,12 +164,12 @@ test "order: distinct charges nested structural hash and equality work" {
     for (integers, 0..) |*integer, index| integer.* = @intCast(index);
 
     const left = try list.fromI64Slice(allocator, integers);
-    defer heap.testing.releaseValue(allocator, left);
+    defer cleanup.releaseValue(left);
     const right = try list.fromI64Slice(allocator, integers);
-    defer heap.testing.releaseValue(allocator, right);
+    defer cleanup.releaseValue(right);
     const outer = try list.fromValuesGeneric(allocator, &.{ left, right });
     var outer_owned = true;
-    defer if (outer_owned) heap.testing.releaseValue(allocator, outer);
+    defer if (outer_owned) cleanup.releaseValue(outer);
     try runtime.pushOwned(outer);
     outer_owned = false;
 

@@ -1,7 +1,6 @@
 const std = @import("std");
 const session = @import("../session.zig");
 const machine = @import("../machine.zig");
-const heap = @import("../heap.zig");
 const support = @import("kernel_test_support.zig");
 
 const allocator = std.testing.allocator;
@@ -11,7 +10,7 @@ fn expectStack(runtime: *session.Session, source: []const u8, expected: []const 
         .ok => {},
         .incomplete => return error.TestUnexpectedResult,
         .err => |failure| {
-            defer heap.testing.releaseValue(allocator, failure);
+            defer runtime.release(failure);
             return error.TestUnexpectedResult;
         },
     }
@@ -30,7 +29,7 @@ fn expectCancelledAfterSetup(
     switch (try runtime.runUnit("<combinator-setup>", setup)) {
         .ok => {},
         .err => |failure| {
-            heap.testing.releaseValue(allocator, failure);
+            runtime.release(failure);
             return error.TestUnexpectedResult;
         },
         .incomplete => return error.TestUnexpectedResult,
@@ -42,7 +41,7 @@ fn expectCancelledAfterSetup(
         .err => |item| item,
         .ok, .incomplete => return error.TestUnexpectedResult,
     };
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     try support.expectLanguageError(failure, .{
         .name = source,
         .source = source,
@@ -183,7 +182,7 @@ test "empty inline iterations remain cancellable and bounded-frame" {
         .err => |item| item,
         .ok, .incomplete => return error.TestUnexpectedResult,
     };
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     try support.expectLanguageError(failure, .{
         .name = "cancelled times",
         .source = "70000 () times",
@@ -235,7 +234,7 @@ test "idioms: automatic hits and forced generic preserves behavior" {
         .err => |item| item,
         .ok, .incomplete => return error.TestUnexpectedResult,
     };
-    defer heap.testing.releaseValue(allocator, failure);
+    defer fallback.release(failure);
     try std.testing.expectEqual(@as(u64, 0), fallback.lastIdiomHits());
 
     var executable_form = try session.Session.init(allocator, &.{});

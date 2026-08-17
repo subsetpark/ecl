@@ -574,9 +574,7 @@ pub fn retainValue(item: Value) void {
     }
 }
 
-/// Allocator-only cleanup exists only in test builds. Production code cannot
-/// name this namespace and must present an explicit host capability or enqueue
-/// into its owning `ReleaseDomain`.
+/// Tests use the same explicit release authority as production owners.
 pub const testing = if (builtin.is_test) struct {
     pub const Cleanup = struct {
         owner: HostOwner,
@@ -593,21 +591,14 @@ pub const testing = if (builtin.is_test) struct {
             return self.owner.cleanup();
         }
 
+        pub fn releaseValue(self: *Cleanup, item: Value) void {
+            self.domain().releaseValue(item);
+        }
+
         pub fn deinit(self: *Cleanup) void {
             self.capability().drain();
         }
     };
-
-    pub fn releaseValue(allocator: std.mem.Allocator, item: Value) void {
-        var owner = HostOwner.init(allocator);
-        owner.domain().releaseValue(item);
-        owner.cleanup().drain();
-    }
-    pub fn decRef(allocator: std.mem.Allocator, handle: anytype) void {
-        var owner = HostOwner.init(allocator);
-        owner.domain().releaseHeader(handle);
-        owner.cleanup().drain();
-    }
 } else struct {};
 
 /// Opaque host ownership is issued by exactly one `HostOwner`. Root-owned

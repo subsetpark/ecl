@@ -3,7 +3,6 @@
 const std = @import("std");
 const session = @import("../session.zig");
 const value = @import("../value.zig");
-const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const dict = @import("../dict.zig");
 const intern = @import("../intern.zig");
@@ -82,7 +81,7 @@ test "errors: lazy trace is innermost-first and retains recursive activations" {
     const source =
         "(dup 0 > (1 - f pop) (pop missing) if) 'f def 1 f";
     const failure = (try runtime.runUnit("recursive.ecl", source)).err;
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     const trace = try field(allocator, failure, "trace");
     try std.testing.expectEqual(@as(u64, 3), trace.list.length());
     try std.testing.expectEqualStrings("missing", intern.get(list.atUnchecked(trace, 0).symbol));
@@ -98,7 +97,7 @@ test "errors: tail-position application continuations retain their enclosing wor
         "application-trace.ecl",
         "((missing) () while) 'f def f",
     )).err;
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     const trace = try field(allocator, failure, "trace");
     try std.testing.expectEqual(@as(u64, 2), trace.list.length());
     try std.testing.expectEqualStrings("missing", intern.get(list.atUnchecked(trace, 0).symbol));
@@ -108,7 +107,7 @@ test "errors: tail-position application continuations retain their enclosing wor
         "application-callback-trace.ecl",
         "((2) () while) 'g def g",
     )).err;
-    defer heap.testing.releaseValue(allocator, callback_failure);
+    defer runtime.release(callback_failure);
     const callback_trace = try field(allocator, callback_failure, "trace");
     try std.testing.expectEqual(@as(u64, 2), callback_trace.list.length());
     try std.testing.expectEqualStrings("while", intern.get(list.atUnchecked(callback_trace, 0).symbol));
@@ -118,7 +117,7 @@ test "errors: tail-position application continuations retain their enclosing wor
         "application-contract-trace.ecl",
         "([1] (dup) each) 'h def h",
     )).err;
-    defer heap.testing.releaseValue(allocator, contract_failure);
+    defer runtime.release(contract_failure);
     const contract_trace = try field(allocator, contract_failure, "trace");
     try std.testing.expectEqual(@as(u64, 2), contract_trace.list.length());
     try std.testing.expectEqualStrings("each", intern.get(list.atUnchecked(contract_trace, 0).symbol));
@@ -170,12 +169,12 @@ test "provisional scalar primitives enforce the d.22 regime" {
     defer runtime.deinit();
 
     const overflow = (try execute(&runtime, "9223372036854775806 2 +")).?;
-    defer heap.testing.releaseValue(allocator, overflow);
+    defer runtime.release(overflow);
     try std.testing.expectEqualStrings("overflow", try errorKind(allocator, overflow));
     try std.testing.expect((try execute(&runtime, "inf 1 +")) == null);
     try std.testing.expect(std.math.isPositiveInf(runtime.stackItems()[0].float));
     const domain = (try execute(&runtime, "inf inf -")).?;
-    defer heap.testing.releaseValue(allocator, domain);
+    defer runtime.release(domain);
     try std.testing.expectEqualStrings("domain", try errorKind(allocator, domain));
 }
 
@@ -218,7 +217,7 @@ test "attempt reifies failure and def rejects scalar bodies" {
     )).?;
     try std.testing.expectEqual(@as(i64, 5), list.atUnchecked(ok_results, 0).int);
     const failure = (try execute(&runtime, "1 'x def")).?;
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     try std.testing.expectEqualStrings("type", try errorKind(allocator, failure));
 }
 
@@ -227,7 +226,7 @@ test "raise preserves valid user dicts and validates optional fields" {
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
     const raised = (try execute(&runtime, "{'kind 'custom 'msg \"hello\"} raise")).?;
-    defer heap.testing.releaseValue(allocator, raised);
+    defer runtime.release(raised);
     const rendered = try printer.toOwnedString(allocator, raised);
     defer allocator.free(rendered);
     try std.testing.expectEqualStrings(
@@ -237,7 +236,7 @@ test "raise preserves valid user dicts and validates optional fields" {
     );
 
     const defaulted = (try execute(&runtime, "{'kind 'custom} raise")).?;
-    defer heap.testing.releaseValue(allocator, defaulted);
+    defer runtime.release(defaulted);
     const defaulted_rendered = try printer.toOwnedString(allocator, defaulted);
     defer allocator.free(defaulted_rendered);
     try std.testing.expectEqualStrings(
@@ -247,7 +246,7 @@ test "raise preserves valid user dicts and validates optional fields" {
     );
 
     const merged = (try execute(&runtime, "{'kind 'custom 'data {'detail 7}} raise")).?;
-    defer heap.testing.releaseValue(allocator, merged);
+    defer runtime.release(merged);
     try std.testing.expectEqualStrings(
         "raise",
         intern.get((try field(allocator, merged, "word")).symbol),
@@ -269,7 +268,7 @@ test "raise preserves valid user dicts and validates optional fields" {
         "{'kind 'custom 'msg \"old\" 'word 'origin 'trace ['origin] " ++
             "'data {'source \"old.ecl\" 'line 9 'col 8} 'detail 7} raise",
     )).?;
-    defer heap.testing.releaseValue(allocator, complete);
+    defer runtime.release(complete);
     const complete_rendered = try printer.toOwnedString(allocator, complete);
     defer allocator.free(complete_rendered);
     try std.testing.expectEqualStrings(
@@ -279,7 +278,7 @@ test "raise preserves valid user dicts and validates optional fields" {
     );
 
     const malformed = (try execute(&runtime, "{'kind 1} raise")).?;
-    defer heap.testing.releaseValue(allocator, malformed);
+    defer runtime.release(malformed);
     try std.testing.expectEqualStrings("type", try errorKind(allocator, malformed));
 }
 
@@ -318,7 +317,7 @@ test "pp and prin write through and writer failures become io errors" {
     var broken = try session.Session.initWithOutput(allocator, &.{}, &failing);
     defer broken.deinit();
     const failure = (try execute(&broken, "'broken pp")).?;
-    defer heap.testing.releaseValue(allocator, failure);
+    defer broken.release(failure);
     try std.testing.expectEqualStrings("io", try errorKind(allocator, failure));
 }
 
@@ -336,7 +335,7 @@ test "inline control and reader-lowered binders execute" {
     try std.testing.expect((try execute(&runtime, "pop 3 (dup 0 >) (1 -) while pop")) == null);
     try std.testing.expectEqual(@as(usize, 0), runtime.stackItems().len);
     const invalid_branch = (try execute(&runtime, "1 (2) 3 if")).?;
-    defer heap.testing.releaseValue(allocator, invalid_branch);
+    defer runtime.release(invalid_branch);
     try std.testing.expectEqualStrings("type", try errorKind(allocator, invalid_branch));
 }
 
@@ -350,7 +349,7 @@ test "public parse reifies forms without execution and retains provenance" {
     try std.testing.expectEqualStrings("(42 missing)", display.bytes());
 
     const failure = (try execute(&runtime, "pop \"(missing)\" parse first call")).?;
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     try std.testing.expectEqualStrings("undefined-word", try errorKind(allocator, failure));
     const data = try field(allocator, failure, "data");
     const source = try field(allocator, data, "source");
@@ -385,7 +384,7 @@ test "public parse cancellation reaches UTF-8 materialization" {
         .err => |item| item,
         .ok, .incomplete => return error.TestUnexpectedResult,
     };
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     try std.testing.expectEqualStrings("cancelled", try errorKind(allocator, failure));
     const rendered = try printer.toOwnedString(allocator, failure);
     defer allocator.free(rendered);
@@ -412,7 +411,7 @@ test "public parse cancellation reaches ignored-source scanning" {
         .err => |item| item,
         .ok, .incomplete => return error.TestUnexpectedResult,
     };
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     try std.testing.expectEqualStrings("cancelled", try errorKind(allocator, failure));
     const rendered = try printer.toOwnedString(allocator, failure);
     defer allocator.free(rendered);

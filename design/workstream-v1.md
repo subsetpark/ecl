@@ -128,19 +128,16 @@ architecture panel; full groundings in
   The cautionary scheduler precedent: ordinary native code is not preempted;
   cooperative timeslice consumption/rescheduling and dirty schedulers are
   distinct remedies. ECL adopts a typed cooperative continuation first and
-  leaves blocking-pool offload as an additive capability.
+  leaves blocking-pool offload as a future capability.
 - **[documentation] Janet C API and native modules** — https://janet-lang.org/capi/
   The ergonomic precedent for loading trusted native modules into a small
   language runtime. ECL narrows that model to one Zig-authored artifact per
   module, with generated capability and ownership adapters rather than a broad
   mutable VM pointer.
-- **[pattern] Sized records with additive tails (protobuf unknown fields; Vulkan `sType`/`pNext` chains)** — https://protobuf.dev/programming-guides/proto3/
-  Every record carries its own byte size, a reader takes
-  `min(declared, sizeof(local))`, and unrecognized trailing bytes are ignored
-  rather than trusted. This is the rule that lets ABI major 1 accept additive
-  minor revisions, so an older `.eclmod` keeps loading on a newer v1 runtime.
-  M9 freezes it in the wire contract and M10's CSV and JSON modules ride the
-  same descriptor.
+- **[pattern] Self-sized exact records** — Every record carries its byte size,
+  and the pre-release loader requires that size and every array stride to equal
+  the current SDK definition. The field is a corruption and stale-artifact
+  guard, not a record-tail negotiation mechanism.
 - **[pattern] Structured concurrency (Trio nurseries; JEP 505)** — https://vorpus.org/blog/notes-on-structured-concurrency-or-go-statement-considered-harmful/
   Scope trees, cancellation checkpoints, wait-for-quiescence at scope
   close, determinism at join points.
@@ -534,7 +531,7 @@ than arbitrary native-stack preemption, but every user-sized traversal
 has one explicit cursor implementation. Scheduler-attached drivers preserve
 that cursor and its partial result and return to the scheduler within the
 accounted-work quantum; blocking bootstrap and tool shells drive the same
-cursor without introducing a legacy traversal mode. Process exit is owned by the
+cursor without introducing a duplicate traversal mode. Process exit is owned by the
 root Unit outside `attempt`: `exit` in a spawned Unit or inside `attempt`
 raises an ordinary catchable `'domain`, while an allowed root exit
 closes, cancels, and quiesces the root task scope before exposing its
@@ -647,15 +644,14 @@ partial registration.
 entry in order, the auto-loader tries `<name>.ecl` and then `<name>.eclmod`; the
 first existing candidate is authoritative, including its failures. The native
 descriptor must name the requested module exactly. Its sized header, ABI
-major/minor, callback table, definition count and indices, reserved state
-layout, canonical names, UTF-8 documentation, effects, and capability
-ids/versions are validated and copied through bounded cursors before host-table
-installation or registry publication. ABI major 1 permits additive record tails
-and capability versions: an older v1 extension continues loading on a newer v1
-runtime when all named requirements are supported, while any breaking change
-requires ABI v2. Unsupported platforms, architectures, ABI/capability versions,
-malformed descriptors, name mismatches, duplicate words, missing documentation,
-invalid effects, a nonzero reserved state layout, or an entry point that reports
+version, callback table, definition count and indices, canonical names, UTF-8
+documentation, effects, and capability ids are validated and copied through
+bounded cursors before host-table installation or registry publication. The
+pre-release ABI accepts exactly one version, exact record sizes and strides,
+and the current capability set. Unsupported platforms, architectures, ABI
+versions, malformed descriptors, unknown capabilities, name mismatches,
+duplicate words, missing documentation, invalid effects, invalid continuation
+layouts, or an entry point that reports
 failure instead of returning a descriptor publish nothing and produce a precise
 module load error. Opening a dynamic library is documented as arbitrary trusted-code
 execution—platform constructors may run before descriptor validation—so a
@@ -751,11 +747,9 @@ transforms, so nothing in v1 needs per-module state. Module state with its
 `ModuleView`/`ModuleUpdate` authority split and scheduler-integrated arbiter is
 therefore deferred alongside native resource values, persistent ECL-value pins,
 package assets, external wake, blocking jobs, quotation evaluation, and
-task/runtime mutation as future independently versioned capabilities. The
-deferral is unreachable rather than half-present: `module_view` and
-`module_update` are reserved capability ids with no supported version and the
-descriptor's state layout must be zero, so an artifact naming them is refused at
-load while the additive-tail rule keeps ABI v1 open for the real capability.
+task/runtime mutation as future capabilities. The deferral is unreachable
+rather than half-present: the descriptor and capability enum contain no
+module-state fields, factories, or ids.
 `Offload` is the expected first scheduling addition; the M10 HTTP builtin
 remains a documented internal direct-blocking exception in v1 and does not widen
 this SDK.
@@ -767,7 +761,7 @@ callback shapes, capability duplication, output-arity mismatch, duplicate words,
 and missing documentation without tests that inspect implementation text. Loader
 cases cover source/native precedence, path order, first-candidate failure,
 name/ABI/capability mismatch, entry-point failure rollback, all-or-nothing
-reflection, old-v1/new-v1 compatibility, and the static and dynamic image pins
+reflection, exact record validation, and the static and dynamic image pins
 reaching the same publication path. A delayed-continuation shutdown property
 uses the real scheduler, cancellation path, registry pins, image release, and a
 DebugAllocator baseline rather than inspecting private representation.
@@ -800,12 +794,12 @@ committing v1 to resources, blocking pools, VM reentry, or application
 embedding.
 
 **Unlocks**: User-authored native extensions; M10's CSV/JSON modules as
-first-party consumers of the same callback protocol; additive post-v1 module
+first-party consumers of the same callback protocol; future module
 state with `ModuleView`/`ModuleUpdate` authority, `Offload`, resource,
 external-wake, package-asset, and evaluation capabilities.
 
 **Established Precedents** (milestone-scoped):
-- **[documentation] Erlang NIFs** — https://www.erlang.org/doc/apps/erts/erl_nif.html — ordinary NIFs demonstrate the non-preemption hazard; timeslice consumption and scheduled/dirty work motivate ECL's typed `Reschedule` now and additive `Offload` later.
+- **[documentation] Erlang NIFs** — https://www.erlang.org/doc/apps/erts/erl_nif.html — ordinary NIFs demonstrate the non-preemption hazard; timeslice consumption and scheduled/dirty work motivate ECL's typed `Reschedule` now and a future `Offload` capability.
 - **[documentation] Janet native modules/C API** — https://janet-lang.org/capi/ — the small-language dynamic-module ergonomics precedent, narrowed here to one generated Zig module descriptor and semantic capabilities instead of a mutable VM pointer.
 
 ---
@@ -904,12 +898,12 @@ pause.
 
 **Unlocks**: Post-v1 work (the static effect checker bundle, d.9;
 performance evolution toward the K ceiling; exactness revisit) starts
-from a proven baseline. The additive native capabilities deferred out of M9 —
+from a proven baseline. The native capabilities deferred out of M9 —
 module state with `ModuleView`/`ModuleUpdate` authority and its
 scheduler-integrated arbiter, then `Offload`, resource values, external wake,
 package assets, and quotation evaluation — also start here. None blocks the
-`v1.0` tag: no v1 consumer needs them, and each is reachable through the
-reserved capability ids and the ABI-v1 additive-tail rule without an ABI v2.
+`v1.0` tag: no v1 consumer needs them, and each requires an explicit future
+wire-contract revision.
 
 ## Dependency Graph
 
@@ -1023,7 +1017,7 @@ reserved capability ids and the ABI-v1 additive-tail rule without an ABI v2.
   general stack access. `BuildValues` and typed `Reschedule` are the initial
   optional capabilities; module state with distinct `ModuleView`/`ModuleUpdate`
   authority, resources, blocking offload, external wake, package assets,
-  retained ECL values, and evaluation are additive future capabilities.
+  retained ECL values, and evaluation are future capabilities.
 - **Native calls are transactional leaves but native code remains trusted.**
   Declared inputs remain pinned, candidate outputs belong to one call, and only
   exact completion mutates the stack; fail/cancel/timeout/OOM/abandonment do
@@ -1041,14 +1035,11 @@ reserved capability ids and the ABI-v1 additive-tail rule without an ABI v2.
   ruling, 2026-08-16). Mandatory `Call` plus optional `BuildValues` and
   `Reschedule`; CSV and JSON are pure value-in/value-out transforms with no
   per-Session state, so `ModuleState`, `ModuleView`, `ModuleUpdate`, and the
-  scheduler-integrated arbiter are deferred to post-v1 along with the additive
+  scheduler-integrated arbiter are deferred to post-v1 along with the future
   capabilities already listed. That removes the milestone's riskiest piece — a
   new `ParkRequest` wait-set variant. The deferral is unreachable rather than
-  half-present:
-  `module_view` and `module_update` are reserved capability ids with no
-  supported version and the descriptor's state layout must be zero, so an
-  artifact naming them is refused at load while the additive-tail rule keeps
-  ABI v1 open for the real capability. When it lands, module state extends the
+  half-present: the descriptor and capability enum expose no module-state
+  fields or ids. When it lands, module state extends the
   `initialized` typestate variant rather than reshaping the typestate.
 - **The static transport is an image-pin variant, not a second path** (gameplan
   ruling, 2026-08-16). The load typestate carries `dynamic` (the library
@@ -1397,9 +1388,9 @@ script in CI.
     the release binary with only a fixture directory on `ECL_PATH` and execute
     `'sample use 41 sample.increment 'sample.increment doc
     'sample.increment which 'sample.increment see`; repeat with source/native,
-    path-order, wrong-name, ABI-major, capability-version, duplicate-word,
-    missing-doc, invalid-effect, reserved-capability, reserved-state,
-    entry-failure, and old-v1 additive-tail fixture variants.
+    path-order, wrong-name, ABI-version, duplicate-word, missing-doc,
+    invalid-effect, unsupported-capability, invalid-continuation,
+    entry-failure, and exact-stride fixture variants.
   - **Expected**: the valid artifact returns `42`, its nonempty documentation,
     canonical `(n -- result)` effect, `which` reporting the binding as `native`
     with its inferred capability list, and `see` rendering
@@ -1407,8 +1398,8 @@ script in CI.
     invalid artifact reports its precise load error, leaves `sample` absent from
     registry/reflection, and never selects a later candidate.
   - **Traces to**: Milestone 9 — SDK descriptor generation, `ECL_PATH` native
-    transport, consuming loader typestate, atomic module publication, and ABI
-    negotiation.
+    transport, consuming loader typestate, atomic module publication, and exact
+    ABI validation.
 
 - **DoD-23 — transactional cooperative native calls**
   - **Assert**: a real loaded callback sees exactly its declared immutable
@@ -1446,9 +1437,9 @@ script in CI.
     capability shapes fail compilation
     rather than requiring a runtime convention, and arbitrary bounded
     descriptor metadata never escapes the production validator. An artifact
-    naming the reserved `module_view` or `module_update` capability ids, or
-    declaring a nonzero reserved state layout, is refused at load — the
-    deferred capability is unreachable rather than half-present.
+    with an unknown capability id or invalid continuation layout is refused at
+    load; deferred module state is unreachable because no corresponding wire
+    fields or capability ids exist.
   - **Verify by** `cmd`: `zig build test-native-sdk-negative`,
     `zig build fuzz-native-descriptor`, and the production-loaded fixture
     under Debug, ReleaseSafe, one/eight workers, and Linux TSan. The production
@@ -1456,8 +1447,8 @@ script in CI.
     shutdown and measures the complete lifetime with `DebugAllocator`.
   - **Expected**: all compile-negative fixtures are rejected by SDK
     comptime validation; arbitrary bounded descriptor metadata never escapes
-    validation; reserved-capability and nonzero-state-layout artifacts report
-    a precise unsupported-capability load error and publish nothing; and
+    validation; unknown-capability and invalid-continuation artifacts report
+    precise load errors and publish nothing; and
     allocator accounting returns to baseline with no callback reachable after
     the registry releases its final image pin.
   - **Traces to**: Milestone 9 — SDK comptime reflection, the descriptor

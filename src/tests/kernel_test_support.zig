@@ -2,7 +2,6 @@
 const std = @import("std");
 const value = @import("../value.zig");
 const session = @import("../session.zig");
-const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const dict = @import("../dict.zig");
 const intern = @import("../intern.zig");
@@ -98,7 +97,7 @@ fn expectStackCase(case: StackCase) !void {
         .ok => {},
         .incomplete => return error.TestUnexpectedResult,
         .err => |failure| {
-            defer heap.testing.releaseValue(allocator, failure);
+            defer runtime.release(failure);
             const rendered = try printer.toOwnedString(allocator, failure);
             defer allocator.free(rendered);
             std.log.err("unexpected language error: {s}", .{rendered});
@@ -117,7 +116,7 @@ fn expectErrorCase(case: ErrorCase) !void {
         .ok, .incomplete => return error.TestUnexpectedResult,
         .err => |item| item,
     };
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     try expectLanguageError(failure, case);
 }
 

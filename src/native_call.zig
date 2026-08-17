@@ -14,8 +14,6 @@ const native_module = @import("native_module.zig");
 const value = @import("value.zig");
 
 const Value = value.Value;
-const legacy_builder_limit = 1024;
-
 const BuilderKind = enum { list, dict };
 
 const BuilderOrigin = struct {
@@ -370,10 +368,12 @@ const Transaction = struct {
         defer self.clearCandidates();
         const timing = evaluator.beginNativeTiming();
         defer evaluator.finishNativeTiming(self.instance, timing);
-        var result = abi.InvokeResult{ .tag = .fail, .reserved = 2 };
+        var result = abi.InvokeResult{ .tag = .fail, .adapter_status = 2 };
         self.instance.invoke()(&self.host_table, self, self.definition.callback_index, &result);
-        if (result.reserved == 1) return error.OutOfMemory;
-        if (result.reserved != 0)
+        if (result.size != @sizeOf(abi.InvokeResult))
+            return evaluator.fail(.contract, "native callback returned an invalid result record size");
+        if (result.adapter_status == 1) return error.OutOfMemory;
+        if (result.adapter_status != 0)
             return evaluator.fail(.contract, "native callback returned an invalid adapter result");
         return switch (result.tag) {
             .complete => complete: {
@@ -442,8 +442,6 @@ const full_host_table = abi.HostTable{
     .input = hostInput,
     .forward = hostForward,
     .scalar = hostScalar,
-    .build_list = hostBuildList,
-    .build_dict = hostBuildDict,
     .complete = hostComplete,
     .fail = hostFail,
     .continuation_state = hostContinuationState,
@@ -572,7 +570,7 @@ fn hostScalar(
     output: *abi.Candidate,
 ) callconv(.c) abi.HostStatus {
     const call = transactionFrom(context);
-    if (call.terminal != .idle) return .invalid;
+    if (call.terminal != .idle or scalar.size != @sizeOf(abi.Scalar)) return .invalid;
     const units: u32 = switch (scalar.kind) {
         .symbol, .word => @max(1, std.math.cast(u32, scalar.bytes_len) orelse return .invalid),
         .int, .float, .char => 0,
@@ -601,56 +599,6 @@ fn hostScalar(
         _ => return .invalid,
     };
     const status = call.appendCandidate(item, null);
-    if (status == .ok) output.* = call.candidateWire();
-    return status;
-}
-
-fn hostBuildList(
-    context: *anyopaque,
-    items: [*]const abi.Candidate,
-    item_count: u32,
-    output: *abi.Candidate,
-) callconv(.c) abi.HostStatus {
-    const call = transactionFrom(context);
-    if (call.terminal != .idle) return .invalid;
-    if (item_count > legacy_builder_limit) return .invalid;
-    if (charge(call, item_count) != .ok) return .yield_required;
-    const values = call.allocator.alloc(Value, item_count) catch return .out_of_memory;
-    defer call.allocator.free(values);
-    for (values, items[0..item_count]) |*slot, wire|
-        slot.* = (call.candidate(wire) orelse return .invalid).value;
-    const result = list.fromValues(call.allocator, values) catch return .out_of_memory;
-    const status = call.appendCandidate(result, null);
-    if (status == .ok) output.* = call.candidateWire();
-    return status;
-}
-
-fn hostBuildDict(
-    context: *anyopaque,
-    keys: [*]const abi.Candidate,
-    values: [*]const abi.Candidate,
-    entry_count: u32,
-    output: *abi.Candidate,
-) callconv(.c) abi.HostStatus {
-    const call = transactionFrom(context);
-    if (call.terminal != .idle) return .invalid;
-    if (entry_count > legacy_builder_limit) return .invalid;
-    if (charge(call, entry_count) != .ok) return .yield_required;
-    const pairs = call.allocator.alloc(dict.Pair, entry_count) catch return .out_of_memory;
-    defer call.allocator.free(pairs);
-    for (pairs, 0..) |*pair, index| {
-        pair[0] = (call.candidate(keys[index]) orelse return .invalid).value;
-        pair[1] = (call.candidate(values[index]) orelse return .invalid).value;
-    }
-    const result = dict.fromPairs(
-        call.allocator,
-        call.releases,
-        pairs,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return .out_of_memory,
-        error.DuplicateKey => return .invalid,
-    };
-    const status = call.appendCandidate(result, null);
     if (status == .ok) output.* = call.candidateWire();
     return status;
 }

@@ -61,25 +61,27 @@ pub fn build(b: *std.Build) void {
 
     const malformed_defects = [_][]const u8{
         "wrong-name",
-        "abi-major",
-        "capability-version",
+        "abi-version",
+        "descriptor-size",
         "duplicate-word",
         "missing-doc",
         "entry-failure",
+        "entry-size",
         "invalid-effect",
-        "reserved-capability",
-        "reserved-state",
+        "unsupported-capability",
+        "invalid-continuation",
         "unknown-entry-status",
         "stride-overread",
         "unknown-result",
+        "result-size",
         "unknown-failure-kind",
         "unknown-scalar-kind",
+        "scalar-size",
         "oversized-scalar",
         "invalid-utf8-scalar",
         "partial-complete",
         "undeclared-yield",
         "consume-without-state",
-        "old-v1",
     };
     for (malformed_defects) |defect| {
         const malformed_options = b.addOptions();

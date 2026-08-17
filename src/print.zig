@@ -540,31 +540,33 @@ test "canonical printer renders the public value syntax" {
     try expectPrint("sym", .{ .word = sym });
 
     const integers = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
-    defer heap.testing.releaseValue(allocator, integers);
+    defer cleanup.releaseValue(integers);
     try expectPrint("[1 2]", integers);
     const quotation = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .word = plus } });
-    defer heap.testing.releaseValue(allocator, quotation);
+    defer cleanup.releaseValue(quotation);
     try expectPrint("(1 +)", quotation);
     const singleton = try list.fromValues(allocator, &.{.{ .int = 3 }});
-    defer heap.testing.releaseValue(allocator, singleton);
+    defer cleanup.releaseValue(singleton);
     const nested = try list.fromValues(allocator, &.{ integers, singleton });
-    defer heap.testing.releaseValue(allocator, nested);
+    defer cleanup.releaseValue(nested);
     try expectPrint("([1 2] [3])", nested);
     const string = try list.fromValues(allocator, &.{ .{ .char = 'a' }, .{ .char = 'b' } });
-    defer heap.testing.releaseValue(allocator, string);
+    defer cleanup.releaseValue(string);
     try expectPrint("\"ab\"", string);
     const empty_string = try list.fromCodepoints(allocator, &.{});
-    defer heap.testing.releaseValue(allocator, empty_string);
+    defer cleanup.releaseValue(empty_string);
     try expectPrint("\"\"", empty_string);
 
     const a = try intern.intern("a");
     const dictionary = try dict.fromPairs(allocator, cleanup.domain(), &.{.{ .{ .symbol = a }, .{ .int = 1 } }});
-    defer heap.testing.releaseValue(allocator, dictionary);
+    defer cleanup.releaseValue(dictionary);
     try expectPrint("{'a 1}", dictionary);
 }
 
 test "char and string escapes follow the grammar" {
     const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     try expectPrint("\\space", .{ .char = ' ' });
     try expectPrint("\\tab", .{ .char = '\t' });
     try expectPrint("\\newline", .{ .char = '\n' });
@@ -574,7 +576,7 @@ test "char and string escapes follow the grammar" {
         .{ .char = '\n' },
         .{ .char = '\\' },
     });
-    defer heap.testing.releaseValue(allocator, string);
+    defer cleanup.releaseValue(string);
     try expectPrint("\"\\\"\\n\\\\\"", string);
 }
 
@@ -582,13 +584,15 @@ test "deep rendering uses an explicit worklist" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     var current = Value{ .int = 1 };
     for (0..100_000) |_| {
         const next = try list.fromValuesGeneric(allocator, &.{current});
-        if (current.heapHeader()) |_| heap.testing.releaseValue(allocator, current);
+        if (current.heapHeader()) |_| cleanup.releaseValue(current);
         current = next;
     }
-    defer heap.testing.releaseValue(allocator, current);
+    defer cleanup.releaseValue(current);
     const rendered = try toOwnedString(allocator, current);
     defer allocator.free(rendered);
     try std.testing.expectEqual(@as(usize, 200_001), rendered.len);

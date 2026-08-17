@@ -560,18 +560,20 @@ fn avalanche(input: u64) u64 {
 }
 
 fn allocationFailureProbe(allocator: std.mem.Allocator) !void {
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     const left = try list.fromValuesGeneric(allocator, &.{
         .{ .int = 1 },
         .{ .float = 2.0 },
         .{ .word = 3 },
     });
-    defer heap.testing.releaseValue(allocator, left);
+    defer cleanup.releaseValue(left);
     const right = try list.fromValuesGeneric(allocator, &.{
         .{ .float = 1.0 },
         .{ .int = 2 },
         .{ .word = 3 },
     });
-    defer heap.testing.releaseValue(allocator, right);
+    defer cleanup.releaseValue(right);
     _ = try matchWithAllocator(allocator, left, right);
     _ = try hashWithAllocator(allocator, left);
 }
@@ -580,18 +582,20 @@ test "deep structural identity uses explicit worklists" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     var left = Value{ .int = 1 };
     var right = Value{ .float = 1.0 };
     for (0..100_000) |_| {
         const next_left = try list.fromValuesGeneric(allocator, &.{left});
-        if (left.heapHeader()) |_| heap.testing.releaseValue(allocator, left);
+        if (left.heapHeader()) |_| cleanup.releaseValue(left);
         left = next_left;
         const next_right = try list.fromValuesGeneric(allocator, &.{right});
-        if (right.heapHeader()) |_| heap.testing.releaseValue(allocator, right);
+        if (right.heapHeader()) |_| cleanup.releaseValue(right);
         right = next_right;
     }
-    defer heap.testing.releaseValue(allocator, left);
-    defer heap.testing.releaseValue(allocator, right);
+    defer cleanup.releaseValue(left);
+    defer cleanup.releaseValue(right);
     try std.testing.expect(match(left, right));
     try std.testing.expectEqual(hash(left), hash(right));
 }

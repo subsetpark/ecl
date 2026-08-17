@@ -10,7 +10,6 @@ const machine = @import("machine.zig");
 const storage = @import("kernel_storage.zig");
 const value = @import("value.zig");
 
-const max_record_size = 4096;
 const max_module_name_bytes = 256;
 const max_word_name_bytes = 256;
 const max_document_bytes = 64 * 1024;
@@ -20,11 +19,10 @@ const max_effect_slots = 256;
 
 pub const ValidateError = error{
     OutOfMemory,
-    AbiMajorMismatch,
+    AbiVersionMismatch,
     UnsupportedCapabilityId,
-    UnsupportedCapabilityVersion,
-    RecordTooShort,
-    RecordTooLarge,
+    RecordSizeMismatch,
+    RecordAlignmentMismatch,
     CountOverflow,
     CallbackIndexOutOfRange,
     InvalidUtf8,
@@ -32,10 +30,9 @@ pub const ValidateError = error{
     InvalidName,
     InvalidEffect,
     DuplicateDefinition,
-    ReservedStateLayout,
+    InvalidContinuation,
     ModuleNameMismatch,
     MissingInvoke,
-    HostTableTooNew,
 };
 
 pub const ValidatedDefinition = struct {
@@ -55,7 +52,6 @@ const DescriptorState = struct {
     doc: *env.DocumentationString,
     definitions: []ValidatedDefinition,
     requirements: []abi.CapabilityRequirement,
-    state_layout: abi.StateLayout,
     invoke: abi.Invoke,
     callback_count: u32,
 
@@ -99,10 +95,6 @@ pub const ValidatedDescriptor = opaque {
 
     pub fn requirements(self: *const ValidatedDescriptor) []const abi.CapabilityRequirement {
         return self.state().requirements;
-    }
-
-    pub fn stateLayout(self: *const ValidatedDescriptor) abi.StateLayout {
-        return self.state().state_layout;
     }
 
     pub fn invoke(self: *const ValidatedDescriptor) abi.Invoke {
@@ -274,7 +266,7 @@ const EffectBuild = struct {
         };
         const records = try RecordArray(abi.EffectSlot).init(base, count, stride);
         const slot = try records.read(index);
-        try validateRecordSize(slot.size, requiredSize(abi.EffectSlot, "name_len"));
+        try validateRecordSize(slot.size, @sizeOf(abi.EffectSlot));
         const bytes = guestUtf8(slot.name_ptr, slot.name_len, max_word_name_bytes) catch
             return error.InvalidEffect;
         if (bytes.len == 0) return error.InvalidEffect;
@@ -396,15 +388,9 @@ pub const ValidateCursor = struct {
 
     fn validateHeader(self: *ValidateCursor) ValidateError!void {
         const declared_size = self.descriptor_ptr.size;
-        try validateRecordSize(declared_size, requiredSize(abi.Descriptor, "state_layout"));
-        self.descriptor = copyRecord(abi.Descriptor, self.descriptor_ptr, declared_size);
-        if (self.descriptor.abi_major != abi.abi_major) return error.AbiMajorMismatch;
-        if (self.descriptor.required_host_table_size > @sizeOf(abi.HostTable)) return error.HostTableTooNew;
-        if (self.descriptor.state_layout.record_size < requiredSize(abi.StateLayout, "reserved"))
-            return error.RecordTooShort;
-        if (self.descriptor.state_layout.size != 0 or self.descriptor.state_layout.alignment != 0 or
-            self.descriptor.state_layout.reserved != 0)
-            return error.ReservedStateLayout;
+        try validateRecordSize(declared_size, @sizeOf(abi.Descriptor));
+        self.descriptor = self.descriptor_ptr.*;
+        if (self.descriptor.abi_version != abi.abi_version) return error.AbiVersionMismatch;
         if (self.descriptor.definition_count > max_definitions or
             self.descriptor.capability_count > max_capabilities)
             return error.CountOverflow;
@@ -463,20 +449,12 @@ pub const ValidateCursor = struct {
             self.descriptor.capability_record_size,
         );
         const requirement = try records.read(self.capability_index);
-        try validateRecordSize(requirement.size, requiredSize(abi.CapabilityRequirement, "version"));
-        const supported_version: ?u32 = switch (@as(abi.CapabilityId, @enumFromInt(requirement.id))) {
-            .call, .reschedule => 1,
-            .build_values => 2,
-            .module_view, .module_update => null,
+        try validateRecordSize(requirement.size, @sizeOf(abi.CapabilityRequirement));
+        switch (@as(abi.CapabilityId, @enumFromInt(requirement.id))) {
+            .call, .build_values, .reschedule => {},
             _ => return error.UnsupportedCapabilityId,
-        };
-        if (supported_version == null or requirement.version == 0 or
-            requirement.version > supported_version.?)
-            return error.UnsupportedCapabilityVersion;
-        self.requirements.?[self.capability_index] = .{
-            .id = requirement.id,
-            .version = requirement.version,
-        };
+        }
+        self.requirements.?[self.capability_index] = requirement;
         self.capability_index += 1;
     }
 
@@ -491,7 +469,7 @@ pub const ValidateCursor = struct {
             self.descriptor.definition_record_size,
         );
         const definition = try records.read(self.definition_index);
-        try validateRecordSize(definition.size, requiredSize(abi.Definition, "outputs_ptr"));
+        try validateRecordSize(definition.size, @sizeOf(abi.Definition));
         if (definition.callback_index >= self.descriptor.callback_count)
             return error.CallbackIndexOutOfRange;
         const has_continuation = definition.continuation_size != 0 or
@@ -505,7 +483,7 @@ pub const ValidateCursor = struct {
                 !std.math.isPowerOfTwo(definition.continuation_alignment) or
                 definition.init_continuation == null or definition.deinit_continuation == null or
                 !self.hasCapability(.reschedule))
-                return error.ReservedStateLayout;
+                return error.InvalidContinuation;
         }
         _ = try RecordArray(abi.EffectSlot).init(
             definition.inputs_ptr,
@@ -546,7 +524,6 @@ pub const ValidateCursor = struct {
             .doc = self.module_doc.?,
             .definitions = self.definitions.?,
             .requirements = self.requirements.?,
-            .state_layout = self.descriptor.state_layout,
             .invoke = invoke,
             .callback_count = self.descriptor.callback_count,
         };
@@ -591,13 +568,8 @@ pub const ValidateCursor = struct {
     }
 };
 
-fn requiredSize(comptime T: type, comptime field_name: []const u8) u32 {
-    return @intCast(@offsetOf(T, field_name) + @sizeOf(@FieldType(T, field_name)));
-}
-
-fn validateRecordSize(size: u32, minimum: u32) ValidateError!void {
-    if (size < minimum) return error.RecordTooShort;
-    if (size > max_record_size) return error.RecordTooLarge;
+fn validateRecordSize(size: u32, expected: u32) ValidateError!void {
+    if (size != expected) return error.RecordSizeMismatch;
 }
 
 /// The single module-to-host text ingress. Callers choose only their semantic
@@ -615,16 +587,6 @@ pub fn guestUtf8(
     return bytes;
 }
 
-fn copyRecord(comptime T: type, pointer: *const T, declared_size: u32) T {
-    var result: T = undefined;
-    const destination = std.mem.asBytes(&result);
-    @memset(destination, 0);
-    const read_size = @min(@as(usize, declared_size), @sizeOf(T));
-    const source: [*]const u8 = @ptrCast(pointer);
-    @memcpy(destination[0..read_size], source[0..read_size]);
-    return result;
-}
-
 fn RecordArray(comptime T: type) type {
     return struct {
         pointer: [*]const T,
@@ -632,10 +594,10 @@ fn RecordArray(comptime T: type) type {
         stride: usize,
 
         fn init(pointer: [*]const T, count_wire: u32, stride_wire: u32) ValidateError!@This() {
-            if (count_wire == 0) return .{ .pointer = pointer, .count = 0, .stride = @sizeOf(T) };
             try validateRecordSize(stride_wire, @sizeOf(T));
+            if (count_wire == 0) return .{ .pointer = pointer, .count = 0, .stride = @sizeOf(T) };
             if (stride_wire % @alignOf(T) != 0 or @intFromPtr(pointer) % @alignOf(T) != 0)
-                return error.RecordTooShort;
+                return error.RecordAlignmentMismatch;
             const count: usize = count_wire;
             const stride: usize = stride_wire;
             const last_offset = std.math.mul(usize, count - 1, stride) catch
@@ -652,9 +614,8 @@ fn RecordArray(comptime T: type) type {
                 return error.CountOverflow;
             const record: *const T = @ptrFromInt(address);
             const declared_size = record.size;
-            try validateRecordSize(declared_size, @sizeOf(u32));
-            if (declared_size > self.stride) return error.RecordTooLarge;
-            return copyRecord(T, record, declared_size);
+            try validateRecordSize(declared_size, @sizeOf(T));
+            return record.*;
         }
     };
 }

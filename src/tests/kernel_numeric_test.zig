@@ -69,7 +69,7 @@ test "numeric: fault blocks report first index before aliased stores" {
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("<test>", "9223372036854775806")) == .ok);
     const failure = (try runtime.runUnit("<test>", "[1 2] +")).err;
-    defer heap.testing.releaseValue(allocator, failure);
+    defer runtime.release(failure);
     try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 9223372036854775806), runtime.stackItems()[0].int);
     try helper.expectLanguageError(failure, .{
@@ -134,11 +134,13 @@ test "numeric: long leaves poll at bounded chunks" {
 
 test "numeric: result materialization remains cancellable" {
     const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
     const integers = try allocator.alloc(i64, 70_000);
     defer allocator.free(integers);
     for (integers, 0..) |*integer, index| integer.* = @intCast(index);
     const input = try list.fromI64Slice(allocator, integers);
-    defer heap.testing.releaseValue(allocator, input);
+    defer cleanup.releaseValue(input);
 
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();

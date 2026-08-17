@@ -89,7 +89,7 @@ const Fixture = struct {
             .output_count = self.outputs.len,
             .outputs_ptr = &self.outputs,
         }};
-        self.capabilities = .{.{ .id = @intFromEnum(abi.CapabilityId.call), .version = 1 }};
+        self.capabilities = .{.{ .id = @intFromEnum(abi.CapabilityId.call) }};
         return .{
             .module_name_ptr = self.module_name.ptr,
             .module_name_len = self.module_name.len,
@@ -152,12 +152,12 @@ test "native: descriptor validation rejects malformed metadata before publicatio
     var fixture = Fixture{};
 
     var raw = fixture.descriptor();
-    raw.abi_major += 1;
-    try expectReject(error.AbiMajorMismatch, host.cleanup(), requested, &raw);
+    raw.abi_version += 1;
+    try expectReject(error.AbiVersionMismatch, host.cleanup(), requested, &raw);
 
     raw = fixture.descriptor();
-    fixture.capabilities[0].version = 2;
-    try expectReject(error.UnsupportedCapabilityVersion, host.cleanup(), requested, &raw);
+    fixture.capabilities[0].id = 99;
+    try expectReject(error.UnsupportedCapabilityId, host.cleanup(), requested, &raw);
 
     raw = fixture.descriptor();
     fixture.definitions[0].callback_index = 1;
@@ -165,11 +165,11 @@ test "native: descriptor validation rejects malformed metadata before publicatio
 
     raw = fixture.descriptor();
     fixture.definitions[0].size = 4;
-    try expectReject(error.RecordTooShort, host.cleanup(), requested, &raw);
+    try expectReject(error.RecordSizeMismatch, host.cleanup(), requested, &raw);
 
     raw = fixture.descriptor();
-    raw.state_layout.size = 1;
-    try expectReject(error.ReservedStateLayout, host.cleanup(), requested, &raw);
+    fixture.definitions[0].continuation_size = 8;
+    try expectReject(error.InvalidContinuation, host.cleanup(), requested, &raw);
 
     raw = fixture.descriptor();
     raw.module_name_ptr = "different".ptr;
@@ -370,14 +370,13 @@ test "native: source candidates win inside a root and path-root order wins acros
 test "native: a rejected artifact publishes nothing and never selects a later candidate" {
     const cases = [_]struct { defect: []const u8, message: []const u8 }{
         .{ .defect = "wrong-name", .message = "ModuleNameMismatch" },
-        .{ .defect = "abi-major", .message = "AbiMajorMismatch" },
-        .{ .defect = "capability-version", .message = "UnsupportedCapabilityVersion" },
+        .{ .defect = "abi-version", .message = "AbiVersionMismatch" },
         .{ .defect = "duplicate-word", .message = "DuplicateDefinition at definition 1" },
         .{ .defect = "missing-doc", .message = "EmptyDocumentation at definition 0" },
         .{ .defect = "entry-failure", .message = "native module entry failed" },
         .{ .defect = "invalid-effect", .message = "InvalidEffect at definition 0" },
-        .{ .defect = "reserved-capability", .message = "UnsupportedCapabilityVersion" },
-        .{ .defect = "reserved-state", .message = "ReservedStateLayout" },
+        .{ .defect = "unsupported-capability", .message = "UnsupportedCapabilityId" },
+        .{ .defect = "invalid-continuation", .message = "InvalidContinuation" },
     };
     for (cases) |case| {
         const broken = try std.fs.path.join(
