@@ -226,6 +226,29 @@ fn runShellScenario(encoded: u16) !void {
         else => |other| return other,
     };
     defer result.deinit();
+    const concurrent_finite_race = !std.mem.eql(u8, scenario.workers, "1") and switch (scenario.operation) {
+        .kernel_fairness,
+        .result_fairness,
+        .raise_fairness,
+        .infra_fairness,
+        => true,
+        else => false,
+    };
+    if (concurrent_finite_race) {
+        // Both tasks are finite and run on different workers. await-any's
+        // winner is deliberately nondeterministic once either completion can
+        // reach the waiter first; the explicit one-worker cases below retain
+        // the exact cooperative-fairness assertion.
+        try result.expect(.{
+            .exit_code = expected_exit,
+            .stderr = "",
+        });
+        try std.testing.expect(
+            std.mem.eql(u8, result.stdout, "0\n") or
+                std.mem.eql(u8, result.stdout, "1\n"),
+        );
+        return;
+    }
     try result.expect(.{
         .exit_code = expected_exit,
         .stdout = expected,
