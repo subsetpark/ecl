@@ -108,7 +108,7 @@ primitives, operationalized as two rules:
 - **No cycle collector.** Immutable bottom-up construction, words
   resolving by name (never by heap pointer), and the absence of closures
   make the value heap a DAG. Sole exception: a task returning its own
-  handle into its outcome cell — a documented bounded leak, not machinery.
+  handle into its result cell — a documented bounded leak, not machinery.
 
 ## Code representation and dispatch
 
@@ -347,7 +347,7 @@ Any change to this machinery must preserve:
   owned, type-erased `WorkDriver`; each resume performs one bounded slice
   and returns the unit to the ready queue. A worker never runs another
   unit recursively while retaining the current unit's native stack.
-  Attempt, task-outcome, and join-result list construction use the same
+  Attempt, task-result, and join-result list construction use the same
   exact-size resumable materializer. Raised-error field lookup and trace
   validation are likewise scheduler-visible cursor work. No signals, ever.
 - **One owned stack handoff:** a `WorkDriver` cannot mutate the operand
@@ -498,7 +498,7 @@ Any change to this machinery must preserve:
   reference-counted rather than lock-free reclamation. Cancel also removes
   parked units from waiter lists.
 - **Task result publication** exposes only `constructing`, a stable active
-  `TaskExecution`, or a published terminal outcome/OOM state. The
+  `TaskExecution`, or a published terminal result/OOM state. The
   execution's evaluating/finishing union is worker-private, so advancing a
   materialization cursor cannot race a waiter reading the cell's
   publication tag. No phase can carry an unrelated unit, materializer, or
@@ -507,7 +507,7 @@ Any change to this machinery must preserve:
   mutex, and spawn re-checks its own cancel flag after registering each
   child (kill-on-arrival closes the orphan race). Scope close cancels
   unawaited children and **waits for quiescence** before reporting its
-  outcome. A cancelled unit's outcome is `{'err {'kind 'cancelled …}}`
+  result. A cancelled unit's result is `{'err {'kind 'cancelled …}}`
   with trace fields when the poll site can produce them, absent otherwise.
   Language code cannot call a blocking scheduler wait API: `await`, joins,
   deadlines, and permitted root `exit` all emit typed park requests; the
@@ -559,7 +559,7 @@ Any change to this machinery must preserve:
   no caller can retain or mismatch a writer/lock lease. This preserves
   whole-write atomicity and the cross-task interleaving contract.
 - **Determinism lives at join points**, never in scheduling:
-  program-order `await-all` outcomes and `par-each` leftmost-error are
+  program-order `await-all` results and `par-each` leftmost-error are
   schedule-invariant. The only sanctioned nondeterminism is `await-any`
   and cross-unit IO interleaving. Enforced by running the suite at 1 and N
   workers.
@@ -964,7 +964,7 @@ preceding material by one empty line.
 against the generic frame-machine path on generated inputs, asserting:
 value equality, representation parity (brackets), error kind/payload
 equality, and bit-identical floats. The scheduler suite runs at 1 worker
-and N workers, asserting identical outcomes. This is the cheapest guard on
+and N workers, asserting identical results. This is the cheapest guard on
 the entire "fast paths are unobservable" doctrine.
 
 **Snapshots.** The Zig executable is the semantic reference. `zig build

@@ -138,7 +138,9 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-primitives.ecl",
         "(3 4 +) 'sum def sum pop (1 0 /) attempt pop (5 6 +) attempt pop " ++
-            "({'kind 'custom 'data {'detail 7}} raise) attempt pop",
+            "({'kind 'custom 'data {'detail 7}} raise) attempt pop " ++
+            "[3 4] (+) partial-all call pop [5 6] (+) attempt-with pop " ++
+            "[7 8] (+) spawn-with await pop",
     );
     try runOk(
         &runtime,

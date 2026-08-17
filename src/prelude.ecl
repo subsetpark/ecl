@@ -34,6 +34,24 @@
  "Return a quotation that pushes an inert captured value before running another quotation.")
 'partial def
 
+### def partial-all
+(((literal) each) dip append raze)
+(values quotation -- quotation :
+ "Return a quotation that pushes every value from a list, in order and inertly, before running another quotation.")
+'partial-all def
+
+### def attempt-with
+(partial-all attempt)
+(values quotation -- result :
+ "Run a quotation as an isolated attempted unit whose initial stack is the supplied list of values.")
+'attempt-with def
+
+### def spawn-with
+(partial-all spawn)
+(values quotation -- task :
+ "Spawn an isolated child task whose initial stack is the supplied list of values.")
+'spawn-with def
+
 ### def str
 (wrap "{}" format)
 (value -- string : "Return the canonical printed representation of a value as a string.")
@@ -312,17 +330,17 @@
 
 ### def ok?
 ('ok has?)
-(outcome -- bool : "Return true when an attempt outcome represents success.")
+(result -- bool : "Return true when an attempt result represents success.")
 'ok? def
 
 ### def or-raise
 (dup 'ok has? ('ok at) ('err at raise) if)
-(outcome -- results : "Return an attempt's result list, or re-raise its captured error unchanged.")
+(result -- values : "Return an attempt result's success values, or re-raise its captured error unchanged.")
 'or-raise def
 
 ### def or-else
 (over 'ok has? (pop 'ok at) (nip) if)
-(outcome fallback -- value :
+(result fallback -- value :
  "Return an attempt's result list on success, or the fallback value on failure.")
 'or-else def
 
@@ -337,6 +355,6 @@
 
 ### def await-all
 ((await) each)
-(tasks -- outcomes :
- "Wait for every task and return its outcome in input order.")
+(tasks -- results :
+ "Wait for every task and return its result in input order.")
 'await-all def

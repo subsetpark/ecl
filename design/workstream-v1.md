@@ -12,7 +12,7 @@ combinator-entry idiom recognition, and green-unit concurrency. v1 is
 slow-but-correct everywhere the architecture permits, but never violates
 the decision-21 invariants that make it evolvable to K-order later.
 Scope additions ruled in during planning: REPL line editing/completion,
-the `str`, `csv`, `json`, `table`, and `http` stdlib modules, and optional
+the `result`, `str`, `csv`, `json`, `table`, and `http` stdlib modules, and optional
 target-specific native extension modules loaded by the stock binary. Core and
 stdlib retain the single-binary distribution guarantee; `.eclmod` artifacts
 are explicitly installed trusted dependencies, not required runtime pieces.
@@ -376,7 +376,7 @@ per-application contract checks as base-depth compares; the full
 inline Control/Cleave surface finalized (`dip keep bi tri bi2 both
 when unless times cond`, `case` as prelude — the Joy/APCL capture
 ruled 2026-08-12, VOCABULARY.md correspondence note); the full
-error/outcome vocabulary (`fail ok? or-raise or-else`); the prelude
+error/result vocabulary (`fail ok? or-raise or-else`); the prelude
 installed from embedded ecl source ([E] words including `filter`,
 `partition`, `any?`, `all?`, `both`, `bi2`, `case`, `unless`,
 `signum`, `clamp`, `empty?`, `append`, `pack` (literal-count effect
@@ -471,7 +471,7 @@ public binding or reflective surface. Float folds remain strictly sequential
 on every path (d.23).
 **The differential harness** (named v1 deliverable, d.23) runs in CI: every
 kernel and idiom entry against the generic frame-machine path for value
-equality, representation parity (brackets), the same success/failure outcome,
+equality, representation parity (brackets), the same success/failure result,
 and bit-identical successful floats, with a required fast-path hit so fallback cannot
 pass vacuously. The former walking skeleton's full 44-test behavior surface
 is ported and green against the Zig binary.
@@ -500,7 +500,7 @@ fuel/reduction safe points including kernel chunk polls (~64K
 elements), task cells (write-once, multi-waiter, per-cell mutex) with
 single-winner wait-policy transitions (no double-enqueue), cancellation with
 kill-on-arrival and waiter-list removal, structured lifetime with
-wait-for-quiescence at scope close, cancelled outcomes as
+wait-for-quiescence at scope close, cancelled results as
 `{'err {'kind 'cancelled …}}`, one timer thread + binary heap for
 `await-for`, stdout whole-write lock. Vocabulary: `spawn await
 await-any await-for cancel tasks par-each` [P] and `await-all` [E]. The
@@ -508,7 +508,7 @@ bounded `par-each` driver represents each captured element directly as the
 child Unit's one-value initial stack, publishes tasks without synthesizing or
 copying quotations, and transfers them to an evaluator-owned ordered join
 state. No private join word is installed. The determinism suite runs
-the full test corpus at 1 worker and N workers asserting identical outcomes.
+the full test corpus at 1 worker and N workers asserting identical results.
 The soul test still spawns zero threads. Before parallel parsing is enabled, the
 M1 intern table's tryLock spin loop is replaced with a blocking mutex so
 contending intern writers do not burn worker cores. **Snapshot
@@ -900,17 +900,33 @@ follow-ups, item 1) sees constants as ordinary words with known
 
 ---
 
-### Milestone 11: stdlib-str-csv-json-table-http
+### Milestone 11: stdlib-result-str-csv-json-table-http
 
 **Definition of Done**:
-Five stdlib modules ship inside the binary (embedded sources / native
+Six stdlib modules ship inside the binary (embedded sources / native
 descriptors registered lazily through M4 plus M9's private static transport,
 so the single-binary story holds; `ECL_PATH` remains for user modules). CSV
 and JSON are first-party consumers of the public typed callback/capability
 protocol without becoming external runtime dependencies. The same milestone
 owns the explicit host scripting words needed by that layer:
+- **`result`** — ecl source over the core `{'ok values}` / `{'err error}`
+  representation. It exports constructors and observations (`result.ok`,
+  `result.err`, `result.ok?`, `result.err?`), success composition
+  (`result.and-then`), failure transformation (`result.map-error`), broad and
+  kind-selective recovery (`result.recover`, `result.recover-kinds`), an
+  exhaustive eliminator (`result.case`), and list aggregation
+  (`result.all`, `result.partition`). Successful values are always a list
+  representing a stack, never one privileged scalar. `result.and-then` seeds
+  that stack into its quotation through `attempt-with`; an existing error is
+  returned unchanged. Recovery seeds the error dict as one value and runs the
+  recovery quotation through `attempt-with`; `recover-kinds` leaves an
+  unmatched result unchanged. `result.all` preserves input order and returns
+  the leftmost error unchanged, or one successful value containing the list
+  of per-result success stacks. `result.partition` returns success-stack lists
+  and error dicts separately without re-raising. All operations reject a
+  malformed tagged result before invoking a supplied quotation.
 - **`str`** — ecl source: `upper lower trim` (ASCII per d.15) and
-  friends; the first real embedded-module consumer.
+  friends; another embedded-source module built on the ordinary module path.
 - **Host scripting words** — `slurp` [P] `( path -- string )` reads one
   UTF-8 file, `spit` [P] `( string path -- )` writes one file, and `getenv`
   [P] `( name -- string )` reads an environment variable. Unset variables
@@ -1018,7 +1034,7 @@ future wire-contract revision.
 - Milestone 8 (repl-line-editing) -> [4]        # parallel with 5–7
 - Milestone 9 (native-extension-abi-and-loader) -> [4, 7]
 - Milestone 10 (one-binder-merge) -> [6, 9]   # ruled 2026-08-17; precedes the stdlib
-- Milestone 11 (stdlib-str-csv-json-table-http) -> [6, 9, 10]
+- Milestone 11 (stdlib-result-str-csv-json-table-http) -> [6, 9, 10]
 - Milestone 12 (v1-acceptance) -> [7, 8, 9, 10, 11]
 
 ## Open Questions
@@ -1626,14 +1642,14 @@ script in CI.
   - **Expected**: fixture's expected output file matches exactly.
   - **Traces to**: Milestone 5 — flip/reshape/group/grade kernels.
 
-- **DoD-18 — spawn/await outcome protocol**
-  - **Assert**: `spawn`+`await` delivers the same outcome shape as
+- **DoD-18 — spawn/await result protocol**
+  - **Assert**: `spawn`+`await` delivers the same result shape as
     `attempt`; `await` is idempotent; source-defined `await-all` returns
-    every ordinary outcome in input order without re-raising failures.
+    every ordinary result in input order without re-raising failures.
   - **Verify by** `cmd`: `ecl '(1 2 +) spawn dup await pop await or-raise call'`
     and a mixed success/failure task-list fixture comparing `await-all` with
     `(await) each` at 1 and 8 workers.
-  - **Expected**: `3`; the two ordered outcome lists match at both worker
+  - **Expected**: `3`; the two ordered result lists match at both worker
     counts.
   - **Traces to**: Milestone 7 — task cells.
 
@@ -1644,7 +1660,7 @@ script in CI.
     `while`-loop unit, cancels it; awaits a sleeper with a 50ms
     deadline).
   - **Expected**: both error kinds observed; exit 0 (the script handles
-    outcomes).
+    results).
   - **Traces to**: Milestone 7 — cancel flags, safe points, timer thread.
 
 - **DoD-20 — par-each determinism and leftmost error**
@@ -1745,6 +1761,27 @@ script in CI.
     validator, library pins, and ordered Session teardown. Module state with
     `ModuleView`/`ModuleUpdate` authority and its scheduler-integrated arbiter
     is deferred post-v1 and carries its own assertions when it lands.
+
+- **DoD-25a — result algebra**
+  - **Assert**: the embedded `result` module constructs and observes canonical
+    results, composes successful stack values through `attempt-with`, maps and
+    selectively recovers errors without swallowing unmatched kinds, eliminates
+    either variant, and aggregates ordered result lists with the specified
+    leftmost-error and partition behavior. Malformed result dicts fail before
+    any supplied quotation runs.
+  - **Verify by** `cmd`: fixture `result.ecl` covers empty, one-value, and
+    multi-value success stacks; word values remain inert; `and-then` success
+    and short-circuit paths; recovery of `'io` but not `'type`; a failing
+    recovery quotation; error mapping; both `case` branches; all-success,
+    mixed, and empty `all`; and stable `partition` output. Run the same fixture
+    after `'result use` and through qualified `result.*` calls.
+  - **Expected**: successes preserve exact stack order and representation;
+    short-circuited and unmatched errors are structurally identical to their
+    inputs; `all` returns the leftmost error or ordered success-stack lists;
+    `partition` preserves order within both outputs; malformed inputs are
+    rejected without executing probe quotations.
+  - **Traces to**: Milestone 11 — embedded source `result` module using the M6
+    result protocol and `attempt-with`.
 
 - **DoD-25 — json round-trip**
   - **Assert**: `json.parse` maps objects/arrays/numbers per the

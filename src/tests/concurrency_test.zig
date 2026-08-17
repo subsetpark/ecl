@@ -137,7 +137,7 @@ test "concurrency: task identity rendering dict keys and cached await are observ
     }
 }
 
-test "concurrency: two parked waiters share one cached outcome with one worker" {
+test "concurrency: two parked waiters share one cached result with one worker" {
     var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(
@@ -269,7 +269,7 @@ test "concurrency: one-worker kernel safe points let another unit progress" {
     try std.testing.expectEqualStrings("1", actual.bytes());
 }
 
-test "concurrency: large task outcomes materialize across scheduler slices" {
+test "concurrency: large task results materialize across scheduler slices" {
     var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
     try runOk(&runtime, "([1] 70000 take call) spawn await 'ok at len");
@@ -311,7 +311,7 @@ test "concurrency: par-each seeds children without resolving capture helpers" {
     try std.testing.expectEqualStrings("[1 2 3]", actual.bytes());
 }
 
-test "concurrency: source await-all is ordered outcome fan-in" {
+test "concurrency: source await-all is ordered result fan-in" {
     const quotation_lists = [_][]const u8{
         "[]",
         "[()]",
@@ -343,7 +343,7 @@ test "concurrency: source await-all is ordered outcome fan-in" {
         var documentation = try display(&runtime);
         defer documentation.deinit();
         try std.testing.expectEqualStrings(
-            "\"Wait for every task and return its outcome in input order.\"",
+            "\"Wait for every task and return its result in input order.\"",
             documentation.bytes(),
         );
     }

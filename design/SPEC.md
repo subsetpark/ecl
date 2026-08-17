@@ -438,7 +438,7 @@ The core kinds are a closed set: `'underflow`, `'undefined-word`, `'type`,
 `{'kind 'user 'msg msg}`.
 
 `(q) attempt` runs a self-contained quotation as a new unit on an isolated
-substack and always pushes exactly one outcome value: `{'ok (results)}`
+substack and always pushes exactly one result value: `{'ok (values)}`
 or `{'err <error dict>}`. Uniform arity is what makes reified failure safe
 in a stack language: a failure never shares a stack with the code
 observing it. Handling is ordinary dict handling — `ok?`, `or-raise`,
@@ -453,22 +453,22 @@ share-nothing units. Immutability makes sharing safe without copying.
 - `spawn` `( q -- task )` runs a self-contained quotation (the `attempt`
   contract: inputs via `partial`/environment, never the ambient stack) on
   its own isolated substack, concurrently.
-- `await` `( task -- outcome )` parks the current unit until the task
-  completes and delivers the same `{'ok …}`/`{'err …}` outcome shape as
-  `attempt`. It is idempotent — the outcome is cached — so task handles
+- `await` `( task -- result )` parks the current unit until the task
+  completes and delivers the same `{'ok …}`/`{'err …}` result shape as
+  `attempt`. It is idempotent — the result is cached — so task handles
   are observationally value-like. **`attempt` is observationally
   equivalent to `spawn await`.**
 - `await-for` adds a deadline in milliseconds: on expiry it returns
   `{'err {'kind 'timeout}}` without cancelling the task. A task that is
   already terminal beats even a zero deadline.
 - `await-any` races a nonempty list of tasks, returning the index and
-  outcome of the first to finish; among tasks already terminal at entry,
+  result of the first to finish; among tasks already terminal at entry,
   the lowest index wins.
 - `cancel` makes a task die with `{'err {'kind 'cancelled}}`; it is a
   no-op on a finished task. Cancellation is unconditional and safe because
   tasks are transactions: killing one discards an isolated substack.
 - `await-all` (defined as `(await) each`) waits for every task and
-  preserves each outcome as data, in input order; it never re-raises and
+  preserves each result as data, in input order; it never re-raises and
   never cancels siblings.
 - `par-each` `( l q -- l' )` applies the quotation to every element
   concurrently, enforcing exactly one result per element, and returns
@@ -483,7 +483,7 @@ failed unit leaves nothing" extends to processes. Dropped handles are
 cancelled at scope end; there are no detached daemons. The session is the
 root scope. `tasks` lists pending descendant tasks in spawn preorder.
 
-**Determinism.** Await order is program order, so `await-all` outcomes and
+**Determinism.** Await order is program order, so `await-all` results and
 `par-each`'s leftmost-error rule are schedule-invariant. Nondeterminism
 enters only where chosen (`await-any`) and in IO interleaving across
 concurrent tasks; within one task IO is ordered. Sequential combinators
@@ -700,27 +700,35 @@ Equivalent to `swap (at) fold`.
 `( y x -- z )` — **Pervasive.** Two-argument arctangent; returns float.
 
 ### attempt
-`( quotation -- outcome )` — *Isolated.* Run a self-contained quotation
+`( quotation -- result )` — *Isolated.* Run a self-contained quotation
 (contract `( -- … )`; inputs via `literal`/`partial`/environment) as a
-new unit on an isolated substack. Always pushes exactly one outcome:
-`{'ok (results)}` with the results as a list, or `{'err <error dict>}`.
+new unit on an isolated substack. Always pushes exactly one result:
+`{'ok (values)}` with the successful stack values as a list, or
+`{'err <error dict>}`.
 Observationally equivalent to `spawn await`. See Errors.
 
+### attempt-with
+`( values quotation -- result )` — Construct a self-contained quotation
+by capturing every element of the values list inertly and in order, then
+`attempt` it. The values therefore form the attempted unit's initial stack;
+the quotation cannot reach the caller's ambient stack. Defined in ecl as
+`partial-all attempt`. Observationally equivalent to `spawn-with await`.
+
 ### await
-`( task -- outcome )` — Park until the task completes; return its cached
-`{'ok …}`/`{'err …}` outcome. Idempotent. See Concurrency.
+`( task -- result )` — Park until the task completes; return its cached
+`{'ok …}`/`{'err …}` result. Idempotent. See Concurrency.
 
 ### await-all
-`( tasks -- outcomes )` — Outcome of every task, in input order; never
+`( tasks -- results )` — Result of every task, in input order; never
 re-raises and never cancels siblings. Equivalent to `(await) each`.
 
 ### await-any
-`( tasks -- index outcome )` — Race a nonempty all-task list; among tasks
+`( tasks -- index result )` — Race a nonempty all-task list; among tasks
 already terminal at entry the lowest index wins, otherwise the first
 completion.
 
 ### await-for
-`( task milliseconds -- outcome )` — `await` with a nonnegative int
+`( task milliseconds -- result )` — `await` with a nonnegative int
 deadline; expiry returns `{'err {'kind 'timeout}}` without cancelling the
 task. A terminal task beats even a zero deadline.
 
@@ -746,7 +754,7 @@ values, `x` first. Equivalent to `(|x y q| x q call y q call)`.
 list pushes its elements.
 
 ### cancel
-`( task -- )` — Request cancellation; the task's outcome becomes
+`( task -- )` — Request cancellation; the task's result becomes
 `{'err {'kind 'cancelled …}}`. No-op when already terminal.
 
 ### case
@@ -1014,7 +1022,7 @@ fresh environment and register the result as a module. See Modules.
 `( bool -- bool )` — **Pervasive.** Invert 0/1 values.
 
 ### ok?
-`( outcome -- bool )` — 1 when an outcome is a success. Equivalent to
+`( result -- bool )` — 1 when a result is a success. Equivalent to
 `'ok has?`.
 
 ### or
@@ -1023,12 +1031,12 @@ Both operands are already evaluated — there is no short-circuiting.
 Defined in ecl.
 
 ### or-else
-`( outcome fallback -- value )` — The result list of a success, or the
+`( result fallback -- value )` — The success values list, or the
 fallback on failure. Defined in ecl.
 
 ### or-raise
-`( outcome -- results )` — The result list of a success, or re-raise the
-captured error unchanged. (`or-raise call` unpacks the results onto the
+`( result -- values )` — The values list of a success, or re-raise the
+captured error unchanged. (`or-raise call` unpacks the values onto the
 stack.) Defined in ecl.
 
 ### over
@@ -1065,6 +1073,12 @@ an unevaluated quotation. `"42" parse first` is string-to-number.
 pushes the captured value inertly, then runs the quotation. Even a
 captured word remains data. Equivalent to `swap literal swap compose`;
 `3 (+) partial` is `((3) first +)`.
+
+### partial-all
+`( values quotation -- quotation )` — Capture every element of a list as
+an inert input to a quotation, preserving order. Calling the result starts
+with the list's elements as separate stack values. Defined in ecl as
+`((literal) each) dip append raze`.
 
 ### partition
 `( sequence predicate -- matches rejects )` — *Isolated*, contract
@@ -1159,6 +1173,13 @@ int, by sign. Equivalent to `dup 0 > swap 0 < -`.
 `( quotation -- task )` — *Isolated*, contract `( -- … )` (inputs via
 `partial`/environment, never the ambient stack). Run a self-contained
 quotation concurrently in a child task. See Concurrency.
+
+### spawn-with
+`( values quotation -- task )` — Construct a self-contained quotation by
+capturing every element of the values list inertly and in order, then
+`spawn` it. The values therefore form the child task's initial stack. Defined
+in ecl as `partial-all spawn`; `spawn-with await` is observationally
+equivalent to `attempt-with`.
 
 ### split
 `( string separator -- parts )` — Split a string at every occurrence of a

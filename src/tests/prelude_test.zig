@@ -63,7 +63,19 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .source = "3 (2 *) partial call (foo) first (type) partial call",
             .expected = "6 'word",
         },
-        .{ .name = "outcomes", .source = "(2 3 +) attempt ok? (2 3 +) attempt or-raise (missing) attempt 9 or-else", .expected = "1 [5] 9" },
+        .{
+            .name = "bulk partial application",
+            .source = "[2 3] (+) partial-all call (type) first 7 2 pack (pop type) partial-all call",
+            .expected = "5 'word",
+        },
+        .{
+            .name = "seeded attempts and tasks",
+            .source = "[] (42) attempt-with [2 3] (+) attempt-with " ++
+                "[2 3] (+) spawn-with await [2 0] (/) attempt-with ok? " ++
+                "[2 3] (+) attempt-with [2 3] (+) spawn-with await match",
+            .expected = "{'ok [42]} {'ok [5]} {'ok [5]} 0 1",
+        },
+        .{ .name = "results", .source = "(2 3 +) attempt ok? (2 3 +) attempt or-raise (missing) attempt 9 or-else", .expected = "1 [5] 9" },
         .{
             .name = "cleaves",
             .source = "1 2 nip 3 (1 +) keep 3 (1 +) (2 *) bi 3 (1 +) (2 *) (1 -) tri " ++
@@ -96,16 +108,17 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose bodies and nonempty documentation" {
     const names = [_][]const u8{
-        "compose", "first",  "wrap",     "literal", "dip",       "over",
-        "partial", "str",    "mod",      "neg",     "abs",       "<>",
-        "<=",      ">=",     "and",      "or",      "nip",       "keep",
-        "bi",      "tri",    "bi2",      "both",    "when",      "unless",
-        "case",    "signum", "clamp",    "last",    "pair",      "pack",
-        "append",  "rest",   "reverse",  "uncons",  "unappend",  "empty?",
-        "zip",     "min-of", "max-of",   "sort",    "distinct",  "at-path",
-        "vals",    "at-or",  "pairs",    "filter",  "partition", "any?",
-        "all?",    "sum",    "prod",     "mean",    "print",     "inspect",
-        "fail",    "ok?",    "or-raise", "or-else", "find",      "await-all",
+        "compose", "first",       "wrap",         "literal",    "dip",    "over",
+        "partial", "partial-all", "attempt-with", "spawn-with", "str",    "mod",
+        "neg",     "abs",         "<>",           "<=",         ">=",     "and",
+        "or",      "nip",         "keep",         "bi",         "tri",    "bi2",
+        "both",    "when",        "unless",       "case",       "signum", "clamp",
+        "last",    "pair",        "pack",         "append",     "rest",   "reverse",
+        "uncons",  "unappend",    "empty?",       "zip",        "min-of", "max-of",
+        "sort",    "distinct",    "at-path",      "vals",       "at-or",  "pairs",
+        "filter",  "partition",   "any?",         "all?",       "sum",    "prod",
+        "mean",    "print",       "inspect",      "fail",       "ok?",    "or-raise",
+        "or-else", "find",        "await-all",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(

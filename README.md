@@ -226,7 +226,7 @@ nonempty, odd, exhaustive, and prevalidated before selection.
 The embedded, commented [`src/prelude.ecl`](src/prelude.ecl) is the sole body
 for the derived vocabulary: cleaves and control adapters, compact numeric and
 comparison compositions, collection helpers, aggregates, `find`, and the
-failure/outcome protocol. Performance-sensitive compact definitions may be
+failure/result protocol. Performance-sensitive compact definitions may be
 recognized into private host callbacks, but those callbacks are not words and
 are unreachable through reflection or higher-order application. Each source
 definition is a navigable `### def <name>` block with reflective documentation:
@@ -260,12 +260,12 @@ The public
 
 `spawn` runs a quotation with an empty isolated stack and returns an opaque
 identity handle. `await` parks the calling unit and returns the child's cached
-`{'ok [...]}` or `{'err {...}}` outcome; duplicated handles and multiple
+`{'ok [...]}` or `{'err {...}}` result; duplicated handles and multiple
 waiters observe the same result. `cancel` recursively flags a task tree,
 `tasks` snapshots pending descendants in spawn preorder, `await-any` selects
 one indexed completion, and `await-for` limits a wait without cancelling the
 task. Source-defined `await-all` waits for a list of tasks and returns every
-ordinary outcome in input order without re-raising task failures. Task
+ordinary result in input order without re-raising task failures. Task
 displays such as `<task:1>` are intentionally rejected by the reader because
 they are live Session capabilities, not serializable values.
 Large native operations, result publication, joins, and cancellation walks
