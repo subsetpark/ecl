@@ -7,6 +7,7 @@ const reader = @import("reader.zig");
 const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
+const native_module = @import("native_module.zig");
 const machine = @import("machine.zig");
 const prims = @import("prims.zig");
 const prelude = @import("prelude.zig");
@@ -125,6 +126,7 @@ const SessionCore = struct {
     host_owner: *heap.HostOwner,
     environment: env.Env,
     registry: modules.Registry,
+    native_owner: *native_module.Owner,
     stack: std.ArrayList(Value) = .empty,
     archive: spans.SpanArchive,
     output: ?*std.Io.Writer,
@@ -141,6 +143,7 @@ const SessionCore = struct {
     last_max_frames: usize = 0,
     last_polls: u64 = 0,
     idiom_mode: machine.IdiomMode = .automatic,
+    native_diagnostics: bool = false,
     last_idiom_hits: u64 = 0,
 
     fn moduleAccess(self: *const SessionCore) *const modules.ExecutionAccess {
@@ -247,6 +250,8 @@ pub const Session = enum(usize) {
         try prims.install(&building);
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
+        const native_owner = try native_module.Owner.init(host_owner.cleanup());
+        errdefer native_owner.closeCalls().settle().deinit();
         var archive = try spans.SpanArchive.init(host_owner.cleanup());
         errdefer archive.deinit();
         var bootstrap_cancelled: std.atomic.Value(bool) = .init(false);
@@ -268,6 +273,7 @@ pub const Session = enum(usize) {
             .host_owner = host_owner,
             .environment = environment,
             .registry = registry,
+            .native_owner = native_owner,
             .archive = archive,
             .output = output,
             .diagnostics = diagnostics,
@@ -286,6 +292,7 @@ pub const Session = enum(usize) {
         const core = self.coreState();
         const allocator = core.allocator();
         const host = core.host_owner.cleanup();
+        const closing_native_owner = core.native_owner.closeCalls();
         core.scheduler.deinit(&core.root_tasks);
         if (core.root_scope) |root_scope| root_scope.retire();
         for (core.stack.items) |item| core.releaseDomain().releaseValue(item);
@@ -295,7 +302,13 @@ pub const Session = enum(usize) {
         core.registry.deinit();
         core.environment.deinit();
         core.archive.deinit();
+        // Environment and registry retirement own native image pins. Drain
+        // them while the issuing Owner is still alive, then let that host-only
+        // authority tear down descriptors/images and drain their ECL values.
         host.drain();
+        const settled_native_owner = closing_native_owner.settle();
+        host.drain();
+        settled_native_owner.deinit();
         allocator.destroy(core.host_owner);
         allocator.destroy(core);
         self.* = .consumed;
@@ -365,13 +378,17 @@ pub const Session = enum(usize) {
             core.arguments,
             &core.cancelled,
         );
-        unit.registry = &core.registry;
-        unit.diagnostics = core.diagnostics;
-        unit.host_io = core.host_io;
-        unit.ecl_path = core.ecl_path;
-        unit.idiom_mode = core.idiom_mode;
-        unit.phrase_recognizer = idioms.tryApply;
-        unit.console = &core.console;
+        unit.inherited = .{
+            .registry = &core.registry,
+            .native_loader = core.native_owner.loader(),
+            .native_diagnostics = core.native_diagnostics,
+            .diagnostics = core.diagnostics,
+            .console = &core.console,
+            .host_io = core.host_io,
+            .ecl_path = core.ecl_path,
+            .idiom_mode = core.idiom_mode,
+            .phrase_recognizer = idioms.tryApply,
+        };
         unit.scheduler = core.scheduler.worker();
         unit.task_scope = &core.root_tasks;
         unit.is_root_unit = true;
@@ -401,10 +418,16 @@ pub const Session = enum(usize) {
         const core = self.coreState();
         var allocating = std.Io.Writer.Allocating.init(core.allocator());
         defer allocating.deinit();
+        var previous_multiline = false;
         for (self.coreState().stack.items, 0..) |item, index| {
-            if (index > 0) allocating.writer.writeByte(' ') catch return error.OutOfMemory;
-            printer.printWithAllocator(core.allocator(), item, &allocating.writer) catch
-                return error.OutOfMemory;
+            const rendered = try printer.toOwnedDisplayString(core.allocator(), item);
+            defer core.allocator().free(rendered);
+            const multiline = std.mem.indexOfScalar(u8, rendered, '\n') != null;
+            if (index > 0) allocating.writer.writeByte(
+                if (previous_multiline or multiline) '\n' else ' ',
+            ) catch return error.OutOfMemory;
+            allocating.writer.writeAll(rendered) catch return error.OutOfMemory;
+            previous_multiline = multiline;
         }
         return .fromOwned(core.allocator(), try allocating.toOwnedSlice());
     }
@@ -530,6 +553,9 @@ pub const Session = enum(usize) {
     pub fn setIdiomMode(self: *Session, mode: machine.IdiomMode) void {
         self.coreState().idiom_mode = mode;
     }
+    pub fn setNativeDiagnostics(self: *Session, enabled: bool) void {
+        self.coreState().native_diagnostics = enabled;
+    }
     pub fn requestedExit(self: *const Session) ?u8 {
         return self.coreState().requested_exit;
     }
@@ -550,16 +576,6 @@ pub const Session = enum(usize) {
     }
     pub fn writeDiagnosticsLine(self: *Session, bytes: []const u8) error{WriteFailed}!void {
         return self.coreState().console.writeDiagnostics(bytes, true);
-    }
-    pub fn registerNativeModule(
-        self: *Session,
-        name: intern.NamespaceName,
-        definitions: []const modules.NativeDefinition,
-    ) modules.RegistryError!u64 {
-        const core = self.coreState();
-        var mutation_turn = BlockingMutationTurn{ .scheduler = &core.scheduler };
-        defer mutation_turn.deinit();
-        return core.registry.registerNative(name, definitions);
     }
     pub fn define(
         self: *Session,

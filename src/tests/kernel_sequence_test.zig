@@ -1,5 +1,39 @@
 //! Executable proofs for sequence, search, and shape kernels.
+const std = @import("std");
 const helper = @import("kernel_test_support.zig");
+const session = @import("../session.zig");
+const heap = @import("../heap.zig");
+
+fn expectRoundTripDisplay(source: []const u8, expected: []const u8) !void {
+    const allocator = std.testing.allocator;
+    var original = try session.Session.init(allocator, &.{});
+    defer original.deinit();
+    switch (try original.runUnit("<display-source>", source)) {
+        .ok => {},
+        .incomplete => return error.TestUnexpectedResult,
+        .err => |failure| {
+            heap.testing.releaseValue(allocator, failure);
+            return error.TestUnexpectedResult;
+        },
+    }
+    var rendered = try original.stackDisplay();
+    defer rendered.deinit();
+    try std.testing.expectEqualStrings(expected, rendered.bytes());
+
+    var reread = try session.Session.init(allocator, &.{});
+    defer reread.deinit();
+    switch (try reread.runUnit("<display-output>", rendered.bytes())) {
+        .ok => {},
+        .incomplete => return error.TestUnexpectedResult,
+        .err => |failure| {
+            heap.testing.releaseValue(allocator, failure);
+            return error.TestUnexpectedResult;
+        },
+    }
+    var repeated = try reread.stackDisplay();
+    defer repeated.deinit();
+    try std.testing.expectEqualStrings(rendered.bytes(), repeated.bytes());
+}
 
 test "sequence: len shape and ragged shape errors" {
     try helper.expectStack("[[1 2] [3 4]] dup len swap shape", "2 [2 2]");
@@ -77,9 +111,18 @@ test "sequence: raze and cat specialize their outputs" {
 }
 
 test "sequence: flip and reshape obey rectangular row-major semantics" {
-    try helper.expectStack(
+    try expectRoundTripDisplay(
         "[[1 2] [3 4]] flip [1 2 3] [2 3] reshape [1 2] flip [] [2 0] reshape shape",
-        "([1 3] [2 4]) ([1 2 3] [1 2 3]) [1 2] [2 0]",
+        "([1 3]\n [2 4])\n([1 2 3]\n [1 2 3])\n[1 2] [2 0]",
+    );
+    try expectRoundTripDisplay(
+        "[0 1 2 3 4 5 6 7 8 9] [2 3 4] reshape",
+        "(([0 1 2 3]\n  [4 5 6 7]\n  [8 9 0 1])\n" ++
+            " ([2 3 4 5]\n  [6 7 8 9]\n  [0 1 2 3]))",
+    );
+    try helper.expectStack(
+        "[0 1 2 3 4 5] [2 3] reshape str",
+        "\"([0 1 2] [3 4 5])\"",
     );
     try helper.expectErrors(&.{
         .{
@@ -98,4 +141,15 @@ test "sequence: flip and reshape obey rectangular row-major semantics" {
             .message_contains = "cannot retain trailing axes",
         },
     });
+}
+
+test "sequence: display indentation follows output columns and strings are not matrix rows" {
+    try expectRoundTripDisplay(
+        "(5 ([1 2] [3 4]))",
+        "(5 ([1 2]\n    [3 4]))",
+    );
+    try expectRoundTripDisplay(
+        "(\"a\" \"b\") (\"a\" \"bb\")",
+        "(\"a\" \"b\") (\"a\" \"bb\")",
+    );
 }

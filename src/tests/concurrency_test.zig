@@ -1,5 +1,6 @@
 const std = @import("std");
 const session = @import("../session.zig");
+const native_fixture = @import("native_fixture_options");
 
 fn runOk(runtime: *session.Session, source: []const u8) !void {
     switch (try runtime.runUnit("concurrency.ecl", source)) {
@@ -39,6 +40,29 @@ test "concurrency: cooperative sessions preserve public task behavior without wo
     var actual = try display(&runtime);
     defer actual.deinit();
     try std.testing.expectEqualStrings("{'ok [3]}", actual.bytes());
+}
+
+test "concurrency: native shutdown releases delayed continuations and image pins" {
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var output_buffer: [64]u8 = undefined;
+        var diagnostic_buffer: [64]u8 = undefined;
+        var output = std.Io.Writer.Discarding.init(&output_buffer);
+        var diagnostics = std.Io.Writer.Discarding.init(&diagnostic_buffer);
+        var runtime = try session.Session.initWithHostConfig(
+            allocator,
+            &.{},
+            std.testing.io,
+            &output.writer,
+            &diagnostics.writer,
+            native_fixture.directory,
+            .{ .worker_pool = 1 },
+        );
+        try runOk(&runtime, "'sample use (9 sample.yield-forever) spawn pop");
+        runtime.deinit();
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
 }
 
 test "concurrency: cooperative ready work cannot starve bounded retirement" {

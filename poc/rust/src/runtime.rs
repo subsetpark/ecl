@@ -271,7 +271,7 @@ enum Frame {
         results: Vec<Value>,
         env: EnvRef,
     },
-    Each2After {
+    ZipWithAfter {
         outer: Vec<Value>,
         left: Arc<[Value]>,
         right: Arc<[Value]>,
@@ -453,7 +453,7 @@ impl<'runtime> Machine<'runtime> {
                 results,
                 env,
             } => self.finish_each(outer, items, quotation, index, results, env),
-            Frame::Each2After {
+            Frame::ZipWithAfter {
                 outer,
                 left,
                 right,
@@ -461,7 +461,7 @@ impl<'runtime> Machine<'runtime> {
                 index,
                 results,
                 env,
-            } => self.finish_each2(outer, (left, right), quotation, index, results, env),
+            } => self.finish_zip_with(outer, (left, right), quotation, index, results, env),
             Frame::ForAfter {
                 outer,
                 items,
@@ -702,7 +702,7 @@ impl<'runtime> Machine<'runtime> {
             "merge" => self.merge(),
             "has?" => self.has(),
             "each" => self.each(env),
-            "each2" => self.each2(env),
+            "zip-with" => self.zip_with(env),
             "for" => self.for_word(env),
             "fold" => self.fold(env, false),
             "scan" => self.fold(env, true),
@@ -1586,11 +1586,11 @@ impl<'runtime> Machine<'runtime> {
         Ok(())
     }
 
-    fn each2(&mut self, env: &EnvRef) -> Result<(), EclError> {
-        self.require(3, "each2")?;
-        let quotation = self.pop_list("each2")?;
-        let right_value = self.pop("each2")?;
-        let left_value = self.pop("each2")?;
+    fn zip_with(&mut self, env: &EnvRef) -> Result<(), EclError> {
+        self.require(3, "zip-with")?;
+        let quotation = self.pop_list("zip-with")?;
+        let right_value = self.pop("zip-with")?;
+        let left_value = self.pop("zip-with")?;
         // Broadcast conformability (decisions 3, 14): an atom on either side
         // extends to the other side's length, exactly as it would under a
         // pervasive binary word.
@@ -1601,7 +1601,7 @@ impl<'runtime> Machine<'runtime> {
                         return Err(EclError::new(
                             ErrorKind::Conform,
                             format!(
-                                "each2 requires equal leading lengths; got {} and {}",
+                                "zip-with requires equal leading lengths; got {} and {}",
                                 left.len(),
                                 right.len()
                             ),
@@ -1618,7 +1618,7 @@ impl<'runtime> Machine<'runtime> {
                     (Arc::from(left), Arc::from(right))
                 }
                 (None, None) => {
-                    return Err(type_error("each2", "at least one list", &left_value));
+                    return Err(type_error("zip-with", "at least one list", &left_value));
                 }
             };
         let outer = std::mem::take(&mut self.runtime.stack);
@@ -1629,7 +1629,7 @@ impl<'runtime> Machine<'runtime> {
         }
         self.runtime.stack.push(left[0].clone());
         self.runtime.stack.push(right[0].clone());
-        self.frames.push(Frame::Each2After {
+        self.frames.push(Frame::ZipWithAfter {
             outer,
             left,
             right,
@@ -1642,7 +1642,7 @@ impl<'runtime> Machine<'runtime> {
         Ok(())
     }
 
-    fn finish_each2(
+    fn finish_zip_with(
         &mut self,
         outer: Vec<Value>,
         inputs: (Arc<[Value]>, Arc<[Value]>),
@@ -1654,7 +1654,7 @@ impl<'runtime> Machine<'runtime> {
         let (left, right) = inputs;
         if self.runtime.stack.len() != 1 {
             return Err(contract_error(
-                &format!("each2 quotation at element {index}"),
+                &format!("zip-with quotation at element {index}"),
                 "( a b -- c )",
                 2,
                 self.runtime.stack.len(),
@@ -1669,7 +1669,7 @@ impl<'runtime> Machine<'runtime> {
         }
         self.runtime.stack.push(left[next].clone());
         self.runtime.stack.push(right[next].clone());
-        self.frames.push(Frame::Each2After {
+        self.frames.push(Frame::ZipWithAfter {
             outer,
             left,
             right,
@@ -2695,7 +2695,7 @@ fn core_words() -> &'static [&'static str] {
         "merge",
         "has?",
         "each",
-        "each2",
+        "zip-with",
         "for",
         "fold",
         "scan",
@@ -2771,7 +2771,7 @@ mod tests {
     #[test]
     fn every_isolated_combinator_writes_only_to_its_child_scope() {
         for source in [
-            "[1] [2] (dup 'k let +) each2 pop k",
+            "[1] [2] (dup 'k let +) zip-with pop k",
             "[1] (dup 'k let pop) for k",
             "[1] 0 (dup 'k let +) fold pop k",
             "[1] 0 (dup 'k let +) scan pop k",
@@ -2975,13 +2975,13 @@ mod tests {
     }
 
     #[test]
-    fn each2_extends_atoms_like_broadcast() {
+    fn zip_with_extends_atoms_like_broadcast() {
         assert_eq!(
-            run("[1 2 3] 10 (pair) each2").stack_display(),
+            run("[1 2 3] 10 (pair) zip-with").stack_display(),
             "[[1 10] [2 10] [3 10]]"
         );
         assert_eq!(
-            run("10 [1 2 3] (pair) each2").stack_display(),
+            run("10 [1 2 3] (pair) zip-with").stack_display(),
             "[[10 1] [10 2] [10 3]]"
         );
     }

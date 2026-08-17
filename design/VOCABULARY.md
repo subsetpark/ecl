@@ -15,7 +15,7 @@ proof that the language can build itself).
   `both`, `if`, `when`, `unless`, `cond`, `while`, `times`.
 - *Isolated*: the quotation runs on a fresh substack per application,
   seeded with declared inputs, its result count checked against the
-  contract (`each`, `each2`, `for`, `fold`, `scan`, `infra`, `attempt`,
+  contract (`each`, `zip-with`, `for`, `fold`, `scan`, `infra`, `attempt`,
   `spawn`, `module`).
 
 ## Stack plumbing
@@ -25,9 +25,9 @@ proof that the language can build itself).
 | [P] | `dup`  | `( x -- x x )` | |
 | [P] | `swap` | `( x y -- y x )` | |
 | [P] | `pop`  | `( x -- )` | Joy name; `drop` is the sequence word |
-| [P] | `over` | `( x y -- x y x )` | |
+| [E] | `over` | `( x y -- x y x )` | `swap dup (swap) dip` |
 | [E] | `nip`  | `( x y -- y )` | `swap pop` |
-| [P] | `dip`  | `( x q -- … x )` | inline: run `q` under the top value |
+| [E] | `dip`  | `( x q -- … x )` | inline: `swap literal compose call` |
 | [E] | `keep` | `( x q -- … x )` | inline: run `q` on `x`, restore `x` |
 | [E] | `bi`   | `( x p q -- … )` | inline: apply `p` to x, then `q` to x |
 | [E] | `tri`  | `( x p q r -- … )` | three-way `bi` |
@@ -40,7 +40,7 @@ proof that the language can build itself).
 |---|---|---|---|
 | [P] | `call`    | `( q -- … )` | inline application (Joy's `i`) |
 | [P] | `cons`    | `( x l -- l' )` | raw structural prepend. On data: `1 [2 3] cons` → `[1 2 3]`. On code it inserts a form: a prepended word executes when the result is called, so `cons` is not universally safe partial application |
-| [P] | `compose` | `( q r -- qr )` | concatenate quotations |
+| [E] | `compose` | `( q r -- qr )` | concatenate quotations with `cat`, preserving the empty quotation representation |
 | [E] | `literal` | `( x -- q )` | build the plain, inspectable quotation `((x) first)` as `wrap (first) cons`; calling it pushes the exact captured value without executing or resolving it |
 | [E] | `partial` | `( x q -- q' )` | safe partial application: capture `x` inertly, then run `q`; defined as `swap literal swap compose`, so even a captured word remains data |
 | [P] | `if`      | `( bool then else -- … )` | inline; branches run on current stack |
@@ -90,7 +90,7 @@ is an idiom-recognition site (d.23).
 | [P] | `load`   | `( path -- )` | replay file as one unit — d.18, grammar |
 | [P] | `parse`  | `( string -- q )` | the reader, reified: source text → list; `"42" parse first` is string→number |
 | [P] | `type`   | `( x -- s )` | value kind as a symbol: `'int 'float 'char 'symbol 'word 'list 'dict 'task` — dict-dispatch with `case`; the closed d.22 atom set |
-| [P] | `str`    | `( x -- string )` | printed representation (round-trips except Session-linked task capabilities, d.16/d.20) |
+| [E] | `str`    | `( x -- string )` | `wrap "{}" format`; printed representation (round-trips except Session-linked task capabilities, d.16/d.20) |
 
 Definition annotations are ordinary quotations: `(a -- b)`,
 `(: "Documentation.")`, or `(a -- b : "Documentation.")`. Top-level effects
@@ -102,8 +102,10 @@ and native entries, while still remaining legal word and symbol values.
 ## Arithmetic — all *pervasive* (d.13)
 
 `+` `-` `*` `/` `( x y -- z )`; `/` is float division (d.12).
-`div` `mod` `( x y -- z )` integer division / modulo.
-`neg` `abs` `sqrt` `( x -- y )`.
+`div` [P], `mod` [E] `( x y -- z )` integer division / modulo;
+`mod` is `over over div * -`.
+`neg` `abs` [E], `sqrt` [P] `( x -- y )`; the source definitions retain
+private pervasive host idioms.
 `floor` `ceil` `round` `( x -- n )` — return int64; `'overflow` outside
 the range (d.22).
 `pow` `min` `max` `( x y -- z )`; `pow` returns float.
@@ -114,7 +116,7 @@ transcendentals, the awk floor for the d.21 slot (gap scan 2026-08-12).
 d.22 governs the edges: `0 log` is −inf from a finite input, so
 `'overflow`; `-1 log` would be NaN, so `'domain`.
 `clamp` `( x lo hi -- y )` [E] — `((max) dip min)`.
-All [P] except `signum`. Integer overflow errors (d.4). Char
+All other words in this section are [P]. Integer overflow errors (d.4). Char
 arithmetic per d.15.
 Floats: `inf`/`-inf` are literals and propagate through arithmetic; NaN
 never exists — NaN-producing operations error `'domain`, and non-finite
@@ -122,9 +124,10 @@ results from finite inputs error `'overflow` (d.22).
 
 ## Comparison & logic — *pervasive* except `match`
 
-`=` `<` `>` `<=` `>=` `<>` `( x y -- bool )` — 0/1 masks. [P]
-`and` `or` `not` — on 0/1 ints. [P] (`<>` on 0/1 ints is xor —
-no separate word.)
+`=` `<` `>` [P] and `<=` `>=` `<>` [E] `( x y -- bool )` — 0/1 masks.
+`not` [P], `and` `or` [E] — on 0/1 ints. The compact [E] comparisons and
+boolean compositions retain private pervasive host idioms. (`<>` on 0/1
+ints is xor — no separate word.)
 `match` `( x y -- bool )` — structural whole-value equality, **not**
 pervasive (the K `~` distinction: `[1 2] [1 2] =` is `[1 1]`,
 `[1 2] [1 2] match` is `1`). [P]
@@ -147,13 +150,14 @@ Indexing is **0-based** throughout (K convention): `range` counts from
 |---|---|---|---|
 | [P] | `len`      | `( l -- n )` | top-level count; any list (d.2) |
 | [P] | `shape`    | `( l -- l' )` | rectangular only, else `'shape` error (d.2) |
-| [P] | `first`    | `( l -- x )` | |
+| [E] | `first`    | `( l -- x )` | `dup len pop 0 at`; direct host idiom |
 | [E] | `last`     | `( l -- x )` | |
-| [P] | `rest`     | `( l -- l' )` | |
+| [E] | `rest`     | `( l -- l' )` | `dup first pop 1 drop`; direct host idiom |
 | [E] | `uncons`   | `( l -- x l' )` | split a nonempty list into its first element and remaining elements |
 | [P] | `take`     | `( l n -- l' )` | negative n: from the end; n beyond len cycles the data (K) — ruled 2026-08-12 |
 | [P] | `drop`     | `( l n -- l' )` | sequence drop (K sense); stack word is `pop` |
 | [P] | `at`       | `( l i -- x )` | index; pervasive over `i` (index vectors select) |
+| [E] | `at-path`  | `( ds l -- x )` | `swap (at) fold`; repeatedly index a nested list/dict by the path's keys and indices; an empty path returns `ds` |
 | [P] | `where`    | `( counts -- l )` | ints → each index replicated count times (K); a 0/1 mask is the common case, yielding positions — generalized 2026-08-12 |
 | [P] | `in`       | `( x l -- bool )` | membership; pervasive over `x` |
 | [E] | `find`     | `( l x -- i )` | index of first match, or len |
@@ -165,17 +169,17 @@ Indexing is **0-based** throughout (K convention): `range` counts from
 | [E] | `append`   | `( l x -- l' )` | `wrap cat` (K `,`) |
 | [E] | `unappend` | `( l -- l' x )` | inverse of single-value `append`; split a nonempty list into its initial elements and last element |
 | [E] | `empty?`   | `( l -- bool )` | `len 0 =` |
-| [E] | `zip`      | `( l m -- l' )` | `(pair) each2` |
+| [E] | `zip`      | `( l m -- l' )` | `(pair) zip-with` |
 | [E] | `min-of`   | `( l -- x )` | `dup first (min) fold` (K `&/`) |
 | [E] | `max-of`   | `( l -- x )` | `dup first (max) fold` (K `\|/`) |
 | [P] | `put`      | `( l i x -- l' )` | functional element update; the same word as dict `put`, like `at`; CoW updates in place when unique (d.1) |
-| [P] | `reverse`  | `( l -- l' )` | |
+| [E] | `reverse`  | `( l -- l' )` | source-defined index permutation; direct host idiom |
 | [P] | `flip`     | `( l -- l' )` | transpose; rectangular, exact nested-list shape required (K name) |
 | [P] | `range`    | `( n -- l )` | `[0 1 … n-1]` |
 | [P] | `reshape`  | `( l shape -- l' )` | cycle data to exact nested-list shape; zero axis must be final |
 | [P] | `grade`    | `( l -- indices )` | ascending sort permutation (K); orders by `cmp`, elements must be mutually comparable |
 | [E] | `sort`     | `( l -- l' )` | `dup grade at` |
-| [P] | `distinct` | `( l -- l' )` | first occurrences, order kept (K) |
+| [E] | `distinct` | `( l -- l' )` | `group keys`; direct host idiom avoids the intermediate grouped dictionary |
 | [P] | `group`    | `( l -- d )` | dict: value → indices (K) |
 
 ## Dicts
@@ -184,7 +188,7 @@ Indexing is **0-based** throughout (K convention): `range` counts from
 |---|---|---|---|
 | [P] | `dict-of` | `( entries -- d )` | flat even-length list of adjacent key/value entries; executes nothing — d.17 |
 | [P] | `keys`    | `( d -- l )` | insertion order |
-| [P] | `vals`    | `( d -- l )` | |
+| [E] | `vals`    | `( d -- l )` | `dup keys swap (swap at) partial each`; direct host idiom |
 | [P] | `at`      | `( d k -- v )` | same word as list indexing; missing key errors |
 | [P] | `put`     | `( d k v -- d' )` | functional update (new dict) |
 | [P] | `del`     | `( d k -- d' )` | |
@@ -199,7 +203,7 @@ Indexing is **0-based** throughout (K convention): `range` counts from
 | | word | effect | quotation contract |
 |---|---|---|---|
 | [P] | `each`  | `( l q -- l' )` | `( a -- b )` |
-| [P] | `each2` | `( l m q -- l' )` | `( a b -- c )`, broadcast conformability |
+| [P] | `zip-with` | `( l m q -- l' )` | `( a b -- c )`, broadcast conformability |
 | [P] | `for`   | `( l q -- )` | `( a -- )`, ordered |
 | [P] | `fold`  | `( l acc q -- acc' )` | `( acc a -- acc )` |
 | [P] | `scan`  | `( l acc q -- l' )` | `( acc a -- acc )`, keeps intermediates |
@@ -310,7 +314,7 @@ selection pipeline is intentionally shown in readable, commented form in
 prelude definition follows the same `### def <name>` navigation convention and
 exposes a meaningful nonempty string through `doc`.
 
-Counts: 107 primitives and 42 prelude words. The kernel surface
+Counts: 90 primitives and 60 prelude words. The kernel surface
 (decision 21's optimization target) is the pervasive arithmetic plus
 the [P] list/dict words plus the iteration combinators — about forty
 loops.

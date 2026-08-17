@@ -26,12 +26,9 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "dup", .primitive = dup },
         .{ .name = "swap", .primitive = swap },
         .{ .name = "pop", .primitive = pop },
-        .{ .name = "over", .primitive = over },
         .{ .name = "cons", .primitive = cons },
-        .{ .name = "compose", .primitive = compose },
         .{ .name = "match", .primitive = match },
         .{ .name = "type", .primitive = typeWord },
-        .{ .name = "str", .primitive = strWord },
         .{ .name = "parse", .primitive = parse },
         .{ .name = "dict-of", .primitive = dictOf },
         .{ .name = "attempt", .primitive = attempt },
@@ -60,11 +57,6 @@ fn pop(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     item.deinit();
 }
-fn over(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    const items = evaluator.unit.stack.items;
-    try evaluator.pushBorrowed(items[items.len - 2]);
-}
 fn cons(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     var collection = try evaluator.popValue();
@@ -76,31 +68,13 @@ fn cons(evaluator: *Machine) MachineError!void {
     const values = try evaluator.allocator().alloc(Value, count + 1);
     errdefer evaluator.allocator().free(values);
     const state = try evaluator.allocator().create(ConcatDriver);
-    state.* = ConcatDriver.init(evaluator.allocator(), .cons, item.borrow(), collection.borrow(), values);
+    state.* = ConcatDriver.init(evaluator.allocator(), item.borrow(), collection.borrow(), values);
     _ = item.take();
     _ = collection.take();
     evaluator.installWorkDriver(state);
 }
-fn compose(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    var right = try evaluator.popValue();
-    defer right.deinit();
-    var left = try evaluator.popValue();
-    defer left.deinit();
-    if (left.borrow() != .list or right.borrow() != .list) return evaluator.typeError("two lists");
-    const left_len: usize = @intCast(left.borrow().list.length());
-    const right_len: usize = @intCast(right.borrow().list.length());
-    const values = try evaluator.allocator().alloc(Value, left_len + right_len);
-    errdefer evaluator.allocator().free(values);
-    const state = try evaluator.allocator().create(ConcatDriver);
-    state.* = ConcatDriver.init(evaluator.allocator(), .compose, left.borrow(), right.borrow(), values);
-    _ = left.take();
-    _ = right.take();
-    evaluator.installWorkDriver(state);
-}
 
 const ConcatDriver = struct {
-    mode: enum { cons, compose },
     left: Value,
     right: Value,
     values: []Value,
@@ -110,13 +84,11 @@ const ConcatDriver = struct {
 
     fn init(
         allocator: std.mem.Allocator,
-        mode: @FieldType(ConcatDriver, "mode"),
         left: Value,
         right: Value,
         values: []Value,
     ) ConcatDriver {
         return .{
-            .mode = mode,
             .left = left,
             .right = right,
             .values = values,
@@ -128,19 +100,10 @@ const ConcatDriver = struct {
         try evaluator.pollKernel();
         var budget = machine.kernel_poll_quantum;
         while (!self.materializing and budget != 0 and self.index != self.values.len) : (budget -= 1) {
-            self.values[self.index] = switch (self.mode) {
-                .cons => if (self.index == 0)
-                    self.left
-                else
-                    list.atUnchecked(self.right, self.index - 1),
-                .compose => blk: {
-                    const left_len: usize = @intCast(self.left.list.length());
-                    break :blk if (self.index < left_len)
-                        list.atUnchecked(self.left, self.index)
-                    else
-                        list.atUnchecked(self.right, self.index - left_len);
-                },
-            };
+            self.values[self.index] = if (self.index == 0)
+                self.left
+            else
+                list.atUnchecked(self.right, self.index - 1);
             self.index += 1;
         }
         if (self.index != self.values.len) return .yielded;
@@ -213,50 +176,6 @@ fn typeWord(evaluator: *Machine) MachineError!void {
     };
     try evaluator.pushOwned(.{ .symbol = try intern.intern(spelling) });
 }
-fn strWord(evaluator: *Machine) MachineError!void {
-    var item = try evaluator.popValue();
-    defer item.deinit();
-    const state = try evaluator.allocator().create(StrDriver);
-    errdefer evaluator.allocator().destroy(state);
-    state.* = .{ .item = item.borrow(), .render = try .init(evaluator.allocator(), item.borrow()) };
-    _ = item.take();
-    evaluator.installWorkDriver(state);
-}
-
-const StrDriver = struct {
-    item: Value,
-    render: printer.OwnedStringCursor,
-    rendered: ?[]u8 = null,
-    utf8: ?kernel_storage.Utf8Materializer = null,
-
-    pub fn advance(evaluator: *Machine, self: *StrDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.utf8 == null) switch (try self.render.advance(machine.kernel_poll_quantum)) {
-            .pending => return .yielded,
-            .complete => |bytes| {
-                self.rendered = bytes;
-                self.utf8 = .init(evaluator.allocator(), bytes);
-                return .yielded;
-            },
-        };
-        return switch (self.utf8.?.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidUtf8 => unreachable,
-        }) {
-            .pending => .yielded,
-            .complete => |result| .{ .output = result },
-        };
-    }
-
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *StrDriver) void {
-        if (self.utf8) |*utf8| utf8.retire(releases);
-        if (self.rendered) |bytes| allocator.free(bytes);
-        self.render.deinit();
-        releases.releaseValue(self.item);
-        allocator.destroy(self);
-    }
-};
-
 fn parse(evaluator: *Machine) MachineError!void {
     var source_value = try evaluator.popValue();
     defer source_value.deinit();
@@ -459,11 +378,14 @@ const RaiseDriver = struct {
 fn pp(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
-    if (evaluator.unit.console == null and evaluator.unit.output == null)
+    if (evaluator.unit.inherited.console == null and evaluator.unit.output == null)
         return evaluator.fail(.io, "standard output is unavailable");
     const state = try evaluator.allocator().create(PpDriver);
     errdefer evaluator.allocator().destroy(state);
-    state.* = .{ .item = item.borrow(), .render = try .init(evaluator.allocator(), item.borrow()) };
+    state.* = .{
+        .item = item.borrow(),
+        .render = try .initDisplay(evaluator.allocator(), item.borrow()),
+    };
     _ = item.take();
     evaluator.installWorkDriver(state);
 }
@@ -478,7 +400,7 @@ const PpDriver = struct {
             .pending => .yielded,
             .complete => |rendered| completed: {
                 defer evaluator.allocator().free(rendered);
-                if (evaluator.unit.console) |console| {
+                if (evaluator.unit.inherited.console) |console| {
                     console.writeOutput(rendered, true) catch
                         return evaluator.fail(.io, "standard output write failed");
                     break :completed .completed;
@@ -506,7 +428,7 @@ fn prin(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     if (!item.borrow().isString()) return evaluator.typeError("a string");
-    if (evaluator.unit.console == null and evaluator.unit.output == null)
+    if (evaluator.unit.inherited.console == null and evaluator.unit.output == null)
         return evaluator.fail(.io, "standard output is unavailable");
     const state = try evaluator.allocator().create(PrinDriver);
     state.* = .{ .item = item.borrow(), .encoder = .init(evaluator.allocator(), item.borrow()) };
@@ -530,7 +452,7 @@ const PrinDriver = struct {
             .pending => .yielded,
             .complete => |encoded| completed: {
                 defer evaluator.allocator().free(encoded);
-                if (evaluator.unit.console) |console| {
+                if (evaluator.unit.inherited.console) |console| {
                     console.writeOutput(encoded, false) catch
                         return evaluator.fail(.io, "standard output write failed");
                     break :completed .completed;

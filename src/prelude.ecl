@@ -1,3 +1,84 @@
+### def compose
+(cat dup len 0 = (pop ()) () if)
+(left right -- quotation : "Concatenate two quotations in execution order.")
+'compose def
+
+### def first
+(dup len pop 0 at)
+(list -- value : "Return the first element of a nonempty list.")
+'first def
+
+### def wrap
+(() cons)
+(value -- list : "Wrap one value in a one-element list.")
+'wrap def
+
+### def literal
+(wrap (first) cons)
+(value -- quotation : "Return a quotation that pushes the exact value as inert data when called.")
+'literal def
+
+### def dip
+(swap literal compose call)
+(: "Run a quotation beneath a protected top stack value.")
+'dip def
+
+### def over
+(swap dup (swap) dip)
+(x y -- x y x : "Copy the value beneath the top of the stack onto the top.")
+'over def
+
+### def partial
+(swap literal swap compose)
+(value quotation -- quotation :
+ "Return a quotation that pushes an inert captured value before running another quotation.")
+'partial def
+
+### def str
+(wrap "{}" format)
+(value -- string : "Return the canonical printed representation of a value as a string.")
+'str def
+
+### def mod
+(over over div * -)
+(x y -- z : "Compute checked integer remainders pervasively.")
+'mod def
+
+### def neg
+(-1 *)
+(x -- y : "Negate numeric values pervasively with checked integer overflow.")
+'neg def
+
+### def abs
+(dup neg 0 + swap max)
+(x -- y : "Return absolute numeric values pervasively with checked integer overflow.")
+'abs def
+
+### def <>
+(= not)
+(x y -- bool : "Compare conforming values for pervasive inequality, producing boolean masks.")
+'<> def
+
+### def <=
+(> not)
+(x y -- bool : "Compare conforming values pervasively for less-than-or-equal order.")
+'<= def
+
+### def >=
+(< not)
+(x y -- bool : "Compare conforming values pervasively for greater-than-or-equal order.")
+'>= def
+
+### def and
+((not not) dip not not min)
+(x y -- bool : "Compute boolean conjunction pervasively over 0 and 1 values.")
+'and def
+
+### def or
+((not not) dip not not max)
+(x y -- bool : "Compute boolean disjunction pervasively over 0 and 1 values.")
+'or def
+
 ### def nip
 (swap pop)
 (x y -- y : "Discard the value immediately beneath the top of the stack.")
@@ -85,22 +166,6 @@
 (sequence -- value : "Return the final element of a nonempty sequence.")
 'last def
 
-### def wrap
-(() cons)
-(value -- list : "Wrap one value in a one-element list.")
-'wrap def
-
-### def literal
-(wrap (first) cons)
-(value -- quotation : "Return a quotation that pushes the exact value as inert data when called.")
-'literal def
-
-### def partial
-(swap literal swap compose)
-(value quotation -- quotation :
- "Return a quotation that pushes an inert captured value before running another quotation.")
-'partial def
-
 ### def pair
 (() cons cons)
 (first second -- list : "Collect two stack values into a two-element list in stack order.")
@@ -115,6 +180,19 @@
 (wrap cat)
 (sequence value -- sequence : "Append one value to the end of a sequence.")
 'append def
+
+### def rest
+(dup first pop 1 drop)
+(list -- list : "Return all but the first element of a nonempty list.")
+'rest def
+
+### def reverse
+(dup len dup 0 =
+ (pop)
+ (dup range swap 1 - swap - at)
+ if)
+(list -- list : "Return a list with its top-level element order reversed.")
+'reverse def
 
 ### def uncons
 (dup first swap rest)
@@ -132,7 +210,7 @@
 'empty? def
 
 ### def zip
-((pair) each2)
+((pair) zip-with)
 (left right -- pairs : "Pair corresponding elements from two conforming sequences.")
 'zip def
 
@@ -150,6 +228,21 @@
 (dup grade at)
 (sequence -- sorted : "Return a stably ascending permutation of a sequence.")
 'sort def
+
+### def distinct
+(group keys)
+(list -- list : "Return the first occurrence of each distinct list value in input order.")
+'distinct def
+
+### def at-path
+(swap (at) fold)
+(ds l -- x : "Look up each key or index in a path from left to right.")
+'at-path def
+
+### def vals
+(dup keys swap (swap at) partial each)
+(dict -- values : "Return a dictionary's values in insertion order.")
+'vals def
 
 ### def at-or
 (|d k default| d k default d k has? (pop at) (nip nip) if)

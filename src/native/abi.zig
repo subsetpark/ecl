@@ -1,0 +1,380 @@
+//! Stable, C-shaped wire contract shared by ecl and the `ecl-native` SDK.
+//!
+//! ABI v1 grows only by additive record tails and capability-version bumps.
+//! Readers inspect at most `min(record.size, @sizeOf(LocalRecord))`; a change
+//! that alters an existing field's representation or meaning requires ABI v2.
+
+const builtin = @import("builtin");
+
+pub const entry_symbol: [:0]const u8 = "ecl_module_abi_v1";
+pub const abi_major: u32 = 1;
+pub const abi_minor: u32 = 3;
+
+pub const max_error_message_bytes: u32 = 4096;
+pub const max_guest_scalar_bytes: u32 = 4096;
+pub const max_builder_slots: u32 = 1024;
+pub const max_continuation_state_bytes: u32 = 4096;
+pub const max_continuation_alignment: u32 = 64;
+
+pub const CapabilityId = enum(u32) {
+    call = 1,
+    build_values = 2,
+    reschedule = 3,
+
+    // Reserved for a later additive ABI-v1 capability version. The runtime
+    // recognizes these ids but advertises no supported version in M9.
+    module_view = 4,
+    module_update = 5,
+    _,
+};
+
+pub const CallResult = enum(u32) {
+    complete = 0,
+    fail = 1,
+    yield = 2,
+    _,
+};
+
+pub const ErrorKindWire = enum(u32) {
+    type = 0,
+    shape = 1,
+    conform = 2,
+    overflow = 3,
+    domain = 4,
+    parse = 5,
+    io = 6,
+    user = 7,
+    _,
+};
+
+pub const EntryStatus = enum(u32) {
+    descriptor = 0,
+    fail = 1,
+    _,
+};
+
+pub const HostStatus = enum(u32) {
+    ok = 0,
+    out_of_memory = 1,
+    invalid = 2,
+    yield_required = 3,
+    _,
+};
+
+pub const ValueKindWire = enum(u32) {
+    int = 0,
+    float = 1,
+    char = 2,
+    symbol = 3,
+    word = 4,
+    list = 5,
+    dict = 6,
+    _,
+};
+
+pub const Candidate = u64;
+
+pub const CapabilityRequirement = extern struct {
+    size: u32 = @sizeOf(CapabilityRequirement),
+    id: u32,
+    version: u32,
+    reserved: u32 = 0,
+};
+
+pub const StateLayout = extern struct {
+    record_size: u32 = @sizeOf(StateLayout),
+    alignment: u32 = 0,
+    size: u64 = 0,
+    reserved: u64 = 0,
+};
+
+pub const EffectSlot = extern struct {
+    size: u32 = @sizeOf(EffectSlot),
+    reserved: u32 = 0,
+    name_ptr: [*]const u8,
+    name_len: u64,
+};
+
+pub const Definition = extern struct {
+    size: u32 = @sizeOf(Definition),
+    callback_index: u32,
+    name_ptr: [*]const u8,
+    name_len: u64,
+    doc_ptr: [*]const u8,
+    doc_len: u64,
+    input_count: u32,
+    input_record_size: u32 = @sizeOf(EffectSlot),
+    inputs_ptr: [*]const EffectSlot,
+    output_count: u32,
+    output_record_size: u32 = @sizeOf(EffectSlot),
+    outputs_ptr: [*]const EffectSlot,
+    continuation_size: u32 = 0,
+    continuation_alignment: u32 = 0,
+    init_continuation: ?StateInitFn = null,
+    deinit_continuation: ?StateDeinitFn = null,
+};
+
+pub const ValueView = extern struct {
+    size: u32 = @sizeOf(ValueView),
+    kind: ValueKindWire,
+    scalar_bits: u64 = 0,
+    aggregate_len: u64 = 0,
+    bytes_ptr: ?[*]const u8 = null,
+    bytes_len: u64 = 0,
+};
+
+pub const Scalar = extern struct {
+    size: u32 = @sizeOf(Scalar),
+    kind: ValueKindWire,
+    bits: u64 = 0,
+    bytes_ptr: ?[*]const u8 = null,
+    bytes_len: u64 = 0,
+};
+
+pub const InvokeResult = extern struct {
+    size: u32 = @sizeOf(InvokeResult),
+    tag: CallResult,
+    reserved: u64 = 0,
+};
+
+pub const InputFn = *const fn (
+    call_context: *anyopaque,
+    index: u32,
+    output: *ValueView,
+) callconv(.c) HostStatus;
+pub const ForwardFn = *const fn (
+    call_context: *anyopaque,
+    index: u32,
+    output: *Candidate,
+) callconv(.c) HostStatus;
+pub const ScalarFn = *const fn (
+    call_context: *anyopaque,
+    scalar: *const Scalar,
+    output: *Candidate,
+) callconv(.c) HostStatus;
+pub const BuildListFn = *const fn (
+    call_context: *anyopaque,
+    items: [*]const Candidate,
+    item_count: u32,
+    output: *Candidate,
+) callconv(.c) HostStatus;
+pub const BuildDictFn = *const fn (
+    call_context: *anyopaque,
+    keys: [*]const Candidate,
+    values: [*]const Candidate,
+    entry_count: u32,
+    output: *Candidate,
+) callconv(.c) HostStatus;
+pub const BuildListAppendFn = *const fn (
+    call_context: *anyopaque,
+    slot: u32,
+    item_count: u64,
+    item: Candidate,
+) callconv(.c) HostStatus;
+pub const BuildListFinishFn = *const fn (
+    call_context: *anyopaque,
+    slot: u32,
+    item_count: u64,
+    output: *Candidate,
+) callconv(.c) HostStatus;
+pub const BuildDictAppendFn = *const fn (
+    call_context: *anyopaque,
+    slot: u32,
+    entry_count: u64,
+    key: Candidate,
+    item: Candidate,
+) callconv(.c) HostStatus;
+pub const BuildDictFinishFn = *const fn (
+    call_context: *anyopaque,
+    slot: u32,
+    entry_count: u64,
+    output: *Candidate,
+) callconv(.c) HostStatus;
+pub const ListAtFn = *const fn (
+    call_context: *anyopaque,
+    input_index: u32,
+    item_index: u64,
+    output: *ValueView,
+) callconv(.c) HostStatus;
+pub const DictAtFn = *const fn (
+    call_context: *anyopaque,
+    input_index: u32,
+    item_index: u64,
+    key_output: *ValueView,
+    value_output: *ValueView,
+) callconv(.c) HostStatus;
+pub const CompleteFn = *const fn (
+    call_context: *anyopaque,
+    outputs: [*]const Candidate,
+    output_count: u32,
+) callconv(.c) HostStatus;
+pub const FailFn = *const fn (
+    call_context: *anyopaque,
+    kind: ErrorKindWire,
+    message_ptr: [*]const u8,
+    message_len: u32,
+) callconv(.c) HostStatus;
+pub const StateInitFn = *const fn (state: *anyopaque) callconv(.c) void;
+pub const StateDeinitFn = *const fn (state: *anyopaque) callconv(.c) void;
+pub const ContinuationStateFn = *const fn (
+    call_context: *anyopaque,
+    output: *?*anyopaque,
+) callconv(.c) HostStatus;
+pub const ConsumeFn = *const fn (
+    call_context: *anyopaque,
+    units: u32,
+) callconv(.c) HostStatus;
+pub const RequestYieldFn = *const fn (call_context: *anyopaque) callconv(.c) HostStatus;
+
+pub const HostTable = extern struct {
+    size: u32 = @sizeOf(HostTable),
+    abi_minor: u32 = abi_minor,
+    input: InputFn,
+    forward: ForwardFn,
+    scalar: ScalarFn,
+    build_list: ?BuildListFn,
+    build_dict: ?BuildDictFn,
+    complete: CompleteFn,
+    fail: FailFn,
+    continuation_state: ?ContinuationStateFn,
+    consume: ?ConsumeFn,
+    request_yield: ?RequestYieldFn,
+    list_at: ?ListAtFn,
+    dict_at: ?DictAtFn,
+    build_list_append: ?BuildListAppendFn,
+    build_list_finish: ?BuildListFinishFn,
+    build_dict_append: ?BuildDictAppendFn,
+    build_dict_finish: ?BuildDictFinishFn,
+};
+
+pub const Invoke = *const fn (
+    host: *const HostTable,
+    call_context: *anyopaque,
+    callback_index: u32,
+    output: *InvokeResult,
+) callconv(.c) void;
+
+pub const Descriptor = extern struct {
+    size: u32 = @sizeOf(Descriptor),
+    abi_major: u32 = abi_major,
+    abi_minor: u32 = abi_minor,
+    flags: u32 = 0,
+    module_name_ptr: [*]const u8,
+    module_name_len: u64,
+    module_doc_ptr: [*]const u8,
+    module_doc_len: u64,
+    definition_count: u32,
+    definition_record_size: u32 = @sizeOf(Definition),
+    definitions_ptr: [*]const Definition,
+    capability_count: u32,
+    capability_record_size: u32 = @sizeOf(CapabilityRequirement),
+    capabilities_ptr: [*]const CapabilityRequirement,
+    callback_count: u32,
+    reserved: u32 = 0,
+    invoke: ?Invoke,
+    state_layout: StateLayout = .{},
+    required_host_table_size: u32 = @sizeOf(HostTable),
+    reserved_tail: u32 = 0,
+};
+
+pub const EntryResult = extern struct {
+    size: u32 = @sizeOf(EntryResult),
+    status: EntryStatus,
+    descriptor: ?*const Descriptor = null,
+    message_ptr: ?[*]const u8 = null,
+    message_len: u64 = 0,
+};
+
+pub const EntryFn = *const fn (output: *EntryResult) callconv(.c) void;
+
+fn assertWireField(comptime T: type) void {
+    switch (@typeInfo(T)) {
+        .int, .float, .bool, .void, .@"opaque" => {},
+        .@"enum" => |enumeration| if (enumeration.is_exhaustive)
+            @compileError("native ABI wire enums must have a non-exhaustive `_` tag: " ++ @typeName(T)),
+        .pointer => |pointer| {
+            if (pointer.size == .slice)
+                @compileError("native ABI records cannot contain Zig slices");
+            assertWireField(pointer.child);
+        },
+        .optional => |optional| switch (@typeInfo(optional.child)) {
+            .pointer => assertWireField(optional.child),
+            else => @compileError("native ABI optionals must be pointer-shaped"),
+        },
+        .@"fn" => |function| {
+            const CallingConvention = @TypeOf(function.calling_convention);
+            const convention: CallingConvention.Tag = function.calling_convention;
+            const c_convention: CallingConvention.Tag = builtin.target.cCallingConvention().?;
+            if (convention != c_convention or
+                function.is_generic or function.is_var_args)
+                @compileError("native ABI callbacks must be non-generic C functions");
+            inline for (function.params) |parameter| {
+                if (parameter.type == null) @compileError("native ABI callbacks require concrete parameters");
+                assertWireField(parameter.type.?);
+            }
+            if (function.return_type) |Return| assertWireField(Return);
+        },
+        .@"struct" => |record| {
+            if (record.layout != .@"extern")
+                @compileError("native ABI nested records must use extern layout");
+            inline for (record.fields) |field| assertWireField(field.type);
+        },
+        else => @compileError("native ABI records contain a non-wire field type: " ++ @typeName(T)),
+    }
+}
+
+fn assertRecord(comptime T: type, comptime expected_size: usize, comptime expected_alignment: usize) void {
+    const record = switch (@typeInfo(T)) {
+        .@"struct" => |info| info,
+        else => @compileError("native ABI record must be a struct"),
+    };
+    if (record.layout != .@"extern") @compileError("native ABI record must use extern layout");
+    inline for (record.fields) |field| assertWireField(field.type);
+    if (@sizeOf(T) != expected_size or @alignOf(T) != expected_alignment)
+        @compileError("native ABI record layout changed: " ++ @typeName(T));
+}
+
+comptime {
+    @setEvalBranchQuota(4000);
+    if (@sizeOf(usize) != 8) @compileError("native ABI v1 supports 64-bit targets only");
+
+    assertRecord(CapabilityRequirement, 16, 4);
+    assertRecord(StateLayout, 24, 8);
+    assertRecord(EffectSlot, 24, 8);
+    assertRecord(Definition, 96, 8);
+    assertRecord(ValueView, 40, 8);
+    assertRecord(Scalar, 32, 8);
+    assertRecord(InvokeResult, 16, 8);
+    assertRecord(HostTable, 136, 8);
+    assertRecord(Descriptor, 128, 8);
+    assertRecord(EntryResult, 32, 8);
+
+    if (@offsetOf(Definition, "callback_index") != 4 or
+        @offsetOf(Definition, "name_ptr") != 8 or
+        @offsetOf(Definition, "inputs_ptr") != 48 or
+        @offsetOf(Definition, "outputs_ptr") != 64)
+        @compileError("native ABI Definition offsets changed");
+    if (@offsetOf(Descriptor, "module_name_ptr") != 16 or
+        @offsetOf(Descriptor, "definitions_ptr") != 56 or
+        @offsetOf(Descriptor, "capabilities_ptr") != 72 or
+        @offsetOf(Descriptor, "invoke") != 88 or
+        @offsetOf(Descriptor, "state_layout") != 96)
+        @compileError("native ABI Descriptor offsets changed");
+
+    // The SDK does not import machine.zig. Keeping this list closed and
+    // name-stable lets the runtime assert the inverse mapping exhaustively.
+    const expected_error_names = [_][]const u8{
+        "type", "shape", "conform", "overflow", "domain", "parse", "io", "user",
+    };
+    const fields = @typeInfo(ErrorKindWire).@"enum".fields;
+    if (fields.len != expected_error_names.len)
+        @compileError("native ABI author error-kind set changed");
+    for (fields, expected_error_names) |field, expected|
+        if (!sameBytes(field.name, expected)) @compileError("native ABI author error-kind mapping changed");
+}
+
+fn sameBytes(comptime left: []const u8, comptime right: []const u8) bool {
+    if (left.len != right.len) return false;
+    inline for (left, right) |a, b| if (a != b) return false;
+    return true;
+}

@@ -33,9 +33,15 @@ tasks:
       cd ecl
       zig build test-repl
       zig build test-repl -Doptimize=ReleaseSafe
+  - native: |
+      cd ecl
+      zig build native-fixture
+      zig build test-native-sdk-negative
+      zig build test-native-runtime
+      zig build test-native-runtime -Doptimize=ReleaseSafe
   - fuzz: |
       cd ecl
-      for target in reader formatter editor completion history scheduler; do
+      for target in reader formatter editor completion history pending scheduler native-descriptor native-call; do
         zig build "fuzz-$target" --fuzz=100
       done
   - test-workers: |

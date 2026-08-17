@@ -5,6 +5,10 @@ const console = @import("../console.zig");
 const line_editor = @import("../line_editor.zig");
 const reader = @import("../reader.zig");
 const session = @import("../session.zig");
+const native_abi = @import("native-abi");
+const native_descriptor = @import("../native_descriptor.zig");
+const intern = @import("../intern.zig");
+const native_fixture = @import("native_fixture_options");
 
 const max_source_bytes = 4096;
 const max_edit_steps = 128;
@@ -60,6 +64,114 @@ test "fuzz: formatter is idempotent for every accepted source" {
         "# comment\n(foo [bar] {baz})",
         "\"raw\n  string\" \\space",
         "(dup) (value -- value : \"documentation\") 'same def",
+    } });
+}
+
+fn fuzzInvoke(
+    _: *const native_abi.HostTable,
+    _: *anyopaque,
+    _: u32,
+    output: *native_abi.InvokeResult,
+) callconv(.c) void {
+    output.* = .{ .tag = .fail };
+}
+
+fn isSizeField(comptime name: []const u8) bool {
+    return std.mem.eql(u8, name, "size") or std.mem.endsWith(u8, name, "_size");
+}
+
+/// Keep malformed-record coverage closed over the ABI record definitions:
+/// every present and future integer size field is discovered from type info,
+/// including nested records such as Descriptor.state_layout.
+fn varyWireSizes(smith: *std.testing.Smith, record: anytype) void {
+    const Pointer = @TypeOf(record);
+    const T = @typeInfo(Pointer).pointer.child;
+    inline for (@typeInfo(T).@"struct".fields) |field| switch (@typeInfo(field.type)) {
+        .int => {
+            if (isSizeField(field.name) and smith.value(bool))
+                @field(record, field.name) = smith.value(field.type);
+        },
+        .@"struct" => varyWireSizes(smith, &@field(record, field.name)),
+        else => {},
+    };
+}
+
+fn fuzzNativeDescriptor(_: void, smith: *std.testing.Smith) !void {
+    var name_storage = [_]u8{ 'f', 'u', 'z', 'z', 'n', 'a', 't', 'i', 'v', 'e' };
+    const name_len = 1 + smith.index(name_storage.len);
+    const module_name = name_storage[0..name_len];
+    const module_doc = "Fuzz-owned descriptor documentation.";
+    const word_name = "word";
+    const word_doc = "Fuzz-owned word documentation.";
+    const input_name = "input";
+    const output_name = "output";
+    var inputs = [_]native_abi.EffectSlot{.{
+        .name_ptr = input_name.ptr,
+        .name_len = input_name.len,
+    }};
+    var outputs = [_]native_abi.EffectSlot{.{
+        .name_ptr = output_name.ptr,
+        .name_len = output_name.len,
+    }};
+    var definitions = [_]native_abi.Definition{.{
+        .callback_index = smith.value(u2),
+        .name_ptr = word_name.ptr,
+        .name_len = word_name.len,
+        .doc_ptr = word_doc.ptr,
+        .doc_len = word_doc.len,
+        .input_count = inputs.len,
+        .inputs_ptr = &inputs,
+        .output_count = outputs.len,
+        .outputs_ptr = &outputs,
+    }};
+    var requirements = [_]native_abi.CapabilityRequirement{.{
+        .id = smith.value(u4),
+        .version = smith.value(u3),
+    }};
+    varyWireSizes(smith, &definitions[0]);
+    varyWireSizes(smith, &inputs[0]);
+    varyWireSizes(smith, &outputs[0]);
+    varyWireSizes(smith, &requirements[0]);
+    var raw = native_abi.Descriptor{
+        .abi_major = if (smith.value(bool)) native_abi.abi_major else smith.value(u3),
+        .module_name_ptr = module_name.ptr,
+        .module_name_len = module_name.len,
+        .module_doc_ptr = module_doc.ptr,
+        .module_doc_len = module_doc.len,
+        .definition_count = if (smith.value(bool)) definitions.len else 0,
+        .definitions_ptr = &definitions,
+        .capability_count = if (smith.value(bool)) requirements.len else 0,
+        .capabilities_ptr = &requirements,
+        .callback_count = smith.value(u3),
+        .invoke = fuzzInvoke,
+    };
+    varyWireSizes(smith, &raw);
+
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    const requested = intern.internNamespace(module_name) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        error.InvalidName => return,
+    };
+    var cursor = native_descriptor.ValidateCursor.init(host.cleanup(), requested, &raw);
+    defer cursor.deinit();
+    while (true) switch (cursor.advance(1 + smith.index(32)) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return,
+    }) {
+        .pending => {},
+        .complete => |validated| {
+            validated.deinit();
+            return;
+        },
+    };
+}
+
+test "fuzz: native descriptor metadata never escapes validation" {
+    try std.testing.fuzz({}, fuzzNativeDescriptor, .{ .corpus = &.{
+        "",
+        "\x01\x01\x01\x01\x01\x01\x01\x01",
+        "descriptor metadata",
     } });
 }
 
@@ -731,5 +843,47 @@ test "fuzz: real scheduler publication cancellation and join traces settle" {
         "cancel-before-dispatch",
         "par-each-order",
         "\x00\x01\x02\x03\x04\x05\x06",
+    } });
+}
+
+fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
+    var output_buffer: [256]u8 = undefined;
+    var diagnostic_buffer: [256]u8 = undefined;
+    var output = std.Io.Writer.Discarding.init(&output_buffer);
+    var diagnostics = std.Io.Writer.Discarding.init(&diagnostic_buffer);
+    var runtime = try session.Session.initWithHostConfig(
+        std.testing.allocator,
+        &.{},
+        std.testing.io,
+        &output.writer,
+        &diagnostics.writer,
+        native_fixture.directory,
+        .cooperative,
+    );
+    defer runtime.deinit();
+    try runOk(&runtime, "'sample use");
+    const programs = [_][]const u8{
+        "7 sample.forward pop",
+        "7 sample.split pop pop",
+        "7 sample.singleton pop",
+        "(7 sample.draft-fail) attempt pop",
+        "sample.cooperative pop",
+        "(9 sample.yield-forever) spawn dup cancel await pop",
+    };
+    var steps: usize = 0;
+    while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1)
+        try runOk(&runtime, programs[smith.index(programs.len)]);
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("", display.bytes());
+}
+
+test "fuzz: native call transactions stay atomic under yield and cancellation" {
+    try std.testing.fuzz({}, fuzzNativeTransactions, .{ .corpus = &.{
+        "",
+        "complete-forward-split",
+        "draft-fail-after-yield",
+        "cancel-yield-forever",
+        "\x00\xff",
     } });
 }

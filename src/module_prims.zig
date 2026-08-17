@@ -134,7 +134,7 @@ const AliasDriver = struct {
                     continue;
                 },
             };
-            const registry = evaluator.unit.registry orelse
+            const registry = evaluator.unit.inherited.registry orelse
                 return evaluator.fail(.domain, "module registry is unavailable");
             if (self.cursor == null) self.cursor = registry.aliasCursor(self.short.?, self.target.?);
             switch (self.cursor.?.advance() catch |err| switch (err) {
@@ -193,7 +193,7 @@ const WordsDriver = struct {
             .visible = .init(
                 .{ .scope = evaluator.currentScope() },
                 evaluator.currentEnv().coreView(),
-                evaluator.unit.registry,
+                evaluator.unit.inherited.registry,
             ),
             .found = .init(evaluator.allocator()),
         };
@@ -270,7 +270,7 @@ const WordsDriver = struct {
                 },
             },
             .write => {
-                if (evaluator.unit.console) |console| {
+                if (evaluator.unit.inherited.console) |console| {
                     console.writeOutput(self.rendered.?, false) catch return writeFailure(evaluator);
                     return .completed;
                 }

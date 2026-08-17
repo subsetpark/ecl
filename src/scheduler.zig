@@ -1073,13 +1073,7 @@ pub const WorkerScheduler = enum(usize) {
         const unit = &execution.unit;
         errdefer unit.deinit();
         unit.replaceRootScope(env.Scope.lazy(self.allocator(), request.parent_scope));
-        unit.registry = request.parent_unit.registry;
-        unit.diagnostics = request.parent_unit.diagnostics;
-        unit.console = request.parent_unit.console;
-        unit.host_io = request.parent_unit.host_io;
-        unit.ecl_path = request.parent_unit.ecl_path;
-        unit.idiom_mode = request.parent_unit.idiom_mode;
-        unit.phrase_recognizer = request.parent_unit.phrase_recognizer;
+        unit.inherited = request.parent_unit.inherited;
         unit.scheduler = self;
         unit.task_scope = &cell.scope;
         unit.is_root_unit = false;

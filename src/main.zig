@@ -182,6 +182,7 @@ fn executeSource(
         .{ .worker_pool = worker_count },
     );
     defer session.deinit();
+    session.setNativeDiagnostics(init.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
     const outcome = try session.runUnit(source_name, source);
     if (session.requestedExit()) |status| return status;
     switch (outcome) {
@@ -217,6 +218,7 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
         .{ .worker_pool = worker_count },
     );
     defer session.deinit();
+    session.setNativeDiagnostics(init.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
     const history_path = if (init.environ_map.get("HOME")) |home|
         std.Io.Dir.path.join(init.gpa, &.{ home, ".ecl_history" }) catch
             return error.OutOfMemory

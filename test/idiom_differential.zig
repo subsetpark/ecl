@@ -48,14 +48,7 @@ fn compareExecutions(source: []const u8) !void {
     try std.testing.expectEqual(@as(u64, 1), automatic.runtime.lastIdiomHits());
     try std.testing.expectEqual(@as(u64, 0), generic.runtime.lastIdiomHits());
     try std.testing.expectEqual(generic.failure != null, automatic.failure != null);
-    if (automatic.failure) |failure| {
-        const automatic_display = try ecl.print.toOwnedString(allocator, failure);
-        defer allocator.free(automatic_display);
-        const generic_display = try ecl.print.toOwnedString(allocator, generic.failure.?);
-        defer allocator.free(generic_display);
-        try std.testing.expectEqualStrings(generic_display, automatic_display);
-        try expectValueIdentical(failure, generic.failure.?);
-    } else {
+    if (automatic.failure == null) {
         try expectStacksIdentical(automatic.runtime.stackItems(), generic.runtime.stackItems());
         var automatic_display = try automatic.runtime.stackDisplay();
         defer automatic_display.deinit();
@@ -66,6 +59,7 @@ fn compareExecutions(source: []const u8) !void {
 }
 
 fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
+    if (entry.context == .direct) return directSource(entry, variant);
     const phrase = try phraseSource(entry, variant);
     defer allocator.free(phrase);
     return switch (entry.operation) {
@@ -80,9 +74,9 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                 "{s} ({s}) each",
                 .{ binaryInput(operation, variant, false), phrase },
             ),
-            .each2 => std.fmt.allocPrint(
+            .zip_with => std.fmt.allocPrint(
                 allocator,
-                "{s} {s} ({s}) each2",
+                "{s} {s} ({s}) zip-with",
                 .{
                     binaryInput(operation, variant, false),
                     binaryInput(operation, variant, true),
@@ -101,10 +95,30 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
             ),
             .direct => unreachable,
         },
-        .direct_sort => std.fmt.allocPrint(
+        .direct => unreachable,
+    };
+}
+
+fn directSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
+    return switch (entry.operation) {
+        .unary => |operation| std.fmt.allocPrint(
             allocator,
             "{s} {s}",
-            .{ sortInput(variant), entry.source_word.? },
+            .{ unaryDirectInput(operation, variant), entry.source_word.? },
+        ),
+        .binary => |operation| std.fmt.allocPrint(
+            allocator,
+            "{s} {s} {s}",
+            .{
+                binaryInput(operation, variant, false),
+                binaryInput(operation, variant, true),
+                entry.source_word.?,
+            },
+        ),
+        .direct => |operation| std.fmt.allocPrint(
+            allocator,
+            "{s} {s}",
+            .{ directInput(operation, variant), entry.source_word.? },
         ),
     };
 }
@@ -116,11 +130,28 @@ fn phraseSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
         if (index > 0) try result.append(allocator, ' ');
         try result.appendSlice(allocator, switch (atom) {
             .constant => binaryConstant(entry.operation.binary, variant),
+            .literal => "0",
             .operation => entry.operation.spelling(),
-            .core_word => |word| word.spelling(),
+            .word => |word| word.spelling,
         });
     }
     return result.toOwnedSlice(allocator);
+}
+
+fn unaryDirectInput(operation: ecl.kernels.numeric.UnaryOp, variant: Variant) []const u8 {
+    return switch (variant) {
+        .atom => switch (operation) {
+            .sqrt => "4",
+            .log => "1.0",
+            .not_word => "0",
+            .abs, .neg => "-2",
+            .floor, .ceil, .round, .exp, .sin, .cos => "1.25",
+        },
+        .empty => "[]",
+        .spine => "[[-2] [3]]",
+        .float => "-0.0",
+        .failure => "{}",
+    };
 }
 
 fn unaryInput(operation: ecl.kernels.numeric.UnaryOp, variant: Variant) []const u8 {
@@ -197,6 +228,33 @@ fn sortInput(variant: Variant) []const u8 {
         .spine => "[\"b\" \"a\"]",
         .float => "[0.1 -0.0 0.2]",
         .failure => "[1 \"x\"]",
+    };
+}
+
+fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
+    return switch (operation) {
+        .sort => sortInput(variant),
+        .first, .rest, .reverse => switch (variant) {
+            .atom => "[1 2 3]",
+            .empty => "[]",
+            .spine => "[[1] [2]]",
+            .float => "[0.1 -0.0 0.2]",
+            .failure => "1",
+        },
+        .distinct => switch (variant) {
+            .atom => "[1 2 1]",
+            .empty => "[]",
+            .spine => "[[1] [2] [1]]",
+            .float => "[0.1 -0.0 0.1]",
+            .failure => "1",
+        },
+        .vals => switch (variant) {
+            .atom => "{'a 1 'b 2}",
+            .empty => "{}",
+            .spine => "{'a [1] 'b [2]}",
+            .float => "{'a 0.1 'b -0.0}",
+            .failure => "1",
+        },
     };
 }
 

@@ -211,7 +211,10 @@ pub const StringEncoder = struct {
         while (remaining != 0 and self.index != count) : (remaining -= 1) {
             const codepoint = list.atUnchecked(self.string, self.index).char;
             var encoded: [4]u8 = undefined;
-            const encoded_len = std.unicode.utf8Encode(@intCast(codepoint), &encoded) catch
+            const encoded_len = std.unicode.utf8Encode(
+                value.unicodeScalar(codepoint) orelse return error.InvalidCodepoint,
+                &encoded,
+            ) catch
                 return error.InvalidCodepoint;
             switch (self.phase) {
                 .count => self.byte_count = std.math.add(usize, self.byte_count, encoded_len) catch
@@ -362,13 +365,14 @@ pub const DictMaterializeProgress = union(enum) {
 /// and each exact-size child materialization preserve their own cursors.
 pub const DictMaterializer = struct {
     const State = union(enum) {
+        table_init: usize,
         hash: struct {
             index: usize = 0,
             cursor: ?equal.HashCursor = null,
         },
         duplicate: struct {
             index: usize,
-            candidate: usize = 0,
+            slot: usize,
             cursor: ?equal.MatchCursor = null,
         },
         keys: ValueMaterializer,
@@ -379,12 +383,14 @@ pub const DictMaterializer = struct {
     };
 
     allocator: std.mem.Allocator,
-    pairs: []const dict.Pair,
+    source_keys: []const Value,
+    source_vals: []const Value,
     check_duplicates: bool,
     keys: []Value,
     vals: []Value,
     hashes: []i64,
-    state: State = .{ .hash = .{} },
+    table: ?[]u32,
+    state: State,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -397,13 +403,53 @@ pub const DictMaterializer = struct {
         const vals = try allocator.alloc(Value, pairs.len);
         errdefer allocator.free(vals);
         const hashes = try allocator.alloc(i64, pairs.len);
+        errdefer allocator.free(hashes);
+        const table = try allocateDictIndex(allocator, pairs.len, check_duplicates);
+        for (pairs, 0..) |pair, index| {
+            keys[index] = pair[0];
+            vals[index] = pair[1];
+        }
+        return initOwned(allocator, keys, vals, hashes, table, check_duplicates);
+    }
+
+    pub fn initSlices(
+        allocator: std.mem.Allocator,
+        source_keys: []const Value,
+        source_vals: []const Value,
+        check_duplicates: bool,
+    ) error{OutOfMemory}!DictMaterializer {
+        if (source_keys.len != source_vals.len or source_keys.len >= std.math.maxInt(u32))
+            return error.OutOfMemory;
+        const keys = try allocator.alloc(Value, source_keys.len);
+        errdefer allocator.free(keys);
+        const vals = try allocator.alloc(Value, source_vals.len);
+        errdefer allocator.free(vals);
+        const hashes = try allocator.alloc(i64, source_keys.len);
+        errdefer allocator.free(hashes);
+        const table = try allocateDictIndex(allocator, source_keys.len, check_duplicates);
+        @memcpy(keys, source_keys);
+        @memcpy(vals, source_vals);
+        return initOwned(allocator, keys, vals, hashes, table, check_duplicates);
+    }
+
+    fn initOwned(
+        allocator: std.mem.Allocator,
+        keys: []Value,
+        vals: []Value,
+        hashes: []i64,
+        table: ?[]u32,
+        check_duplicates: bool,
+    ) DictMaterializer {
         return .{
             .allocator = allocator,
-            .pairs = pairs,
+            .source_keys = keys,
+            .source_vals = vals,
             .check_duplicates = check_duplicates,
             .keys = keys,
             .vals = vals,
             .hashes = hashes,
+            .table = table,
+            .state = if (table != null) .{ .table_init = 0 } else .{ .hash = .{} },
         };
     }
 
@@ -412,10 +458,12 @@ pub const DictMaterializer = struct {
         self.allocator.free(self.keys);
         self.allocator.free(self.vals);
         self.allocator.free(self.hashes);
+        if (self.table) |table| self.allocator.free(table);
         self.* = undefined;
     }
     pub fn retire(self: *DictMaterializer, releases: *heap.ReleaseDomain) void {
         switch (self.state) {
+            .table_init => {},
             .hash => |*state| if (state.cursor) |*cursor| cursor.deinit(),
             .duplicate => |*state| if (state.cursor) |*cursor| cursor.deinit(),
             .keys => |*materializer| materializer.retire(releases),
@@ -438,6 +486,7 @@ pub const DictMaterializer = struct {
         self.allocator.free(self.keys);
         self.allocator.free(self.vals);
         self.allocator.free(self.hashes);
+        if (self.table) |table| self.allocator.free(table);
         self.* = undefined;
     }
 
@@ -447,23 +496,33 @@ pub const DictMaterializer = struct {
     ) error{OutOfMemory}!DictMaterializeProgress {
         std.debug.assert(budget != 0 and self.state != .complete);
         while (true) switch (self.state) {
+            .table_init => |*index| {
+                const table = self.table.?;
+                const end = @min(index.* + budget, table.len);
+                @memset(table[index.*..end], 0);
+                index.* = end;
+                if (index.* != table.len) return .pending;
+                self.state = .{ .hash = .{} };
+                return .pending;
+            },
             .hash => |*state| {
-                if (state.index == self.pairs.len) {
+                if (state.index == self.source_keys.len) {
                     self.state = .{ .keys = .init(self.allocator, self.keys) };
                     continue;
                 }
                 if (state.cursor == null)
-                    state.cursor = try .init(self.allocator, self.pairs[state.index][0]);
+                    state.cursor = try .init(self.allocator, self.source_keys[state.index]);
                 switch (try state.cursor.?.advance(budget)) {
                     .pending => return .pending,
                     .complete => |computed| {
                         state.cursor.?.deinit();
                         state.cursor = null;
-                        self.keys[state.index] = self.pairs[state.index][0];
-                        self.vals[state.index] = self.pairs[state.index][1];
                         self.hashes[state.index] = @bitCast(computed);
-                        if (self.check_duplicates and state.index != 0)
-                            self.state = .{ .duplicate = .{ .index = state.index } }
+                        if (self.table) |table|
+                            self.state = .{ .duplicate = .{
+                                .index = state.index,
+                                .slot = @as(usize, @intCast(computed & (table.len - 1))),
+                            } }
                         else
                             state.index += 1;
                         return .pending;
@@ -472,15 +531,23 @@ pub const DictMaterializer = struct {
             },
             .duplicate => |*state| {
                 var remaining = budget;
-                while (remaining != 0 and state.candidate != state.index) {
-                    if (self.hashes[state.candidate] != self.hashes[state.index]) {
-                        state.candidate += 1;
+                const table = self.table.?;
+                while (remaining != 0) {
+                    const encoded = table[state.slot];
+                    if (encoded == 0) {
+                        table[state.slot] = @intCast(state.index + 1);
+                        self.state = .{ .hash = .{ .index = state.index + 1 } };
+                        return .pending;
+                    }
+                    const candidate = encoded - 1;
+                    if (!self.check_duplicates or self.hashes[candidate] != self.hashes[state.index]) {
+                        state.slot = (state.slot + 1) & (table.len - 1);
                         remaining -= 1;
                         continue;
                     }
                     if (state.cursor == null) state.cursor = try .init(
                         self.allocator,
-                        self.keys[state.candidate],
+                        self.keys[candidate],
                         self.keys[state.index],
                     );
                     switch (try state.cursor.?.advance(remaining)) {
@@ -489,13 +556,11 @@ pub const DictMaterializer = struct {
                             state.cursor.?.deinit();
                             state.cursor = null;
                             if (matches) return .duplicate_key;
-                            state.candidate += 1;
+                            state.slot = (state.slot + 1) & (table.len - 1);
                             return .pending;
                         },
                     }
                 }
-                if (state.candidate != state.index) return .pending;
-                self.state = .{ .hash = .{ .index = state.index + 1 } };
                 return .pending;
             },
             .keys => |*materializer| switch (try materializer.advance(budget)) {
@@ -531,12 +596,13 @@ pub const DictMaterializer = struct {
                 },
             },
             .finish => |state| {
-                var builder = try heap.DictBuilder.init(self.allocator, self.pairs.len);
+                var builder = try heap.DictBuilder.init(self.allocator, self.source_keys.len);
                 const header = builder.finish(.{
                     .keys = state.keys.list,
                     .vals = state.vals.list,
                     .hashes = state.hashes.list,
-                }, null);
+                }, self.table);
+                self.table = null;
                 self.state = .complete;
                 return .{ .complete = .{ .dict = header } };
             },
@@ -544,6 +610,19 @@ pub const DictMaterializer = struct {
         };
     }
 };
+
+fn allocateDictIndex(
+    allocator: std.mem.Allocator,
+    count: usize,
+    check_duplicates: bool,
+) error{OutOfMemory}!?[]u32 {
+    if (!check_duplicates and count < 16) return null;
+    var table_len: usize = 32;
+    const minimum = std.math.mul(usize, count, 2) catch return error.OutOfMemory;
+    while (table_len < minimum)
+        table_len = std.math.mul(usize, table_len, 2) catch return error.OutOfMemory;
+    return try allocator.alloc(u32, table_len);
+}
 
 pub const DictFindProgress = union(enum) { pending, complete: ?Value };
 
@@ -822,8 +901,9 @@ pub const ToUtf8Cursor = struct {
         while (remaining != 0) : (remaining -= 1) switch (self.phase) {
             .count => if (self.index != count) {
                 var encoded: [4]u8 = undefined;
+                const codepoint = @import("list.zig").atUnchecked(self.string, self.index).char;
                 const length = std.unicode.utf8Encode(
-                    @intCast(@import("list.zig").atUnchecked(self.string, self.index).char),
+                    value.unicodeScalar(codepoint) orelse return error.InvalidCodepoint,
                     &encoded,
                 ) catch return error.InvalidCodepoint;
                 self.byte_count = std.math.add(usize, self.byte_count, length) catch
@@ -836,8 +916,9 @@ pub const ToUtf8Cursor = struct {
             },
             .fill => if (self.index != count) {
                 var encoded: [4]u8 = undefined;
+                const codepoint = @import("list.zig").atUnchecked(self.string, self.index).char;
                 const length = std.unicode.utf8Encode(
-                    @intCast(@import("list.zig").atUnchecked(self.string, self.index).char),
+                    value.unicodeScalar(codepoint) orelse return error.InvalidCodepoint,
                     &encoded,
                 ) catch return error.InvalidCodepoint;
                 @memcpy(self.bytes.?[self.output_index..][0..length], encoded[0..length]);

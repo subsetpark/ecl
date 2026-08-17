@@ -60,7 +60,7 @@ test "every primitive exposes meaningful reflective documentation" {
         "match",    "type",    "str",     "parse", "dict-of",   "attempt",
         "raise",    "pp",      "prin",    "args",  "exit",      "dip",
         "call",     "if",      "while",   "times", "cond",      "each",
-        "each2",    "for",     "fold",    "scan",  "infra",     "def",
+        "zip-with", "for",     "fold",    "scan",  "infra",     "def",
         "set",      "defp",    "setp",    "body",  "doc",       "which",
         "see",      "module",  "use",     "alias", "words",     "load",
         "spawn",    "await",   "cancel",  "tasks", "await-any", "await-for",
@@ -98,7 +98,7 @@ test "every primitive exposes meaningful reflective documentation" {
     try std.testing.expectEqualStrings(expected.written(), display.bytes());
     try expectOk(&runtime, "'over see 'call see");
     try std.testing.expectEqualStrings(
-        "<primitive> (x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") 'over def\n" ++
+        "(swap dup (swap) dip) (x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") 'over def\n" ++
             "<primitive> (: \"Run a quotation on the current stack.\") 'call def\n",
         output.written(),
     );

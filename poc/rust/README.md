@@ -48,7 +48,7 @@ calculator and stdin modes print the final stack.
   visible.
 - Chained environments with a core root, a persistent session scope, and a
   disposable child scope for every isolated quotation application. `each`,
-  `each2`, `for`, `fold`, `scan`, `dict-of`, and `attempt` cannot leak a
+  `zip-with`, `for`, `fold`, `scan`, `dict-of`, and `attempt` cannot leak a
   temporary `def` or `let` into their caller; inline applications keep the
   current scope.
 - Late-bound `def` versus non-executing `let`, private `defp`/`letp` inside
@@ -78,7 +78,7 @@ as ordinary ecl definitions.
 Decision-22 rulings are implemented: words and symbols are distinct atoms
 (`to-word`/`to-symbol` convert), `inf`/`-inf` are float literals with IEEE
 propagation while NaN-producing operations error, all-char lists specialize
-to strings at construction, `each2` extends atoms like broadcast,
+to strings at construction, `zip-with` extends atoms like broadcast,
 `floor`/`ceil`/`round` return int64, and error dicts omit `'word` when no
 word raised.
 

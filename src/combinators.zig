@@ -20,29 +20,19 @@ const Definition = struct { name: []const u8, primitive: env.PrimitiveImpl };
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]Definition{
-        .{ .name = "dip", .primitive = dip },
         .{ .name = "call", .primitive = call },
         .{ .name = "if", .primitive = ifWord },
         .{ .name = "while", .primitive = whileWord },
         .{ .name = "times", .primitive = times },
         .{ .name = "cond", .primitive = cond },
         .{ .name = "each", .primitive = each },
-        .{ .name = "each2", .primitive = each2 },
+        .{ .name = "zip-with", .primitive = zipWith },
         .{ .name = "for", .primitive = forWord },
         .{ .name = "fold", .primitive = fold },
         .{ .name = "scan", .primitive = scan },
         .{ .name = "infra", .primitive = infra },
     };
     try core.installBuiltins(definitions);
-}
-
-fn dip(evaluator: *Machine) MachineError!void {
-    try evaluator.require(2);
-    var quotation = try evaluator.popValue();
-    defer quotation.deinit();
-    var protected = try evaluator.popValue();
-    defer protected.deinit();
-    try evaluator.dipOwned(try takeQuotation(evaluator, &quotation), protected.take());
 }
 
 fn call(evaluator: *Machine) MachineError!void {
@@ -295,7 +285,7 @@ const CondDriver = struct {
     }
 };
 
-const IterationKind = enum { each, each2, for_word, fold, scan, infra };
+const IterationKind = enum { each, zip_with, for_word, fold, scan, infra };
 const IterationState = struct {
     kind: IterationKind,
     left: Value,
@@ -323,7 +313,7 @@ const IterationState = struct {
         const observed = window.observed(evaluator.unit.stack.items.len) orelse
             return evaluator.applicationContractError(self.expected.?, 0, 0, self.index);
         return switch (self.kind) {
-            .each, .each2 => self.resumeCollect(evaluator, observed),
+            .each, .zip_with => self.resumeCollect(evaluator, observed),
             .for_word => self.resumeFor(evaluator, observed),
             .fold, .scan => self.resumeFold(evaluator, observed),
             .infra => resumeInfra(evaluator, base),
@@ -400,7 +390,7 @@ const IterationState = struct {
 
     fn pushInputs(self: *IterationState, evaluator: *Machine) MachineError!void {
         try evaluator.pushBorrowed(inputAt(self.left, self.index));
-        if (self.kind == .each2) try evaluator.pushBorrowed(inputAt(self.right.?, self.index));
+        if (self.kind == .zip_with) try evaluator.pushBorrowed(inputAt(self.right.?, self.index));
     }
 
     pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *IterationState) void {
@@ -562,10 +552,10 @@ fn startUnaryIteration(evaluator: *Machine, kind: IterationKind) MachineError!vo
     try evaluator.beginIsolatedApplication(state.application(1));
 }
 
-fn each2(evaluator: *Machine) MachineError!void {
-    return evaluator.continueWithIdiom(.each2, statelessFallback(each2Generic));
+fn zipWith(evaluator: *Machine) MachineError!void {
+    return evaluator.continueWithIdiom(.zip_with, statelessFallback(zipWithGeneric));
 }
-fn each2Generic(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
+fn zipWithGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
     try evaluator.require(3);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
@@ -597,7 +587,7 @@ fn each2Generic(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
     defer expected.deinit();
     var state_owner: ?*IterationState = try createIteration(
         evaluator,
-        .each2,
+        .zip_with,
         &left,
         &right,
         &quotation,

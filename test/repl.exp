@@ -80,6 +80,22 @@ expect_stack $name 3
 clean_eof $name
 puts "PASS: $name"
 
+set name "repl pty: nested arrays use delimiter-preserving matrix rows"
+start_repl $binary $temporary $name
+send "\[0 1 2 3 4 5 6 7 8 9\] \[2 3 4\] reshape\r"
+expect {
+    -re {\(\(\[0 1 2 3\]\r?\n  \[4 5 6 7\]\r?\n  \[8 9 0 1\]\)\r?\n \(\[2 3 4 5\]\r?\n  \[6 7 8 9\]\r?\n  \[0 1 2 3\]\)\)\r?\n} {}
+    timeout { fail_case $name "nested array did not use matrix row layout" }
+    eof { fail_case $name "process exited before displaying the nested array" }
+}
+expect {
+    "ecl> " {}
+    timeout { fail_case $name "next primary prompt timed out" }
+    eof { fail_case $name "process exited before the next primary prompt" }
+}
+clean_eof $name
+puts "PASS: $name"
+
 set name "repl pty: cursor editing and single-match completion"
 start_repl $binary $temporary $name
 send "13x +\033\[H\033\[C \033\[C\033\[3~\r"

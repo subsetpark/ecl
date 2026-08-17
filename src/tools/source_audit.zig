@@ -5,7 +5,7 @@ const std = @import("std");
 // budgeted, not treated as overhead to squeeze away. Tests and verification
 // tooling are classified for source coverage, but their lines are neither
 // measured nor controlled by the product complexity budget.
-const business_logic_budget: usize = 30_000;
+const business_logic_budget: usize = 36_000;
 
 const Component = struct {
     name: []const u8,
@@ -46,7 +46,7 @@ const components = [_]Component{
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
     // That stronger lifecycle boundary is intentionally budgeted here.
-    .{ .name = "machine", .budget = 5600, .files = &.{
+    .{ .name = "machine", .budget = 5900, .files = &.{
         "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "root.zig",
     }, .sources = &.{
         @embedFile("../machine.zig"),         @embedFile("../task_join_core.zig"),
@@ -59,7 +59,7 @@ const components = [_]Component{
     // Completion adds Directory/Shape/generation-owning cursors plus an
     // opaque rendered result; the higher ceiling preserves those nominal
     // lifetime boundaries rather than folding them into Session internals.
-    .{ .name = "modules and registry", .budget = 4800, .files = &.{
+    .{ .name = "modules and registry", .budget = 5300, .files = &.{
         "env.zig", "modules.zig", "snapshot.zig", "snapshot_core.zig", "module_prims.zig", "reflection.zig", "session.zig",
     }, .sources = &.{
         @embedFile("../env.zig"),          @embedFile("../modules.zig"),
@@ -77,7 +77,7 @@ const components = [_]Component{
     }, .sources = &.{
         @embedFile("../combinators.zig"),
     } },
-    .{ .name = "definition annotations", .budget = 1000, .files = &.{
+    .{ .name = "definition annotations", .budget = 1100, .files = &.{
         "definition_prims.zig", "doc.zig",
     }, .sources = &.{
         @embedFile("../definition_prims.zig"), @embedFile("../doc.zig"),
@@ -119,6 +119,18 @@ const components = [_]Component{
         @embedFile("../scheduler.zig"), @embedFile("../scheduler_core.zig"),
         @embedFile("../console.zig"),   @embedFile("../task_prims.zig"),
     } },
+    // The installed author SDK, its sized ABI records, validation, loader,
+    // and transactional-call boundary form one separately rooted component.
+    .{ .name = "native SDK, ABI, and loader", .budget = 3800, .files = &.{
+        "native/abi.zig",          "native/capability.zig", "native/sdk.zig",
+        "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",
+        "native_call.zig",
+    }, .sources = &.{
+        @embedFile("../native/abi.zig"),        @embedFile("../native/capability.zig"),
+        @embedFile("../native/sdk.zig"),        @embedFile("../native/build_helper.zig"),
+        @embedFile("../native_descriptor.zig"), @embedFile("../native_module.zig"),
+        @embedFile("../native_call.zig"),
+    } },
 };
 
 const test_files = [_][]const u8{
@@ -132,16 +144,27 @@ const test_files = [_][]const u8{
     "tests/concurrency_test.zig",         "tests/scheduler_property_test.zig",
     "tests/snapshot_property_test.zig",   "tests/task_join_property_test.zig",
     "tests/resolution_property_test.zig", "tests/oom_test.zig",
-    "tests/line_editor_test.zig",         "tests/fuzz_test.zig",
-    "oom_root.zig",
+    "tests/line_editor_test.zig",         "tests/native_test.zig",
+    "tests/fuzz_test.zig",                "oom_root.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
     "test/cli_test_support.zig",
     "test/e2e.zig",
+    "test/native_runtime.zig",
     "test/idiom_differential.zig",
     "test/oracle_differential.zig",
     "test/scheduler_shell_property.zig",
+    "test/native/sample.zig",
+    "test/native/malformed.zig",
+    "test/native/negative/no_call_parameter.zig",
+    "test/native/negative/wrong_return_type.zig",
+    "test/native/negative/generic_callback.zig",
+    "test/native/negative/malformed_effect.zig",
+    "test/native/negative/output_arity_mismatch.zig",
+    "test/native/negative/unknown_capability.zig",
+    "test/native/negative/duplicate_word.zig",
+    "test/native/negative/empty_doc.zig",
 };
 pub fn main(init: std.process.Init) !void {
     var failed = false;

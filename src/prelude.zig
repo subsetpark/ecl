@@ -75,7 +75,7 @@ pub fn installSource(
         cancelled,
     );
     defer unit.deinit();
-    unit.registry = registry;
+    unit.inherited.registry = registry;
     unit.replaceRootScope(building.rootScope(allocator));
     machine.run(&unit, root_header) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,

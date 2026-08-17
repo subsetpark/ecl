@@ -16,7 +16,6 @@ const MachineError = support.MachineError;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try support.installPrimitive(core, "keys", keysPrimitive);
-    try support.installPrimitive(core, "vals", valsPrimitive);
     try support.installPrimitive(core, "put", putPrimitive);
     try support.installPrimitive(core, "to-dict", toDictPrimitive);
     try support.installPrimitive(core, "del", delPrimitive);
@@ -41,6 +40,10 @@ fn valsPrimitive(evaluator: *Machine) MachineError!void {
     if (dictionary.borrow() != .dict) return evaluator.typeError("a dict");
     const values = dict.valsOf(dictionary.borrow()) catch return evaluator.typeError("a dict");
     try evaluator.pushBorrowed(values);
+}
+
+pub fn valsForIdiom(evaluator: *Machine) MachineError!void {
+    return valsPrimitive(evaluator);
 }
 
 fn hasPrimitive(evaluator: *Machine) MachineError!void {

@@ -15,16 +15,16 @@ const Case = struct {
 // list put, count-vector where, and cycling take beyond the shared overlap.
 
 const shared_words = [_][]const u8{
-    "str",   "+",      "-",        "*",       "/",     "div",   "mod",
-    "pow",   "min",    "max",      "=",       "<>",    "<",     ">",
-    "<=",    ">=",     "and",      "or",      "neg",   "abs",   "sqrt",
-    "floor", "ceil",   "round",    "not",     "len",   "shape", "first",
-    "rest",  "take",   "drop",     "at",      "where", "in",    "find",
-    "raze",  "cat",    "reverse",  "range",   "grade", "sort",  "distinct",
-    "keys",  "vals",   "put",      "del",     "merge", "has?",  "split",
-    "join",  "format", "parse",    "each",    "each2", "for",   "fold",
-    "scan",  "nip",    "when",     "wrap",    "pair",  "last",  "sum",
-    "prod",  "mean",   "print",    "inspect", "keep",  "bi",    "tri",
+    "str",   "+",      "-",        "*",       "/",        "div",   "mod",
+    "pow",   "min",    "max",      "=",       "<>",       "<",     ">",
+    "<=",    ">=",     "and",      "or",      "neg",      "abs",   "sqrt",
+    "floor", "ceil",   "round",    "not",     "len",      "shape", "first",
+    "rest",  "take",   "drop",     "at",      "where",    "in",    "find",
+    "raze",  "cat",    "reverse",  "range",   "grade",    "sort",  "distinct",
+    "keys",  "vals",   "put",      "del",     "merge",    "has?",  "split",
+    "join",  "format", "parse",    "each",    "zip-with", "for",   "fold",
+    "scan",  "nip",    "when",     "wrap",    "pair",     "last",  "sum",
+    "prod",  "mean",   "print",    "inspect", "keep",     "bi",    "tri",
     "fail",  "ok?",    "or-raise", "or-else",
 };
 
@@ -84,7 +84,7 @@ const cases = [_]Case{
     .{ .word = "format", .source = "[3.14 2] \"pi={} n={}\" format" },
     .{ .word = "parse", .source = "\"42\" parse first" },
     .{ .word = "each", .source = "[1 2 3] (dup *) each" },
-    .{ .word = "each2", .source = "[1 2] [3 4] (+) each2" },
+    .{ .word = "zip-with", .source = "[1 2] [3 4] (+) zip-with" },
     .{ .word = "for", .source = "[1 2] (pp) for" },
     .{ .word = "fold", .source = "[1 2 3] 0 (+) fold" },
     .{ .word = "scan", .source = "[1 2 3] 0 (+) scan" },

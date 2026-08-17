@@ -16,6 +16,23 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "(() cons) (wrap (first) cons) (swap literal swap compose) (() cons cons) (dup grade at) (() swap (cons) times)",
         },
         .{ .name = "pack", .source = "1 2 3 4 4 pack", .expected = "[1 2 3 4]" },
+        .{
+            .name = "migrated stack and quotation words",
+            .source = "1 2 over (1) (2) compose call 4 7 (1 +) dip 42 str",
+            .expected = "1 2 1 1 2 5 7 \"42\"",
+        },
+        .{
+            .name = "migrated numeric words",
+            .source = "7 3 mod -2 neg -2 abs 2 3 <> 2 2 <> 2 3 <= 3 2 <= " ++
+                "3 2 >= 2 3 >= 1 0 and 1 0 or",
+            .expected = "1 2 2 1 0 1 0 1 0 0 1",
+        },
+        .{
+            .name = "migrated sequence and dictionary words",
+            .source = "[1 2 3] first [1 2 3] rest [1 2 3] reverse " ++
+                "[1 2 1 3 2] distinct {'a 1 'b 2} vals",
+            .expected = "1 [2 3] [3 2 1] [1 2 3] [1 2]",
+        },
         .{ .name = "partition", .source = "[1 2 3 4] (2 >) partition", .expected = "[3 4] [1 2]" },
         .{ .name = "aggregates", .source = "[3 1 2] min-of [3 1 2] max-of [1 2 3] sum [1 2 3] prod", .expected = "1 3 6 6" },
         .{
@@ -24,6 +41,13 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "1 9 foo bar",
         },
         .{ .name = "find", .source = "[2 3 2] 3 find [2 3 2] 9 find (foo) dup first find", .expected = "1 3 0" },
+        .{
+            .name = "at-path",
+            .source = "[[10 20] [30 40]] [1 0] at-path " ++
+                "{'users ({'name \"Ada\"} {'name \"Lin\"})} ['users 1 'name] at-path " ++
+                "42 [] at-path",
+            .expected = "30 \"Lin\" 42",
+        },
         .{
             .name = "literal values",
             .source = "(foo) first literal call 42 literal call [1 2] literal call",
@@ -59,7 +83,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
                 "[1 2 3] uncons [1 2 3] unappend [] empty? [1] empty? " ++
                 "[1 2] [3 4] zip [3 1 2] sort",
             .expected = "3 [7] [7 8] [1 2 3] [1 2 3] 1 [2 3] [1 2] 3 " ++
-                "1 0 ([1 3] [2 4]) [1 2 3]",
+                "1 0\n([1 3]\n [2 4])\n[1 2 3]",
         },
         .{
             .name = "selection and aggregation",
@@ -72,13 +96,16 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose bodies and nonempty documentation" {
     const names = [_][]const u8{
-        "nip",    "keep",     "bi",       "tri",     "bi2",       "both",
-        "when",   "unless",   "case",     "signum",  "clamp",     "last",
-        "wrap",   "literal",  "partial",  "pair",    "pack",      "append",
-        "uncons", "unappend", "empty?",   "zip",     "min-of",    "max-of",
-        "sort",   "at-or",    "pairs",    "filter",  "partition", "any?",
-        "all?",   "sum",      "prod",     "mean",    "print",     "inspect",
-        "fail",   "ok?",      "or-raise", "or-else", "find",
+        "compose", "first",  "wrap",     "literal", "dip",       "over",
+        "partial", "str",    "mod",      "neg",     "abs",       "<>",
+        "<=",      ">=",     "and",      "or",      "nip",       "keep",
+        "bi",      "tri",    "bi2",      "both",    "when",      "unless",
+        "case",    "signum", "clamp",    "last",    "pair",      "pack",
+        "append",  "rest",   "reverse",  "uncons",  "unappend",  "empty?",
+        "zip",     "min-of", "max-of",   "sort",    "distinct",  "at-path",
+        "vals",    "at-or",  "pairs",    "filter",  "partition", "any?",
+        "all?",    "sum",    "prod",     "mean",    "print",     "inspect",
+        "fail",    "ok?",    "or-raise", "or-else", "find",      "await-all",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -145,6 +172,7 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         .{ .name = "case shape", .source = "1 [] case", .kind = "shape" },
         .{ .name = "case type", .source = "1 2 case", .kind = "type" },
         .{ .name = "at-or propagates type", .source = "1 0 9 at-or", .kind = "type", .word = "has?" },
+        .{ .name = "at-path propagates lookup failure", .source = "{'a [1]} ['a 4] at-path", .kind = "domain", .word = "at" },
         .{ .name = "pack negative", .source = "1 -1 pack", .kind = "domain", .word = "times" },
         .{ .name = "pack type", .source = "1 1.0 pack", .kind = "type", .word = "times" },
         .{ .name = "pack underflow", .source = "1 2 pack", .kind = "underflow", .word = "cons" },

@@ -6,6 +6,7 @@ const list = @import("list.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
+const native_module = @import("native_module.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const reflection = @import("reflection.zig");
 const doc_text = @import("doc.zig");
@@ -368,7 +369,8 @@ const WhichDriver = struct {
         self.add(.{ .bytes = switch (self.resolved.?.lease.binding) {
             .word => "def",
             .value => "set",
-            .primitive, .builtin => "primitive",
+            .builtin => "primitive",
+            .native => "native",
         } });
         self.add(.{ .bytes = " " });
         self.add(.{ .bytes = @tagName(self.resolved.?.lease.visibility) });
@@ -379,6 +381,16 @@ const WhichDriver = struct {
         if (self.resolved.?.lease.effect) |effect| {
             self.add(.{ .bytes = " " });
             self.add(.{ .value = .{ .list = effect.header() } });
+        }
+        switch (self.resolved.?.lease.binding) {
+            .native => |callable| {
+                self.add(.{ .bytes = " requires " });
+                for (callable.instance.requirements(), 0..) |requirement, index| {
+                    if (index != 0) self.add(.{ .bytes = ", " });
+                    self.add(.{ .bytes = native_module.capabilityName(requirement.id) });
+                }
+            },
+            else => {},
         }
         self.initialized = true;
     }
@@ -408,7 +420,12 @@ const WhichDriver = struct {
                     self.shadow_cursor = null;
                     const fixed_count: usize = 8 +
                         @as(usize, @intFromBool(self.resolved.?.home != null)) * 2 +
-                        @as(usize, @intFromBool(self.resolved.?.lease.effect != null)) * 2;
+                        @as(usize, @intFromBool(self.resolved.?.lease.effect != null)) * 2 +
+                        switch (self.resolved.?.lease.binding) {
+                            .native => |callable| 1 + callable.instance.requirements().len * 2 -
+                                @intFromBool(callable.instance.requirements().len != 0),
+                            else => 0,
+                        };
                     self.actions = try evaluator.allocator().alloc(
                         reflection.Action,
                         fixed_count + shadows.len * 2,
@@ -435,7 +452,7 @@ const WhichDriver = struct {
             .pending => return .yielded,
             .complete => |bytes| self.rendered = bytes,
         };
-        if (evaluator.unit.console) |console| {
+        if (evaluator.unit.inherited.console) |console| {
             console.writeOutput(self.rendered.?, false) catch return writeFailure(evaluator);
             return .completed;
         }
@@ -471,7 +488,7 @@ const SeeDriver = struct {
     annotation_index: usize = 0,
     annotation_materializer: ?kernel_storage.ValueMaterializer = null,
     annotation: ?Value = null,
-    actions: [8]reflection.Action = .{reflection.Action{ .bytes = "" }} ** 8,
+    actions: [144]reflection.Action = .{reflection.Action{ .bytes = "" }} ** 144,
     action_count: usize = 0,
     plan: ?reflection.OwnedPlanCursor = null,
     rendered: ?[]u8 = null,
@@ -485,7 +502,12 @@ const SeeDriver = struct {
         switch (self.resolved.?.lease.binding) {
             .word => |source| self.add(.{ .value = .{ .list = env.quotationHeader(source) } }),
             .value => |item| self.add(.{ .value = item }),
-            .primitive, .builtin => self.add(.{ .bytes = "<primitive>" }),
+            .builtin => self.add(.{ .bytes = "<primitive>" }),
+            .native => {
+                self.add(.{ .bytes = "<native:" });
+                self.add(.{ .name = self.resolved.?.trace_word });
+                self.add(.{ .bytes = ">" });
+            },
         }
         if (self.annotation) |annotation| {
             self.add(.{ .bytes = " " });
@@ -494,12 +516,23 @@ const SeeDriver = struct {
             self.add(.{ .bytes = " " });
             self.add(.{ .value = .{ .list = effect.header() } });
         }
+        switch (self.resolved.?.lease.binding) {
+            .native => |callable| {
+                self.add(.{ .bytes = " requires " });
+                for (callable.instance.requirements(), 0..) |requirement, index| {
+                    if (index != 0) self.add(.{ .bytes = ", " });
+                    self.add(.{ .bytes = native_module.capabilityName(requirement.id) });
+                }
+            },
+            else => {},
+        }
         self.add(.{ .bytes = " '" });
         self.add(.{ .name = self.resolved.?.trace_word });
         self.add(.{ .bytes = switch (self.resolved.?.lease.binding) {
             .value => if (self.resolved.?.lease.visibility == .private) " setp\n" else " set\n",
             .word => if (self.resolved.?.lease.visibility == .private) " defp\n" else " def\n",
-            .primitive, .builtin => " def\n",
+            .builtin => " def\n",
+            .native => " def\n",
         } });
         self.plan = .init(allocator, self.actions[0..self.action_count]);
     }
@@ -564,7 +597,7 @@ const SeeDriver = struct {
             .pending => return .yielded,
             .complete => |bytes| self.rendered = bytes,
         };
-        if (evaluator.unit.console) |console| {
+        if (evaluator.unit.inherited.console) |console| {
             console.writeOutput(self.rendered.?, false) catch return writeFailure(evaluator);
             return .completed;
         }

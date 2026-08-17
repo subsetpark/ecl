@@ -8,6 +8,8 @@ const intern = @import("intern.zig");
 const spans = @import("spans.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
+const native_call = @import("native_call.zig");
+const native_module = @import("native_module.zig");
 const reader = @import("reader.zig");
 const reader_cursor = @import("reader_cursor.zig");
 const poll_api = @import("poll.zig");
@@ -779,7 +781,7 @@ const Boundary = struct {
         }
     }
 };
-const EffectCheck = struct {
+pub const EffectCheck = struct {
     expected_depth: u32,
     entry_depth: u32,
     inputs: u32,
@@ -890,7 +892,6 @@ const ApplicationFrame = struct {
 };
 pub const Frame = union(enum(u8)) {
     eval: Eval,
-    restore: Value,
     effect_check: EffectCheck,
     application: ApplicationFrame,
     use_after_load: struct {
@@ -903,7 +904,6 @@ pub const Frame = union(enum(u8)) {
     fn deinit(self: Frame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         switch (self) {
             .eval => |frame| releases.releaseHeader(frame.code),
-            .restore => |item| releases.releaseValue(item),
             .effect_check => {},
             .application => |frame| frame.deinit(releases, allocator),
             .use_after_load => |frame| {
@@ -945,7 +945,13 @@ comptime {
     // extra words: invalid correlated continuation states are unrepresentable.
     if (@sizeOf(Frame) > 80) @compileError("machine frames must remain at most 80 bytes");
 }
-pub const IdiomRequest = union(enum) { direct: *Header, each, each2, fold, scan };
+pub const IdiomRequest = union(enum) {
+    direct: struct { body: *Header, word: u32 },
+    each,
+    zip_with,
+    fold,
+    scan,
+};
 pub const IdiomFallback = struct {
     context: ?*anyopaque = null,
     run_fn: *const fn (*Machine, ?*anyopaque) MachineError!void,
@@ -956,6 +962,21 @@ pub const IdiomFallback = struct {
     pub fn deinit(self: IdiomFallback, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         self.deinit_fn(releases, allocator, self.context);
     }
+};
+
+/// Configuration and semantic services inherited by every spawned Unit.
+/// Keeping this as one value makes addition of a new inherited service an
+/// atomic parent-to-child copy instead of a scheduler-site field checklist.
+pub const InheritedContext = struct {
+    registry: ?*modules.Registry = null,
+    native_loader: ?*native_module.Loader = null,
+    native_diagnostics: bool = false,
+    diagnostics: ?*std.Io.Writer = null,
+    console: ?*console_api.Console = null,
+    host_io: ?std.Io = null,
+    ecl_path: ?[]const u8 = null,
+    idiom_mode: IdiomMode = .automatic,
+    phrase_recognizer: ?PhraseRecognizer = null,
 };
 
 fn IdiomFallbackAdapters(comptime Driver: type) type {
@@ -1222,6 +1243,25 @@ pub const StackReservation = struct {
     }
 };
 
+/// Validated exact replacement of the current operand suffix. Capacity is
+/// secured before this capability is returned; `commitOwned` is the only
+/// splice that releases the inputs and transfers the completed outputs.
+pub const StackReplacement = struct {
+    unit: *Unit,
+    base: usize,
+    input_count: usize,
+    output_count: usize,
+
+    pub fn commitOwned(self: *StackReplacement, outputs: []const Value) void {
+        std.debug.assert(outputs.len == self.output_count);
+        std.debug.assert(self.unit.stack.items.len == self.base + self.input_count);
+        for (self.unit.stack.items[self.base..]) |item| self.unit.releases.releaseValue(item);
+        self.unit.stack.items.len = self.base;
+        for (outputs) |item| self.unit.stack.appendAssumeCapacity(item);
+        self.* = undefined;
+    }
+};
+
 const TaskJoinCleanupProgress = struct {
     complete: bool,
     consumed: usize,
@@ -1381,14 +1421,10 @@ pub const Unit = struct {
     frames: std.ArrayList(Frame) = .empty,
     stack: std.ArrayList(Value),
     environment: *env.Env,
-    registry: ?*modules.Registry = null,
+    inherited: InheritedContext = .{},
     lifetime: LifetimeGuard,
     archive: *spans.SpanArchive,
     output: ?*std.Io.Writer,
-    diagnostics: ?*std.Io.Writer = null,
-    console: ?*console_api.Console = null,
-    host_io: ?std.Io = null,
-    ecl_path: ?[]const u8 = null,
     arguments: Value,
     cancelled: *const std.atomic.Value(bool),
     fuel: u32 = fuel_quantum,
@@ -1401,9 +1437,7 @@ pub const Unit = struct {
     pending: ?EclErr = null,
     last_error: ?Value = null,
     exit_status: ?u8 = null,
-    idiom_mode: IdiomMode = .automatic,
     idiom_hits: u64 = 0,
-    phrase_recognizer: ?PhraseRecognizer = null,
     scheduler: ?*const anyopaque = null,
     task_scope: ?*anyopaque = null,
     is_root_unit: bool = true,
@@ -1750,6 +1784,37 @@ pub const Machine = struct {
     pub fn releaseDomain(self: *const Machine) *heap.ReleaseDomain {
         return self.unit.releases;
     }
+    pub fn beginNativeTiming(self: *const Machine) ?i128 {
+        if (!self.unit.inherited.native_diagnostics) return null;
+        const io = self.unit.inherited.host_io orelse return null;
+        return std.Io.Clock.awake.now(io).nanoseconds;
+    }
+    /// Native code cannot be preempted. This optional observation reports a
+    /// long slice after it returns; it provides no sandboxing or instruction
+    /// reduction, and the default path does not sample the clock at all.
+    pub fn finishNativeTiming(
+        self: *Machine,
+        instance: *native_module.ModuleInstance,
+        started: ?i128,
+    ) void {
+        const start = started orelse return;
+        const io = self.unit.inherited.host_io orelse return;
+        const end = std.Io.Clock.awake.now(io).nanoseconds;
+        const elapsed: u64 = @intCast(@max(end - start, 0));
+        if (!instance.recordDuration(elapsed)) return;
+        var buffer: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(
+            &buffer,
+            "native module `{s}` returned after an over-quantum slice ({d} ns)\n",
+            .{ intern.get(intern.namespaceId(instance.name())), elapsed },
+        ) catch return;
+        if (self.unit.inherited.console) |console| {
+            console.writeDiagnostics(line, false) catch {};
+        } else if (self.unit.inherited.diagnostics) |diagnostics| {
+            diagnostics.writeAll(line) catch {};
+            diagnostics.flush() catch {};
+        }
+    }
     pub fn currentEnv(self: *const Machine) *env.Env {
         return self.unit.environment;
     }
@@ -1806,21 +1871,26 @@ pub const Machine = struct {
     }
     pub fn useOrLoad(self: *Machine, name: u32) MachineError!void {
         const driver = try self.unit.allocator.create(UseDriver);
-        driver.* = try .init(self, self.currentScope(), name, true);
+        driver.* = .init(self, self.currentScope(), name, true);
         self.installWorkDriver(driver);
     }
     fn autoLoadModule(self: *Machine, name: u32) MachineError!void {
-        const registry = self.unit.registry orelse return self.undefinedModule(name);
+        const registry = self.unit.inherited.registry orelse return self.undefinedModule(name);
         const driver = try self.unit.allocator.create(AutoLoadDriver);
         driver.* = .{ .name = name, .cursor = registry.beginLoadingCursor(name) };
         self.installWorkDriver(driver);
     }
     const AutoLoadDriver = struct {
+        const FileKind = enum { source, native };
+        const FilenameTarget = enum { component_start, candidate };
+
         name: u32,
         cursor: modules.Registry.BeginLoadingCursor,
         loading: ?modules.LoadingLease = null,
         filename: ?[]u8 = null,
         filename_index: usize = 0,
+        file_kind: FileKind = .source,
+        filename_target: FilenameTarget = .component_start,
         search_index: usize = 0,
         component_start: usize = 0,
         component_end: usize = 0,
@@ -1838,10 +1908,30 @@ pub const Machine = struct {
             self.candidate_index = 0;
             self.separator = false;
             self.access_error = null;
-            self.phase = .component_start;
+        }
+        fn beginFilename(
+            self: *AutoLoadDriver,
+            evaluator: *Machine,
+            kind: FileKind,
+            target: FilenameTarget,
+        ) error{OutOfMemory}!void {
+            if (self.filename) |filename| evaluator.unit.allocator.free(filename);
+            self.filename = null;
+            self.filename_index = 0;
+            self.file_kind = kind;
+            self.filename_target = target;
+            const module_name = intern.get(self.name);
+            const extension = switch (kind) {
+                .source => ".ecl",
+                .native => ".eclmod",
+            };
+            const length = std.math.add(usize, module_name.len, extension.len) catch
+                return error.OutOfMemory;
+            self.filename = try evaluator.unit.allocator.alloc(u8, length);
+            self.phase = .filename;
         }
         fn beginCandidate(self: *AutoLoadDriver, evaluator: *Machine) error{OutOfMemory}!void {
-            const search = evaluator.unit.ecl_path.?;
+            const search = evaluator.unit.inherited.ecl_path.?;
             const directory = search[self.component_start..self.component_end];
             self.separator = directory.len != 0 and !std.fs.path.isSep(directory[directory.len - 1]);
             var length = std.math.add(usize, directory.len, self.filename.?.len) catch
@@ -1863,28 +1953,30 @@ pub const Machine = struct {
                             "recursive auto-load of module `{s}`",
                             .{intern.get(self.name)},
                         );
-                        if (evaluator.unit.host_io == null or evaluator.unit.ecl_path == null)
+                        if (evaluator.unit.inherited.host_io == null or evaluator.unit.inherited.ecl_path == null)
                             return evaluator.undefinedModule(self.name);
-                        const module_name = intern.get(self.name);
-                        const length = std.math.add(usize, module_name.len, 4) catch
-                            return error.OutOfMemory;
-                        self.filename = try evaluator.unit.allocator.alloc(u8, length);
-                        self.phase = .filename;
+                        try self.beginFilename(evaluator, .source, .component_start);
                     },
                 },
                 .filename => {
                     const module_name = intern.get(self.name);
-                    const extension = ".ecl";
+                    const extension = switch (self.file_kind) {
+                        .source => ".ecl",
+                        .native => ".eclmod",
+                    };
                     if (self.filename_index != self.filename.?.len) {
                         self.filename.?[self.filename_index] = if (self.filename_index < module_name.len)
                             module_name[self.filename_index]
                         else
                             extension[self.filename_index - module_name.len];
                         self.filename_index += 1;
-                    } else self.phase = .component_start;
+                    } else switch (self.filename_target) {
+                        .component_start => self.phase = .component_start,
+                        .candidate => try self.beginCandidate(evaluator),
+                    }
                 },
                 .component_start => {
-                    const search = evaluator.unit.ecl_path.?;
+                    const search = evaluator.unit.inherited.ecl_path.?;
                     if (self.search_index == search.len) return evaluator.undefinedModule(self.name);
                     if (search[self.search_index] == std.fs.path.delimiter) {
                         self.search_index += 1;
@@ -1894,7 +1986,7 @@ pub const Machine = struct {
                     }
                 },
                 .component_end => {
-                    const search = evaluator.unit.ecl_path.?;
+                    const search = evaluator.unit.inherited.ecl_path.?;
                     if (self.search_index == search.len or
                         search[self.search_index] == std.fs.path.delimiter)
                     {
@@ -1904,7 +1996,7 @@ pub const Machine = struct {
                     } else self.search_index += 1;
                 },
                 .candidate => {
-                    const search = evaluator.unit.ecl_path.?;
+                    const search = evaluator.unit.inherited.ecl_path.?;
                     const directory = search[self.component_start..self.component_end];
                     if (self.candidate_index != self.candidate.?.len) {
                         self.candidate.?[self.candidate_index] = if (self.candidate_index < directory.len)
@@ -1918,12 +2010,17 @@ pub const Machine = struct {
                 },
                 .access => {
                     std.Io.Dir.cwd().access(
-                        evaluator.unit.host_io.?,
+                        evaluator.unit.inherited.host_io.?,
                         self.candidate.?,
                         .{ .read = true },
                     ) catch |err| switch (err) {
                         error.FileNotFound => {
                             self.resetCandidate(evaluator.unit.allocator);
+                            if (self.file_kind == .source) {
+                                try self.beginFilename(evaluator, .native, .candidate);
+                            } else {
+                                try self.beginFilename(evaluator, .source, .component_start);
+                            }
                             continue;
                         },
                         else => self.access_error = @errorName(err),
@@ -1953,6 +2050,7 @@ pub const Machine = struct {
                     },
                 },
                 .transfer => {
+                    if (self.file_kind == .native) return self.transferNative(evaluator);
                     const candidate = self.candidate.?;
                     const completion: SourceCompletion = .{ .use = .{
                         .name = self.name,
@@ -1975,12 +2073,135 @@ pub const Machine = struct {
             };
             return .yielded;
         }
+        fn transferNative(self: *AutoLoadDriver, evaluator: *Machine) MachineError!WorkProgress {
+            const loader_authority = evaluator.unit.inherited.native_loader orelse
+                return evaluator.fail(.io, "native module loader is unavailable");
+            const start = try loader_authority.startDynamic(@enumFromInt(self.name), self.candidate.?);
+            const loader = switch (start) {
+                .failure => |failure| {
+                    const failed = evaluator.fail(.io, failure.text());
+                    evaluator.unit.pending.?.addData(.path, self.path_value.?);
+                    return failed;
+                },
+                .loading => |loading| loading,
+            };
+            const next = evaluator.unit.allocator.create(NativeLoadDriver) catch |err| {
+                var cleanup = loader;
+                cleanup.deinit();
+                return err;
+            };
+            next.* = .{
+                .name = self.name,
+                .loader = loader,
+                .loading = self.loading.?.move(),
+                .path = self.path_value.?,
+            };
+            self.loading = null;
+            self.path_value = null;
+            evaluator.detachWorkDriver(self);
+            AutoLoadDriver.destroy(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            evaluator.installWorkDriver(next);
+            return .detached;
+        }
         pub fn destroy(releases: *heap.ReleaseDomain, storage_allocator: std.mem.Allocator, self: *AutoLoadDriver) void {
             if (self.loading) |*loading| loading.deinit();
             if (self.path_materializer) |*materializer| materializer.retire(releases);
             if (self.path_value) |path_value| releases.releaseValue(path_value);
             if (self.candidate) |candidate| storage_allocator.free(candidate);
             if (self.filename) |filename| storage_allocator.free(filename);
+            storage_allocator.destroy(self);
+        }
+    };
+    const NativeLoadDriver = struct {
+        name: u32,
+        loader: native_module.LoadCursor,
+        loading: ?modules.LoadingLease,
+        path: ?Value,
+        instance: ?*native_module.ModuleInstance = null,
+        publication: ?modules.Registry.NativeCandidateCursor = null,
+        candidate: ?modules.OwnedCandidate = null,
+        commit: ?modules.Registry.CommitCursor = null,
+        next: ?*UseDriver = null,
+        phase: enum { validate, definitions, commit } = .validate,
+
+        fn failLoad(self: *NativeLoadDriver, evaluator: *Machine, message: []const u8) MachineError {
+            const failure = evaluator.fail(.io, message);
+            evaluator.unit.pending.?.addData(.path, self.path.?);
+            return failure;
+        }
+
+        pub fn advance(evaluator: *Machine, self: *NativeLoadDriver) MachineError!WorkProgress {
+            try evaluator.pollKernel();
+            switch (self.phase) {
+                .validate => switch (try self.loader.advance(kernel_poll_quantum)) {
+                    .pending => return .yielded,
+                    .failure => |failure| return self.failLoad(evaluator, failure.text()),
+                    .loaded => |instance| {
+                        self.instance = instance;
+                        self.publication = try .init(evaluator.unit.inherited.registry.?, instance);
+                        self.phase = .definitions;
+                        return .yielded;
+                    },
+                },
+                .definitions => switch (try self.publication.?.advance()) {
+                    .pending => return .yielded,
+                    .complete => |candidate| {
+                        self.publication.?.deinit();
+                        self.publication = null;
+                        self.candidate = candidate;
+                        self.next = try evaluator.unit.allocator.create(UseDriver);
+                        self.commit = evaluator.unit.inherited.registry.?.commitCursor(&self.candidate.?);
+                        self.phase = .commit;
+                        return .yielded;
+                    },
+                },
+                .commit => switch (self.commit.?.advance() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return evaluator.failFmt(
+                        .io,
+                        "cannot publish native module `{s}`: {s}",
+                        .{ intern.get(self.name), @errorName(err) },
+                    ),
+                }) {
+                    .pending => return .yielded,
+                    .complete => {
+                        self.commit.?.deinit();
+                        self.commit = null;
+                        const next = self.next.?;
+                        next.* = UseDriver.init(evaluator, evaluator.currentScope(), self.name, false);
+                        next.after_load = .{
+                            .loading = self.loading.?.move(),
+                            .path = self.path.?,
+                        };
+                        self.loading = null;
+                        self.path = null;
+                        self.next = null;
+                        evaluator.detachWorkDriver(self);
+                        NativeLoadDriver.destroy(
+                            evaluator.releaseDomain(),
+                            evaluator.unit.allocator,
+                            self,
+                        );
+                        evaluator.installWorkDriver(next);
+                        return .detached;
+                    },
+                },
+            }
+        }
+
+        pub fn destroy(
+            releases: *heap.ReleaseDomain,
+            storage_allocator: std.mem.Allocator,
+            self: *NativeLoadDriver,
+        ) void {
+            if (!self.loader.done) self.loader.deinit();
+            if (self.publication) |*publication| publication.deinit();
+            if (self.commit) |*commit| commit.deinit();
+            if (self.candidate) |*candidate| candidate.deinit();
+            if (self.instance) |instance| instance.releasePin();
+            if (self.next) |next| storage_allocator.destroy(next);
+            if (self.loading) |*loading| loading.deinit();
+            if (self.path) |path| releases.releaseValue(path);
             storage_allocator.destroy(self);
         }
     };
@@ -2017,23 +2238,23 @@ pub const Machine = struct {
             scope: *env.Scope,
             name: u32,
             allow_load: bool,
-        ) error{OutOfMemory}!UseDriver {
+        ) UseDriver {
             return .{
                 .allocator = evaluator.unit.allocator,
                 .scope = scope,
                 .name = name,
                 .allow_load = allow_load,
-                .canonical = if (evaluator.unit.registry) |registry| registry.canonicalCursor(name) else null,
+                .canonical = if (evaluator.unit.inherited.registry) |registry| registry.canonicalCursor(name) else null,
                 .found = .init(evaluator.unit.allocator),
                 .actions_found = .init(evaluator.unit.allocator),
             };
         }
         fn diagnosticsAvailable(self: *UseDriver, evaluator: *Machine) bool {
             _ = self;
-            return if (evaluator.unit.console) |console|
+            return if (evaluator.unit.inherited.console) |console|
                 console.diagnostics != null
             else
-                evaluator.unit.diagnostics != null;
+                evaluator.unit.inherited.diagnostics != null;
         }
         fn beginMove(self: *UseDriver) error{OutOfMemory}!void {
             self.mover = try self.scope.moveUseCursor(self.canonical_name);
@@ -2082,7 +2303,7 @@ pub const Machine = struct {
                             cursor.deinit();
                             self.canonical = null;
                             if (self.scope.kind() == .session and self.diagnosticsAvailable(evaluator)) {
-                                self.acquisition = evaluator.unit.registry.?.acquireCursor(self.canonical_name);
+                                self.acquisition = evaluator.unit.inherited.registry.?.acquireCursor(self.canonical_name);
                                 self.phase = .acquire;
                             } else try self.beginMove();
                         },
@@ -2166,13 +2387,13 @@ pub const Machine = struct {
                     },
                 },
                 .write => {
-                    if (evaluator.unit.console) |console| {
+                    if (evaluator.unit.inherited.console) |console| {
                         console.writeDiagnostics(self.rendered.?, false) catch
                             return evaluator.fail(.io, "standard error write failed");
                         try self.beginMove();
                         return .yielded;
                     }
-                    const output = evaluator.unit.diagnostics.?;
+                    const output = evaluator.unit.inherited.diagnostics.?;
                     output.writeAll(self.rendered.?) catch return evaluator.fail(.io, "standard error write failed");
                     output.flush() catch return evaluator.fail(.io, "standard error flush failed");
                     try self.beginMove();
@@ -2442,7 +2663,7 @@ pub const Machine = struct {
         path_value: ?Value,
         completion: SourceCompletion,
     ) MachineError!void {
-        if (self.unit.host_io == null) {
+        if (self.unit.inherited.host_io == null) {
             const failure = self.fail(.io, "filesystem access is unavailable");
             if (path_value) |item| self.unit.pending.?.addData(.path, item);
             return failure;
@@ -2482,7 +2703,7 @@ pub const Machine = struct {
         }
         pub fn advance(evaluator: *Machine, self: *FileSourceDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
-            const io = evaluator.unit.host_io.?;
+            const io = evaluator.unit.inherited.host_io.?;
             self.io = io;
             switch (self.phase) {
                 .open => {
@@ -2613,6 +2834,25 @@ pub const Machine = struct {
         try self.unit.stack.ensureUnusedCapacity(self.unit.allocator, count);
         return .init(self.unit, count);
     }
+    pub fn reserveStackReplacement(
+        self: *Machine,
+        input_count: usize,
+        output_count: usize,
+    ) error{OutOfMemory}!StackReplacement {
+        std.debug.assert(self.available() >= input_count);
+        const base = self.unit.stack.items.len - input_count;
+        try self.unit.stack.ensureTotalCapacity(self.unit.allocator, base + output_count);
+        return .{
+            .unit = self.unit,
+            .base = base,
+            .input_count = input_count,
+            .output_count = output_count,
+        };
+    }
+    pub fn nativeInputBorrowed(self: *const Machine, input_count: usize, index: usize) Value {
+        std.debug.assert(index < input_count and self.available() >= input_count);
+        return self.unit.stack.items[self.unit.stack.items.len - input_count + index];
+    }
     /// Consumes `item`. The stack owns it on success; the release domain owns
     /// its constant-time retirement if stack growth fails.
     pub fn pushOwned(self: *Machine, item: Value) error{OutOfMemory}!void {
@@ -2703,7 +2943,7 @@ pub const Machine = struct {
         return error.Ecl;
     }
     pub fn continueWithIdiom(self: *Machine, request: IdiomRequest, fallback: IdiomFallback) MachineError!void {
-        if (self.unit.phrase_recognizer) |recognize| return recognize(self, request, fallback);
+        if (self.unit.inherited.phrase_recognizer) |recognize| return recognize(self, request, fallback);
         defer fallback.deinit(self.releaseDomain(), self.unit.allocator);
         return fallback.run(self);
     }
@@ -2829,33 +3069,6 @@ pub const Machine = struct {
             .traced_word = inherited_trace,
         };
     }
-    /// Consumes both values and restores `protected` after the quotation.
-    pub fn dipOwned(
-        self: *Machine,
-        quotation: *Header,
-        protected: Value,
-    ) error{OutOfMemory}!void {
-        const scope = self.unit.current.?.scope;
-        const home = self.unit.current.?.home;
-        const inherited_trace = self.suspendCurrent() catch {
-            self.releaseDomain().releaseHeader(quotation);
-            self.releaseDomain().releaseValue(protected);
-            return error.OutOfMemory;
-        };
-        var continuation = OwnedFrame.init(.{ .restore = protected });
-        defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
-        self.appendFrame(&continuation) catch {
-            self.releaseDomain().releaseHeader(quotation);
-            return error.OutOfMemory;
-        };
-        self.unit.current = .{
-            .code = quotation,
-            .ip = 0,
-            .scope = scope,
-            .home = home,
-            .traced_word = inherited_trace,
-        };
-    }
     /// Starts one quotation application behind a base-index stack barrier.
     /// `application.context` is consumed on every path. Its callback either
     /// returns null (finished) or transfers that same ownership into the next
@@ -2939,7 +3152,7 @@ pub const Machine = struct {
         name: intern.NamespaceName,
         quotation: *Header,
     ) MachineError!void {
-        const registry = self.unit.registry orelse {
+        const registry = self.unit.inherited.registry orelse {
             self.releaseDomain().releaseHeader(quotation);
             return self.fail(.domain, "module registry is unavailable");
         };
@@ -3058,44 +3271,6 @@ pub const Machine = struct {
     }
 };
 
-/// Callback-facing evaluator capability. It exposes semantic stack operations
-/// but no Unit, module-home, generation-pin, or reclamation-domain access.
-pub const NativeMachine = opaque {
-    fn evaluator(self: *NativeMachine) *Machine {
-        return @ptrCast(@alignCast(self));
-    }
-
-    pub fn allocator(self: *NativeMachine) std.mem.Allocator {
-        return self.evaluator().allocator();
-    }
-
-    pub fn require(self: *NativeMachine, count: usize) MachineError!void {
-        return self.evaluator().require(count);
-    }
-
-    pub fn depth(self: *NativeMachine) usize {
-        return self.evaluator().available();
-    }
-
-    pub fn peekBorrowed(self: *NativeMachine, offset_from_top: usize) MachineError!Value {
-        const machine_state = self.evaluator();
-        try machine_state.require(offset_from_top + 1);
-        return machine_state.unit.stack.items[machine_state.unit.stack.items.len - 1 - offset_from_top];
-    }
-
-    pub fn discard(self: *NativeMachine, count: usize) MachineError!void {
-        try self.evaluator().require(count);
-        self.evaluator().discard(count);
-    }
-
-    pub fn pushBorrowed(self: *NativeMachine, item: Value) error{OutOfMemory}!void {
-        return self.evaluator().pushBorrowed(item);
-    }
-
-    pub fn pushOwned(self: *NativeMachine, item: Value) error{OutOfMemory}!void {
-        return self.evaluator().pushOwned(item);
-    }
-};
 pub const RunStatus = enum { completed, yielded, parked };
 
 pub const InitialStack = union(enum) {
@@ -3539,6 +3714,11 @@ const DispatchDriver = struct {
 fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     self.unit.active_word = resolved.trace_word;
     const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home;
+    const cross_home_effect = if (cross_home) resolved.lease.effect else null;
+    const check: ?EffectCheck = if (cross_home) switch (resolved.lease.binding) {
+        .builtin, .native => try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
+        .value, .word => null,
+    } else null;
     switch (resolved.lease.binding) {
         .value => |item| try self.pushBorrowed(item),
         .word => |body| {
@@ -3548,7 +3728,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 heap.incRef(body_header);
                 fallback.* = .{ .body = body_header, .word = resolved.trace_word };
                 return self.continueWithIdiom(
-                    .{ .direct = body_header },
+                    .{ .direct = .{ .body = body_header, .word = resolved.trace_word } },
                     typedIdiomFallback(fallback),
                 );
             }
@@ -3557,26 +3737,10 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 body_header,
                 resolved.trace_word,
                 resolved.home,
-                if (cross_home) resolved.lease.effect else null,
+                cross_home_effect,
             );
         },
-        .primitive => |primitive| {
-            const check = if (cross_home)
-                try prepareEffectCheck(self, resolved.lease.effect, resolved.trace_word)
-            else
-                null;
-            const native: *NativeMachine = @ptrCast(self);
-            switch (try primitive(native)) {
-                .ok => {},
-                .failure => |failure_value| return self.installPrimitiveFailure(failure_value),
-            }
-            if (check) |effect_check| try finishEffectCheck(self, effect_check);
-        },
         .builtin => |primitive| {
-            const check = if (cross_home)
-                try prepareEffectCheck(self, resolved.lease.effect, resolved.trace_word)
-            else
-                null;
             primitive(self) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Ecl => {
@@ -3589,6 +3753,9 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 return self.installPrimitiveFailure(failure_value);
             }
             if (check) |effect_check| try finishEffectCheck(self, effect_check);
+        },
+        .native => |callable| {
+            try native_call.begin(self, callable, check);
         },
     }
 }
@@ -3664,7 +3831,7 @@ pub const ResolutionCursor = struct {
         const spelling = intern.get(word);
         return .{
             .allocator = evaluator.unit.allocator,
-            .registry = evaluator.unit.registry,
+            .registry = evaluator.unit.inherited.registry,
             .module_access = evaluator.unit.module_access,
             .core = evaluator.unit.environment.coreView(),
             .current_home = evaluator.unit.current.?.home,
@@ -3913,7 +4080,7 @@ pub const ShadowCursor = struct {
         return .{
             .allocator = evaluator.unit.allocator,
             .releases = evaluator.releaseDomain(),
-            .registry = evaluator.unit.registry,
+            .registry = evaluator.unit.inherited.registry,
             .core = evaluator.unit.environment.coreView(),
             .word = word,
             .dot = intern.dotCursor(intern.get(word)),
@@ -4125,7 +4292,6 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             self.unit.current = continuation;
             return true;
         },
-        .restore => |item| try self.pushOwned(item),
         .effect_check => |check| try finishEffectCheck(self, check),
         .application => |continuation| {
             const launch: Machine.ApplicationLaunch, const base: StackWindow = switch (continuation.mode) {
@@ -4162,7 +4328,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             }
             continuation.deinit_fn(self.releaseDomain(), self.unit.allocator, continuation.context);
             // Native work installed by an application continuation is the
-            // continuation's tail. Do not cross restore/boundary frames until
+            // continuation's tail. Do not cross later continuation frames until
             // that owned work has produced its stack result.
             if (self.unit.hasWorkDriver()) return true;
         },
@@ -4174,7 +4340,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             self.unit.active_word = try intern.intern("use");
             const driver = try self.unit.allocator.create(Machine.UseDriver);
             errdefer self.unit.allocator.destroy(driver);
-            driver.* = try .init(self, continuation.scope, continuation.name, false);
+            driver.* = .init(self, continuation.scope, continuation.name, false);
             driver.after_load = .{ .loading = loading.move(), .path = path.take() };
             self.installWorkDriver(driver);
             return true;
@@ -4199,7 +4365,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
     };
     return false;
 }
-fn finishEffectCheck(self: *Machine, check: EffectCheck) MachineError!void {
+pub fn finishEffectCheck(self: *Machine, check: EffectCheck) MachineError!void {
     const observed = self.unit.stack.items.len;
     if (observed == check.expected_depth) return;
     self.unit.active_word = check.word;
@@ -4299,7 +4465,7 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
     }
     const driver = try self.unit.allocator.create(ModuleCommitDriver);
     driver.candidate = candidate.move();
-    driver.cursor = self.unit.registry.?.commitCursor(&driver.candidate);
+    driver.cursor = self.unit.inherited.registry.?.commitCursor(&driver.candidate);
     self.installWorkDriver(driver);
 }
 const ModuleCommitDriver = struct {
@@ -4431,7 +4597,7 @@ const FailureDriver = struct {
                 self.frame_index -= 1;
                 switch (evaluator.unit.frames.items[self.frame_index]) {
                     .eval => |frame| if (frame.traced_word != no_word) self.appendTrace(frame.traced_word),
-                    .restore, .effect_check, .application, .use_after_load, .boundary => {},
+                    .effect_check, .application, .use_after_load, .boundary => {},
                 }
             },
             .locate => switch (self.location_cursor.?.advance()) {

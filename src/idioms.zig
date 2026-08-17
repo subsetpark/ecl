@@ -10,39 +10,48 @@ const storage = @import("kernel_storage.zig");
 const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
 const sequence = @import("kernel_sequence.zig");
+const dict_text = @import("kernel_dict_text.zig");
 
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 
-pub const Context = enum { direct, each, each2, fold, scan };
+pub const Context = enum { direct, each, zip_with, fold, scan };
+pub const DirectOp = enum {
+    sort,
+    first,
+    rest,
+    reverse,
+    distinct,
+    vals,
+
+    pub fn spelling(self: DirectOp) []const u8 {
+        return @tagName(self);
+    }
+};
 pub const Operation = union(enum) {
     unary: numeric.UnaryOp,
     binary: numeric.BinaryOp,
-    direct_sort,
+    direct: DirectOp,
 
     pub fn spelling(self: Operation) []const u8 {
         return switch (self) {
             .unary => |operation| operation.spelling(),
             .binary => |operation| operation.spelling(),
-            .direct_sort => "sort",
+            .direct => |operation| operation.spelling(),
         };
     }
 };
-pub const CoreWord = enum {
-    dup,
-    swap,
-    grade,
-    at,
-
-    pub fn spelling(self: CoreWord) []const u8 {
-        return @tagName(self);
-    }
+pub const BindingKind = enum { builtin, source };
+pub const ExpectedWord = struct {
+    spelling: []const u8,
+    binding: BindingKind = .builtin,
 };
 pub const PatternAtom = union(enum) {
     constant,
+    literal,
     operation,
-    core_word: CoreWord,
+    word: ExpectedWord,
 };
 pub const RegistryEntry = struct {
     context: Context,
@@ -56,19 +65,97 @@ const operation_pattern = [_]PatternAtom{.operation};
 const constant_operation_pattern = [_]PatternAtom{ .constant, .operation };
 const constant_swap_operation_pattern = [_]PatternAtom{
     .constant,
-    .{ .core_word = .swap },
+    .{ .word = .{ .spelling = "swap" } },
     .operation,
 };
 const sort_pattern = [_]PatternAtom{
-    .{ .core_word = .dup },
-    .{ .core_word = .grade },
-    .{ .core_word = .at },
+    .{ .word = .{ .spelling = "dup" } },
+    .{ .word = .{ .spelling = "grade" } },
+    .{ .word = .{ .spelling = "at" } },
+};
+const neg_pattern = [_]PatternAtom{ .literal, .{ .word = .{ .spelling = "*" } } };
+const abs_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "dup" } },
+    .{ .word = .{ .spelling = "neg", .binding = .source } },
+    .literal,
+    .{ .word = .{ .spelling = "+" } },
+    .{ .word = .{ .spelling = "swap" } },
+    .{ .word = .{ .spelling = "max" } },
+};
+const mod_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "over", .binding = .source } },
+    .{ .word = .{ .spelling = "over", .binding = .source } },
+    .{ .word = .{ .spelling = "div" } },
+    .{ .word = .{ .spelling = "*" } },
+    .{ .word = .{ .spelling = "-" } },
+};
+const ne_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "=" } },
+    .{ .word = .{ .spelling = "not" } },
+};
+const le_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = ">" } },
+    .{ .word = .{ .spelling = "not" } },
+};
+const ge_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "<" } },
+    .{ .word = .{ .spelling = "not" } },
+};
+const and_pattern = [_]PatternAtom{
+    .literal,
+    .{ .word = .{ .spelling = "dip", .binding = .source } },
+    .{ .word = .{ .spelling = "not" } },
+    .{ .word = .{ .spelling = "not" } },
+    .{ .word = .{ .spelling = "min" } },
+};
+const or_pattern = [_]PatternAtom{
+    .literal,
+    .{ .word = .{ .spelling = "dip", .binding = .source } },
+    .{ .word = .{ .spelling = "not" } },
+    .{ .word = .{ .spelling = "not" } },
+    .{ .word = .{ .spelling = "max" } },
+};
+const first_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "dup" } },
+    .{ .word = .{ .spelling = "len" } },
+    .{ .word = .{ .spelling = "pop" } },
+    .literal,
+    .{ .word = .{ .spelling = "at" } },
+};
+const rest_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "dup" } },
+    .{ .word = .{ .spelling = "first", .binding = .source } },
+    .{ .word = .{ .spelling = "pop" } },
+    .literal,
+    .{ .word = .{ .spelling = "drop" } },
+};
+const reverse_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "dup" } },
+    .{ .word = .{ .spelling = "len" } },
+    .{ .word = .{ .spelling = "dup" } },
+    .literal,
+    .{ .word = .{ .spelling = "=" } },
+    .literal,
+    .literal,
+    .{ .word = .{ .spelling = "if" } },
+};
+const distinct_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "group" } },
+    .{ .word = .{ .spelling = "keys" } },
+};
+const vals_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "dup" } },
+    .{ .word = .{ .spelling = "keys" } },
+    .{ .word = .{ .spelling = "swap" } },
+    .literal,
+    .{ .word = .{ .spelling = "partial", .binding = .source } },
+    .{ .word = .{ .spelling = "each" } },
 };
 
 const unary_count = std.meta.fields(numeric.UnaryOp).len;
 const binary_count = std.meta.fields(numeric.BinaryOp).len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 9]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 3 + 8 + 14]RegistryEntry = undefined;
     var index: usize = 0;
     for (std.meta.fields(numeric.UnaryOp)) |field| {
         entries[index] = .{
@@ -92,7 +179,7 @@ pub const registry = blk: {
             .constant_left = true,
         };
         entries[index + 2] = .{
-            .context = .each2,
+            .context = .zip_with,
             .pattern = &operation_pattern,
             .operation = .{ .binary = operation },
         };
@@ -111,12 +198,41 @@ pub const registry = blk: {
         };
         index += 2;
     }
-    entries[index] = .{
-        .context = .direct,
-        .pattern = &sort_pattern,
-        .operation = .direct_sort,
-        .source_word = "sort",
-    };
+    for ([_]struct { operation: Operation, pattern: []const PatternAtom }{
+        .{ .operation = .{ .unary = .neg }, .pattern = &neg_pattern },
+        .{ .operation = .{ .unary = .abs }, .pattern = &abs_pattern },
+        .{ .operation = .{ .binary = .mod }, .pattern = &mod_pattern },
+        .{ .operation = .{ .binary = .ne }, .pattern = &ne_pattern },
+        .{ .operation = .{ .binary = .le }, .pattern = &le_pattern },
+        .{ .operation = .{ .binary = .ge }, .pattern = &ge_pattern },
+        .{ .operation = .{ .binary = .and_word }, .pattern = &and_pattern },
+        .{ .operation = .{ .binary = .or_word }, .pattern = &or_pattern },
+    }) |direct| {
+        entries[index] = .{
+            .context = .direct,
+            .pattern = direct.pattern,
+            .operation = direct.operation,
+            .source_word = direct.operation.spelling(),
+        };
+        index += 1;
+    }
+    for ([_]struct { operation: DirectOp, pattern: []const PatternAtom }{
+        .{ .operation = .sort, .pattern = &sort_pattern },
+        .{ .operation = .first, .pattern = &first_pattern },
+        .{ .operation = .rest, .pattern = &rest_pattern },
+        .{ .operation = .reverse, .pattern = &reverse_pattern },
+        .{ .operation = .distinct, .pattern = &distinct_pattern },
+        .{ .operation = .vals, .pattern = &vals_pattern },
+    }) |direct| {
+        entries[index] = .{
+            .context = .direct,
+            .pattern = direct.pattern,
+            .operation = .{ .direct = direct.operation },
+            .source_word = direct.operation.spelling(),
+        };
+        index += 1;
+    }
+    std.debug.assert(index == entries.len);
     break :blk entries;
 };
 
@@ -125,7 +241,7 @@ pub fn tryApply(
     request: machine.IdiomRequest,
     fallback: machine.IdiomFallback,
 ) MachineError!void {
-    if (evaluator.unit.idiom_mode == .generic_only or requestCandidate(evaluator, request) == null) {
+    if (evaluator.unit.inherited.idiom_mode == .generic_only or requestCandidate(evaluator, request) == null) {
         defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
         return fallback.run(evaluator);
     }
@@ -140,7 +256,11 @@ pub fn tryApply(
     evaluator.installWorkDriver(driver);
 }
 
-const Candidate = struct { context: Context, phrase: Value };
+const Candidate = struct {
+    context: Context,
+    phrase: Value,
+    source_word: ?u32 = null,
+};
 const Capture = struct {
     constant: ?Value = null,
     active_word: ?u32 = null,
@@ -151,23 +271,30 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
     const context: Context = switch (request) {
         .direct => .direct,
         .each => .each,
-        .each2 => .each2,
+        .zip_with => .zip_with,
         .fold => .fold,
         .scan => .scan,
     };
     const phrase: Value = switch (request) {
-        .direct => |quotation| .{ .list = quotation },
+        .direct => |direct| .{ .list = direct.body },
         .each => blk: {
             if (evaluator.available() < 2) return null;
             break :blk evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1];
         },
-        .each2, .fold, .scan => blk: {
+        .zip_with, .fold, .scan => blk: {
             if (evaluator.available() < 3) return null;
             break :blk evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1];
         },
     };
     if (phrase != .list) return null;
-    return .{ .context = context, .phrase = phrase };
+    return .{
+        .context = context,
+        .phrase = phrase,
+        .source_word = switch (request) {
+            .direct => |direct| direct.word,
+            else => null,
+        },
+    };
 }
 
 const IdiomDriver = struct {
@@ -178,12 +305,14 @@ const IdiomDriver = struct {
     capture: Capture = .{},
     resolution: ?machine.ResolutionCursor = null,
     expected: ?env.PrimitiveImpl = null,
+    expected_binding: BindingKind = .builtin,
 
     fn rejectEntry(self: *IdiomDriver) void {
         self.entry_index += 1;
         self.atom_index = 0;
         self.capture = .{};
         self.expected = null;
+        self.expected_binding = .builtin;
     }
     fn finish(
         self: *IdiomDriver,
@@ -206,7 +335,7 @@ const IdiomDriver = struct {
             evaluator.unit.idiom_hits += 1;
             applyEntry(evaluator, selected, capture) catch |err| {
                 if (err == error.Ecl) {
-                    evaluator.setFailureSite(candidate.phrase.list, capture.active_index.?);
+                    if (capture.active_index) |index| evaluator.setFailureSite(candidate.phrase.list, index);
                     if (direct_parent) |word| evaluator.setFailureTraceParent(word);
                 }
                 return err;
@@ -235,21 +364,26 @@ const IdiomDriver = struct {
                         continue;
                     };
                     defer resolved.deinit(evaluator.allocator());
-                    if (resolved.origin != .core or resolved.lease.binding != .builtin or
-                        (self.expected != null and resolved.lease.binding.builtin != self.expected.?))
-                    {
+                    const binding_matches = switch (self.expected_binding) {
+                        .builtin => resolved.lease.binding == .builtin and
+                            (self.expected == null or resolved.lease.binding.builtin == self.expected.?),
+                        .source => resolved.lease.binding == .word,
+                    };
+                    if (resolved.origin != .core or !binding_matches) {
                         self.rejectEntry();
                         continue;
                     }
                     self.atom_index += 1;
                     self.expected = null;
+                    self.expected_binding = .builtin;
                     continue;
                 },
             };
             if (self.entry_index == registry.len) return self.finish(evaluator, null);
             const entry = registry[self.entry_index];
             if (entry.context != self.candidate.context or
-                self.candidate.phrase.list.length() != entry.pattern.len)
+                self.candidate.phrase.list.length() != entry.pattern.len or
+                !sourceWordMatches(self.candidate, entry))
             {
                 self.rejectEntry();
                 continue;
@@ -267,6 +401,13 @@ const IdiomDriver = struct {
                     self.capture.constant = actual;
                     self.atom_index += 1;
                 },
+                .literal => {
+                    if (actual == .word) {
+                        self.rejectEntry();
+                        continue;
+                    }
+                    self.atom_index += 1;
+                },
                 .operation => {
                     const word = if (actual == .word) actual.word else {
                         self.rejectEntry();
@@ -278,23 +419,28 @@ const IdiomDriver = struct {
                     }
                     self.capture.active_word = word;
                     self.capture.active_index = @intCast(self.atom_index);
-                    self.expected = operationPrimitive(entry.operation);
+                    self.expected_binding = operationBinding(entry.operation);
+                    self.expected = if (self.expected_binding == .builtin)
+                        operationPrimitive(entry.operation)
+                    else
+                        null;
                     self.resolution = .init(evaluator, word);
                 },
-                .core_word => |expected_word| {
+                .word => |expected_word| {
                     const word = if (actual == .word) actual.word else {
                         self.rejectEntry();
                         continue;
                     };
-                    if (!std.mem.eql(u8, intern.get(word), expected_word.spelling())) {
+                    if (!std.mem.eql(u8, intern.get(word), expected_word.spelling)) {
                         self.rejectEntry();
                         continue;
                     }
-                    if (expected_word == .grade) {
+                    if (std.mem.eql(u8, expected_word.spelling, "grade")) {
                         self.capture.active_word = word;
                         self.capture.active_index = @intCast(self.atom_index);
                     }
-                    self.expected = corePrimitive(expected_word);
+                    self.expected_binding = expected_word.binding;
+                    self.expected = null;
                     self.resolution = .init(evaluator, word);
                 },
             }
@@ -308,29 +454,43 @@ const IdiomDriver = struct {
     }
 };
 
+fn sourceWordMatches(candidate: Candidate, entry: RegistryEntry) bool {
+    const expected = entry.source_word orelse return candidate.source_word == null;
+    const actual = candidate.source_word orelse return false;
+    return std.mem.eql(u8, intern.get(actual), expected);
+}
+
 fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
     const stack = evaluator.unit.stack.items;
     return switch (entry.operation) {
-        .unary => stack[stack.len - 2] == .list,
+        .unary => switch (entry.context) {
+            .direct => evaluator.available() >= 1,
+            .each => stack[stack.len - 2] == .list,
+            else => false,
+        },
         .binary => switch (entry.context) {
             .each => stack[stack.len - 2] == .list,
-            .each2 => blk: {
+            .zip_with => blk: {
                 const right = stack[stack.len - 2];
                 const left = stack[stack.len - 3];
                 if (left != .list and right != .list) break :blk false;
                 break :blk left != .list or right != .list or left.list.length() == right.list.length();
             },
             .fold, .scan => stack[stack.len - 3] == .list,
-            .direct => unreachable,
+            .direct => evaluator.available() >= 2,
         },
-        .direct_sort => evaluator.available() >= 1 and stack[stack.len - 1] == .list,
+        .direct => evaluator.available() >= 1,
     };
 }
 
 fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) MachineError!void {
     if (capture.active_word) |word| evaluator.setActiveWord(word);
     try switch (entry.operation) {
-        .unary => |operation| applyUnaryEach(evaluator, operation),
+        .unary => |operation| switch (entry.context) {
+            .direct => unaryPrimitive(operation)(evaluator),
+            .each => applyUnaryEach(evaluator, operation),
+            else => unreachable,
+        },
         .binary => |operation| switch (entry.context) {
             .each => applyConstantEach(
                 evaluator,
@@ -338,16 +498,23 @@ fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) Machi
                 capture.constant.?,
                 entry.constant_left,
             ),
-            .each2 => applyEach2(evaluator, operation),
+            .zip_with => applyZipWith(evaluator, operation),
             .fold, .scan => applyReduction(evaluator, operation, entry.context == .scan),
-            .direct => unreachable,
+            .direct => binaryPrimitive(operation)(evaluator),
         },
-        .direct_sort => applyDirectSort(evaluator),
+        .direct => |operation| applyDirect(evaluator, operation),
     };
 }
 
-fn applyDirectSort(evaluator: *Machine) MachineError!void {
-    try order.sortForIdiom(evaluator);
+fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
+    try switch (operation) {
+        .sort => order.sortForIdiom(evaluator),
+        .first => sequence.firstForIdiom(evaluator),
+        .rest => sequence.restForIdiom(evaluator),
+        .reverse => sequence.reverseForIdiom(evaluator),
+        .distinct => order.distinctForIdiom(evaluator),
+        .vals => dict_text.valsForIdiom(evaluator),
+    };
 }
 
 fn applyUnaryEach(evaluator: *Machine, operation: numeric.UnaryOp) MachineError!void {
@@ -378,7 +545,7 @@ fn applyConstantEach(
     );
 }
 
-fn applyEach2(evaluator: *Machine, operation: numeric.BinaryOp) MachineError!void {
+fn applyZipWith(evaluator: *Machine, operation: numeric.BinaryOp) MachineError!void {
     const stack = evaluator.unit.stack.items;
     const right = stack[stack.len - 2];
     const left = stack[stack.len - 3];
@@ -389,7 +556,7 @@ fn applyEach2(evaluator: *Machine, operation: numeric.BinaryOp) MachineError!voi
     const count: usize = if (left_list) @intCast(left.list.length()) else @intCast(right.list.length());
     try PervadeEachDriver.install(
         evaluator,
-        .{ .each2 = .{ .operation = operation, .left_list = left_list, .right_list = right_list } },
+        .{ .zip_with = .{ .operation = operation, .left_list = left_list, .right_list = right_list } },
         left,
         right,
         count,
@@ -401,7 +568,7 @@ const PervadeEachDriver = struct {
     const Mode = union(enum) {
         unary: numeric.UnaryOp,
         constant: struct { operation: numeric.BinaryOp, value: Value, left: bool },
-        each2: struct { operation: numeric.BinaryOp, left_list: bool, right_list: bool },
+        zip_with: struct { operation: numeric.BinaryOp, left_list: bool, right_list: bool },
     };
 
     mode: Mode,
@@ -485,12 +652,12 @@ const PervadeEachDriver = struct {
                     if (constant.left) item else constant.value,
                 );
             },
-            .each2 => |each2| .initBinary(
+            .zip_with => |zip_with| .initBinary(
                 releases,
                 allocator,
-                each2.operation,
-                if (each2.left_list) list.atUnchecked(self.left, self.index) else self.left,
-                if (each2.right_list) list.atUnchecked(self.right.?, self.index) else self.right.?,
+                zip_with.operation,
+                if (zip_with.left_list) list.atUnchecked(self.left, self.index) else self.left,
+                if (zip_with.right_list) list.atUnchecked(self.right.?, self.index) else self.right.?,
             ),
         };
     }
@@ -659,15 +826,21 @@ fn operationPrimitive(operation: Operation) ?env.PrimitiveImpl {
     return switch (operation) {
         .unary => |selected| unaryPrimitive(selected),
         .binary => |selected| binaryPrimitive(selected),
-        .direct_sort => null,
+        .direct => null,
     };
 }
 
-fn corePrimitive(word: CoreWord) ?env.PrimitiveImpl {
-    return switch (word) {
-        .dup, .swap => null,
-        .grade => order.gradePrimitiveForIdiom(),
-        .at => sequence.atPrimitiveForIdiom(),
+fn operationBinding(operation: Operation) BindingKind {
+    return switch (operation) {
+        .unary => |selected| switch (selected) {
+            .neg, .abs => .source,
+            else => .builtin,
+        },
+        .binary => |selected| switch (selected) {
+            .mod, .ne, .le, .ge, .and_word, .or_word => .source,
+            else => .builtin,
+        },
+        .direct => .source,
     };
 }
 

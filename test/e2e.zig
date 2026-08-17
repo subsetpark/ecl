@@ -20,6 +20,13 @@ fn runWithWorkers(arguments: []const []const u8, workers: []const u8) !cli.Resul
     return cli.runOptions(.{ .argv = arguments, .environ_map = &environment });
 }
 
+fn runWithNativePath(arguments: []const []const u8) !cli.Result {
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_PATH", build_options.native_fixture_dir);
+    return cli.runOptions(.{ .argv = arguments, .environ_map = &environment });
+}
+
 fn absoluteExe() ![:0]u8 {
     return std.Io.Dir.cwd().realPathFileAlloc(
         io,
@@ -54,6 +61,23 @@ test "soul test executes the installed artifact" {
     var result = try run(&.{ build_options.ecl_exe, "3 4 +" });
     defer result.deinit();
     try result.expect(.{ .exit_code = 0, .stdout = "7\n", .stderr = "" });
+}
+
+test "e2e: native extension discovery ABI and reflection acceptance" {
+    var result = try runWithNativePath(&.{
+        build_options.ecl_exe,
+        "-e",
+        "'sample use 41 sample.increment 'sample.increment which 'sample.increment see",
+    });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout = "sample.increment -> sample.increment native public generation 1 " ++
+            "(n -- result) requires call, build-values, reschedule\n" ++
+            "<native:sample.increment> (n -- result : \"Increment an integer.\") " ++
+            "requires call, build-values, reschedule 'sample.increment def\n42\n",
+        .stderr = "",
+    });
 }
 
 test "e2e: worker configuration rejects every non-positive decimal form" {
@@ -387,7 +411,7 @@ test "e2e: cmp exactness and string-grade agreement" {
     try result.expect(.{ .exit_code = 0, .stdout = "1 -1 [1 0]\n", .stderr = "" });
 }
 
-test "e2e: array words fixture matches canonical output" {
+test "e2e: array words fixture matches display output" {
     var result = try run(&.{ build_options.ecl_exe, "test/acceptance/array-words.ecl" });
     defer result.deinit();
     try result.expect(.{
@@ -402,7 +426,8 @@ test "e2e: M6 combinators parse and contract payloads" {
     defer behavior.deinit();
     try behavior.expect(.{
         .exit_code = 0,
-        .stdout = "[1 4 9]\n([1 10] [2 10] [3 10])\n([10 1] [10 2] [10 3])\n" ++
+        .stdout = "[1 4 9]\n([1 10]\n [2 10]\n [3 10])\n" ++
+            "([10 1]\n [10 2]\n [10 3])\n" ++
             "1\n2\n3\n6\n[1 3 6]\n[1 2 3 3]\n3\n222\n111\n\"three\"\n42\n",
         .stderr = "",
     });

@@ -107,6 +107,13 @@ pub const Value = union(Tag) {
     }
 };
 
+/// Validate and narrow the integer representation shared by every character
+/// producer to the Unicode scalar domain accepted by UTF-8.
+pub fn unicodeScalar(codepoint: u64) ?u21 {
+    if (codepoint > 0x10ffff or (codepoint >= 0xd800 and codepoint <= 0xdfff)) return null;
+    return @intCast(codepoint);
+}
+
 comptime {
     if (@sizeOf(Value) != 16) @compileError("Value must remain exactly 16 bytes");
     if (@typeInfo(HeapKind).@"enum".fields.len != 10)

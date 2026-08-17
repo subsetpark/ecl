@@ -71,10 +71,13 @@ fn validateBinaryMatrix(comptime matrix: BinaryMatrix) void {
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(BinaryOp)) |field| {
         const operation: BinaryOp = @enumFromInt(field.value);
+        if (operation == .mod or operation == .ne or operation == .le or operation == .ge or
+            operation == .and_word or operation == .or_word) continue;
         try support.installPrimitive(core, operation.spelling(), bindBinary(operation));
     }
     inline for (std.meta.fields(UnaryOp)) |field| {
         const operation: UnaryOp = @enumFromInt(field.value);
+        if (operation == .neg or operation == .abs) continue;
         try support.installPrimitive(core, operation.spelling(), bindUnary(operation));
     }
 }
@@ -873,9 +876,8 @@ fn boolean(operand: Value) ScalarError!bool {
 
 fn offsetChar(codepoint: u32, offset: i64) ScalarError!Value {
     const adjusted = std.math.add(i64, @intCast(codepoint), offset) catch return error.Domain;
-    if (adjusted < 0 or adjusted > 0x10ffff) return error.Domain;
-    const result: u32 = @intCast(adjusted);
-    if (result >= 0xd800 and result <= 0xdfff) return error.Domain;
+    if (adjusted < 0) return error.Domain;
+    const result = value.unicodeScalar(@intCast(adjusted)) orelse return error.Domain;
     return .{ .char = result };
 }
 

@@ -3,11 +3,9 @@ const std = @import("std");
 const env = @import("env.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
+const native_module = @import("native_module.zig");
 const poll = @import("poll.zig");
 const snapshot_api = @import("snapshot.zig");
-const storage = @import("kernel_storage.zig");
-const doc_text = @import("doc.zig");
-const value = @import("value.zig");
 
 pub const ModuleGeneration = struct {
     allocator: std.mem.Allocator,
@@ -429,34 +427,6 @@ pub const OwnedCandidate = enum(usize) {
     }
 };
 
-pub const NativePrimitive = struct {
-    name: intern.NamespaceName,
-    callback: env.Primitive,
-    effect: env.ValidatedEffect,
-    /// Borrowed on every exit; a successful registration owns a normalized copy.
-    doc: []const u8,
-    visibility: env.Visibility = .public,
-};
-pub const NativeWord = struct {
-    name: intern.NamespaceName,
-    body: *env.Quotation,
-    effect: env.ValidatedEffect,
-    visibility: env.Visibility = .public,
-};
-pub const NativeValue = struct {
-    name: intern.NamespaceName,
-    item: @import("value.zig").Value,
-    visibility: env.Visibility = .public,
-};
-
-/// The tag makes metadata compatibility structural: callable definitions must
-/// carry an effect and values have no effect field to misuse.
-pub const NativeDefinition = union(enum) {
-    primitive: NativePrimitive,
-    word: NativeWord,
-    value: NativeValue,
-};
-
 pub const RegistryError = error{ OutOfMemory, Ecl, NameConflict, MissingModule, InvalidDefinition };
 
 const LoadingNode = struct {
@@ -704,6 +674,59 @@ pub const Registry = enum(usize) {
     ) error{OutOfMemory}!OwnedCandidate {
         return .init(try ModuleGeneration.create(self.allocator(), self.releaseDomain(), name));
     }
+
+    pub const NativeCandidateProgress = union(enum) {
+        pending,
+        complete: OwnedCandidate,
+    };
+
+    /// The single bounded native-definition publication path used by dynamic
+    /// loading and static transport verification. Each turn installs at most
+    /// one validated definition into the unpublished generation.
+    pub const NativeCandidateCursor = struct {
+        instance: *native_module.ModuleInstance,
+        candidate: ?OwnedCandidate,
+        definition_index: usize = 0,
+
+        pub fn init(
+            registry: *Registry,
+            instance: *native_module.ModuleInstance,
+        ) error{OutOfMemory}!NativeCandidateCursor {
+            return .{
+                .instance = instance,
+                .candidate = try registry.createCandidate(instance.name()),
+            };
+        }
+
+        pub fn deinit(self: *NativeCandidateCursor) void {
+            if (self.candidate) |*candidate| candidate.deinit();
+            self.* = undefined;
+        }
+
+        pub fn advance(self: *NativeCandidateCursor) error{OutOfMemory}!NativeCandidateProgress {
+            const definitions = self.instance.validated().definitions();
+            if (self.definition_index == definitions.len) {
+                const completed = self.candidate.?.move();
+                self.candidate = null;
+                return .{ .complete = completed };
+            }
+            const definition = definitions[self.definition_index];
+            _ = self.candidate.?.publishDefinition(definition.name, .{ .native = .{
+                .callable = .{
+                    .instance = self.instance,
+                    .definition = @intCast(self.definition_index),
+                },
+                .visibility = .public,
+                .effect = definition.effect,
+                .doc = definition.doc,
+            } }) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Frozen => unreachable,
+            };
+            self.definition_index += 1;
+            return .pending;
+        }
+    };
 
     pub const CommitProgress = union(enum) { pending, complete: u64 };
     pub const CommitCursor = struct {
@@ -1372,75 +1395,6 @@ pub const Registry = enum(usize) {
             .pending => {},
             .complete => return,
         };
-    }
-
-    pub fn registerNative(
-        self: *Registry,
-        name: intern.NamespaceName,
-        definitions: []const NativeDefinition,
-    ) RegistryError!u64 {
-        var candidate = try self.createCandidate(name);
-        errdefer candidate.deinit();
-        for (definitions) |definition| {
-            var document_value: ?value.Value = null;
-            defer if (document_value) |document| self.releaseDomain().releaseValue(document);
-            const publication: env.ModulePublication, const definition_name = switch (definition) {
-                .primitive => |primitive| publication: {
-                    document_value = try self.nativeDocumentation(primitive.doc);
-                    break :publication .{ .{
-                        .primitive = .{
-                            .callback = primitive.callback,
-                            .visibility = primitive.visibility,
-                            .effect = primitive.effect,
-                            .doc = env.documentation(document_value.?.list).?,
-                        },
-                    }, primitive.name };
-                },
-                .word => |word| .{ .{
-                    .word = .{
-                        .body = word.body,
-                        .visibility = word.visibility,
-                        .effect = word.effect,
-                    },
-                }, word.name },
-                .value => |item| .{ .{
-                    .value = .{
-                        .item = item.item,
-                        .visibility = item.visibility,
-                    },
-                }, item.name },
-            };
-            _ = candidate.borrow().scope.publishModule(definition_name, publication) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.Frozen => unreachable,
-            };
-        }
-        return self.commit(&candidate);
-    }
-
-    fn nativeDocumentation(
-        self: *Registry,
-        source: []const u8,
-    ) RegistryError!value.Value {
-        var materializer = storage.TextMaterializer.init(self.allocator(), source);
-        defer materializer.retire(self.releaseDomain());
-        const document = while (true) switch (try materializer.advance(1024)) {
-            .pending => {},
-            .complete => |complete| break complete,
-        };
-        defer self.releaseDomain().releaseValue(document);
-
-        var normalizer = try doc_text.NormalizeCursor.init(self.allocator(), document);
-        defer normalizer.retire(self.releaseDomain());
-        const normalized = while (true) switch (try normalizer.advance(1024)) {
-            .pending => {},
-            .complete => |complete| break complete,
-        };
-        if (normalized.list.length() == 0) {
-            self.releaseDomain().releaseValue(normalized);
-            return error.InvalidDefinition;
-        }
-        return normalized;
     }
 
     pub fn beginLoading(

@@ -17,7 +17,6 @@ const MachineError = support.MachineError;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try support.installPrimitive(core, "cmp", cmpPrimitive);
     try support.installPrimitive(core, "grade", gradePrimitive);
-    try support.installPrimitive(core, "distinct", distinctPrimitive);
     try support.installPrimitive(core, "group", groupPrimitive);
 }
 
@@ -324,6 +323,10 @@ fn distinctPrimitive(evaluator: *Machine) MachineError!void {
     const driver = try evaluator.allocator().create(DistinctDriver);
     driver.* = .{ .collection = collection.take(), .results = results };
     evaluator.installWorkDriver(driver);
+}
+
+pub fn distinctForIdiom(evaluator: *Machine) MachineError!void {
+    return distinctPrimitive(evaluator);
 }
 
 const DistinctDriver = struct {

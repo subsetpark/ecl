@@ -4,6 +4,7 @@
 //! bootstrap independently for every feature-specific failure index.
 const std = @import("std");
 const session = @import("../session.zig");
+const native_fixture = @import("native_fixture_options");
 
 const LockedAllocator = struct {
     child: std.mem.Allocator,
@@ -87,13 +88,19 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
     var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+    const search = try std.fmt.allocPrint(
+        thread_safe_allocator,
+        "test/acceptance/modules{c}{s}",
+        .{ std.fs.path.delimiter, native_fixture.directory },
+    );
+    defer thread_safe_allocator.free(search);
     var runtime = try session.Session.initWithHostConfig(
         thread_safe_allocator,
         &.{"argument"},
         std.testing.io,
         &output,
         &diagnostics,
-        "test/acceptance/modules",
+        search,
         .cooperative,
     );
     defer runtime.deinit();
@@ -107,8 +114,17 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-sequence.ecl",
         "[[1 2] [3 4]] flip pop [1 2 3] [2 3] reshape pop " ++
-            "[[1 2] [3]] raze pop [1 2] 5 take pop [2 0 3] where pop",
+            "[[1 2] [3]] raze pop [1 2] 5 take pop [2 0 3] where pop " ++
+            "{'rows ([10 20] [30 40])} ['rows 1 0] at-path pop",
     );
+    try runOk(
+        &runtime,
+        "oom-display.ecl",
+        "[0 1 2 3 4 5] [2 3] reshape dup pp",
+    );
+    var display = try runtime.stackDisplay();
+    display.deinit();
+    try runOk(&runtime, "oom-display-cleanup.ecl", "pop");
     try runOk(&runtime, "oom-order.ecl", "[2 1 2 1] grade group pop");
     try runOk(
         &runtime,
@@ -134,7 +150,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-combinators.ecl",
         "[(1) (111) (222)] cond pop " ++
             "[1 2 3] (dup 'each-local set each-local *) each pop " ++
-            "[1] [2] (pop dup 'each2-local set each2-local pop) each2 pop " ++
+            "[1] [2] (pop dup 'zip-with-local set zip-with-local pop) zip-with pop " ++
             "[1] (dup 'for-local set pop) for " ++
             "[1] 0 (+ dup 'fold-local set) fold pop " ++
             "[1] 0 (+ dup 'scan-local set) scan pop " ++
@@ -159,6 +175,15 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "'f which 'reflection-module.f see",
     );
     try runOk(&runtime, "oom-loader.ecl", "'stats use answer pop");
+    try runOk(
+        &runtime,
+        "oom-native.ecl",
+        "'sample use 41 sample.increment pop 7 sample.singleton pop " ++
+            "1000 range sample.sum-list pop {'a 1 'b 2} sample.sum-dict pop " ++
+            "'answer 42 sample.pair-dict pop sample.builder-budget pop " ++
+            "sample.cooperative pop (9 sample.draft-fail) attempt pop " ++
+            "(9 sample.yield-forever) spawn dup cancel await pop",
+    );
     try runOk(
         &runtime,
         "oom-module.ecl",

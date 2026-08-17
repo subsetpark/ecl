@@ -16,6 +16,10 @@ pub const formatter = @import("formatter.zig");
 pub const line_editor = @import("line_editor.zig");
 pub const spans = @import("spans.zig");
 pub const env = @import("env.zig");
+pub const native_abi = @import("native-abi");
+pub const native_descriptor = @import("native_descriptor.zig");
+pub const native_module = @import("native_module.zig");
+pub const native_call = @import("native_call.zig");
 pub const modules = @import("modules.zig");
 pub const machine = @import("machine.zig");
 pub const prims = @import("prims.zig");
@@ -53,6 +57,10 @@ test {
     _ = line_editor;
     _ = spans;
     _ = env;
+    _ = native_abi;
+    _ = native_descriptor;
+    _ = native_module;
+    _ = native_call;
     _ = modules;
     _ = machine;
     _ = prims;
@@ -85,5 +93,6 @@ test {
     _ = @import("tests/task_join_property_test.zig");
     _ = @import("tests/resolution_property_test.zig");
     _ = @import("tests/line_editor_test.zig");
+    _ = @import("tests/native_test.zig");
     _ = @import("tests/fuzz_test.zig");
 }

@@ -56,17 +56,17 @@ fn expectCancelledAfterSetup(
 test "combinators: isolated iteration broadcast reduction and infra" {
     try support.expectStacks(&.{
         .{ .name = "each", .source = "[1 2 3] (dup *) each", .expected = "[1 4 9]" },
-        .{ .name = "each2 right broadcast", .source = "[1 2 3] 10 (pair) each2", .expected = "([1 10] [2 10] [3 10])" },
-        .{ .name = "each2 left broadcast", .source = "10 [1 2 3] (pair) each2", .expected = "([10 1] [10 2] [10 3])" },
+        .{ .name = "zip-with right broadcast", .source = "[1 2 3] 10 (pair) zip-with", .expected = "([1 10]\n [2 10]\n [3 10])" },
+        .{ .name = "zip-with left broadcast", .source = "10 [1 2 3] (pair) zip-with", .expected = "([10 1]\n [10 2]\n [10 3])" },
         .{ .name = "fold", .source = "[1 2 3] 0 (+) fold", .expected = "6" },
         .{ .name = "scan", .source = "[1 2 3] 0 (+) scan", .expected = "[1 3 6]" },
         .{ .name = "infra", .source = "7 [1 2 3] (dup) infra", .expected = "7 [1 2 3 3]" },
         .{ .name = "empty each", .source = "() (dup) each", .expected = "()" },
         .{ .name = "empty scan", .source = "() 0 (+) scan", .expected = "()" },
-        .{ .name = "empty each2 lists", .source = "[] [] (+) each2", .expected = "()" },
-        .{ .name = "empty each2 right broadcast", .source = "[] 10 (+) each2", .expected = "()" },
-        .{ .name = "empty each2 left broadcast", .source = "10 [] (+) each2", .expected = "()" },
-        .{ .name = "empty string each2", .source = "\"\" 10 (+) each2", .expected = "()" },
+        .{ .name = "empty zip-with lists", .source = "[] [] (+) zip-with", .expected = "()" },
+        .{ .name = "empty zip-with right broadcast", .source = "[] 10 (+) zip-with", .expected = "()" },
+        .{ .name = "empty zip-with left broadcast", .source = "10 [] (+) zip-with", .expected = "()" },
+        .{ .name = "empty string zip-with", .source = "\"\" 10 (+) zip-with", .expected = "()" },
     });
 }
 
@@ -87,12 +87,12 @@ test "combinators: contracts and conformability are structural errors" {
         .{ .name = "for result", .source = "[10] (dup) for", .kind = "contract", .word = "for" },
         .{ .name = "fold extra result", .source = "[10] 0 (dup) fold", .kind = "contract", .word = "fold" },
         .{ .name = "scan extra result", .source = "[10] 0 (dup) scan", .kind = "contract", .word = "scan" },
-        .{ .name = "each2 atoms", .source = "1 2 (+) each2", .kind = "type", .word = "each2" },
+        .{ .name = "zip-with atoms", .source = "1 2 (+) zip-with", .kind = "type", .word = "zip-with" },
         .{
-            .name = "each2 lengths",
-            .source = "[1] [2 3] (+) each2",
+            .name = "zip-with lengths",
+            .source = "[1] [2 3] (+) zip-with",
             .kind = "conform",
-            .word = "each2",
+            .word = "zip-with",
             .data = &.{
                 .{ .name = "left", .expected = .{ .int = 1 } },
                 .{ .name = "right", .expected = .{ .int = 2 } },
@@ -110,8 +110,8 @@ test "combinators: child scopes are fresh and discarded" {
             .word = "k",
         },
         .{
-            .name = "each2 scope",
-            .source = "[1] [2] (pop dup 'k set k pop) each2 pop k",
+            .name = "zip-with scope",
+            .source = "[1] [2] (pop dup 'k set k pop) zip-with pop k",
             .kind = "undefined-word",
             .word = "k",
         },
@@ -220,6 +220,15 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     try expectStack(&automatic, "pop [3 1 2] sort", "[1 2 3]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
+    try expectStack(&automatic, "pop -2 abs", "2");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    try expectStack(&automatic, "pop [1 2 3] reverse", "[3 2 1]");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    try expectStack(&automatic, "pop {'a 1 'b 2} vals", "[1 2]");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
     var fallback = try session.Session.init(allocator, &.{});
     defer fallback.deinit();
     const failure = switch (try fallback.runUnit("<idiom-fallback>", "1 (neg) each")) {
@@ -240,6 +249,16 @@ test "idioms: late binding defeats recognition" {
     defer runtime.deinit();
     try expectStack(&runtime, "(pop pop 42) '+ def [1 2 3] 0 (+) fold", "42");
     try std.testing.expectEqual(@as(u64, 0), runtime.lastIdiomHits());
+
+    var rebound_source = try session.Session.init(allocator, &.{});
+    defer rebound_source.deinit();
+    try expectStack(&rebound_source, "(pop 42) 'neg def [1 2] (neg) each", "[42 42]");
+    try std.testing.expectEqual(@as(u64, 0), rebound_source.lastIdiomHits());
+
+    var rebound_dependency = try session.Session.init(allocator, &.{});
+    defer rebound_dependency.deinit();
+    try expectStack(&rebound_dependency, "(pop pop 42) '* def 2 neg", "42");
+    try std.testing.expectEqual(@as(u64, 0), rebound_dependency.lastIdiomHits());
 
     var direct_sort = try session.Session.init(allocator, &.{});
     defer direct_sort.deinit();

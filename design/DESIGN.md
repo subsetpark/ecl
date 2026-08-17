@@ -257,7 +257,7 @@ are preserved. Nothing below is constrained by compatibility.
     - `each` (K `'`): requires `( a -- b )`; applies one level down the
       leading axis, exactly one result per element; result specializes when
       rectangular. Depth composes by nesting: `((q) each) each`.
-    - `each2`: requires `( a b -- c )`; zip with broadcast conformability.
+    - `zip-with`: requires `( a b -- c )`; zip with broadcast conformability.
       Each-left/right are derived via `partial`, not primitives.
     - `for`: requires `( a -- )`; the ordered effect loop, collects nothing.
     - `fold`/`scan`: require `( acc a -- acc )`.
@@ -291,8 +291,12 @@ are preserved. Nothing below is constrained by compatibility.
     way; the brackets show what the representation did. So `(1 2 3)` prints
     as `[1 2 3]`, and a ragged result like `[[1 2] [3]] 10 *` prints as
     `([10 20] [30])`. Either bracket pair is accepted on input and
-    normalizes; printed output round-trips to the same value when it contains
-    no Session-linked runtime capability. A task instead prints as a stable
+    normalizes. `str` uses the compact single-line spelling. REPL stack display
+    and `pp` retain those exact delimiters and atom spellings but replace the
+    inter-row spaces of rectangular matrices and nested matrix groups with
+    newline-plus-indentation. The display is therefore still source, and
+    printed output round-trips to the same value when it contains no
+    Session-linked runtime capability. A task instead prints as a stable
     per-Session `<task:N>` marker, which the reader deliberately rejects bare
     or nested. Pairs must
     match: `[1 2 3)` is a parse error — brackets are interchangeable per
@@ -463,6 +467,14 @@ are preserved. Nothing below is constrained by compatibility.
       code.
     - Exactness (decision 4) stays deferred-not-rejected; this positioning
       neither demands nor forecloses it.
+    - Native extensions do not change that positioning. ecl still generates no
+      machine code: a `.eclmod` is authored and compiled ahead of time by a
+      person, never emitted by the interpreter. Core and the standard library
+      remain a single binary; target-specific `.eclmod` files are optional
+      installed dependencies, not required runtime pieces. A native-bearing
+      `ECL_PATH` is explicitly trusted because opening a shared library may
+      execute arbitrary code before ecl can inspect its descriptor. Decision
+      9's cached compiled form still means threaded or opcode arrays only.
     - Host/implementation language is outside this ledger; the runtime is
       specified implementation-agnostically below.
 
@@ -525,7 +537,7 @@ implementation matter, not a design matter.
   share nothing mutable.
 
 - **Kernels.** Coarse primitives — pervasive arithmetic/comparison,
-  `each`/`each2`/`fold`/`scan`/`for`, `where`/`at`/`raze`,
+  `each`/`zip-with`/`fold`/`scan`/`for`, `where`/`at`/`at-path`/`raze`,
   take/drop/reverse/index, dict align/merge, string search/split —
   execute as single runtime loops over leaves, never per-element trips
   through the frame machine when data is specialized; generic spines fall

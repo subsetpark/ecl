@@ -19,7 +19,7 @@ Decision 21's doctrine becomes two enforced rules:
    2015, the CPython 3.14 musttail numbers after Nelhage/Jin — shows
    dispatch technique is worth 1–5% even in bytecode-bound languages,
    and ecl is kernel-bound by design.)
-2. **Zig line budget (recalibrated 2026-08-14 for structural type boundaries).**
+2. **Zig line budget (recalibrated 2026-08-16 for structural type boundaries).**
    Only shipped business-logic Zig is counted, including kernels, the CLI, and
    the formatter. Tests (including inline `test` declarations), fixtures,
    build/source-audit verification tooling, and all target-language ECL source
@@ -29,18 +29,19 @@ Decision 21's doctrine becomes two enforced rules:
 
    | component | budget | measured |
    |---|---|---|
-   | values + RC | 4,200 | 3,798 |
+   | values + RC | 4,200 | 4,016 |
    | reader | 3,300 | 2,595 |
-   | machine | 5,600 | 5,506 |
-   | modules and registry | 4,800 | 4,760 |
+   | machine | 5,900 | 5,598 |
+   | modules and registry | 5,300 | 4,730 |
    | bootstrap prelude loader | 150 | 86 |
-   | combinators | 1,200 | 748 |
-   | definition annotations and doc normalization | 1,000 | 905 |
-   | primitive documentation | 300 | 159 |
-   | CLI, line editor, and source formatter | 2,800 | 2,148 |
-   | kernels and idioms | 8,500 | 5,590 |
-   | scheduler and concurrency | 3,500 | 2,889 |
-   | **business-logic Zig total** | **30,000** | **29,184** |
+   | combinators | 1,200 | 738 |
+   | definition annotations and doc normalization | 1,100 | 938 |
+   | primitive documentation | 300 | 142 |
+   | CLI, line editor, and source formatter | 2,800 | 2,150 |
+   | kernels and idioms | 8,500 | 5,861 |
+   | scheduler and concurrency | 3,500 | 2,883 |
+   | native SDK, ABI, and loader | 3,800 | 3,428 |
+   | **business-logic Zig total** | **36,000** | **33,176** |
 
    The M7 recalibration supersedes the earlier 22,000 total and 5,500 kernel
    ceilings. Scheduler-safe kernels, task joins, failure unwinding, snapshot
@@ -48,7 +49,7 @@ Decision 21's doctrine becomes two enforced rules:
    nominal cursor/ownership states instead of native-stack traversal. Keeping
    the earlier limits would require recombining those states or restoring
    synchronous teardown, contrary to the structural and scheduler-quantum
-   invariants. The 30,000 total and 8,500 kernel ceilings preserve room for
+   invariants. The 36,000 total and 8,500 kernel ceilings preserve room for
    those explicit boundaries; they are enforced ceilings, not growth targets.
    A limit must not incentivize weakening a type boundary. The audit
    recursively enumerates `src/**/*.zig`, `test/**/*.zig`, and root-level Zig
@@ -63,18 +64,25 @@ Decision 21's doctrine becomes two enforced rules:
    verification code.
    Runtime sources remain directly under `src/`; test suites and helpers are
    grouped in `src/tests/`, while substantive build-only checks live in
-   `src/tools/` behind package-root entrypoints required by Zig.
+   `src/tools/` behind package-root entrypoints required by Zig. `src/native/`
+   is the independently rooted author SDK package: that module-root boundary
+   prevents SDK code from importing interpreter internals.
 
-   The native-extension milestone is scope added after this measurement. The
-   current 30,000-line ceiling remains authoritative until that milestone's
-   first patch remeasures the tree and updates this table, the exhaustive
-   source classification, the source-audit constants, and the workstream in
-   one change. That rebaseline must give the SDK/ABI/loader its own component
-   and honestly raise the machine, module, scheduler, and total ceilings needed
-   by the typed transaction, module-instance, and arbitration states below. It
-   begins from the workstream's 4,000-line native-component / 37,000-line total
-   planning envelope, but measurement and the strong representation boundary
-   take precedence over those provisional numbers.
+   M9 installed the native-extension rebaseline on 2026-08-16. Its planning
+   envelope was 4,000 native-component lines and 37,000 total, assuming that
+   module-state arbitration and a scheduler wait-set variant landed together.
+   The shipped v1 surface is deliberately narrower: `Call`, `BuildValues`, and
+   `Reschedule` are exactly what M10's CSV and JSON modules consume, while
+   module state is reserved and deferred. The first installed ceilings were
+   therefore 3,000 for the native SDK/ABI/loader component and 36,000 total; machine,
+   modules-and-registry, and definition-annotation headroom preserves the
+   nominal transaction, instance, and reflection boundaries, and scheduler
+   remains at 3,500 because no new wait-set variant lands. The post-implementation
+   boundary review then raised only the native component to 3,800: runtime-minted
+   capability tables, generation-checked turn drafts, resumable list/dictionary
+   builders, typed record arrays, and owner-only image settlement are structural
+   states that cannot honestly fit the original 3,000-line estimate. The total
+   remains 36,000 and every measured component remains below its ceiling.
    The installed SDK and its author-facing build helper are shipped logic and
    must be added to the audit's exhaustive first-party roots; only fixture and
    verification harness code is excluded. The rebaseline may not recover space
@@ -141,6 +149,13 @@ generation (permanently, per decision 21).
   bools; representation-only, d.23). Specialization is a
   construction-time header fact, never recomputed by inspection — the
   printer reads a bit.
+- **Value rendering:** `print.zig` uses one explicit action worklist for both
+  styles. `str`, errors, and reflective source use compact canonical
+  whitespace. REPL stack display and `pp` select the display style, which
+  changes only separators between rectangular matrix rows (and one enclosing
+  matrix-group axis) to newline-plus-indentation. Delimiters and atom spellings
+  are unchanged, so displayed arrays remain valid, round-trippable ECL source;
+  the action worklist keeps both styles free of host recursion.
 - **Dicts, K-style:** keys vector + values vector (insertion order for
   free — the columns literally are the table story) + cached per-entry
   hashes + linear scan below ~16 entries, one u32 hash index above.
@@ -291,7 +306,13 @@ publication critical sections.
   ABI and capability versions, canonical names, UTF-8 documentation, parsed
   effects, definition uniqueness, callback indices, state size/alignment, and
   all counts are validated before module-state initialization or registry
-  publication can run. Validation and metadata materialization are
+  publication can run. One module-to-host text ingress owns pointer/null,
+  representability, ceiling, and UTF-8 validation for descriptor text, scalar
+  symbols/words, callback failures, and entry diagnostics. Character scalars
+  cross the shared `Value.unicodeScalar` factory: only U+0000 through U+10FFFF
+  excluding surrogate halves can become a native candidate, and every UTF-8
+  encoder consumes that same validated narrowing rather than a trapping cast.
+  Validation and metadata materialization are
   cursor-driven. Opening a
   native library is nevertheless arbitrary-code execution at the platform
   level—library constructors may run before ECL can inspect the descriptor—so
@@ -299,11 +320,14 @@ publication critical sections.
   boundary.
 - **Library lifetime is Session lifetime.** V1 performs no native hot reload or
   early unload. A published instance pins its code image while any binding,
-  call transaction, state access, or continuation can reach a callback. Session
-  shutdown first closes new call/lifetime creation, quiesces tasks and state
-  waiters, destroys all continuations, settles their ECL retirement, runs each
-  bounded module-state destructor exactly once, and only then closes library
-  handles. An optional private static transport accepts the same generated
+  call transaction, state access, or continuation can reach a callback. Worker
+  Units inherit only an opaque `Loader`; that capability can begin validation
+  but has no descriptor-settlement, image-close, or owner-destruction method.
+  Session consumes the distinct owner through `open -> closing -> settled`:
+  closing rejects new call/image lifetimes, task quiescence and environment
+  retirement release every pin, and only the resulting settled capability can
+  destroy the root after owner-only descriptor teardown and library close. An
+  optional private static transport accepts the same generated
   descriptor for first-party modules such as CSV and JSON, with a no-op code
   image pin; it does not expose an ECL-in-Zig embedding API.
 - **The effect is part of the call type.** A callback's mandatory first
@@ -324,19 +348,26 @@ publication critical sections.
   runtime `Value` or heap storage. `call.forward(i)` and `BuildValues` produce
   issuer-checked candidate outputs owned by the call transaction. Complete
   reserves the exact final stack window before atomically replacing the inputs
-  with the effect's output tuple. Yield preserves the inputs, candidates, and
-  transaction; deliberate failure, cancellation, deadline loss, OOM, or
-  abandonment leaves the operand stack unchanged and transfers tentative roots
-  to bounded retirement. Native failures may name only `type`, `shape`,
+  with the effect's output tuple. Yield preserves the inputs, transaction, and
+  host-owned aggregate builders. Candidate handles are valid for one callback
+  turn only; their roots enter bounded retirement at the turn boundary, while
+  a builder retains only values already appended to its exact-size storage.
+  Deliberate failure, cancellation, deadline loss, OOM, or abandonment leaves
+  the operand stack unchanged and transfers tentative roots to bounded
+  retirement. Native failures may name only `type`, `shape`,
   `conform`, `overflow`, `domain`, `parse`, `io`, or `user` plus one bounded
   message. The runtime retains authority over underflow, undefined-word,
   contract, cancellation, timeout, word/site/trace attachment, and OOM. The
-  Zig callback result is exactly `error{OutOfMemory}!Outcome`; its generated
-  adapter maps complete/failure/yield/OOM to explicit wire tags.
+  Zig callback result is exactly
+  `error{OutOfMemory,InvalidValue}!Outcome`; its generated adapter maps
+  complete/failure/yield/OOM to explicit wire tags and maps an SDK capability
+  rejection to a language `domain` error rather than a process trap.
 - **Capability values are ephemeral authority, not a host object.** There is no
   public capability map, lookup by string, raw host-context pointer, or
-  allocator. The adapter mints only the exact parameters named by a callback
-  for one invocation. Comptime state validation recursively rejects ephemeral
+  allocator. The loader mints each instance's host table from its validated
+  requirements, leaving undeclared optional operations null, and the adapter
+  exposes only the exact parameters named by a callback for one invocation.
+  Comptime state validation recursively rejects ephemeral
   capabilities, `Call`, `ValueView`, and lifetime-incompatible SDK handles from
   module or continuation state; only handles explicitly marked durable for
   that owner may cross a turn. Runtime issuer/generation checks remain active
@@ -350,27 +381,23 @@ publication critical sections.
   advances as the ordinary scheduler-owned driver, with one 65,536-unit kernel
   budget per turn, the normal cancellation check, and the same ready-queue and
   retirement arbitration as first-party cursors. Aggregate content is available
-  only through budget-charging text/leaf/list/dict cursors, aggregate builders
-  charge the same budget, and extension-local loops call `consume`. No raw
-  backing slice or unmetered SDK iterator bypasses that path. Exhaustion yields
-  with the exact state; complete/fail/cancel consumes it once. Native machine
+  only through budget-charging list cursors (including text and specialized
+  leaves) and dictionary cursors; incremental aggregate append/materialization
+  charges the same budget, and extension-local loops call `consume`. No raw
+  aggregate backing slice, whole-slice public builder, or unmetered SDK iterator
+  bypasses that path. Exhaustion yields with the exact continuation and builder
+  state; complete/fail/cancel consumes them once. Native machine
   code itself is not preemptible, and the runtime cannot infer instruction
   reductions, so unrelated long computation or blocking remains a trusted-code
   violation detected only by per-invocation duration/overrun diagnostics.
-- **Module state has distinct observation and mutation authority.** An optional
-  `ModuleState(T, init, deinit)` declaration fixes one state instance per
-  Session. Its prompt, non-yielding initializer receives no ECL, environment,
-  scheduler, registry, allocation, or package-resource capability and either
-  constructs state or returns a bounded load-failure message; its destructor
-  is infallible and bounded. State cannot retain ECL values in v1. Callbacks ask
-  separately for `ModuleView(StateSpec)` or `ModuleUpdate(StateSpec)`. The
-  former exposes a turn-scoped immutable borrow and the latter an exclusive
-  mutable borrow. V1 may serialize both through one scheduler-integrated
-  arbiter, but a contending Unit parks rather than blocking a worker. Every
-  borrow is released before complete, failure, or yield and reacquired on a
-  later turn; continuation validation rejects retained state borrows. Native
-  state and external side effects are explicitly outside operand-stack
-  rollback.
+- **Module state is reserved, not half-present.** V1 descriptors must declare a
+  zero state layout, and `module_view` and `module_update` have reserved ids but
+  no supported version. Validation rejects either form before publication.
+  A future additive capability must introduce one state instance per Session,
+  distinct immutable-view and exclusive-update authority, a scheduler-integrated
+  arbiter, bounded initialization/destruction, and continuation validation; M9
+  deliberately ships none of those factories or aliases. Native external side
+  effects remain outside operand-stack rollback.
 - **V1 remains intentionally leaf-shaped.** Native callbacks cannot resolve or
   invoke words, evaluate quotations, spawn tasks, re-enter a Session, publish
   definitions, retain ECL values in module state, create opaque ECL resource
@@ -620,20 +647,32 @@ publication critical sections.
 
 ## Idiom recognition (the only bridge to the vector unit)
 
-At isolated-combinator entry (each/each2/fold/scan), structurally match
-the quotation against a small closed pattern table — `(w)` for a
-primitive word, constant-operand forms, the sum/prod compositions — then
-**guard by resolving each word against the application env and checking
-identity with the expected core primitive**. Guard passes → fused
-kernel; fails (user re-defined `+`) → generic path, always semantically
-complete. Per-application guard cost is O(quotation length) against O(n)
-work: no cache, no invalidation, sound under late binding by
-construction (Dyalog's unguarded token idioms are safe only because APL
-primitives aren't redefinable; ecl's are). Snapshot semantics are scoped
-to this guard alone (d.23) — the generic path keeps full per-application
-late binding. Prelude words stay honest source with no dual
-representation: `sum = (0 (+) fold)` reaches the sum kernel through
-fold's entry recognition.
+At direct source-word and isolated-combinator entry
+(each/zip-with/fold/scan), structurally match the body or quotation against a
+small closed pattern table. Pattern words name an expected core binding, which
+may be either an irreducible builtin or an ordinary prelude source word.
+Resolving each exposed pattern word in the application environment guards the
+selection; a mismatch falls through to the generic frame-machine path. The
+selected host callback is private to the recognizer: it has no core binding,
+reflection entry, or higher-order route of its own.
+
+This lets compact source definitions remain authoritative while still reaching
+pervasive numeric kernels and allocation-saving sequence/dictionary paths.
+`neg`, `abs`, `mod`, `<>`, `<=`, `>=`, `and`, `or`, `first`, `rest`,
+`reverse`, `distinct`, and `vals` use that bridge. `sort = (dup grade at)` is
+the original direct source-body example. Cheap compositions such as `over`,
+`compose`, `str`, and `dip` have no host callback at all. Per-application guard
+cost is O(phrase length) against O(n) work, with no cache or invalidation.
+Prelude words therefore stay honest source with no public dual
+representation: `sum = (0 (+) fold)` reaches the sum kernel through fold's
+entry recognition.
+
+The standard-library placement rule is deliberately asymmetric: implement a
+word in the prelude when its target-language definition is sufficiently
+compact, or when its performance does not justify a host idiom. Keep a word
+entirely primitive only when its source definition would be substantial and
+its performance characteristics justify the host implementation. Thus
+`zip-with`, `range`, `to-dict`, `has?`, `del`, and `merge` remain primitives.
 
 **Float folds are strictly sequential on every path (d.23).** Only exact
 reductions — integer (with fault masks), min/max, boolean — may be
@@ -1018,7 +1057,8 @@ editor; one stable warning is exposed to Session diagnostics. The CLI/editor
 component ceiling rises from 1,900 to 2,800 for these raw-mode, owned-line, and
 locked-history state boundaries. The modules/registry ceiling rises from
 4,400 to 4,800 for the lease-owning visibility and completion capabilities;
-the total shipped-logic ceiling remains 30,000.
+At that M8 checkpoint the total shipped-logic ceiling remained 30,000; this
+historical figure is superseded by the current table above.
 
 The editor fuzz target is a shrinkable arbitrary-byte/action state machine.
 After every operation it compares production bytes and cursor position with an
@@ -1081,7 +1121,7 @@ injected failure index pays for the embedded prelude bootstrap once. Native
 fixture code uses the real generated descriptor and public loader; exhaustive
 initialized-Session coverage remains here rather than independently
 bootstrapping the prelude for every capability surface. Its tagged cooperative
-scheduler mode executes the same queue, wait-set, native-state arbitration,
+  scheduler mode executes the same queue, wait-set, native continuation,
 cancellation, publication, and reclamation transitions on the root thread
 while starting no worker pool. This makes ordinal failure injection a total
 order instead of depending on which allocator call wins a thread race; the
@@ -1095,13 +1135,14 @@ wrapper.
 
 ## Coverage-guided fuzz topology
 
-The parser, formatter, shrinkable arbitrary-byte edit-buffer model, Session
+The parser, formatter, shrinkable arbitrary-byte edit-buffer model, pending
+unit accumulator, Session
 completion mutation path, durable-history merge path, production scheduler
 publication/join path, native-descriptor validator, and native-call transaction
 path each have a distinct named build step and exactly one selected
-`std.testing.fuzz` entry point. `zig build fuzz` executes all eight seed corpora
+`std.testing.fuzz` entry point. `zig build fuzz` executes all nine seed corpora
 as ordinary tests. Bounded campaigns invoke `fuzz-reader`, `fuzz-formatter`,
-`fuzz-editor`, `fuzz-completion`, `fuzz-history`, `fuzz-scheduler`,
+`fuzz-editor`, `fuzz-completion`, `fuzz-history`, `fuzz-pending`, `fuzz-scheduler`,
 `fuzz-native-descriptor`, and `fuzz-native-call` separately, because Zig's
 coverage-guided runner selects one fuzz entry point per invocation. CI
 therefore cannot report validation of a model or metadata parser as coverage
@@ -1109,19 +1150,19 @@ for the real dynamic loader, generated adapter, scheduler continuation, state
 arbiter, and retirement path.
 
 The native descriptor campaign passes arbitrary bounded metadata through the
-production validator using valid host-owned backing ranges; it varies all
-sizes, counts, offsets/indices, strings, names, effects, capability versions,
-callback-table relationships, and state layout fields without attempting to
-`dlopen` arbitrary hostile code. The native-call campaign drives a real
-SDK-built fixture through public `ECL_PATH` resolution and generates
-complete/fail/yield/cancel sequences, aggregate cursor budgets, candidate
-output graphs, and module view/update contention. Its oracle observes only ECL
-stack values, errors, reflection, fixture lifecycle events, and allocator
-counts. The same production-connected property runs with one and many workers
-under TSan; after delayed calls and state waiters quiesce, it requires bounded
-retired memory and the exact continuation -> module-state -> library shutdown
-order. A model-only callback state machine is supplementary evidence, never
-acceptance for that path.
+production validator using valid host-owned backing ranges. Comptime reflection
+varies every integer size field in the ABI records, while the campaign also
+varies selected counts, callback indices, capability ids/versions, and module
+name length; dedicated malformed shared libraries cover entry results, strided
+records, and module-written call/scalar/error tags. The native-call fuzz target
+selects bounded sequences of public SDK-fixture calls in the cooperative
+scheduler and observes only ECL stack values and errors. Separate runtime tests
+cover one/eight-worker identity, >quantum list and dictionary construction,
+spawned-unit loading, malformed wire values, and delayed shutdown. The TSan
+gate runs those production-connected tests, and the delayed-continuation test
+uses a DebugAllocator to require complete Session teardown. These are distinct
+claims; the fuzz campaign alone is not evidence for worker scheduling, dynamic
+loader failure, or allocator reclamation.
 
 The four P1 escapes exposed four different coverage-boundary mistakes. The
 completion campaign originally ran a Unit before its mutation loop, so it never

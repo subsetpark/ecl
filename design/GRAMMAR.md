@@ -162,7 +162,9 @@ back) is delimited by the reader:
 
 ## Round-trip
 
-The printer (decision 16) emits only forms this grammar reads, and
-reading printed output yields the same value. The grammar is closed
-under printing; `{k v}` dict printing, `[...]`/`(...)` representation
-display, and string/char escapes are all re-readable.
+Both compact `str` rendering and the REPL/`pp` display (decision 16) emit only
+forms this grammar reads, and reading printed output yields the same value.
+The display may use newline-plus-indentation between rectangular array rows,
+but retains every `[...]`/`(...)` delimiter. The grammar is closed under both
+renderings; `{k v}` dict printing, representation display, and string/char
+escapes are all re-readable.

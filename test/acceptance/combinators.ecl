@@ -1,6 +1,6 @@
 [1 2 3] (dup *) each pp
-[1 2 3] 10 (pair) each2 pp
-10 [1 2 3] (pair) each2 pp
+[1 2 3] 10 (pair) zip-with pp
+10 [1 2 3] (pair) zip-with pp
 [1 2 3] (pp) for
 [1 2 3] 0 (+) fold pp
 [1 2 3] 0 (+) scan pp

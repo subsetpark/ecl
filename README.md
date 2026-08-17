@@ -37,6 +37,9 @@ zig build test-oom
 zig build test-tsan
 zig build test-repl
 zig build test-repl -Doptimize=ReleaseSafe
+zig build native-fixture
+zig build test-native-sdk-negative
+zig build test-native-runtime
 zig build fuzz
 zig build source-audit
 zig build differential
@@ -45,7 +48,8 @@ zig build differential
 `zig build fuzz` runs the seed corpus as an ordinary smoke test. Add a bounded
 coverage-guided campaign for one independently wired target, for example
 `zig build fuzz-editor --fuzz=10K`. The available suffixes are `reader`,
-`formatter`, `editor`, `completion`, `history`, and `scheduler`; CI invokes
+`formatter`, `editor`, `completion`, `history`, `pending`, `scheduler`,
+`native-descriptor`, and `native-call`; CI invokes
 every target separately for 100 generated iterations so Zig's single-target
 fuzz runner cannot silently select only one surface.
 The editor target is a shrinkable arbitrary-byte/action state machine that
@@ -83,6 +87,66 @@ ECL_WORKERS=8 ./zig-out/bin/ecl '[1 2 3] (dup *) par-each'
 ./zig-out/bin/ecl fmt src/prelude.ecl
 ./zig-out/bin/ecl fmt - < src/prelude.ecl
 ```
+
+## Native extensions
+
+Native extensions are optional, target-specific installed dependencies. Core
+and the standard library remain part of the single `ecl` binary; ecl does not
+generate machine code. When a module is absent from the registry, each
+`ECL_PATH` root is searched for `<name>.ecl` and then `<name>.eclmod`.
+The first existing candidate is authoritative, including load or validation
+failure.
+
+Zig authors on the pinned Zig 0.16 toolchain use the `ecl-native` SDK. A word's
+first parameter declares its effect, while additional typed parameters request
+capabilities; the SDK derives the descriptor and capability manifest:
+
+```zig
+const ecl = @import("ecl-native");
+
+fn increment(call: *ecl.Call("n -- result")) ecl.CallbackResult {
+    const n = call.input(0).int() orelse
+        return call.fail(.type, "increment expects an integer");
+    return call.complete(.{ecl.Scalar.int(n + 1)});
+}
+
+pub const Extension = ecl.module(.{
+    .name = "sample",
+    .doc = "Example native extension.",
+    .words = .{ecl.word("increment", "Increment an integer.", increment)},
+});
+```
+
+Add this repository as a `build.zig.zon` dependency, import its `ecl-native`
+module, and call `src/native/build_helper.zig`'s `addExtension` plus
+`installExtension` from the extension build. The helper emits
+`<name>.eclmod`; build it for the same target and ABI as the `ecl` process,
+install its directory on `ECL_PATH`, then use it normally:
+
+```sh
+ECL_PATH=/opt/ecl/extensions ./zig-out/bin/ecl -e \
+  "'sample use 41 sample.increment"
+```
+
+An `ECL_PATH` containing `.eclmod` files is a trusted-code path. Opening a
+dynamic library executes arbitrary machine code before ecl can inspect its
+descriptor; validation is an ABI and capability check, not a sandbox. Native
+side effects are also outside operand-stack rollback.
+
+Cooperative extensions request `ecl.Reschedule(Spec)` and explicitly consume
+scheduler budget. They cannot obtain the host allocator or scheduler. Machine
+code still cannot be preempted: setting `ECL_NATIVE_DIAGNOSTICS=1` enables a
+rate-limited, after-the-fact duration warning for long native slices, but it
+does not impose instruction limits or provide sandboxing. With the variable
+unset, the runtime samples no clock and emits no native timing diagnostics.
+
+Aggregate-producing words also request `*ecl.BuildValues`. Use
+`appendList`/`finishList` or `appendDict`/`finishDict` with a bounded logical
+slot, retain only an index/count in `Reschedule` state, and yield when either
+operation reports `yield_required`. Candidate handles are valid for one
+callback turn; the host-owned builder, not the candidate, carries appended
+values across turns. This incremental v2 path is required for aggregates that
+can exceed one 65,536-unit scheduler quantum.
 
 ## Interactive REPL
 
@@ -137,8 +201,10 @@ zig build oracle-differential \
 ```
 
 The in-process differential requires a fast-path hit for every registered
-idiom and compares it with forced-generic execution, including representation
-and float-bit parity. The oracle differential covers every shared M5/M6 word
+idiom and compares it with forced-generic execution. Successful applications
+must have identical representations and float bits; failing applications must
+both fail, while their exact error dictionaries may evolve independently. The
+oracle differential covers every shared M5/M6 word
 without changing the frozen Rust tree.
 Normal `zig build test` remains independent of Cargo; `flip`, `reshape`,
 `group`, `cmp`, `type`, `to-dict`, the transcendental floor, and the extended
@@ -147,7 +213,7 @@ with native unit and real-binary acceptance coverage.
 
 ## M6 quotation and source surface
 
-`each`, `each2`, `for`, `fold`, and `scan` run each application on a fresh
+`each`, `zip-with`, `for`, `fold`, and `scan` run each application on a fresh
 isolated stack and scope, enforcing `(a -- b)`, `(a b -- c)`, `(a --)`, and
 `(acc a -- acc)` contracts as appropriate. `infra` also isolates its
 quotation but collects any number of results. `times`, `cond`, and `case` run
@@ -156,9 +222,12 @@ inline: `cond` is `[test action ... else]`, while `case` is
 nonempty, odd, exhaustive, and prevalidated before selection.
 
 The embedded, commented [`src/prelude.ecl`](src/prelude.ecl) is the sole body
-for the M6 derived vocabulary: cleaves and control adapters, collection
-helpers, aggregates, `find`, and the failure/outcome protocol. Each definition
-is a navigable `### def <name>` block with reflective documentation:
+for the derived vocabulary: cleaves and control adapters, compact numeric and
+comparison compositions, collection helpers, aggregates, `find`, and the
+failure/outcome protocol. Performance-sensitive compact definitions may be
+recognized into private host callbacks, but those callbacks are not words and
+are unreachable through reflection or higher-order application. Each source
+definition is a navigable `### def <name>` block with reflective documentation:
 
 ```ecl
 ### def signum

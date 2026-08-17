@@ -3,9 +3,9 @@ const env = @import("env.zig");
 pub const support = @import("kernel_support.zig");
 pub const storage = @import("kernel_storage.zig");
 pub const numeric = @import("kernel_numeric.zig");
-pub const sequence = @import("kernel_sequence.zig");
-pub const order = @import("kernel_order.zig");
-pub const dict_text = @import("kernel_dict_text.zig");
+const sequence = @import("kernel_sequence.zig");
+const order = @import("kernel_order.zig");
+const dict_text = @import("kernel_dict_text.zig");
 pub const Registry = struct {
     pub const entries = @import("idioms.zig").registry;
 };

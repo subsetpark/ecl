@@ -952,7 +952,8 @@ fn escapedWord(
             },
             else => {
                 var encoded: [4]u8 = undefined;
-                const length = std.unicode.utf8Encode(@intCast(codepoint), &encoded) catch
+                const scalar = value.unicodeScalar(codepoint) orelse return error.InvalidSource;
+                const length = std.unicode.utf8Encode(scalar, &encoded) catch
                     return error.InvalidSource;
                 try output.appendSlice(allocator, encoded[0..length]);
             },

@@ -7,21 +7,19 @@ const poll = @import("poll.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
+const native_module = @import("native_module.zig");
 const primitive_docs = @import("primitive_docs.zig");
 const snapshot_api = @import("snapshot.zig");
-/// Public native callbacks cannot split a language-error tag from its payload.
-/// The dispatcher installs `.failure` atomically after the callback returns.
-pub const PrimitiveOutcome = union(enum) {
-    ok,
-    failure: machine.EclErr,
-};
-pub const PrimitiveResult = error{OutOfMemory}!PrimitiveOutcome;
-pub const Primitive = *const fn (*machine.NativeMachine) PrimitiveResult;
-
-/// Existing in-tree primitives use Machine's ergonomic error helpers. They
-/// occupy a separate binding variant which is unavailable through native
-/// module registration; external/native registration accepts only `Primitive`.
+/// In-tree primitives use Machine's ergonomic error helpers. This binding
+/// kind is not part of the native-extension ABI.
 pub const PrimitiveImpl = *const fn (*machine.Machine) machine.MachineError!void;
+
+/// A native definition together with the nominal image pin that owns its
+/// callback. Only the loader can construct the opaque `ModuleInstance`.
+pub const NativeCallable = struct {
+    instance: *native_module.ModuleInstance,
+    definition: u32,
+};
 
 pub const Quotation = opaque {};
 pub const DocumentationString = opaque {};
@@ -52,20 +50,22 @@ pub fn documentationHeader(document: *const DocumentationString) *value.ListHand
 pub const Binding = union(enum) {
     word: *Quotation,
     value: value.Value,
-    primitive: Primitive,
     builtin: PrimitiveImpl,
+    native: NativeCallable,
     pub fn retain(self: Binding) void {
         switch (self) {
             .word => |body| heap.incRef(quotationHeader(body)),
             .value => |item| heap.retainValue(item),
-            .primitive, .builtin => {},
+            .builtin => {},
+            .native => |callable| callable.instance.retain(),
         }
     }
     pub fn retire(self: Binding, releases: *heap.ReleaseDomain) void {
         switch (self) {
             .word => |body| releases.releaseHeader(quotationHeader(body)),
             .value => |item| releases.releaseValue(item),
-            .primitive, .builtin => {},
+            .builtin => {},
+            .native => |callable| callable.instance.releasePin(),
         }
     }
 };
@@ -168,8 +168,8 @@ pub const ModulePublication = union(enum) {
         item: value.Value,
         visibility: Visibility,
     },
-    primitive: struct {
-        callback: Primitive,
+    native: struct {
+        callable: NativeCallable,
         visibility: Visibility,
         effect: ValidatedEffect,
         doc: *DocumentationString,
@@ -211,12 +211,12 @@ const BindingSpec = struct {
                 .visibility = item.visibility,
                 .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
             },
-            .primitive => |primitive| .{
-                .binding = .{ .primitive = primitive.callback },
-                .visibility = primitive.visibility,
+            .native => |native| .{
+                .binding = .{ .native = native.callable },
+                .visibility = native.visibility,
                 .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
-                .effect = primitive.effect,
-                .doc = primitive.doc,
+                .effect = native.effect,
+                .doc = native.doc,
             },
         };
     }

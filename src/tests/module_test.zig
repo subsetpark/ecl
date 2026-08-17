@@ -231,7 +231,6 @@ test "module: use shadow notices stay within the cancellation bound" {
     defer allocator.free(name_bytes);
     @memset(name_bytes, 's');
     const long_name = try intern.internNamespace(name_bytes);
-    const module_name = try intern.trustedNamespace("wide");
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
@@ -246,10 +245,9 @@ test "module: use shadow notices stay within the cancellation bound" {
     );
     defer runtime.deinit();
     try runtime.define(long_name, .{ .value = .{ .int = 1 } });
-    _ = try runtime.registerNativeModule(module_name, &.{.{ .value = .{
-        .name = long_name,
-        .item = .{ .int = 2 },
-    } }});
+    const module_source = try std.fmt.allocPrint(allocator, "'wide (2 '{s} set) module", .{name_bytes});
+    defer allocator.free(module_source);
+    try expectOk(&runtime, module_source);
     runtime.requestCancellation();
     const failure = (try runtime.runUnit("shadow-poll.ecl", "'wide use")).err;
     defer heap.testing.releaseValue(allocator, failure);
@@ -450,7 +448,6 @@ test "reflection remains cancellable across sorting and identifier output" {
     try std.testing.expect(which_runtime.lastPolls() >= 1);
     try std.testing.expectEqual(@as(usize, 0), which_output.written().len);
 
-    const module_name = try intern.trustedNamespace("poll-module");
     const qualified_bytes = try allocator.alloc(u8, "poll-module.".len + first_bytes.len);
     defer allocator.free(qualified_bytes);
     @memcpy(qualified_bytes[0.."poll-module.".len], "poll-module.");
@@ -460,10 +457,13 @@ test "reflection remains cancellable across sorting and identifier output" {
     defer qualified_output.deinit();
     var qualified_runtime = try session.Session.initWithOutput(allocator, &.{}, &qualified_output.writer);
     defer qualified_runtime.deinit();
-    _ = try qualified_runtime.registerNativeModule(module_name, &.{.{ .value = .{
-        .name = first,
-        .item = .{ .int = 1 },
-    } }});
+    const module_source = try std.fmt.allocPrint(
+        allocator,
+        "'poll-module (1 '{s} set) module",
+        .{first_bytes},
+    );
+    defer allocator.free(module_source);
+    try expectOk(&qualified_runtime, module_source);
     try qualified_runtime.pushOwned(.{ .symbol = qualified });
     qualified_runtime.requestCancellation();
     const qualified_failure = (try qualified_runtime.runUnit("reflection-poll.ecl", "which")).err;
@@ -481,182 +481,6 @@ test "reflection failures are total" {
     try expectErrorContains(&no_output, "words", &.{"'kind 'io"});
     try expectErrorContains(&no_output, "'dup body", &.{"'kind 'type"});
     try expectErrorContains(&no_output, "'missing which", &.{"'kind 'undefined-word"});
-}
-
-fn nativeAnswer(evaluator: *machine.NativeMachine) error{OutOfMemory}!env.PrimitiveOutcome {
-    try evaluator.pushOwned(.{ .int = 42 });
-    return .ok;
-}
-
-fn nativeAnswerReloaded(evaluator: *machine.NativeMachine) error{OutOfMemory}!env.PrimitiveOutcome {
-    try evaluator.pushOwned(.{ .int = 43 });
-    return .ok;
-}
-
-fn nativeFailure(_: *machine.NativeMachine) env.PrimitiveResult {
-    return .{ .failure = machine.EclErr.init(.domain, "native failure payload") };
-}
-
-fn nativeMachineSurface(evaluator: *machine.NativeMachine) env.PrimitiveResult {
-    const allocator = evaluator.allocator();
-    evaluator.require(2) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => unreachable,
-    };
-    if (evaluator.depth() != 2) {
-        return .{ .failure = machine.EclErr.init(.domain, "native depth mismatch") };
-    }
-    const top = evaluator.peekBorrowed(0) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => unreachable,
-    };
-    const bottom = evaluator.peekBorrowed(1) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => unreachable,
-    };
-    if (top != .int or top.int != 20 or bottom != .int or bottom.int != 10) {
-        return .{ .failure = machine.EclErr.init(.domain, "native peek mismatch") };
-    }
-    try evaluator.pushBorrowed(bottom);
-    evaluator.discard(2) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Ecl => unreachable,
-    };
-    const result = try list.fromValues(allocator, &.{.{ .int = 30 }});
-    try evaluator.pushOwned(result);
-    return .ok;
-}
-
-test "public native machine exposes a complete semantic stack capability" {
-    const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
-    defer runtime.deinit();
-    const separator = try intern.intern("--");
-    const a = try intern.intern("a");
-    const b = try intern.intern("b");
-    const result_name = try intern.intern("result");
-    const effect_value = try list.fromValuesGeneric(allocator, &.{
-        .{ .word = a },
-        .{ .word = b },
-        .{ .word = separator },
-        .{ .word = a },
-        .{ .word = result_name },
-    });
-    defer heap.testing.releaseValue(allocator, effect_value);
-    const effect = env.ValidatedEffect.parse(effect_value.list, separator).?;
-    _ = try runtime.registerNativeModule(
-        try intern.trustedNamespace("native-surface"),
-        &.{.{ .primitive = .{
-            .name = try intern.trustedNamespace("exercise"),
-            .callback = nativeMachineSurface,
-            .effect = effect,
-            .doc = "Exercise the complete native stack capability.",
-        } }},
-    );
-
-    try expectOk(&runtime, "10 20 native-surface.exercise");
-    try std.testing.expectEqual(@as(usize, 2), runtime.stackItems().len);
-    try std.testing.expectEqual(@as(i64, 10), runtime.stackItems()[0].int);
-    try std.testing.expectEqual(@as(i64, 30), (try list.at(runtime.stackItems()[1], 0)).int);
-}
-
-test "public native failures carry their payload atomically" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
-    defer runtime.deinit();
-    const separator = try intern.intern("--");
-    const effect_value = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .word = separator }});
-    defer heap.testing.releaseValue(std.testing.allocator, effect_value);
-    const effect = (env.ValidatedEffect.parse(effect_value.list, separator)).?;
-    _ = try runtime.registerNativeModule(
-        try intern.trustedNamespace("failing-native"),
-        &.{.{ .primitive = .{
-            .name = try intern.trustedNamespace("fail"),
-            .callback = nativeFailure,
-            .effect = effect,
-            .doc = "Return a native language failure.",
-        } }},
-    );
-    try expectErrorContains(&runtime, "failing-native.fail", &.{
-        "'kind 'domain",
-        "native failure payload",
-        "'word 'failing-native.fail",
-    });
-}
-
-test "registry: native primitives expose ordinary reflective metadata" {
-    const allocator = std.testing.allocator;
-    var output = std.Io.Writer.Allocating.init(allocator);
-    defer output.deinit();
-    var diagnostics = std.Io.Writer.Allocating.init(allocator);
-    defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(
-        allocator,
-        &.{},
-        std.testing.io,
-        &output.writer,
-        &diagnostics.writer,
-        null,
-    );
-    defer runtime.deinit();
-    const separator = try intern.intern("--");
-    const output_name = try intern.intern("n");
-    const effect_value = try list.fromValuesGeneric(allocator, &.{
-        .{ .word = separator },
-        .{ .word = output_name },
-    });
-    defer heap.testing.releaseValue(allocator, effect_value);
-    const effect = (env.ValidatedEffect.parse(effect_value.list, separator)).?;
-    const module_name = try intern.trustedNamespace("native");
-    const answer_name = try intern.trustedNamespace("answer");
-    try std.testing.expectEqual(@as(u64, 1), try runtime.registerNativeModule(module_name, &.{.{
-        .primitive = .{
-            .name = answer_name,
-            .callback = nativeAnswer,
-            .effect = effect,
-            .doc = "Return the native\nanswer.",
-        },
-    }}));
-    try expectOk(&runtime, "native.answer 'native use answer 'n 'native alias n.answer " ++
-        "'native.answer doc \"Return the native answer.\" match " ++
-        "'native.answer which 'native.answer see");
-    for (runtime.stackItems()[0..3]) |item| try std.testing.expectEqual(@as(i64, 42), item.int);
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[3].int);
-    try std.testing.expectEqualStrings(
-        "native.answer -> native.answer primitive public generation 1 (-- n)\n" ++
-            "<primitive> (-- n : \"Return the native answer.\") 'native.answer def\n",
-        output.written(),
-    );
-    try std.testing.expectEqual(@as(u64, 2), try runtime.registerNativeModule(module_name, &.{.{
-        .primitive = .{
-            .name = answer_name,
-            .callback = nativeAnswerReloaded,
-            .effect = effect,
-            .doc = "Return the reloaded native answer.",
-        },
-    }}));
-    try expectOk(&runtime, "native.answer answer n.answer " ++
-        "'native.answer doc \"Return the reloaded native answer.\" match");
-    for (runtime.stackItems()[4..7]) |item| try std.testing.expectEqual(@as(i64, 43), item.int);
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[7].int);
-    try std.testing.expectError(
-        error.InvalidName,
-        intern.internNamespace("invalid.module"),
-    );
-    const invalid_effect = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    defer heap.testing.releaseValue(allocator, invalid_effect);
-    try std.testing.expect((env.ValidatedEffect.parse(
-        invalid_effect.list,
-        separator,
-    )) == null);
-    try std.testing.expectError(error.InvalidDefinition, runtime.registerNativeModule(
-        try intern.trustedNamespace("undocumented-native"),
-        &.{.{ .primitive = .{
-            .name = answer_name,
-            .callback = nativeAnswer,
-            .effect = effect,
-            .doc = " \n ",
-        } }},
-    ));
 }
 
 const EnvThreadContext = struct {
@@ -951,22 +775,6 @@ test "environment and registry retirement stays bounded after a delayed reader d
         }
         host.cleanup().drain();
         try std.testing.expect(counting.total_requested_bytes <= warmed_live_bytes + 4096);
-    }
-    try std.testing.expectEqual(.ok, counting.deinit());
-}
-
-test "session: cold native registration settles generation retirement every turn" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
-    const allocator = counting.allocator();
-    {
-        var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
-        defer runtime.deinit();
-        const module_name = try intern.trustedNamespace("cold-native-retirement");
-        for (0..64) |_| _ = try runtime.registerNativeModule(module_name, &.{});
-        const warmed_live_bytes = counting.total_requested_bytes;
-        for (0..1024) |_| _ = try runtime.registerNativeModule(module_name, &.{});
-        try std.testing.expect(counting.total_requested_bytes <= warmed_live_bytes + 4096);
-        try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }
@@ -1362,12 +1170,12 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     const document = env.documentation(document_value.list).?;
     const first_name = try intern.trustedNamespace("allocation-module");
     const alias_name = try intern.trustedNamespace("allocation-alias");
-    const second_name = try intern.trustedNamespace("allocation-native");
+    const second_name = try intern.trustedNamespace("allocation-second-module");
     const word_name = try intern.trustedNamespace("answer");
     var first = try registry.createCandidate(first_name);
     defer first.deinit();
-    _ = try first.publishDefinition(word_name, .{ .primitive = .{
-        .callback = nativeAnswer,
+    _ = try first.publishDefinition(word_name, .{ .word = .{
+        .body = env.quotation(effect_value.list).?,
         .visibility = .public,
         .effect = effect,
         .doc = document,
@@ -1378,19 +1186,20 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     defer lease.deinit();
     var second = try registry.createCandidate(first_name);
     defer second.deinit();
-    _ = try second.publishDefinition(word_name, .{ .primitive = .{
-        .callback = nativeAnswer,
+    _ = try second.publishDefinition(word_name, .{ .word = .{
+        .body = env.quotation(effect_value.list).?,
         .visibility = .public,
         .effect = effect,
         .doc = document,
     } });
     _ = try registry.commit(&second);
-    _ = try registry.registerNative(second_name, &.{.{ .primitive = .{
-        .name = word_name,
-        .callback = nativeAnswer,
-        .effect = effect,
-        .doc = "Native allocation probe.",
-    } }});
+    var third = try registry.createCandidate(second_name);
+    defer third.deinit();
+    _ = try third.publishDefinition(word_name, .{ .value = .{
+        .item = .{ .int = 42 },
+        .visibility = .public,
+    } });
+    _ = try registry.commit(&third);
 }
 
 test "environment and registry APIs propagate every allocation failure" {

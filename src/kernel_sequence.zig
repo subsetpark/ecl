@@ -54,6 +54,7 @@ const Op = enum {
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(Op)) |field| {
         const operation: Op = @enumFromInt(field.value);
+        if (operation == .reverse or operation == .first or operation == .rest) continue;
         try support.installPrimitive(core, operation.spelling(), bind(operation));
     }
 }
@@ -688,6 +689,10 @@ fn firstPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.pushBorrowed(list.atUnchecked(collection.borrow(), 0));
 }
 
+pub fn firstForIdiom(evaluator: *Machine) MachineError!void {
+    return firstPrimitive(evaluator);
+}
+
 fn restPrimitive(evaluator: *Machine) MachineError!void {
     var collection = try evaluator.popValue();
     defer collection.deinit();
@@ -697,6 +702,10 @@ fn restPrimitive(evaluator: *Machine) MachineError!void {
     if (count == 1) return evaluator.pushOwned(try emptyLike(evaluator.allocator(), collection.borrow()));
     try ListCopyDriver.installOne(evaluator, collection.borrow(), 1, count, false);
     _ = collection.take();
+}
+
+pub fn restForIdiom(evaluator: *Machine) MachineError!void {
+    return restPrimitive(evaluator);
 }
 
 fn takePrimitive(evaluator: *Machine) MachineError!void {
@@ -803,6 +812,10 @@ fn reversePrimitive(evaluator: *Machine) MachineError!void {
     if (count == 0) return evaluator.pushOwned(try emptyLike(evaluator.allocator(), collection.borrow()));
     try ListCopyDriver.installOne(evaluator, collection.borrow(), 0, count, true);
     _ = collection.take();
+}
+
+pub fn reverseForIdiom(evaluator: *Machine) MachineError!void {
+    return reversePrimitive(evaluator);
 }
 
 const ListCopyDriver = struct {
