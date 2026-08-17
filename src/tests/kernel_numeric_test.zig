@@ -22,7 +22,7 @@ test "numeric: empty leaves bypass scalar signature selection" {
     try helper.expectStack("\"\" \"\" + \"\" neg", "() ()");
 }
 
-test "numeric: transcendental d.22 edges" {
+test "numeric: transcendental non-finite edges" {
     try helper.expectStacks(&.{
         .{
             .name = "transcendental identities",

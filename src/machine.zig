@@ -1,4 +1,4 @@
-//! Defunctionalized CEK evaluator, boundary unwinding, and d.19 errors.
+//! Defunctionalized CEK evaluator, boundary unwinding, and error dicts.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -41,7 +41,7 @@ pub const ErrorKind = enum {
     cancelled,
     timeout,
     user,
-    /// d.19 freezes this set, so `else` cannot silently absorb a new kind.
+    /// The spec closes this set, so `else` cannot silently absorb a new kind.
     /// A hyphenated addition would still need its own arm.
     pub fn symbol(self: ErrorKind) []const u8 {
         return switch (self) {

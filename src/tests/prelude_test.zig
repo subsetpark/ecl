@@ -82,8 +82,8 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .source = "[1 2 3] last 7 wrap 7 8 pair 1 2 3 3 pack [1 2] 3 append " ++
                 "[1 2 3] uncons [1 2 3] unappend [] empty? [1] empty? " ++
                 "[1 2] [3 4] zip [3 1 2] sort",
-            .expected = "3 [7] [7 8] [1 2 3] [1 2 3] 1 [2 3] [1 2] 3 " ++
-                "1 0\n([1 3]\n [2 4])\n[1 2 3]",
+            .expected = "                                                ([1 3]\n" ++
+                "3 [7] [7 8] [1 2 3] [1 2 3] 1 [2 3] [1 2] 3 1 0  [2 4]) [1 2 3]",
         },
         .{
             .name = "selection and aggregation",

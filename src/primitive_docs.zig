@@ -81,7 +81,7 @@ const entries = [_]Metadata{
 
     .{ .name = "at", .effect = "collection key -- value", .text = "Select a list index or dictionary key, pervading over list indices." },
     .{ .name = "where", .effect = "counts -- indices", .text = "Expand integer counts into their replicated zero-based indices." },
-    .{ .name = "in", .effect = "value list -- bool", .text = "Test whole-value membership, pervading over the searched value." },
+    .{ .name = "in", .effect = "value list -- bool", .text = "Test whole-value membership, pervading over the sought value and never into the list." },
     .{ .name = "raze", .effect = "list -- list", .text = "Flatten one level of a list." },
     .{ .name = "cat", .effect = "left right -- list", .text = "Concatenate two lists." },
     .{ .name = "take", .effect = "list count -- list", .text = "Take a signed number of list elements, cycling when necessary." },

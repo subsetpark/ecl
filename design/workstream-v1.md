@@ -53,7 +53,7 @@ Verified in the checkout (2026-08-16):
   bounded retirement, and one/eight-worker acceptance. M8 adds scalar-safe
   TTY editing, locked atomic 100-line history, snapshot-safe live and dotted
   completion, continuation cancellation/EOF behavior, and a real-binary PTY
-  gate while leaving non-TTY input unchanged. M9 native extensions and M10
+  gate while leaving non-TTY input unchanged. M9 native extensions and M11
   stdlib remain future milestones.
 - All derived core words now live in `src/prelude.ecl`; the loader embeds and
   evaluates that ordinary source with retained provenance before freezing the
@@ -289,7 +289,7 @@ swap protocol. Reflection: `body`, `doc`, `words`, `which`, `see`. **New over
 the skeleton**: `load` (file as one unit) and `ECL_PATH` auto-load on
 unregistered `use`, and the native-builtin-module mechanism (modules
 pre-registered at startup whose bindings are primitive-backed — the
-static substrate M10 reuses after M9 replaces the public callback seam).
+static substrate M11 reuses after M9 replaces the public callback seam).
 **New over the skeleton (d.9, re-ruled
 2026-08-12, supplemented after M6)**: module `def`/`defp` consume a body
 plus a unified annotation whose effect portion is mandatory —
@@ -313,7 +313,7 @@ complete module system; kernels/combinators still run the provisional
 paths.
 
 **Unlocks**: M5/M6 idiom guards (resolution identity), M8 completion
-(env enumeration), M9 native module publication, and M10 stdlib modules.
+(env enumeration), M9 native module publication, and M11 stdlib modules.
 
 ---
 
@@ -455,7 +455,7 @@ provenance archive, so a later `call` reports `<parse>`. Non-string input is
 leave no partial result. Encoding, lexer/parser scans, binder lowering, and
 result/span materialization poll inside their actual traversals. This adds
 no host capability: `slurp`, `spit`, `getenv`, and the source-defined
-`lines` remain absent until M10.
+`lines` remain absent until M11.
 
 **Idiom recognition** uses one context-parameterized exact-phrase matcher,
 not a combinator-only switch plus special cases. Phrase shape may be
@@ -481,7 +481,7 @@ concurrency and stdlib; the harness guards everything behind it, and the
 derived core vocabulary now has one inspectable target-language source of
 truth rather than host-encoded bodies.
 
-**Unlocks**: M7 (par-each rides spawn), M10 (str module uses kernels +
+**Unlocks**: M7 (par-each rides spawn), M11 (str module uses kernels +
 prelude machinery).
 
 **Established Precedents** (milestone-scoped):
@@ -556,7 +556,7 @@ allocates an independent release cursor.
 is complete; only scope-ruled stdlib and REPL polish remain.
 
 **Unlocks**: M9's typed native `Reschedule` continuation on the production
-`WorkDriver`, M10's internal HTTP exception, and M11 acceptance.
+`WorkDriver`, M11's internal HTTP exception, and M12 acceptance.
 
 ---
 
@@ -628,7 +628,7 @@ bounded descriptor validator, the `ecl-native` SDK and build helper, retirement
 of the general-stack seam, native first light (loader typestate, `.eclmod`
 resolution, atomic publication, transactional leaf call, reflection), the typed
 `Reschedule` continuation with ordered shutdown, and acceptance. Planning
-narrowed the milestone to exactly the capability set M10's CSV and JSON modules
+narrowed the milestone to exactly the capability set M11's CSV and JSON modules
 consume; see the deferred-capability entry in Decisions Made.
 
 **Definition of Done**:
@@ -688,7 +688,7 @@ continuation, drains registry and environment pins, performs owner-only
 descriptor/image settlement, and only then destroys the settled root. The
 image pin is a variant of the load typestate: `dynamic` holds the
 library handle, while `static` is a no-op pin over a linked first-party
-descriptor. That static arm is the transport M10's CSV and JSON modules use; it
+descriptor. That static arm is the transport M11's CSV and JSON modules use; it
 is proved in M9 by registering the SDK fixture as a linked Zig module, and it is
 not a public API for embedding ECL in Zig applications. The old general-stack `NativeMachine` and
 public `Session.registerNativeModule` seam cease to be a supported extension
@@ -750,7 +750,7 @@ are opt-in through `ECL_NATIVE_DIAGNOSTICS`: with the variable unset no clock is
 sampled and nothing is emitted, so the default build does not observe the limit
 it documents. Inline callbacks must return promptly.
 
-**The initial capability set remains deliberately closed, at exactly what M10
+**The initial capability set remains deliberately closed, at exactly what M11
 consumes.** Mandatory `Call` plus optional `BuildValues` and `Reschedule` are
 the complete callback surface. CSV and JSON are pure value-in/value-out
 transforms, so nothing in v1 needs per-module state. Module state with its
@@ -760,7 +760,7 @@ package assets, external wake, blocking jobs, quotation evaluation, and
 task/runtime mutation as future capabilities. The deferral is unreachable
 rather than half-present: the descriptor and capability enum contain no
 module-state fields, factories, or ids.
-`Offload` is the expected first scheduling addition; the M10 HTTP builtin
+`Offload` is the expected first scheduling addition; the M11 HTTP builtin
 remains a documented internal direct-blocking exception in v1 and does not widen
 this SDK.
 
@@ -815,7 +815,7 @@ public surface is useful for value-in/value-out native acceleration without
 committing v1 to resources, blocking pools, VM reentry, or application
 embedding.
 
-**Unlocks**: User-authored native extensions; M10's CSV/JSON modules as
+**Unlocks**: User-authored native extensions; M11's CSV/JSON modules as
 first-party consumers of the same callback protocol; future module
 state with `ModuleView`/`ModuleUpdate` authority, `Offload`, resource,
 external-wake, package-asset, and evaluation capabilities.
@@ -826,7 +826,81 @@ external-wake, package-asset, and evaluation capabilities.
 
 ---
 
-### Milestone 10: stdlib-str-csv-json-table-http
+### Milestone 10: one-binder-merge
+
+Ruled 2026-08-17 (see Decisions Made); slotted before the stdlib so M11's
+embedded modules are authored once against the merged semantics, and
+before the `0.1.0` tag because it changes observable behavior —
+prerelease is when to break. It reopens M4-frozen binding surface
+deliberately, as its own milestone rather than a silent edit to an
+executed one.
+
+**Definition of Done**:
+One binding kind exists. Bare reference always applies the stored body;
+the word|value binding tag is deleted from binding cells, environment
+entries, reflection output, and the publication typestates (the
+module-callable-requires-`ValidatedEffect` / value-cannot-carry-one split
+collapses: every module binding is a callable with a mandatory effect).
+Concretely:
+
+- **The equivalence law is the invariant:** `v 'name set` is
+  observationally `v literal 'name def` — it publishes the literal-capture
+  body `((v) first)`, safe for every value kind (words, quotations, dicts,
+  task handles, `()`), and `setp` likewise over `defp`. `set`/`setp` keep
+  their names and always attach the synthesized effect annotation
+  `(-- value)`, uniformly in and out of modules, satisfying the mandatory
+  module effect while remaining harmless top-level metadata. The
+  never-recognize-annotations guarantee holds mechanically: captured
+  marker-bearing data ends up nested and inert.
+- **Intended placement is prelude source** —
+  `set = (swap literal swap (-- value) swap def)` — demoting both words
+  from primitive to prelude (counts 90/60 → 88/62). GATE: this requires
+  `def` executed inside another word's body to write the *unit's current
+  scope*, never the executing frame's resolution environment (core is
+  frozen). The gameplan pins the write-target rule with a test before
+  committing to source placement; if dynamic write-targeting is wrong,
+  `set`/`setp` stay host primitives implementing the identical observable
+  contract — placement is not the invariant, the law is.
+- **Reflection is total and honest.** `body` works on every binding
+  (`'x body` on a set-bound name returns `((3) first)`); `see`/`which`
+  print the stored body with no reconstruction of set-sugar spelling (the
+  deleted tag must not reappear as a display heuristic). A captured task
+  handle makes `see` non-re-readable, matching today's value display.
+  Module constants become documentable via raw `def`/`defp` with a full
+  annotation — previously impossible through `set`.
+- **Redefinition is uniform snapshot replacement** — no kind flip; `def`'s
+  non-list-body error still points at `set`.
+- **One idiom-recognition entry** fast-paths the `((v) first)` body shape
+  — covering both constants and `partial` results — through the existing
+  guarded bridge, differentially tested like every idiom, observationally
+  invisible.
+- The multi-value/single-list distinction is legible in bodies:
+  `(1 2 3) 'xs def` pushes three values; `[1 2 3] 'xs set` pushes the
+  list.
+- SPEC.md (Evaluation, Bindings, Definition annotations, Modules, and the
+  `def`/`defp`/`set`/`setp`/`body`/`see`/`which` entries), INTERPRETER.md
+  (binding cells, typed publication, idiom table), and the snapshot corpus
+  are rewritten to the merged semantics in the same change.
+
+**Why this is a safe pause point**: It deletes a semantic axis rather than
+adding one; every observable delta is in reflection output and error
+cases, and the write-time `def`-vs-`set` intent distinction
+(store-as-code vs store-as-data) is unchanged — only its representation
+moves from a hidden tag into inspectable structure.
+
+**Unlocks**: M11 authors the embedded `str` and `table` sources and the
+native modules against final binding semantics — no migration pass; a
+simpler M12 acceptance surface; the deferred static checker (Post-v1
+follow-ups, item 1) sees constants as ordinary words with known
+`( -- x )` effects and loses its values-cannot-carry-effects exception.
+
+**Established Precedents** (milestone-scoped):
+- **[standard] Forth `CONSTANT`** — https://forth-standard.org/standard/core/CONSTANT — one dictionary, everything executes; a constant is a word that pushes.
+- **[documentation] Factor `CONSTANT:`** — https://docs.factorcode.org/content/word-CONSTANT__colon__,syntax.html — the same one-kind answer in a modern concatenative vocabulary.
+
+---
+
+### Milestone 11: stdlib-str-csv-json-table-http
 
 **Definition of Done**:
 Five stdlib modules ship inside the binary (embedded sources / native
@@ -901,7 +975,7 @@ aggregate → emit) — the awk/sed/jq positioning made literal.
 
 ---
 
-### Milestone 11: v1-acceptance
+### Milestone 12: v1-acceptance
 
 **Definition of Done**:
 The terminal acceptance suite below is implemented as a CI job
@@ -913,7 +987,12 @@ inputs and checks only source-body boundedness, unsafe cast confinement, and
 prelude layout where compiler guarantees cannot express the rule. Snapshot
 retention is bounded (the M7
 reclamation obligation): a soak fixture that defines and re-registers in a loop
-shows stable memory. A `v1.0` tag exists.
+shows stable memory. `pp` and the REPL stack display implement best-effort
+huge-leaf elision so a unit producing a huge value cannot flood the terminal;
+`str` alone carries the round-trip guarantee, and SPEC.md's printing contract
+already reserves exactly this split (ruled 2026-08-17). A `0.1.0` tag
+exists — the first prerelease tag, not a stable release (ruled 2026-08-17;
+supersedes the earlier `v1.0` prescription).
 
 **Why this is a safe pause point**: It is the end; the tag is the
 pause.
@@ -924,8 +1003,8 @@ from a proven baseline. The native capabilities deferred out of M9 —
 module state with `ModuleView`/`ModuleUpdate` authority and its
 scheduler-integrated arbiter, then `Offload`, resource values, external wake,
 package assets, and quotation evaluation — also start here. None blocks the
-`v1.0` tag: no v1 consumer needs them, and each requires an explicit future
-wire-contract revision.
+`0.1.0` tag: no v1 consumer needs them, and each requires an explicit
+future wire-contract revision.
 
 ## Dependency Graph
 
@@ -938,8 +1017,9 @@ wire-contract revision.
 - Milestone 7 (scheduler-and-concurrency) -> [6]
 - Milestone 8 (repl-line-editing) -> [4]        # parallel with 5–7
 - Milestone 9 (native-extension-abi-and-loader) -> [4, 7]
-- Milestone 10 (stdlib-str-csv-json-table-http) -> [6, 9]
-- Milestone 11 (v1-acceptance) -> [7, 8, 9, 10]
+- Milestone 10 (one-binder-merge) -> [6, 9]   # ruled 2026-08-17; precedes the stdlib
+- Milestone 11 (stdlib-str-csv-json-table-http) -> [6, 9, 10]
+- Milestone 12 (v1-acceptance) -> [7, 8, 9, 10, 11]
 
 ## Open Questions
 
@@ -947,7 +1027,7 @@ wire-contract revision.
    line-processing of piped input, but piped stdin is currently
    consumed as *source*. A `stdin` word must coexist with the
    stdin-as-source CLI modes without ambiguity. Real design
-   conversation; owner: M10 gameplan at the latest.
+   conversation; owner: M11 gameplan at the latest.
 2. **Randomness (gap scan 2026-08-12).** No `rand`/roll/deal words
    exist. First impure-nondeterministic vocabulary: seeding must be
    ruled against d.20 units (per-session RNG, per-unit, or
@@ -956,11 +1036,199 @@ wire-contract revision.
 3. **http backend (choice only; procedure is decided).** Which backend
    wins the spike — Zig `std.http.Client` + `std.crypto.tls` (pure Zig,
    no C dependency, maturity risk) or a libcurl binding (battle-tested,
-   complicates the static single binary). Resolved by the M10 spike per
-   the agreed criteria in Decisions Made. Owner: M10 gameplan.
+   complicates the static single binary). Resolved by the M11 spike per
+   the agreed criteria in Decisions Made. Owner: M11 gameplan.
+
+## Post-v1 follow-ups (deferred features)
+
+Potential follow-ups, not milestones: none blocks the `0.1.0` tag, none has
+an owner, and picking one up starts a design conversation and its own
+workstream or gameplan. Each was deferred with constraints pre-written at
+deferral time. The 2026-08-17 documentation consolidation removed them
+from SPEC.md and INTERPRETER.md (those describe present state only), so
+this section is the sole active record of those constraints; when a
+follow-up lands, its present-state description moves into SPEC.md and
+INTERPRETER.md and its entry here is retired.
+
+1. **Static effect checker bundle** (ledger d.9's deferred layer). Verify
+   module bodies against their declared effects at registration,
+   Factor-style, with inline quotation literals inferred; dynamic `call`
+   inside checked code requires a declared-effect variant. Checker scope —
+   row polymorphism and purity marks — stays deferred as one bundle.
+   Pre-accepted consequences and constraints:
+   - Arrival is a *principled break*, accepted on the record: a module
+     whose declaration is wrong-but-unexecuted starts failing at
+     registration. The checker rejects only code already violating its own
+     stated contract (success-typing discipline).
+   - Statically *verified* applications may skip the dynamic contract
+     check — verification licenses the skip, never module residence alone.
+   - Purity checking upgrades `par-each` to full observational equivalence
+     with `each` (no cross-task IO interleaving possible); purity stays
+     per-word and scoped to where it pays.
+   - Literal-count `pack` is checker-inferable; a nonliteral count has
+     unknown effect and is unavailable inside a statically verified body
+     (it remains legal on the dynamic top level).
+   - Static coverage never extends to metaprogramming: cons/compose-built
+     quotations applied mid-body resolve dynamically forever, and every
+     module keeps a dynamic path. Top-level words permanently forgo
+     hardening.
+   - The substrate is already in place and nothing more was pre-built: the
+     binding cell's slots (doc; effect — populated by module declarations;
+     compiled-form cache — present, unused) and observable binding writes
+     as generation counters (per-env shape generation, per-module registry
+     generation).
+   - The cached compiled form is the deferred execution view:
+     pre-resolved threaded arrays, guard-free for intra-module references
+     (module envs are write-once under the binding license),
+     generation-guarded at `use`/core edges — threaded or opcode arrays at
+     most, never native code. It is built with this bundle, later, or
+     never.
+
+2. **Exactness** (ledger d.4). Bignums, rationals, or decimals — deferred,
+   not rejected; a positioning decision to revisit. Constraints: the
+   numeric tower stays out of core; bignum promotion inside flat leaves is
+   rejected outright because scalar and array arithmetic would diverge, so
+   any exactness design must keep them identical and cannot silently
+   promote. The interpreted-forever positioning neither demands nor
+   forecloses it.
+
+3. **pdict** (ledger d.1's reservation). An Erlang-style per-substack
+   process dictionary, sketched as `put`/`get` (note the existing list/dict
+   word `put`; naming is among the open questions). Constraints reserved
+   with it: immutable values only; scoped to the substack (the unit
+   boundary); follows env rules — a failed unit does not roll it back;
+   stays out of the stdlib. All remaining questions, including child
+   inheritance (empty vs copy-on-spawn), are decided if and when it is
+   added.
+
+4. **Channels** (ledger d.20's reservation). Producer/consumer streaming.
+   If added: immutable values only, and channel ends are scoped to units —
+   the structured-lifetime rule extends to them. Promise-style combinator
+   algebras on pending tasks remain refused regardless.
+
+5. **Unicode tables layer** (ledger d.15's deferral). Grapheme
+   segmentation, normalization, non-ASCII case mapping, and locale
+   collation — a stdlib layer gated on Unicode tables, beyond M11's ASCII
+   `str` scope. Until it exists, codepoint semantics stay documented
+   honestly (composed vs decomposed "café" is 4 vs 5 chars).
+
+6. **`'origin` error field** (ledger d.19's anticipated extension). Errors
+   are sendable by construction — immutable plain data — so when errors
+   cross process boundaries, `'origin` is an added field, not a redesign.
+
+7. **`fsum`** (ledger d.23). The documented escape valve if float-sum
+   throughput ever matters. The standing rule it relaxes stays otherwise
+   absolute: float folds are strictly sequential on every path, only exact
+   reductions (integer, min/max, boolean) may be reassociated, and fused ≡
+   generic remains bit-identical.
+
+8. **Kernel evolution toward the K ceiling.** All profiling-gated:
+   - Vectorization tier 2: explicit `@Vector` kernels and target-feature
+     multiversioning (compress, radix histograms, packed compares).
+     Tier 3: per-ISA variants selected at startup. One authoring
+     invariant: every ISA variant of a float kernel implements the
+     identical association tree.
+   - Kernel-internal multicore, deferred entirely: grain around 10⁵
+     elements per thread, memory bandwidth as the ceiling. Kernels already
+     take explicit index ranges, so a future splitter forks block ranges
+     without touching kernel bodies. One worker pool under everything:
+     kernel splits are scoped fork-join subtasks on the same pool as
+     units, with the caller participating; kernels never own threads.
+   - The reserved narrow-mask leaf tag (packed bools) —
+     representation-only, never semantics.
+
+9. **Work-driver overhead program.** The cursor/`WorkDriver` substrate
+   pays per-operation allocation, per-transition state loads, and
+   per-slice indirection; measure before optimizing. Benchmarks: input
+   sizes 1, 32, 1,024, 65,535, 65,536, 65,537, and 1,048,576 (fixed cost,
+   quantum boundaries, steady state visible); one and eight workers,
+   uncontended and with a long task competing against short ones; record
+   wall/CPU time and ns per logical transition, allocations and bytes,
+   resumes and ready-queue handoffs, short-task queue latency
+   (p50/p95/p99), cancellation-observation latency and maximum
+   uninterrupted work, and peak temporary memory, in ReleaseSafe and the
+   intended release mode, through the public runtime surface. Optimize
+   only measured contributors, preferring in order:
+   1. eliminating fixed driver allocation — an inline continuation area in
+      `Unit` (nominal occupied/empty state, comptime alignment and size
+      validation), per-unit size-class pools, or typed slabs; pools keep
+      precise ownership and allocator-failure behavior and never turn
+      teardown into unbounded traversal;
+   2. batching transitions inside a bounded slice — dispatch once per
+      slice, monomorphic inner loops per chunk (bulk copy/fill, leaf
+      pervasion, fixed-width string traversal, materializer passes), with
+      conservative accounting: a bounded chunk may count as one
+      transition, an arbitrarily large copy may not, and a parent driver
+      never assumes a completed child consumed one transition;
+   3. specializing hot flat-leaf state machines — monomorphic drivers,
+      compact tagged state with exhaustive transitions,
+      structure-of-arrays temporaries where bandwidth-bound, vectorized
+      chunks with scalar tails, fused profile/fill only when the exact
+      representation is already known; and
+   4. scheduler or quantum policy last — never tune the quantum to hide
+      avoidable allocation or cursor overhead, and any adaptive policy
+      preserves a hard maximum non-yield interval.
+   Bounded-first-slice promotion (run one bounded slice locally, install
+   the driver only when incomplete) is attempted only if driver allocation
+   remains material after inline storage or pooling, and only with an
+   immediate scheduler return on an incomplete first slice. Genuinely
+   constant-bounded scalar cases may execute directly — domain dispatch,
+   never a second implementation of a user-sized algorithm. Every
+   candidate preserves INTERPRETER.md's bounded-work invariants and passes
+   the scheduler interleaving properties, shell/process properties with
+   deadlines, behavioral and differential suites, allocator failure
+   sweeps, and the one/eight-worker matrix, reporting both throughput and
+   worst-case progress latency: an optimization that improves aggregate
+   throughput by monopolizing a worker is a scheduler regression.
+
+10. **Profiling-gated implementation upgrades**, declined for v1 and legal
+    later under standing rules: a custom bucket allocator (capacity
+    derived from power-of-two bucket class; a concurrent allocator is the
+    riskiest subsystem in the plan — ride the system allocator until
+    profiling demands otherwise); Tokio-style local run queues with
+    steal-half; quickening/inline caches under the iron law — hold the
+    binding cell, re-read its interior every execution, never cache a
+    resolution. The execution view is item 1's compiled form. The
+    dispatch-loop freeze stands: none of these touches the inner loop's
+    design.
+
+11. **Native extension capabilities.** Already recorded in M9's deferral
+    ruling, M12's Unlocks, and Decisions Made; listed here only for
+    completeness: module state (one state instance per Session, distinct
+    `ModuleView`/`ModuleUpdate` authority, a scheduler-integrated arbiter,
+    bounded initialization/destruction, continuation validation),
+    `Offload` (the expected first scheduling capability — a blocking-pool
+    split reusing the await machinery unchanged), resource values,
+    external wake, package assets, and quotation evaluation. Each requires
+    an explicit wire-contract revision; none is a new callback class.
+
+12. **Package manager.** Owns dependency solving and target selection, and
+    publishes its result by ordering package roots in `ECL_PATH`; the
+    runtime does neither job. `.eclmod` stays portable naming, never a
+    portable binary.
+
+13. **Reserved doors.** `;` is a reserved token (parse error; currently
+    means nothing). Word aliases for `fold` and friends can come later —
+    words-not-glyphs remains the identity, and the glyph budget stays
+    spent on literals.
 
 ## Decisions Made
 
+- **One-binder merge ruled; LISP-2 rejected (2026-08-17, user ruling).**
+  The word|value kind tag is replaced by uniform application with visible
+  literal capture — Milestone 10 carries the full contract; SPEC.md is
+  rewritten only when it executes (the spec describes implemented state).
+  Sub-rulings: `set`/`setp` survive as sugar over `literal` + `def`/`defp`;
+  the sugar synthesizes a fixed `(-- value)` effect so module constants
+  keep mandatory effects; `see`/`which` print stored bodies with no
+  sugar reconstruction; the change lands before the stdlib milestone
+  (M11 now depends on M10) and therefore pre-`0.1.0`. Dual namespaces
+  (LISP-2) were examined and rejected: concatenative syntax has no
+  reference position to select a namespace, so the move either changes
+  nothing observable (one-namespace-per-name is isomorphic to the tag) or
+  makes bare-name behavior policy-dependent (cross-namespace shadowing;
+  words-win priority renders `set` silently inert at call sites), and the
+  macro-hygiene motivation for LISP-2 is absent — ecl has no macro layer.
 - **Host = Zig** (user ruling, this session). Consequences absorbed into the
   plan: the kernel matrix generates via comptime, SIMD rides `@Vector`,
   RC/atomics use `@atomicRmw` with the d.23 orderings, publication is an atomic
@@ -1047,13 +1315,13 @@ wire-contract revision.
   and builders mapped to the real `WorkDriver`. The runtime cannot preempt or
   infer reductions for arbitrary native instructions, so inline code must
   return promptly and duration diagnostics expose violations after the fact.
-  M10 HTTP remains the sole internal direct-blocking v1 exception; `Offload` is
+  M11 HTTP remains the sole internal direct-blocking v1 exception; `Offload` is
   the committed first scheduling extension.
 - **Native lifetime is one ordered shutdown.** Session shutdown closes new
   native-call creation, quiesces calls, destroys continuations, settles ECL
   retirement, and only then closes libraries. External side effects a native
   word performs are not rolled back with the operand-stack transaction.
-- **M9's capability set is closed at exactly what M10 consumes** (gameplan
+- **M9's capability set is closed at exactly what M11 consumes** (gameplan
   ruling, 2026-08-16). Mandatory `Call` plus optional `BuildValues` and
   `Reschedule`; CSV and JSON are pure value-in/value-out transforms with no
   per-Session state, so `ModuleState`, `ModuleView`, `ModuleUpdate`, and the
@@ -1067,7 +1335,7 @@ wire-contract revision.
   ruling, 2026-08-16). The load typestate carries `dynamic` (the library
   handle) and `static` (a no-op pin over a linked first-party descriptor);
   both traverse identical validation, publication, transaction, and teardown,
-  so M10's CSV and JSON cannot drift from a `.eclmod`'s behavior. M9 proves the
+  so M11's CSV and JSON cannot drift from a `.eclmod`'s behavior. M9 proves the
   static arm by registering the SDK fixture as a linked Zig module rather than
   shipping it unexercised.
 - **Native loading ships ungated** (gameplan ruling, 2026-08-16). No feature
@@ -1179,13 +1447,13 @@ wire-contract revision.
   is untouched; arrays like `[1, null]` round-trip. Recorded in the
   ledger (d.22 addendum).
 - **http backend is chosen by spike, not by guess** (user ruling, this
-  session): at M10 planning, `std.http` wins if it handles TLS 1.3
+  session): at M11 planning, `std.http` wins if it handles TLS 1.3
   against 5 real-world hosts including redirects and chunked encoding;
   otherwise bind libcurl.
 - **Toolchain pinned: Zig 0.16.0** (resolved at M1 planning, closing the
   former open question). Pinned in `build.zig.zon`
   (`minimum_zig_version`) and by the CI tarball; revisited only at
-  milestone boundaries and at the M10 http spike.
+  milestone boundaries and at the M11 http spike.
 - **Forge and CI: sourcehut** (M1 planning ruling). The repo is
   `git.sr.ht/~subsetpark/ecl` (unlisted; flip with
   `hut git update --visibility public`); CI is builds.sr.ht via
@@ -1487,7 +1755,7 @@ script in CI.
     numbers; plus `{1 2} json.emit` expecting `'kind 'type`.
   - **Expected**: corpus round-trips byte-identically; the emit error
     fires.
-  - **Traces to**: Milestone 10 — json native module using M9 capabilities.
+  - **Traces to**: Milestone 11 — json native module using M9 capabilities.
 
 - **DoD-26 — csv round-trip**
   - **Assert**: `csv.parse` preserves fields, empty cells, record widths,
@@ -1505,7 +1773,7 @@ script in CI.
     canonical output matches byte-for-byte; the malformed input yields
     `'kind 'parse`, the numeric cell and non-list row yield `'kind 'type`,
     and the zero-field row yields `'kind 'shape`.
-  - **Traces to**: Milestone 10 — csv native module using M9 capabilities.
+  - **Traces to**: Milestone 11 — csv native module using M9 capabilities.
 
 - **DoD-27 — table representation and conversions**
   - **Assert**: a valid table remains an ordinary dict under every core
@@ -1524,7 +1792,7 @@ script in CI.
     records round-trip while empty records are explicitly schema-less, casts
     are the only scalar coercions, and every transformation produces the
     fixture's expected ordered column dict.
-  - **Traces to**: Milestone 10 — embedded `table` module value policy and
+  - **Traces to**: Milestone 11 — embedded `table` module value policy and
     conversion/transform words.
 
 - **DoD-28 — table validation boundary**
@@ -1541,7 +1809,7 @@ script in CI.
     fail as `'type`, `'shape`, `'domain`, or `'contract` according to the
     frozen policy, no cast/aggregate quotation runs before complete
     prevalidation, and core `type` continues to report `'dict`.
-  - **Traces to**: Milestone 10 — embedded `table` module validators.
+  - **Traces to**: Milestone 11 — embedded `table` module validators.
 
 - **DoD-29 — table filtering and aggregation**
   - **Assert**: CSV text can be explicitly cast, filtered, grouped by named
@@ -1555,7 +1823,7 @@ script in CI.
   - **Expected**: the grouped index dict and final region/revenue/count/mean
     column dict match the checked-in expected values exactly; no header or
     numeric inference occurs.
-  - **Traces to**: Milestone 10 — embedded `table` module grouping and
+  - **Traces to**: Milestone 11 — embedded `table` module grouping and
     aggregation words.
 
 - **DoD-30 — stable table joins and explicit missingness**
@@ -1571,7 +1839,7 @@ script in CI.
     duplicates expand in the specified order, unmatched left rows use only
     caller-provided fills, collisions and incomplete fills are `'domain`, and
     a JSON `'null` value remains ordinary data when present.
-  - **Traces to**: Milestone 10 — embedded `table` module join words.
+  - **Traces to**: Milestone 11 — embedded `table` module join words.
 
 - **DoD-31 — http client**
   - **Assert**: `http.get` against a local fixture server returns a
@@ -1581,7 +1849,7 @@ script in CI.
     `http.ecl` gets a known file and one dead port.
   - **Expected**: status/body asserted; the dead port errors `'io`
     without crashing the interpreter.
-  - **Traces to**: Milestone 10 — internal http native module and documented
+  - **Traces to**: Milestone 11 — internal http native module and documented
     direct-blocking exception.
 
 - **DoD-32 — str module via embedded stdlib**
@@ -1590,7 +1858,7 @@ script in CI.
   - **Verify by** `cmd`: `ecl "'str use \"hello\" str.upper pp"` in an
     empty environment.
   - **Expected**: `"HELLO"`.
-  - **Traces to**: Milestone 10 — embedded stdlib registration (mechanism Milestone 4).
+  - **Traces to**: Milestone 11 — embedded stdlib registration (mechanism Milestone 4).
 
 - **DoD-33 — source architecture audit**
   - **Assert**: every first-party Zig input belongs to exactly one production
@@ -1600,7 +1868,7 @@ script in CI.
     this audit.
   - **Expected**: exit 0 with exhaustive source classification and no
     architecture-policy violations.
-  - **Traces to**: Milestone 11 — the source architecture audit (d.23).
+  - **Traces to**: Milestone 12 — the source architecture audit (d.23).
 
 - **DoD-34 — module effect declarations (d.9)**
   - **Assert**: a module `def` without an effect declaration fails

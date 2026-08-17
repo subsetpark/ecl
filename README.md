@@ -5,8 +5,10 @@ implementation is the Zig interpreter at the repository root.
 
 ## Repository map
 
-- [`design/`](design/) contains the settled design ledger, grammar, and
-  vocabulary.
+- [`design/`](design/) contains the language specification
+  ([`SPEC.md`](design/SPEC.md)) and the interpreter description
+  ([`INTERPRETER.md`](design/INTERPRETER.md)), plus the workstream plan and
+  preserved research.
 - [`src/`](src/) contains the Zig implementation. The value core, reader,
   frame machine, chained environments, and module registry are live:
   `zig build` produces a working calculator with transactional units,

@@ -112,7 +112,7 @@
   Transfer ownership through moved/consumed capabilities or tagged results; never make
   a caller infer whether a failed append, publication, or transition retained or
   destroyed its input.
-- Update the gameplan and `design/ARCHITECTURE.md` when introducing or revising a
+- Update the gameplan and `design/INTERPRETER.md` when introducing or revising a
   structural invariant. Acceptance must show that every producer and consumer uses the
   new seam and that invalid states are unavailable in all build modes.
 - Raise a representation ceiling when a strong type boundary honestly needs the
@@ -231,5 +231,5 @@
   indirect helpers and every destructor spelling, rather than recognizing only selected
   names or direct loops.
 - Treat source-audit output as the classification authority. Update
-  `design/ARCHITECTURE.md`, the workstream, and the gameplan in the same change whenever
+  `design/INTERPRETER.md`, the workstream, and the gameplan in the same change whenever
   classifications, reachability rules, or proof claims move.

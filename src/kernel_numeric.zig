@@ -1,4 +1,4 @@
-//! Checked scalar and flat-leaf arithmetic plus d.13 pervasive descent.
+//! Checked scalar and flat-leaf arithmetic plus pervasive descent.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");

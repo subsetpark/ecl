@@ -3,35 +3,51 @@ const std = @import("std");
 const helper = @import("kernel_test_support.zig");
 const session = @import("../session.zig");
 
+fn expectDisplay(source: []const u8, expected: []const u8) !void {
+    const allocator = std.testing.allocator;
+    var original = try session.Session.init(allocator, &.{});
+    defer original.deinit();
+    try runDisplaySource(&original, "<display-source>", source);
+    var rendered = try original.stackDisplay();
+    defer rendered.deinit();
+    try std.testing.expectEqualStrings(expected, rendered.bytes());
+}
+
+/// Reparse proof for a display that is also valid source. Row breaks inside
+/// one value keep its delimiters, so a lone value reads back unchanged; a
+/// stack of several does not, because the display pastes its items side by
+/// side and a reader sees one row at a time. SPEC.md grants the display no
+/// round-trip guarantee, so only single-value cases belong here.
 fn expectRoundTripDisplay(source: []const u8, expected: []const u8) !void {
     const allocator = std.testing.allocator;
     var original = try session.Session.init(allocator, &.{});
     defer original.deinit();
-    switch (try original.runUnit("<display-source>", source)) {
-        .ok => {},
-        .incomplete => return error.TestUnexpectedResult,
-        .err => |failure| {
-            original.release(failure);
-            return error.TestUnexpectedResult;
-        },
-    }
+    try runDisplaySource(&original, "<display-source>", source);
     var rendered = try original.stackDisplay();
     defer rendered.deinit();
     try std.testing.expectEqualStrings(expected, rendered.bytes());
 
     var reread = try session.Session.init(allocator, &.{});
     defer reread.deinit();
-    switch (try reread.runUnit("<display-output>", rendered.bytes())) {
-        .ok => {},
-        .incomplete => return error.TestUnexpectedResult,
-        .err => |failure| {
-            reread.release(failure);
-            return error.TestUnexpectedResult;
-        },
-    }
+    try runDisplaySource(&reread, "<display-output>", rendered.bytes());
     var repeated = try reread.stackDisplay();
     defer repeated.deinit();
     try std.testing.expectEqualStrings(rendered.bytes(), repeated.bytes());
+}
+
+fn runDisplaySource(
+    runtime: *session.Session,
+    name: []const u8,
+    source: []const u8,
+) !void {
+    switch (try runtime.runUnit(name, source)) {
+        .ok => {},
+        .incomplete => return error.TestUnexpectedResult,
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+    }
 }
 
 test "sequence: len shape and ragged shape errors" {
@@ -110,9 +126,9 @@ test "sequence: raze and cat specialize their outputs" {
 }
 
 test "sequence: flip and reshape obey rectangular row-major semantics" {
-    try expectRoundTripDisplay(
+    try expectDisplay(
         "[[1 2] [3 4]] flip [1 2 3] [2 3] reshape [1 2] flip [] [2 0] reshape shape",
-        "([1 3]\n [2 4])\n([1 2 3]\n [1 2 3])\n[1 2] [2 0]",
+        "([1 3]  ([1 2 3]\n [2 4])  [1 2 3]) [1 2] [2 0]",
     );
     try expectRoundTripDisplay(
         "[0 1 2 3 4 5 6 7 8 9] [2 3 4] reshape",

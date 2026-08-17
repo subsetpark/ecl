@@ -163,7 +163,7 @@ test "early prelude installs source-defined wrap and pair" {
     try std.testing.expectEqualStrings("[1] [2 3] (() cons) (() cons cons)", display.bytes());
 }
 
-test "provisional scalar primitives enforce the d.22 regime" {
+test "provisional scalar primitives enforce the non-finite regime" {
     const allocator = std.testing.allocator;
     var runtime = try session.Session.init(allocator, &.{});
     defer runtime.deinit();
