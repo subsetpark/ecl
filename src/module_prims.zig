@@ -27,34 +27,34 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 }
 fn moduleWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    var body = try evaluator.popValue();
+    var body = try evaluator.popQuotation();
     defer body.deinit();
-    if (body.borrow() != .list) return evaluator.typeError("a quotation/list");
-    const name = try popSymbol(evaluator);
-    const driver = try evaluator.allocator().create(ModuleStartDriver);
-    driver.* = .{ .body = body.take().list, .validation = .init(name) };
-    evaluator.installWorkDriver(driver);
+    const name = try evaluator.popSymbol();
+    try evaluator.startDriver(ModuleStartDriver{
+        .body = .init(body.take().list),
+        .validation = .init(name),
+    });
 }
 fn useModule(evaluator: *Machine) MachineError!void {
-    const name = try popSymbol(evaluator);
-    const driver = try evaluator.allocator().create(UseNameDriver);
-    driver.* = .{ .name = name, .dot = intern.dotCursor(intern.get(name)) };
-    evaluator.installWorkDriver(driver);
+    const name = try evaluator.popSymbol();
+    try evaluator.startDriver(UseNameDriver{
+        .name = name,
+        .dot = intern.dotCursor(intern.get(name)),
+    });
 }
 fn aliasModule(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const target = try popSymbol(evaluator);
-    const short = try popSymbol(evaluator);
-    const driver = try evaluator.allocator().create(AliasDriver);
-    driver.* = .{
+    const target = try evaluator.popSymbol();
+    const short = try evaluator.popSymbol();
+    try evaluator.startDriver(AliasDriver{
         .short_validation = .init(short),
         .target_validation = .init(target),
-    };
-    evaluator.installWorkDriver(driver);
+    });
 }
 
 const ModuleStartDriver = struct {
-    body: ?*value.ListHandle,
+    pub const ownership: heap.DriverOwnership = .fields;
+    body: ?heap.Owned(*value.ListHandle),
     validation: intern.NamespaceCursor,
     pub fn advance(evaluator: *Machine, self: *ModuleStartDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -66,7 +66,7 @@ const ModuleStartDriver = struct {
                     .domain,
                     "module requires an unqualified, non-reserved name",
                 );
-                const body = self.body.?;
+                const body = self.body.?.take();
                 self.body = null;
                 try evaluator.moduleOwned(name, body);
                 return .completed;
@@ -74,13 +74,10 @@ const ModuleStartDriver = struct {
         };
         return .yielded;
     }
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *ModuleStartDriver) void {
-        if (self.body) |body| releases.releaseHeader(body);
-        allocator.destroy(self);
-    }
 };
 
 const UseNameDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
     name: u32,
     dot: intern.DotCursor,
     pub fn advance(evaluator: *Machine, self: *UseNameDriver) MachineError!machine.WorkProgress {
@@ -92,24 +89,22 @@ const UseNameDriver = struct {
                 if (dot != null) return evaluator.fail(.domain, "use requires an unqualified name");
                 const name = self.name;
                 evaluator.detachWorkDriver(self);
-                evaluator.allocator().destroy(self);
+                heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
                 try evaluator.useOrLoad(name);
                 return .detached;
             },
         };
         return .yielded;
     }
-    pub fn destroy(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *UseNameDriver) void {
-        allocator.destroy(self);
-    }
 };
 
 const AliasDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
     short_validation: intern.NamespaceCursor,
     target_validation: intern.NamespaceCursor,
     short: ?intern.NamespaceName = null,
     target: ?intern.NamespaceName = null,
-    cursor: ?modules.Registry.AliasCursor = null,
+    cursor: ?heap.Owned(modules.Registry.AliasCursor) = null,
     pub fn advance(evaluator: *Machine, self: *AliasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
@@ -136,8 +131,8 @@ const AliasDriver = struct {
             };
             const registry = evaluator.unit.inherited.registry orelse
                 return evaluator.fail(.domain, "module registry is unavailable");
-            if (self.cursor == null) self.cursor = registry.aliasCursor(self.short.?, self.target.?);
-            switch (self.cursor.?.advance() catch |err| switch (err) {
+            if (self.cursor == null) self.cursor = .init(registry.aliasCursor(self.short.?, self.target.?));
+            switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Ecl => unreachable,
                 error.NameConflict => return evaluator.fail(.domain, "alias collides with a module name"),
@@ -150,147 +145,108 @@ const AliasDriver = struct {
         }
         return .yielded;
     }
-    pub fn destroy(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *AliasDriver) void {
-        if (self.cursor) |*cursor| cursor.deinit();
-        allocator.destroy(self);
-    }
 };
-fn popSymbol(evaluator: *Machine) MachineError!u32 {
-    var item = try evaluator.popValue();
-    defer item.deinit();
-    return switch (item.borrow()) {
-        .symbol => |id| id,
-        else => evaluator.typeError("a symbol name"),
-    };
-}
 fn words(evaluator: *Machine) MachineError!void {
-    const driver = try evaluator.allocator().create(WordsDriver);
-    driver.* = .init(evaluator);
-    evaluator.installWorkDriver(driver);
+    try evaluator.startDriver(WordsDriver.init(evaluator));
 }
 
 const WordsDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
     const Phase = enum { visible, materialize, unique, actions, render, write };
     allocator: std.mem.Allocator,
-    visible: reflection.VisibleNameCursor,
+    visible: heap.Owned(reflection.VisibleNameCursor),
     phase: Phase = .visible,
-    found: poll_api.ChunkList(u32),
-    names: ?[]u32 = null,
+    found: heap.Owned(poll_api.ChunkList(u32)),
+    names: ?heap.Owned([]u32) = null,
     found_iterator: ?poll_api.ChunkList(u32).Iterator = null,
     materialize_index: usize = 0,
-    sorter: ?reflection.NameSortCursor = null,
-    unique_count: usize = 0,
+    sorter: ?heap.Owned(reflection.NameSortCursor) = null,
     scan_index: usize = 0,
-    actions: ?[]reflection.Action = null,
+    actions: heap.Owned(reflection.ActionPlan),
     action_index: usize = 0,
     previous: ?u32 = null,
-    plan: ?reflection.OwnedPlanCursor = null,
-    rendered: ?[]u8 = null,
+    rendered: ?heap.Owned([]u8) = null,
 
     fn init(evaluator: *Machine) WordsDriver {
         return .{
             .allocator = evaluator.allocator(),
-            .visible = .init(
+            .visible = .init(reflection.VisibleNameCursor.init(
                 .{ .scope = evaluator.currentScope() },
                 evaluator.currentEnv().coreView(),
                 evaluator.unit.inherited.registry,
-            ),
-            .found = .init(evaluator.allocator()),
+            )),
+            .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator())),
+            .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
         };
     }
     fn append(self: *WordsDriver, name: u32) error{OutOfMemory}!void {
-        try self.found.append(name);
+        try self.found.borrowMut().append(name);
     }
     pub fn advance(evaluator: *Machine, self: *WordsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) switch (self.phase) {
-            .visible => switch (self.visible.advance()) {
+            .visible => switch (self.visible.borrowMut().advance()) {
                 .pending => {},
                 .complete => {
-                    self.names = try self.allocator.alloc(u32, self.found.count);
-                    self.found_iterator = self.found.iterator();
+                    self.names = .init(try self.allocator.alloc(u32, self.found.borrow().count));
+                    self.found_iterator = self.found.borrow().iterator();
                     self.phase = .materialize;
                 },
-                .name => |name| try self.append(name),
+                .item => |name| try self.append(name),
             },
             .materialize => if (self.found_iterator.?.next()) |name| {
-                self.names.?[self.materialize_index] = name.*;
+                self.names.?.borrow()[self.materialize_index] = name.*;
                 self.materialize_index += 1;
             } else {
-                self.sorter = try .init(self.allocator, self.names.?);
+                self.sorter = .init(try .init(self.allocator, self.names.?.borrow()));
                 self.phase = .unique;
             },
-            .unique => if (self.sorter.?.advance(1) == .complete) {
-                self.sorter.?.deinit();
+            .unique => if (self.sorter.?.borrowMut().advance(1) == .complete) {
+                self.sorter.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.sorter = null;
                 self.scan_index = 0;
                 self.previous = null;
-                self.unique_count = 0;
                 self.phase = .actions;
             },
             .actions => {
-                if (self.actions == null) {
-                    if (self.scan_index != self.names.?.len) {
-                        const name = self.names.?[self.scan_index];
-                        self.scan_index += 1;
-                        if (self.previous == null or self.previous.? != name) self.unique_count += 1;
-                        self.previous = name;
-                        continue;
-                    }
-                    self.actions = try self.allocator.alloc(reflection.Action, @max(self.unique_count * 2, 1));
-                    self.scan_index = 0;
-                    self.previous = null;
-                    continue;
-                }
-                if (self.scan_index != self.names.?.len) {
-                    const name = self.names.?[self.scan_index];
+                if (self.scan_index != self.names.?.borrow().len) {
+                    const name = self.names.?.borrow()[self.scan_index];
                     self.scan_index += 1;
                     if (self.previous != null and self.previous.? == name) continue;
                     if (self.action_index != 0) {
-                        self.actions.?[self.action_index] = .{ .bytes = " " };
+                        try self.actions.borrowMut().add(.{ .bytes = " " });
                         self.action_index += 1;
                     }
-                    self.actions.?[self.action_index] = .{ .name = name };
+                    try self.actions.borrowMut().add(.{ .name = name });
                     self.action_index += 1;
                     self.previous = name;
                     continue;
                 }
-                self.actions.?[self.action_index] = .{ .bytes = "\n" };
+                try self.actions.borrowMut().add(.{ .bytes = "\n" });
                 self.action_index += 1;
-                std.debug.assert(self.action_index == self.actions.?.len);
-                self.plan = .init(self.allocator, self.actions.?);
+                self.actions.borrowMut().seal();
                 self.phase = .render;
             },
-            .render => switch (try self.plan.?.advance(1)) {
+            .render => switch (try self.actions.borrowMut().advance(1)) {
                 .pending => {},
                 .complete => |bytes| {
-                    self.rendered = bytes;
+                    self.rendered = .init(bytes);
                     self.phase = .write;
                 },
             },
             .write => {
                 if (evaluator.unit.inherited.console) |console| {
-                    console.writeOutput(self.rendered.?, false) catch return writeFailure(evaluator);
+                    console.writeOutput(self.rendered.?.borrow(), false) catch return writeFailure(evaluator);
                     return .completed;
                 }
                 const output = try outputWriter(evaluator);
-                output.writeAll(self.rendered.?) catch return writeFailure(evaluator);
+                output.writeAll(self.rendered.?.borrow()) catch return writeFailure(evaluator);
                 output.flush() catch return evaluator.fail(.io, "standard output flush failed");
                 return .completed;
             },
         };
         return .yielded;
-    }
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *WordsDriver) void {
-        self.visible.deinit();
-        if (self.sorter) |*sorter| sorter.deinit();
-        if (self.plan) |*plan| plan.deinit();
-        if (self.rendered) |rendered| allocator.free(rendered);
-        if (self.actions) |actions| allocator.free(actions);
-        if (self.names) |names| allocator.free(names);
-        self.found.retire(releases);
-        allocator.destroy(self);
     }
 };
 fn outputWriter(evaluator: *Machine) MachineError!*std.Io.Writer {
@@ -303,44 +259,32 @@ fn load(evaluator: *Machine) MachineError!void {
     var path_value = try evaluator.popValue();
     defer path_value.deinit();
     if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
-    const driver = try evaluator.allocator().create(LoadPathDriver);
-    driver.* = .{
-        .path_value = path_value.borrow(),
-        .encoder = .init(evaluator.allocator(), path_value.borrow()),
-    };
-    _ = path_value.take();
-    evaluator.installWorkDriver(driver);
+    const encoder = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), path_value.borrow());
+    try evaluator.startDriver(LoadPathDriver{
+        .path_value = .init(path_value.take()),
+        .encoder = .init(encoder),
+    });
 }
 const LoadPathDriver = struct {
-    path_value: ?Value,
-    encoder: kernel_storage.ToUtf8Cursor,
-    path: ?[]u8 = null,
+    path_value: heap.Owned(Value),
+    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+    path: ?heap.Owned([]u8) = null,
     pub fn advance(evaluator: *Machine, self: *LoadPathDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.path == null) switch (self.encoder.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        if (self.path == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(.domain, "path contains an invalid Unicode scalar"),
         }) {
             .pending => return .yielded,
-            .complete => |path| self.path = path,
+            .complete => |path| self.path = .init(path),
         };
-        const path = self.path.?;
-        const path_value = self.path_value.?;
+        const path = self.path.?.take();
+        const path_value = self.path_value.take();
         self.path = null;
-        self.path_value = null;
         evaluator.detachWorkDriver(self);
-        LoadPathDriver.destroy(evaluator.releaseDomain(), evaluator.allocator(), self);
-        evaluator.loadFileOwned(path, path_value) catch |err| {
-            evaluator.allocator().free(path);
-            evaluator.releaseDomain().releaseValue(path_value);
-            return err;
-        };
+        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+        try evaluator.loadFileOwned(path, path_value);
         return .detached;
     }
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *LoadPathDriver) void {
-        if (self.path) |path| allocator.free(path);
-        self.encoder.deinit();
-        if (self.path_value) |path_value| releases.releaseValue(path_value);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };

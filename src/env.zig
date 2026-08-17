@@ -112,7 +112,7 @@ pub const ValidatedEffect = struct {
             .outputs = @intCast(@as(usize, @intCast(effect_header.length())) - separator_index - 1),
         };
     }
-    pub const ParseProgress = union(enum) { pending, complete: ?ValidatedEffect };
+    pub const ParseProgress = poll.Progress(?ValidatedEffect);
     pub const ParseCursor = struct {
         header: *value.ListHandle,
         separator: u32,
@@ -141,10 +141,7 @@ pub const ValidatedEffect = struct {
     };
     pub fn parse(effect_header: *value.ListHandle, separator: u32) ?ValidatedEffect {
         var cursor = ParseCursor{ .header = effect_header, .separator = separator };
-        while (true) switch (cursor.advance()) {
-            .pending => {},
-            .complete => |effect| return effect,
-        };
+        return poll.drive(?ValidatedEffect, &cursor, .{});
     }
 };
 pub const Effect = ValidatedEffect;
@@ -497,7 +494,7 @@ pub const ShapeLease = struct {
     }
 };
 pub const NameEntry = struct { name: u32, lease: BindingLease };
-pub const NameCursorProgress = union(enum) { pending, complete, entry: NameEntry };
+pub const NameCursorProgress = poll.StreamProgress(NameEntry);
 pub const NameCursor = struct {
     shape: ShapeLease,
     entries: ?Shape.NameMap.RawEntryCursor,
@@ -511,7 +508,7 @@ pub const NameCursor = struct {
         return switch (entries.advance()) {
             .pending => .pending,
             .complete => .complete,
-            .entry => |entry| .{ .entry = .{
+            .item => |entry| .{ .item = .{
                 .name = intern.namespaceId(entry.key),
                 .lease = entry.value.load(),
             } },
@@ -519,7 +516,7 @@ pub const NameCursor = struct {
     }
 };
 
-pub const DirectLookupProgress = union(enum) { pending, complete: ?BindingLease };
+pub const DirectLookupProgress = poll.Progress(?BindingLease);
 pub const DirectLookupCursor = struct {
     shape: ShapeLease,
     lookup: ?Shape.NameMap.RawLookupCursor,
@@ -634,7 +631,7 @@ pub const Environment = struct {
         };
     }
 
-    pub const BindProgress = union(enum) { pending, complete: *BindingCell };
+    pub const BindProgress = poll.Progress(*BindingCell);
     pub const BindCursor = struct {
         const Builder = union(enum) {
             initialize: Shape.NameMap.InitCursor,
@@ -856,18 +853,12 @@ pub const Environment = struct {
     ) BindError!*BindingCell {
         var cursor = try self.bindCursor(name, spec);
         defer cursor.deinit();
-        while (true) switch (try cursor.advance()) {
-            .pending => {},
-            .complete => |cell| return cell,
-        };
+        return poll.driveFallible(*BindingCell, &cursor, .{});
     }
     pub fn resolveDirect(self: *const Environment, id: u32) ?BindingLease {
         var cursor = self.directLookupCursor(id);
         defer cursor.deinit();
-        while (true) switch (cursor.advance()) {
-            .pending => {},
-            .complete => |lease| return lease,
-        };
+        return poll.drive(?BindingLease, &cursor, .{});
     }
     pub fn generation(self: *const Environment) u64 {
         return self.shape_generation.load(.acquire);
@@ -875,12 +866,9 @@ pub const Environment = struct {
     fn moveUseToTop(self: *Environment, canonical: u32) BindError!void {
         var cursor = MoveUseCursor.init(self, canonical);
         defer cursor.deinit();
-        while (true) switch (try cursor.advance()) {
-            .pending => {},
-            .complete => return,
-        };
+        return poll.driveVoidFallible(&cursor, .{});
     }
-    pub const MoveUseProgress = enum { pending, complete };
+    pub const MoveUseProgress = poll.Progress(void);
     pub const MoveUseCursor = struct {
         environment: *Environment,
         canonical: u32,
@@ -1031,7 +1019,7 @@ pub const Environment = struct {
         while (true) switch (cursor.advance()) {
             .pending => {},
             .complete => break,
-            .entry => |entry| {
+            .item => |entry| {
                 var lease = entry.lease;
                 lease.deinit();
                 result[index] = entry.name;
@@ -1298,10 +1286,7 @@ pub const Scope = struct {
                     intern.namespaceId(name),
                 );
                 defer qualified.deinit();
-                const trace_word = while (true) switch (try qualified.advance()) {
-                    .pending => {},
-                    .complete => |id| break id,
-                };
+                const trace_word = try poll.driveFallible(u32, &qualified, .{});
                 return module.target.bind(
                     name,
                     BindingSpec.fromModule(module.home, trace_word, publication),

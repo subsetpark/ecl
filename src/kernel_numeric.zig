@@ -65,64 +65,51 @@ fn binaryPrimitive(evaluator: *Machine, operation: BinaryOp) MachineError!void {
     var left = try evaluator.popValue();
     defer left.deinit();
 
-    const driver = try evaluator.allocator().create(PervadeDriver);
-    errdefer evaluator.allocator().destroy(driver);
-    driver.* = .{
-        .left = left.borrow(),
-        .right = right.borrow(),
-        .cursor = try PervadeCursor.initBinary(
-            evaluator.releaseDomain(),
-            evaluator.allocator(),
-            operation,
-            left.borrow(),
-            right.borrow(),
-        ),
-    };
-    _ = left.take();
-    _ = right.take();
-    evaluator.installWorkDriver(driver);
+    const cursor = try PervadeCursor.initBinary(
+        evaluator.releaseDomain(),
+        evaluator.allocator(),
+        operation,
+        left.borrow(),
+        right.borrow(),
+    );
+    try evaluator.startDriver(PervadeDriver{
+        .left = .init(left.take()),
+        .right = .init(right.take()),
+        .cursor = .init(cursor),
+    });
 }
 
 fn unaryPrimitive(evaluator: *Machine, operation: UnaryOp) MachineError!void {
     var operand = try evaluator.popValue();
     defer operand.deinit();
-    const driver = try evaluator.allocator().create(PervadeDriver);
-    errdefer evaluator.allocator().destroy(driver);
-    driver.* = .{
-        .left = operand.borrow(),
-        .cursor = try PervadeCursor.initUnary(
-            evaluator.releaseDomain(),
-            evaluator.allocator(),
-            operation,
-            operand.borrow(),
-        ),
-    };
-    _ = operand.take();
-    evaluator.installWorkDriver(driver);
+    const cursor = try PervadeCursor.initUnary(
+        evaluator.releaseDomain(),
+        evaluator.allocator(),
+        operation,
+        operand.borrow(),
+    );
+    try evaluator.startDriver(PervadeDriver{
+        .left = .init(operand.take()),
+        .cursor = .init(cursor),
+    });
 }
 
 const PervadeDriver = struct {
-    left: Value,
-    right: ?Value = null,
-    cursor: PervadeCursor,
+    pub const ownership: heap.DriverOwnership = .fields;
+    left: heap.Owned(Value),
+    right: ?heap.Owned(Value) = null,
+    cursor: heap.Owned(PervadeCursor),
 
     pub fn advance(evaluator: *Machine, self: *PervadeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (try self.cursor.advance(evaluator, machine.kernel_poll_quantum)) {
+        return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
         };
     }
-
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *PervadeDriver) void {
-        self.cursor.deinit();
-        releases.releaseValue(self.left);
-        if (self.right) |right| releases.releaseValue(right);
-        allocator.destroy(self);
-    }
 };
 
-pub const PervadeProgress = union(enum) { pending, complete: Value };
+pub const PervadeProgress = poll.Progress(Value);
 
 pub const PervadeCursor = struct {
     releases: *heap.ReleaseDomain,

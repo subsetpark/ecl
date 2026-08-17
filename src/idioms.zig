@@ -245,15 +245,10 @@ pub fn tryApply(
         defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
         return fallback.run(evaluator);
     }
-    const driver = evaluator.allocator().create(IdiomDriver) catch {
-        fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
-        return error.OutOfMemory;
-    };
-    driver.* = .{
+    try evaluator.startDriver(IdiomDriver{
         .candidate = requestCandidate(evaluator, request).?,
-        .fallback = fallback,
-    };
-    evaluator.installWorkDriver(driver);
+        .fallback = .init(fallback),
+    });
 }
 
 const Candidate = struct {
@@ -299,11 +294,11 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
 
 const IdiomDriver = struct {
     candidate: Candidate,
-    fallback: ?machine.IdiomFallback,
+    fallback: heap.Owned(machine.IdiomFallback),
     entry_index: usize = 0,
     atom_index: usize = 0,
     capture: Capture = .{},
-    resolution: ?machine.ResolutionCursor = null,
+    resolution: ?heap.Owned(machine.ResolutionCursor) = null,
     expected: ?env.PrimitiveImpl = null,
     expected_binding: BindingKind = .builtin,
 
@@ -319,13 +314,16 @@ const IdiomDriver = struct {
         evaluator: *Machine,
         entry: ?RegistryEntry,
     ) MachineError!machine.WorkProgress {
-        const fallback = self.fallback.?;
+        const fallback = self.fallback.take();
         const candidate = self.candidate;
         const capture = self.capture;
-        self.fallback = null;
-        if (self.resolution) |*cursor| cursor.deinit();
+        if (self.resolution) |*cursor| cursor.deinit(
+            evaluator.releaseDomain(),
+            evaluator.allocator(),
+        );
+        self.resolution = null;
         evaluator.detachWorkDriver(self);
-        evaluator.allocator().destroy(self);
+        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
         if (entry) |selected| {
             defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
             const direct_parent = if (selected.context == .direct)
@@ -354,10 +352,10 @@ const IdiomDriver = struct {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) {
-            if (self.resolution) |*cursor| switch (cursor.advance()) {
+            if (self.resolution) |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => continue,
                 .complete => |maybe_resolved| {
-                    cursor.deinit();
+                    cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.resolution = null;
                     var resolved = maybe_resolved orelse {
                         self.rejectEntry();
@@ -424,7 +422,7 @@ const IdiomDriver = struct {
                         operationPrimitive(entry.operation)
                     else
                         null;
-                    self.resolution = .init(evaluator, word);
+                    self.resolution = .init(.init(evaluator, word));
                 },
                 .word => |expected_word| {
                     const word = if (actual == .word) actual.word else {
@@ -441,17 +439,13 @@ const IdiomDriver = struct {
                     }
                     self.expected_binding = expected_word.binding;
                     self.expected = null;
-                    self.resolution = .init(evaluator, word);
+                    self.resolution = .init(.init(evaluator, word));
                 },
             }
         }
         return .yielded;
     }
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *IdiomDriver) void {
-        if (self.resolution) |*cursor| cursor.deinit();
-        if (self.fallback) |fallback| fallback.deinit(releases, allocator);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 fn sourceWordMatches(candidate: Candidate, entry: RegistryEntry) bool {
@@ -574,11 +568,11 @@ const PervadeEachDriver = struct {
     mode: Mode,
     left: Value,
     right: ?Value,
-    results: heap.OwnedValueBuffer,
+    results: heap.Owned(heap.OwnedValueBuffer),
     consumed: usize,
     index: usize = 0,
-    cursor: ?numeric.PervadeCursor = null,
-    materializer: ?storage.ValueMaterializer = null,
+    cursor: ?heap.Owned(numeric.PervadeCursor) = null,
+    materializer: ?heap.Owned(storage.ValueMaterializer) = null,
 
     fn install(
         evaluator: *Machine,
@@ -588,40 +582,37 @@ const PervadeEachDriver = struct {
         count: usize,
         consumed: usize,
     ) error{OutOfMemory}!void {
-        var results = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
-        errdefer results.deinit();
-        const driver = try evaluator.allocator().create(PervadeEachDriver);
-        driver.* = .{
+        const results = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
+        try evaluator.startDriver(PervadeEachDriver{
             .mode = mode,
             .left = left,
             .right = right,
-            .results = results.take(),
+            .results = .init(results),
             .consumed = consumed,
-        };
-        evaluator.installWorkDriver(driver);
+        });
     }
 
     pub fn advance(evaluator: *Machine, self: *PervadeEachDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.index != self.results.capacity()) {
-            if (self.cursor == null) self.cursor = try self.startCursor(
+        if (self.index != self.results.borrow().capacity()) {
+            if (self.cursor == null) self.cursor = .init(try self.startCursor(
                 evaluator.releaseDomain(),
                 evaluator.allocator(),
-            );
-            switch (try self.cursor.?.advance(evaluator, machine.kernel_poll_quantum)) {
+            ));
+            switch (try self.cursor.?.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
                 .pending => return .yielded,
                 .complete => |result| {
-                    self.cursor.?.deinit();
+                    self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.cursor = null;
-                    self.results.appendOwned(result);
+                    self.results.borrowMut().appendOwned(result);
                     self.index += 1;
                     return .yielded;
                 },
             }
         }
         if (self.materializer == null)
-            self.materializer = .init(evaluator.allocator(), self.results.values());
-        return switch (try self.materializer.?.advance(machine.kernel_poll_quantum)) {
+            self.materializer = .init(.init(evaluator.allocator(), self.results.borrow().values()));
+        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
             .pending => .yielded,
             .complete => |result| completed: {
                 popRelease(evaluator, self.consumed);
@@ -662,12 +653,7 @@ const PervadeEachDriver = struct {
         };
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *PervadeEachDriver) void {
-        if (self.cursor) |*cursor| cursor.deinit();
-        if (self.materializer) |*materializer| materializer.retire(releases);
-        self.results.deinit();
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 fn applyReduction(
@@ -689,34 +675,30 @@ fn applyReduction(
         try evaluator.pushOwned(accumulator.take());
         return;
     }
-    const state = try evaluator.allocator().create(ReductionDriver);
-    errdefer evaluator.allocator().destroy(state);
-    var results: ?heap.OwnedValueBuffer = if (scan)
+    const results: ?heap.OwnedValueBuffer = if (scan)
         try .init(evaluator.releaseDomain(), count)
     else
         null;
-    errdefer if (results) |*owned_results| owned_results.deinit();
-    state.* = .{
+    try evaluator.startDriver(ReductionDriver{
         .operation = operation,
         .scan = scan,
         .input = input,
-        .accumulator = .{ .borrowed = initial },
-        .results = if (results) |*owned_results| owned_results.take() else null,
+        .accumulator = .init(.{ .borrowed = initial }),
+        .results = if (results) |owned_results| .init(owned_results) else null,
         .materializer = null,
-    };
-    evaluator.installWorkDriver(state);
+    });
 }
 
 const ReductionDriver = struct {
     operation: numeric.BinaryOp,
     scan: bool,
     input: Value,
-    accumulator: Accumulator,
-    results: ?heap.OwnedValueBuffer,
+    accumulator: heap.Owned(Accumulator),
+    results: ?heap.Owned(heap.OwnedValueBuffer),
     initialized: usize = 0,
     materializing: bool = false,
-    materializer: ?storage.ValueMaterializer,
-    cursor: ?numeric.PervadeCursor = null,
+    materializer: ?heap.Owned(storage.ValueMaterializer),
+    cursor: ?heap.Owned(numeric.PervadeCursor) = null,
 
     pub fn advance(
         evaluator: *Machine,
@@ -724,37 +706,40 @@ const ReductionDriver = struct {
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (!self.materializing and self.initialized < self.input.list.length()) {
-            if (self.cursor == null) self.cursor = try .initBinary(
+            if (self.cursor == null) self.cursor = .init(try .initBinary(
                 evaluator.releaseDomain(),
                 evaluator.allocator(),
                 self.operation,
-                self.accumulator.value(),
+                self.accumulator.borrow().value(),
                 list.atUnchecked(self.input, self.initialized),
-            );
-            const next = switch (try self.cursor.?.advance(evaluator, machine.kernel_poll_quantum)) {
+            ));
+            const next = switch (try self.cursor.?.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
                 .pending => return .yielded,
                 .complete => |result| result,
             };
-            self.cursor.?.deinit();
+            self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
             self.cursor = null;
             if (self.scan) {
-                self.results.?.appendOwned(next);
-                self.accumulator = .{ .borrowed = next };
+                self.results.?.borrowMut().appendOwned(next);
+                self.accumulator.borrowMut().* = .{ .borrowed = next };
             } else {
-                self.accumulator.replaceOwned(evaluator.releaseDomain(), next);
+                self.accumulator.borrowMut().replaceOwned(evaluator.releaseDomain(), next);
             }
             self.initialized += 1;
             return .yielded;
         }
         if (!self.scan) {
             popRelease(evaluator, 3);
-            return .{ .output = self.accumulator.takeOwned() };
+            return .{ .output = self.accumulator.borrowMut().takeOwned() };
         }
         if (!self.materializing) {
-            self.materializer = .init(evaluator.allocator(), self.results.?.values());
+            self.materializer = .init(.init(
+                evaluator.allocator(),
+                self.results.?.borrow().values(),
+            ));
             self.materializing = true;
         }
-        return switch (try self.materializer.?.advance(machine.kernel_poll_quantum)) {
+        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
             .pending => .yielded,
             .complete => |result| completed: {
                 popRelease(evaluator, 3);
@@ -763,13 +748,7 @@ const ReductionDriver = struct {
         };
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *ReductionDriver) void {
-        if (self.cursor) |*cursor| cursor.deinit();
-        if (self.materializer) |*materializer| materializer.retire(releases);
-        if (self.results) |*results| results.deinit();
-        self.accumulator.deinit(releases);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 const Accumulator = union(enum) {
@@ -803,7 +782,7 @@ const Accumulator = union(enum) {
         };
     }
 
-    fn deinit(self: Accumulator, releases: *heap.ReleaseDomain) void {
+    pub fn deinit(self: Accumulator, releases: *heap.ReleaseDomain) void {
         switch (self) {
             .borrowed, .transferred => {},
             .owned => |item| releases.releaseValue(item),

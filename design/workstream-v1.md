@@ -555,9 +555,14 @@ reference-count transition and enqueue zero-count objects, exact-capacity
 partial buffers retire as one domain-owned heap root, unknown reader output is
 held by a fixed-chunk `OwnedValueChain` with one root, and scheduler/root turns
 drain the domain in fixed chunks. Work-driver and continuation teardown receive
-that domain explicitly. The evaluator exposes only `OwnedValue` for live stack
-pops. Blocking host helpers drain a local domain but do not implement another
-graph walker, and no operation allocates an independent release cursor.
+that domain explicitly. Every driver carries an exhaustive ownership policy:
+field-derived teardown forbids a destructor hook, bounded teardown requires its
+intrusive retirement state, and coordinated self-teardown is restricted to
+address-stable aggregates. Structured owned payloads with both `retire` and
+`deinit` must choose the cancellation-safe protocol at compile time. The
+evaluator exposes only `OwnedValue` for live stack pops. Blocking host helpers
+drain a local domain but do not implement another graph walker, and no operation
+allocates an independent release cursor.
 
 **Why this is a safe pause point**: The language surface of DESIGN.md
 is complete; only scope-ruled stdlib and REPL polish remain.

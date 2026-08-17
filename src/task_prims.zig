@@ -52,9 +52,8 @@ fn spawnTask(
 }
 
 fn spawn(evaluator: *Machine) MachineError!void {
-    var quotation = try evaluator.popValue();
+    var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
-    if (quotation.borrow() != .list) return evaluator.typeError("a quotation/list");
     const task = try spawnTask(evaluator, quotation.borrow().list, .empty);
     try evaluator.pushOwned(task);
 }
@@ -88,9 +87,7 @@ fn awaitAny(evaluator: *Machine) MachineError!void {
     if (count == 0) {
         return evaluator.fail(.domain, "await-any requires a nonempty list");
     }
-    const driver = try evaluator.allocator().create(AwaitAnyDriver);
-    driver.* = .{ .tasks = tasks_value.take() };
-    evaluator.installWorkDriver(driver);
+    try evaluator.startDriver(AwaitAnyDriver{ .tasks = .init(tasks_value.take()) });
 }
 
 fn awaitFor(evaluator: *Machine) MachineError!void {
@@ -112,27 +109,25 @@ fn parEach(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     var quotation = try evaluator.popValue();
     defer quotation.deinit();
-    var sequence = try evaluator.popValue();
+    var sequence = try evaluator.popList();
     defer sequence.deinit();
-    if (sequence.borrow() != .list) return evaluator.typeError("a list");
     if (quotation.borrow() != .list) return evaluator.typeError("a quotation");
 
     const count: usize = @intCast(sequence.borrow().list.length());
     var task_buffer = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
     defer task_buffer.deinit();
-    const driver = try evaluator.allocator().create(ParEachDriver);
-    driver.* = .{
-        .sequence = sequence.take(),
-        .quotation = quotation.take(),
-        .tasks = task_buffer.take(),
-    };
-    evaluator.installWorkDriver(driver);
+    try evaluator.startDriver(ParEachDriver{
+        .sequence = .init(sequence.take()),
+        .quotation = .init(quotation.take()),
+        .tasks = .init(task_buffer.take()),
+    });
 }
 
 const ParEachDriver = struct {
-    sequence: Value,
-    quotation: Value,
-    tasks: heap.OwnedValueBuffer,
+    pub const ownership: heap.DriverOwnership = .fields;
+    sequence: heap.Owned(Value),
+    quotation: heap.Owned(Value),
+    tasks: heap.Owned(heap.OwnedValueBuffer),
     index: usize = 0,
 
     pub fn advance(
@@ -140,38 +135,28 @@ const ParEachDriver = struct {
         self: *ParEachDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        const count: usize = @intCast(self.sequence.list.length());
+        const count: usize = @intCast(self.sequence.borrow().list.length());
         const end = @min(self.index + par_each_work_quantum, count);
         while (self.index != end) : (self.index += 1) {
             const task = try spawnTask(
                 evaluator,
-                self.quotation.list,
-                .{ .borrowed_seed = list.atUnchecked(self.sequence, self.index) },
+                self.quotation.borrow().list,
+                .{ .borrowed_seed = list.atUnchecked(self.sequence.borrow(), self.index) },
             );
-            self.tasks.appendOwned(task);
+            self.tasks.borrowMut().appendOwned(task);
         }
         if (self.index != count) return .yielded;
-        const task_values = self.tasks.takeList();
+        const task_values = self.tasks.borrowMut().takeList();
         evaluator.detachWorkDriver(self);
-        ParEachDriver.destroy(evaluator.releaseDomain(), evaluator.allocator(), self);
+        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
         try evaluator.beginTaskJoinOwned(task_values);
         return .detached;
-    }
-
-    pub fn destroy(
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-        self: *ParEachDriver,
-    ) void {
-        releases.releaseValue(self.sequence);
-        releases.releaseValue(self.quotation);
-        self.tasks.deinit();
-        allocator.destroy(self);
     }
 };
 
 const AwaitAnyDriver = struct {
-    tasks: ?Value,
+    pub const ownership: heap.DriverOwnership = .fields;
+    tasks: ?heap.Owned(Value),
     index: usize = 0,
 
     pub fn advance(
@@ -179,7 +164,7 @@ const AwaitAnyDriver = struct {
         self: *AwaitAnyDriver,
     ) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        const task_values = self.tasks.?;
+        const task_values = self.tasks.?.borrow();
         const count: usize = @intCast(task_values.list.length());
         const end = @min(self.index + machine.kernel_poll_quantum, count);
         while (self.index != end) : (self.index += 1) {
@@ -192,15 +177,11 @@ const AwaitAnyDriver = struct {
             }
         }
         if (self.index != count) return .yielded;
+        _ = self.tasks.?.take();
         self.tasks = null;
         evaluator.detachWorkDriver(self);
-        AwaitAnyDriver.destroy(evaluator.releaseDomain(), evaluator.allocator(), self);
+        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
         evaluator.unit.installParkRequest(.{ .any = task_values });
         return .detached;
-    }
-
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *AwaitAnyDriver) void {
-        if (self.tasks) |task_values| releases.releaseValue(task_values);
-        allocator.destroy(self);
     }
 };

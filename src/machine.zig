@@ -141,7 +141,7 @@ pub const EclErr = struct {
     }
 };
 
-const ErrorValueProgress = union(enum) { pending, complete: Value };
+const ErrorValueProgress = poll_api.Progress(Value);
 const OrdinaryErrorCursor = struct {
     allocator: std.mem.Allocator,
     failure: *EclErr,
@@ -729,10 +729,7 @@ pub fn errorValue(
 ) error{OutOfMemory}!Value {
     var cursor = ErrorValueCursor.init(allocator, failure, trace_ids, location);
     defer cursor.retire(releases);
-    while (true) switch (try cursor.advance()) {
-        .pending => {},
-        .complete => |item| return item,
-    };
+    return poll_api.driveFallible(Value, &cursor, .{});
 }
 pub fn stringValue(
     allocator: std.mem.Allocator,
@@ -741,10 +738,7 @@ pub fn stringValue(
 ) error{OutOfMemory}!Value {
     var materializer = kernel_storage.TextMaterializer.init(allocator, bytes);
     defer materializer.retire(releases);
-    while (true) switch (try materializer.advance(kernel_poll_quantum)) {
-        .pending => {},
-        .complete => |item| return item,
-    };
+    return poll_api.driveFallible(Value, &materializer, .{kernel_poll_quantum});
 }
 const Eval = struct {
     code: *Header,
@@ -835,7 +829,7 @@ fn ApplicationAdapters(comptime Driver: type) type {
             raw: *anyopaque,
         ) void {
             const driver: *Driver = @ptrCast(@alignCast(raw));
-            Driver.destroy(releases, allocator, driver);
+            heap.destroyDriver(releases, allocator, driver);
         }
     };
 }
@@ -992,7 +986,7 @@ fn IdiomFallbackAdapters(comptime Driver: type) type {
             raw: ?*anyopaque,
         ) void {
             const driver: *Driver = @ptrCast(@alignCast(raw.?));
-            Driver.destroy(releases, allocator, driver);
+            heap.destroyDriver(releases, allocator, driver);
         }
     };
 }
@@ -1315,7 +1309,7 @@ fn WorkDriverAdapters(comptime Driver: type) type {
             raw: *anyopaque,
         ) void {
             const driver: *Driver = @ptrCast(@alignCast(raw));
-            Driver.destroy(releases, allocator, driver);
+            heap.destroyDriver(releases, allocator, driver);
         }
     };
 }
@@ -1824,7 +1818,7 @@ pub const Machine = struct {
     pub fn currentHome(self: *const Machine) ?*modules.ModuleHome {
         return self.unit.current.?.home;
     }
-    pub fn installWorkDriver(self: *Machine, context: anytype) void {
+    fn installDriver(self: *Machine, context: anytype) void {
         const Context = @TypeOf(context);
         const pointer = switch (@typeInfo(Context)) {
             .pointer => |info| info,
@@ -1854,6 +1848,34 @@ pub const Machine = struct {
             else => unreachable,
         };
     }
+    /// Consumes a fully initialized, heap-allocated continuation whose type
+    /// explicitly requires address-stable construction. Ordinary drivers use
+    /// `startDriver`, which owns allocation failure as well as installation.
+    pub fn adoptDriver(self: *Machine, context: anytype) void {
+        const Driver = @typeInfo(@TypeOf(context)).pointer.child;
+        if (!@hasDecl(Driver, "address_stable_driver"))
+            @compileError("adoptDriver requires an address-stable driver declaration");
+        _ = comptime heap.validateDriverOwnership(Driver);
+        self.installDriver(context);
+    }
+    /// Allocate and install a continuation as one ownership transfer. Driver
+    /// values accepted here opt into field-derived ownership, so allocation
+    /// failure retires the still-uninstalled value without a bespoke cleanup
+    /// path.
+    pub fn startDriver(self: *Machine, initial: anytype) error{OutOfMemory}!void {
+        const Driver = @TypeOf(initial);
+        switch (comptime heap.validateDriverOwnership(Driver)) {
+            .fields, .bounded_retirement => {},
+            .self_owned => @compileError("self-owned drivers require address-stable construction"),
+        }
+        var pending = initial;
+        const driver = self.unit.allocator.create(Driver) catch |err| {
+            heap.deinitUninstalledDriver(self.unit.releases, self.unit.allocator, &pending);
+            return err;
+        };
+        driver.* = pending;
+        self.installDriver(driver);
+    }
     /// Consumes the currently installed erased continuation without invoking
     /// its destructor. Self-replacing drivers use this before destroying their
     /// concrete state and installing the typed successor.
@@ -1870,15 +1892,14 @@ pub const Machine = struct {
         self.unit.native = .yielded;
     }
     pub fn useOrLoad(self: *Machine, name: u32) MachineError!void {
-        const driver = try self.unit.allocator.create(UseDriver);
-        driver.* = .init(self, self.currentScope(), name, true);
-        self.installWorkDriver(driver);
+        try self.startDriver(UseDriver.init(self, self.currentScope(), name, true));
     }
     fn autoLoadModule(self: *Machine, name: u32) MachineError!void {
         const registry = self.unit.inherited.registry orelse return self.undefinedModule(name);
-        const driver = try self.unit.allocator.create(AutoLoadDriver);
-        driver.* = .{ .name = name, .cursor = registry.beginLoadingCursor(name) };
-        self.installWorkDriver(driver);
+        try self.startDriver(AutoLoadDriver{
+            .name = name,
+            .cursor = registry.beginLoadingCursor(name),
+        });
     }
     const AutoLoadDriver = struct {
         const FileKind = enum { source, native };
@@ -1886,24 +1907,27 @@ pub const Machine = struct {
 
         name: u32,
         cursor: modules.Registry.BeginLoadingCursor,
-        loading: ?modules.LoadingLease = null,
-        filename: ?[]u8 = null,
+        loading: ?heap.Owned(modules.LoadingLease) = null,
+        filename: ?heap.Owned([]u8) = null,
         filename_index: usize = 0,
         file_kind: FileKind = .source,
         filename_target: FilenameTarget = .component_start,
         search_index: usize = 0,
         component_start: usize = 0,
         component_end: usize = 0,
-        candidate: ?[]u8 = null,
+        candidate: ?heap.Owned([]u8) = null,
         candidate_index: usize = 0,
         separator: bool = false,
-        path_materializer: ?kernel_storage.Utf8Materializer = null,
-        path_value: ?Value = null,
+        path_materializer: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
+        path_value: ?heap.Owned(Value) = null,
         access_error: ?[]const u8 = null,
         phase: enum { begin, filename, component_start, component_end, candidate, access, path_value, transfer } = .begin,
 
-        fn resetCandidate(self: *AutoLoadDriver, storage_allocator: std.mem.Allocator) void {
-            if (self.candidate) |candidate| storage_allocator.free(candidate);
+        fn resetCandidate(self: *AutoLoadDriver, evaluator: *Machine) void {
+            if (self.candidate) |*candidate| candidate.deinit(
+                evaluator.releaseDomain(),
+                evaluator.allocator(),
+            );
             self.candidate = null;
             self.candidate_index = 0;
             self.separator = false;
@@ -1915,7 +1939,10 @@ pub const Machine = struct {
             kind: FileKind,
             target: FilenameTarget,
         ) error{OutOfMemory}!void {
-            if (self.filename) |filename| evaluator.unit.allocator.free(filename);
+            if (self.filename) |*filename| filename.deinit(
+                evaluator.releaseDomain(),
+                evaluator.allocator(),
+            );
             self.filename = null;
             self.filename_index = 0;
             self.file_kind = kind;
@@ -1927,18 +1954,18 @@ pub const Machine = struct {
             };
             const length = std.math.add(usize, module_name.len, extension.len) catch
                 return error.OutOfMemory;
-            self.filename = try evaluator.unit.allocator.alloc(u8, length);
+            self.filename = .init(try evaluator.unit.allocator.alloc(u8, length));
             self.phase = .filename;
         }
         fn beginCandidate(self: *AutoLoadDriver, evaluator: *Machine) error{OutOfMemory}!void {
             const search = evaluator.unit.inherited.ecl_path.?;
             const directory = search[self.component_start..self.component_end];
             self.separator = directory.len != 0 and !std.fs.path.isSep(directory[directory.len - 1]);
-            var length = std.math.add(usize, directory.len, self.filename.?.len) catch
+            var length = std.math.add(usize, directory.len, self.filename.?.borrow().len) catch
                 return error.OutOfMemory;
             if (self.separator) length = std.math.add(usize, length, 1) catch
                 return error.OutOfMemory;
-            self.candidate = try evaluator.unit.allocator.alloc(u8, length);
+            self.candidate = .init(try evaluator.unit.allocator.alloc(u8, length));
             self.phase = .candidate;
         }
         pub fn advance(evaluator: *Machine, self: *AutoLoadDriver) MachineError!WorkProgress {
@@ -1948,11 +1975,11 @@ pub const Machine = struct {
                 .begin => switch (try self.cursor.advance()) {
                     .pending => {},
                     .complete => |maybe_loading| {
-                        self.loading = maybe_loading orelse return evaluator.failFmt(
+                        self.loading = .init(maybe_loading orelse return evaluator.failFmt(
                             .domain,
                             "recursive auto-load of module `{s}`",
                             .{intern.get(self.name)},
-                        );
+                        ));
                         if (evaluator.unit.inherited.host_io == null or evaluator.unit.inherited.ecl_path == null)
                             return evaluator.undefinedModule(self.name);
                         try self.beginFilename(evaluator, .source, .component_start);
@@ -1964,8 +1991,8 @@ pub const Machine = struct {
                         .source => ".ecl",
                         .native => ".eclmod",
                     };
-                    if (self.filename_index != self.filename.?.len) {
-                        self.filename.?[self.filename_index] = if (self.filename_index < module_name.len)
+                    if (self.filename_index != self.filename.?.borrow().len) {
+                        self.filename.?.borrow()[self.filename_index] = if (self.filename_index < module_name.len)
                             module_name[self.filename_index]
                         else
                             extension[self.filename_index - module_name.len];
@@ -1998,24 +2025,24 @@ pub const Machine = struct {
                 .candidate => {
                     const search = evaluator.unit.inherited.ecl_path.?;
                     const directory = search[self.component_start..self.component_end];
-                    if (self.candidate_index != self.candidate.?.len) {
-                        self.candidate.?[self.candidate_index] = if (self.candidate_index < directory.len)
+                    if (self.candidate_index != self.candidate.?.borrow().len) {
+                        self.candidate.?.borrow()[self.candidate_index] = if (self.candidate_index < directory.len)
                             directory[self.candidate_index]
                         else if (self.separator and self.candidate_index == directory.len)
                             std.fs.path.sep
                         else
-                            self.filename.?[self.candidate_index - directory.len - @intFromBool(self.separator)];
+                            self.filename.?.borrow()[self.candidate_index - directory.len - @intFromBool(self.separator)];
                         self.candidate_index += 1;
                     } else self.phase = .access;
                 },
                 .access => {
                     std.Io.Dir.cwd().access(
                         evaluator.unit.inherited.host_io.?,
-                        self.candidate.?,
+                        self.candidate.?.borrow(),
                         .{ .read = true },
                     ) catch |err| switch (err) {
                         error.FileNotFound => {
-                            self.resetCandidate(evaluator.unit.allocator);
+                            self.resetCandidate(evaluator);
                             if (self.file_kind == .source) {
                                 try self.beginFilename(evaluator, .native, .candidate);
                             } else {
@@ -2025,23 +2052,29 @@ pub const Machine = struct {
                         },
                         else => self.access_error = @errorName(err),
                     };
-                    self.path_materializer = .init(evaluator.unit.allocator, self.candidate.?);
+                    self.path_materializer = .init(.init(
+                        evaluator.unit.allocator,
+                        self.candidate.?.borrow(),
+                    ));
                     self.phase = .path_value;
                 },
-                .path_value => switch (self.path_materializer.?.advance(1) catch |err| switch (err) {
+                .path_value => switch (self.path_materializer.?.borrowMut().advance(1) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidUtf8 => return evaluator.fail(.io, "module path is not valid UTF-8"),
                 }) {
                     .pending => {},
                     .complete => |path_value| {
-                        self.path_materializer.?.deinit();
+                        self.path_materializer.?.deinit(
+                            evaluator.releaseDomain(),
+                            evaluator.allocator(),
+                        );
                         self.path_materializer = null;
-                        self.path_value = path_value;
+                        self.path_value = .init(path_value);
                         if (self.access_error) |name| {
                             const failure = evaluator.failFmt(
                                 .io,
                                 "cannot access module file `{s}`: {s}",
-                                .{ self.candidate.?, name },
+                                .{ self.candidate.?.borrow(), name },
                             );
                             evaluator.unit.pending.?.addData(.path, path_value);
                             return failure;
@@ -2051,23 +2084,18 @@ pub const Machine = struct {
                 },
                 .transfer => {
                     if (self.file_kind == .native) return self.transferNative(evaluator);
-                    const candidate = self.candidate.?;
+                    const candidate = self.candidate.?.take();
                     const completion: SourceCompletion = .{ .use = .{
                         .name = self.name,
-                        .loading = self.loading.?.move(),
-                        .path = self.path_value.?,
+                        .loading = self.loading.?.borrowMut().move(),
+                        .path = self.path_value.?.take(),
                     } };
                     self.candidate = null;
                     self.loading = null;
                     self.path_value = null;
                     evaluator.detachWorkDriver(self);
-                    AutoLoadDriver.destroy(evaluator.releaseDomain(), evaluator.unit.allocator, self);
-                    evaluator.fileSourceOwned(candidate, null, completion) catch |err| {
-                        var cleanup = completion;
-                        cleanup.deinit(evaluator.releaseDomain());
-                        evaluator.unit.allocator.free(candidate);
-                        return err;
-                    };
+                    heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+                    try evaluator.fileSourceOwned(candidate, null, completion);
                     return .detached;
                 },
             };
@@ -2076,86 +2104,78 @@ pub const Machine = struct {
         fn transferNative(self: *AutoLoadDriver, evaluator: *Machine) MachineError!WorkProgress {
             const loader_authority = evaluator.unit.inherited.native_loader orelse
                 return evaluator.fail(.io, "native module loader is unavailable");
-            const start = try loader_authority.startDynamic(@enumFromInt(self.name), self.candidate.?);
+            const start = try loader_authority.startDynamic(
+                @enumFromInt(self.name),
+                self.candidate.?.borrow(),
+            );
             const loader = switch (start) {
                 .failure => |failure| {
                     const failed = evaluator.fail(.io, failure.text());
-                    evaluator.unit.pending.?.addData(.path, self.path_value.?);
+                    evaluator.unit.pending.?.addData(.path, self.path_value.?.borrow());
                     return failed;
                 },
                 .loading => |loading| loading,
             };
-            const next = evaluator.unit.allocator.create(NativeLoadDriver) catch |err| {
-                var cleanup = loader;
-                cleanup.deinit();
-                return err;
-            };
-            next.* = .{
+            const next = NativeLoadDriver{
                 .name = self.name,
-                .loader = loader,
-                .loading = self.loading.?.move(),
-                .path = self.path_value.?,
+                .loader = .init(loader),
+                .loading = .init(self.loading.?.take()),
+                .path = .init(self.path_value.?.take()),
             };
-            self.loading = null;
-            self.path_value = null;
             evaluator.detachWorkDriver(self);
-            AutoLoadDriver.destroy(evaluator.releaseDomain(), evaluator.unit.allocator, self);
-            evaluator.installWorkDriver(next);
+            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            try evaluator.startDriver(next);
             return .detached;
         }
-        pub fn destroy(releases: *heap.ReleaseDomain, storage_allocator: std.mem.Allocator, self: *AutoLoadDriver) void {
-            if (self.loading) |*loading| loading.deinit();
-            if (self.path_materializer) |*materializer| materializer.retire(releases);
-            if (self.path_value) |path_value| releases.releaseValue(path_value);
-            if (self.candidate) |candidate| storage_allocator.free(candidate);
-            if (self.filename) |filename| storage_allocator.free(filename);
-            storage_allocator.destroy(self);
-        }
+        pub const ownership: heap.DriverOwnership = .fields;
     };
     const NativeLoadDriver = struct {
         name: u32,
-        loader: native_module.LoadCursor,
-        loading: ?modules.LoadingLease,
-        path: ?Value,
-        instance: ?*native_module.ModuleInstance = null,
-        publication: ?modules.Registry.NativeCandidateCursor = null,
-        candidate: ?modules.OwnedCandidate = null,
-        commit: ?modules.Registry.CommitCursor = null,
-        next: ?*UseDriver = null,
+        loader: heap.Owned(native_module.LoadCursor),
+        loading: heap.Owned(modules.LoadingLease),
+        path: heap.Owned(Value),
+        instance: ?heap.Owned(*native_module.ModuleInstance) = null,
+        publication: ?heap.Owned(modules.Registry.NativeCandidateCursor) = null,
+        candidate: ?heap.Owned(modules.OwnedCandidate) = null,
+        commit: ?heap.Owned(modules.Registry.CommitCursor) = null,
         phase: enum { validate, definitions, commit } = .validate,
 
         fn failLoad(self: *NativeLoadDriver, evaluator: *Machine, message: []const u8) MachineError {
             const failure = evaluator.fail(.io, message);
-            evaluator.unit.pending.?.addData(.path, self.path.?);
+            evaluator.unit.pending.?.addData(.path, self.path.borrow());
             return failure;
         }
 
         pub fn advance(evaluator: *Machine, self: *NativeLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             switch (self.phase) {
-                .validate => switch (try self.loader.advance(kernel_poll_quantum)) {
+                .validate => switch (try self.loader.borrowMut().advance(kernel_poll_quantum)) {
                     .pending => return .yielded,
                     .failure => |failure| return self.failLoad(evaluator, failure.text()),
                     .loaded => |instance| {
-                        self.instance = instance;
-                        self.publication = try .init(evaluator.unit.inherited.registry.?, instance);
+                        self.instance = .init(instance);
+                        self.publication = .init(try .init(
+                            evaluator.unit.inherited.registry.?,
+                            instance,
+                        ));
                         self.phase = .definitions;
                         return .yielded;
                     },
                 },
-                .definitions => switch (try self.publication.?.advance()) {
+                .definitions => switch (try self.publication.?.borrowMut().advance()) {
                     .pending => return .yielded,
                     .complete => |candidate| {
-                        self.publication.?.deinit();
+                        self.publication.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.publication = null;
-                        self.candidate = candidate;
-                        self.next = try evaluator.unit.allocator.create(UseDriver);
-                        self.commit = evaluator.unit.inherited.registry.?.commitCursor(&self.candidate.?);
+                        self.candidate = .init(candidate);
+                        self.commit = .init(evaluator.unit.inherited.registry.?.commitCursor(
+                            self.candidate.?.borrowMut(),
+                        ));
                         self.phase = .commit;
                         return .yielded;
                     },
                 },
-                .commit => switch (self.commit.?.advance() catch |err| switch (err) {
+                .commit => switch (self.commit.?.borrowMut().advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return evaluator.failFmt(
                         .io,
@@ -2165,73 +2185,56 @@ pub const Machine = struct {
                 }) {
                     .pending => return .yielded,
                     .complete => {
-                        self.commit.?.deinit();
+                        self.commit.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.commit = null;
-                        const next = self.next.?;
-                        next.* = UseDriver.init(evaluator, evaluator.currentScope(), self.name, false);
-                        next.after_load = .{
-                            .loading = self.loading.?.move(),
-                            .path = self.path.?,
-                        };
-                        self.loading = null;
-                        self.path = null;
-                        self.next = null;
+                        var next = UseDriver.init(evaluator, evaluator.currentScope(), self.name, false);
+                        next.after_load = .init(.{
+                            .loading = self.loading.take(),
+                            .path = self.path.take(),
+                        });
                         evaluator.detachWorkDriver(self);
-                        NativeLoadDriver.destroy(
-                            evaluator.releaseDomain(),
-                            evaluator.unit.allocator,
-                            self,
-                        );
-                        evaluator.installWorkDriver(next);
+                        heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+                        try evaluator.startDriver(next);
                         return .detached;
                     },
                 },
             }
         }
 
-        pub fn destroy(
-            releases: *heap.ReleaseDomain,
-            storage_allocator: std.mem.Allocator,
-            self: *NativeLoadDriver,
-        ) void {
-            if (!self.loader.done) self.loader.deinit();
-            if (self.publication) |*publication| publication.deinit();
-            if (self.commit) |*commit| commit.deinit();
-            if (self.candidate) |*candidate| candidate.deinit();
-            if (self.instance) |instance| instance.releasePin();
-            if (self.next) |next| storage_allocator.destroy(next);
-            if (self.loading) |*loading| loading.deinit();
-            if (self.path) |path| releases.releaseValue(path);
-            storage_allocator.destroy(self);
-        }
+        pub const ownership: heap.DriverOwnership = .fields;
     };
     const UseDriver = struct {
-        const Phase = enum { canonical, acquire, exports, materialize, sort, check, action_materialize, render, write, move };
+        const Phase = enum { canonical, acquire, exports, materialize, sort, check, render, write, move };
+        const AfterLoad = struct {
+            loading: modules.LoadingLease,
+            path: Value,
+
+            pub fn retire(self: *AfterLoad, releases: *heap.ReleaseDomain) void {
+                self.loading.deinit();
+                releases.releaseValue(self.path);
+            }
+        };
         allocator: std.mem.Allocator,
         scope: *env.Scope,
         name: u32,
         allow_load: bool,
         phase: Phase = .canonical,
-        canonical: ?modules.Registry.CanonicalCursor = null,
+        canonical: ?heap.Owned(modules.Registry.CanonicalCursor) = null,
         canonical_name: u32 = 0,
-        acquisition: ?modules.Registry.AcquireCursor = null,
-        generation: ?modules.GenerationLease = null,
-        exports: ?modules.ModuleGeneration.PublicNameCursor = null,
-        found: poll_api.ChunkList(u32),
-        names: ?[]u32 = null,
+        acquisition: ?heap.Owned(modules.Registry.AcquireCursor) = null,
+        generation: ?heap.Owned(modules.GenerationLease) = null,
+        exports: ?heap.Owned(modules.ModuleGeneration.PublicNameCursor) = null,
+        found: heap.Owned(poll_api.ChunkList(u32)),
+        names: ?heap.Owned([]u32) = null,
         found_iterator: ?poll_api.ChunkList(u32).Iterator = null,
         materialize_index: usize = 0,
-        sorter: ?reflection.NameSortCursor = null,
+        sorter: ?heap.Owned(reflection.NameSortCursor) = null,
         check_index: usize = 0,
-        check_lookup: ?env.DirectLookupCursor = null,
-        actions_found: poll_api.ChunkList(reflection.Action),
-        actions: ?[]reflection.Action = null,
-        action_iterator: ?poll_api.ChunkList(reflection.Action).Iterator = null,
-        action_index: usize = 0,
-        plan: ?reflection.OwnedPlanCursor = null,
-        rendered: ?[]u8 = null,
-        mover: ?env.Environment.MoveUseCursor = null,
-        after_load: ?struct { loading: modules.LoadingLease, path: Value } = null,
+        check_lookup: ?heap.Owned(env.DirectLookupCursor) = null,
+        actions: heap.Owned(reflection.ActionPlan),
+        rendered: ?heap.Owned([]u8) = null,
+        mover: ?heap.Owned(env.Environment.MoveUseCursor) = null,
+        after_load: ?heap.Owned(AfterLoad) = null,
 
         fn init(
             evaluator: *Machine,
@@ -2244,9 +2247,12 @@ pub const Machine = struct {
                 .scope = scope,
                 .name = name,
                 .allow_load = allow_load,
-                .canonical = if (evaluator.unit.inherited.registry) |registry| registry.canonicalCursor(name) else null,
-                .found = .init(evaluator.unit.allocator),
-                .actions_found = .init(evaluator.unit.allocator),
+                .canonical = if (evaluator.unit.inherited.registry) |registry|
+                    .init(registry.canonicalCursor(name))
+                else
+                    null,
+                .found = .init(.init(evaluator.unit.allocator)),
+                .actions = .init(.init(evaluator.unit.allocator)),
             };
         }
         fn diagnosticsAvailable(self: *UseDriver, evaluator: *Machine) bool {
@@ -2257,7 +2263,7 @@ pub const Machine = struct {
                 evaluator.unit.inherited.diagnostics != null;
         }
         fn beginMove(self: *UseDriver) error{OutOfMemory}!void {
-            self.mover = try self.scope.moveUseCursor(self.canonical_name);
+            self.mover = .init(try self.scope.moveUseCursor(self.canonical_name));
             self.phase = .move;
         }
         fn appendNotice(self: *UseDriver, module_name: u32, name: u32) error{OutOfMemory}!void {
@@ -2269,18 +2275,19 @@ pub const Machine = struct {
                 .{ .bytes = "." },
                 .{ .name = name },
                 .{ .bytes = "`\n" },
-            }) |action| try self.actions_found.append(action);
+            }) |action| try self.actions.borrowMut().add(action);
         }
         fn missing(self: *UseDriver, evaluator: *Machine) MachineError!WorkProgress {
             const name = self.name;
             const allow_load = self.allow_load;
-            const path = if (self.after_load) |after| retained: {
+            const path = if (self.after_load) |*after_owner| retained: {
+                const after = after_owner.borrow();
                 heap.retainValue(after.path);
                 break :retained after.path;
             } else null;
             defer if (path) |item| evaluator.releaseDomain().releaseValue(item);
             evaluator.detachWorkDriver(self);
-            UseDriver.destroy(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
             if (allow_load) {
                 try evaluator.autoLoadModule(name);
             } else {
@@ -2295,116 +2302,114 @@ pub const Machine = struct {
             var budget: usize = kernel_poll_quantum;
             while (budget != 0) : (budget -= 1) switch (self.phase) {
                 .canonical => {
-                    const cursor = &(self.canonical orelse return self.missing(evaluator));
-                    switch (cursor.advance()) {
+                    const cursor = if (self.canonical) |*owned|
+                        owned
+                    else
+                        return self.missing(evaluator);
+                    switch (cursor.borrowMut().advance()) {
                         .pending => {},
                         .complete => |maybe_name| {
                             self.canonical_name = maybe_name orelse return self.missing(evaluator);
-                            cursor.deinit();
+                            cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
                             self.canonical = null;
                             if (self.scope.kind() == .session and self.diagnosticsAvailable(evaluator)) {
-                                self.acquisition = evaluator.unit.inherited.registry.?.acquireCursor(self.canonical_name);
+                                self.acquisition = .init(
+                                    evaluator.unit.inherited.registry.?.acquireCursor(self.canonical_name),
+                                );
                                 self.phase = .acquire;
                             } else try self.beginMove();
                         },
                     }
                 },
-                .acquire => switch (self.acquisition.?.advance()) {
+                .acquire => switch (self.acquisition.?.borrowMut().advance()) {
                     .pending => {},
                     .complete => |maybe_generation| {
-                        self.acquisition.?.deinit();
+                        self.acquisition.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.acquisition = null;
-                        self.generation = maybe_generation orelse unreachable;
-                        self.exports = self.generation.?.publicNameCursor();
+                        self.generation = .init(maybe_generation orelse unreachable);
+                        self.exports = .init(self.generation.?.borrow().publicNameCursor());
                         self.phase = .exports;
                     },
                 },
-                .exports => switch (self.exports.?.advance()) {
+                .exports => switch (self.exports.?.borrowMut().advance()) {
                     .pending => {},
-                    .name => |name| try self.found.append(name),
+                    .item => |name| try self.found.borrowMut().append(name),
                     .complete => {
-                        self.exports.?.deinit();
+                        self.exports.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.exports = null;
-                        self.names = try self.allocator.alloc(u32, self.found.count);
-                        self.found_iterator = self.found.iterator();
+                        self.names = .init(try self.allocator.alloc(u32, self.found.borrow().count));
+                        self.found_iterator = self.found.borrow().iterator();
                         self.phase = .materialize;
                     },
                 },
                 .materialize => if (self.found_iterator.?.next()) |name| {
-                    self.names.?[self.materialize_index] = name.*;
+                    self.names.?.borrow()[self.materialize_index] = name.*;
                     self.materialize_index += 1;
                 } else {
-                    self.sorter = try .init(self.allocator, self.names.?);
+                    self.sorter = .init(try .init(self.allocator, self.names.?.borrow()));
                     self.phase = .sort;
                 },
-                .sort => if (self.sorter.?.advance(1) == .complete) {
-                    self.sorter.?.deinit();
+                .sort => if (self.sorter.?.borrowMut().advance(1) == .complete) {
+                    self.sorter.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.sorter = null;
                     self.phase = .check;
                 },
                 .check => {
-                    if (self.check_lookup) |*lookup| switch (lookup.advance()) {
+                    if (self.check_lookup) |*lookup| switch (lookup.borrowMut().advance()) {
                         .pending => continue,
                         .complete => |maybe_lease| {
-                            lookup.deinit();
+                            lookup.deinit(evaluator.releaseDomain(), evaluator.allocator());
                             self.check_lookup = null;
                             if (maybe_lease) |loaded| {
                                 var lease = loaded;
                                 defer lease.deinit();
                                 try self.appendNotice(
-                                    intern.namespaceId(self.generation.?.name()),
-                                    self.names.?[self.check_index],
+                                    intern.namespaceId(self.generation.?.borrow().name()),
+                                    self.names.?.borrow()[self.check_index],
                                 );
                             }
                             self.check_index += 1;
                             continue;
                         },
                     };
-                    if (self.check_index != self.names.?.len) {
-                        self.check_lookup = self.scope.environmentOrNull().?.directLookupCursor(
-                            self.names.?[self.check_index],
-                        );
-                    } else if (self.actions_found.count == 0) {
+                    if (self.check_index != self.names.?.borrow().len) {
+                        self.check_lookup = .init(self.scope.environmentOrNull().?.directLookupCursor(
+                            self.names.?.borrow()[self.check_index],
+                        ));
+                    } else if (self.actions.borrow().count() == 0) {
                         try self.beginMove();
                     } else {
-                        self.actions = try self.allocator.alloc(reflection.Action, self.actions_found.count);
-                        self.action_iterator = self.actions_found.iterator();
-                        self.phase = .action_materialize;
+                        self.actions.borrowMut().seal();
+                        self.phase = .render;
                     }
                 },
-                .action_materialize => if (self.action_iterator.?.next()) |action| {
-                    self.actions.?[self.action_index] = action.*;
-                    self.action_index += 1;
-                } else {
-                    self.plan = .init(self.allocator, self.actions.?);
-                    self.phase = .render;
-                },
-                .render => switch (try self.plan.?.advance(1)) {
+                .render => switch (try self.actions.borrowMut().advance(1)) {
                     .pending => {},
                     .complete => |bytes| {
-                        self.rendered = bytes;
+                        self.rendered = .init(bytes);
                         self.phase = .write;
                     },
                 },
                 .write => {
                     if (evaluator.unit.inherited.console) |console| {
-                        console.writeDiagnostics(self.rendered.?, false) catch
+                        console.writeDiagnostics(self.rendered.?.borrow(), false) catch
                             return evaluator.fail(.io, "standard error write failed");
                         try self.beginMove();
                         return .yielded;
                     }
                     const output = evaluator.unit.inherited.diagnostics.?;
-                    output.writeAll(self.rendered.?) catch return evaluator.fail(.io, "standard error write failed");
+                    output.writeAll(self.rendered.?.borrow()) catch return evaluator.fail(.io, "standard error write failed");
                     output.flush() catch return evaluator.fail(.io, "standard error flush failed");
                     try self.beginMove();
                 },
-                .move => switch (self.mover.?.advance() catch |err| switch (err) {
+                .move => switch (self.mover.?.borrowMut().advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Frozen => return evaluator.fail(.domain, "registered module environments are immutable"),
                 }) {
                     .pending => {},
                     .complete => {
-                        if (self.after_load) |*after| {
+                        if (self.after_load) |*after_owner| {
+                            var after = after_owner.take();
                             after.loading.finish();
                             evaluator.releaseDomain().releaseValue(after.path);
                             self.after_load = null;
@@ -2415,38 +2420,20 @@ pub const Machine = struct {
             };
             return .yielded;
         }
-        pub fn destroy(releases: *heap.ReleaseDomain, storage_allocator: std.mem.Allocator, self: *UseDriver) void {
-            if (self.canonical) |*cursor| cursor.deinit();
-            if (self.acquisition) |*cursor| cursor.deinit();
-            if (self.exports) |*cursor| cursor.deinit();
-            if (self.generation) |*lease| lease.deinit();
-            if (self.sorter) |*sorter| sorter.deinit();
-            if (self.check_lookup) |*lookup| lookup.deinit();
-            if (self.plan) |*plan| plan.deinit();
-            if (self.mover) |*mover| mover.deinit();
-            if (self.after_load) |*after| {
-                after.loading.deinit();
-                releases.releaseValue(after.path);
-            }
-            if (self.rendered) |rendered| storage_allocator.free(rendered);
-            if (self.actions) |actions| storage_allocator.free(actions);
-            if (self.names) |names| storage_allocator.free(names);
-            self.actions_found.retire(releases);
-            self.found.retire(releases);
-            storage_allocator.destroy(self);
-        }
+        pub const ownership: heap.DriverOwnership = .fields;
     };
+    /// Consumes `source` on success and failure.
     pub fn parseSourceOwned(self: *Machine, source: []u8) MachineError!void {
-        const source_name = try self.unit.allocator.dupe(u8, "<parse>");
-        errdefer self.unit.allocator.free(source_name);
-        const driver = try self.unit.allocator.create(SourceDriver);
-        driver.* = .{
-            .allocator = self.unit.allocator,
-            .source_name = source_name,
-            .source = source,
-            .completion = .push,
+        const source_name = self.unit.allocator.dupe(u8, "<parse>") catch |err| {
+            self.unit.allocator.free(source);
+            return err;
         };
-        self.installWorkDriver(driver);
+        try self.startDriver(SourceDriver{
+            .allocator = self.unit.allocator,
+            .source_name = .init(source_name),
+            .source = .init(source),
+            .completion = .init(.push),
+        });
     }
     const SourceCompletion = union(enum) {
         push,
@@ -2457,7 +2444,7 @@ pub const Machine = struct {
             path: ?Value,
         },
 
-        fn deinit(self: *SourceCompletion, releases: *heap.ReleaseDomain) void {
+        pub fn deinit(self: *SourceCompletion, releases: *heap.ReleaseDomain) void {
             switch (self.*) {
                 .push, .call => {},
                 .use => |*use| {
@@ -2474,21 +2461,19 @@ pub const Machine = struct {
         source: []u8,
         completion: SourceCompletion,
     ) error{OutOfMemory}!void {
-        const driver = try self.unit.allocator.create(SourceDriver);
-        driver.* = .{
+        try self.startDriver(SourceDriver{
             .allocator = self.unit.allocator,
-            .source_name = source_name,
-            .source = source,
-            .completion = completion,
-        };
-        self.installWorkDriver(driver);
+            .source_name = .init(source_name),
+            .source = .init(source),
+            .completion = .init(completion),
+        });
     }
     const SourceDriver = struct {
         retirement: heap.ReleaseDomain.Retirement = .{},
         allocator: std.mem.Allocator,
-        source_name: []u8,
-        source: []u8,
-        completion: SourceCompletion,
+        source_name: heap.Owned([]u8),
+        source: heap.Owned([]u8),
+        completion: heap.Owned(SourceCompletion),
         diag: reader.Diag = .{},
         reader_state: ?reader_cursor.ReadCursor = null,
         parsed: ?reader.Parsed = null,
@@ -2508,15 +2493,15 @@ pub const Machine = struct {
                     if (self.reader_state == null) self.reader_state = reader_cursor.ReadCursor.init(
                         self.allocator,
                         evaluator.releaseDomain(),
-                        self.source_name,
-                        self.source,
+                        self.source_name.borrow(),
+                        self.source.borrow(),
                         &self.diag,
                     );
                     switch (self.reader_state.?.advance() catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.Parse => {
                             const failure = evaluator.fail(.parse, self.diag.text());
-                            evaluator.unit.pending.?.setLocation(self.source_name, self.diag.span);
+                            evaluator.unit.pending.?.setLocation(self.source_name.borrow(), self.diag.span);
                             return failure;
                         },
                     }) {
@@ -2526,7 +2511,7 @@ pub const Machine = struct {
                                 .complete => |parsed| parsed,
                                 .incomplete => |value_incomplete| {
                                     const failure = evaluator.fail(.parse, value_incomplete.message);
-                                    evaluator.unit.pending.?.setLocation(self.source_name, value_incomplete.span);
+                                    evaluator.unit.pending.?.setLocation(self.source_name.borrow(), value_incomplete.span);
                                     return failure;
                                 },
                             };
@@ -2561,7 +2546,7 @@ pub const Machine = struct {
                     },
                 },
                 .activate => {
-                    switch (self.completion) {
+                    switch (self.completion.borrowMut().*) {
                         .push => try evaluator.pushBorrowed(.{ .list = self.root_header.? }),
                         .call => {
                             heap.incRef(self.root_header.?);
@@ -2602,11 +2587,6 @@ pub const Machine = struct {
             };
             return .yielded;
         }
-        pub fn destroy(releases: *heap.ReleaseDomain, storage_allocator: std.mem.Allocator, self: *SourceDriver) void {
-            _ = storage_allocator;
-            releases.retire(self, &self.retirement);
-        }
-
         pub fn advanceRetirement(
             releases: *heap.ReleaseDomain,
             storage_allocator: std.mem.Allocator,
@@ -2620,7 +2600,7 @@ pub const Machine = struct {
                     self.materializer = null;
                     if (self.root) |root| releases.releaseValue(root);
                     self.root = null;
-                    self.completion.deinit(releases);
+                    self.completion.deinit(releases, storage_allocator);
                     self.retirement_phase = .reader;
                     break :result false;
                 },
@@ -2646,13 +2626,14 @@ pub const Machine = struct {
                     break :result false;
                 },
                 .storage => {
-                    storage_allocator.free(self.source);
-                    storage_allocator.free(self.source_name);
+                    self.source.deinit(releases, storage_allocator);
+                    self.source_name.deinit(releases, storage_allocator);
                     storage_allocator.destroy(self);
                     return true;
                 },
             };
         }
+        pub const ownership: heap.DriverOwnership = .bounded_retirement;
     };
     pub fn loadFileOwned(self: *Machine, path: []u8, path_value: Value) MachineError!void {
         return self.fileSourceOwned(path, path_value, .call);
@@ -2665,33 +2646,47 @@ pub const Machine = struct {
     ) MachineError!void {
         if (self.unit.inherited.host_io == null) {
             const failure = self.fail(.io, "filesystem access is unavailable");
-            if (path_value) |item| self.unit.pending.?.addData(.path, item);
+            if (path_value) |item| {
+                self.unit.pending.?.addData(.path, item);
+            } else switch (completion) {
+                .use => |use| if (use.path) |item| self.unit.pending.?.addData(.path, item),
+                .push, .call => {},
+            }
+            self.unit.allocator.free(path);
+            if (path_value) |item| self.releaseDomain().releaseValue(item);
+            var completion_cleanup = completion;
+            completion_cleanup.deinit(self.releaseDomain());
             return failure;
         }
-        const driver = try self.unit.allocator.create(FileSourceDriver);
-        driver.* = .{
+        try self.startDriver(FileSourceDriver{
             .allocator = self.unit.allocator,
-            .path = path,
-            .path_value = path_value,
-            .completion = completion,
-        };
-        self.installWorkDriver(driver);
+            .path = .init(path),
+            .path_value = if (path_value) |item| .init(item) else null,
+            .completion = .init(completion),
+        });
     }
+    const OpenFile = struct {
+        io: std.Io,
+        file: std.Io.File,
+
+        pub fn deinit(self: *OpenFile) void {
+            self.file.close(self.io);
+        }
+    };
     const FileSourceDriver = struct {
         allocator: std.mem.Allocator,
-        path: ?[]u8,
-        path_value: ?Value,
-        completion: ?SourceCompletion,
-        io: ?std.Io = null,
-        file: ?std.Io.File = null,
+        path: heap.Owned([]u8),
+        path_value: ?heap.Owned(Value),
+        completion: heap.Owned(SourceCompletion),
+        open_file: ?heap.Owned(OpenFile) = null,
         file_reader: ?std.Io.File.Reader = null,
-        source: ?[]u8 = null,
+        source: ?heap.Owned([]u8) = null,
         offset: usize = 0,
         phase: enum { open, size, read, transfer } = .open,
 
         fn diagnosticPath(self: *FileSourceDriver) ?Value {
-            if (self.path_value) |item| return item;
-            return switch (self.completion.?) {
+            if (self.path_value) |*item| return item.borrow();
+            return switch (self.completion.borrow()) {
                 .use => |use| use.path,
                 .push, .call => null,
             };
@@ -2704,49 +2699,50 @@ pub const Machine = struct {
         pub fn advance(evaluator: *Machine, self: *FileSourceDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             const io = evaluator.unit.inherited.host_io.?;
-            self.io = io;
             switch (self.phase) {
                 .open => {
-                    self.file = std.Io.Dir.cwd().openFile(io, self.path.?, .{}) catch |err| {
+                    const file = std.Io.Dir.cwd().openFile(io, self.path.borrow(), .{}) catch |err| {
                         const failure = evaluator.failFmt(
                             .io,
                             "cannot read `{s}`: {s}",
-                            .{ self.path.?, @errorName(err) },
+                            .{ self.path.borrow(), @errorName(err) },
                         );
                         if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
                         return failure;
                     };
+                    self.open_file = .init(.{ .io = io, .file = file });
                     self.phase = .size;
                     return .yielded;
                 },
                 .size => {
-                    const stat = self.file.?.stat(io) catch |err| {
+                    const opened = self.open_file.?.borrow();
+                    const stat = opened.file.stat(opened.io) catch |err| {
                         const failure = evaluator.failFmt(
                             .io,
                             "cannot read `{s}`: {s}",
-                            .{ self.path.?, @errorName(err) },
+                            .{ self.path.borrow(), @errorName(err) },
                         );
                         if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
                         return failure;
                     };
                     if (stat.size > std.math.maxInt(usize))
                         return self.failIo(evaluator, "source file is too large");
-                    self.source = try self.allocator.alloc(u8, @intCast(stat.size));
-                    self.file_reader = self.file.?.reader(io, &.{});
+                    self.source = .init(try self.allocator.alloc(u8, @intCast(stat.size)));
+                    self.file_reader = opened.file.reader(opened.io, &.{});
                     self.phase = .read;
                     return .yielded;
                 },
                 .read => {
-                    if (self.offset != self.source.?.len) {
-                        const end = @min(self.offset + kernel_poll_quantum, self.source.?.len);
+                    if (self.offset != self.source.?.borrow().len) {
+                        const end = @min(self.offset + kernel_poll_quantum, self.source.?.borrow().len);
                         const amount = self.file_reader.?.interface.readSliceShort(
-                            self.source.?[self.offset..end],
+                            self.source.?.borrow()[self.offset..end],
                         ) catch {
                             const name = if (self.file_reader.?.err) |err| @errorName(err) else "ReadFailed";
                             const failure = evaluator.failFmt(
                                 .io,
                                 "cannot read `{s}`: {s}",
-                                .{ self.path.?, name },
+                                .{ self.path.borrow(), name },
                             );
                             if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
                             return failure;
@@ -2755,42 +2751,34 @@ pub const Machine = struct {
                         self.offset += amount;
                         return .yielded;
                     }
-                    self.file.?.close(io);
-                    self.file = null;
                     self.file_reader = null;
+                    self.open_file.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.open_file = null;
                     self.phase = .transfer;
                     return .yielded;
                 },
                 .transfer => {
-                    const path = self.path.?;
-                    const source = self.source.?;
-                    const completion = self.completion.?;
-                    self.path = null;
+                    const path = self.path.take();
+                    const source = self.source.?.take();
+                    const completion = self.completion.take();
                     self.source = null;
-                    self.completion = null;
-                    if (self.path_value) |item| evaluator.releaseDomain().releaseValue(item);
+                    if (self.path_value) |*item| item.deinit(
+                        evaluator.releaseDomain(),
+                        evaluator.allocator(),
+                    );
                     self.path_value = null;
                     evaluator.detachWorkDriver(self);
-                    self.allocator.destroy(self);
-                    evaluator.sourceOwned(path, source, completion) catch |err| {
-                        var cleanup = completion;
-                        cleanup.deinit(evaluator.releaseDomain());
-                        evaluator.unit.allocator.free(path);
-                        evaluator.unit.allocator.free(source);
-                        return err;
-                    };
+                    heap.destroyDriver(
+                        evaluator.releaseDomain(),
+                        evaluator.allocator(),
+                        self,
+                    );
+                    try evaluator.sourceOwned(path, source, completion);
                     return .detached;
                 },
             }
         }
-        pub fn destroy(releases: *heap.ReleaseDomain, storage_allocator: std.mem.Allocator, self: *FileSourceDriver) void {
-            if (self.file) |file| file.close(self.io.?);
-            if (self.source) |source| storage_allocator.free(source);
-            if (self.path) |path| storage_allocator.free(path);
-            if (self.path_value) |item| releases.releaseValue(item);
-            if (self.completion) |*completion| completion.deinit(releases);
-            storage_allocator.destroy(self);
-        }
+        pub const ownership: heap.DriverOwnership = .fields;
     };
     pub fn undefinedModule(self: *Machine, name: u32) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined module `{s}`", .{intern.get(name)});
@@ -2825,6 +2813,52 @@ pub const Machine = struct {
     pub fn popValue(self: *Machine) MachineError!heap.OwnedValue {
         try self.require(1);
         return .init(self.releaseDomain(), self.unit.takeStackOwned().?);
+    }
+    fn popChecked(
+        self: *Machine,
+        comptime expected: []const u8,
+        comptime accepts: fn (Value) bool,
+    ) MachineError!heap.OwnedValue {
+        var item = try self.popValue();
+        errdefer item.deinit();
+        if (!accepts(item.borrow())) return self.typeError(expected);
+        return item;
+    }
+    pub fn popList(self: *Machine) MachineError!heap.OwnedValue {
+        return self.popChecked("a list", struct {
+            fn accepts(item: Value) bool {
+                return item == .list;
+            }
+        }.accepts);
+    }
+    pub fn popDict(self: *Machine) MachineError!heap.OwnedValue {
+        return self.popChecked("a dict", struct {
+            fn accepts(item: Value) bool {
+                return item == .dict;
+            }
+        }.accepts);
+    }
+    pub fn popQuotation(self: *Machine) MachineError!heap.OwnedValue {
+        return self.popChecked("a quotation/list", struct {
+            fn accepts(item: Value) bool {
+                return item == .list;
+            }
+        }.accepts);
+    }
+    pub fn popString(self: *Machine) MachineError!heap.OwnedValue {
+        return self.popChecked("a string", struct {
+            fn accepts(item: Value) bool {
+                return item.isString();
+            }
+        }.accepts);
+    }
+    pub fn popSymbol(self: *Machine) MachineError!u32 {
+        var item = try self.popValue();
+        defer item.deinit();
+        return switch (item.borrow()) {
+            .symbol => |name| name,
+            else => self.typeError("a symbol name"),
+        };
     }
     pub fn discard(self: *Machine, count: usize) void {
         std.debug.assert(self.available() >= count);
@@ -3596,10 +3630,12 @@ fn finishTaskJoin(self: *Machine) MachineError!void {
             join.results.values(),
         ),
     };
-    self.installWorkDriver(state);
+    self.adoptDriver(state);
 }
 
 const JoinMaterializeDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
     join: ?TaskJoinState,
     materializer: kernel_storage.ValueMaterializer,
 
@@ -3641,10 +3677,13 @@ const JoinMaterializeDriver = struct {
         };
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *JoinMaterializeDriver) void {
+    pub fn deinit(
+        self: *JoinMaterializeDriver,
+        releases: *heap.ReleaseDomain,
+        _: std.mem.Allocator,
+    ) void {
         self.materializer.retire(releases);
         std.debug.assert(self.join == null);
-        allocator.destroy(self);
     }
 };
 
@@ -3669,24 +3708,22 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
         .int, .float, .char, .symbol, .list, .dict, .task => return self.pushBorrowed(form),
     };
     self.unit.active_word = word;
-    const driver = try self.unit.allocator.create(DispatchDriver);
-    driver.* = .{ .resolution = .init(self, word) };
-    self.installWorkDriver(driver);
+    try self.startDriver(DispatchDriver{ .resolution = .init(.init(self, word)) });
 }
 
 const DispatchDriver = struct {
-    resolution: ResolutionCursor,
+    resolution: heap.Owned(ResolutionCursor),
 
     pub fn advance(self_machine: *Machine, self: *DispatchDriver) MachineError!WorkProgress {
         try self_machine.pollKernel();
         var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.resolution.advance()) {
+        while (budget != 0) : (budget -= 1) switch (self.resolution.borrowMut().advance()) {
             .pending => {},
             .complete => |maybe_resolved| {
-                self.resolution.deinit();
+                self.resolution.deinit(self_machine.releaseDomain(), self_machine.allocator());
                 const allocator = self_machine.unit.allocator;
                 self_machine.detachWorkDriver(self);
-                allocator.destroy(self);
+                heap.destroyDriver(self_machine.releaseDomain(), allocator, self);
                 var resolved = maybe_resolved orelse {
                     const word = self_machine.unit.active_word;
                     const failure = self_machine.failFmt(
@@ -3705,10 +3742,7 @@ const DispatchDriver = struct {
         return .yielded;
     }
 
-    pub fn destroy(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *DispatchDriver) void {
-        self.resolution.deinit();
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
@@ -3726,7 +3760,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
             if (resolved.origin == .core) {
                 const fallback = try self.unit.allocator.create(DirectWordFallback);
                 heap.incRef(body_header);
-                fallback.* = .{ .body = body_header, .word = resolved.trace_word };
+                fallback.* = .{ .body = .init(body_header), .word = resolved.trace_word };
                 return self.continueWithIdiom(
                     .{ .direct = .{ .body = body_header, .word = resolved.trace_word } },
                     typedIdiomFallback(fallback),
@@ -3761,19 +3795,12 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
 }
 
 const DirectWordFallback = struct {
-    body: *Header,
+    body: heap.Owned(*Header),
     word: u32,
     pub fn run(evaluator: *Machine, self: *DirectWordFallback) MachineError!void {
-        return scheduleWord(evaluator, self.body, self.word, null, null);
+        return scheduleWord(evaluator, self.body.borrow(), self.word, null, null);
     }
-    pub fn destroy(
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-        self: *DirectWordFallback,
-    ) void {
-        releases.releaseHeader(self.body);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 pub const ResolutionOrigin = resolution_core.Origin;
@@ -3790,7 +3817,7 @@ pub const Resolution = struct {
     }
 };
 
-pub const ResolutionProgress = union(enum) { pending, complete: ?Resolution };
+pub const ResolutionProgress = poll_api.Progress(?Resolution);
 pub const ResolutionCursor = struct {
     const Phase = enum {
         dot,
@@ -4053,7 +4080,7 @@ pub const ResolutionCursor = struct {
     }
 };
 
-pub const ShadowProgress = union(enum) { pending, complete: []u32 };
+pub const ShadowProgress = poll_api.Progress([]u32);
 pub const ShadowCursor = struct {
     const Phase = enum { dot, scope, direct, uses, acquire, export_name, core, materialize, complete };
     allocator: std.mem.Allocator,
@@ -4338,11 +4365,9 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             var path = heap.OwnedValue.init(self.releaseDomain(), continuation.path);
             defer path.deinit();
             self.unit.active_word = try intern.intern("use");
-            const driver = try self.unit.allocator.create(Machine.UseDriver);
-            errdefer self.unit.allocator.destroy(driver);
-            driver.* = .init(self, continuation.scope, continuation.name, false);
-            driver.after_load = .{ .loading = loading.move(), .path = path.take() };
-            self.installWorkDriver(driver);
+            var driver = Machine.UseDriver.init(self, continuation.scope, continuation.name, false);
+            driver.after_load = .init(.{ .loading = loading.move(), .path = path.take() });
+            try self.startDriver(driver);
             return true;
         },
         .boundary => |boundary| {
@@ -4380,44 +4405,38 @@ pub fn finishEffectCheck(self: *Machine, check: EffectCheck) MachineError!void {
     return failure;
 }
 fn finishAttempt(self: *Machine, base: u32) MachineError!void {
-    const driver = try self.unit.allocator.create(AttemptResultDriver);
-    driver.* = .init(self.unit.allocator, self.unit.releases, base, self.unit.stack.items[base..]);
-    self.installWorkDriver(driver);
+    try self.startDriver(AttemptResultDriver.init(
+        self.unit.allocator,
+        base,
+        self.unit.stack.items[base..],
+    ));
 }
 const AttemptResultDriver = struct {
     allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
     base: usize,
-    materializer: kernel_storage.ValueMaterializer,
-    results: ?heap.OwnedValue = null,
+    materializer: heap.Owned(kernel_storage.ValueMaterializer),
+    results: ?heap.Owned(Value) = null,
     phase: enum { materialize, release, outcome } = .materialize,
 
     fn init(
         allocator: std.mem.Allocator,
-        releases: *heap.ReleaseDomain,
         base: u32,
         values: []const Value,
     ) AttemptResultDriver {
         return .{
             .allocator = allocator,
-            .releases = releases,
             .base = base,
-            .materializer = .init(allocator, values),
+            .materializer = .init(.init(allocator, values)),
         };
-    }
-    fn deinit(self: *AttemptResultDriver, releases: *heap.ReleaseDomain) void {
-        self.materializer.retire(releases);
-        if (self.results) |*results| results.deinit();
-        self.allocator.destroy(self);
     }
     pub fn advance(evaluator: *Machine, self: *AttemptResultDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
-            .materialize => switch (try self.materializer.advance(budget)) {
+            .materialize => switch (try self.materializer.borrowMut().advance(budget)) {
                 .pending => return .yielded,
                 .complete => |results| {
-                    self.results = .init(self.releases, results);
+                    self.results = .init(results);
                     self.phase = .release;
                     return .yielded;
                 },
@@ -4427,26 +4446,19 @@ const AttemptResultDriver = struct {
                     self.phase = .outcome;
                     continue;
                 }
-                self.releases.releaseValue(evaluator.unit.stack.pop().?);
+                evaluator.releaseDomain().releaseValue(evaluator.unit.stack.pop().?);
                 budget -= 1;
             },
             .outcome => {
                 const results = self.results.?.take();
                 self.results = null;
-                const outcome = try outcomeDict(self.allocator, self.releases, "ok", results);
+                const outcome = try outcomeDict(self.allocator, evaluator.releaseDomain(), "ok", results);
                 return .{ .output = outcome };
             },
         };
         return .yielded;
     }
-    pub fn destroy(
-        releases: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-        self: *AttemptResultDriver,
-    ) void {
-        _ = allocator;
-        self.deinit(releases);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
     var candidate = boundary.mode.module;
@@ -4464,17 +4476,20 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
         return failure;
     }
     const driver = try self.unit.allocator.create(ModuleCommitDriver);
-    driver.candidate = candidate.move();
-    driver.cursor = self.unit.inherited.registry.?.commitCursor(&driver.candidate);
-    self.installWorkDriver(driver);
+    driver.candidate = .init(candidate.move());
+    driver.cursor = .init(self.unit.inherited.registry.?.commitCursor(
+        driver.candidate.borrowMut(),
+    ));
+    self.adoptDriver(driver);
 }
 const ModuleCommitDriver = struct {
-    candidate: modules.OwnedCandidate,
-    cursor: modules.Registry.CommitCursor,
+    pub const address_stable_driver = {};
+    candidate: heap.Owned(modules.OwnedCandidate),
+    cursor: heap.Owned(modules.Registry.CommitCursor),
     pub fn advance(evaluator: *Machine, self: *ModuleCommitDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.cursor.advance() catch |err| switch (err) {
+        while (budget != 0) : (budget -= 1) switch (self.cursor.borrowMut().advance() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => unreachable,
             error.NameConflict => return evaluator.fail(.domain, "module name collides with an alias"),
@@ -4486,11 +4501,7 @@ const ModuleCommitDriver = struct {
         };
         return .yielded;
     }
-    pub fn destroy(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *ModuleCommitDriver) void {
-        self.cursor.deinit();
-        self.candidate.deinit();
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 pub fn outcomeDict(
     allocator: std.mem.Allocator,
@@ -4518,10 +4529,12 @@ fn startFailure(self: *Machine) error{OutOfMemory}!void {
     };
     self.unit.pending = null;
     driver.appendInitial(self);
-    self.installWorkDriver(driver);
+    self.adoptDriver(driver);
 }
 
 const FailureDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
     allocator: std.mem.Allocator,
     failure: EclErr,
     trace: []u32,
@@ -4551,7 +4564,7 @@ const FailureDriver = struct {
         self.trace[self.trace_count] = word;
         self.trace_count += 1;
     }
-    fn deinit(
+    pub fn deinit(
         self: *FailureDriver,
         releases: *heap.ReleaseDomain,
         storage_allocator: std.mem.Allocator,
@@ -4561,7 +4574,6 @@ const FailureDriver = struct {
         if (self.error_value) |item| releases.releaseValue(item);
         self.failure.retire(releases);
         storage_allocator.free(self.trace);
-        storage_allocator.destroy(self);
     }
     fn beginLocation(self: *FailureDriver, evaluator: *Machine) void {
         if (self.failure.site) |site| {
@@ -4690,9 +4702,6 @@ const FailureDriver = struct {
             .finish => return if (self.attempt_index == null) .failed else .completed,
         };
         return .yielded;
-    }
-    pub fn destroy(releases: *heap.ReleaseDomain, storage_allocator: std.mem.Allocator, self: *FailureDriver) void {
-        self.deinit(releases, storage_allocator);
     }
 };
 fn releaseCurrent(self: *Machine) void {

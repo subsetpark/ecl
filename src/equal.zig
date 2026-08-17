@@ -54,13 +54,10 @@ pub fn matchWithAllocator(
 ) error{OutOfMemory}!bool {
     var cursor = try MatchCursor.init(allocator, a, b);
     defer cursor.deinit();
-    while (true) switch (try cursor.advance(1024)) {
-        .pending => {},
-        .complete => |complete| return complete,
-    };
+    return poll.driveFallible(bool, &cursor, .{1024});
 }
 
-pub const MatchProgress = union(enum) { pending, complete: bool };
+pub const MatchProgress = poll.Progress(bool);
 
 /// Owned structural-comparison state. `advance` performs at most `budget`
 /// worklist transitions, including nested dictionary-key hashing.
@@ -367,13 +364,10 @@ pub fn hashWithAllocator(
 ) error{OutOfMemory}!u64 {
     var cursor = try HashCursor.init(allocator, item);
     defer cursor.deinit();
-    while (true) switch (try cursor.advance(1024)) {
-        .pending => {},
-        .complete => |complete| return complete,
-    };
+    return poll.driveFallible(u64, &cursor, .{1024});
 }
 
-pub const HashProgress = union(enum) { pending, complete: u64 };
+pub const HashProgress = poll.Progress(u64);
 
 /// Owned structural-hash state. Every transition is bounded and the cursor
 /// never relocates its accumulated continuation stack.

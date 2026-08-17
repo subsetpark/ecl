@@ -316,6 +316,10 @@ pub fn ListBuilder(comptime kind_value: HeapKind) type {
             if (self.header) |header| releases.releaseHeader(publishList(header));
             self.header = null;
         }
+
+        pub fn retire(self: *Self, releases: *ReleaseDomain) void {
+            self.retirePartial(releases);
+        }
     };
 }
 
@@ -417,6 +421,10 @@ pub const DictBuilder = struct {
     pub fn retirePartial(self: *DictBuilder, releases: *ReleaseDomain) void {
         if (self.header) |header| releases.releaseHeader(publishDict(header));
         self.header = null;
+    }
+
+    pub fn retire(self: *DictBuilder, releases: *ReleaseDomain) void {
+        self.retirePartial(releases);
     }
 };
 
@@ -1027,6 +1035,258 @@ pub const OwnedValue = struct {
         self.item = null;
     }
 };
+
+/// Exhaustive destruction policy for scheduler-owned driver objects.
+///
+/// Field-owned drivers have no destructor hook: their `Owned` fields are the
+/// complete ownership declaration. Bounded-retirement drivers are enqueued by
+/// the shared adapter. Self-owned drivers are address-stable aggregates whose
+/// teardown must coordinate internal borrows before the allocation is freed.
+pub const DriverOwnership = enum {
+    fields,
+    bounded_retirement,
+    self_owned,
+};
+
+/// Explicit protocol selected by a structured `Owned(T)` payload. Requiring
+/// the type to choose prevents adding a second teardown method from silently
+/// changing cancellation behavior.
+pub const OwnedDisposal = enum {
+    retire,
+    deinit,
+};
+
+/// Field-level ownership marker for runtime continuations. Unlike
+/// `OwnedValue`, this capability does not carry a reclamation root: the
+/// enclosing owner supplies that root when its fields are derivedly retired.
+pub fn Owned(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        pub const owned_payload = T;
+
+        item: ?T,
+
+        pub fn init(item: T) Self {
+            return .{ .item = item };
+        }
+
+        pub fn borrow(self: *const Self) T {
+            return self.item.?;
+        }
+
+        pub fn borrowMut(self: *Self) *T {
+            return &self.item.?;
+        }
+
+        pub fn take(self: *Self) T {
+            const item = self.item.?;
+            self.item = null;
+            return item;
+        }
+
+        pub fn deinit(
+            self: *Self,
+            releases: *ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            if (self.item) |*item| disposeOwned(T, releases, allocator, item);
+            self.item = null;
+        }
+    };
+}
+
+fn disposeOwned(
+    comptime T: type,
+    releases: *ReleaseDomain,
+    allocator: std.mem.Allocator,
+    item: *T,
+) void {
+    if (T == Value) {
+        releases.releaseValue(item.*);
+        return;
+    }
+    switch (@typeInfo(T)) {
+        .pointer => |pointer| {
+            if (pointer.size == .slice) {
+                allocator.free(item.*);
+                return;
+            }
+            if (pointer.size == .one and
+                (pointer.child == Header or pointer.child == ListHandle or pointer.child == DictHandle))
+            {
+                releases.releaseHeader(item.*);
+                return;
+            }
+            if (pointer.size == .one and @hasDecl(pointer.child, "ownership")) {
+                destroyDriver(releases, allocator, item.*);
+                return;
+            }
+            if (pointer.size == .one and @hasDecl(pointer.child, "releasePin")) {
+                item.*.releasePin();
+                return;
+            }
+        },
+        .@"struct", .@"union", .@"enum" => {
+            const has_retire = @hasDecl(T, "retire");
+            const has_deinit = @hasDecl(T, "deinit");
+            const disposal: OwnedDisposal = if (@hasDecl(T, "owned_disposal"))
+                T.owned_disposal
+            else if (has_retire and has_deinit)
+                @compileError(@typeName(T) ++ " must choose retire or deinit explicitly")
+            else if (has_retire)
+                .retire
+            else if (has_deinit)
+                .deinit
+            else
+                @compileError("heap.Owned has no disposal protocol for " ++ @typeName(T));
+            switch (disposal) {
+                .retire => {
+                    if (!has_retire)
+                        @compileError(@typeName(T) ++ " selects retirement without a retire method");
+                    const retire_info = @typeInfo(@TypeOf(T.retire)).@"fn";
+                    if (retire_info.params.len == 2)
+                        item.retire(releases)
+                    else if (retire_info.params.len == 3 and
+                        retire_info.params[2].type.? == std.mem.Allocator)
+                        item.retire(releases, allocator)
+                    else
+                        @compileError("unsupported retire protocol for " ++ @typeName(T));
+                    return;
+                },
+                .deinit => {
+                    if (!has_deinit)
+                        @compileError(@typeName(T) ++ " selects deinit without a deinit method");
+                    const deinit_info = @typeInfo(@TypeOf(T.deinit)).@"fn";
+                    if (deinit_info.params.len == 1)
+                        item.deinit()
+                    else if (deinit_info.params.len == 2 and
+                        deinit_info.params[1].type.? == std.mem.Allocator)
+                        item.deinit(allocator)
+                    else if (deinit_info.params.len == 2 and
+                        deinit_info.params[1].type.? == *ReleaseDomain)
+                        item.deinit(releases)
+                    else if (deinit_info.params.len == 3 and
+                        deinit_info.params[1].type.? == *ReleaseDomain and
+                        deinit_info.params[2].type.? == std.mem.Allocator)
+                        item.deinit(releases, allocator)
+                    else
+                        @compileError("unsupported deinit protocol for " ++ @typeName(T));
+                    return;
+                },
+            }
+        },
+        else => {},
+    }
+    @compileError("heap.Owned has no disposal protocol for " ++ @typeName(T));
+}
+
+fn isOwnedMarker(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct" => @hasDecl(T, "owned_payload"),
+        else => false,
+    };
+}
+
+/// Retire every explicitly owned field. Each payload's disposal must be
+/// self-contained: it may inspect its own state, but it must never dereference
+/// a sibling field of the enclosing owner. Declaration order therefore has no
+/// lifetime meaning; the reverse walk below is only a deterministic cleanup
+/// order. Bare fields are observational state, and ownership is never inferred
+/// from a field name or from a destructor body.
+fn deinitOwnedFields(
+    releases: *ReleaseDomain,
+    allocator: std.mem.Allocator,
+    owner: anytype,
+) void {
+    const Owner = @typeInfo(@TypeOf(owner)).pointer.child;
+    const fields = @typeInfo(Owner).@"struct".fields;
+    inline for (0..fields.len) |offset| {
+        const field = fields[fields.len - 1 - offset];
+        const Field = field.type;
+        if (comptime isOwnedMarker(Field)) {
+            @field(owner, field.name).deinit(releases, allocator);
+        } else switch (@typeInfo(Field)) {
+            .optional => |optional| if (comptime isOwnedMarker(optional.child)) {
+                if (@field(owner, field.name)) |*owned| owned.deinit(releases, allocator);
+                @field(owner, field.name) = null;
+            },
+            else => {},
+        }
+    }
+}
+
+fn destroyOwned(
+    releases: *ReleaseDomain,
+    allocator: std.mem.Allocator,
+    owner: anytype,
+) void {
+    deinitOwnedFields(releases, allocator, owner);
+    allocator.destroy(owner);
+}
+
+pub fn validateDriverOwnership(comptime Driver: type) DriverOwnership {
+    if (!@hasDecl(Driver, "ownership"))
+        @compileError(@typeName(Driver) ++ " must declare heap.DriverOwnership");
+    if (@hasDecl(Driver, "destroy"))
+        @compileError(@typeName(Driver) ++ " must use its declared driver ownership policy");
+    const ownership: DriverOwnership = Driver.ownership;
+    switch (ownership) {
+        .fields => {
+            if (@hasDecl(Driver, "deinit"))
+                @compileError(@typeName(Driver) ++ " field ownership forbids a destructor hook");
+        },
+        .bounded_retirement => {
+            if (!@hasField(Driver, "retirement"))
+                @compileError(@typeName(Driver) ++ " bounded retirement requires a retirement node");
+            if (@FieldType(Driver, "retirement") != ReleaseDomain.Retirement)
+                @compileError(@typeName(Driver) ++ " has the wrong retirement node type");
+            if (!@hasDecl(Driver, "advanceRetirement"))
+                @compileError(@typeName(Driver) ++ " bounded retirement requires advanceRetirement");
+            if (@hasDecl(Driver, "deinit"))
+                @compileError(@typeName(Driver) ++ " bounded retirement forbids a destructor hook");
+        },
+        .self_owned => {
+            if (!@hasDecl(Driver, "address_stable_driver"))
+                @compileError(@typeName(Driver) ++ " self-owned destruction requires address-stable construction");
+            if (!@hasDecl(Driver, "deinit"))
+                @compileError(@typeName(Driver) ++ " self-owned destruction requires deinit");
+        },
+    }
+    return ownership;
+}
+
+/// Retire a fully initialized driver value whose heap allocation failed.
+/// Self-owned drivers are deliberately excluded because their representation
+/// is only valid after address-stable construction.
+pub fn deinitUninstalledDriver(
+    releases: *ReleaseDomain,
+    allocator: std.mem.Allocator,
+    driver: anytype,
+) void {
+    const Driver = @typeInfo(@TypeOf(driver)).pointer.child;
+    switch (comptime validateDriverOwnership(Driver)) {
+        .fields, .bounded_retirement => deinitOwnedFields(releases, allocator, driver),
+        .self_owned => @compileError("self-owned drivers cannot be destroyed before installation"),
+    }
+}
+
+/// Destroy a scheduler-owned driver through its exhaustive type policy. No
+/// adapter chooses a destructor by method-name convention.
+pub fn destroyDriver(
+    releases: *ReleaseDomain,
+    allocator: std.mem.Allocator,
+    driver: anytype,
+) void {
+    const Driver = @typeInfo(@TypeOf(driver)).pointer.child;
+    switch (comptime validateDriverOwnership(Driver)) {
+        .fields => destroyOwned(releases, allocator, driver),
+        .bounded_retirement => releases.retire(driver, &driver.retirement),
+        .self_owned => {
+            driver.deinit(releases, allocator);
+            allocator.destroy(driver);
+        },
+    }
+}
 
 /// Exact-capacity, non-relocating ownership for a partially initialized value
 /// sequence. Abandonment retires one heap root; it never loops over the

@@ -198,6 +198,8 @@ const Terminal = union(enum) {
 };
 
 const Transaction = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .self_owned;
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
     active_evaluator: ?*machine.Machine = null,
@@ -250,7 +252,11 @@ const Transaction = struct {
         return call;
     }
 
-    fn deinit(self: *Transaction) void {
+    pub fn deinit(
+        self: *Transaction,
+        _: *heap.ReleaseDomain,
+        _: std.mem.Allocator,
+    ) void {
         for (self.outputs.items) |item| self.releases.releaseValue(item);
         self.clearCandidates();
         for (&self.builders) |*builder_entry| if (builder_entry.*) |owned| {
@@ -265,8 +271,6 @@ const Transaction = struct {
             self.allocator.free(state);
         }
         self.instance.releasePin();
-        const allocator = self.allocator;
-        allocator.destroy(self);
     }
 
     fn appendCandidate(
@@ -408,14 +412,6 @@ const Transaction = struct {
             _ => return evaluator.fail(.contract, "native callback returned an unknown result tag"),
         };
     }
-
-    pub fn destroy(
-        _: *heap.ReleaseDomain,
-        _: std.mem.Allocator,
-        self: *Transaction,
-    ) void {
-        self.deinit();
-    }
 };
 
 pub fn begin(
@@ -439,7 +435,7 @@ pub fn begin(
             "native call creation is closed during Session shutdown",
         ),
     };
-    evaluator.installWorkDriver(call);
+    evaluator.adoptDriver(call);
 }
 
 const full_host_table = abi.HostTable{

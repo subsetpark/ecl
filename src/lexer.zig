@@ -1,6 +1,7 @@
 //! UTF-8 cursor, source spans, diagnostics, and whole-token classification.
 
 const std = @import("std");
+const poll = @import("poll.zig");
 
 pub const Span = struct {
     line: u32 = 1,
@@ -103,21 +104,18 @@ pub const Cursor = struct {
 
     pub fn skipIgnored(self: *Cursor) void {
         var ignored = IgnoredCursor{ .source = self };
-        while (ignored.advance() == .pending) {}
+        poll.driveVoid(&ignored, .{});
     }
 
     /// Takes one maximal atom token. Quote and backslash dispatch only when
     /// token-initial; inside a token, symbol validation diagnoses them.
     pub fn takeToken(self: *Cursor) []const u8 {
         var token = TokenCursor.init(self);
-        while (true) switch (token.advance()) {
-            .pending => {},
-            .complete => |bytes| return bytes,
-        };
+        return poll.drive([]const u8, &token, .{});
     }
 };
 
-pub const ScanProgress = enum { pending, complete };
+pub const ScanProgress = poll.Progress(void);
 pub const IgnoredCursor = struct {
     source: *Cursor,
     comment: bool = false,
@@ -140,7 +138,7 @@ pub const IgnoredCursor = struct {
     }
 };
 
-pub const TokenProgress = union(enum) { pending, complete: []const u8 };
+pub const TokenProgress = poll.Progress([]const u8);
 pub const TokenCursor = struct {
     source: *Cursor,
     start: usize,
@@ -159,21 +157,15 @@ pub const TokenCursor = struct {
 
 pub fn classify(token: []const u8) Classification {
     var cursor = ClassifyCursor.init(token);
-    while (true) switch (cursor.advance()) {
-        .pending => {},
-        .complete => |classification| return classification,
-    };
+    return poll.drive(Classification, &cursor, .{});
 }
 
 pub fn validSymbol(token: []const u8) bool {
     var cursor = SymbolCursor.init(token);
-    while (true) switch (cursor.advance()) {
-        .pending => {},
-        .complete => |valid| return valid,
-    };
+    return poll.drive(bool, &cursor, .{});
 }
 
-pub const SymbolProgress = union(enum) { pending, complete: bool };
+pub const SymbolProgress = poll.Progress(bool);
 pub const SymbolCursor = struct {
     token: []const u8,
     index: usize = 0,
@@ -202,7 +194,7 @@ pub const SymbolCursor = struct {
     }
 };
 
-pub const ClassifyProgress = union(enum) { pending, complete: Classification };
+pub const ClassifyProgress = poll.Progress(Classification);
 pub const ClassifyCursor = struct {
     token: []const u8,
     unsigned: []const u8,

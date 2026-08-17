@@ -457,12 +457,7 @@ pub const Session = enum(usize) {
             if (!validNamespace(namespace_id)) return .empty;
             var acquisition = core.registry.acquireCursor(namespace_id);
             defer acquisition.deinit();
-            const maybe_generation: ?modules.GenerationLease = acquisition_loop: {
-                while (true) switch (acquisition.advance()) {
-                    .pending => {},
-                    .complete => |candidate| break :acquisition_loop candidate,
-                };
-            };
+            const maybe_generation = poll.drive(?modules.GenerationLease, &acquisition, .{});
             const generation = maybe_generation orelse return .empty;
             var generation_lease = generation;
             defer generation_lease.deinit();
@@ -471,7 +466,7 @@ pub const Session = enum(usize) {
             while (true) switch (names.advance()) {
                 .pending => {},
                 .complete => break,
-                .name => |name| if (std.mem.startsWith(u8, intern.get(name), word_prefix))
+                .item => |name| if (std.mem.startsWith(u8, intern.get(name), word_prefix))
                     try found.append(name),
             };
             return materializeCompletion(core.allocator(), &found, namespace_bytes);
@@ -490,7 +485,7 @@ pub const Session = enum(usize) {
         while (true) switch (visible.advance()) {
             .pending => {},
             .complete => break,
-            .name => |name| if (std.mem.startsWith(u8, intern.get(name), prefix))
+            .item => |name| if (std.mem.startsWith(u8, intern.get(name), prefix))
                 try found.append(name),
         };
         var namespaces = core.registry.namespaceCursor();
@@ -498,7 +493,7 @@ pub const Session = enum(usize) {
         while (true) switch (namespaces.advance()) {
             .pending => {},
             .complete => break,
-            .name => |name| {
+            .item => |name| {
                 const id = intern.namespaceId(name);
                 if (std.mem.startsWith(u8, intern.get(id), prefix)) try found.append(id);
             },
@@ -729,26 +724,17 @@ comptime {
 
 fn firstDot(bytes: []const u8) ?usize {
     var cursor = intern.dotCursor(bytes);
-    while (true) switch (cursor.advance()) {
-        .pending => {},
-        .complete => |index| return index,
-    };
+    return poll.drive(?usize, &cursor, .{});
 }
 
 fn lookupInterned(bytes: []const u8) ?u32 {
     var cursor = intern.lookupCursor(bytes);
-    while (true) switch (cursor.advance()) {
-        .pending => {},
-        .complete => |id| return id,
-    };
+    return poll.drive(?u32, &cursor, .{});
 }
 
 fn validNamespace(id: u32) bool {
     var cursor = intern.NamespaceCursor.init(id);
-    while (true) switch (cursor.advance()) {
-        .pending => {},
-        .complete => |name| return name != null,
-    };
+    return poll.drive(?intern.NamespaceName, &cursor, .{}) != null;
 }
 
 fn materializeCompletion(

@@ -347,8 +347,7 @@ fn auditPreludeLayout() bool {
             var line = source[index..end];
             if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
             const navigation = std.mem.startsWith(u8, line, "### def ");
-            const legacy_navigation = std.mem.startsWith(u8, line, "# def ");
-            if (stage == .body and !navigation and !legacy_navigation) {
+            if (stage == .body and !navigation) {
                 index = end;
                 continue;
             }
@@ -548,7 +547,6 @@ fn auditSourceBodies() bool {
         if (!component.production) continue;
         for (component.sources, component.files) |source, file| {
             failed = auditWorkDriverOutputs(file, source) or failed;
-            failed = auditReleaseDestructors(file, source) or failed;
         }
     }
     return failed;
@@ -664,43 +662,6 @@ fn auditErasedCasts(
         }
     }
     return failed;
-}
-
-/// A destructor that receives a release capability may retire roots but may
-/// not bypass the sole graph walker through a synchronous compatibility API.
-fn auditReleaseDestructors(label: []const u8, source: [:0]const u8) bool {
-    var tree = std.zig.Ast.parse(std.heap.page_allocator, source, .zig) catch return true;
-    defer tree.deinit(std.heap.page_allocator);
-    if (tree.errors.len != 0) return true;
-    var failed = false;
-    var node_index: usize = 0;
-    while (node_index < tree.nodes.len) : (node_index += 1) {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(node_index);
-        if (tree.nodeTag(node) != .fn_decl) continue;
-        var buffer: [1]std.zig.Ast.Node.Index = undefined;
-        const function = tree.fullFnProto(&buffer, node) orelse continue;
-        const name_token = function.name_token orelse continue;
-        if (!std.mem.eql(u8, tree.tokenSlice(name_token), "destroy")) continue;
-        const first = tree.firstToken(node);
-        const end = tree.lastToken(node) + 1;
-        if (!tokenRangeContains(tree, first, end, "ReleaseDomain")) continue;
-        failed = hasForbiddenTokens(label, tree, first, end, &.{
-            &.{ "materializer", ".", "deinit" },
-            &.{ "normalizer", ".", "deinit" },
-            &.{ "utf8", ".", "deinit" },
-            &.{"blocking"},
-            &.{"for"},
-            &.{"while"},
-        }) or failed;
-    }
-    return failed;
-}
-
-fn tokenRangeContains(tree: std.zig.Ast, first: usize, end: usize, wanted: []const u8) bool {
-    var token = first;
-    while (token != end) : (token += 1)
-        if (std.mem.eql(u8, tree.tokenSlice(@intCast(token)), wanted)) return true;
-    return false;
 }
 
 /// Work drivers may produce owned values, but only the evaluator loop may

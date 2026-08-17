@@ -30,13 +30,11 @@ const WalkFrame = struct {
     next_child: ?usize = null,
 };
 
-pub const LowerProgress = union(enum) {
-    pending,
-    complete: struct {
-        forms: []SpannedValue,
-        values: heap.OwnedValueBuffer,
-    },
+pub const Lowered = struct {
+    forms: []SpannedValue,
+    values: heap.OwnedValueBuffer,
 };
+pub const LowerProgress = poll.Progress(Lowered);
 
 /// Resumable binder validation and lowering. One call performs at most one
 /// token byte, hash-table probe, nested-list edge, or output operation.
@@ -402,13 +400,9 @@ pub fn lower(
     defer host.drain();
     var cursor = try LowerCursor.init(allocator, releases, names, body, binder_span, diag);
     defer cursor.deinit();
-    while (true) switch (try cursor.advance()) {
-        .pending => {},
-        .complete => |completed| {
-            for (completed.forms) |form| heap.retainValue(form.value);
-            var values = completed.values;
-            values.deinit();
-            return completed.forms;
-        },
-    };
+    const completed = try poll.driveFallible(Lowered, &cursor, .{});
+    for (completed.forms) |form| heap.retainValue(form.value);
+    var values = completed.values;
+    values.deinit();
+    return completed.forms;
 }

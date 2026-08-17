@@ -41,7 +41,7 @@ const Action = union(enum) {
     spaces: usize,
 };
 
-pub const RenderProgress = enum { pending, complete };
+pub const RenderProgress = poll_api.Progress(void);
 
 /// Owned rendering state. Each transition writes only a scalar rendering, one
 /// collection edge, one codepoint, or at most 256 identifier/indent bytes.
@@ -331,7 +331,7 @@ pub const RenderCursor = struct {
     }
 };
 
-pub const OwnedStringProgress = union(enum) { pending, complete: []u8 };
+pub const OwnedStringProgress = poll_api.Progress([]u8);
 
 /// Exact-size two-pass rendering state for scheduler drivers. No growable
 /// writer is used in the cancellable path.
@@ -432,10 +432,7 @@ pub fn printWithAllocator(
 ) (error{OutOfMemory} || std.Io.Writer.Error)!void {
     var cursor = try RenderCursor.init(allocator, item);
     defer cursor.deinit();
-    while (true) switch (try cursor.advance(writer, 1024)) {
-        .pending => {},
-        .complete => return,
-    };
+    return poll_api.driveVoidFallible(&cursor, .{ writer, 1024 });
 }
 
 pub fn toOwnedString(
@@ -444,10 +441,7 @@ pub fn toOwnedString(
 ) error{OutOfMemory}![]u8 {
     var cursor = try OwnedStringCursor.init(allocator, item);
     defer cursor.deinit();
-    while (true) switch (try cursor.advance(1024)) {
-        .pending => {},
-        .complete => |rendered| return rendered,
-    };
+    return poll_api.driveFallible([]u8, &cursor, .{1024});
 }
 
 pub fn toOwnedDisplayString(
@@ -456,10 +450,7 @@ pub fn toOwnedDisplayString(
 ) error{OutOfMemory}![]u8 {
     var cursor = try OwnedStringCursor.initDisplay(allocator, item);
     defer cursor.deinit();
-    while (true) switch (try cursor.advance(1024)) {
-        .pending => {},
-        .complete => |rendered| return rendered,
-    };
+    return poll_api.driveFallible([]u8, &cursor, .{1024});
 }
 
 fn isFlatRow(item: Value) bool {

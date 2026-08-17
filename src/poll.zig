@@ -2,6 +2,155 @@
 const std = @import("std");
 const heap = @import("heap.zig");
 
+/// The common result of polling a finite cursor. `void` results carry no
+/// payload, so completion remains an ordinary enum value.
+pub fn Progress(comptime T: type) type {
+    return if (T == void)
+        enum { pending, complete }
+    else
+        union(enum) { pending, complete: T };
+}
+
+/// The common result of polling a stream: completion and production of one
+/// item are distinct states.
+pub fn StreamProgress(comptime T: type) type {
+    return union(enum) { pending, complete, item: T };
+}
+
+/// Drive a non-failing finite cursor to its observable result.
+pub fn drive(comptime T: type, cursor: anytype, args: anytype) T {
+    const Cursor = @TypeOf(cursor.*);
+    while (true) switch (@call(.auto, Cursor.advance, .{cursor} ++ args)) {
+        .pending => {},
+        .complete => |result| return result,
+    };
+}
+
+/// Drive a fallible finite cursor to its observable result.
+pub fn driveFallible(comptime T: type, cursor: anytype, args: anytype) !T {
+    const Cursor = @TypeOf(cursor.*);
+    while (true) switch (try @call(.auto, Cursor.advance, .{cursor} ++ args)) {
+        .pending => {},
+        .complete => |result| return result,
+    };
+}
+
+pub fn driveVoid(cursor: anytype, args: anytype) void {
+    const Cursor = @TypeOf(cursor.*);
+    while (@call(.auto, Cursor.advance, .{cursor} ++ args) == .pending) {}
+}
+
+pub fn driveVoidFallible(cursor: anytype, args: anytype) !void {
+    const Cursor = @TypeOf(cursor.*);
+    while (try @call(.auto, Cursor.advance, .{cursor} ++ args) == .pending) {}
+}
+
+/// Bottom-up stable merge sort whose comparisons and copying are both
+/// resumable. `Comparator` supplies `Context`, `Cursor`, `init`, and
+/// `advance`; the latter returns `Progress(std.math.Order)`.
+pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
+    return struct {
+        const Self = @This();
+
+        allocator: std.mem.Allocator,
+        items: []T,
+        scratch: []T,
+        context: Comparator.Context,
+        width: usize = 1,
+        start: usize = 0,
+        middle: usize = 0,
+        end: usize = 0,
+        left: usize = 0,
+        right: usize = 0,
+        output: usize = 0,
+        run_ready: bool = false,
+        source_scratch: bool = false,
+        comparator: ?Comparator.Cursor = null,
+        copy_index: usize = 0,
+
+        pub fn init(
+            allocator: std.mem.Allocator,
+            items: []T,
+            context: Comparator.Context,
+        ) error{OutOfMemory}!Self {
+            return .{
+                .allocator = allocator,
+                .items = items,
+                .scratch = try allocator.alloc(T, items.len),
+                .context = context,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.scratch);
+            self.* = undefined;
+        }
+
+        pub fn advance(self: *Self, budget: usize) Progress(void) {
+            var remaining = budget;
+            while (remaining != 0) {
+                if (self.width >= self.items.len) {
+                    if (!self.source_scratch) return .complete;
+                    const end = @min(self.copy_index + remaining, self.items.len);
+                    const copied = end - self.copy_index;
+                    @memcpy(self.items[self.copy_index..end], self.scratch[self.copy_index..end]);
+                    self.copy_index = end;
+                    if (self.copy_index == self.items.len) return .complete;
+                    remaining -= copied;
+                    continue;
+                }
+                if (!self.run_ready) {
+                    if (self.start == self.items.len) {
+                        self.source_scratch = !self.source_scratch;
+                        self.start = 0;
+                        self.width = if (self.width > self.items.len / 2)
+                            self.items.len
+                        else
+                            self.width * 2;
+                        continue;
+                    }
+                    self.middle = self.start + @min(self.width, self.items.len - self.start);
+                    self.end = self.middle + @min(self.width, self.items.len - self.middle);
+                    self.left = self.start;
+                    self.right = self.middle;
+                    self.output = self.start;
+                    self.run_ready = true;
+                }
+                if (self.output == self.end) {
+                    self.start = self.end;
+                    self.run_ready = false;
+                    continue;
+                }
+                const source = if (self.source_scratch) self.scratch else self.items;
+                var choose_left = self.right == self.end;
+                if (!choose_left and self.left != self.middle) {
+                    if (self.comparator == null) self.comparator = Comparator.init(
+                        self.context,
+                        source[self.left],
+                        source[self.right],
+                    );
+                    switch (Comparator.advance(&self.comparator.?, 1)) {
+                        .pending => {
+                            remaining -= 1;
+                            continue;
+                        },
+                        .complete => |ordering| {
+                            self.comparator = null;
+                            choose_left = ordering != .gt;
+                        },
+                    }
+                }
+                const destination = if (self.source_scratch) self.items else self.scratch;
+                destination[self.output] = if (choose_left) source[self.left] else source[self.right];
+                if (choose_left) self.left += 1 else self.right += 1;
+                self.output += 1;
+                remaining -= 1;
+            }
+            return .pending;
+        }
+    };
+}
+
 /// Exact-capacity, non-rehashing map used by runtime publication snapshots.
 /// Its key is nominal in entries and cursors; conversion to an integer is
 /// confined to the hash-slot adapter.
@@ -29,7 +178,7 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
             return self.count_value;
         }
 
-        pub const RawEntryProgress = union(enum) { pending, complete, entry: Entry };
+        pub const RawEntryProgress = StreamProgress(Entry);
         pub const RawEntryCursor = struct {
             slots: []const ?Entry,
             index: usize = 0,
@@ -37,14 +186,14 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
                 if (self.index == self.slots.len) return .complete;
                 const maybe_entry = self.slots[self.index];
                 self.index += 1;
-                return if (maybe_entry) |entry| .{ .entry = entry } else .pending;
+                return if (maybe_entry) |entry| .{ .item = entry } else .pending;
             }
         };
         pub fn rawEntries(self: *const Self) RawEntryCursor {
             return .{ .slots = self.slots };
         }
 
-        pub const RawLookupProgress = union(enum) { pending, complete: ?V };
+        pub const RawLookupProgress = Progress(?V);
         pub const RawLookupCursor = struct {
             map: *const Self,
             key: K,
@@ -68,7 +217,7 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
             };
         }
 
-        pub const InitProgress = union(enum) { pending, complete: Self };
+        pub const InitProgress = Progress(Self);
         pub const InitCursor = struct {
             allocator: std.mem.Allocator,
             expected: usize,
@@ -105,7 +254,7 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
             return .{ .allocator = allocator, .expected = expected };
         }
 
-        pub const PutProgress = union(enum) { pending, complete: bool };
+        pub const PutProgress = Progress(bool);
         pub const PutCursor = struct {
             map: *Self,
             key: K,
@@ -139,7 +288,7 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
             };
         }
 
-        pub const CloneProgress = union(enum) { pending, complete: Self };
+        pub const CloneProgress = Progress(Self);
         pub const CloneCursor = struct {
             source: *const Self,
             initializer: InitCursor,
@@ -169,7 +318,7 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
                 };
                 return switch (self.entries.?.advance()) {
                     .pending => .pending,
-                    .entry => |entry| pending: {
+                    .item => |entry| pending: {
                         self.insertion = self.result.?.putCursor(entry.key, entry.value);
                         break :pending .pending;
                     },
@@ -200,6 +349,7 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
 pub fn ChunkStack(comptime T: type) type {
     return struct {
         const Self = @This();
+        pub const owned_disposal: heap.OwnedDisposal = .retire;
         const chunk_len = 256;
         const Chunk = struct {
             retirement: heap.ReleaseDomain.Retirement = .{},
@@ -300,6 +450,7 @@ pub fn ChunkStack(comptime T: type) type {
 pub fn ChunkList(comptime T: type) type {
     return struct {
         const Self = @This();
+        pub const owned_disposal: heap.OwnedDisposal = .retire;
         const chunk_len = 256;
         const Chunk = struct {
             retirement: heap.ReleaseDomain.Retirement = .{},

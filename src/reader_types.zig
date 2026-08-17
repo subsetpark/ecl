@@ -33,7 +33,7 @@ pub const SpanTable = struct {
     pub fn init(allocator: std.mem.Allocator) SpanTable {
         return .{ .entries = .init(allocator) };
     }
-    pub const RetireProgress = enum { pending, complete };
+    pub const RetireProgress = poll.Progress(void);
     pub const RetireCursor = struct {
         table: *SpanTable,
         entries: EntryList.Iterator,
@@ -70,7 +70,7 @@ pub const SpanTable = struct {
         return address & (bucket_count - 1);
     }
 
-    pub const LookupProgress = union(enum) { pending, complete: ?[]const Span };
+    pub const LookupProgress = poll.Progress(?[]const Span);
     pub const LookupCursor = struct {
         header: *Header,
         entry: ?*Entry,
@@ -86,7 +86,7 @@ pub const SpanTable = struct {
         return .{ .header = header, .entry = self.buckets[bucket(header)] };
     }
 
-    pub const PutProgress = enum { pending, complete };
+    pub const PutProgress = poll.Progress(void);
     pub const PutCursor = struct {
         table: *SpanTable,
         allocator: std.mem.Allocator,

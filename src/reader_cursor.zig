@@ -38,7 +38,8 @@ const TokenKind = enum {
 };
 const Token = struct { kind: TokenKind, bytes: []const u8 = &.{}, span: Span };
 
-const TokenizeProgress = union(enum) { pending, complete, incomplete: reader.Incomplete };
+const SourceProgress = union(enum) { pending, complete, incomplete: reader.Incomplete };
+const TokenizeProgress = SourceProgress;
 const Mode = enum { validate, main, comment, atom, string, character, character_unicode, complete };
 const Tokenizer = struct {
     source: []const u8,
@@ -362,7 +363,7 @@ pub const PendingUnit = enum(usize) {
     }
 };
 
-const ScalarProgress = union(enum) { pending, complete: Value };
+const ScalarProgress = poll.Progress(Value);
 const AtomBuilder = struct {
     token: Token,
     quoted: bool,
@@ -776,7 +777,7 @@ const Context = struct {
     }
 };
 
-const CollectionProgress = union(enum) { pending, complete: binder.SpannedValue };
+const CollectionProgress = poll.Progress(binder.SpannedValue);
 const CollectionBuilder = struct {
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
@@ -1026,7 +1027,7 @@ const CollectionBuilder = struct {
     }
 };
 
-const ParseProgress = union(enum) { pending, complete, incomplete: reader.Incomplete };
+const ParseProgress = SourceProgress;
 const ParserCursor = struct {
     const State = union(enum) {
         reading,
@@ -1296,7 +1297,7 @@ const ParserCursor = struct {
     }
 };
 
-pub const ReadProgress = union(enum) { pending, complete: reader.ReadResult };
+pub const ReadProgress = poll.Progress(reader.ReadResult);
 
 /// Owns the complete read pipeline. Advancing it once performs one bounded
 /// lexical, parse, lowering, provenance, or final-copy operation.
@@ -1483,13 +1484,8 @@ pub fn read(
     const releases = heap.hostDomain(host);
     var cursor = ReadCursor.init(allocator, releases, source_name, source, diag);
     defer cursor.deinitHost();
-    while (true) switch (try cursor.advance()) {
-        .pending => {},
-        .complete => |result| switch (result) {
-            .incomplete => |incomplete| return .{ .incomplete = incomplete },
-            .complete => |parsed_value| {
-                return .{ .complete = .{ .parsed = parsed_value, .host = host } };
-            },
-        },
+    return switch (try poll.driveFallible(reader.ReadResult, &cursor, .{})) {
+        .incomplete => |incomplete| .{ .incomplete = incomplete },
+        .complete => |parsed_value| .{ .complete = .{ .parsed = parsed_value, .host = host } },
     };
 }

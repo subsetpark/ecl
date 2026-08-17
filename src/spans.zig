@@ -84,7 +84,7 @@ pub const SpanArchive = enum(usize) {
         defer cursor.deinit();
         while (try cursor.advance() == .pending) {}
     }
-    pub const AbsorbProgress = enum { pending, complete };
+    pub const AbsorbProgress = poll.Progress(void);
     pub const AbsorbCursor = struct {
         archive: *SpanArchive,
         parsed: *reader.Parsed,
@@ -149,12 +149,9 @@ pub const SpanArchive = enum(usize) {
         index: usize,
     ) ?LocatedSpan {
         var cursor = self.locateCursor(header, index);
-        while (true) switch (cursor.advance()) {
-            .pending => {},
-            .complete => |found| return found,
-        };
+        return poll.drive(?LocatedSpan, &cursor, .{});
     }
-    pub const LocateProgress = union(enum) { pending, complete: ?LocatedSpan };
+    pub const LocateProgress = poll.Progress(?LocatedSpan);
     pub const LocateCursor = struct {
         entries: poll.ChunkList(Entry).ReverseIterator,
         header: *value.ListHandle,

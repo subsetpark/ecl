@@ -1204,9 +1204,7 @@ pub const WorkerScheduler = enum(usize) {
         evaluator: *machine.Machine,
         scope: *TaskScope,
     ) error{OutOfMemory}!void {
-        const driver = try self.allocator().create(TasksDriver);
-        driver.* = .{ .scheduler = self, .scope = scope };
-        evaluator.installWorkDriver(driver);
+        try evaluator.startDriver(TasksDriver{ .scheduler = self, .scope = scope });
     }
 
     fn closeRootScope(self: *const WorkerScheduler, scope: *TaskScope) void {
@@ -1746,6 +1744,10 @@ const TaskSnapshotPass = struct {
             .retained => |next| releases.releaseHeader(next.handle()),
         }
     }
+
+    pub fn retire(self: *TaskSnapshotPass, releases: *heap.ReleaseDomain) void {
+        self.releaseRetained(releases);
+    }
 };
 
 /// Two-pass, generic-list snapshot of pending descendants. Only the cursor's
@@ -1754,10 +1756,10 @@ const TaskSnapshotPass = struct {
 const TasksDriver = struct {
     scheduler: *const WorkerScheduler,
     scope: *TaskScope,
-    pass: ?TaskSnapshotPass = null,
+    pass: ?heap.Owned(TaskSnapshotPass) = null,
     phase: enum { count, collect } = .count,
     count: usize = 0,
-    result: ?heap.ListBuilder(.generic_spine) = null,
+    result: ?heap.Owned(heap.ListBuilder(.generic_spine)) = null,
     filled: usize = 0,
 
     pub fn advance(
@@ -1765,7 +1767,8 @@ const TasksDriver = struct {
         self: *TasksDriver,
     ) machine.MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        const old_pass = self.pass;
+        const old_pass = if (self.pass) |*pass| pass.take() else null;
+        self.pass = null;
         const scheduler_state = self.scheduler.privateState();
         std.Io.Threaded.mutexLock(&scheduler_state.tree_mutex);
         if (old_pass) |pass| if (pass.tree_epoch != scheduler_state.tree_epoch) {
@@ -1774,7 +1777,7 @@ const TasksDriver = struct {
             self.filled = 0;
             self.phase = .count;
             if (self.result) |*result| {
-                result.retirePartial(self.scheduler.releaseDomain());
+                result.deinit(self.scheduler.releaseDomain(), self.scheduler.allocator());
                 self.result = null;
             }
             std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
@@ -1805,16 +1808,16 @@ const TasksDriver = struct {
                 },
                 .collect => if (self.filled != self.count) {
                     heap.incRef(cell.handle());
-                    self.result.?.items()[self.filled] = .{ .task = cell.handle() };
+                    self.result.?.borrowMut().items()[self.filled] = .{ .task = cell.handle() };
                     self.filled += 1;
-                    self.result.?.setLen(self.filled);
+                    self.result.?.borrowMut().setLen(self.filled);
                 },
             }
         }
-        self.pass = .{ .tree_epoch = pass_epoch };
+        self.pass = .init(.{ .tree_epoch = pass_epoch });
         if (current) |following| {
             heap.incRef(following.handle());
-            self.pass.?.position = .{ .retained = following };
+            self.pass.?.borrowMut().position = .{ .retained = following };
         }
         std.Io.Threaded.mutexUnlock(&scheduler_state.tree_mutex);
         if (old_pass) |pass| pass.releaseRetained(self.scheduler.releaseDomain());
@@ -1822,28 +1825,29 @@ const TasksDriver = struct {
         switch (self.phase) {
             .count => {
                 if (self.count >= std.math.maxInt(u32)) return error.OutOfMemory;
-                self.result = try heap.ListBuilder(.generic_spine).init(
+                self.result = .init(try heap.ListBuilder(.generic_spine).init(
                     self.scheduler.allocator(),
                     0,
                     self.count,
-                );
+                ));
                 self.phase = .collect;
                 return .yielded;
             },
             .collect => {
-                const result: Value = .{ .list = self.result.?.finish() };
+                var result_builder = self.result.?.take();
                 self.result = null;
+                if (self.pass) |*pass| pass.deinit(
+                    self.scheduler.releaseDomain(),
+                    self.scheduler.allocator(),
+                );
                 self.pass = null;
+                const result: Value = .{ .list = result_builder.finish() };
                 return .{ .output = result };
             },
         }
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *TasksDriver) void {
-        if (self.pass) |pass| pass.releaseRetained(releases);
-        if (self.result) |*result| result.retirePartial(releases);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 fn nextDescendant(root: *const TaskScope, cell: *TaskCell) ?*TaskCell {

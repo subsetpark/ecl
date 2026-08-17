@@ -79,13 +79,10 @@ pub const ModuleGeneration = struct {
     ) ?env.BindingLease {
         var cursor = self.resolveCursor(id, public_only);
         defer cursor.deinit();
-        while (true) switch (cursor.advance()) {
-            .pending => {},
-            .complete => |lease| return lease,
-        };
+        return poll.drive(?env.BindingLease, &cursor, .{});
     }
 
-    pub const ResolveProgress = union(enum) { pending, complete: ?env.BindingLease };
+    pub const ResolveProgress = poll.Progress(?env.BindingLease);
     pub const ResolveCursor = struct {
         allocator: std.mem.Allocator,
         public_only: bool,
@@ -136,7 +133,7 @@ pub const ModuleGeneration = struct {
         while (true) switch (cursor.advance()) {
             .pending => {},
             .complete => break,
-            .name => |id| try visible.append(id),
+            .item => |id| try visible.append(id),
         };
         const result = try allocator.alloc(u32, visible.count);
         errdefer allocator.free(result);
@@ -146,7 +143,7 @@ pub const ModuleGeneration = struct {
         return result;
     }
 
-    pub const PublicNameProgress = union(enum) { pending, complete, name: u32 };
+    pub const PublicNameProgress = poll.StreamProgress(u32);
     pub const PublicNameCursor = struct {
         allocator: std.mem.Allocator,
         inner: env.NameCursor,
@@ -160,11 +157,11 @@ pub const ModuleGeneration = struct {
             return switch (self.inner.advance()) {
                 .pending => .pending,
                 .complete => .complete,
-                .entry => |entry| result: {
+                .item => |entry| result: {
                     var lease = entry.lease;
                     defer lease.deinit();
                     break :result if (lease.visibility == .public)
-                        .{ .name = entry.name }
+                        .{ .item = entry.name }
                     else
                         .pending;
                 },
@@ -547,11 +544,7 @@ pub const Registry = enum(usize) {
         };
     }
 
-    pub const NamespaceProgress = union(enum) {
-        pending,
-        complete,
-        name: intern.NamespaceName,
-    };
+    pub const NamespaceProgress = poll.StreamProgress(intern.NamespaceName);
     /// Snapshot-owning enumeration of canonical module and alias names. The
     /// directory representation remains private and the lease survives until
     /// the cursor is explicitly released, including when iteration is
@@ -576,7 +569,7 @@ pub const Registry = enum(usize) {
                     });
                     switch (entries.advance()) {
                         .pending => return .pending,
-                        .entry => |entry| return .{ .name = entry.key },
+                        .item => |entry| return .{ .item = entry.key },
                         .complete => {
                             self.modules = null;
                             self.phase = .aliases;
@@ -590,7 +583,7 @@ pub const Registry = enum(usize) {
                     });
                     switch (entries.advance()) {
                         .pending => return .pending,
-                        .entry => |entry| return .{ .name = entry.key },
+                        .item => |entry| return .{ .item = entry.key },
                         .complete => {
                             self.aliases = null;
                             self.phase = .complete;
@@ -620,7 +613,7 @@ pub const Registry = enum(usize) {
         return retired;
     }
 
-    const ReclaimProgress = enum { pending, complete };
+    const ReclaimProgress = poll.Progress(void);
     const ReclaimCursor = struct {
         registry: *Registry,
         iterator: poll.ChunkList(RetiredGeneration).Iterator,
@@ -675,10 +668,7 @@ pub const Registry = enum(usize) {
         return .init(try ModuleGeneration.create(self.allocator(), self.releaseDomain(), name));
     }
 
-    pub const NativeCandidateProgress = union(enum) {
-        pending,
-        complete: OwnedCandidate,
-    };
+    pub const NativeCandidateProgress = poll.Progress(OwnedCandidate);
 
     /// The single bounded native-definition publication path used by dynamic
     /// loading and static transport verification. Each turn installs at most
@@ -728,7 +718,7 @@ pub const Registry = enum(usize) {
         }
     };
 
-    pub const CommitProgress = union(enum) { pending, complete: u64 };
+    pub const CommitProgress = poll.Progress(u64);
     pub const CommitCursor = struct {
         const ModuleBuilder = union(enum) {
             initialize: Directory.ModuleMap.InitCursor,
@@ -1020,7 +1010,7 @@ pub const Registry = enum(usize) {
         return .init(self, owned);
     }
 
-    pub const AliasProgress = enum { pending, complete };
+    pub const AliasProgress = poll.Progress(void);
     pub const AliasCursor = struct {
         registry: *Registry,
         short: intern.NamespaceName,
@@ -1189,7 +1179,7 @@ pub const Registry = enum(usize) {
         return .init(self, short, target);
     }
 
-    pub const CanonicalProgress = union(enum) { pending, complete: ?u32 };
+    pub const CanonicalProgress = poll.Progress(?u32);
     pub const CanonicalCursor = struct {
         directory: DirectoryLease,
         name: u32,
@@ -1246,7 +1236,7 @@ pub const Registry = enum(usize) {
         };
     }
 
-    pub const AcquireProgress = union(enum) { pending, complete: ?GenerationLease };
+    pub const AcquireProgress = poll.Progress(?GenerationLease);
     pub const AcquireCursor = struct {
         registry: *const Registry,
         directory: DirectoryLease,
@@ -1360,28 +1350,19 @@ pub const Registry = enum(usize) {
     ) RegistryError!u64 {
         var cursor = self.commitCursor(owned);
         defer cursor.deinit();
-        while (true) switch (try cursor.advance()) {
-            .pending => {},
-            .complete => |generation| return generation,
-        };
+        return poll.driveFallible(u64, &cursor, .{});
     }
 
     pub fn canonical(self: *const Registry, name: u32) ?u32 {
         var cursor = self.canonicalCursor(name);
         defer cursor.deinit();
-        while (true) switch (cursor.advance()) {
-            .pending => {},
-            .complete => |canonical_name| return canonical_name,
-        };
+        return poll.drive(?u32, &cursor, .{});
     }
 
     pub fn acquire(self: *const Registry, name: u32) ?GenerationLease {
         var cursor = self.acquireCursor(name);
         defer cursor.deinit();
-        while (true) switch (cursor.advance()) {
-            .pending => {},
-            .complete => |lease| return lease,
-        };
+        return poll.drive(?GenerationLease, &cursor, .{});
     }
 
     pub fn alias(
@@ -1391,10 +1372,7 @@ pub const Registry = enum(usize) {
     ) RegistryError!void {
         var cursor = self.aliasCursor(short, target);
         defer cursor.deinit();
-        while (true) switch (try cursor.advance()) {
-            .pending => {},
-            .complete => return,
-        };
+        return poll.driveVoidFallible(&cursor, .{});
     }
 
     pub fn beginLoading(
@@ -1402,13 +1380,10 @@ pub const Registry = enum(usize) {
         name: u32,
     ) error{OutOfMemory}!?LoadingLease {
         var cursor = self.beginLoadingCursor(name);
-        while (true) switch (try cursor.advance()) {
-            .pending => {},
-            .complete => |lease| return lease,
-        };
+        return poll.driveFallible(?LoadingLease, &cursor, .{});
     }
 
-    pub const BeginLoadingProgress = union(enum) { pending, complete: ?LoadingLease };
+    pub const BeginLoadingProgress = poll.Progress(?LoadingLease);
     pub const BeginLoadingCursor = struct {
         registry: *Registry,
         name: u32,

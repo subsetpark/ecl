@@ -5,6 +5,7 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const lexer = @import("lexer.zig");
 const storage = @import("kernel_storage.zig");
+const poll = @import("poll.zig");
 
 const Value = value.Value;
 
@@ -17,7 +18,7 @@ const Line = struct {
 
 const Kind = enum { prose, bullet };
 
-pub const NormalizeProgress = union(enum) { pending, complete: Value };
+pub const NormalizeProgress = poll.Progress(Value);
 
 pub fn normalize(
     allocator: std.mem.Allocator,
@@ -25,16 +26,15 @@ pub fn normalize(
 ) error{OutOfMemory}!Value {
     var cursor = try NormalizeCursor.init(allocator, document);
     defer cursor.deinit();
-    while (true) switch (try cursor.advance(1024)) {
-        .pending => {},
-        .complete => |result| return result,
-    };
+    return poll.driveFallible(Value, &cursor, .{1024});
 }
 
 /// Resumable two-pass documentation normalization. Line discovery, margin
 /// selection, collapsed rendering, and exact string materialization all keep
 /// their next position in this owned state.
 pub const NormalizeCursor = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
     allocator: std.mem.Allocator,
     document: Value,
     lines: []Line,

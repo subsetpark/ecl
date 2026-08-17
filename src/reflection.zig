@@ -1,8 +1,10 @@
 //! Poll-aware ordering and output for interned reflection names.
 const std = @import("std");
+const heap = @import("heap.zig");
 const env = @import("env.zig");
 const intern = @import("intern.zig");
 const modules = @import("modules.zig");
+const poll = @import("poll.zig");
 const printer = @import("print.zig");
 const resolution_core = @import("resolution_core.zig");
 const value = @import("value.zig");
@@ -18,7 +20,7 @@ pub const VisibleNameRoot = union(enum) {
     environment: env.EnvironmentView,
 };
 
-pub const VisibleNameProgress = union(enum) { pending, complete, name: u32 };
+pub const VisibleNameProgress = poll.StreamProgress(u32);
 /// The one public-name traversal shared by reflection and Session completion.
 /// A scope root is retained for the cursor's whole lifetime; all environment,
 /// directory, and generation storage is reached only through owned leases.
@@ -136,7 +138,7 @@ pub const VisibleNameCursor = struct {
     fn publicEntry(entry: env.NameEntry) VisibleNameProgress {
         var lease = entry.lease;
         defer lease.deinit();
-        return if (lease.visibility == .public) .{ .name = entry.name } else .pending;
+        return if (lease.visibility == .public) .{ .item = entry.name } else .pending;
     }
 
     pub fn advance(self: *VisibleNameCursor) VisibleNameProgress {
@@ -159,7 +161,7 @@ pub const VisibleNameCursor = struct {
             },
             .direct => |*state| switch (state.cursor.advance()) {
                 .pending => .pending,
-                .entry => |entry| publicEntry(entry),
+                .item => |entry| publicEntry(entry),
                 .complete => result: {
                     self.finishEnvironment(state);
                     break :result .pending;
@@ -204,7 +206,7 @@ pub const VisibleNameCursor = struct {
             },
             .exports => |*state| switch (state.cursor.advance()) {
                 .pending => .pending,
-                .name => |name| .{ .name = name },
+                .item => |name| .{ .item = name },
                 .complete => result: {
                     state.cursor.deinit();
                     state.generation.deinit();
@@ -218,7 +220,7 @@ pub const VisibleNameCursor = struct {
             },
             .core => |*cursor| switch (cursor.advance()) {
                 .pending => .pending,
-                .entry => |entry| publicEntry(entry),
+                .item => |entry| publicEntry(entry),
                 .complete => result: {
                     cursor.deinit();
                     self.phase = .complete;
@@ -230,7 +232,7 @@ pub const VisibleNameCursor = struct {
     }
 };
 
-pub const PlanProgress = enum { pending, complete };
+pub const PlanProgress = poll.Progress(void);
 pub const PlanCursor = struct {
     allocator: std.mem.Allocator,
     actions: []const Action,
@@ -284,7 +286,7 @@ pub const PlanCursor = struct {
     }
 };
 
-pub const OwnedPlanProgress = union(enum) { pending, complete: []u8 };
+pub const OwnedPlanProgress = poll.Progress([]u8);
 pub const OwnedPlanCursor = struct {
     allocator: std.mem.Allocator,
     actions: []const Action,
@@ -339,6 +341,77 @@ pub const OwnedPlanCursor = struct {
     }
 };
 
+/// Non-relocating action accumulation followed by one exact materialization
+/// and the shared resumable renderer. Callers never count actions or couple a
+/// fixed buffer to another component's capacity.
+pub const ActionPlan = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    allocator: std.mem.Allocator,
+    pending: poll.ChunkList(Action),
+    actions: ?[]Action = null,
+    iterator: ?poll.ChunkList(Action).Iterator = null,
+    materialize_index: usize = 0,
+    renderer: ?OwnedPlanCursor = null,
+    sealed: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator) ActionPlan {
+        return .{ .allocator = allocator, .pending = .init(allocator) };
+    }
+
+    pub fn add(self: *ActionPlan, action: Action) error{OutOfMemory}!void {
+        std.debug.assert(!self.sealed);
+        try self.pending.append(action);
+    }
+
+    pub fn count(self: *const ActionPlan) usize {
+        return self.pending.count;
+    }
+
+    pub fn isSealed(self: *const ActionPlan) bool {
+        return self.sealed;
+    }
+
+    pub fn seal(self: *ActionPlan) void {
+        std.debug.assert(!self.sealed);
+        self.sealed = true;
+    }
+
+    pub fn advance(self: *ActionPlan, budget: usize) error{OutOfMemory}!OwnedPlanProgress {
+        std.debug.assert(self.sealed and budget != 0);
+        var remaining = budget;
+        if (self.actions == null) {
+            self.actions = try self.allocator.alloc(Action, self.pending.count);
+            self.iterator = self.pending.iterator();
+        }
+        while (remaining != 0 and self.iterator != null) : (remaining -= 1) {
+            if (self.iterator.?.next()) |action| {
+                self.actions.?[self.materialize_index] = action.*;
+                self.materialize_index += 1;
+            } else {
+                self.iterator = null;
+                self.renderer = .init(self.allocator, self.actions.?);
+            }
+        }
+        if (self.iterator != null or self.renderer == null) return .pending;
+        return self.renderer.?.advance(@max(remaining, 1));
+    }
+
+    pub fn deinit(self: *ActionPlan) void {
+        if (self.renderer) |*renderer| renderer.deinit();
+        if (self.actions) |actions| self.allocator.free(actions);
+        self.pending.deinit();
+        self.* = undefined;
+    }
+
+    pub fn retire(self: *ActionPlan, releases: *heap.ReleaseDomain) void {
+        if (self.renderer) |*renderer| renderer.deinit();
+        if (self.actions) |actions| self.allocator.free(actions);
+        self.pending.retire(releases);
+        self.* = undefined;
+    }
+};
+
 const NameCompareCursor = struct {
     left: []const u8,
     right: []const u8,
@@ -346,10 +419,7 @@ const NameCompareCursor = struct {
     fn init(left: u32, right: u32) NameCompareCursor {
         return .{ .left = intern.get(left), .right = intern.get(right) };
     }
-    fn advance(self: *NameCompareCursor, budget: usize) union(enum) {
-        pending,
-        complete: std.math.Order,
-    } {
+    fn advance(self: *NameCompareCursor, budget: usize) poll.Progress(std.math.Order) {
         const shared = @min(self.left.len, self.right.len);
         const end = @min(self.index + budget, shared);
         while (self.index != end) : (self.index += 1) {
@@ -361,87 +431,32 @@ const NameCompareCursor = struct {
     }
 };
 
-pub const NameSortProgress = enum { pending, complete };
+const NameComparator = struct {
+    pub const Context = void;
+    pub const Cursor = NameCompareCursor;
+
+    pub fn init(_: Context, left: u32, right: u32) Cursor {
+        return .init(left, right);
+    }
+
+    pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
+        return cursor.advance(budget);
+    }
+};
+
+const InternNameMergeSort = poll.MergeSortCursor(u32, NameComparator);
+pub const NameSortProgress = poll.Progress(void);
 pub const NameSortCursor = struct {
-    allocator: std.mem.Allocator,
-    names: []u32,
-    scratch: []u32,
-    width: usize = 1,
-    start: usize = 0,
-    middle: usize = 0,
-    end: usize = 0,
-    left: usize = 0,
-    right: usize = 0,
-    output: usize = 0,
-    run_ready: bool = false,
-    source_scratch: bool = false,
-    comparator: ?NameCompareCursor = null,
-    copy_index: usize = 0,
+    sort: InternNameMergeSort,
 
     pub fn init(allocator: std.mem.Allocator, names: []u32) error{OutOfMemory}!NameSortCursor {
-        return .{ .allocator = allocator, .names = names, .scratch = try allocator.alloc(u32, names.len) };
+        return .{ .sort = try .init(allocator, names, {}) };
     }
     pub fn deinit(self: *NameSortCursor) void {
-        self.allocator.free(self.scratch);
+        self.sort.deinit();
         self.* = undefined;
     }
     pub fn advance(self: *NameSortCursor, budget: usize) NameSortProgress {
-        var remaining = budget;
-        while (remaining != 0) {
-            if (self.width >= self.names.len) {
-                if (!self.source_scratch) return .complete;
-                const end = @min(self.copy_index + remaining, self.names.len);
-                const copied = end - self.copy_index;
-                @memcpy(self.names[self.copy_index..end], self.scratch[self.copy_index..end]);
-                self.copy_index = end;
-                if (self.copy_index == self.names.len) return .complete;
-                remaining -= copied;
-                continue;
-            }
-            if (!self.run_ready) {
-                if (self.start == self.names.len) {
-                    self.source_scratch = !self.source_scratch;
-                    self.start = 0;
-                    self.width = if (self.width > self.names.len / 2)
-                        self.names.len
-                    else
-                        self.width * 2;
-                    continue;
-                }
-                self.middle = self.start + @min(self.width, self.names.len - self.start);
-                self.end = self.middle + @min(self.width, self.names.len - self.middle);
-                self.left = self.start;
-                self.right = self.middle;
-                self.output = self.start;
-                self.run_ready = true;
-            }
-            if (self.output == self.end) {
-                self.start = self.end;
-                self.run_ready = false;
-                continue;
-            }
-            const source = if (self.source_scratch) self.scratch else self.names;
-            var choose_left = self.right == self.end;
-            if (!choose_left and self.left != self.middle) {
-                if (self.comparator == null)
-                    self.comparator = .init(source[self.left], source[self.right]);
-                switch (self.comparator.?.advance(1)) {
-                    .pending => {
-                        remaining -= 1;
-                        continue;
-                    },
-                    .complete => |ordering| {
-                        self.comparator = null;
-                        choose_left = ordering != .gt;
-                    },
-                }
-            }
-            const destination = if (self.source_scratch) self.names else self.scratch;
-            destination[self.output] = if (choose_left) source[self.left] else source[self.right];
-            if (choose_left) self.left += 1 else self.right += 1;
-            self.output += 1;
-            remaining -= 1;
-        }
-        return .pending;
+        return self.sort.advance(budget);
     }
 };

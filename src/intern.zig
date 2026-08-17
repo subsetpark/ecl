@@ -4,6 +4,7 @@
 //! external input can grow this table without bound; bucket chains never rehash.
 
 const std = @import("std");
+const poll = @import("poll.zig");
 
 const entries_per_segment = 256;
 const byte_segment_size = 64 * 1024;
@@ -25,10 +26,7 @@ pub const NameError = error{InvalidName};
 pub fn namespaceName(id: u32) NameError!NamespaceName {
     _ = process_table.getBytes(id) orelse return error.InvalidName;
     var cursor = NamespaceCursor.init(id);
-    while (true) switch (cursor.advance()) {
-        .pending => {},
-        .complete => |name| return name orelse error.InvalidName,
-    };
+    return poll.drive(?NamespaceName, &cursor, .{}) orelse error.InvalidName;
 }
 
 pub fn internNamespace(bytes: []const u8) error{ OutOfMemory, InvalidName }!NamespaceName {
@@ -95,10 +93,7 @@ pub const Table = struct {
 
     pub fn internBytes(self: *Table, bytes: []const u8) error{OutOfMemory}!u32 {
         var cursor = self.internCursor(bytes);
-        while (true) switch (try cursor.advance()) {
-            .pending => {},
-            .complete => |id| return id,
-        };
+        return poll.driveFallible(u32, &cursor, .{});
     }
 
     pub fn getBytes(self: *const Table, id: u32) ?[]const u8 {
@@ -110,7 +105,7 @@ pub const Table = struct {
         return byte_segment.bytes[entry.offset..][0..entry.len];
     }
 
-    pub const LookupProgress = union(enum) { pending, complete: ?u32 };
+    pub const LookupProgress = poll.Progress(?u32);
     pub const LookupCursor = struct {
         table: *const Table,
         bytes: []const u8,
@@ -162,7 +157,7 @@ pub const Table = struct {
         return .{ .table = self, .bytes = bytes };
     }
 
-    pub const InternProgress = union(enum) { pending, complete: u32 };
+    pub const InternProgress = poll.Progress(u32);
     pub const InternCursor = struct {
         table: *Table,
         bytes: []const u8,
@@ -311,7 +306,7 @@ pub fn insertionCursor(bytes: []const u8) InternInsertionCursor {
     return process_table.internCursor(bytes);
 }
 
-pub const QualifiedProgress = union(enum) { pending, complete: u32 };
+pub const QualifiedProgress = poll.Progress(u32);
 pub const QualifiedCursor = struct {
     allocator: std.mem.Allocator,
     module: []const u8,
@@ -359,7 +354,7 @@ pub const QualifiedCursor = struct {
     }
 };
 
-pub const DotProgress = union(enum) { pending, complete: ?usize };
+pub const DotProgress = poll.Progress(?usize);
 pub const DotCursor = struct {
     bytes: []const u8,
     index: usize = 0,
@@ -374,7 +369,7 @@ pub fn dotCursor(bytes: []const u8) DotCursor {
     return .{ .bytes = bytes };
 }
 
-pub const NamespaceProgress = union(enum) { pending, complete: ?NamespaceName };
+pub const NamespaceProgress = poll.Progress(?NamespaceName);
 pub const NamespaceCursor = struct {
     id: u32,
     bytes: []const u8,

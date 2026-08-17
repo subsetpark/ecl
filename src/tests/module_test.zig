@@ -974,7 +974,7 @@ test "registry: generation cursors independently pin their snapshot" {
     const old_name = while (true) switch (names.advance()) {
         .pending => {},
         .complete => return error.TestUnexpectedResult,
-        .name => |name| break name,
+        .item => |name| break name,
     };
     try std.testing.expectEqual(intern.namespaceId(value_name), old_name);
     lookup.deinit();

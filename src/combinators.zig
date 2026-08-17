@@ -36,9 +36,9 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 }
 
 fn call(evaluator: *Machine) MachineError!void {
-    var quotation = try evaluator.popValue();
+    var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
-    try evaluator.callOwned(try takeQuotation(evaluator, &quotation));
+    try evaluator.callOwned(quotation.take().list);
 }
 
 fn ifWord(evaluator: *Machine) MachineError!void {
@@ -70,20 +70,20 @@ fn whileWord(evaluator: *Machine) MachineError!void {
     defer expected.deinit();
     const state = try evaluator.allocator().create(WhileState);
     state.* = .{
-        .condition = condition.take().list,
-        .body = body.take().list,
-        .expected = expected.take(),
+        .condition = .init(condition.take().list),
+        .body = .init(body.take().list),
+        .expected = .init(expected.take()),
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
         .word = evaluator.activeWordId(),
     };
-    try evaluator.beginInlineApplication(state.application(state.condition));
+    try evaluator.beginInlineApplication(state.application(state.condition.borrow()));
 }
 
 const WhileState = struct {
-    condition: *Header,
-    body: *Header,
-    expected: Value,
+    condition: heap.Owned(*Header),
+    body: heap.Owned(*Header),
+    expected: heap.Owned(Value),
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
     running_body: bool = false,
@@ -101,41 +101,36 @@ const WhileState = struct {
         try evaluator.yieldNativeStep();
         if (self.running_body) {
             self.running_body = false;
-            return self.step(self.condition);
+            return self.step(self.condition.borrow());
         }
         const observed = window.observed(evaluator.unit.stack.items.len) orelse {
-            return evaluator.applicationContractError(self.expected, 0, 0, null);
+            return evaluator.applicationContractError(self.expected.borrow(), 0, 0, null);
         };
         if (observed != 1) {
-            return evaluator.applicationContractError(self.expected, 0, observed, null);
+            return evaluator.applicationContractError(self.expected.borrow(), 0, observed, null);
         }
         var predicate = try evaluator.popValue();
         defer predicate.deinit();
         if (!try boolValue(evaluator, &predicate)) return null;
         self.running_body = true;
-        return self.step(self.body);
+        return self.step(self.body.borrow());
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *WhileState) void {
-        releases.releaseHeader(self.condition);
-        releases.releaseHeader(self.body);
-        releases.releaseValue(self.expected);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 const TimesState = struct {
-    quotation: *Header,
+    quotation: heap.Owned(*Header),
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
     remaining: usize,
     word: u32,
 
     fn application(self: *TimesState) Application {
-        return machine.typedApplication(self, self.quotation, self.parent, self.home, 0);
+        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, 0);
     }
     fn step(self: *TimesState) ApplicationStep {
-        return .{ .quotation = self.quotation, .seeded = 0 };
+        return .{ .quotation = self.quotation.borrow(), .seeded = 0 };
     }
 
     pub fn resumeApplication(evaluator: *Machine, self: *TimesState, _: StackWindow) MachineError!?ApplicationStep {
@@ -145,15 +140,12 @@ const TimesState = struct {
         return if (self.remaining == 0) null else self.step();
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *TimesState) void {
-        releases.releaseHeader(self.quotation);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 fn times(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    var quotation = try evaluator.popValue();
+    var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
     var count_value = try evaluator.popValue();
     defer count_value.deinit();
@@ -164,7 +156,7 @@ fn times(evaluator: *Machine) MachineError!void {
     if (count_value.borrow().int == 0) return;
     const state = try evaluator.allocator().create(TimesState);
     state.* = .{
-        .quotation = quotation.take().list,
+        .quotation = .init(quotation.take().list),
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
         .remaining = @intCast(count_value.borrow().int),
@@ -174,8 +166,8 @@ fn times(evaluator: *Machine) MachineError!void {
 }
 
 const CondState = struct {
-    clauses: Value,
-    expected: Value,
+    clauses: heap.Owned(Value),
+    expected: heap.Owned(Value),
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
     pair_index: usize = 0,
@@ -194,32 +186,28 @@ const CondState = struct {
         try evaluator.yieldNativeStep();
         if (self.running_action) return null;
         const observed = window.observed(evaluator.unit.stack.items.len) orelse {
-            return evaluator.applicationContractError(self.expected, 0, 0, self.pair_index / 2);
+            return evaluator.applicationContractError(self.expected.borrow(), 0, 0, self.pair_index / 2);
         };
         if (observed != 1) {
-            return evaluator.applicationContractError(self.expected, 0, observed, self.pair_index / 2);
+            return evaluator.applicationContractError(self.expected.borrow(), 0, observed, self.pair_index / 2);
         }
         var predicate = try evaluator.popValue();
         defer predicate.deinit();
         const selected = try boolValue(evaluator, &predicate);
         if (selected) {
             self.running_action = true;
-            return self.step(list.atUnchecked(self.clauses, self.pair_index + 1).list);
+            return self.step(list.atUnchecked(self.clauses.borrow(), self.pair_index + 1).list);
         }
         self.pair_index += 2;
-        const count: usize = @intCast(self.clauses.list.length());
+        const count: usize = @intCast(self.clauses.borrow().list.length());
         if (self.pair_index + 1 >= count) {
             self.running_action = true;
-            return self.step(list.atUnchecked(self.clauses, count - 1).list);
+            return self.step(list.atUnchecked(self.clauses.borrow(), count - 1).list);
         }
-        return self.step(list.atUnchecked(self.clauses, self.pair_index).list);
+        return self.step(list.atUnchecked(self.clauses.borrow(), self.pair_index).list);
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *CondState) void {
-        releases.releaseValue(self.clauses);
-        releases.releaseValue(self.expected);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 fn cond(evaluator: *Machine) MachineError!void {
@@ -232,18 +220,16 @@ fn cond(evaluator: *Machine) MachineError!void {
     if (count == 0 or count % 2 == 0) {
         return evaluator.fail(.shape, "cond requires a nonempty odd clause list ending in else");
     }
-    const driver = try evaluator.allocator().create(CondDriver);
-    driver.* = .{
-        .clauses = clauses.take(),
+    try evaluator.startDriver(CondDriver{
+        .clauses = .init(clauses.take()),
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
         .word = evaluator.activeWordId(),
-    };
-    evaluator.installWorkDriver(driver);
+    });
 }
 
 const CondDriver = struct {
-    clauses: ?Value,
+    clauses: heap.Owned(Value),
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
     word: u32,
@@ -251,7 +237,7 @@ const CondDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *CondDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        const clauses = self.clauses.?;
+        const clauses = self.clauses.borrow();
         const count: usize = @intCast(clauses.list.length());
         const end = @min(self.index + machine.kernel_poll_quantum, count);
         while (self.index != end) : (self.index += 1) {
@@ -263,14 +249,13 @@ const CondDriver = struct {
         errdefer if (expected_value) |expected| evaluator.releaseDomain().releaseValue(expected);
         const state = try evaluator.allocator().create(CondState);
         state.* = .{
-            .clauses = clauses,
-            .expected = expected_value.?,
+            .clauses = .init(self.clauses.take()),
+            .expected = .init(expected_value.?),
             .parent = self.parent,
             .home = self.home,
             .word = self.word,
         };
         expected_value = null;
-        self.clauses = null;
         const first = if (count == 1) blk: {
             state.running_action = true;
             break :blk list.atUnchecked(clauses, 0).list;
@@ -279,20 +264,17 @@ const CondDriver = struct {
         return .completed;
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *CondDriver) void {
-        if (self.clauses) |clauses| releases.releaseValue(clauses);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 const IterationKind = enum { each, zip_with, for_word, fold, scan, infra };
 const IterationState = struct {
     kind: IterationKind,
-    left: Value,
-    right: ?Value,
-    quotation: *Header,
-    expected: ?Value,
-    results: ?heap.OwnedValueBuffer = null,
+    left: heap.Owned(Value),
+    right: ?heap.Owned(Value),
+    quotation: heap.Owned(*Header),
+    expected: ?heap.Owned(Value),
+    results: ?heap.Owned(heap.OwnedValueBuffer) = null,
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
     index: usize = 0,
@@ -300,10 +282,10 @@ const IterationState = struct {
     word: u32,
 
     fn application(self: *IterationState, seeded: u32) Application {
-        return machine.typedApplication(self, self.quotation, self.parent, self.home, seeded);
+        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, seeded);
     }
     fn step(self: *IterationState, seeded: u32) ApplicationStep {
-        return .{ .quotation = self.quotation, .seeded = seeded };
+        return .{ .quotation = self.quotation.borrow(), .seeded = seeded };
     }
 
     pub fn resumeApplication(evaluator: *Machine, self: *IterationState, window: StackWindow) MachineError!?ApplicationStep {
@@ -311,7 +293,7 @@ const IterationState = struct {
         try evaluator.yieldNativeStep();
         const base: usize = window.base();
         const observed = window.observed(evaluator.unit.stack.items.len) orelse
-            return evaluator.applicationContractError(self.expected.?, 0, 0, self.index);
+            return evaluator.applicationContractError(self.expected.?.borrow(), 0, 0, self.index);
         return switch (self.kind) {
             .each, .zip_with => self.resumeCollect(evaluator, observed),
             .for_word => self.resumeFor(evaluator, observed),
@@ -323,10 +305,10 @@ const IterationState = struct {
     fn resumeCollect(self: *IterationState, evaluator: *Machine, observed: usize) MachineError!?ApplicationStep {
         const seeded: usize = if (self.kind == .each) 1 else 2;
         if (observed != 1) {
-            return evaluator.applicationContractError(self.expected.?, seeded, observed, self.index);
+            return evaluator.applicationContractError(self.expected.?.borrow(), seeded, observed, self.index);
         }
         var result = try evaluator.popValue();
-        self.results.?.appendOwned(result.take());
+        self.results.?.borrowMut().appendOwned(result.take());
         self.index += 1;
         if (self.index == self.count) {
             try self.installCollected(evaluator);
@@ -338,7 +320,7 @@ const IterationState = struct {
 
     fn resumeFor(self: *IterationState, evaluator: *Machine, observed: usize) MachineError!?ApplicationStep {
         if (observed != 0) {
-            return evaluator.applicationContractError(self.expected.?, 1, observed, self.index);
+            return evaluator.applicationContractError(self.expected.?.borrow(), 1, observed, self.index);
         }
         self.index += 1;
         if (self.index == self.count) return null;
@@ -348,12 +330,12 @@ const IterationState = struct {
 
     fn resumeFold(self: *IterationState, evaluator: *Machine, observed: usize) MachineError!?ApplicationStep {
         if (observed != 1) {
-            return evaluator.applicationContractError(self.expected.?, 2, observed, self.index);
+            return evaluator.applicationContractError(self.expected.?.borrow(), 2, observed, self.index);
         }
         var accumulator = try evaluator.popValue();
         defer accumulator.deinit();
         const accumulator_value = accumulator.borrow();
-        if (self.kind == .scan) self.results.?.appendOwned(accumulator.take());
+        if (self.kind == .scan) self.results.?.borrowMut().appendOwned(accumulator.take());
         self.index += 1;
         if (self.index == self.count) {
             if (self.kind == .scan) {
@@ -368,7 +350,7 @@ const IterationState = struct {
         } else {
             try evaluator.pushOwned(accumulator.take());
         }
-        try evaluator.pushBorrowed(list.atUnchecked(self.left, self.index));
+        try evaluator.pushBorrowed(list.atUnchecked(self.left.borrow(), self.index));
         return self.step(2);
     }
 
@@ -378,82 +360,69 @@ const IterationState = struct {
     }
 
     fn installCollected(self: *IterationState, evaluator: *Machine) error{OutOfMemory}!void {
-        const driver = try evaluator.allocator().create(CollectedDriver);
-        var values = self.results.?.take();
+        const values = self.results.?.take();
         self.results = null;
-        driver.* = .{
-            .materializer = .init(evaluator.allocator(), values.values()),
-            .values = values,
-        };
-        evaluator.installWorkDriver(driver);
+        try evaluator.startDriver(CollectedDriver{
+            .materializer = .init(.init(evaluator.allocator(), values.values())),
+            .values = .init(values),
+        });
     }
 
     fn pushInputs(self: *IterationState, evaluator: *Machine) MachineError!void {
-        try evaluator.pushBorrowed(inputAt(self.left, self.index));
-        if (self.kind == .zip_with) try evaluator.pushBorrowed(inputAt(self.right.?, self.index));
+        try evaluator.pushBorrowed(inputAt(self.left.borrow(), self.index));
+        if (self.kind == .zip_with) try evaluator.pushBorrowed(inputAt(
+            self.right.?.borrow(),
+            self.index,
+        ));
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *IterationState) void {
-        releases.releaseValue(self.left);
-        if (self.right) |right| releases.releaseValue(right);
-        releases.releaseHeader(self.quotation);
-        if (self.expected) |expected| releases.releaseValue(expected);
-        if (self.results) |*results| results.deinit();
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 const CollectedDriver = struct {
-    values: heap.OwnedValueBuffer,
-    materializer: storage.ValueMaterializer,
-    result: ?Value = null,
+    values: heap.Owned(heap.OwnedValueBuffer),
+    materializer: heap.Owned(storage.ValueMaterializer),
+    result: ?heap.Owned(Value) = null,
 
     pub fn advance(evaluator: *Machine, self: *CollectedDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.result == null) {
-            switch (try self.materializer.advance(machine.kernel_poll_quantum)) {
+            switch (try self.materializer.borrowMut().advance(machine.kernel_poll_quantum)) {
                 .pending => return .yielded,
                 .complete => |result| {
-                    self.result = result;
+                    self.result = .init(result);
                     return .yielded;
                 },
             }
         }
-        self.values.deinit();
-        const result = self.result.?;
+        self.values.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        const result = self.result.?.take();
         self.result = null;
         return .{ .output = result };
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *CollectedDriver) void {
-        self.materializer.retire(releases);
-        self.values.deinit();
-        if (self.result) |result| releases.releaseValue(result);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 const InfraResultDriver = struct {
     base: usize,
-    materializer: storage.ValueMaterializer,
-    result: ?Value = null,
+    materializer: heap.Owned(storage.ValueMaterializer),
+    result: ?heap.Owned(Value) = null,
 
     fn install(evaluator: *Machine, base: usize) error{OutOfMemory}!void {
-        const driver = try evaluator.allocator().create(InfraResultDriver);
-        driver.* = .{
+        try evaluator.startDriver(InfraResultDriver{
             .base = base,
-            .materializer = .init(evaluator.allocator(), evaluator.unit.stack.items[base..]),
-        };
-        evaluator.installWorkDriver(driver);
+            .materializer = .init(.init(evaluator.allocator(), evaluator.unit.stack.items[base..])),
+        });
     }
 
     pub fn advance(evaluator: *Machine, self: *InfraResultDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.result == null) {
-            switch (try self.materializer.advance(machine.kernel_poll_quantum)) {
+            switch (try self.materializer.borrowMut().advance(machine.kernel_poll_quantum)) {
                 .pending => return .yielded,
                 .complete => |result| {
-                    self.result = result;
+                    self.result = .init(result);
                     return .yielded;
                 },
             }
@@ -464,43 +433,36 @@ const InfraResultDriver = struct {
             discarded.deinit();
         }
         if (evaluator.unit.stack.items.len != self.base) return .yielded;
-        const result = self.result.?;
+        const result = self.result.?.take();
         self.result = null;
         return .{ .output = result };
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *InfraResultDriver) void {
-        self.materializer.retire(releases);
-        if (self.result) |result| releases.releaseValue(result);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 const InfraBootstrapDriver = struct {
-    iteration: ?*IterationState,
+    iteration: heap.Owned(*IterationState),
     stack: machine.StackReservation,
     index: usize = 0,
 
     pub fn advance(evaluator: *Machine, self: *InfraBootstrapDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        const iteration = self.iteration.?;
+        const iteration = self.iteration.borrow();
         const end = @min(self.index + machine.kernel_poll_quantum, iteration.count);
         while (self.index != end) : (self.index += 1) {
-            const item = list.atUnchecked(iteration.left, self.index);
+            const item = list.atUnchecked(iteration.left.borrow(), self.index);
             self.stack.pushBorrowed(item);
         }
         if (self.index != iteration.count) return .yielded;
         std.debug.assert(self.stack.complete());
         const application = iteration.application(@intCast(iteration.count));
-        self.iteration = null;
+        _ = self.iteration.take();
         try evaluator.beginIsolatedApplication(application);
         return .completed;
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *InfraBootstrapDriver) void {
-        if (self.iteration) |iteration| IterationState.destroy(releases, allocator, iteration);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 fn each(evaluator: *Machine) MachineError!void {
@@ -544,9 +506,9 @@ fn startUnaryIteration(evaluator: *Machine, kind: IterationKind) MachineError!vo
         &expected,
         count,
     );
-    errdefer if (state_owner) |state| IterationState.destroy(evaluator.releaseDomain(), evaluator.allocator(), state);
+    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), state);
     const state = state_owner.?;
-    if (kind == .each) state.results = try .init(evaluator.releaseDomain(), count);
+    if (kind == .each) state.results = .init(try .init(evaluator.releaseDomain(), count));
     try state.pushInputs(evaluator);
     state_owner = null;
     try evaluator.beginIsolatedApplication(state.application(1));
@@ -563,7 +525,6 @@ fn zipWithGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
     defer right.deinit();
     var left = try evaluator.popValue();
     defer left.deinit();
-    if (quotation.borrow() != .list) return evaluator.typeError("a quotation/list");
     const left_list = left.borrow() == .list;
     const right_list = right.borrow() == .list;
     if (!left_list and !right_list) return evaluator.typeError("at least one list");
@@ -594,9 +555,9 @@ fn zipWithGeneric(evaluator: *Machine, _: ?*anyopaque) MachineError!void {
         &expected,
         count,
     );
-    errdefer if (state_owner) |state| IterationState.destroy(evaluator.releaseDomain(), evaluator.allocator(), state);
+    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), state);
     const state = state_owner.?;
-    state.results = try .init(evaluator.releaseDomain(), count);
+    state.results = .init(try .init(evaluator.releaseDomain(), count));
     try state.pushInputs(evaluator);
     state_owner = null;
     try evaluator.beginIsolatedApplication(state.application(2));
@@ -656,11 +617,11 @@ fn startFold(evaluator: *Machine, kind: IterationKind) MachineError!void {
         &expected,
         count,
     );
-    errdefer if (state_owner) |state| IterationState.destroy(evaluator.releaseDomain(), evaluator.allocator(), state);
+    errdefer if (state_owner) |state| heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), state);
     const state = state_owner.?;
-    if (kind == .scan) state.results = try .init(evaluator.releaseDomain(), count);
+    if (kind == .scan) state.results = .init(try .init(evaluator.releaseDomain(), count));
     try evaluator.pushOwned(accumulator.take());
-    try evaluator.pushBorrowed(list.atUnchecked(state.left, 0));
+    try evaluator.pushBorrowed(list.atUnchecked(state.left.borrow(), 0));
     state_owner = null;
     try evaluator.beginIsolatedApplication(state.application(2));
 }
@@ -675,11 +636,15 @@ fn infra(evaluator: *Machine) MachineError!void {
         return evaluator.typeError("a list and quotation");
     const count: usize = @intCast(input.borrow().list.length());
     const state = try createIteration(evaluator, .infra, &input, null, &quotation, null, count);
-    errdefer IterationState.destroy(evaluator.releaseDomain(), evaluator.allocator(), state);
+    var state_owner: ?*IterationState = state;
+    errdefer if (state_owner) |owned| heap.destroyDriver(
+        evaluator.releaseDomain(),
+        evaluator.allocator(),
+        owned,
+    );
     const stack = try evaluator.reserveStack(count);
-    const driver = try evaluator.allocator().create(InfraBootstrapDriver);
-    driver.* = .{ .iteration = state, .stack = stack };
-    evaluator.installWorkDriver(driver);
+    state_owner = null;
+    try evaluator.startDriver(InfraBootstrapDriver{ .iteration = .init(state), .stack = stack });
 }
 
 fn createIteration(
@@ -694,10 +659,10 @@ fn createIteration(
     const state = try evaluator.allocator().create(IterationState);
     state.* = .{
         .kind = kind,
-        .left = left.take(),
-        .right = if (right) |item| item.take() else null,
-        .quotation = quotation.take().list,
-        .expected = if (expected) |item| item.take() else null,
+        .left = .init(left.take()),
+        .right = if (right) |item| .init(item.take()) else null,
+        .quotation = .init(quotation.take().list),
+        .expected = if (expected) |item| .init(item.take()) else null,
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
         .count = count,
@@ -730,9 +695,4 @@ fn boolValue(evaluator: *Machine, item: *const heap.OwnedValue) MachineError!boo
         },
         .float, .char, .symbol, .word, .list, .dict, .task => evaluator.typeError("a 0/1 bool"),
     };
-}
-
-fn takeQuotation(evaluator: *Machine, item: *heap.OwnedValue) MachineError!*Header {
-    if (item.borrow() != .list) return evaluator.typeError("a quotation/list");
-    return item.take().list;
 }

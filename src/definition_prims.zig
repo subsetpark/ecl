@@ -44,7 +44,7 @@ const Annotation = struct {
     doc_value: ?*env.DocumentationString = null,
     doc_source: ?Value = null,
 
-    fn deinit(self: *Annotation, releases: *heap.ReleaseDomain) void {
+    pub fn deinit(self: *Annotation, releases: *heap.ReleaseDomain) void {
         if (self.effect_value) |item| releases.releaseValue(item);
         if (self.doc_source) |item| releases.releaseValue(item);
         self.* = undefined;
@@ -58,44 +58,49 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
     const scope = evaluator.currentScope();
     const module_root = scope.kind() == .module_root;
     if (private and !module_root) return evaluator.fail(.domain, "defp/setp are legal only in a module root");
-    const name = try popSymbol(evaluator);
+    const name = try evaluator.popSymbol();
     var item = try evaluator.popValue();
     defer item.deinit();
-    const driver = try evaluator.allocator().create(DefineDriver);
-    driver.* = .{
+    const separator = try intern.intern("--");
+    const colon = try intern.intern(":");
+    const phase: DefineDriver.Phase = if (word_binding and item.borrow() == .list)
+        .scan_annotation
+    else
+        .validate_name;
+    try evaluator.startDriver(DefineDriver{
         .mode = mode,
         .scope = scope,
         .name = name,
-        .item = item.borrow(),
-        .separator = try intern.intern("--"),
-        .colon = try intern.intern(":"),
-        .phase = if (word_binding and item.borrow() == .list) .scan_annotation else .validate_name,
-    };
-    _ = item.take();
-    evaluator.installWorkDriver(driver);
+        .item = .init(item.take()),
+        .separator = separator,
+        .colon = colon,
+        .phase = phase,
+        .annotation = .init(.{}),
+    });
 }
 
 const DefineDriver = struct {
+    const Phase = enum { scan_annotation, validate_annotation, validate_name, normalize_doc, copy_effect, materialize_effect, qualify_name, publish };
     mode: Mode,
     scope: *env.Scope,
     name: u32,
-    item: ?Value,
-    annotation_source: ?Value = null,
+    item: ?heap.Owned(Value),
+    annotation_source: ?heap.Owned(Value) = null,
     separator: u32,
     colon: u32,
-    phase: enum { scan_annotation, validate_annotation, validate_name, normalize_doc, copy_effect, materialize_effect, qualify_name, publish },
+    phase: Phase,
     index: usize = 0,
     separator_at: ?usize = null,
     colon_at: ?usize = null,
     effect_end: usize = 0,
-    annotation: Annotation = .{},
+    annotation: heap.Owned(Annotation),
     document: ?Value = null,
-    normalizer: ?doc_text.NormalizeCursor = null,
-    effect_items: ?[]Value = null,
-    effect_materializer: ?kernel_storage.ValueMaterializer = null,
-    qualified: ?intern.QualifiedCursor = null,
+    normalizer: ?heap.Owned(doc_text.NormalizeCursor) = null,
+    effect_items: ?heap.Owned([]Value) = null,
+    effect_materializer: ?heap.Owned(kernel_storage.ValueMaterializer) = null,
+    qualified: ?heap.Owned(intern.QualifiedCursor) = null,
     trace_word: ?u32 = null,
-    publisher: ?env.Environment.BindCursor = null,
+    publisher: ?heap.Owned(env.Environment.BindCursor) = null,
 
     fn malformed(evaluator: *Machine) MachineError {
         return evaluator.fail(.domain, "malformed definition annotation");
@@ -106,7 +111,7 @@ const DefineDriver = struct {
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
             .scan_annotation => {
-                const count: usize = @intCast(self.item.?.list.length());
+                const count: usize = @intCast(self.item.?.borrow().list.length());
                 if (self.index == count) {
                     if (self.separator_at == null and self.colon_at == null) {
                         self.phase = .validate_name;
@@ -120,7 +125,7 @@ const DefineDriver = struct {
                         return malformed(evaluator);
                     if (self.colon_at) |doc_at| {
                         if (count != doc_at + 2) return malformed(evaluator);
-                        const document = list.atUnchecked(self.item.?, doc_at + 1);
+                        const document = list.atUnchecked(self.item.?.borrow(), doc_at + 1);
                         if (!document.isString()) return malformed(evaluator);
                         self.document = document;
                     }
@@ -128,7 +133,7 @@ const DefineDriver = struct {
                     self.phase = .validate_annotation;
                     continue;
                 }
-                const item = list.atUnchecked(self.item.?, self.index);
+                const item = list.atUnchecked(self.item.?.borrow(), self.index);
                 if (item == .word and item.word == self.separator) {
                     if (self.separator_at != null) return malformed(evaluator);
                     self.separator_at = self.index;
@@ -142,37 +147,37 @@ const DefineDriver = struct {
             .validate_annotation => {
                 if (self.separator_at) |split| {
                     if (self.index != self.effect_end) {
-                        if (self.index != split and list.atUnchecked(self.item.?, self.index) != .word)
+                        if (self.index != split and list.atUnchecked(self.item.?.borrow(), self.index) != .word)
                             return malformed(evaluator);
                         self.index += 1;
                         budget -= 1;
                         continue;
                     }
                 }
-                self.annotation_source = self.item;
+                self.annotation_source = .init(self.item.?.take());
                 self.item = null;
                 try evaluator.require(1);
                 var item = try evaluator.popValue();
-                self.item = item.take();
+                self.item = .init(item.take());
                 self.index = 0;
                 if (self.document) |document| {
-                    self.normalizer = try .init(evaluator.allocator(), document);
+                    self.normalizer = .init(try .init(evaluator.allocator(), document));
                     self.phase = .normalize_doc;
                 } else if (self.separator_at != null) {
-                    self.effect_items = try evaluator.allocator().alloc(Value, self.effect_end);
+                    self.effect_items = .init(try evaluator.allocator().alloc(Value, self.effect_end));
                     self.phase = .copy_effect;
                 } else self.phase = .validate_name;
             },
-            .normalize_doc => switch (try self.normalizer.?.advance(budget)) {
+            .normalize_doc => switch (try self.normalizer.?.borrowMut().advance(budget)) {
                 .pending => return .yielded,
                 .complete => |normalized| {
-                    self.normalizer.?.deinit();
+                    self.normalizer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.normalizer = null;
-                    self.annotation.doc_source = normalized;
-                    self.annotation.doc_value = env.documentation(normalized.list) orelse
+                    self.annotation.borrowMut().doc_source = normalized;
+                    self.annotation.borrowMut().doc_value = env.documentation(normalized.list) orelse
                         return malformed(evaluator);
                     if (self.separator_at != null) {
-                        self.effect_items = try evaluator.allocator().alloc(Value, self.effect_end);
+                        self.effect_items = .init(try evaluator.allocator().alloc(Value, self.effect_end));
                         self.phase = .copy_effect;
                     } else self.phase = .validate_name;
                     return .yielded;
@@ -180,21 +185,27 @@ const DefineDriver = struct {
             },
             .copy_effect => {
                 if (self.index == self.effect_end) {
-                    self.effect_materializer = .init(evaluator.allocator(), self.effect_items.?);
+                    self.effect_materializer = .init(.init(
+                        evaluator.allocator(),
+                        self.effect_items.?.borrow(),
+                    ));
                     self.phase = .materialize_effect;
                     continue;
                 }
-                self.effect_items.?[self.index] = list.atUnchecked(self.annotation_source.?, self.index);
+                self.effect_items.?.borrow()[self.index] = list.atUnchecked(
+                    self.annotation_source.?.borrow(),
+                    self.index,
+                );
                 self.index += 1;
                 budget -= 1;
             },
-            .materialize_effect => switch (try self.effect_materializer.?.advance(budget)) {
+            .materialize_effect => switch (try self.effect_materializer.?.borrowMut().advance(budget)) {
                 .pending => return .yielded,
                 .complete => |effect_value| {
-                    self.effect_materializer.?.deinit();
+                    self.effect_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.effect_materializer = null;
-                    self.annotation.effect_value = effect_value;
-                    self.annotation.effect = env.ValidatedEffect.fromValidated(
+                    self.annotation.borrowMut().effect_value = effect_value;
+                    self.annotation.borrowMut().effect = env.ValidatedEffect.fromValidated(
                         effect_value.list,
                         self.separator_at.?,
                     );
@@ -215,15 +226,15 @@ const DefineDriver = struct {
                     continue;
                 }
                 if (self.scope.kind() == .module_root) {
-                    self.qualified = try .init(
+                    self.qualified = .init(try .init(
                         evaluator.allocator(),
                         intern.namespaceId(evaluator.currentHome().?.name()),
                         self.name,
-                    );
+                    ));
                     self.phase = .qualify_name;
                 } else self.phase = .publish;
             },
-            .qualify_name => switch (try self.qualified.?.advance()) {
+            .qualify_name => switch (try self.qualified.?.borrowMut().advance()) {
                 .pending => budget -= 1,
                 .complete => |trace_word| {
                     self.trace_word = trace_word;
@@ -234,28 +245,28 @@ const DefineDriver = struct {
                 const word_binding = self.mode == .def or self.mode == .defp;
                 const private = self.mode == .defp or self.mode == .setp;
                 const module_root = self.scope.kind() == .module_root;
-                if (word_binding and self.item.? != .list)
+                if (word_binding and self.item.?.borrow() != .list)
                     return evaluator.fail(.type, "def expected a list body; use set for values");
-                if (module_root and word_binding and self.annotation.effect == null)
+                if (module_root and word_binding and self.annotation.borrow().effect == null)
                     return evaluator.fail(.domain, "module def/defp requires an effect declaration");
                 const name: intern.NamespaceName = @enumFromInt(self.name);
                 const visibility: env.Visibility = if (private) .private else .public;
-                if (self.publisher == null) self.publisher = if (module_root)
+                if (self.publisher == null) self.publisher = .init(if (module_root)
                     try self.scope.publishModuleCursor(name, self.trace_word.?, if (word_binding) .{ .word = .{
-                        .body = env.quotation(self.item.?.list) orelse
+                        .body = env.quotation(self.item.?.borrow().list) orelse
                             return evaluator.fail(.domain, "definition body has an invalid heap representation"),
                         .visibility = visibility,
-                        .effect = self.annotation.effect.?,
-                        .doc = self.annotation.doc_value,
-                    } } else .{ .value = .{ .item = self.item.?, .visibility = visibility } })
+                        .effect = self.annotation.borrow().effect.?,
+                        .doc = self.annotation.borrow().doc_value,
+                    } } else .{ .value = .{ .item = self.item.?.borrow(), .visibility = visibility } })
                 else
                     try self.scope.publishTopCursor(name, if (word_binding) .{ .word = .{
-                        .body = env.quotation(self.item.?.list) orelse
+                        .body = env.quotation(self.item.?.borrow().list) orelse
                             return evaluator.fail(.domain, "definition body has an invalid heap representation"),
-                        .effect = self.annotation.effect,
-                        .doc = self.annotation.doc_value,
-                    } } else .{ .value = self.item.? });
-                switch (self.publisher.?.advance() catch |err| switch (err) {
+                        .effect = self.annotation.borrow().effect,
+                        .doc = self.annotation.borrow().doc_value,
+                    } } else .{ .value = self.item.?.borrow() }));
+                switch (self.publisher.?.borrowMut().advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Frozen => return evaluator.fail(
                         .domain,
@@ -270,43 +281,36 @@ const DefineDriver = struct {
         return .yielded;
     }
 
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *DefineDriver) void {
-        if (self.normalizer) |*normalizer| normalizer.retire(releases);
-        if (self.effect_materializer) |*materializer| materializer.retire(releases);
-        if (self.qualified) |*qualified| qualified.deinit();
-        if (self.publisher) |*publisher| publisher.deinit();
-        if (self.effect_items) |items| allocator.free(items);
-        self.annotation.deinit(releases);
-        if (self.annotation_source) |item| releases.releaseValue(item);
-        if (self.item) |item| releases.releaseValue(item);
-        allocator.destroy(self);
-    }
+    pub const ownership: heap.DriverOwnership = .fields;
 };
 
 fn body(evaluator: *Machine) MachineError!void {
-    const requested = try popSymbol(evaluator);
+    const requested = try evaluator.popSymbol();
     return installLookup(evaluator, requested, .body);
 }
 
 fn doc(evaluator: *Machine) MachineError!void {
-    const requested = try popSymbol(evaluator);
+    const requested = try evaluator.popSymbol();
     return installLookup(evaluator, requested, .doc);
 }
 
 const LookupMode = enum { body, doc };
 fn installLookup(evaluator: *Machine, requested: u32, mode: LookupMode) MachineError!void {
-    const driver = try evaluator.allocator().create(LookupDriver);
-    driver.* = .{ .requested = requested, .mode = mode, .resolution = .init(evaluator, requested) };
-    evaluator.installWorkDriver(driver);
+    try evaluator.startDriver(LookupDriver{
+        .requested = requested,
+        .mode = mode,
+        .resolution = .init(machine.ResolutionCursor.init(evaluator, requested)),
+    });
 }
 const LookupDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
     requested: u32,
     mode: LookupMode,
-    resolution: machine.ResolutionCursor,
+    resolution: heap.Owned(machine.ResolutionCursor),
     pub fn advance(evaluator: *Machine, self: *LookupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.resolution.advance()) {
+        while (budget != 0) : (budget -= 1) switch (self.resolution.borrowMut().advance()) {
             .pending => {},
             .complete => |maybe_resolved| {
                 var resolved = maybe_resolved orelse return evaluator.undefinedName(self.requested);
@@ -328,66 +332,62 @@ const LookupDriver = struct {
         };
         return .yielded;
     }
-    pub fn destroy(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *LookupDriver) void {
-        self.resolution.deinit();
-        allocator.destroy(self);
-    }
 };
 
 fn which(evaluator: *Machine) MachineError!void {
-    const requested = try popSymbol(evaluator);
-    const driver = try evaluator.allocator().create(WhichDriver);
-    driver.* = .{
-        .requested = requested,
-        .resolution = .init(evaluator, requested),
-    };
-    evaluator.installWorkDriver(driver);
+    const requested = try evaluator.popSymbol();
+    try evaluator.startDriver(WhichDriver.init(evaluator, requested));
 }
 
 const WhichDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
     requested: u32,
-    resolution: ?machine.ResolutionCursor,
-    shadow_cursor: ?machine.ShadowCursor = null,
-    resolved: ?machine.Resolution = null,
-    shadows: ?[]u32 = null,
-    actions: ?[]reflection.Action = null,
+    resolution: ?heap.Owned(machine.ResolutionCursor),
+    shadow_cursor: ?heap.Owned(machine.ShadowCursor) = null,
+    resolved: ?heap.Owned(machine.Resolution) = null,
+    shadows: ?heap.Owned([]u32) = null,
+    actions: heap.Owned(reflection.ActionPlan),
     initialized: bool = false,
     shadow_index: usize = 0,
-    action_index: usize = 0,
-    plan: ?reflection.OwnedPlanCursor = null,
-    rendered: ?[]u8 = null,
+    rendered: ?heap.Owned([]u8) = null,
 
-    fn add(self: *WhichDriver, action: reflection.Action) void {
-        self.actions.?[self.action_index] = action;
-        self.action_index += 1;
+    fn init(evaluator: *Machine, requested: u32) WhichDriver {
+        return .{
+            .requested = requested,
+            .resolution = .init(machine.ResolutionCursor.init(evaluator, requested)),
+            .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
+        };
     }
-    fn initialize(self: *WhichDriver) void {
-        self.add(.{ .name = self.requested });
-        self.add(.{ .bytes = " -> " });
-        self.add(.{ .name = self.resolved.?.trace_word });
-        self.add(.{ .bytes = " " });
-        self.add(.{ .bytes = switch (self.resolved.?.lease.binding) {
+    fn add(self: *WhichDriver, action: reflection.Action) error{OutOfMemory}!void {
+        try self.actions.borrowMut().add(action);
+    }
+    fn initialize(self: *WhichDriver) error{OutOfMemory}!void {
+        try self.add(.{ .name = self.requested });
+        try self.add(.{ .bytes = " -> " });
+        try self.add(.{ .name = self.resolved.?.borrow().trace_word });
+        try self.add(.{ .bytes = " " });
+        try self.add(.{ .bytes = switch (self.resolved.?.borrow().lease.binding) {
             .word => "def",
             .value => "set",
             .builtin => "primitive",
             .native => "native",
         } });
-        self.add(.{ .bytes = " " });
-        self.add(.{ .bytes = @tagName(self.resolved.?.lease.visibility) });
-        if (self.resolved.?.home) |home| {
-            self.add(.{ .bytes = " generation " });
-            self.add(.{ .value = .{ .int = @intCast(home.generationNumber()) } });
+        try self.add(.{ .bytes = " " });
+        try self.add(.{ .bytes = @tagName(self.resolved.?.borrow().lease.visibility) });
+        if (self.resolved.?.borrow().home) |home| {
+            try self.add(.{ .bytes = " generation " });
+            try self.add(.{ .value = .{ .int = @intCast(home.generationNumber()) } });
         }
-        if (self.resolved.?.lease.effect) |effect| {
-            self.add(.{ .bytes = " " });
-            self.add(.{ .value = .{ .list = effect.header() } });
+        if (self.resolved.?.borrow().lease.effect) |effect| {
+            try self.add(.{ .bytes = " " });
+            try self.add(.{ .value = .{ .list = effect.header() } });
         }
-        switch (self.resolved.?.lease.binding) {
+        switch (self.resolved.?.borrow().lease.binding) {
             .native => |callable| {
-                self.add(.{ .bytes = " requires " });
+                try self.add(.{ .bytes = " requires " });
                 for (callable.instance.requirements(), 0..) |requirement, index| {
-                    if (index != 0) self.add(.{ .bytes = ", " });
-                    self.add(.{ .bytes = native_module.capabilityName(requirement.id) });
+                    if (index != 0) try self.add(.{ .bytes = ", " });
+                    try self.add(.{ .bytes = native_module.capabilityName(requirement.id) });
                 }
             },
             else => {},
@@ -398,13 +398,13 @@ const WhichDriver = struct {
         try evaluator.pollKernel();
         if (self.resolved == null) {
             var budget: usize = machine.kernel_poll_quantum;
-            while (budget != 0) : (budget -= 1) switch (self.resolution.?.advance()) {
+            while (budget != 0) : (budget -= 1) switch (self.resolution.?.borrowMut().advance()) {
                 .pending => {},
                 .complete => |maybe_resolved| {
-                    self.resolved = maybe_resolved orelse return evaluator.undefinedName(self.requested);
-                    self.resolution.?.deinit();
+                    self.resolved = .init(maybe_resolved orelse return evaluator.undefinedName(self.requested));
+                    self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.resolution = null;
-                    self.shadow_cursor = .init(evaluator, self.requested);
+                    self.shadow_cursor = .init(machine.ShadowCursor.init(evaluator, self.requested));
                     return .yielded;
                 },
             };
@@ -412,221 +412,183 @@ const WhichDriver = struct {
         }
         if (self.shadows == null) {
             var budget: usize = machine.kernel_poll_quantum;
-            while (budget != 0) : (budget -= 1) switch (try self.shadow_cursor.?.advance()) {
+            while (budget != 0) : (budget -= 1) switch (try self.shadow_cursor.?.borrowMut().advance()) {
                 .pending => {},
                 .complete => |shadows| {
-                    self.shadows = shadows;
-                    self.shadow_cursor.?.deinit();
+                    self.shadows = .init(shadows);
+                    self.shadow_cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.shadow_cursor = null;
-                    const fixed_count: usize = 8 +
-                        @as(usize, @intFromBool(self.resolved.?.home != null)) * 2 +
-                        @as(usize, @intFromBool(self.resolved.?.lease.effect != null)) * 2 +
-                        switch (self.resolved.?.lease.binding) {
-                            .native => |callable| 1 + callable.instance.requirements().len * 2 -
-                                @intFromBool(callable.instance.requirements().len != 0),
-                            else => 0,
-                        };
-                    self.actions = try evaluator.allocator().alloc(
-                        reflection.Action,
-                        fixed_count + shadows.len * 2,
-                    );
                     break;
                 },
             };
             if (self.shadows == null) return .yielded;
         }
-        if (!self.initialized) self.initialize();
+        if (!self.initialized) try self.initialize();
         var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0 and self.shadow_index != self.shadows.?.len) : (budget -= 1) {
-            self.add(.{ .bytes = "; shadows " });
-            self.add(.{ .name = self.shadows.?[self.shadow_index] });
+        while (budget != 0 and self.shadow_index != self.shadows.?.borrow().len) : (budget -= 1) {
+            try self.add(.{ .bytes = "; shadows " });
+            try self.add(.{ .name = self.shadows.?.borrow()[self.shadow_index] });
             self.shadow_index += 1;
         }
-        if (self.shadow_index != self.shadows.?.len) return .yielded;
-        if (self.plan == null) {
-            self.add(.{ .bytes = "\n" });
-            std.debug.assert(self.action_index == self.actions.?.len);
-            self.plan = .init(evaluator.allocator(), self.actions.?);
+        if (self.shadow_index != self.shadows.?.borrow().len) return .yielded;
+        if (!self.actions.borrow().isSealed()) {
+            try self.add(.{ .bytes = "\n" });
+            self.actions.borrowMut().seal();
         }
-        if (self.rendered == null) switch (try self.plan.?.advance(machine.kernel_poll_quantum)) {
+        if (self.rendered == null) switch (try self.actions.borrowMut().advance(machine.kernel_poll_quantum)) {
             .pending => return .yielded,
-            .complete => |bytes| self.rendered = bytes,
+            .complete => |bytes| self.rendered = .init(bytes),
         };
         if (evaluator.unit.inherited.console) |console| {
-            console.writeOutput(self.rendered.?, false) catch return writeFailure(evaluator);
+            console.writeOutput(self.rendered.?.borrow(), false) catch return writeFailure(evaluator);
             return .completed;
         }
         const output = try outputWriter(evaluator);
-        output.writeAll(self.rendered.?) catch return writeFailure(evaluator);
+        output.writeAll(self.rendered.?.borrow()) catch return writeFailure(evaluator);
         output.flush() catch return evaluator.fail(.io, "standard output flush failed");
         return .completed;
-    }
-    pub fn destroy(_: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *WhichDriver) void {
-        if (self.resolution) |*cursor| cursor.deinit();
-        if (self.shadow_cursor) |*cursor| cursor.deinit();
-        if (self.plan) |*plan| plan.deinit();
-        if (self.rendered) |rendered| allocator.free(rendered);
-        if (self.actions) |actions| allocator.free(actions);
-        if (self.shadows) |shadows| allocator.free(shadows);
-        if (self.resolved) |*resolved| resolved.deinit(allocator);
-        allocator.destroy(self);
     }
 };
 
 fn see(evaluator: *Machine) MachineError!void {
-    const requested = try popSymbol(evaluator);
-    const driver = try evaluator.allocator().create(SeeDriver);
-    driver.* = .{ .requested = requested, .resolution = .init(evaluator, requested) };
-    evaluator.installWorkDriver(driver);
+    const requested = try evaluator.popSymbol();
+    try evaluator.startDriver(SeeDriver.init(evaluator, requested));
 }
 
 const SeeDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
     requested: u32,
-    resolution: ?machine.ResolutionCursor,
-    resolved: ?machine.Resolution = null,
-    annotation_items: ?[]Value = null,
+    resolution: ?heap.Owned(machine.ResolutionCursor),
+    resolved: ?heap.Owned(machine.Resolution) = null,
+    annotation_items: ?heap.Owned([]Value) = null,
     annotation_index: usize = 0,
-    annotation_materializer: ?kernel_storage.ValueMaterializer = null,
-    annotation: ?Value = null,
-    actions: [144]reflection.Action = .{reflection.Action{ .bytes = "" }} ** 144,
-    action_count: usize = 0,
-    plan: ?reflection.OwnedPlanCursor = null,
-    rendered: ?[]u8 = null,
+    annotation_materializer: ?heap.Owned(kernel_storage.ValueMaterializer) = null,
+    annotation: ?heap.Owned(Value) = null,
+    actions: heap.Owned(reflection.ActionPlan),
+    plan_ready: bool = false,
+    rendered: ?heap.Owned([]u8) = null,
 
-    fn add(self: *SeeDriver, action: reflection.Action) void {
-        self.actions[self.action_count] = action;
-        self.action_count += 1;
+    fn init(evaluator: *Machine, requested: u32) SeeDriver {
+        return .{
+            .requested = requested,
+            .resolution = .init(machine.ResolutionCursor.init(evaluator, requested)),
+            .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
+        };
+    }
+    fn add(self: *SeeDriver, action: reflection.Action) error{OutOfMemory}!void {
+        try self.actions.borrowMut().add(action);
     }
 
-    fn buildPlan(self: *SeeDriver, allocator: std.mem.Allocator) void {
-        switch (self.resolved.?.lease.binding) {
-            .word => |source| self.add(.{ .value = .{ .list = env.quotationHeader(source) } }),
-            .value => |item| self.add(.{ .value = item }),
-            .builtin => self.add(.{ .bytes = "<primitive>" }),
+    fn buildPlan(self: *SeeDriver) error{OutOfMemory}!void {
+        switch (self.resolved.?.borrow().lease.binding) {
+            .word => |source| try self.add(.{ .value = .{ .list = env.quotationHeader(source) } }),
+            .value => |item| try self.add(.{ .value = item }),
+            .builtin => try self.add(.{ .bytes = "<primitive>" }),
             .native => {
-                self.add(.{ .bytes = "<native:" });
-                self.add(.{ .name = self.resolved.?.trace_word });
-                self.add(.{ .bytes = ">" });
+                try self.add(.{ .bytes = "<native:" });
+                try self.add(.{ .name = self.resolved.?.borrow().trace_word });
+                try self.add(.{ .bytes = ">" });
             },
         }
-        if (self.annotation) |annotation| {
-            self.add(.{ .bytes = " " });
-            self.add(.{ .value = annotation });
-        } else if (self.resolved.?.lease.effect) |effect| {
-            self.add(.{ .bytes = " " });
-            self.add(.{ .value = .{ .list = effect.header() } });
+        if (self.annotation) |*annotation| {
+            try self.add(.{ .bytes = " " });
+            try self.add(.{ .value = annotation.borrow() });
+        } else if (self.resolved.?.borrow().lease.effect) |effect| {
+            try self.add(.{ .bytes = " " });
+            try self.add(.{ .value = .{ .list = effect.header() } });
         }
-        switch (self.resolved.?.lease.binding) {
+        switch (self.resolved.?.borrow().lease.binding) {
             .native => |callable| {
-                self.add(.{ .bytes = " requires " });
+                try self.add(.{ .bytes = " requires " });
                 for (callable.instance.requirements(), 0..) |requirement, index| {
-                    if (index != 0) self.add(.{ .bytes = ", " });
-                    self.add(.{ .bytes = native_module.capabilityName(requirement.id) });
+                    if (index != 0) try self.add(.{ .bytes = ", " });
+                    try self.add(.{ .bytes = native_module.capabilityName(requirement.id) });
                 }
             },
             else => {},
         }
-        self.add(.{ .bytes = " '" });
-        self.add(.{ .name = self.resolved.?.trace_word });
-        self.add(.{ .bytes = switch (self.resolved.?.lease.binding) {
-            .value => if (self.resolved.?.lease.visibility == .private) " setp\n" else " set\n",
-            .word => if (self.resolved.?.lease.visibility == .private) " defp\n" else " def\n",
+        try self.add(.{ .bytes = " '" });
+        try self.add(.{ .name = self.resolved.?.borrow().trace_word });
+        try self.add(.{ .bytes = switch (self.resolved.?.borrow().lease.binding) {
+            .value => if (self.resolved.?.borrow().lease.visibility == .private) " setp\n" else " set\n",
+            .word => if (self.resolved.?.borrow().lease.visibility == .private) " defp\n" else " def\n",
             .builtin => " def\n",
             .native => " def\n",
         } });
-        self.plan = .init(allocator, self.actions[0..self.action_count]);
+        self.actions.borrowMut().seal();
+        self.plan_ready = true;
     }
 
     pub fn advance(evaluator: *Machine, self: *SeeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         if (self.resolved == null) {
             var budget: usize = machine.kernel_poll_quantum;
-            while (budget != 0) : (budget -= 1) switch (self.resolution.?.advance()) {
+            while (budget != 0) : (budget -= 1) switch (self.resolution.?.borrowMut().advance()) {
                 .pending => {},
                 .complete => |maybe_resolved| {
-                    self.resolved = maybe_resolved orelse return evaluator.undefinedName(self.requested);
-                    self.resolution.?.deinit();
+                    self.resolved = .init(maybe_resolved orelse return evaluator.undefinedName(self.requested));
+                    self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.resolution = null;
                     break;
                 },
             };
             if (self.resolved == null) return .yielded;
         }
-        const document = self.resolved.?.lease.doc;
-        if (self.plan == null and document != null) {
-            const effect_count: usize = if (self.resolved.?.lease.effect) |effect|
+        const document = self.resolved.?.borrow().lease.doc;
+        if (!self.plan_ready and document != null) {
+            const effect_count: usize = if (self.resolved.?.borrow().lease.effect) |effect|
                 @intCast(effect.header().length())
             else
                 0;
-            if (self.annotation_items == null) self.annotation_items = try evaluator.allocator().alloc(
+            if (self.annotation_items == null) self.annotation_items = .init(try evaluator.allocator().alloc(
                 Value,
                 effect_count + 2,
-            );
+            ));
             const end = @min(
                 self.annotation_index + machine.kernel_poll_quantum,
                 effect_count,
             );
             while (self.annotation_index != end) : (self.annotation_index += 1) {
-                self.annotation_items.?[self.annotation_index] = list.atUnchecked(
-                    .{ .list = self.resolved.?.lease.effect.?.header() },
+                self.annotation_items.?.borrow()[self.annotation_index] = list.atUnchecked(
+                    .{ .list = self.resolved.?.borrow().lease.effect.?.header() },
                     self.annotation_index,
                 );
             }
             if (self.annotation_index != effect_count) return .yielded;
-            self.annotation_items.?[effect_count] = .{ .word = try intern.intern(":") };
-            self.annotation_items.?[effect_count + 1] = .{
+            self.annotation_items.?.borrow()[effect_count] = .{ .word = try intern.intern(":") };
+            self.annotation_items.?.borrow()[effect_count + 1] = .{
                 .list = env.documentationHeader(document.?),
             };
-            if (self.annotation_materializer == null) self.annotation_materializer = .init(
+            if (self.annotation_materializer == null) self.annotation_materializer = .init(kernel_storage.ValueMaterializer.init(
                 evaluator.allocator(),
-                self.annotation_items.?,
-            );
-            switch (try self.annotation_materializer.?.advance(machine.kernel_poll_quantum)) {
+                self.annotation_items.?.borrow(),
+            ));
+            switch (try self.annotation_materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
                 .pending => return .yielded,
                 .complete => |annotation| {
-                    self.annotation_materializer.?.deinit();
+                    self.annotation_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.annotation_materializer = null;
-                    self.annotation = annotation;
-                    self.buildPlan(evaluator.allocator());
+                    self.annotation = .init(annotation);
+                    try self.buildPlan();
                     return .yielded;
                 },
             }
         }
-        if (self.plan == null) self.buildPlan(evaluator.allocator());
-        if (self.rendered == null) switch (try self.plan.?.advance(machine.kernel_poll_quantum)) {
+        if (!self.plan_ready) try self.buildPlan();
+        if (self.rendered == null) switch (try self.actions.borrowMut().advance(machine.kernel_poll_quantum)) {
             .pending => return .yielded,
-            .complete => |bytes| self.rendered = bytes,
+            .complete => |bytes| self.rendered = .init(bytes),
         };
         if (evaluator.unit.inherited.console) |console| {
-            console.writeOutput(self.rendered.?, false) catch return writeFailure(evaluator);
+            console.writeOutput(self.rendered.?.borrow(), false) catch return writeFailure(evaluator);
             return .completed;
         }
         const output = try outputWriter(evaluator);
-        output.writeAll(self.rendered.?) catch return writeFailure(evaluator);
+        output.writeAll(self.rendered.?.borrow()) catch return writeFailure(evaluator);
         output.flush() catch return evaluator.fail(.io, "standard output flush failed");
         return .completed;
     }
-
-    pub fn destroy(releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, self: *SeeDriver) void {
-        if (self.resolution) |*cursor| cursor.deinit();
-        if (self.annotation_materializer) |*materializer| materializer.retire(releases);
-        if (self.plan) |*plan| plan.deinit();
-        if (self.rendered) |rendered| allocator.free(rendered);
-        if (self.annotation) |annotation| releases.releaseValue(annotation);
-        if (self.annotation_items) |items| allocator.free(items);
-        if (self.resolved) |*resolved| resolved.deinit(allocator);
-        allocator.destroy(self);
-    }
 };
-
-fn popSymbol(evaluator: *Machine) MachineError!u32 {
-    var item = try evaluator.popValue();
-    defer item.deinit();
-    return switch (item.borrow()) {
-        .symbol => |id| id,
-        else => evaluator.typeError("a symbol name"),
-    };
-}
 
 fn outputWriter(evaluator: *Machine) MachineError!*std.Io.Writer {
     return evaluator.unit.output orelse return evaluator.fail(.io, "standard output is unavailable");

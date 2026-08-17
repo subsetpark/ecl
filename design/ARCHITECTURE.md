@@ -113,12 +113,20 @@ generation (permanently, per decision 21).
   byte, release, and materialization cursors expose bounded chunks and report
   suspension before another quantum. Standard-library bulk operations cannot
   hide unbounded work behind one logical transition.
+- **Polling has one vocabulary.** Finite cursors return `poll.Progress(T)`,
+  streams return `poll.StreamProgress(T)`, and blocking facades use the shared
+  `drive` helpers. Stable bottom-up sorting is one parameterized
+  `MergeSortCursor`; reflection name ordering and language `grade` supply only
+  their payload and resumable comparator. Resumption and stability therefore
+  have one implementation.
 - **Construction has two approved shapes.** A known-size result is allocated
   exactly once and initialized through a work cursor. An unknown-size result
   uses linked fixed chunks, then materializes exactly once through a work
   cursor. Reader forms, binder output, string provenance, span tables, and the
   session span archive use this substrate; none grows by relocating accumulated
-  state or by automatic hash-table rehashing.
+  state or by automatic hash-table rehashing. Homogeneous fill phases share
+  `ChunkedMaterializer`; action-producing reflection drivers accumulate through
+  `ActionPlan`, which owns counting, exact allocation, filling, and rendering.
 - **Bounded probes are lazy.** Formatter group lookahead uses a fixed-capacity
   command stack and expands concatenations one child at a time. Its step and
   stack ceilings apply before child expansion, and width scans stop once the
@@ -710,6 +718,26 @@ out). Kernels never own threads.
   exact-capacity result construction the same constant-time abandonment rule;
   `OwnedValueChain` links fixed generic-spine chunks for unknown-size reader
   results while preserving a single retirement root.
+  Scheduler continuation fields mark transferable ownership as
+  `heap.Owned(T)`; bare fields are borrows or scalar state. A compile-time field
+  walk retires those markers and rejects payload types without a disposal
+  protocol. Each owned payload's disposal receives only that payload; resources
+  needing correlated state are one owned value (for example, an open source
+  file owns both its file handle and I/O capability). Disposal never receives
+  the enclosing driver, so declaration order carries no lifetime meaning.
+  A structured payload exposing both `retire` and `deinit` must select an
+  `OwnedDisposal` at compile time; partial-state materializers select `retire`,
+  while an omitted or contradictory selection fails compilation.
+  Every scheduler, application, and fallback driver declares one exhaustive
+  `DriverOwnership`: `fields` forbids destructor hooks and always uses the
+  generated walk, `bounded_retirement` requires the intrusive node and
+  `advanceRetirement`, and `self_owned` is restricted to address-stable
+  aggregate state whose internal borrows require coordinated teardown. All
+  erased adapters and direct detach paths call the same policy dispatcher.
+  `Machine.startDriver` consumes the whole initialized value on both success
+  and allocation failure. The only separate entry accepts a heap object whose
+  type declares address-stable construction; it cannot be used by an ordinary
+  driver.
   Typed intrusive retirement nodes also own snapshot chains, fixed reader
   chunks, abandoned source drivers, binding cells, environments, scopes, and
   module generations; their generated adapter advances one bounded cleanup
@@ -755,14 +783,11 @@ out). Kernels never own threads.
   Copy-on-write replacement swaps the destination's old representation into
   the consumed source wrapper and retires that wrapper through the caller's
   shared domain; representation adoption has no allocator-only blocking
-  adapter. Every classified production file passes the same bounded-destructor
-  check; adding a component cannot omit it through a second hand-maintained
-  list. The audit rejects loops, blocking calls, and synchronous materializer
-  teardown in release-capable destructors, properties Zig signatures cannot
-  express. Representation validators enforce the single host capability and
-  worker-facade shapes at `comptime`; the audit is limited to unsafe casts that
-  could forge `HostCleanup` or `ExecutionAccess`, plus casts at the owned erased
-  callback seams. Behavioral tests may create a host explicitly;
+  adapter. Driver destruction is selected by the exhaustive compile-time
+  ownership policy rather than a source scan for destructor names. The audit is
+  limited to boundaries the compiler cannot represent directly, including
+  unsafe casts that could forge `HostCleanup` or `ExecutionAccess` and casts at
+  the owned erased callback seams. Behavioral tests may create a host explicitly;
   allocator-only compatibility cleanup is compiled only into test builds.
 - **Observation and execution capabilities do not expose host ownership.**
   `Env` returns a copyable opaque `EnvironmentView`, never a mutable
