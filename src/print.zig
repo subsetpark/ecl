@@ -525,7 +525,7 @@ fn expectPrint(expected: []const u8, item: Value) !void {
     try std.testing.expectEqualStrings(expected, actual);
 }
 
-test "canonical printer matches the Rust proof-of-concept fixtures" {
+test "canonical printer renders the public value syntax" {
     const allocator = std.testing.allocator;
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();

@@ -140,7 +140,7 @@ const repository_verification_files = [_][]const u8{
     "test/e2e.zig",
     "test/native_runtime.zig",
     "test/idiom_differential.zig",
-    "test/oracle_differential.zig",
+    "test/reference_snapshots.zig",
     "test/scheduler_shell_property.zig",
     "test/native/sample.zig",
     "test/native/malformed.zig",

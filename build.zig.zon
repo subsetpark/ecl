@@ -8,6 +8,10 @@
             .url = "https://github.com/CogitatorTech/minish/archive/refs/tags/v0.3.0.tar.gz",
             .hash = "minish-0.3.0-SQtSTYI3AgCxWdWbKxS_lvmfbp0wJk29ZW5C9CozJaxm",
         },
+        .ohsnap = .{
+            .url = "https://github.com/mnemnion/ohsnap/archive/refs/tags/v0.5.1.tar.gz",
+            .hash = "ohsnap-0.5.1-iWxzyj2qAADjYk9IZ2awVmEM9vhRHvz114xTRkKQVM_S",
+        },
     },
     .paths = .{
         "build.zig",

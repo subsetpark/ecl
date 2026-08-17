@@ -1,8 +1,7 @@
 # ecl
 
-ecl is a clean-slate homoiconic concatenative array language. The real
-interpreter is being built in Zig at the repository root; the earlier Rust
-walking skeleton remains a frozen executable semantics oracle.
+ecl is a clean-slate homoiconic concatenative array language. Its reference
+implementation is the Zig interpreter at the repository root.
 
 ## Repository map
 
@@ -22,10 +21,6 @@ walking skeleton remains a frozen executable semantics oracle.
   serialization, and an embedded source prelude.
   Test suites and their helpers live under [`src/tests/`](src/tests/);
   build-only architecture checks live under [`src/tools/`](src/tools/).
-- [`poc/rust/`](poc/rust/) contains the Rust walking-skeleton interpreter and
-  its examples and tests. It is a standalone Cargo project and is not evolved
-  with the real interpreter.
-
 To test the Zig implementation with the pinned Zig 0.16 toolchain:
 
 ```sh
@@ -43,6 +38,7 @@ zig build test-native-runtime
 zig build fuzz
 zig build source-audit
 zig build differential
+zig build test-snapshots
 ```
 
 `zig build fuzz` runs the seed corpus as an ordinary smoke test. Add a bounded
@@ -193,25 +189,27 @@ Definition docstrings are the one reflowable string position: their canonical
 text folds physical prose lines, retains paragraphs and Markdown `- ` items,
 and therefore remains unchanged when the formatted definition is loaded.
 
-To exercise the Rust semantics oracle:
+To check the promoted CLI reference behavior:
 
 ```sh
-cargo test --locked --manifest-path poc/rust/Cargo.toml
-cargo build --locked --manifest-path poc/rust/Cargo.toml
-zig build oracle-differential \
-  -Doracle-exe=poc/rust/target/debug/ecl
+zig build test-snapshots
 ```
 
-The in-process differential requires a fast-path hit for every registered
-idiom and compares it with forced-generic execution. Successful applications
-must have identical representations and float bits; failing applications must
-both fail, while their exact error dictionaries may evolve independently. The
-oracle differential covers every shared M5/M6 word
-without changing the frozen Rust tree.
-Normal `zig build test` remains independent of Cargo; `flip`, `reshape`,
-`group`, `cmp`, `type`, `to-dict`, the transcendental floor, and the extended
-list-`put`/cycling-`take`/count-`where` semantics are post-freeze Zig additions
-with native unit and real-binary acceptance coverage.
+The checked-in `ohsnap` transcript records the exact exit status, stdout, and
+stderr from the Zig executable for the 74 CLI cases that formerly defined the
+shared M5/M6 comparison surface. Updating it is an explicit source edit and
+review event. It also runs as part of ordinary `zig build test`; the named step
+keeps the semantic-reference gate independently runnable. To accept an
+intentional change, put `<!update>` at the start of the inline snapshot, run
+the named step once to rewrite it, inspect the diff, and rerun the step.
+
+The separate in-process differential requires a fast-path hit for every
+registered idiom and compares it with forced-generic Zig execution. Successful
+applications must have identical representations and float bits; failing
+applications must both fail, while their exact error dictionaries may evolve
+independently. `flip`, `reshape`, `group`, `cmp`, `type`, `to-dict`, the
+transcendental floor, and the extended list-`put`/cycling-`take`/count-`where`
+semantics retain native unit and real-binary acceptance coverage.
 
 ## M6 quotation and source surface
 

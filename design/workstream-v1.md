@@ -34,24 +34,17 @@ Verified in the checkout (2026-08-16):
   records 119 tests across library/cross-layer and real-binary coverage;
   Debug, ReleaseSafe, ReleaseFast, named Linux TSan, formatting, and
   blocking ZLint are green, including builds.sr.ht job 1859966.
-- `poc/rust/` remains a **frozen, complete-for-its-scope walking
-  skeleton** (44 tests green): full grammar, unified values
-  with construction-time specialization (chars→string only), pervasion with
-  leading-axis broadcast and d.22 float semantics, contract-checked
-  combinators, crash-only `attempt` with outcome dicts, chained
-  environments with the full d.18 module system (registry, legacy
-  `defp`/`letp` spelling,
-  qualified access, `use`/`alias`, hot reload), binder lowering, and
-  error dicts. Its internals are disqualified for v1 by
-  ARCHITECTURE.md's disposition table (span-on-Value, boxed `Arc<[Value]>`
-  lists, no leaves, no interning, RwLock-per-lookup envs, eager traces).
+- The Zig executable is the **semantic reference**. A checked-in `ohsnap`
+  transcript records exact exit status, stdout, and stderr for the 74 CLI
+  cases promoted from the former cross-implementation comparison surface.
+  The superseded walking skeleton and its toolchain have been removed.
 - The real Zig interpreter is now implemented through M8 in the current
   checkout (on the M7 base at commit `6c7c970`). Its closed data plane includes
   pervasive leaf kernels,
   sequence/shape/order/group operations, immutable dict updates, Unicode
   text kernels, kind reflection, cycling/count-vector sequence operations,
-  the awk-floor transcendentals, exact whole-value `cmp`, and the separate
-  frozen-Rust differential job, isolated and inline combinators, guarded
+  the awk-floor transcendentals, exact whole-value `cmp`, and the promoted CLI
+  snapshot gate, isolated and inline combinators, guarded
   phrase recognition, and the documented embedded target-language prelude.
   Its ordinary lists, ordered dicts, `group`, `at`, `where`, `flip`, folds,
   and pervasive kernels provide the data-plane substrate for tabular work;
@@ -73,10 +66,9 @@ Verified in the checkout (2026-08-16):
 
 - **The RC/CoW/uniqueness machinery under true parallelism** — precise
   atomic counts, acquire-ordered uniqueness, the Perceus-style stack
-  ownership discipline, and publication edges. Subtle, cross-cutting,
-  and unproven in the skeleton (which leaned on Rust `Arc`). In Zig it
-  is hand-built. Mitigated by d.23's rules being written down and by the
-  differential harness.
+  ownership discipline, and publication edges. This is subtle,
+  cross-cutting, and hand-built in Zig. Mitigated by d.23's rules being
+  written down and by the differential harness.
 - **Host = Zig, pre-1.0.** Toolchain churn between Zig versions is
   real; `std.http`/TLS maturity is a known risk for the http module.
   Mitigations: pin the toolchain (`build.zig.zon` + CI), keep the http
@@ -176,10 +168,10 @@ architecture panel; full groundings in
 formatting, and blocking ZLint validated). Landed at commit `8295fd5`;
 CI green at builds.sr.ht job 1859694 with *instrumented* Linux TSan —
 the manifest gained `linux-headers`, since Zig builds its TSan runtime
-from source. Review fixes before landing included exact int/float
-comparison beyond 2^53, which also patched the poc oracle
-(`compare_int_float`, covering ordering comparisons — a fix beyond the
-original milestone sketch). ZLint was promoted from advisory to
+from source. Review fixes before landing included exact int/float comparison
+beyond 2^53 (`compare_int_float`, covering ordering comparisons — a fix beyond
+the original milestone sketch). That accepted behavior now lives in the
+promoted CLI snapshot. ZLint was promoted from advisory to
 blocking after the milestone landed clean under it.
 
 **Definition of Done**:
@@ -331,8 +323,8 @@ paths.
 ### Milestone 5: kernels-and-pervasion
 
 **Status**: executed in the working tree. Debug, ReleaseSafe, ReleaseFast,
-the named TSan suite, formatting, blocking ZLint, all 44 frozen Rust
-tests, and the CLI oracle differential are green locally. Its seven-patch
+the named TSan suite, formatting, blocking ZLint, the ported walking-skeleton
+coverage, and the promoted CLI snapshots are green locally. Its seven-patch
 design and formal contracts are complete; the durable
 implementation contract now lives in this workstream and the design documents.
 
@@ -363,11 +355,10 @@ and Unicode string kernels (`split join format`). Two semantics
 rulings from the 2026-08-12 gap scan land here: `take` beyond length
 cycles the data (K), and `where` generalizes from 0/1 masks to counts
 (each index replicated count times, K).
-Kernel unit tests cover every path and allocator failure; a separate CI
-job compares every shared M5 word with the untouched `poc/rust`, while a
-real-binary fixture locks Zig-only `flip`/`reshape`/`group`/`cmp` plus the
-post-freeze supplemental vocabulary and extended `put`/`take`/`where`
-semantics.
+Kernel unit tests cover every path and allocator failure; the promoted CLI
+snapshot locks every previously shared M5 word, while real-binary coverage
+locks `flip`/`reshape`/`group`/`cmp` plus the supplemental vocabulary and
+extended `put`/`take`/`where` semantics.
 
 The M5 `wrap`, `pair`, and `sort` bindings are ordinary target-word bodies
 assembled by Zig as temporary bootstrap scaffolding. They are not new
@@ -485,8 +476,8 @@ on every path (d.23).
 kernel and idiom entry against the generic frame-machine path for value
 equality, representation parity (brackets), the same success/failure outcome,
 and bit-identical successful floats, with a required fast-path hit so fallback cannot
-pass vacuously. The skeleton's full 44-test suite is ported and green
-against the Zig binary.
+pass vacuously. The former walking skeleton's full 44-test behavior surface
+is ported and green against the Zig binary.
 
 **Why this is a safe pause point**: ecl is feature-complete except
 concurrency and stdlib; the harness guards everything behind it, and the
@@ -954,14 +945,11 @@ reserved capability ids and the ABI-v1 additive-tail rule without an ABI v2.
 
 ## Decisions Made
 
-- **Host = Zig** (user ruling, this session). Consequences absorbed
-  into the plan: the kernel matrix generates via comptime (replacing
-  the Rust macro plan), SIMD tier 1 rides `@Vector` (no nightly-Rust
-  caveat), RC/atomics are hand-built on `@atomicRmw` with the d.23
-  orderings, arc-swap becomes plain atomic pointer swap over immutable
-  snapshots, and `Result<Box<EclError>>` becomes a Zig error union with
-  an out-param error dict. ARCHITECTURE.md's mechanisms are host-
-  agnostic; its Rust-specific grounding notes stay as history.
+- **Host = Zig** (user ruling, this session). Consequences absorbed into the
+  plan: the kernel matrix generates via comptime, SIMD rides `@Vector`,
+  RC/atomics use `@atomicRmw` with the d.23 orderings, publication is an atomic
+  pointer swap over immutable snapshots, and runtime failures use Zig error
+  unions with an out-param error dict.
 - **Zig is the kernel; ecl source is the prelude.** Irreducible or
   runtime-bound [P] operations live in the host, while shipped [E] core
   words are authored in `src/prelude.ecl`, embedded into the binary, and
@@ -971,9 +959,9 @@ reserved capability ids and the ABI-v1 additive-tail rule without an ABI v2.
   staging. A generated system image or snapshot is permitted only as a
   profile-justified post-v1 startup optimization; it must be reproducible
   from the same ecl source and cannot become a second semantic authority.
-- **Fresh implementation at repo root; `poc/rust` frozen as the
-  executable semantics oracle.** Its 44 tests become cross-
-  implementation fixtures (M5/M6); it is never evolved.
+- **The Zig executable is the semantic reference.** The former
+  cross-implementation M5/M6 cases are exact CLI snapshots, and the
+  superseded walking skeleton is not retained as a second authority.
 - **M5 kernel boundary and ownership are frozen.** Dispatch reuses
   `value.HeapKind` rather than translating to a second tag enum. A
   kernel entry consumes its operands and returns one owned result;
@@ -1009,13 +997,11 @@ reserved capability ids and the ABI-v1 additive-tail rule without an ABI v2.
   because
   its specified body needs M6's `each`. M5 does not preempt M6's idiom
   table, resolution guards, or fast-vs-frame-machine harness.
-- **The Rust oracle is a separate CI obligation.** Ordinary `zig build
-  test` needs no Rust toolchain. SourceHut separately builds the frozen
-  PoC and exhaustively maps every shared M5 word; successes compare
-  canonical stdout, errors compare semantic kind/word, and Zig-only
-  `flip`/`reshape`/`group`/`cmp`, kind reflection, collection constructors,
-  canonical `str`, transcendentals, and extended `put`/`take`/`where` behavior use native
-  unit proofs plus a real-binary acceptance fixture.
+- **The promoted CLI reference is a snapshot CI obligation.** `zig build
+  test-snapshots` executes all 74 promoted cases and compares exact exit
+  status, stdout, and stderr with the checked-in `ohsnap` transcript. It also
+  runs under ordinary `zig build test`. Supplemental vocabulary uses public
+  CLI acceptance coverage alongside the focused runtime properties.
 - **Benchmark baseline harness is OUT of v1** (user ruling): v1's gate
   is the differential harness, not numbers. Performance work is
   post-v1, against the invariants v1 preserved.
@@ -1300,9 +1286,8 @@ script in CI.
 - **DoD-12 — hot reload heals all access paths**
   - **Assert**: re-registering a module updates qualified, `use`d, and
     aliased callers.
-  - **Verify by** `cmd`: fixture `hot-reload.ecl` (ports
-    `poc/rust/examples/modules.ecl` and adds mandatory effects to its
-    module words).
+  - **Verify by** `cmd`: fixture `hot-reload.ecl`, whose module words carry
+    mandatory effects.
   - **Expected**: outputs `11 21 31 12 22 32` (one per line).
   - **Traces to**: Milestone 4 — registry generation swap.
 

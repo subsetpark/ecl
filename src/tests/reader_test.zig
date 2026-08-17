@@ -1,4 +1,4 @@
-//! Cross-layer reader properties and Rust-oracle fixture parity.
+//! Cross-layer reader properties and canonical fixture parity.
 
 const std = @import("std");
 const minish = @import("minish");

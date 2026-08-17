@@ -61,8 +61,8 @@ generation (permanently, per decision 21).
   NaN-boxing is rejected decisively: full-range int64 with
   overflow-as-error (d.4) cannot live in a 48-bit payload — CBQN can
   NaN-box because BQN numbers *are* f64; ecl is not that language.
-  In Rust this is a niche-optimized enum; the data stack is a plain
-  `Vec<Value>`.
+  In Zig this is a tagged union; the data stack is contiguous `Value`
+  storage.
 - **Heap header (16 bytes):** `{ rc: AtomicU32, meta: u32, len: u64 }` —
   meta holds the representation tag and flags. Capacity is an explicit
   field in the leaf payload for v1 (the kdb+ trick of deriving capacity
@@ -623,9 +623,9 @@ Three levels, each kept in its lane:
 
 1. **SIMD lanes** inside one kernel loop — the default, ~ns/element.
    v1 ships tier 1 only: autovectorization-friendly loop shapes
-   (monomorphic, branchless bodies, block fault masks, scalar tails) on
-   stable Rust — never nightly `std::simd`. Tier 2 (explicit portable
-   SIMD via stable `target_feature`/multiversioning for compress, radix
+   (monomorphic, branchless bodies, block fault masks, scalar tails) in
+   Zig. Tier 2 (explicit `@Vector` kernels and target-feature
+   multiversioning for compress, radix
    histograms, packed compares) and tier 3 (per-ISA variants selected at
    startup — the Highway/ISPC ahead-of-time model, CBQN/Singeli as the
    array-language proof) are profiling-gated, with one authoring
@@ -1049,6 +1049,13 @@ Built before the second kernel exists:
 This is the cheapest guard on the entire "fast paths are unobservable"
 doctrine — most soundness holes the adversarial review found would have
 been caught by it.
+
+The Zig executable is also the semantic reference. `zig build
+test-snapshots` runs the real CLI over the promoted reference corpus and
+compares exact exit status, stdout, and stderr with one checked-in `ohsnap`
+transcript. That corpus preserves the former cross-implementation comparison
+surface without retaining a second implementation. Snapshot changes are
+intentional review events, and the same gate is part of `zig build test`.
 
 ## Allocation-failure test topology
 

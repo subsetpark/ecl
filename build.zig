@@ -5,6 +5,12 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const minish = b.dependency("minish", .{}).module("minish");
+    const ohsnap = b.dependency("ohsnap", .{
+        .target = target,
+        .optimize = optimize,
+        .module_name = @as([]const []const u8, &.{"root"}),
+        .root_directory = @as([]const []const u8, &.{"test"}),
+    }).module("ohsnap");
     const native_abi = b.createModule(.{
         .root_source_file = b.path("src/native/abi.zig"),
         .target = target,
@@ -400,27 +406,21 @@ pub fn build(b: *std.Build) void {
     const differential_step = b.step("differential", "Compare automatic and generic idiom execution");
     differential_step.dependOn(&run_differential.step);
 
-    const oracle_step = b.step(
-        "oracle-differential",
-        "Compare shared semantics with the frozen Rust PoC",
+    const reference_options = b.addOptions();
+    reference_options.addOptionPath("zig_exe", exe.getEmittedBin());
+    const reference_mod = b.createModule(.{
+        .root_source_file = b.path("test/reference_snapshots.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    reference_mod.addOptions("reference_options", reference_options);
+    reference_mod.addImport("ohsnap", ohsnap);
+    const reference_tests = b.addTest(.{ .root_module = reference_mod });
+    const run_reference_tests = b.addRunArtifact(reference_tests);
+    const reference_step = b.step(
+        "test-snapshots",
+        "Check promoted Zig CLI behavior against reference snapshots",
     );
-    if (b.option([]const u8, "oracle-exe", "Path to the frozen Rust ecl executable")) |rust_exe| {
-        const oracle_options = b.addOptions();
-        oracle_options.addOptionPath("zig_exe", exe.getEmittedBin());
-        oracle_options.addOption([]const u8, "rust_exe", rust_exe);
-        const oracle_mod = b.createModule(.{
-            .root_source_file = b.path("test/oracle_differential.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        oracle_mod.addOptions("oracle_options", oracle_options);
-        const oracle_tests = b.addTest(.{ .root_module = oracle_mod });
-        const run_oracle_tests = b.addRunArtifact(oracle_tests);
-        oracle_step.dependOn(&run_oracle_tests.step);
-    } else {
-        const missing_oracle = b.addFail(
-            "oracle-differential requires -Doracle-exe=path/to/poc/rust/ecl",
-        );
-        oracle_step.dependOn(&missing_oracle.step);
-    }
+    reference_step.dependOn(&run_reference_tests.step);
+    test_step.dependOn(&run_reference_tests.step);
 }
