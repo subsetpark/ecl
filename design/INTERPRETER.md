@@ -134,9 +134,13 @@ primitives, operationalized as two rules:
 - **Deep binding** (chain search: child → session → core; module → its
   uses → core). Chains are structurally short because quotations capture
   nothing.
-- **Binding cells:** `def`/`set` replacement publishes one complete
-  immutable snapshot atomically: binding, visibility, home, effect,
-  documentation, and compiled form. Omitting metadata clears it in the new
+- **Binding cells:** a binding is one closed sum — a source-defined word
+  body, a host builtin, or a native callable. There is no kind tag beyond
+  that and no value arm: constants are word bodies holding a literal
+  capture, so resolution never has to ask whether a name pushes or
+  applies. `def`/`set` replacement publishes one complete immutable
+  snapshot atomically: binding, visibility, home, effect, documentation,
+  and compiled form. Omitting metadata clears it in the new
   snapshot; extant leases retain the old snapshot's body and metadata
   until release. Every future resolution heals by construction, so late
   binding needs zero invalidation. Shape changes (name create/delete,
@@ -615,6 +619,12 @@ This lets compact source definitions remain authoritative while still
 reaching pervasive numeric kernels and allocation-saving
 sequence/dictionary paths. `neg`, `abs`, `mod`, `<>`, `<=`, `>=`, `and`,
 `or`, `first`, `rest`, `reverse`, `distinct`, and `vals` use that bridge;
+the literal-capture shape `((v) first)` that `literal`, `partial`, and
+`set` produce is a pattern atom of its own at `each` entry, so a
+capture-headed quotation reaches the same constant-operand kernels a bare
+constant does — guarded on `first` resolving to its core source binding
+and on the capture being a one-element list, and falling through
+generically otherwise;
 `sort = (dup grade at)` runs a direct sort, and `sum = (0 (+) fold)`
 reaches the sum kernel through fold's entry recognition. Cheap
 compositions such as `over`, `compose`, `str`, and `dip` have no host
@@ -636,9 +646,11 @@ source with no public dual representation.
 
 - Namespace publication accepts `NamespaceName`, produced by the polled
   validator, rather than a raw intern id. Top-level and module
-  publications are different tagged types; module callables require
-  `ValidatedEffect`, values cannot carry one, and the module-root scope
-  supplies the single coherent home.
+  publications are different tagged types — top-level publication is a
+  word body, module publication is a word body or a native callable, and
+  both module arms require a `ValidatedEffect`, so every module binding
+  carries a live contract. The module-root scope supplies the single
+  coherent home.
 - An unpublished module generation is held by an opaque, consumable
   `OwnedCandidate`. Registry publication consumes that capability;
   rollback releases only the provisional guard. Tasks spawned before

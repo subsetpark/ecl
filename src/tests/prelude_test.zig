@@ -7,6 +7,7 @@ const modules = @import("../modules.zig");
 const spans = @import("../spans.zig");
 const intern = @import("../intern.zig");
 const heap = @import("../heap.zig");
+const list = @import("../list.zig");
 
 test "embedded prelude exposes source bodies and derived dataflow" {
     try support.expectStacks(&.{
@@ -64,16 +65,17 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "6 'word",
         },
         .{
-            .name = "bulk partial application",
-            .source = "[2 3] (+) partial-all call (type) first 7 2 pack (pop type) partial-all call",
+            .name = "quotation with initial values",
+            .source = "[2 3] (+) with call (type) first 7 2 pack (pop type) with call",
             .expected = "5 'word",
         },
         .{
-            .name = "seeded attempts and tasks",
+            .name = "seeded attempts tasks and modules",
             .source = "[] (42) attempt-with [2 3] (+) attempt-with " ++
                 "[2 3] (+) spawn-with await [2 0] (/) attempt-with ok? " ++
-                "[2 3] (+) attempt-with [2 3] (+) spawn-with await match",
-            .expected = "{'ok [42]} {'ok [5]} {'ok [5]} 0 1",
+                "[2 3] (+) attempt-with [2 3] (+) spawn-with await match " ++
+                "[4 5] 'seeded (+ 'sum set) module-with seeded.sum",
+            .expected = "{'ok [42]} {'ok [5]} {'ok [5]} 0 1 9",
         },
         .{ .name = "results", .source = "(2 3 +) attempt ok? (2 3 +) attempt or-raise (missing) attempt 9 or-else", .expected = "1 [5] 9" },
         .{
@@ -108,17 +110,17 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose bodies and nonempty documentation" {
     const names = [_][]const u8{
-        "compose", "first",       "wrap",         "literal",    "dip",    "over",
-        "partial", "partial-all", "attempt-with", "spawn-with", "str",    "mod",
-        "neg",     "abs",         "<>",           "<=",         ">=",     "and",
-        "or",      "nip",         "keep",         "bi",         "tri",    "bi2",
-        "both",    "when",        "unless",       "case",       "signum", "clamp",
-        "last",    "pair",        "pack",         "append",     "rest",   "reverse",
-        "uncons",  "unappend",    "empty?",       "zip",        "min-of", "max-of",
-        "sort",    "distinct",    "at-path",      "vals",       "at-or",  "pairs",
-        "filter",  "partition",   "any?",         "all?",       "sum",    "prod",
-        "mean",    "print",       "inspect",      "fail",       "ok?",    "or-raise",
-        "or-else", "find",        "await-all",
+        "compose",  "first",   "wrap",         "literal",    "dip",         "over",
+        "partial",  "with",    "attempt-with", "spawn-with", "module-with", "str",
+        "mod",      "neg",     "abs",          "<>",         "<=",          ">=",
+        "and",      "or",      "nip",          "keep",       "bi",          "tri",
+        "bi2",      "both",    "when",         "unless",     "case",        "signum",
+        "clamp",    "last",    "pair",         "pack",       "append",      "rest",
+        "reverse",  "uncons",  "unappend",     "empty?",     "zip",         "min-of",
+        "max-of",   "sort",    "distinct",     "at-path",    "vals",        "at-or",
+        "pairs",    "filter",  "partition",    "any?",       "all?",        "sum",
+        "prod",     "mean",    "print",        "inspect",    "fail",        "ok?",
+        "or-raise", "or-else", "find",         "await-all",  "set",         "setp",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -153,7 +155,12 @@ fn expectInvalidPrelude(source: []const u8) !void {
         "invalid-prelude.ecl",
         source,
     ));
-    try building.installCore(try intern.trustedNamespace("still-writable"), .{ .value = .{ .int = 1 } });
+    const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 1 }});
+    defer heap.hostDomain(host.cleanup()).releaseValue(body);
+    try building.installCore(
+        try intern.trustedNamespace("still-writable"),
+        .{ .word = env.quotation(body.list).? },
+    );
 }
 
 test "bootstrap rejects malformed failing and unbalanced source" {

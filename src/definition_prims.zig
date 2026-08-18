@@ -13,7 +13,7 @@ const doc_text = @import("doc.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-const Mode = enum { def, set, defp, setp };
+const Mode = enum { def, defp };
 const Definition = struct { name: []const u8, primitive: env.PrimitiveImpl };
 
 fn bind(comptime mode: Mode) env.PrimitiveImpl {
@@ -27,9 +27,7 @@ fn bind(comptime mode: Mode) env.PrimitiveImpl {
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]Definition{
         .{ .name = "def", .primitive = bind(.def) },
-        .{ .name = "set", .primitive = bind(.set) },
         .{ .name = "defp", .primitive = bind(.defp) },
-        .{ .name = "setp", .primitive = bind(.setp) },
         .{ .name = "body", .primitive = body },
         .{ .name = "doc", .primitive = doc },
         .{ .name = "which", .primitive = which },
@@ -53,8 +51,7 @@ const Annotation = struct {
 
 fn define(evaluator: *Machine, mode: Mode) MachineError!void {
     try evaluator.require(2);
-    const word_binding = mode == .def or mode == .defp;
-    const private = mode == .defp or mode == .setp;
+    const private = mode == .defp;
     const scope = evaluator.currentScope();
     const module_root = scope.kind() == .module_root;
     if (private and !module_root) return evaluator.fail(.domain, "defp/setp are legal only in a module root");
@@ -63,7 +60,7 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
     defer item.deinit();
     const separator = try intern.intern("--");
     const colon = try intern.intern(":");
-    const phase: DefineDriver.Phase = if (word_binding and item.borrow() == .list)
+    const phase: DefineDriver.Phase = if (item.borrow() == .list)
         .scan_annotation
     else
         .validate_name;
@@ -242,30 +239,29 @@ const DefineDriver = struct {
                 },
             },
             .publish => {
-                const word_binding = self.mode == .def or self.mode == .defp;
-                const private = self.mode == .defp or self.mode == .setp;
+                const private = self.mode == .defp;
                 const module_root = self.scope.kind() == .module_root;
-                if (word_binding and self.item.?.borrow() != .list)
+                if (self.item.?.borrow() != .list)
                     return evaluator.fail(.type, "def expected a list body; use set for values");
-                if (module_root and word_binding and self.annotation.borrow().effect == null)
+                if (module_root and self.annotation.borrow().effect == null)
                     return evaluator.fail(.domain, "module def/defp requires an effect declaration");
                 const name: intern.NamespaceName = @enumFromInt(self.name);
                 const visibility: env.Visibility = if (private) .private else .public;
                 if (self.publisher == null) self.publisher = .init(if (module_root)
-                    try self.scope.publishModuleCursor(name, self.trace_word.?, if (word_binding) .{ .word = .{
+                    try self.scope.publishModuleCursor(name, self.trace_word.?, .{ .word = .{
                         .body = env.quotation(self.item.?.borrow().list) orelse
                             return evaluator.fail(.domain, "definition body has an invalid heap representation"),
                         .visibility = visibility,
                         .effect = self.annotation.borrow().effect.?,
                         .doc = self.annotation.borrow().doc_value,
-                    } } else .{ .value = .{ .item = self.item.?.borrow(), .visibility = visibility } })
+                    } })
                 else
-                    try self.scope.publishTopCursor(name, if (word_binding) .{ .word = .{
+                    try self.scope.publishTopCursor(name, .{ .word = .{
                         .body = env.quotation(self.item.?.borrow().list) orelse
                             return evaluator.fail(.domain, "definition body has an invalid heap representation"),
                         .effect = self.annotation.borrow().effect,
                         .doc = self.annotation.borrow().doc_value,
-                    } } else .{ .value = self.item.?.borrow() }));
+                    } }));
                 switch (self.publisher.?.borrowMut().advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Frozen => return evaluator.fail(
@@ -368,7 +364,6 @@ const WhichDriver = struct {
         try self.add(.{ .bytes = " " });
         try self.add(.{ .bytes = switch (self.resolved.?.borrow().lease.binding) {
             .word => "def",
-            .value => "set",
             .builtin => "primitive",
             .native => "native",
         } });
@@ -482,7 +477,6 @@ const SeeDriver = struct {
     fn buildPlan(self: *SeeDriver) error{OutOfMemory}!void {
         switch (self.resolved.?.borrow().lease.binding) {
             .word => |source| try self.add(.{ .value = .{ .list = env.quotationHeader(source) } }),
-            .value => |item| try self.add(.{ .value = item }),
             .builtin => try self.add(.{ .bytes = "<primitive>" }),
             .native => {
                 try self.add(.{ .bytes = "<native:" });
@@ -510,7 +504,6 @@ const SeeDriver = struct {
         try self.add(.{ .bytes = " '" });
         try self.add(.{ .name = self.resolved.?.borrow().trace_word });
         try self.add(.{ .bytes = switch (self.resolved.?.borrow().lease.binding) {
-            .value => if (self.resolved.?.borrow().lease.visibility == .private) " setp\n" else " set\n",
             .word => if (self.resolved.?.borrow().lease.visibility == .private) " defp\n" else " def\n",
             .builtin => " def\n",
             .native => " def\n",

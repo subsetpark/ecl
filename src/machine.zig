@@ -3753,10 +3753,9 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     const cross_home_effect = if (cross_home) resolved.lease.effect else null;
     const check: ?EffectCheck = if (cross_home) switch (resolved.lease.binding) {
         .builtin, .native => try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
-        .value, .word => null,
+        .word => null,
     } else null;
     switch (resolved.lease.binding) {
-        .value => |item| try self.pushBorrowed(item),
         .word => |body| {
             const body_header = env.quotationHeader(body);
             if (resolved.origin == .core) {

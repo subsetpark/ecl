@@ -34,23 +34,29 @@
  "Return a quotation that pushes an inert captured value before running another quotation.")
 'partial def
 
-### def partial-all
+### def with
 (((literal) each) dip append raze)
 (values quotation -- quotation :
  "Return a quotation that pushes every value from a list, in order and inertly, before running another quotation.")
-'partial-all def
+'with def
 
 ### def attempt-with
-(partial-all attempt)
+(with attempt)
 (values quotation -- result :
  "Run a quotation as an isolated attempted unit whose initial stack is the supplied list of values.")
 'attempt-with def
 
 ### def spawn-with
-(partial-all spawn)
+(with spawn)
 (values quotation -- task :
  "Spawn an isolated child task whose initial stack is the supplied list of values.")
 'spawn-with def
+
+### def module-with
+(swap (with) dip swap module)
+(values name quotation -- :
+ "Register a module whose isolated body receives every supplied value on its initial stack.")
+'module-with def
 
 ### def str
 (wrap "{}" format)
@@ -358,3 +364,15 @@
 (tasks -- results :
  "Wait for every task and return its result in input order.")
 'await-all def
+
+### def set
+(swap literal swap (-- value) swap def)
+(value name -- :
+ "Bind a value as a constant word in the current scope.")
+'set def
+
+### def setp
+(swap literal swap (-- value) swap defp)
+(value name -- :
+ "Bind a private module value as a constant word.")
+'setp def

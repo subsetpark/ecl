@@ -49,6 +49,10 @@ pub const ExpectedWord = struct {
 };
 pub const PatternAtom = union(enum) {
     constant,
+    /// A literal capture wrapper: a one-element list whose single element
+    /// becomes the operation's constant operand. `literal` builds this shape
+    /// as `((value) first)`, so `partial` prefixes it onto its quotation.
+    capture,
     literal,
     operation,
     word: ExpectedWord,
@@ -65,6 +69,17 @@ const operation_pattern = [_]PatternAtom{.operation};
 const constant_operation_pattern = [_]PatternAtom{ .constant, .operation };
 const constant_swap_operation_pattern = [_]PatternAtom{
     .constant,
+    .{ .word = .{ .spelling = "swap" } },
+    .operation,
+};
+const capture_operation_pattern = [_]PatternAtom{
+    .capture,
+    .{ .word = .{ .spelling = "first", .binding = .source } },
+    .operation,
+};
+const capture_swap_operation_pattern = [_]PatternAtom{
+    .capture,
+    .{ .word = .{ .spelling = "first", .binding = .source } },
     .{ .word = .{ .spelling = "swap" } },
     .operation,
 };
@@ -155,7 +170,7 @@ const vals_pattern = [_]PatternAtom{
 const unary_count = std.meta.fields(numeric.UnaryOp).len;
 const binary_count = std.meta.fields(numeric.BinaryOp).len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 3 + 8 + 14]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 5 + 8 + 14]RegistryEntry = undefined;
     var index: usize = 0;
     for (std.meta.fields(numeric.UnaryOp)) |field| {
         entries[index] = .{
@@ -183,7 +198,18 @@ pub const registry = blk: {
             .pattern = &operation_pattern,
             .operation = .{ .binary = operation },
         };
-        index += 3;
+        entries[index + 3] = .{
+            .context = .each,
+            .pattern = &capture_operation_pattern,
+            .operation = .{ .binary = operation },
+        };
+        entries[index + 4] = .{
+            .context = .each,
+            .pattern = &capture_swap_operation_pattern,
+            .operation = .{ .binary = operation },
+            .constant_left = true,
+        };
+        index += 5;
     }
     for ([_]numeric.BinaryOp{ .add, .mul, .min, .max }) |operation| {
         entries[index] = .{
@@ -397,6 +423,17 @@ const IdiomDriver = struct {
                         continue;
                     }
                     self.capture.constant = actual;
+                    self.atom_index += 1;
+                },
+                .capture => {
+                    if (self.capture.constant != null or
+                        actual != .list or
+                        actual.list.length() != 1)
+                    {
+                        self.rejectEntry();
+                        continue;
+                    }
+                    self.capture.constant = list.atUnchecked(actual, 0);
                     self.atom_index += 1;
                 },
                 .literal => {

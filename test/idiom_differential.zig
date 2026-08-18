@@ -3,6 +3,20 @@ const ecl = @import("ecl");
 
 const allocator = std.testing.allocator;
 
+/// Session bootstrap dominates this harness: every case builds two full
+/// sessions, and each evaluates the embedded prelude. `std.testing.allocator`
+/// captures a stack trace per allocation, which makes one bootstrap cost
+/// ~270ms against ~14ms without them. Dropping the traces keeps both leak
+/// detection and the safety checks; a leak still fails the run, just without
+/// an allocation site — which the failing case's logged source already gives.
+/// Source strings stay on `std.testing.allocator`, where the volume is small
+/// and the attribution is worth having.
+const SessionHeap = std.heap.DebugAllocator(.{ .stack_trace_frames = 0 });
+
+fn retireHeap(heap: *SessionHeap) void {
+    if (heap.deinit() == .leak) std.debug.panic("idiom differential leaked session memory", .{});
+}
+
 const Variant = enum { atom, empty, spine, float, failure };
 
 test "every idiom entry hits across values empties spines floats and failures" {
@@ -28,8 +42,12 @@ const Execution = struct {
     }
 };
 
-fn execute(source: []const u8, mode: ecl.machine.IdiomMode) !Execution {
-    var runtime = try ecl.session.Session.init(allocator, &.{});
+fn execute(
+    source: []const u8,
+    mode: ecl.machine.IdiomMode,
+    session_allocator: std.mem.Allocator,
+) !Execution {
+    var runtime = try ecl.session.Session.init(session_allocator, &.{});
     errdefer runtime.deinit();
     runtime.setIdiomMode(mode);
     const failure = switch (try runtime.runUnit("<idiom-differential>", source)) {
@@ -41,9 +59,13 @@ fn execute(source: []const u8, mode: ecl.machine.IdiomMode) !Execution {
 }
 
 fn compareExecutions(source: []const u8) !void {
-    var automatic = try execute(source, .automatic);
+    var automatic_heap: SessionHeap = .init;
+    defer retireHeap(&automatic_heap);
+    var generic_heap: SessionHeap = .init;
+    defer retireHeap(&generic_heap);
+    var automatic = try execute(source, .automatic, automatic_heap.allocator());
     defer automatic.deinit();
-    var generic = try execute(source, .generic_only);
+    var generic = try execute(source, .generic_only, generic_heap.allocator());
     defer generic.deinit();
     try std.testing.expectEqual(@as(u64, 1), automatic.runtime.lastIdiomHits());
     try std.testing.expectEqual(@as(u64, 0), generic.runtime.lastIdiomHits());
@@ -128,12 +150,22 @@ fn phraseSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
     errdefer result.deinit(allocator);
     for (entry.pattern, 0..) |atom, index| {
         if (index > 0) try result.append(allocator, ' ');
-        try result.appendSlice(allocator, switch (atom) {
-            .constant => binaryConstant(entry.operation.binary, variant),
-            .literal => "0",
-            .operation => entry.operation.spelling(),
-            .word => |word| word.spelling,
-        });
+        switch (atom) {
+            // The capture wrapper is spelled as the one-element list that
+            // `literal` builds at runtime — the same value either way.
+            .capture => {
+                try result.append(allocator, '(');
+                try result.appendSlice(allocator, binaryConstant(entry.operation.binary, variant));
+                try result.append(allocator, ')');
+            },
+            else => try result.appendSlice(allocator, switch (atom) {
+                .constant => binaryConstant(entry.operation.binary, variant),
+                .literal => "0",
+                .operation => entry.operation.spelling(),
+                .word => |word| word.spelling,
+                .capture => unreachable,
+            }),
+        }
     }
     return result.toOwnedSlice(allocator);
 }
@@ -287,4 +319,100 @@ fn expectValueIdentical(left: ecl.value.Value, right: ecl.value.Value) !void {
             }
         },
     }
+}
+
+/// Full observational comparison of the two execution modes: success or
+/// failure alike, stack values (bit-identical floats via
+/// expectValueIdentical), rendered representation, and — unlike the
+/// exhaustive harness above — the complete error dict on failure.
+fn compareModesExactly(source: []const u8) !void {
+    var automatic_heap: SessionHeap = .init;
+    defer retireHeap(&automatic_heap);
+    var generic_heap: SessionHeap = .init;
+    defer retireHeap(&generic_heap);
+    var automatic = try execute(source, .automatic, automatic_heap.allocator());
+    defer automatic.deinit();
+    var generic = try execute(source, .generic_only, generic_heap.allocator());
+    defer generic.deinit();
+
+    try std.testing.expectEqual(generic.failure != null, automatic.failure != null);
+    if (automatic.failure) |automatic_failure| {
+        var automatic_rendered = try automatic.runtime.renderValue(automatic_failure);
+        defer automatic_rendered.deinit();
+        var generic_rendered = try generic.runtime.renderValue(generic.failure.?);
+        defer generic_rendered.deinit();
+        try std.testing.expectEqualStrings(generic_rendered.bytes(), automatic_rendered.bytes());
+        return;
+    }
+    try expectStacksIdentical(automatic.runtime.stackItems(), generic.runtime.stackItems());
+    var automatic_display = try automatic.runtime.stackDisplay();
+    defer automatic_display.deinit();
+    var generic_display = try generic.runtime.stackDisplay();
+    defer generic_display.deinit();
+    try std.testing.expectEqualStrings(generic_display.bytes(), automatic_display.bytes());
+}
+
+test "idioms: capture shapes match the generic path exactly" {
+    // The literal-capture shape `((v) first)` is what `literal` builds and
+    // what `partial` prefixes onto a quotation. These sources build the
+    // shape the way programs do, rather than spelling the list literally as
+    // the exhaustive harness above does, so recognition is proven against
+    // the runtime-constructed value.
+    const sources = [_][]const u8{
+        // Constant on the right, then the swapped (constant-left) form.
+        "[1 2 3] 3 (+) partial each",
+        "[1 2 3] 3 (swap -) partial each",
+        "[1 2 3] 3 (-) partial each",
+        // Nested spines, empties, and dict pervasion.
+        "[[1 2] [3]] 10 (*) partial each",
+        "[] 4 (+) partial each",
+        // Floats must stay bit-identical, including signed zero.
+        "[0.1 0.2 0.3] 0.3 (+) partial each",
+        "[0.0 -0.0] -0.0 (+) partial each",
+        "[1 2] 0.5 (swap /) partial each",
+        // Failures: type, overflow, and domain must carry identical dicts.
+        "[1 2] {} (+) partial each",
+        "[9223372036854775807 1] 1 (+) partial each",
+        "[1 0] 0 (swap div) partial each",
+        // Shapes that must NOT be recognized still agree with the generic
+        // path: a multi-element wrapper, a longer phrase, and a capture whose
+        // captured element is itself a word.
+        "[1 2 3] ((3 4) first +) each",
+        "[1 2 3] ((1) first pop 7 +) each",
+        "[1 2 3] ((dup) first +) each",
+        // The `first` guard is load-bearing, not decorative: the pattern
+        // demands the core source binding, so a session definition of `first`
+        // must send an otherwise perfectly capture-shaped phrase down the
+        // generic path — where the shadow actually runs. Recognizing through
+        // the shadow would silently compute the unshadowed answer.
+        "(pop 99) 'first def [1 2 3] 3 (+) partial each",
+        "(pop 99) 'first def [1 2 3] 3 (swap -) partial each",
+    };
+    for (sources) |source| {
+        compareModesExactly(source) catch |err| {
+            std.log.err("capture-shape differential failed for `{s}`", .{source});
+            return err;
+        };
+    }
+
+    // A recognized capture fuses the whole `each` into one kernel run: one
+    // hit for the three elements, and `first` never executes. A rejected
+    // wrapper falls through to the generic frame machine, which then runs
+    // `first` once per element — three hits from `first`'s own direct
+    // recognition. The contrast is the proof that selection is shape-driven.
+    try expectHits("[1 2 3] 3 (+) partial each", 1);
+    try expectHits("[1 2 3] 3 (swap -) partial each", 1);
+    try expectHits("[1 2 3] ((3 4) first +) each", 3);
+    // Shadowing `first` takes the entry out of play entirely: no capture
+    // entry fires, and the shadow is not core-resolved either, so the
+    // shadowed body earns no direct recognition of its own.
+    try expectHits("(pop 99) 'first def [1 2 3] 3 (+) partial each", 0);
+}
+
+fn expectHits(source: []const u8, expected: u64) !void {
+    var heap: SessionHeap = .init;
+    defer retireHeap(&heap);
+    var run = try execute(source, .automatic, heap.allocator());
+    defer run.deinit();
+    try std.testing.expectEqual(expected, run.runtime.lastIdiomHits());
 }

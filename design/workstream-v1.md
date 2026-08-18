@@ -12,14 +12,15 @@ combinator-entry idiom recognition, and green-unit concurrency. v1 is
 slow-but-correct everywhere the architecture permits, but never violates
 the decision-21 invariants that make it evolvable to K-order later.
 Scope additions ruled in during planning: REPL line editing/completion,
-the `result`, `str`, `csv`, `json`, `table`, and `http` stdlib modules, and optional
-target-specific native extension modules loaded by the stock binary. Core and
-stdlib retain the single-binary distribution guarantee; `.eclmod` artifacts
-are explicitly installed trusted dependencies, not required runtime pieces.
+userland stateful modules, the `result`, `str`, `csv`, `json`, `table`, and
+`http` stdlib modules, and optional target-specific native extension modules
+loaded by the stock binary. Core and stdlib retain the single-binary
+distribution guarantee; `.eclmod` artifacts are explicitly installed trusted
+dependencies, not required runtime pieces.
 
 ## Current State
 
-Verified in the checkout (2026-08-16):
+Verified in the checkout (2026-08-17):
 
 - `design/` holds the complete, internally consistent spec: DESIGN.md
   (23 decisions + implementation-agnostic runtime spec), GRAMMAR.md,
@@ -53,8 +54,8 @@ Verified in the checkout (2026-08-16):
   bounded retirement, and one/eight-worker acceptance. M8 adds scalar-safe
   TTY editing, locked atomic 100-line history, snapshot-safe live and dotted
   completion, continuation cancellation/EOF behavior, and a real-binary PTY
-  gate while leaving non-TTY input unchanged. M9 native extensions and M11
-  stdlib remain future milestones.
+  gate while leaving non-TTY input unchanged. M9 native extensions, M11
+  stateful modules, and M12 stdlib remain future milestones.
 - All derived core words now live in `src/prelude.ecl`; the loader embeds and
   evaluates that ordinary source with retained provenance before freezing the
   core. Every definition is a documented `### def <name>` block. A standard
@@ -83,6 +84,12 @@ Verified in the checkout (2026-08-16):
   kill-on-arrival, quiescence at scope close, kernel chunk polls. The
   adversarial review found races in the *paper* design; the code must
   implement the corrected protocols.
+- **Stateful-module publication and teardown** — a canonical registry slot
+  must outlive replaceable code generations and immutable durable-stack
+  snapshots, while serialized drafts and pending outputs remain cancellable
+  and removal remains bounded. M11 makes this one owner-issued lifecycle
+  instead of correlating registry, state, arbiter, output, and retirement fields
+  in callers.
 - **JSON null in a language with no nil** (see Open Questions) — the
   first time absence-is-absence (d.22) meets an external data model
   that reifies null.
@@ -289,7 +296,7 @@ swap protocol. Reflection: `body`, `doc`, `words`, `which`, `see`. **New over
 the skeleton**: `load` (file as one unit) and `ECL_PATH` auto-load on
 unregistered `use`, and the native-builtin-module mechanism (modules
 pre-registered at startup whose bindings are primitive-backed — the
-static substrate M11 reuses after M9 replaces the public callback seam).
+static substrate M12 reuses after M9 replaces the public callback seam).
 **New over the skeleton (d.9, re-ruled
 2026-08-12, supplemented after M6)**: module `def`/`defp` consume a body
 plus a unified annotation whose effect portion is mandatory —
@@ -313,7 +320,7 @@ complete module system; kernels/combinators still run the provisional
 paths.
 
 **Unlocks**: M5/M6 idiom guards (resolution identity), M8 completion
-(env enumeration), M9 native module publication, and M11 stdlib modules.
+(env enumeration), M9 native module publication, and M12 stdlib modules.
 
 ---
 
@@ -455,7 +462,7 @@ provenance archive, so a later `call` reports `<parse>`. Non-string input is
 leave no partial result. Encoding, lexer/parser scans, binder lowering, and
 result/span materialization poll inside their actual traversals. This adds
 no host capability: `slurp`, `spit`, `getenv`, and the source-defined
-`lines` remain absent until M11.
+`lines` remain absent until M12.
 
 **Idiom recognition** uses one context-parameterized exact-phrase matcher,
 not a combinator-only switch plus special cases. Phrase shape may be
@@ -481,7 +488,7 @@ concurrency and stdlib; the harness guards everything behind it, and the
 derived core vocabulary now has one inspectable target-language source of
 truth rather than host-encoded bodies.
 
-**Unlocks**: M7 (par-each rides spawn), M11 (str module uses kernels +
+**Unlocks**: M7 (par-each rides spawn), M12 (str module uses kernels +
 prelude machinery).
 
 **Established Precedents** (milestone-scoped):
@@ -556,7 +563,7 @@ allocates an independent release cursor.
 is complete; only scope-ruled stdlib and REPL polish remain.
 
 **Unlocks**: M9's typed native `Reschedule` continuation on the production
-`WorkDriver`, M11's internal HTTP exception, and M12 acceptance.
+`WorkDriver`, M12's internal HTTP exception, and M13 acceptance.
 
 ---
 
@@ -628,7 +635,7 @@ bounded descriptor validator, the `ecl-native` SDK and build helper, retirement
 of the general-stack seam, native first light (loader typestate, `.eclmod`
 resolution, atomic publication, transactional leaf call, reflection), the typed
 `Reschedule` continuation with ordered shutdown, and acceptance. Planning
-narrowed the milestone to exactly the capability set M11's CSV and JSON modules
+narrowed the milestone to exactly the capability set M12's CSV and JSON modules
 consume; see the deferred-capability entry in Decisions Made.
 
 **Definition of Done**:
@@ -667,7 +674,8 @@ moves through `opened -> described -> validated -> initialized -> published`,
 and every variant owns exactly the handle, copied metadata, and rollback action
 valid in that phase. Descriptor text, scalar symbols/words, callback failures,
 and entry diagnostics all cross one bounded UTF-8 ingress rather than carrying
-per-producer validation policy. With module state deferred, `initialized` constructs the
+per-producer validation policy. With native module backing state deferred,
+`initialized` constructs the
 pinned instance from validated metadata. The SDK descriptor itself occupies
 addressable image-lifetime storage, so the entry point cannot return a pointer
 to a comptime value materialized in its stack frame. Dynamic images use the operating
@@ -676,8 +684,9 @@ through Zig's relocation-incomplete static ELF mapper. Validator records and
 generated adapter cursor backing use explicit empty/populated states, so phase
 or capability access cannot read uninitialized storage in optimized builds.
 The host table is minted only for an
-invocation, so no artifact-stored host pointer survives a call; a future
-module-state capability can extend that variant without reshaping the typestate. Native bindings
+invocation, so no artifact-stored host pointer survives a call; a future SDK
+module-state capability can extend that variant without reshaping the
+typestate. Native bindings
 store a nominal module-instance handle plus validated definition index, never a
 raw callback/context pair. V1 has no native hot reload or early unload. Session
 hands worker Units only a loader capability whose surface cannot settle
@@ -688,7 +697,7 @@ continuation, drains registry and environment pins, performs owner-only
 descriptor/image settlement, and only then destroys the settled root. The
 image pin is a variant of the load typestate: `dynamic` holds the
 library handle, while `static` is a no-op pin over a linked first-party
-descriptor. That static arm is the transport M11's CSV and JSON modules use; it
+descriptor. That static arm is the transport M12's CSV and JSON modules use; it
 is proved in M9 by registering the SDK fixture as a linked Zig module, and it is
 not a public API for embedding ECL in Zig applications. The old general-stack `NativeMachine` and
 public `Session.registerNativeModule` seam cease to be a supported extension
@@ -750,17 +759,19 @@ are opt-in through `ECL_NATIVE_DIAGNOSTICS`: with the variable unset no clock is
 sampled and nothing is emitted, so the default build does not observe the limit
 it documents. Inline callbacks must return promptly.
 
-**The initial capability set remains deliberately closed, at exactly what M11
+**The initial capability set remains deliberately closed, at exactly what M12
 consumes.** Mandatory `Call` plus optional `BuildValues` and `Reschedule` are
 the complete callback surface. CSV and JSON are pure value-in/value-out
-transforms, so nothing in v1 needs per-module state. Module state with its
-`ModuleView`/`ModuleUpdate` authority split and scheduler-integrated arbiter is
-therefore deferred alongside native resource values, persistent ECL-value pins,
-package assets, external wake, blocking jobs, quotation evaluation, and
-task/runtime mutation as future capabilities. The deferral is unreachable
-rather than half-present: the descriptor and capability enum contain no
-module-state fields, factories, or ids.
-`Offload` is the expected first scheduling addition; the M11 HTTP builtin
+transforms, so nothing in the v1 native callback surface needs per-module
+state. SDK access to M11's internal module-stack draft and outward-transfer
+authority is
+therefore deferred alongside
+native resource values, persistent ECL-value pins, package assets, external
+wake, blocking jobs, quotation evaluation, and task/runtime mutation as future
+capabilities. The SDK deferral is unreachable rather than half-present: the
+descriptor and capability enum contain no module-state fields, factories, or
+ids.
+`Offload` is the expected first scheduling addition; the M12 HTTP builtin
 remains a documented internal direct-blocking exception in v1 and does not widen
 this SDK.
 
@@ -815,9 +826,9 @@ public surface is useful for value-in/value-out native acceleration without
 committing v1 to resources, blocking pools, VM reentry, or application
 embedding.
 
-**Unlocks**: User-authored native extensions; M11's CSV/JSON modules as
-first-party consumers of the same callback protocol; future module
-state with `ModuleView`/`ModuleUpdate` authority, `Offload`, resource,
+**Unlocks**: User-authored native extensions; M12's CSV/JSON modules as
+first-party consumers of the same callback protocol; future SDK access to
+M11's module-stack authority, `Offload`, resource,
 external-wake, package-asset, and evaluation capabilities.
 
 **Established Precedents** (milestone-scoped):
@@ -828,8 +839,21 @@ external-wake, package-asset, and evaluation capabilities.
 
 ### Milestone 10: one-binder-merge
 
-Ruled 2026-08-17 (see Decisions Made); slotted before the stdlib so M11's
-embedded modules are authored once against the merged semantics, and
+**Status**: executed from `gameplans/one-binder-merge.json` on 2026-08-17;
+this section is the durable as-built record. Five patches, one BEHAVIOR: the
+skipped stubs naming the merge's observable contract, capture-shape idiom
+recognition, the flip (prelude `set`/`setp` over `literal` + `def`/`defp`,
+builtins retired), deletion of the unproducible value arms from `Binding`
+and both publication typestates, and the SPEC.md/INTERPRETER.md rewrite.
+Counts landed at 88 primitives and 66 documented prelude blocks (the plan
+said 62; the working tree also carried the `partial-all` → `with` rename and
+the new `module-with`). One planned piece was dropped during execution as
+unreachable — the direct-context capture idiom entry — and its underlying
+cost is carried as post-v1 follow-up 14.
+
+Ruled 2026-08-17 (see Decisions Made); slotted before stateful modules and the
+stdlib so M11's construction-time constants and M12's embedded modules are authored once
+against the merged semantics, and
 before the `0.1.0` tag because it changes observable behavior —
 prerelease is when to break. It reopens M4-frozen binding surface
 deliberately, as its own milestone rather than a silent edit to an
@@ -844,7 +868,9 @@ collapses: every module binding is a callable with a mandatory effect).
 Concretely:
 
 - **The equivalence law is the invariant:** `v 'name set` is
-  observationally `v literal 'name def` — it publishes the literal-capture
+  observationally `v literal (-- value) 'name def` (the annotation is part
+  of the equivalence: it is what reflection reports and what satisfies the
+  mandatory module effect) — it publishes the literal-capture
   body `((v) first)`, safe for every value kind (words, quotations, dicts,
   task handles, `()`), and `setp` likewise over `defp`. `set`/`setp` keep
   their names and always attach the synthesized effect annotation
@@ -852,15 +878,17 @@ Concretely:
   module effect while remaining harmless top-level metadata. The
   never-recognize-annotations guarantee holds mechanically: captured
   marker-bearing data ends up nested and inert.
-- **Intended placement is prelude source** —
+- **Placement is prelude source** —
   `set = (swap literal swap (-- value) swap def)` — demoting both words
-  from primitive to prelude (counts 90/60 → 88/62). GATE: this requires
-  `def` executed inside another word's body to write the *unit's current
-  scope*, never the executing frame's resolution environment (core is
-  frozen). The gameplan pins the write-target rule with a test before
-  committing to source placement; if dynamic write-targeting is wrong,
-  `set`/`setp` stay host primitives implementing the identical observable
-  contract — placement is not the invariant, the law is.
+  from primitive to prelude (primitives 90 → 88). The gate on this
+  placement is resolved (gameplan grounding, 2026-08-17): `def` executed
+  inside another word's body writes the *unit's current scope*, never the
+  executing frame's resolution environment, because `scheduleWord`
+  (`src/machine.zig`) keeps the caller's scope and home for core words —
+  so top-level `set` binds the session, module-body `set` binds the
+  module root, and `defp`'s module-root check stays correctly dynamic.
+  The test "definitions: def inside a word body writes the caller's
+  scope" pins the rule; the equivalence law remains the invariant.
 - **Reflection is total and honest.** `body` works on every binding
   (`'x body` on a set-bound name returns `((3) first)`); `see`/`which`
   print the stored body with no reconstruction of set-sugar spelling (the
@@ -870,10 +898,14 @@ Concretely:
   annotation — previously impossible through `set`.
 - **Redefinition is uniform snapshot replacement** — no kind flip; `def`'s
   non-list-body error still points at `set`.
-- **One idiom-recognition entry** fast-paths the `((v) first)` body shape
-  — covering both constants and `partial` results — through the existing
-  guarded bridge, differentially tested like every idiom, observationally
-  invisible.
+- **Idiom recognition covers the `((v) first)` capture shape** through the
+  existing guarded bridge, differentially tested like every idiom and
+  observationally invisible. Shipped in combinator context (`[capture,
+  op]` and `[capture, swap, op]` at `each` entry), which is what
+  `partial`-built quotations reach. The direct-context entry for constant
+  bodies was dropped during execution as unreachable — direct recognition
+  is gated on core origin and core holds no `set`-published names — and
+  the underlying cost is carried as post-v1 follow-up 14.
 - The multi-value/single-list distinction is legible in bodies:
   `(1 2 3) 'xs def` pushes three values; `[1 2 3] 'xs set` pushes the
   list.
@@ -888,9 +920,10 @@ cases, and the write-time `def`-vs-`set` intent distinction
 (store-as-code vs store-as-data) is unchanged — only its representation
 moves from a hidden tag into inspectable structure.
 
-**Unlocks**: M11 authors the embedded `str` and `table` sources and the
+**Unlocks**: M11 can add a durable module stack without changing binding
+representation; M12 authors the embedded `str` and `table` sources and the
 native modules against final binding semantics — no migration pass; a
-simpler M12 acceptance surface; the deferred static checker (Post-v1
+simpler M13 acceptance surface; the deferred static checker (Post-v1
 follow-ups, item 1) sees constants as ordinary words with known
 `( -- x )` effects and loses its values-cannot-carry-effects exception.
 
@@ -900,7 +933,163 @@ follow-ups, item 1) sees constants as ordinary words with known
 
 ---
 
-### Milestone 11: stdlib-result-str-csv-json-table-http
+### Milestone 11: stateful-modules
+
+**Definition of Done**:
+The existing dynamically constructible module registry becomes ECL's
+userland durable-state layer without adding an actor, mailbox, or resident
+task. Every canonical module registry slot owns one immutable snapshot of a
+durable operand stack per Session, distinct from its replaceable immutable code
+generation; the only mutation is transactional publication of a replacement
+stack snapshot. Concretely:
+
+- **The registry slot is the singleton identity.** `'name (body) module` and
+  the source-defined `module-with` constructor build a candidate; the first
+  successful registration of a canonical name creates its slot, while later
+  registrations replace only its code generation. Separately constructed names
+  own independent stacks even when their bodies come from the same quotation.
+  Construction from inside another module remains
+  registration in the same flat Session registry, not lexical nesting or
+  parent ownership; the created slot has an independent lifetime and its
+  completed registration is not rolled back if the constructing body later
+  fails. A new nominal `'module` value kind is the opaque Session-local handle
+  to that slot, not its symbol or code generation. Handles compare by slot
+  identity, display non-readably, survive hot reload, cannot be forged, and
+  become closed rather than retargeting if the name is later reused.
+- **Construction produces the initial state stack.** While a module body is
+  registering, `def`/`defp` and `set`/`setp` retain M10's one-binding
+  representation and build only the immutable candidate code environment. The
+  isolated body's final operand stack becomes the durable initial stack for a
+  newly created slot instead of being required to be empty. `values 'name body
+  module-with` supplies its values in order as that construction stack's
+  initial contents, using `with` exactly as `attempt-with` and `spawn-with` do;
+  the body may consume, reorder, or extend them before publication. On
+  re-registration, the successfully built candidate's initial-state stack is
+  discarded and the existing slot's durable stack is retained: initialization
+  happens once per slot identity, not once per code generation.
+- **Source annotations become optional everywhere.** Module `def` and `defp`
+  accept the same four forms as top-level `def`: no annotation, effect only,
+  documentation only, or both. A declared module effect remains a live
+  caller-stack contract checked when execution crosses the module boundary; an
+  omitted effect means no such check, not an inferred effect. Malformed
+  recognized annotations remain `'domain`, and reflection preserves whether
+  each portion is absent. This source-language relaxation does not weaken the
+  native ABI's mandatory typed `Call` effect, and the shipped prelude keeps its
+  stronger repository policy requiring meaningful documentation.
+- **Ordinary module words still use the caller's stack.** An optional
+  `(before -- after)` annotation describes and, when present, checks only the
+  externally observable caller-stack contract. It acquires no state marker and
+  moves no values implicitly. Stateless module words and all existing stdlib
+  modules therefore retain their ordinary concatenative behavior.
+- **`within` is the explicit stack boundary.** `within`, with effect
+  `( quotation -- outputs... )`, is a new core primitive legal only while
+  executing a published word whose definition-site home is a live module; the
+  registration root already operates directly on the candidate construction
+  stack and does not use `within`. The quotation resolves with that module home
+  and runs against a private draft of the slot's durable stack, never the
+  ambient caller stack. Inputs cross the boundary only because the word body
+  explicitly captures them into the quotation with existing composition tools:
+  `partial` for one value, or `with` when a list should supply several values.
+  Extracting a body and redefining it elsewhere changes its home and therefore
+  loses this authority. There is no module-handle-targeted form. Semantically,
+  `within` is the module-scoped transactional counterpart of Joy's `infra`:
+  `infra` continues to use an explicitly supplied list as a temporary stack,
+  while `within` selects the invoking word's durable home-module stack.
+- **`without` is the explicit outward boundary.** The second new boundary
+  primitive, `without`, pops the draft's top value inside an active `within`
+  quotation and appends it to a pending output sequence; elsewhere it is
+  `'domain`. Multiple outward values reach the caller in invocation order. A
+  value remains on the durable stack and is returned only when the quotation explicitly
+  duplicates it before `without`; values captured with `partial` or `with`
+  remain in state unless the quotation consumes or moves them outward.
+  Before publication the runtime reserves the exact caller-stack result window,
+  so no allocation failure can commit state without delivering every output.
+- **Each `within` application is the transaction.** Success publishes the
+  remaining draft stack once and then transfers the already-owned outputs to
+  the caller. Error, cancellation, OOM, contract failure, or `without`
+  underflow discards both draft and pending outputs and propagates normally. A
+  later failure in the enclosing word or Unit does not roll back a `within`
+  application that has
+  already returned successfully, matching ECL's existing rule that Unit stack
+  rollback does not undo completed environment or IO side effects.
+- **`within` applications are serialized scheduler work, not mutex-held
+  evaluation.** One fair per-slot arbiter orders drafts. It holds no OS lock
+  while ECL code executes and permits ordinary bounded scheduler yields.
+  Parking (`await`/deadline waits), nested `within`, and an application
+  homed in another module are rejected as `'domain` before parking or acquiring
+  another slot, preventing self- and cross-module deadlocks. Ordinary calls,
+  including read-only calls into other modules, remain available inside the
+  quotation; only another `within` boundary is prohibited.
+- **`__MODULE__` exposes definition-site identity without making it ambient.**
+  The reserved, unshadowable word `( -- module )` returns the stable slot
+  handle at module-registration root and in code whose home is that module;
+  session top-level use is `'domain`. Extracting a body and redefining it
+  elsewhere changes its home exactly as it already changes private resolution.
+  The handle supports identity, reflection, and lifecycle operations such as
+  `unmodule`; returning or storing it does not grant `within` authority or expose
+  the durable stack or private bindings.
+- **Bindings remain immutable after registration.** M11 does not contextualize
+  `set`/`setp`, add `unset`, or place mutable bindings in name resolution.
+  M10's one-binding representation remains unchanged, while optional module
+  effects let the prelude definitions simplify to the exact equivalences
+  `value 'name set == value literal (-- value) 'name def` and likewise for
+  `setp`/`defp`,
+  with no synthesized `(-- value)` annotation. `set`/`setp` in the construction
+  body still define code-generation constants, while a later attempt to mutate
+  the frozen module environment fails exactly as it does before M11. Existing
+  `del` remains solely the pure `(dict key -- dict)` transformation.
+- **Hot reload preserves the stack.** Re-registration constructs a new code
+  generation while retaining the slot and its durable stack. It closes new
+  calls and waits cooperatively for old-generation calls and active/queued
+  `within` applications to quiesce before publication, so old code cannot
+  publish state after a new representation becomes current. Failed
+  registration changes neither code nor state. Stack-layout evolution is an
+  explicit userland protocol: replacement code must understand the retained
+  representation and may migrate it with an ordinary first `within` operation;
+  the runtime neither inspects nor names positions in the stack.
+- **Removal completes the lifecycle.** `unmodule` accepts a canonical module
+  name or exact module handle, closes new resolution, calls, and `within`
+  applications, waits cooperatively for generation pins and queued/active
+  drafts to quiesce, invalidates extant handles, removes aliases targeting the
+  slot, then retires code and every value on the durable stack through bounded
+  work. A minimal closed handle-control record may remain until copied handles
+  release; it owns no module state and can never retarget to a later slot.
+  Concurrent
+  resolution observes either the live module or `'undefined-word` once close
+  begins, never a half-removed entry. Session shutdown consumes the same
+  `live -> closing -> retired` protocol.
+- **No hidden resource or persistence promise.** Native opaque resources,
+  persistence across process restart, and SDK exposure of the internal module
+  stack/draft capabilities remain later extensions. A future connection module
+  supplies opaque connection values natively while its pool policy and
+  singleton coordination use this userland state mechanism.
+- SPEC.md and INTERPRETER.md record uniform optional source annotations, the
+  module-handle kind, construction-stack ownership, `within`/`without` boundary
+  and failure semantics, arbiter fairness, hot-reload barrier, removal
+  typestate, and ordered Session shutdown. The type
+  system makes a state application one tagged owner of the module-stack draft,
+  pending outputs, home authority, and publication transition; only the
+  definition-site home can create it, and worker-visible code cannot obtain the
+  lifecycle authority required for blocking teardown. The source audit covers
+  only constraints the compiler cannot express.
+
+**Why this is a safe pause point**: Existing annotated stateless modules retain
+their contracts and binding semantics, while previously inexpressible
+unannotated and documentation-only module words have explicit reflection
+behavior. Stateful modules have a complete construction, explicit caller/state
+transfer, transactional update, reload, removal, and Session-shutdown
+lifecycle; there is no published stack or pending output that can be created but
+not safely retired.
+
+**Unlocks**: Userland counters, registries, caches, service configuration, and
+pool policies as dynamically constructed singleton modules; M12 stdlib modules
+may use durable Session-local state without adding private host globals; future
+native resource values can inhabit the already-proven ownership and update
+protocol.
+
+---
+
+### Milestone 12: stdlib-result-str-csv-json-table-http
 
 **Definition of Done**:
 Six stdlib modules ship inside the binary (embedded sources / native
@@ -991,7 +1180,7 @@ aggregate → emit) — the awk/sed/jq positioning made literal.
 
 ---
 
-### Milestone 12: v1-acceptance
+### Milestone 13: v1-acceptance
 
 **Definition of Done**:
 The terminal acceptance suite below is implemented as a CI job
@@ -1015,11 +1204,10 @@ pause.
 
 **Unlocks**: Post-v1 work (the static effect checker bundle, d.9;
 performance evolution toward the K ceiling; exactness revisit) starts
-from a proven baseline. The native capabilities deferred out of M9 —
-module state with `ModuleView`/`ModuleUpdate` authority and its
-scheduler-integrated arbiter, then `Offload`, resource values, external wake,
-package assets, and quotation evaluation — also start here. None blocks the
-`0.1.0` tag: no v1 consumer needs them, and each requires an explicit
+from a proven baseline. The native capabilities deferred out of M9 — SDK
+exposure of M11's module-state authority, `Offload`, resource values, external
+wake, package assets, and quotation evaluation — also start here. None blocks
+the `0.1.0` tag: no v1 consumer needs them, and each requires an explicit
 future wire-contract revision.
 
 ## Dependency Graph
@@ -1033,9 +1221,10 @@ future wire-contract revision.
 - Milestone 7 (scheduler-and-concurrency) -> [6]
 - Milestone 8 (repl-line-editing) -> [4]        # parallel with 5–7
 - Milestone 9 (native-extension-abi-and-loader) -> [4, 7]
-- Milestone 10 (one-binder-merge) -> [6, 9]   # ruled 2026-08-17; precedes the stdlib
-- Milestone 11 (stdlib-result-str-csv-json-table-http) -> [6, 9, 10]
-- Milestone 12 (v1-acceptance) -> [7, 8, 9, 10, 11]
+- Milestone 10 (one-binder-merge) -> [6, 9]   # ruled 2026-08-17; precedes state and stdlib
+- Milestone 11 (stateful-modules) -> [7, 10]
+- Milestone 12 (stdlib-result-str-csv-json-table-http) -> [6, 9, 10, 11]
+- Milestone 13 (v1-acceptance) -> [7, 8, 9, 10, 11, 12]
 
 ## Open Questions
 
@@ -1043,7 +1232,7 @@ future wire-contract revision.
    line-processing of piped input, but piped stdin is currently
    consumed as *source*. A `stdin` word must coexist with the
    stdin-as-source CLI modes without ambiguity. Real design
-   conversation; owner: M11 gameplan at the latest.
+   conversation; owner: M12 gameplan at the latest.
 2. **Randomness (gap scan 2026-08-12).** No `rand`/roll/deal words
    exist. First impure-nondeterministic vocabulary: seeding must be
    ruled against d.20 units (per-session RNG, per-unit, or
@@ -1052,8 +1241,8 @@ future wire-contract revision.
 3. **http backend (choice only; procedure is decided).** Which backend
    wins the spike — Zig `std.http.Client` + `std.crypto.tls` (pure Zig,
    no C dependency, maturity risk) or a libcurl binding (battle-tested,
-   complicates the static single binary). Resolved by the M11 spike per
-   the agreed criteria in Decisions Made. Owner: M11 gameplan.
+   complicates the static single binary). Resolved by the M12 spike per
+   the agreed criteria in Decisions Made. Owner: M12 gameplan.
 
 ## Post-v1 follow-ups (deferred features)
 
@@ -1124,7 +1313,7 @@ INTERPRETER.md and its entry here is retired.
 
 5. **Unicode tables layer** (ledger d.15's deferral). Grapheme
    segmentation, normalization, non-ASCII case mapping, and locale
-   collation — a stdlib layer gated on Unicode tables, beyond M11's ASCII
+   collation — a stdlib layer gated on Unicode tables, beyond M12's ASCII
    `str` scope. Until it exists, codepoint semantics stay documented
    honestly (composed vs decomposed "café" is 4 vs 5 chars).
 
@@ -1139,6 +1328,19 @@ INTERPRETER.md and its entry here is retired.
    generic remains bit-identical.
 
 8. **Kernel evolution toward the K ceiling.** All profiling-gated:
+   - Grounding case study: codereport's
+     [`WHY_BQN_WINS.md`](https://github.com/codereport/max-odd-binary/blob/main/WHY_BQN_WINS.md)
+     dissects a small CBQN workload into six compounding advantages. Five
+     map to ECL's value model: activate the reserved packed-mask leaf;
+     specialize mask and `Char1` algorithms (popcount/fill and counting or
+     radix sort); generate explicit SIMD variants; fuse recognized pipelines
+     such as compare-to-mask-to-count or compare-to-mask-to-replicate; and
+     select algorithms by the O(1) leaf kind and length. These are independent
+     optimizations rather than a mandate to recognize that particular program.
+     Its sixth advantage, a custom array allocator, is orthogonal to the value
+     model and remains measurement-gated: prefer the host allocator unless
+     allocation profiles justify owner-scoped header, driver, or leaf-buffer
+     pools that preserve allocator-failure injection and bounded retirement.
    - Vectorization tier 2: explicit `@Vector` kernels and target-feature
      multiversioning (compress, radix histograms, packed compares).
      Tier 3: per-ISA variants selected at startup. One authoring
@@ -1209,14 +1411,13 @@ INTERPRETER.md and its entry here is retired.
     design.
 
 11. **Native extension capabilities.** Already recorded in M9's deferral
-    ruling, M12's Unlocks, and Decisions Made; listed here only for
-    completeness: module state (one state instance per Session, distinct
-    `ModuleView`/`ModuleUpdate` authority, a scheduler-integrated arbiter,
-    bounded initialization/destruction, continuation validation),
-    `Offload` (the expected first scheduling capability — a blocking-pool
-    split reusing the await machinery unchanged), resource values,
-    external wake, package assets, and quotation evaluation. Each requires
-    an explicit wire-contract revision; none is a new callback class.
+    ruling, M13's Unlocks, and Decisions Made; listed here only for
+    completeness: SDK exposure of M11's internal module-stack draft/outward-transfer
+    authority, `Offload` (the expected first scheduling capability — a
+    blocking-pool split reusing the await machinery unchanged), resource
+    values, external wake, package assets, and quotation evaluation. Each
+    requires an explicit wire-contract revision; none is a new callback
+    class.
 
 12. **Package manager.** Owns dependency solving and target selection, and
     publishes its result by ordering package roots in `ECL_PATH`; the
@@ -1228,6 +1429,35 @@ INTERPRETER.md and its entry here is retired.
     words-not-glyphs remains the identity, and the glyph budget stays
     spent on literals.
 
+14. **Constant-reference fast path** (M10's one unbuilt piece, deferred
+    2026-08-17 during execution). Milestone 10 traded a value binding's
+    single push for a word application: referencing a name bound by `set`
+    resolves, pushes a frame, evaluates `((v) first)` — pushing the
+    one-element list — applies `first`, and returns. The merge's
+    equivalence law is unaffected; only the cost is. M10's planned
+    mitigation, a `.direct` idiom entry matching the two-form capture
+    body, was specified but never built, because it is unreachable:
+    direct-context recognition fires only when `resolved.origin == .core`
+    (`src/machine.zig`), and core carries no `set`-published names, so the
+    entry would have matched nothing. The combinator-context capture
+    entries (`[capture, op]`, `[capture, swap, op]` at `each` entry) are
+    reachable, shipped, and differentially proven; they are not affected
+    by this deferral. Profiling-gated, and constrained if picked up:
+    - Whatever fires must be observationally invisible, proven in the
+      existing differential harness like every other recognition entry —
+      the deleted word|value tag must not return as a dispatch heuristic.
+    - Widening direct recognition past core origin is the expensive
+      option: the `.core` gate is what keeps a shadowing session
+      definition out of the recognizer, so removing it means replacing
+      that guarantee, not just deleting a condition.
+    - Special-casing the capture shape in `executeResolved`, ahead of the
+      idiom machinery, is the cheaper option and the one to measure first;
+      it needs no registry mechanism, no `source_word` relaxation, and no
+      new `Operation` variant.
+    - Measure before building. The cost is one frame plus one transient
+      one-element list per constant reference; whether that is worth any
+      dispatch complexity is unknown until M13's benchmarks exist.
+
 ## Decisions Made
 
 - **One-binder merge ruled; LISP-2 rejected (2026-08-17, user ruling).**
@@ -1238,13 +1468,47 @@ INTERPRETER.md and its entry here is retired.
   the sugar synthesizes a fixed `(-- value)` effect so module constants
   keep mandatory effects; `see`/`which` print stored bodies with no
   sugar reconstruction; the change lands before the stdlib milestone
-  (M11 now depends on M10) and therefore pre-`0.1.0`. Dual namespaces
+  (M11 and M12 now depend on M10) and therefore pre-`0.1.0`. Gameplanned
+  2026-08-17 (`gameplans/one-binder-merge.json`): the placement gate
+  resolved during grounding — `scheduleWord` keeps the caller's scope for
+  core words, so prelude placement of `set`/`setp` is committed rather
+  than conditional. Dual namespaces
   (LISP-2) were examined and rejected: concatenative syntax has no
   reference position to select a namespace, so the move either changes
   nothing observable (one-namespace-per-name is isomorphic to the tag) or
   makes bare-name behavior policy-dependent (cross-namespace shadowing;
   words-win priority renders `set` silently inert at call sites), and the
   macro-hygiene motivation for LISP-2 is absent — ecl has no macro layer.
+  M11 retains this one-binding representation but, when it makes source
+  annotations optional in modules, removes the no-longer-needed synthesized
+  effect from the prelude `set`/`setp` bodies. Durable state is a separate
+  module-owned operand stack, not a mutable name-resolution layer.
+- **Modules are ECL's durable state objects (2026-08-17, user ruling).** A
+  dynamically constructed canonical module registry slot owns one durable
+  operand stack per Session, initialized by the module construction body's
+  final stack and preserved across code generations. Ordinary module words
+  continue to use the caller stack and ordinary annotations; `partial` or
+  `with` explicitly captures caller inputs into a quotation, module-homed
+  `within` executes it transactionally against a serialized private draft, and
+  contextual `without` explicitly removes values from that draft for delivery to
+  the caller. No
+  state-specific annotation, implicit argument/result movement, or mutable
+  binding overlay exists. The slot, not a replaceable code generation, is the
+  singleton identity; `__MODULE__` returns its nominal identity/lifecycle
+  handle, but the handle confers no state authority. There is no resident actor,
+  mailbox, or supervision tree. M11 also adds an explicit quiescing removal
+  path; native resource values and SDK access to its internal stack authority
+  remain later extensions.
+- **Source annotations are uniformly optional (2026-08-17, user ruling).**
+  Top-level and module `def`/`defp` accept absent, effect-only,
+  documentation-only, and combined annotations. A supplied module effect
+  remains a checked cross-boundary contract; absence means unknown rather than
+  inferred. Annotations classify, document, and optionally assert behavior but
+  never authorize state access or move values. This lets M11 remove M10's
+  synthesized `(-- value)` metadata from `set`/`setp` and restore exact
+  equivalence with `literal` plus `def`/`defp`. Native `Call` effects remain
+  mandatory ABI declarations, and shipped prelude documentation remains a
+  repository authoring requirement rather than a source-language restriction.
 - **Host = Zig** (user ruling, this session). Consequences absorbed into the
   plan: the kernel matrix generates via comptime, SIMD rides `@Vector`,
   RC/atomics use `@atomicRmw` with the d.23 orderings, publication is an atomic
@@ -1321,9 +1585,10 @@ INTERPRETER.md and its entry here is retired.
   requirement manifest and stable C-shaped adapter at comptime. There are no
   callback classes, `.requires` duplication, raw VM/context/allocator, or
   general stack access. `BuildValues` and typed `Reschedule` are the initial
-  optional capabilities; module state with distinct `ModuleView`/`ModuleUpdate`
-  authority, resources, blocking offload, external wake, package assets,
-  retained ECL values, and evaluation are future capabilities.
+  optional capabilities; SDK access to module state through narrowly split
+  module-stack observation/update authority, resources, blocking offload, external
+  wake, package assets, retained ECL values, and evaluation are future
+  capabilities.
 - **Native calls are transactional leaves but native code remains trusted.**
   Declared inputs remain pinned, candidate outputs belong to one call, and only
   exact completion mutates the stack; fail/cancel/timeout/OOM/abandonment do
@@ -1331,27 +1596,26 @@ INTERPRETER.md and its entry here is retired.
   and builders mapped to the real `WorkDriver`. The runtime cannot preempt or
   infer reductions for arbitrary native instructions, so inline code must
   return promptly and duration diagnostics expose violations after the fact.
-  M11 HTTP remains the sole internal direct-blocking v1 exception; `Offload` is
+  M12 HTTP remains the sole internal direct-blocking v1 exception; `Offload` is
   the committed first scheduling extension.
 - **Native lifetime is one ordered shutdown.** Session shutdown closes new
   native-call creation, quiesces calls, destroys continuations, settles ECL
   retirement, and only then closes libraries. External side effects a native
   word performs are not rolled back with the operand-stack transaction.
-- **M9's capability set is closed at exactly what M11 consumes** (gameplan
+- **M9's capability set is closed at exactly what M12 consumes** (gameplan
   ruling, 2026-08-16). Mandatory `Call` plus optional `BuildValues` and
   `Reschedule`; CSV and JSON are pure value-in/value-out transforms with no
-  per-Session state, so `ModuleState`, `ModuleView`, `ModuleUpdate`, and the
-  scheduler-integrated arbiter are deferred to post-v1 along with the future
-  capabilities already listed. That removes the milestone's riskiest piece — a
-  new `ParkRequest` wait-set variant. The deferral is unreachable rather than
-  half-present: the descriptor and capability enum expose no module-state
-  fields or ids. When it lands, module state extends the
-  `initialized` typestate variant rather than reshaping the typestate.
+  per-Session state, so module-stack draft/outward-transfer capabilities and the
+  scheduler-integrated arbiter are absent from the v1 native wire contract.
+  M11 introduces the arbiter and nominal authorities internally for userland
+  stateful modules; exposing them to native callbacks remains a later explicit
+  wire revision. The descriptor and capability enum therefore expose no
+  module-state fields or ids in v1.
 - **The static transport is an image-pin variant, not a second path** (gameplan
   ruling, 2026-08-16). The load typestate carries `dynamic` (the library
   handle) and `static` (a no-op pin over a linked first-party descriptor);
   both traverse identical validation, publication, transaction, and teardown,
-  so M11's CSV and JSON cannot drift from a `.eclmod`'s behavior. M9 proves the
+  so M12's CSV and JSON cannot drift from a `.eclmod`'s behavior. M9 proves the
   static arm by registering the SDK fixture as a linked Zig module rather than
   shipping it unexercised.
 - **Native loading ships ungated** (gameplan ruling, 2026-08-16). No feature
@@ -1463,13 +1727,13 @@ INTERPRETER.md and its entry here is retired.
   is untouched; arrays like `[1, null]` round-trip. Recorded in the
   ledger (d.22 addendum).
 - **http backend is chosen by spike, not by guess** (user ruling, this
-  session): at M11 planning, `std.http` wins if it handles TLS 1.3
+  session): at M12 planning, `std.http` wins if it handles TLS 1.3
   against 5 real-world hosts including redirects and chunked encoding;
   otherwise bind libcurl.
 - **Toolchain pinned: Zig 0.16.0** (resolved at M1 planning, closing the
   former open question). Pinned in `build.zig.zon`
   (`minimum_zig_version`) and by the CI tarball; revisited only at
-  milestone boundaries and at the M11 http spike.
+  milestone boundaries and at the M12 http spike.
 - **Forge and CI: sourcehut** (M1 planning ruling). The repo is
   `git.sr.ht/~subsetpark/ecl` (unlisted; flip with
   `hut git update --visibility public`); CI is builds.sr.ht via
@@ -1584,7 +1848,7 @@ script in CI.
   - **Assert**: re-registering a module updates qualified, `use`d, and
     aliased callers.
   - **Verify by** `cmd`: fixture `hot-reload.ecl`, whose module words carry
-    mandatory effects.
+    declared effects.
   - **Expected**: outputs `11 21 31 12 22 32` (one per line).
   - **Traces to**: Milestone 4 — registry generation swap.
 
@@ -1744,8 +2008,8 @@ script in CI.
     rather than requiring a runtime convention, and arbitrary bounded
     descriptor metadata never escapes the production validator. An artifact
     with an unknown capability id or invalid continuation layout is refused at
-    load; deferred module state is unreachable because no corresponding wire
-    fields or capability ids exist.
+    load; deferred native access to module state is unreachable because no
+    corresponding wire fields or capability ids exist.
   - **Verify by** `cmd`: `zig build test-native-sdk-negative`,
     `zig build fuzz-native-descriptor`, and the production-loaded fixture
     under Debug, ReleaseSafe, one/eight workers, and Linux TSan. The production
@@ -1758,9 +2022,9 @@ script in CI.
     allocator accounting returns to baseline with no callback reachable after
     the registry releases its final image pin.
   - **Traces to**: Milestone 9 — SDK comptime reflection, the descriptor
-    validator, library pins, and ordered Session teardown. Module state with
-    `ModuleView`/`ModuleUpdate` authority and its scheduler-integrated arbiter
-    is deferred post-v1 and carries its own assertions when it lands.
+    validator, library pins, and ordered Session teardown. SDK access to the
+    module stack remains deferred; M11 owns the internal draft/outward-transfer
+    authorities, userland behavior, and arbiter assertions.
 
 - **DoD-25a — result algebra**
   - **Assert**: the embedded `result` module constructs and observes canonical
@@ -1780,7 +2044,7 @@ script in CI.
     inputs; `all` returns the leftmost error or ordered success-stack lists;
     `partition` preserves order within both outputs; malformed inputs are
     rejected without executing probe quotations.
-  - **Traces to**: Milestone 11 — embedded source `result` module using the M6
+  - **Traces to**: Milestone 12 — embedded source `result` module using the M6
     result protocol and `attempt-with`.
 
 - **DoD-25 — json round-trip**
@@ -1792,7 +2056,7 @@ script in CI.
     numbers; plus `{1 2} json.emit` expecting `'kind 'type`.
   - **Expected**: corpus round-trips byte-identically; the emit error
     fires.
-  - **Traces to**: Milestone 11 — json native module using M9 capabilities.
+  - **Traces to**: Milestone 12 — json native module using M9 capabilities.
 
 - **DoD-26 — csv round-trip**
   - **Assert**: `csv.parse` preserves fields, empty cells, record widths,
@@ -1810,7 +2074,7 @@ script in CI.
     canonical output matches byte-for-byte; the malformed input yields
     `'kind 'parse`, the numeric cell and non-list row yield `'kind 'type`,
     and the zero-field row yields `'kind 'shape`.
-  - **Traces to**: Milestone 11 — csv native module using M9 capabilities.
+  - **Traces to**: Milestone 12 — csv native module using M9 capabilities.
 
 - **DoD-27 — table representation and conversions**
   - **Assert**: a valid table remains an ordinary dict under every core
@@ -1829,7 +2093,7 @@ script in CI.
     records round-trip while empty records are explicitly schema-less, casts
     are the only scalar coercions, and every transformation produces the
     fixture's expected ordered column dict.
-  - **Traces to**: Milestone 11 — embedded `table` module value policy and
+  - **Traces to**: Milestone 12 — embedded `table` module value policy and
     conversion/transform words.
 
 - **DoD-28 — table validation boundary**
@@ -1846,7 +2110,7 @@ script in CI.
     fail as `'type`, `'shape`, `'domain`, or `'contract` according to the
     frozen policy, no cast/aggregate quotation runs before complete
     prevalidation, and core `type` continues to report `'dict`.
-  - **Traces to**: Milestone 11 — embedded `table` module validators.
+  - **Traces to**: Milestone 12 — embedded `table` module validators.
 
 - **DoD-29 — table filtering and aggregation**
   - **Assert**: CSV text can be explicitly cast, filtered, grouped by named
@@ -1860,7 +2124,7 @@ script in CI.
   - **Expected**: the grouped index dict and final region/revenue/count/mean
     column dict match the checked-in expected values exactly; no header or
     numeric inference occurs.
-  - **Traces to**: Milestone 11 — embedded `table` module grouping and
+  - **Traces to**: Milestone 12 — embedded `table` module grouping and
     aggregation words.
 
 - **DoD-30 — stable table joins and explicit missingness**
@@ -1876,7 +2140,7 @@ script in CI.
     duplicates expand in the specified order, unmatched left rows use only
     caller-provided fills, collisions and incomplete fills are `'domain`, and
     a JSON `'null` value remains ordinary data when present.
-  - **Traces to**: Milestone 11 — embedded `table` module join words.
+  - **Traces to**: Milestone 12 — embedded `table` module join words.
 
 - **DoD-31 — http client**
   - **Assert**: `http.get` against a local fixture server returns a
@@ -1886,7 +2150,7 @@ script in CI.
     `http.ecl` gets a known file and one dead port.
   - **Expected**: status/body asserted; the dead port errors `'io`
     without crashing the interpreter.
-  - **Traces to**: Milestone 11 — internal http native module and documented
+  - **Traces to**: Milestone 12 — internal http native module and documented
     direct-blocking exception.
 
 - **DoD-32 — str module via embedded stdlib**
@@ -1895,7 +2159,7 @@ script in CI.
   - **Verify by** `cmd`: `ecl "'str use \"hello\" str.upper pp"` in an
     empty environment.
   - **Expected**: `"HELLO"`.
-  - **Traces to**: Milestone 11 — embedded stdlib registration (mechanism Milestone 4).
+  - **Traces to**: Milestone 12 — embedded stdlib registration (mechanism Milestone 4).
 
 - **DoD-33 — source architecture audit**
   - **Assert**: every first-party Zig input belongs to exactly one production
@@ -1905,35 +2169,39 @@ script in CI.
     this audit.
   - **Expected**: exit 0 with exhaustive source classification and no
     architecture-policy violations.
-  - **Traces to**: Milestone 12 — the source architecture audit (d.23).
+  - **Traces to**: Milestone 13 — the source architecture audit (d.23).
 
-- **DoD-34 — module effect declarations (d.9)**
-  - **Assert**: a module `def` without an effect declaration fails
-    registration; a declared effect is enforced dynamically when a call
-    enters from outside its home module; same-home calls are unbracketed;
-    optional documentation shares the same annotation and is visible via
-    `doc`/`see`. SDK-loaded native words derive their validated effect from the
+- **DoD-34 — declared source effects remain live contracts**
+  - **Assert**: when a module word supplies an effect, it is enforced as a live
+    contract on entry from outside its home; same-home calls remain unbracketed,
+    and optional documentation in the same annotation remains visible through
+    `doc` and `see`.
+  - **Verify by** `cmd`:
+    `ecl -e "'m ((dup +) (a -- b c) 'lies def) module 1 m.lies"`;
+    `ecl -e "'m ((dup +) (a -- b : \"Double.\") 'dbl def) module 'm.dbl see 'm.dbl doc"`;
+    and the `module: effect shape cross-home contract and same-home TCO` fixture
+    at depths 20 and 20,000.
+  - **Expected**: the false declaration raises `'contract`; `see` includes
+    `(a -- b : "Double.")` and `doc` returns `"Double."`; both recursion depths
+    have the same bounded maximum frame count.
+  - **Traces to**: Milestone 4 — module call-contract entry, combined
+    annotation reflection, and same-home tail calls.
+
+- **DoD-34a — native effect declarations remain mandatory**
+  - **Assert**: SDK-loaded native words derive a validated effect from their
     typed `Call`, require nonempty documentation at comptime and load time, and
-    expose both through `doc`, `which`, and `see` like ordinary callables.
-  - **Verify by** `cmd`: `ecl -e "'m ( (dup +) 'bad def ) module"`;
-    `ecl -e "'m ( (dup +) ( a -- b c ) 'lies def ) module 1 m.lies"`;
-    `ecl -e "'m ( (dup +) ( a -- b : \"Double.\" ) 'dbl def ) module 'm.dbl see 'm.dbl doc"`;
-    `zig build native-fixture`; and `zig build test`, whose
-    `module: effect shape cross-home contract and same-home TCO` fixture compares
-    20- and 20,000-deep module countdowns. The real loaded native fixture checks
-    all three reflection commands plus callback/effect/capability consistency.
-  - **Expected**: exit ≠ 0 with `'kind 'domain` (missing declaration);
-    exit ≠ 0 with `'kind 'contract` (observed `( a -- b )` ≠ declared
-    `( a -- b c )`); `see` output includes
-    `(a -- b : "Double.")` and `doc` returns `"Double."`; both countdown
-    depths have the same bounded maximum frame count, proving no
-    per-activation same-home contract checkpoint. For the native fixture,
-    `which` renders the binding kind as `native` followed by its inferred
-    capability list, and `see` renders `<native:<module>.<word>>` with the
-    ordinary combined annotation.
-  - **Traces to**: Milestone 4 — module `def`/`defp` declaration validation and
-    the cross-home d.14 dynamic enforcement hook; Milestone 9 — native typed
-    effects and reflective metadata.
+    expose both through `doc`, `which`, and `see` like ordinary callables; the
+    source-language relaxation in M11 does not create an untyped native entry.
+  - **Verify by** `cmd`: `zig build native-fixture` runs the compile-negative
+    missing-`Call` and missing-documentation fixtures, then loads the real
+    fixture and checks all three reflection commands plus
+    callback/effect/capability consistency.
+  - **Expected**: both incomplete descriptors are rejected; `which` renders
+    the loaded binding kind as `native` followed by its inferred capability
+    list, and `see` renders `<native:<module>.<word>>` with the ordinary combined
+    annotation.
+  - **Traces to**: Milestone 9 — native typed effects, descriptor validation,
+    and reflective metadata.
 
 - **DoD-35 — embedded target-language prelude**
   - **Assert**: the shipped [E] core vocabulary loads without filesystem
@@ -1952,3 +2220,123 @@ script in CI.
     tests exit 0 without reading an external prelude file.
   - **Traces to**: Milestone 6 — `src/prelude.ecl` plus the core bootstrap
     loader and provenance archive.
+
+- **DoD-36 — one-binder set publishes literal captures**
+  - **Assert**: `set` publishes a word binding whose stored body is the
+    literal capture: bare reference applies it and pushes the value, and
+    `body` returns the capture with no hidden value-binding representation.
+  - **Verify by** `cmd`: `ecl -e "3 'x set x 'x body"`.
+  - **Expected**: final stack `3 ((3) first)`.
+  - **Traces to**: Milestone 10 — `src/prelude.ecl` `### def set` block +
+    `src/definition_prims.zig` reflection over word bindings.
+
+- **DoD-37 — one binding kind supports annotated module constants**
+  - **Assert**: an explicitly annotated literal-capture module definition is
+    the same callable binding kind as every other word; qualified cross-home
+    reference checks its declared effect, and reflection exposes its body.
+  - **Verify by** `cmd`:
+    `ecl -e "'m (40 literal (-- value) 'k def) module m.k 'm.k body 'm.k which"`.
+  - **Expected**: stdout shows `40` and a `m.k -> m.k def public` which
+    line carrying `(-- value)`; `body` returns `((40) first)` with no distinct
+    value-binding representation.
+  - **Traces to**: Milestone 10 — the literal-capture publication path and the
+    shrunk `Binding` union in `src/env.zig`, which M11 leaves unchanged when it
+    adds a separate durable module stack.
+
+- **DoD-38 — source annotations are optional in every definition context**
+  - **Assert**: module `def`/`defp` accept no annotation, effect only,
+    documentation only, or both; a supplied effect remains a live
+    cross-boundary contract, while omission adds no inferred check. `set` and
+    `setp` publish the exact literal-capture definition without synthesized
+    metadata, and malformed recognized annotations still fail.
+  - **Verify by** `cmd`: fixture `optional-module-annotations.ecl` registers
+    public and private words in all four source forms, reflects body/doc/effect
+    presence, calls one deliberately false supplied effect and one unannotated
+    dynamic-effect word, and compares `set` with `literal` plus `def`.
+  - **Expected**: all four source forms register and reflect exactly what was
+    supplied; only the declared false effect raises `'contract`; malformed
+    annotations are `'domain`; `set` and explicit literal definition have the
+    same body and absent metadata.
+  - **Traces to**: Milestone 11 — definition annotation validation/publication,
+    module call-contract entry, reflection, and the simplified prelude
+    `set`/`setp` definitions.
+
+- **DoD-39 — dynamically constructed modules are independent state singletons**
+  - **Assert**: two canonical module names registered from the same
+    `module-with` body own independent durable stacks initialized from their
+    supplied construction values; module-homed `within` reaches only its
+    definition-site slot, and `__MODULE__` returns a distinct stable `'module`
+    handle for each slot.
+  - **Verify by** `cmd`: fixture `stateful-module-instances.ecl` constructs two
+    counter modules from one body quotation with different seed values, invokes
+    exported `within`-backed operations by different amounts, reads both through
+    `without`, compares their exported handles, and repeats at 1 and 8 workers. A
+    separate top-level `__MODULE__` and handle-targeted `within` are attempted.
+  - **Expected**: both worker counts produce the same distinct final values;
+    the handles do not match, both invalid authority uses are `'domain`, and
+    neither module can observe or mutate the other's stack.
+  - **Traces to**: Milestone 11 — `module-with`, module-handle identity,
+    construction-stack publication, definition-site `__MODULE__`, and
+    module-home `within` authority.
+
+- **DoD-40 — explicit state transfers serialize and roll back**
+  - **Assert**: concurrent module-homed `within` quotations are linearizable;
+    caller values enter only through explicit quotation capture (exercised with
+    both `partial` and `with`) and `without` is the only draft-to-caller
+    transfer;
+    ordinary module words still operate on the caller stack. An application
+    that errors, is cancelled, exhausts allocation, underflows `without`,
+    attempts to park, nests `within`, or enters another module's durable stack
+    publishes neither draft nor pending outputs.
+  - **Verify by** `cmd`: the production-connected stateful-module suite spawns
+    contending counter operations implemented as
+    `(+ dup without) partial within`, exercises pool-style checkout as
+    `(without) within` and checkin as `() partial within`, uses `with` for one
+    multiple-input update, verifies a stateless module word against ambient
+    caller values, and runs one case for each failed exit at 1 and 8 workers,
+    under Linux/x86_64 TSan, and in the initialized-Session OOM sweep.
+  - **Expected**: the final value equals exactly the successful increment
+    count in every schedule; every failed path returns its documented error,
+    leaves the preceding stack and caller output unchanged, outward values
+    preserve invocation order, and there is no TSan report or leak.
+  - **Traces to**: Milestone 11 — `within`, `without`, the scheduler-integrated
+    per-slot arbiter, exact output-window reservation, and all-or-nothing stack
+    publication.
+
+- **DoD-41 — hot reload preserves module state**
+  - **Assert**: re-registering a stateful canonical module atomically changes
+    its exported behavior without replacing the durable stack with the new
+    candidate body's construction stack; failed registration preserves both
+    the prior generation and state.
+  - **Verify by** `cmd`: fixture `stateful-module-reload.ecl` mutates a module,
+    re-registers a body that proposes a different initial stack and implements
+    different behavior over the retained layout, observes through both
+    qualified and previously used access paths, then attempts one failing
+    registration.
+  - **Expected**: successful reload exposes the new code over the old durable
+    stack, not the proposed replacement initializer; failed reload changes
+    neither behavior nor state, and no call observes a mixed generation/state
+    transition.
+  - **Traces to**: Milestone 11 — the registry-slot stack/code-generation
+    identity split and reload quiescence barrier.
+
+- **DoD-42 — module removal and Session shutdown quiesce state owners**
+  - **Assert**: `unmodule` prevents new calls, cooperatively quiesces active
+    `within` drafts and generation pins, closes every extant module
+    handle without retargeting it, removes aliases, and retires the slot
+    through bounded work; Session shutdown uses the same ordering. Repeated
+    construct/remove/name-reuse cycles do not retain memory proportional to
+    history.
+  - **Verify by** `cmd`: the production-connected lifecycle suite races
+    qualified calls and `within` applications with name- and handle-based
+    `unmodule`, checks aliases and stale handles after reusing the canonical
+    name, repeats dynamic construction/removal under a counting allocator, and
+    runs the path under the Linux/x86_64 TSan gate.
+  - **Expected**: pre-close calls finish with stable values, post-close calls
+    fail with `'undefined-word`, stale handles report closed and never reach the
+    replacement slot, no alias reaches retired state, and settled memory is
+    bounded by peak simultaneously live modules, stack values, drafts, outputs,
+    and handles rather than update or registration count.
+  - **Traces to**: Milestone 11 — the opaque module-owner
+    `live -> closing -> retired` lifecycle, registry removal, and bounded
+    retirement integration.

@@ -85,6 +85,13 @@ const cases = [_]Case{
     .{ .name = "ok?", .source = "(2 3 +) attempt ok?" },
     .{ .name = "or-raise", .source = "(2 3 +) attempt or-raise" },
     .{ .name = "or-else", .source = "(2 3 +) attempt 9 or-else" },
+    .{ .name = "set", .source = "3 'x set x" },
+    .{ .name = "set quotation", .source = "(dup *) 'q set q" },
+    .{ .name = "body", .source = "3 'x set 'x body" },
+    .{ .name = "which", .source = "3 'x set 'x which" },
+    .{ .name = "see", .source = "3 'x set 'x see" },
+    .{ .name = "see set", .source = "'set see" },
+    .{ .name = "setp", .source = "1 'x setp" },
 };
 
 test "promoted Zig CLI behavior matches the reference snapshot" {
@@ -609,7 +616,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 327 'col 47}}
+        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 333 'col 47}}
         \\=== ok? ===
         \\source: (2 3 +) attempt ok?
         \\exit: 0
@@ -631,6 +638,55 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\[5]
         \\stderr:
         \\<empty>
+        \\=== set ===
+        \\source: 3 'x set x
+        \\exit: 0
+        \\stdout:
+        \\3
+        \\stderr:
+        \\<empty>
+        \\=== set quotation ===
+        \\source: (dup *) 'q set q
+        \\exit: 0
+        \\stdout:
+        \\(dup *)
+        \\stderr:
+        \\<empty>
+        \\=== body ===
+        \\source: 3 'x set 'x body
+        \\exit: 0
+        \\stdout:
+        \\([3] first)
+        \\stderr:
+        \\<empty>
+        \\=== which ===
+        \\source: 3 'x set 'x which
+        \\exit: 0
+        \\stdout:
+        \\x -> x def public (-- value)
+        \\stderr:
+        \\<empty>
+        \\=== see ===
+        \\source: 3 'x set 'x see
+        \\exit: 0
+        \\stdout:
+        \\([3] first) (-- value) 'x def
+        \\stderr:
+        \\<empty>
+        \\=== see set ===
+        \\source: 'set see
+        \\exit: 0
+        \\stdout:
+        \\(swap literal swap (-- value) swap def) (value name -- : "Bind a value as a constant word in the current scope.") 'set def
+        \\stderr:
+        \\<empty>
+        \\=== setp ===
+        \\source: 1 'x setp
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 375 'col 36}}
         \\
     ).diff(transcript.written(), true);
 }

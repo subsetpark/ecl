@@ -205,13 +205,15 @@ test "nested and quoted markers remain body data and set never recognizes annota
 test "reserved namespace names reject every binding surface but remain readable" {
     try support.expectErrors(&.{
         .{ .name = "definition", .source = "(1) '-- def", .kind = "domain", .word = "def" },
-        .{ .name = "value", .source = "1 ': set", .kind = "domain", .word = "set" },
+        // set is prelude sugar, so the reserved-name check raises from the
+        // def it calls, with set as the trace parent.
+        .{ .name = "value", .source = "1 ': set", .kind = "domain", .word = "def" },
         .{ .name = "local separator", .source = "1 (|--| --)", .kind = "parse" },
         .{ .name = "local colon", .source = "1 (|:| :)", .kind = "parse" },
         .{ .name = "module", .source = "'-- () module", .kind = "domain", .word = "module" },
         .{ .name = "alias", .source = "'m () module '-- 'm alias", .kind = "domain", .word = "alias" },
         .{ .name = "public export", .source = "'m ((1) (-- x) '-- def) module", .kind = "domain", .word = "def" },
-        .{ .name = "private value", .source = "'m (1 ': setp) module", .kind = "domain", .word = "setp" },
+        .{ .name = "private value", .source = "'m (1 ': setp) module", .kind = "domain", .word = "defp" },
         .{ .name = "bare reserved word is readable", .source = "--", .kind = "undefined-word", .word = "--" },
     });
     try support.expectStack("'-- ': (-- :) 'x:y", "'-- ': (-- :) 'x:y");
@@ -231,7 +233,7 @@ test "long annotation traversal and reflection observe cancellation" {
     const allocator = std.testing.allocator;
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
     try runtime.pushOwned(body);
@@ -249,7 +251,7 @@ test "long annotation traversal and reflection observe cancellation" {
     runtime.clearCancellation();
     try expectErrorContains(&runtime, "cancelled-definition", "'kind 'undefined-word");
 
-    var doc_runtime = try session.Session.init(allocator, &.{});
+    var doc_runtime = try session.Session.init(std.testing.allocator, &.{});
     defer doc_runtime.deinit();
     const doc_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
     try doc_runtime.pushOwned(doc_body);
@@ -271,7 +273,7 @@ test "long annotation traversal and reflection observe cancellation" {
 
     var output_buffer: [256]u8 = undefined;
     var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var reflection_runtime = try session.Session.initWithOutput(allocator, &.{}, &output.writer);
+    var reflection_runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer reflection_runtime.deinit();
     const long_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
     defer cleanup.releaseValue(long_body);
@@ -292,7 +294,7 @@ test "long annotation traversal and reflection observe cancellation" {
     try expectErrorContains(&reflection_runtime, "'long-doc see", "unit cancelled");
     try std.testing.expect(reflection_runtime.lastPolls() >= 1);
 
-    var name_runtime = try session.Session.init(allocator, &.{});
+    var name_runtime = try session.Session.init(std.testing.allocator, &.{});
     defer name_runtime.deinit();
     const name_bytes = try allocator.alloc(u8, 70_000);
     defer allocator.free(name_bytes);
@@ -307,4 +309,134 @@ test "long annotation traversal and reflection observe cancellation" {
     const lookup_source = try std.fmt.allocPrint(allocator, "'{s} body", .{name_bytes});
     defer allocator.free(lookup_source);
     try expectErrorContains(&name_runtime, lookup_source, "'kind 'undefined-word");
+}
+
+// ── Milestone 10 (one-binder-merge) ──────────────────────────────────────
+// The merge makes `v 'name set` observationally `v literal (-- value)`
+// `'name def`:
+// bindings have one kind, bare reference always applies a stored body, and
+// a "value" is a word whose body is the literal capture `((v) first)`
+// carrying the synthesized effect `(-- value)`.
+
+test "definitions: set publishes a literal-capture word with a synthesized effect" {
+    // A constant is a word whose body is the literal capture, so referencing
+    // it applies that body and pushes exactly the captured value. The capture
+    // is inert for every kind of value: a quotation is pushed rather than run,
+    // and a bare word stays data rather than resolving.
+    try support.expectStack("3 'x set x 'x body", "3 ([3] first)");
+    try support.expectStack("(dup *) 'q set q", "(dup *)");
+    try support.expectStack("(dup) first 'w set w", "dup");
+    try support.expectStack("{'a 1} 'd set d", "{'a 1}");
+    // Rebinding replaces the whole snapshot, capture and all.
+    try support.expectStack("3 'x set 4 'x set x", "4");
+}
+
+test "definitions: body returns the capture body for set-bound names" {
+    // One binding kind makes `body` total over everything published from
+    // ecl: a constant has a stored body just as a definition does, and the
+    // capture round-trips as ordinary data.
+    try support.expectStack("3 'x set 'x body", "([3] first)");
+    try support.expectStack("3 'x set 'x body call", "3");
+    // Two unwrappings reach the captured value itself: the capture wrapper,
+    // then the quotation that was captured.
+    try support.expectStack("(swap) 'q set 'q body first first", "(swap)");
+    // Host bindings still have no ecl body to return.
+    try support.expectErrors(&.{
+        .{ .name = "builtin", .source = "'def body", .kind = "type", .word = "body" },
+        .{ .name = "missing", .source = "'absent body", .kind = "undefined-word", .word = "absent" },
+    });
+}
+
+test "definitions: which and see render set bindings as public defs" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    defer runtime.deinit();
+    // Reflection reports what is stored: one kind, and the effect the sugar
+    // synthesized. There is no `set` label to report, and `see` does not
+    // reconstruct the `set` spelling from the capture shape.
+    try expectOk(&runtime, "3 'x set 'x which 'x see");
+    try std.testing.expectEqualStrings(
+        "x -> x def public (-- value)\n" ++
+            "([3] first) (-- value) 'x def\n",
+        output.written(),
+    );
+
+    // The rendering is source: reading it back reproduces the binding.
+    var reread = try session.Session.init(std.testing.allocator, &.{});
+    defer reread.deinit();
+    try expectOk(&reread, "([3] first) (-- value) 'x def x 'x body");
+    var display = try reread.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("3 ([3] first)", display.bytes());
+}
+
+test "definitions: set never recognizes annotations in captured data" {
+    // The guarantee is now mechanical rather than a mode test: the sugar
+    // wraps its value before def sees it, so a captured marker list is
+    // always nested one level down, and nested markers are inert.
+    try support.expectStack("(-- :) 'markers set markers", "(-- :)");
+    try support.expectStack("(: \"doc\") 'ann set ann", "(: \"doc\")");
+    try support.expectStack("(a -- b) 'eff set eff 'eff body", "(a -- b) (((a -- b)) first)");
+    // The captured annotation is data, not metadata: it never becomes the
+    // binding's own documentation or effect.
+    try support.expectErrors(&.{
+        .{ .name = "captured doc is not documentation", .source = "(: \"doc\") 'ann set 'ann doc", .kind = "domain", .word = "doc" },
+    });
+}
+
+test "definitions: top-level setp fails through defp's module-root check" {
+    // Privacy is still checked dynamically against the unit's current scope;
+    // the sugar just relocates the raiser to the primitive it calls.
+    try support.expectErrors(&.{
+        .{
+            .name = "top-level setp",
+            .source = "1 'x setp",
+            .kind = "domain",
+            .word = "defp",
+            .message = "defp/setp are legal only in a module root",
+        },
+        .{
+            // An isolated child scope is not a module root either, even
+            // inside a module body — the check is against the unit's current
+            // scope, not the enclosing registration.
+            .name = "setp inside an isolated child",
+            .source = "'m ([1] (pop 1 'x setp) each) module",
+            .kind = "domain",
+            .word = "defp",
+        },
+    });
+}
+
+test "definitions: def inside a word body writes the caller's scope" {
+    // The invariant licensing prelude placement of set/setp: a word whose
+    // body calls def publishes into the *unit's current scope*, never the
+    // executing frame's resolution environment (core is frozen after prelude
+    // installation).
+
+    // At top level the definition lands in the session environment and
+    // outlives the helper that made it.
+    try support.expectStack(
+        "((1) (-- n) 'made-here def) ( -- ) 'maker def maker made-here",
+        "1",
+    );
+
+    // Inside a module body it lands in the module root — which is exactly
+    // how the core words set and setp publish module constants, including
+    // the privacy distinction. Module bodies resolve against the module's
+    // own chain, so only core words (not session helpers) can be used here.
+    try support.expectStack("'m (7 'x set 8 'h setp (h) (-- n) 'peek def) module m.x m.peek", "7 8");
+    try support.expectErrors(&.{
+        .{ .name = "private stays private", .source = "'m (8 'h setp) module m.h", .kind = "undefined-word", .word = "m.h" },
+    });
+
+    // Inside an isolated child unit it stays in that disposable scope.
+    try support.expectErrors(&.{
+        .{
+            .name = "child scope is disposable",
+            .source = "((1) (-- n) 'scoped def) ( -- ) 'h def (h) attempt pop scoped",
+            .kind = "undefined-word",
+            .word = "scoped",
+        },
+    });
 }

@@ -1,4 +1,13 @@
 //! Shared behavioral test helpers for M5 kernel families.
+//!
+//! Every case here builds and tears down a whole session, so these helpers
+//! run on the traceless `test_heap.SessionHeap` — leaks still fail, without
+//! an allocation site. That is safe only because these helpers pass nothing
+//! but source strings to the session. A helper added here that hands the
+//! session a host-built value (`define`, `pushOwned`) would free across
+//! allocators; put such a test in `definition_test` or `module_test`, which
+//! stay on `std.testing.allocator`. See `test_heap.zig` for the full policy
+//! and for which suite each kind of memory assertion belongs in.
 const std = @import("std");
 const value = @import("../value.zig");
 const session = @import("../session.zig");
@@ -6,7 +15,11 @@ const list = @import("../list.zig");
 const dict = @import("../dict.zig");
 const intern = @import("../intern.zig");
 const printer = @import("../print.zig");
+const test_heap = @import("test_heap.zig");
 
+/// Strings and comparisons stay on the tracing allocator: the volume is small
+/// and an allocation site is worth having. Only the per-case session, which
+/// replays the whole prelude bootstrap, moves to the traceless heap.
 const allocator = std.testing.allocator;
 
 pub const StackCase = struct {
@@ -91,7 +104,9 @@ pub fn expectLanguageError(failure: value.Value, expected: ErrorCase) !void {
 }
 
 fn expectStackCase(case: StackCase) !void {
-    var runtime = try session.Session.init(allocator, &.{});
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var runtime = try session.Session.init(heap.allocator(), &.{});
     defer runtime.deinit();
     switch (try runtime.runUnit("<kernel-test>", case.source)) {
         .ok => {},
@@ -110,7 +125,9 @@ fn expectStackCase(case: StackCase) !void {
 }
 
 fn expectErrorCase(case: ErrorCase) !void {
-    var runtime = try session.Session.init(allocator, &.{});
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var runtime = try session.Session.init(heap.allocator(), &.{});
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<kernel-test>", case.source)) {
         .ok, .incomplete => return error.TestUnexpectedResult,

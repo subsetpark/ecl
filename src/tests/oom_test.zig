@@ -2,6 +2,24 @@
 //!
 //! Keeping these surfaces in one probe avoids replaying the embedded prelude
 //! bootstrap independently for every feature-specific failure index.
+//!
+//! Component-level probes elsewhere inject failures into a directly
+//! constructed subject (`list.zig`, `dict.zig`, `env.zig`, `equal.zig`, the
+//! reader, formatter, line-editor, registry, and native-validation probes);
+//! none of them bootstraps a Session. This is the only sweep over a fully
+//! initialized one, so a surface reachable only through a live Session — a
+//! word, a prelude definition, a module, reflection, the loader, the
+//! scheduler — has no allocation-failure coverage unless a snippet below
+//! reaches it, and its behavioral tests still pass. Adding such a surface
+//! means adding a snippet here; see `test_heap.zig` for the allocator
+//! policy.
+//!
+//! `checkAllAllocationFailures` re-runs the whole probe once per allocation
+//! ordinal, so a snippet's cost is multiplied by the total allocation count.
+//! Keep additions short and reaching, not exhaustive — one line through a
+//! path is coverage; a hundred lines through it is the same coverage, slower.
+//! Snippets must leave the stack clean (`pop` what they push) and propagate
+//! errors, or the sweep silently stops testing what follows.
 const std = @import("std");
 const session = @import("../session.zig");
 const native_fixture = @import("native_fixture_options");
@@ -139,8 +157,9 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-primitives.ecl",
         "(3 4 +) 'sum def sum pop (1 0 /) attempt pop (5 6 +) attempt pop " ++
             "({'kind 'custom 'data {'detail 7}} raise) attempt pop " ++
-            "[3 4] (+) partial-all call pop [5 6] (+) attempt-with pop " ++
-            "[7 8] (+) spawn-with await pop",
+            "[3 4] (+) with call pop [5 6] (+) attempt-with pop " ++
+            "[7 8] (+) spawn-with await pop " ++
+            "[9 10] 'oom-seeded (+ 'x set) module-with oom-seeded.x pop",
     );
     try runOk(
         &runtime,
@@ -156,7 +175,12 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[1] (dup 'for-local set pop) for " ++
             "[1] 0 (+ dup 'fold-local set) fold pop " ++
             "[1] 0 (+ dup 'scan-local set) scan pop " ++
-            "[1] (dup 'infra-local set) infra pop",
+            "[1] (dup 'infra-local set) infra pop " ++
+            // Capture-shape recognition allocates on its own path (the fused
+            // kernel) and on the rejected one (the generic frame machine);
+            // both belong in the consolidated allocation-failure sweep.
+            "[1 2 3] 3 (+) partial each pop " ++
+            "[1 2 3] ((3 4) first +) each pop",
     );
     try runOk(
         &runtime,

@@ -1,4 +1,5 @@
 const std = @import("std");
+const value = @import("../value.zig");
 const env = @import("../env.zig");
 const heap = @import("../heap.zig");
 const intern = @import("../intern.zig");
@@ -40,6 +41,50 @@ fn expectErrorContains(
     for (needles) |needle| try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), needle) != null);
 }
 
+/// Host-level publication helpers. The tests below measure generation
+/// bumping, snapshot reclamation, and name enumeration, where a binding's
+/// payload is incidental — one constant body and one effect serve every
+/// publication. The caller owns what it builds and releases it once the
+/// publication, which retains whatever it stores, has been made.
+const TestBinding = struct {
+    body: value.Value,
+
+    fn init(allocator: std.mem.Allocator) !TestBinding {
+        return .{ .body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }}) };
+    }
+    fn release(self: TestBinding, releases: *heap.ReleaseDomain) void {
+        releases.releaseValue(self.body);
+    }
+    fn top(self: TestBinding) env.TopPublication {
+        return .{ .word = .{ .body = env.quotation(self.body.list).? } };
+    }
+    fn module(
+        self: TestBinding,
+        effect: env.ValidatedEffect,
+        visibility: env.Visibility,
+    ) env.ModulePublication {
+        return .{ .word = .{
+            .body = env.quotation(self.body.list).?,
+            .visibility = visibility,
+            .effect = effect,
+        } };
+    }
+};
+
+const TestEffect = struct {
+    source: value.Value,
+    effect: env.ValidatedEffect,
+
+    fn init(allocator: std.mem.Allocator) !TestEffect {
+        const marker = try intern.intern("--");
+        const source = try list.fromValuesGeneric(allocator, &.{.{ .word = marker }});
+        return .{ .source = source, .effect = env.ValidatedEffect.parse(source.list, marker).? };
+    }
+    fn release(self: TestEffect, releases: *heap.ReleaseDomain) void {
+        releases.releaseValue(self.source);
+    }
+};
+
 fn commitEmptyModule(registry: *modules.Registry, name: intern.NamespaceName) !void {
     var candidate = try registry.createCandidate(name);
     defer candidate.deinit();
@@ -57,9 +102,13 @@ test "env: new names and use edits bump shape and deep lookup is ordered" {
     defer env.testing.deinitScope(&scope, releases);
     const first = try intern.trustedNamespace("first-env-name");
     const second = try intern.trustedNamespace("second-env-name");
-    _ = try scope.publishModule(first, .{ .value = .{ .item = .{ .int = 1 }, .visibility = .public } });
+    const binding = try TestBinding.init(std.testing.allocator);
+    defer binding.release(releases);
+    const effect = try TestEffect.init(std.testing.allocator);
+    defer effect.release(releases);
+    _ = try scope.publishModule(first, binding.module(effect.effect, .public));
     try std.testing.expectEqual(@as(u64, 1), environment.generation());
-    _ = try scope.publishModule(second, .{ .value = .{ .item = .{ .int = 2 }, .visibility = .public } });
+    _ = try scope.publishModule(second, binding.module(effect.effect, .public));
     try std.testing.expectEqual(@as(u64, 2), environment.generation());
     try scope.moveUseToTop(8);
     try std.testing.expectEqual(@as(u64, 3), environment.generation());
@@ -79,7 +128,7 @@ test "env: new names and use edits bump shape and deep lookup is ordered" {
     scope.freezeModule();
     try std.testing.expectError(
         error.Frozen,
-        scope.publishModule(first, .{ .value = .{ .item = .{ .int = 3 }, .visibility = .public } }),
+        scope.publishModule(first, binding.module(effect.effect, .public)),
     );
 }
 
@@ -244,7 +293,9 @@ test "module: use shadow notices stay within the cancellation bound" {
         null,
     );
     defer runtime.deinit();
-    try runtime.define(long_name, .{ .value = .{ .int = 1 } });
+    const binding = try TestBinding.init(allocator);
+    defer runtime.release(binding.body);
+    try runtime.define(long_name, binding.top());
     const module_source = try std.fmt.allocPrint(allocator, "'wide (2 '{s} set) module", .{name_bytes});
     defer allocator.free(module_source);
     try expectOk(&runtime, module_source);
@@ -283,8 +334,11 @@ test "reflection: which and see expose home shadow and effect" {
     try expectOk(&runtime, "'m (40 's setp (s 2 +) ( -- n ) 'f def) module 'm use " ++
         "'m.f see 9 'f set 'f which 'f see words");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(s 2 +) (-- n) 'm.f def") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f set public; shadows m.f") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "9 'f set") != null);
+    // One binding kind: a session constant reports as a public def carrying
+    // the effect its sugar synthesized, and `see` prints the stored literal
+    // capture rather than reconstructing the `set` spelling.
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f def public (-- value); shadows m.f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "([9] first) (-- value) 'f def") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " f ") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " s ") == null);
     try expectErrorContains(&runtime, "'m.f body call", &.{ "'kind 'undefined-word", "'word 's" });
@@ -423,8 +477,10 @@ test "reflection remains cancellable across sorting and identifier output" {
     var discarding = std.Io.Writer.Discarding.init(&discard_buffer);
     var words_runtime = try session.Session.initWithOutput(allocator, &.{}, &discarding.writer);
     defer words_runtime.deinit();
-    try words_runtime.define(first, .{ .value = .{ .int = 1 } });
-    try words_runtime.define(second, .{ .value = .{ .int = 2 } });
+    const binding = try TestBinding.init(allocator);
+    defer words_runtime.release(binding.body);
+    try words_runtime.define(first, binding.top());
+    try words_runtime.define(second, binding.top());
     words_runtime.requestCancellation();
     const words_failure = (try words_runtime.runUnit("reflection-poll.ecl", "words")).err;
     defer words_runtime.release(words_failure);
@@ -437,7 +493,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     defer which_output.deinit();
     var which_runtime = try session.Session.initWithOutput(allocator, &.{}, &which_output.writer);
     defer which_runtime.deinit();
-    try which_runtime.define(first, .{ .value = .{ .int = 1 } });
+    try which_runtime.define(first, binding.top());
     try which_runtime.pushOwned(.{ .symbol = intern.namespaceId(first) });
     which_runtime.requestCancellation();
     const which_failure = (try which_runtime.runUnit("reflection-poll.ecl", "which")).err;
@@ -488,13 +544,14 @@ const EnvThreadContext = struct {
     environment: env.EnvironmentView,
     failed: *std.atomic.Value(bool),
     name: intern.NamespaceName,
+    publication: env.TopPublication,
 };
 
 fn envWorker(context: EnvThreadContext) void {
-    for (0..100) |index| {
+    for (0..100) |_| {
         _ = context.scope.publishTop(
             context.name,
-            .{ .value = .{ .int = @intCast(index) } },
+            context.publication,
         ) catch {
             context.failed.store(true, .release);
             return;
@@ -514,6 +571,7 @@ const ReclamationRaceContext = struct {
     environment: env.EnvironmentView,
     releases: *heap.ReleaseDomain,
     name: intern.NamespaceName,
+    publication: env.TopPublication,
     phase: *std.atomic.Value(u8),
     writer_done: *std.atomic.Value(bool),
     reader_loop_started: *std.atomic.Value(bool),
@@ -537,7 +595,10 @@ fn reclamationReader(context: ReclamationRaceContext) void {
                 context.failed.store(true, .release);
                 break;
             };
-            if (old.binding.value.int != 0) context.failed.store(true, .release);
+            // Identity of the resolved body is the reader-visible fact: a
+            // torn or stale snapshot would not carry the published quotation.
+            if (old.binding != .word or old.binding.word != context.publication.word.body)
+                context.failed.store(true, .release);
             old.deinit();
             break;
         },
@@ -565,7 +626,8 @@ fn reclamationReader(context: ReclamationRaceContext) void {
                 context.failed.store(true, .release);
                 break;
             };
-            if (observed.binding.value.int != 0) context.failed.store(true, .release);
+            if (observed.binding != .word or observed.binding.word != context.publication.word.body)
+                context.failed.store(true, .release);
             observed.deinit();
             break;
         },
@@ -583,7 +645,8 @@ fn reclamationReader(context: ReclamationRaceContext) void {
                     context.failed.store(true, .release);
                     break;
                 };
-                if (observed.binding.value.int != 0) context.failed.store(true, .release);
+                if (observed.binding != .word or observed.binding.word != context.publication.word.body)
+                    context.failed.store(true, .release);
                 observed.deinit();
                 break;
             },
@@ -642,10 +705,13 @@ test "env: concurrent cell publication is lease-safe and TSan-clean" {
     var scope = container.sessionRoot(std.testing.allocator);
     defer env.testing.deinitScope(&scope, releases);
     var failed = std.atomic.Value(bool).init(false);
+    const binding = try TestBinding.init(std.testing.allocator);
+    defer binding.release(releases);
     const context = EnvThreadContext{
         .scope = &scope,
         .environment = container.sessionView(),
         .failed = &failed,
+        .publication = binding.top(),
         .name = try intern.trustedNamespace("concurrent-env-name"),
     };
     var threads: [4]std.Thread = undefined;
@@ -664,7 +730,9 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
     var scope = container.sessionRoot(std.testing.allocator);
     defer env.testing.deinitScope(&scope, releases);
     const name = try intern.trustedNamespace("concurrent-reclamation");
-    _ = try scope.publishTop(name, .{ .value = .{ .int = 0 } });
+    const binding = try TestBinding.init(std.testing.allocator);
+    defer binding.release(releases);
+    _ = try scope.publishTop(name, binding.top());
     try scope.moveUseToTop(8);
     try scope.moveUseToTop(9);
     host.cleanup().drain();
@@ -678,6 +746,7 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
         .environment = container.sessionView(),
         .releases = releases,
         .name = name,
+        .publication = binding.top(),
         .phase = &phase,
         .writer_done = &writer_done,
         .reader_loop_started = &reader_loop_started,
@@ -693,7 +762,7 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
     try std.testing.expect(!failed.load(.acquire));
     var current = container.sessionView().resolveDirect(intern.namespaceId(name)).?;
     defer current.deinit();
-    try std.testing.expectEqual(@as(i64, 0), current.binding.value.int);
+    try std.testing.expectEqual(env.quotation(binding.body.list).?, current.binding.word);
 }
 
 test "environment and registry retirement stays bounded after a delayed reader drains" {
@@ -714,7 +783,9 @@ test "environment and registry retirement stays bounded after a delayed reader d
         const module_name = try intern.trustedNamespace("bounded-module");
         const alternate_module = try intern.trustedNamespace("bounded-module-alternate");
         const alias_name = try intern.trustedNamespace("bounded-module-alias");
-        _ = try scope.publishTop(binding_name, .{ .value = .{ .int = 0 } });
+        const binding = try TestBinding.init(allocator);
+        defer binding.release(releases);
+        _ = try scope.publishTop(binding_name, binding.top());
         try scope.moveUseToTop(8);
 
         // One public shape lease deliberately delays reclamation while a long
@@ -751,7 +822,7 @@ test "environment and registry retirement stays bounded after a delayed reader d
         host.cleanup().drain();
 
         for (0..128) |index| {
-            _ = try scope.publishTop(binding_name, .{ .value = .{ .int = @intCast(index) } });
+            _ = try scope.publishTop(binding_name, binding.top());
             try scope.moveUseToTop(if (index & 1 == 0) 9 else 8);
             try commitEmptyModule(&registry, module_name);
             try registry.alias(
@@ -764,7 +835,7 @@ test "environment and registry retirement stays bounded after a delayed reader d
         const warmed_live_bytes = counting.total_requested_bytes;
 
         for (0..2048) |index| {
-            _ = try scope.publishTop(binding_name, .{ .value = .{ .int = @intCast(index) } });
+            _ = try scope.publishTop(binding_name, binding.top());
             try scope.moveUseToTop(if (index & 1 == 0) 9 else 8);
             try commitEmptyModule(&registry, module_name);
             try registry.alias(
@@ -786,15 +857,11 @@ test "session: public definition mutation settles retirement every turn" {
         var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
         defer runtime.deinit();
         const name = try intern.trustedNamespace("public-mutation-retirement");
-        for (0..64) |index| try runtime.define(
-            name,
-            .{ .value = .{ .int = @intCast(index) } },
-        );
+        const binding = try TestBinding.init(allocator);
+        defer runtime.release(binding.body);
+        for (0..64) |_| try runtime.define(name, binding.top());
         const warmed_live_bytes = counting.total_requested_bytes;
-        for (0..1024) |index| try runtime.define(
-            name,
-            .{ .value = .{ .int = @intCast(index) } },
-        );
+        for (0..1024) |_| try runtime.define(name, binding.top());
         try std.testing.expect(counting.total_requested_bytes <= warmed_live_bytes + 4096);
         try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
     }
@@ -809,9 +876,11 @@ test "session: mutation settlement is independent of a busy sole worker" {
         defer runtime.deinit();
         try expectOk(&runtime, "((1) () while) spawn");
         const name = try intern.trustedNamespace("busy-worker-retirement");
-        for (0..64) |index| try runtime.define(name, .{ .value = .{ .int = @intCast(index) } });
+        const binding = try TestBinding.init(allocator);
+        defer runtime.release(binding.body);
+        for (0..64) |_| try runtime.define(name, binding.top());
         const warmed_live_bytes = counting.total_requested_bytes;
-        for (0..4096) |index| try runtime.define(name, .{ .value = .{ .int = @intCast(index) } });
+        for (0..4096) |_| try runtime.define(name, binding.top());
         try std.testing.expect(counting.total_requested_bytes <= warmed_live_bytes + 4096);
         try std.testing.expectEqual(@as(usize, 1), runtime.schedulerWorkerThreadCount());
         try expectOk(&runtime, "dup cancel await pop");
@@ -840,7 +909,11 @@ test "env: a replaced interior remains valid only through its binding lease" {
         .doc = env.documentation(document.list).?,
     } });
     var old = (environment.sessionView().resolveDirect(intern.namespaceId(name))).?;
-    _ = try scope.publishTop(name, .{ .value = .{ .int = 9 } });
+    // The replacement deliberately shares nothing with the original body, so
+    // the old lease is the only thing still holding it.
+    const replacement = try TestBinding.init(std.testing.allocator);
+    defer replacement.release(releases);
+    _ = try scope.publishTop(name, replacement.top());
     _ = releases.advance(1);
     try std.testing.expectEqual(@as(u32, 3), heap.refCount(body.list));
     old.deinit();
@@ -924,9 +997,12 @@ test "registry: old generation leases survive reload and reclaim after release" 
     const value_name = try intern.trustedNamespace("leased-value");
     var first = try registry.createCandidate(module_name);
     defer first.deinit();
-    _ = try first.publishDefinition(value_name, .{ .value = .{
-        .item = body,
+    const effect = try TestEffect.init(std.testing.allocator);
+    defer effect.release(releases);
+    _ = try first.publishDefinition(value_name, .{ .word = .{
+        .body = env.quotation(body.list).?,
         .visibility = .public,
+        .effect = effect.effect,
     } });
     _ = try registry.commit(&first);
     var old = registry.acquire(intern.namespaceId(module_name)).?;
@@ -950,10 +1026,11 @@ test "registry: generation cursors independently pin their snapshot" {
     const value_name = try intern.trustedNamespace("cursor-pinned-value");
     var first = try registry.createCandidate(module_name);
     defer first.deinit();
-    _ = try first.publishDefinition(value_name, .{ .value = .{
-        .item = .{ .int = 41 },
-        .visibility = .public,
-    } });
+    const binding = try TestBinding.init(std.testing.allocator);
+    defer binding.release(releases);
+    const effect = try TestEffect.init(std.testing.allocator);
+    defer effect.release(releases);
+    _ = try first.publishDefinition(value_name, binding.module(effect.effect, .public));
     _ = try registry.commit(&first);
 
     var lease = registry.acquire(intern.namespaceId(module_name)).?;
@@ -971,7 +1048,7 @@ test "registry: generation cursors independently pin their snapshot" {
     };
     var old_binding = old;
     defer old_binding.deinit();
-    try std.testing.expectEqual(@as(i64, 41), old_binding.binding.value.int);
+    try std.testing.expectEqual(env.quotation(binding.body.list).?, old_binding.binding.word);
     const old_name = while (true) switch (names.advance()) {
         .pending => {},
         .complete => return error.TestUnexpectedResult,
@@ -996,9 +1073,11 @@ test "module generation retirement waits for descendant scope propagation" {
             try intern.trustedNamespace("descendant-retirement"),
         );
         const child = try env.Scope.createLazy(allocator, &generation.scope);
+        const binding = try TestBinding.init(allocator);
+        defer binding.release(releases);
         _ = try child.publishTop(
             try intern.trustedNamespace("descendant-local"),
-            .{ .value = .{ .int = 1 } },
+            binding.top(),
         );
         // The generation owner may retire first, but its embedded scope must
         // keep both its storage and environment until the child finishes its
@@ -1008,11 +1087,11 @@ test "module generation retirement waits for descendant scope propagation" {
         try std.testing.expect(releases.hasPending());
         const grandchild = try env.Scope.createLazy(allocator, child);
         const grandchild_name = try intern.trustedNamespace("grandchild-after-retirement");
-        _ = try grandchild.publishTop(grandchild_name, .{ .value = .{ .int = 43 } });
+        _ = try grandchild.publishTop(grandchild_name, binding.top());
         var grandchild_value = grandchild.environmentOrNull().?.resolveDirect(
             intern.namespaceId(grandchild_name),
         ).?;
-        try std.testing.expectEqual(@as(i64, 43), grandchild_value.binding.value.int);
+        try std.testing.expectEqual(env.quotation(binding.body.list).?, grandchild_value.binding.word);
         grandchild_value.deinit();
         grandchild.retire();
         child.retire();
@@ -1145,11 +1224,11 @@ fn environmentAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var lease = (environment.sessionView().resolveDirect(intern.namespaceId(first))).?;
     defer lease.deinit();
-    _ = try scope.publishTop(first, .{ .value = .{ .int = 2 } });
-    _ = try scope.publishTop(second, .{ .value = .{ .int = 3 } });
+    _ = try scope.publishTop(first, .{ .word = .{ .body = env.quotation(body.list).? } });
+    _ = try scope.publishTop(second, .{ .word = .{ .body = env.quotation(body.list).? } });
     try scope.moveUseToTop(8);
     try scope.moveUseToTop(9);
-    _ = try scope.publishTop(after_uses, .{ .value = .{ .int = 4 } });
+    _ = try scope.publishTop(after_uses, .{ .word = .{ .body = env.quotation(body.list).? } });
     const names = try environment.sessionView().namesOwned(allocator);
     allocator.free(names);
 }
@@ -1197,14 +1276,60 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     _ = try registry.commit(&second);
     var third = try registry.createCandidate(second_name);
     defer third.deinit();
-    _ = try third.publishDefinition(word_name, .{ .value = .{
-        .item = .{ .int = 42 },
-        .visibility = .public,
-    } });
+    const constant = try TestBinding.init(allocator);
+    defer releases.releaseValue(constant.body);
+    _ = try third.publishDefinition(word_name, constant.module(effect, .public));
     _ = try registry.commit(&third);
 }
 
 test "environment and registry APIs propagate every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, environmentAllocationProbe, .{});
     try std.testing.checkAllAllocationFailures(std.testing.allocator, registryAllocationProbe, .{});
+}
+
+// ── Milestone 10 (one-binder-merge) ──────────────────────────────────────
+
+test "modules: module set and setp publish constants with mandatory effects" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    defer runtime.deinit();
+    // Registration succeeding is itself the proof that the synthesized
+    // `(-- value)` satisfies the mandatory module-effect rule: a module
+    // definition carrying no effect is a registration error, so there is no
+    // value exception left for constants to take.
+    try expectOk(&runtime, "'m (7 'x set 8 'h setp (h) (-- n) 'peek def) module");
+    try expectOk(&runtime, "m.x m.peek");
+    try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[1].int);
+    // Privacy is unchanged, and the published effect is visible to
+    // reflection exactly as a hand-written one would be.
+    try expectErrorContains(&runtime, "m.h", &.{ "'kind 'undefined-word", "'word 'm.h" });
+    try expectOk(&runtime, "'m.x which 'm.x see");
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "m.x -> m.x def public") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- value)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "([7] first) (-- value) 'm.x def") != null);
+}
+
+test "modules: cross-home constant references pass the synthesized effect contract" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    // A constant reached across a home boundary runs under the ordinary word
+    // effect-check frame. A conforming constant leaves exactly one value, so
+    // qualified access, spliced access, and module-internal access agree.
+    try expectOk(&runtime, "'m (7 'x set 8 'h setp (h) (-- n) 'peek def) module");
+    try expectOk(&runtime, "m.x 'm use x m.peek");
+    try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
+    try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);
+    try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[2].int);
+    // The frame is a real contract for `(-- value)` declarations: a module
+    // word declaring it and leaving two values is a contract violation.
+    try expectErrorContains(
+        &runtime,
+        "'liar ((1 2) (-- value) 'two def) module liar.two",
+        // Seeded/observed are absolute stack depths, so assert the parts that
+        // do not depend on what this session left on the stack.
+        &.{ "'kind 'contract", "'word 'liar.two", "declared (0 -- 1)" },
+    );
 }

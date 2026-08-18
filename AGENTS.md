@@ -17,6 +17,33 @@
 - Keep focused allocator failure sweeps in the normal suite. Consolidate exhaustive
   initialized-Session coverage in `src/tests/oom_test.zig`, run by `zig build test-oom`, so
   the embedded prelude is not bootstrapped independently for every runtime surface.
+- Choose a test's allocator deliberately; `src/tests/test_heap.zig` is the policy and the
+  table of what each one provides. The choice decides which assertions are even possible,
+  and the wrong choice does not fail — it passes, having tested less:
+  - **Allocation failure is injected only by `checkAllAllocationFailures` probes.** Every
+    ordinary test runs each allocation once and it succeeds. Component-level probes sit
+    next to their component (`list.zig`, `dict.zig`, `env.zig`, `equal.zig`, and the
+    reader, formatter, line-editor, registry, and native-validation probes); none of them
+    bootstraps a Session. `oom_test` is the only sweep over a *fully initialized* Session,
+    so any surface reachable only through a live one — words, prelude, modules, scheduler,
+    reflection, loader — has no allocation-failure coverage unless a snippet in that
+    enumerated probe reaches it, however well the behavioral suites cover it.
+  - **Bounded-memory claims need `DebugAllocator{.enable_memory_limit}`**, the only
+    allocator populating `total_requested_bytes`. Assert a measured delta against a warmed
+    baseline, never a fixed number, and set `requested_memory_limit` to force failure at a
+    budget. Do not move these tests onto a shared session heap: it makes the assertion
+    unwriteable rather than wrong.
+  - **Leak detection is universal; leak attribution is not.** Every test allocator detects
+    leaks. Only `std.testing.allocator` reports the allocation site, at ~19x on session
+    bootstrap because it traces every allocation. Default to the traceless session heap and
+    raise `stack_trace_frames` when you actually have a leak to chase — one edit restores
+    attribution everywhere, and the leak is never in the suite you predicted.
+- A session must own every value it will free, and no compiler checks it. Building a heap
+  value with one allocator and handing it to a session backed by another (`define`,
+  `pushOwned`, `publishTop`, `publishModule`) aborts with "Invalid free" deep inside
+  `heap.freePayload`, far from the line at fault. Suites that pass only source strings to a
+  session may use the shared session heap; suites that mix host-built values in stay on
+  `std.testing.allocator`, where value and session already agree.
 - On macOS, run the TSan gate in the same Linux/x86_64 Alpine environment used by CI;
   Zig 0.16's native arm64 macOS sanitizer runtime may segfault before tests start, and
   its Linux/arm64 runtime may fail while unmapping shadow memory under Docker Desktop.

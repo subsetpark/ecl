@@ -133,7 +133,7 @@ const test_files = [_][]const u8{
     "tests/concurrency_test.zig",    "tests/oom_test.zig",
     "tests/line_editor_test.zig",    "tests/native_test.zig",
     "tests/fuzz_test.zig",           "fuzz_root.zig",
-    "oom_root.zig",
+    "tests/test_heap.zig",           "oom_root.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",

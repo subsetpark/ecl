@@ -1,0 +1,442 @@
+{
+  "projectName": "one-binder-merge",
+  "owner": "~subsetpark",
+  "repo": "ecl",
+  "specFile": null,
+  "workstream": {
+    "name": "ecl v1 — the real interpreter (design/workstream-v1.md)",
+    "milestone": "Milestone 10: one-binder-merge",
+    "priorMilestones": [
+      "Milestone 1: value-core",
+      "Milestone 2: reader",
+      "Milestone 3: frame-machine-first-light",
+      "Milestone 4: environments-and-modules",
+      "Milestone 5: kernels-and-pervasion",
+      "Milestone 6: combinators-and-recognition",
+      "Milestone 7: scheduler-and-concurrency",
+      "Milestone 8: repl-line-editing",
+      "Milestone 9: native-extension-abi-and-loader"
+    ],
+    "unlocks": "Milestone 11 (stdlib-str-csv-json-table-http) authors the embedded stdlib modules once against merged binding semantics; Milestone 12 (v1-acceptance) tags 0.1.0 with one binding kind."
+  },
+  "problemStatement": "ecl bindings carry a hidden word|value kind tag: `def` publishes a word whose reference applies its body, `set` publishes a value whose reference pushes it. The tag places a burden on the reader — bare `foo`'s behavior depends on how it was bound, and for quotations the same-looking value behaves oppositely. The 2026-08-17 ruling (workstream Decisions Made; Milestone 10) replaces the tag with uniform application plus visible literal capture, before the stdlib milestone so embedded modules are authored once against final semantics.",
+  "solutionSummary": "Make `v 'name set` observationally `v literal (-- value) 'name def`: set/setp become prelude source words that publish a word binding whose stored body is the literal capture `((v) first)` with a synthesized `(-- value)` effect annotation, uniformly at top level and in modules. Bare reference then always applies a body; the `Binding.value` union arm and the value arms of both publication types are deleted; `body` becomes total over def/set-published names and `which`/`see` print the stored body honestly. One idiom-recognition family fast-paths the capture shape observationally invisibly. The prelude placement is licensed by a grounded machine invariant: `scheduleWord` keeps the caller's scope for core words (src/machine.zig:4270), so `def` executing inside `set`'s body writes the unit's current scope — session at top level, module root inside a module body.",
+  "currentStateAnalysis": "At HEAD (master, M1–M9 executed): src/env.zig:50 defines `Binding = union(enum){ word, value, builtin, native }`; TopPublication (:149) and ModulePublication (:157) carry value arms (module values have no effect — the callable-requires-ValidatedEffect/value-cannot-carry split); BindingSpec.fromTop/fromModule (:176–219) construct the value arms. src/machine.zig:3750 `executeResolved` dispatches `.value => pushBorrowed`, `.word => scheduleWord` with cross-home effect frames, and prepares immediate effect checks only for builtin/native; :4270 `scheduleWord` keeps the caller's scope when resolved_home is null (core words) — the write-target fact that licenses prelude set. src/definition_prims.zig registers set/setp as builtins (:30–32) sharing `define()`/DefineDriver with def/defp (Mode enum :16); annotation recognition is skipped for set/setp by the word_binding test (:56, :66); the driver pops the body mid-drive when the first popped item is an annotation (:159–160); `body` type-errors on non-word bindings (:319–324); `which` prints kind strings 'def/set/primitive/native' (:369–374); `see` renders value bindings as `<value> 'name set/setp` (:483–517); `def expected a list body; use set for values` (:249). src/primitive_docs.zig:39,41 carry set/setp metadata (90 entries). src/prelude.ecl has 60 `### def` blocks; src/prelude.zig evaluates it into the building core with a root scope, so prelude `'set def` replaces the builtin cell. src/idioms.zig PatternAtom `.constant` matches a single non-word form only — the two-form capture `((v) first)` is unrecognized today, so partial-built quotations take the generic path. test/reference_snapshots.zig holds an inline ohsnap transcript with no set/which/see cases; test/acceptance's two setp fixtures (body-extraction.ecl, modules-privacy.ecl) produce identical output under the merge. The source audit logs (does not assert) the prelude block count. Only src/tests/definition_test.zig and src/tests/module_test.zig pin kind-specific observables; concurrency/oom/fuzz set usages have equivalence-preserved outcomes.",
+  "operationalConsiderations": {
+    "externalSystemAccess": "Not applicable — ecl is a single-binary interpreter and this gameplan adds no external system. The one external surface, the native-extension wire ABI, is untouched: ModulePublication.native, NativeCallable, and the descriptor format are not modified by any patch.",
+    "crossRuntimeContracts": "The `.eclmod` ABI-v1 contract (src/native/abi.zig, validated by src/native_descriptor.zig) is unchanged — native words already publish as effect-carrying callables and keep doing so. The human contract surfaces are design/SPEC.md and design/INTERPRETER.md, rewritten in patch 5 in the same gameplan so docs and binary land together. src/prelude.ecl is embedded at build time (@embedFile in src/prelude.zig), so there is no runtime producer/consumer skew: a binary always carries the prelude matching its code.",
+    "failureBehavior": "Two deliberate failure-behavior changes, both owned by patch 3: (1) error-site attribution shifts into the sugar — an underflowing `set` now raises from `swap` (and a non-symbol name raises from `def`) with `set` as the trace parent, pinned by updated tests; (2) a defect in the new prelude blocks fails bootstrap with error.InvalidPrelude at Session init, which fails every test in every gate immediately — the failure mode is loud and pre-merge, not latent. The `zig build test-oom` exhaustive allocation-failure sweep automatically covers the sugar's new allocation points (literal capture list construction, effect materialization) because it injects by ordinal across the whole initialized-Session lifetime.",
+    "concurrencyAndIdempotency": "No new concurrent path. Binding publication continues through the existing single-writer funnel (publishTopCursor/publishModuleCursor, snapshot leases with sequentially consistent handoff) — patch 3 changes what is published, not how. Idiom recognition (patch 2) is a per-application structural guard with no cache and no invalidation, per the existing recognizer discipline. The scheduler suites at 1 and N workers plus the TSan gate run unchanged and must stay green at every patch.",
+    "rollbackStrategy": "No persistent state anywhere in the change: no migrations, no on-disk formats, no external writes. Reverting the patch stack restores the builtin set/setp, the Binding.value arm, the snapshot transcript, and the docs in one git operation; sequencing (stubs → invisible recognition → flip → dead-arm removal → docs) means any prefix of the stack is a green, shippable tree."
+  },
+  "mergabilityStrategy": {
+    "featureFlagStrategy": "Ungated. ecl has no feature-flag infrastructure (the only env toggles are ECL_WORKERS/ECL_PATH/ECL_NATIVE_DIAGNOSTICS, none of which gates semantics), and the workstream ruling (Decisions Made, 2026-08-17) ships this as a pre-0.1.0 semantics replacement — prerelease is when to break. Gating the binding representation would double every reflection, snapshot, and differential expectation for a toggle no one would keep. Safety comes from sequencing instead: every intermediate tree is green, and the single BEHAVIOR patch is the smallest possible flip.",
+    "featureFlags": [],
+    "patchOrderingStrategy": "Early INFRA: patch 1 lands skipped test stubs naming their implementing patches; patch 2 lands the capture-shape idiom recognition, which is observationally invisible today (the shape is already producible via literal/partial) and differentially proven. Middle BEHAVIOR: patch 3 is the one semantic flip — prelude set/setp replace the builtins, tests and snapshots update together. Late INFRA: patch 4 deletes the now-unproducible value arms (compile-atomic exhaustive-switch sweep), and patch 5 rewrites SPEC.md/INTERPRETER.md to the merged semantics."
+  },
+  "requiredChanges": [
+    { "file": "src/prelude.ecl", "line": 342, "description": "Append `### def set` and `### def setp` blocks. set body: `(swap literal swap (-- value) swap def)` with annotation `(value name -- : \"Bind a value as a constant word in the current scope.\")`; setp body: `(swap literal swap (-- value) swap defp)` with annotation `(value name -- : \"Bind a private module value as a constant word.\")`. The nested `(-- value)` is inert during the prelude's own definition (nested markers are inert) and becomes the synthesized effect annotation for every set-published binding.", "signature": null },
+    { "file": "src/definition_prims.zig", "line": 30, "description": "Patch 3: remove the `set` and `setp` entries from install()'s Definition list (def/defp/body/doc/which/see remain). Patch 4: shrink Mode to `enum { def, defp }`, delete dead set/setp logic in define()/DefineDriver, delete the `.value` arms in WhichDriver.initialize (:371) and SeeDriver.buildPlan (:485, :513).", "signature": "const Mode = enum { def, defp };" },
+    { "file": "src/primitive_docs.zig", "line": 39, "description": "Patch 3: delete the `set` (:39) and `setp` (:41) Metadata entries — installBuiltins forName lookups would otherwise go stale; 90 entries become 88.", "signature": null },
+    { "file": "src/env.zig", "line": 50, "description": "Patch 4: delete Binding.value (Binding = word | builtin | native, including retain/retire arms), TopPublication.value (:155), ModulePublication.value (:164–167), and the BindingSpec.fromTop/fromModule value arms (:190, :206–210).", "signature": "pub const Binding = union(enum) { word: *Quotation, builtin: PrimitiveImpl, native: NativeCallable, ... };" },
+    { "file": "src/machine.zig", "line": 3754, "description": "Patch 4: delete the `.value` arms in executeResolved — the effect-check preparation switch (:3756) and the dispatch switch (:3759).", "signature": null },
+    { "file": "src/idioms.zig", "line": 157, "description": "Patch 2: add PatternAtom-based capture patterns and registry entries: a `.direct` entry matching the two-form body `[.literal, first(source)]` whose handler validates a one-element-list first form and pushes its element (fallback to the generic path otherwise), plus combinator-context entries `[capture, .operation]` and `[capture, swap, .operation]` per binary op that treat the unwrapped captured element as the constant operand (constant_left semantics mirror the existing constant_* patterns). Update the comptime registry length arithmetic.", "signature": null },
+    { "file": "test/reference_snapshots.zig", "line": 88, "description": "Patch 3: add snapshot cases pinning the merged reflection surface — e.g. set-then-reference, `'x body` on a set-bound name, `'x see`, `'x which`, `'set see` (source body instead of <primitive>), and top-level setp failure — and update the inline ohsnap transcript.", "signature": null },
+    { "file": "src/tests/definition_test.zig", "line": null, "description": "Patch 1: add skipped stubs (return error.SkipZigTest with `// PENDING: Patch 3`). Patch 3: implement them and update existing assertions that pin value-kind observables (which/see/body on set bindings, error attribution).", "signature": null },
+    { "file": "src/tests/module_test.zig", "line": null, "description": "Patch 1: add skipped stubs for module set/setp effect synthesis and cross-home constant contracts. Patch 3: implement; update any assertions pinning module value-binding internals.", "signature": null },
+    { "file": "test/idiom_differential.zig", "line": null, "description": "Patch 1: add a skipped stub (`// PENDING: Patch 2`). Patch 2: implement differential coverage — capture-shaped direct core-word bodies and capture-headed combinator quotations against the generic path (value, representation, error kind/payload, bit-identical floats).", "signature": null },
+    { "file": "design/SPEC.md", "line": null, "description": "Patch 5: rewrite Evaluation/Bindings/Definition annotations/Modules prose and the def/defp/set/setp/body/see/which reference entries to the merged semantics (set/setp become 'Defined in ecl' with normative equivalences; body total over def/set-published names; kind language removed).", "signature": null },
+    { "file": "design/INTERPRETER.md", "line": null, "description": "Patch 5: update the Binding description, 'Typed publication and control state' (callable/value split collapses; every module binding carries ValidatedEffect), and the idiom-recognition word list to include the capture entries.", "signature": null }
+  ],
+  "functionalChanges": [
+    { "id": "FC-1", "description": "`v 'name set` at top level publishes a word binding whose stored body is the literal capture `((v) first)` with declared effect `(-- value)`; bare reference applies the body and pushes exactly v — observationally `v literal (-- value) 'name def`.", "ownedBy": 3 },
+    { "id": "FC-2", "description": "`setp` and module-body `set` publish module constants as word bindings carrying the synthesized `(-- value)` effect, satisfying the mandatory module-effect rule; privacy is unchanged.", "ownedBy": 3 },
+    { "id": "FC-3", "description": "`'name body` on a set-bound name returns the capture body `((v) first)` instead of raising `'type` — body is total over def/set-published bindings (builtin/native still error).", "ownedBy": 3 },
+    { "id": "FC-4", "description": "`which` reports set-bound names with the `def` kind string and shows their `(-- value)` effect; the `set` kind label no longer appears in which output.", "ownedBy": 3 },
+    { "id": "FC-5", "description": "`see` on a set-bound name prints the stored capture body plus the `(-- value)` annotation ending `'name def` (or `defp` for privates) — no reconstruction of set-sugar spelling.", "ownedBy": 3 },
+    { "id": "FC-6", "description": "Top-level `setp` fails through defp's module-root check: the raised `'domain` error names defp as the raiser with setp in the trace.", "ownedBy": 3 },
+    { "id": "FC-7", "description": "set's failure sites shift into its body: stack underflow raises from `swap` and a non-symbol name raises from `def`, each with `set` as the trace parent (message kinds unchanged: 'underflow/'type).", "ownedBy": 3 },
+    { "id": "FC-8", "description": "`'set see` and `'setp see` print prelude source definitions instead of `<primitive>`; set/setp leave the builtin vocabulary (88 primitives, 62 prelude blocks) while keeping their names and stack protocols.", "ownedBy": 3 },
+    { "id": "FC-9", "description": "Cross-home references to module constants pass through the standard word effect-check frame with the `(-- value)` contract; a conforming constant application is indistinguishable from today's value push in result terms.", "ownedBy": 3 }
+  ],
+  "contextResources": [
+    {
+      "id": "CR-DEFINE",
+      "kind": "predecessor",
+      "paths": ["src/definition_prims.zig"],
+      "why": "The builtin set/setp being retired live here, sharing define()/DefineDriver with def/defp (Mode :16, install :27–39, annotation scan and mid-drive body pop :112–260, publish funnel :255–263). body/doc/which/see drivers (:287–560) define the exact reflection strings the stubs and snapshot cases pin: which kind strings :369–374, see rendering arms :483–517, def's list-body error text :249.",
+      "consumedBy": [1, 3, 4]
+    },
+    {
+      "id": "CR-ENV",
+      "kind": "existing-implementation",
+      "paths": ["src/env.zig"],
+      "why": "Binding (:50), TopPublication (:149), ModulePublication (:157), BindingSpec.fromTop/fromModule (:176–219), and ValidatedEffect.parse (:94–147) — the arms patch 4 deletes and the effect representation the synthesized `(-- value)` annotation must satisfy (exactly one `--` separator among words; inputs 0, outputs 1).",
+      "consumedBy": [3, 4]
+    },
+    {
+      "id": "CR-MACHINE",
+      "kind": "existing-implementation",
+      "paths": ["src/machine.zig"],
+      "why": "executeResolved (:3750–3797) is the dispatch whose .value arm dies; scheduleWord (:4263–4288) proves the write-target rule licensing prelude set — a core word's body keeps the caller's scope and home, so def inside set writes the unit's current scope and module-root checks stay dynamic; cross-home word applications already install effect-check frames, which is how the `(-- value)` contract is enforced. continueWithIdiom at :3762–3769 is the direct-context recognition entry patch 2 extends.",
+      "consumedBy": [2, 3, 4]
+    },
+    {
+      "id": "CR-IDIOM",
+      "kind": "existing-implementation",
+      "paths": ["src/idioms.zig", "test/idiom_differential.zig"],
+      "why": "PatternAtom/RegistryEntry (:50–62), the comptime registry (:157+), and the matcher (:391–430) define the recognition discipline the new capture entries must follow: pattern words resolved in the application environment guard selection, mismatch falls through to the generic path, and every entry ships with differential coverage in the existing harness.",
+      "consumedBy": [1, 2]
+    },
+    {
+      "id": "CR-PRELUDE",
+      "kind": "existing-implementation",
+      "paths": ["src/prelude.ecl", "src/prelude.zig", "src/primitive_docs.zig"],
+      "why": "The `### def` block convention, annotation-with-docstring house style, and the literal/partial definitions the sugar composes; prelude.zig shows bootstrap evaluates prelude.ecl against the building core (a prelude 'set def replaces the builtin cell, and the stack must end empty); primitive_docs.zig is the closed metadata table whose set/setp rows leave with the builtins.",
+      "consumedBy": [3]
+    },
+    {
+      "id": "CR-RULING",
+      "kind": "contract",
+      "paths": ["design/workstream-v1.md", "design/SPEC.md"],
+      "why": "Workstream Milestone 10 and the Decisions Made entry (2026-08-17) are the ruling this gameplan implements: equivalence law, uniform `(-- value)` synthesis, honest see/which, prelude placement gated on the write-target rule. SPEC.md's current Bindings/Definition annotations/Modules sections are the pre-state contract — everything there except the kind tag must survive verbatim.",
+      "consumedBy": [3, 5]
+    },
+    {
+      "id": "CR-SNAP",
+      "kind": "test-or-static-check",
+      "paths": ["test/reference_snapshots.zig", "src/tools/source_audit.zig", "AGENTS.md"],
+      "why": "The snapshot gate is one inline ohsnap transcript over -e cases — new cases mean editing the cases array and the transcript together, and snapshot changes are intentional review events. The source audit lexes prelude.ecl and requires every top-level definition to be a `### def <name>` block with a matching quoted name; AGENTS.md's Embedded prelude section requires a meaningful nonempty docstring per block.",
+      "consumedBy": [3]
+    },
+    {
+      "id": "CR-INTERP",
+      "kind": "reference-doc",
+      "paths": ["design/INTERPRETER.md"],
+      "why": "The as-built sections patch 5 rewrites: Values and memory / Environments (Binding snapshot contents), Typed publication and control state (the callable/value ValidatedEffect split), and Idiom recognition (the bridged-word list gaining the capture entries). Descriptions must match the post-patch-4 code exactly.",
+      "consumedBy": [5]
+    }
+  ],
+  "acceptanceCriteria": [
+    "`3 'x set x` leaves 3; `(dup *) 'q set q` leaves the quotation `(dup *)`; both via word bindings whose stored body is `((v) first)` — verified by tests and snapshot cases.",
+    "`'x body` on a set-bound name returns the capture body; `'x which` prints the `def` kind string with the `(-- value)` effect; `'x see` prints the stored body plus `(-- value)` ending `'x def` and round-trips through the reader.",
+    "Module `set`/`setp` publish constants carrying the synthesized `(-- value)` ValidatedEffect (inputs 0, outputs 1); cross-home references pass the effect-check frame; top-level `setp` raises `'domain` through defp's module-root check.",
+    "set/setp are `### def` blocks in src/prelude.ecl with docstrings (audit reports 62 documented blocks); they are absent from definition_prims install() and primitive_docs.zig (88 primitive entries); `'set see` shows the source definition.",
+    "After patch 4, `Binding` has no value arm, TopPublication is word-only, ModulePublication is word|native, and every switch over these types compiles exhaustively.",
+    "The capture-shape idiom entries pass the differential harness — value equality, representation parity, error kind/payload equality, bit-identical floats — and the 1/N-worker suites assert identical outcomes.",
+    "`zig build test` (including snapshots and the source audit), `zig build test-workers`, and `zig build test-oom` are green at every patch boundary; the two setp acceptance fixtures (body-extraction, modules-privacy) pass unchanged.",
+    "design/SPEC.md and design/INTERPRETER.md describe exactly the merged semantics: no kind-tag language, set/setp documented as normative ecl equivalences, INTERPRETER's publication typestates match the shrunk unions."
+  ],
+  "reachabilityTraces": [
+    {
+      "observable": "3 'x set; x pushes 3 through a word binding (FC-1)",
+      "tracesTo": "FC-1",
+      "ownedBy": 3,
+      "path": [
+        { "file": "src/machine.zig", "symbol": "dispatch", "status": "existing" },
+        { "file": "src/machine.zig", "symbol": "executeResolved", "status": "existing" },
+        { "file": "src/prelude.ecl", "symbol": "set", "status": "existing" },
+        { "file": "src/definition_prims.zig", "symbol": "define", "status": "existing" },
+        { "file": "src/env.zig", "symbol": "Scope.publishTopCursor", "status": "existing" }
+      ],
+      "testPath": null,
+      "runtimeReachabilityNote": null
+    },
+    {
+      "observable": "module set/setp publish effect-carrying constants; cross-home reference passes the (-- value) contract (FC-2, FC-9)",
+      "tracesTo": "FC-2",
+      "ownedBy": 3,
+      "path": [
+        { "file": "src/machine.zig", "symbol": "executeResolved", "status": "existing" },
+        { "file": "src/prelude.ecl", "symbol": "setp", "status": "existing" },
+        { "file": "src/definition_prims.zig", "symbol": "DefineDriver.advance (publishModuleCursor call)", "status": "existing" },
+        { "file": "src/machine.zig", "symbol": "scheduleWord/prepareEffectCheck", "status": "existing" }
+      ],
+      "testPath": null,
+      "runtimeReachabilityNote": null
+    },
+    {
+      "observable": "'x body returns ((3) first) for a set-bound name (FC-3)",
+      "tracesTo": "FC-3",
+      "ownedBy": 3,
+      "path": [
+        { "file": "src/definition_prims.zig", "symbol": "body/LookupDriver", "status": "existing" },
+        { "file": "src/prelude.ecl", "symbol": "set", "status": "existing" }
+      ],
+      "testPath": null,
+      "runtimeReachabilityNote": null
+    },
+    {
+      "observable": "'x which prints the def kind string with the (-- value) effect (FC-4)",
+      "tracesTo": "FC-4",
+      "ownedBy": 3,
+      "path": [
+        { "file": "src/definition_prims.zig", "symbol": "WhichDriver.initialize", "status": "existing" },
+        { "file": "src/prelude.ecl", "symbol": "set", "status": "existing" }
+      ],
+      "testPath": null,
+      "runtimeReachabilityNote": null
+    },
+    {
+      "observable": "'x see prints the stored capture body ending 'x def; 'set see prints prelude source (FC-5, FC-8)",
+      "tracesTo": "FC-5",
+      "ownedBy": 3,
+      "path": [
+        { "file": "src/definition_prims.zig", "symbol": "SeeDriver.buildPlan", "status": "existing" },
+        { "file": "src/prelude.ecl", "symbol": "set", "status": "existing" }
+      ],
+      "testPath": null,
+      "runtimeReachabilityNote": null
+    },
+    {
+      "observable": "top-level setp raises 'domain through defp's module-root check (FC-6)",
+      "tracesTo": "FC-6",
+      "ownedBy": 3,
+      "path": [
+        { "file": "src/machine.zig", "symbol": "dispatch", "status": "existing" },
+        { "file": "src/prelude.ecl", "symbol": "setp", "status": "existing" },
+        { "file": "src/definition_prims.zig", "symbol": "define (module_root check)", "status": "existing" }
+      ],
+      "testPath": null,
+      "runtimeReachabilityNote": null
+    },
+    {
+      "observable": "underflowing set raises 'underflow from swap with set as trace parent (FC-7)",
+      "tracesTo": "FC-7",
+      "ownedBy": 3,
+      "path": [
+        { "file": "src/machine.zig", "symbol": "dispatch", "status": "existing" },
+        { "file": "src/prelude.ecl", "symbol": "set", "status": "existing" },
+        { "file": "src/machine.zig", "symbol": "FailureDriver (trace assembly)", "status": "existing" }
+      ],
+      "testPath": null,
+      "runtimeReachabilityNote": null
+    },
+    {
+      "observable": "'set see prints the prelude source definition instead of <primitive> (FC-8)",
+      "tracesTo": "FC-8",
+      "ownedBy": 3,
+      "path": [
+        { "file": "src/definition_prims.zig", "symbol": "SeeDriver.buildPlan (.word arm)", "status": "existing" },
+        { "file": "src/prelude.ecl", "symbol": "set", "status": "existing" },
+        { "file": "src/definition_prims.zig", "symbol": "install (set/setp entries removed)", "status": "existing" }
+      ],
+      "testPath": null,
+      "runtimeReachabilityNote": null
+    }
+  ],
+  "openQuestions": [],
+  "explicitOpinions": [
+    {
+      "opinion": "set/setp are prelude source, not host primitives with equivalent behavior.",
+      "rationale": "The milestone gated source placement on the write-target rule; grounding resolved it at HEAD: scheduleWord (src/machine.zig:4270) keeps the caller's scope and home for core words, so def inside set's body writes the unit's current scope — session at top level, module root in a module body — and defp's module-root check stays dynamic. A dedicated test pins this rule (stub in patch 1) so a future scoping change cannot silently break the sugar. Source placement also follows the standard-library placement rule: the definitions are compact and their performance does not justify host idioms."
+    },
+    {
+      "opinion": "The `(-- value)` effect is synthesized uniformly, at top level and in modules.",
+      "rationale": "One definition with no context-sensitivity: top-level def accepts optional annotations, module def requires the effect portion, so unconditional attachment satisfies both. The contract (0 inputs, 1 output) is true of every literal capture by construction. Ruled in the milestone DoD (agreed 2026-08-17)."
+    },
+    {
+      "opinion": "see/which print stored bodies with no reconstruction of set-sugar spelling.",
+      "rationale": "Ruled 2026-08-17: reconstruction would be the deleted kind tag reappearing as a display heuristic. Consequence accepted: `'x see` prints `((3) first) (-- value) 'x def`, which is honest, re-readable source; a captured task handle makes see non-re-readable exactly as today's value display did."
+    },
+    {
+      "opinion": "Error-site attribution shifts into the sugar (FC-7) are accepted, not compensated.",
+      "rationale": "Follows necessarily from prelude placement, which was ruled. Compensating (e.g. a special pre-check) would reintroduce host logic the placement removed. Error kinds are unchanged ('underflow/'type); traces name set as the parent, matching how every other prelude word reports."
+    },
+    {
+      "opinion": "Idiom recognition covers the capture shape in both direct and combinator contexts, and lands before the flip as an independent INFRA patch.",
+      "rationale": "The shape ((v) first) is already producible today via literal/partial, so recognition is observationally invisible now and differentially provable before any semantics change — sequencing it first keeps the BEHAVIOR patch minimal. Direct-context entries serve prelude/core constants; combinator-context [capture, op] and [capture, swap, op] entries make partial-built quotations reach kernels, honoring the milestone's 'constants and partial results' commitment."
+    },
+    {
+      "opinion": "The dead Binding.value arm is deleted in a separate INFRA patch after the flip, not bundled into it.",
+      "rationale": "After patch 3 no language path can construct a value binding, so arm deletion is observationally invisible — but it is compile-atomic across env.zig/machine.zig/definition_prims.zig (Zig's exhaustive switches force simultaneous edits). Separating it keeps the BEHAVIOR patch reviewable and makes the union shrink a mechanical, obviously-safe diff."
+    },
+    {
+      "opinion": "No feature flag.",
+      "rationale": "No flag infrastructure exists; the workstream ruled this a pre-0.1.0 breaking change; gating a core binding representation would double every reflection/snapshot/differential expectation for a toggle with no rollout story."
+    }
+  ],
+  "patches": [
+    {
+      "number": 1,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "Skipped test stubs naming the merge's observable contract",
+      "files": [
+        { "path": "src/tests/definition_test.zig", "action": "modify", "description": "Add five skipped tests (each body: `return error.SkipZigTest;` with `// PENDING: Patch 3`): set publishes a literal-capture word with a synthesized effect; body returns the capture body for set-bound names; which and see render set bindings as public defs; set never recognizes annotations in captured data; top-level setp fails through defp's module-root check. Comments document the exact expected strings from CR-DEFINE (which kind string 'def', see suffix `'x def`, error kinds)." },
+        { "path": "src/tests/module_test.zig", "action": "modify", "description": "Add two skipped tests (`// PENDING: Patch 3`): module set and setp publish constants with mandatory effects (lease carries ValidatedEffect inputs 0 / outputs 1, visibility preserved); cross-home constant references pass the synthesized effect contract (qualified reference to a public module constant succeeds; the effect frame is exercised)." },
+        { "path": "test/idiom_differential.zig", "action": "modify", "description": "Add one skipped test (`// PENDING: Patch 2`): capture shapes match the generic path exactly — direct core-word capture bodies and capture-headed combinator quotations, asserting value equality, representation parity, error kind/payload equality, and bit-identical floats." }
+      ],
+      "changes": [
+        "Write each stub with Zig's skip mechanism (`return error.SkipZigTest;`) as the first statement and a `// PENDING: Patch N` comment naming the implementing patch.",
+        "In comments, pin the concrete observables using the current reflection code as reference: which prints `<name> -> <name> def public [-- value]`-shaped output for merged constants; see ends `'name def\\n`; body returns a two-form list whose first form is a one-element list.",
+        "Also stub the write-target rule test in definition_test.zig: a word whose body calls def binds in the caller's scope (session at top level, module root inside a module body) — the invariant licensing prelude set. `// PENDING: Patch 3`.",
+        "Do not modify any production source; the suite must stay green with the stubs skipped."
+      ],
+      "requiredContext": ["CR-DEFINE", "CR-IDIOM"],
+      "testStubsIntroduced": [
+        "definitions: set publishes a literal-capture word with a synthesized effect",
+        "definitions: body returns the capture body for set-bound names",
+        "definitions: which and see render set bindings as public defs",
+        "definitions: set never recognizes annotations in captured data",
+        "definitions: top-level setp fails through defp's module-root check",
+        "definitions: def inside a word body writes the caller's scope",
+        "modules: module set and setp publish constants with mandatory effects",
+        "modules: cross-home constant references pass the synthesized effect contract",
+        "idioms: capture shapes match the generic path exactly"
+      ],
+      "testStubsImplemented": null,
+      "spec": "module ONE_BINDER_MERGE_PATCH_1.\n\n> Patch 1 introduces skipped test stubs only. The contribution is the\n> enumerated contract: every stub names exactly one implementing patch.\n\nPendingTest.\nimplementing-patch t: PendingTest => Nat.\n---\nall t: PendingTest | implementing-patch t = 2 or implementing-patch t = 3.",
+      "precedents": null
+    },
+    {
+      "number": 2,
+      "classification": "INFRA",
+      "complexity": 3,
+      "title": "Capture-shape idiom recognition (observationally invisible)",
+      "files": [
+        { "path": "src/idioms.zig", "action": "modify", "description": "Add a capture-matching pattern element and registry entries: (a) a `.direct` entry for the two-form body `[<literal>, first(source-bound)]` whose selected handler verifies the first form is a one-element list and pushes its element directly, falling through to the generic path on any shape mismatch; (b) per-BinaryOp combinator-context entries `[capture, <op>]` and `[capture, swap, <op>]` that unwrap the captured element as the constant operand, reusing the existing constant/constant_left kernel machinery. Update the comptime registry array length." },
+        { "path": "test/idiom_differential.zig", "action": "modify", "description": "Implement the patch-1 stub: build capture shapes exactly as programs do (`3 literal`, `3 (+) partial`, `3 (swap -) partial`), run recognized and generic paths over generated inputs including error-producing ones (overflow, type), and assert value equality, representation parity (brackets), error kind/payload equality, and bit-identical floats." }
+      ],
+      "changes": [
+        "Extend the pattern vocabulary so a capture matches exactly a one-element non-word list followed by the word `first` resolving to the source-defined core `first` (binding = .source, matching the existing rest_pattern discipline); any other resolution of `first` in the application environment falls through to the generic path — recognition guards must preserve full late-binding semantics.",
+        "The direct-context handler must validate the literal form is a list of length 1 at selection or execution time and fall back generically otherwise — `.literal` alone matches any non-word form, so the length check cannot be skipped.",
+        "Combinator entries mirror constant_operation_pattern/constant_swap_operation_pattern semantics with the captured element as the constant; set constant_left correctly for both orders and route through the same kernels the existing constant entries use.",
+        "Run `zig build differential` and the 1/N-worker suites; recognition must be unobservable at HEAD (the shapes are producible today via literal and partial)."
+      ],
+      "requiredContext": ["CR-IDIOM", "CR-MACHINE"],
+      "testStubsIntroduced": null,
+      "testStubsImplemented": ["idioms: capture shapes match the generic path exactly"],
+      "spec": "module ONE_BINDER_MERGE_PATCH_2.\n\n> Capture-shape recognition is acceleration only: a recognized\n> application is indistinguishable from the generic frame-machine path.\n\nQuotation.\nContext.\ndirect => Context.\ncombinator => Context.\nOutcome.\ncapture-shaped? q: Quotation => Bool.\nrecognized? q: Quotation, c: Context => Bool.\ngeneric-eval q: Quotation, c: Context => Outcome.\nfused-eval q: Quotation, c: Context => Outcome.\n---\n> Recognition only ever fires on capture shapes.\nall q: Quotation, c: Context | recognized? q c -> capture-shaped? q.\n> The fused path is bit-identical to the generic path — values,\n> representation, and error kind/payload alike (Outcome covers success\n> and failure, so the equality is total over both arms).\nall q: Quotation, c: Context | recognized? q c -> fused-eval q c = generic-eval q c.\n> An unrecognized application always takes the generic path.\nall q: Quotation, c: Context | ~(recognized? q c) -> fused-eval q c = generic-eval q c.",
+      "precedents": null
+    },
+    {
+      "number": 3,
+      "classification": "BEHAVIOR",
+      "complexity": 3,
+      "title": "The flip: set/setp become prelude sugar over literal + def/defp",
+      "files": [
+        { "path": "src/prelude.ecl", "action": "modify", "description": "Append `### def set` — body `(swap literal swap (-- value) swap def)`, annotation `(value name -- : \"Bind a value as a constant word in the current scope.\")` — and `### def setp` — body `(swap literal swap (-- value) swap defp)`, annotation `(value name -- : \"Bind a private module value as a constant word.\")`. 62 documented blocks total." },
+        { "path": "src/definition_prims.zig", "action": "modify", "description": "Remove the `set` and `setp` Definition entries from install() (:30–32). No other edits here — dead Mode arms and reflection arms are patch 4's frame." },
+        { "path": "src/primitive_docs.zig", "action": "modify", "description": "Delete the set (:39) and setp (:41) Metadata entries; the table drops to 88." },
+        { "path": "src/tests/definition_test.zig", "action": "modify", "description": "Implement the six patch-1 stubs (drop SkipZigTest, assert the pinned observables) and update existing assertions that depended on value-kind behavior: which/see output for set bindings, `'x body` no longer 'type on set names, underflow/type attribution per FC-7." },
+        { "path": "src/tests/module_test.zig", "action": "modify", "description": "Implement the two patch-1 stubs; update assertions pinning module value-binding internals (leases now carry .word with ValidatedEffect for set/setp names)." },
+        { "path": "test/reference_snapshots.zig", "action": "modify", "description": "Add cases pinning the merged surface (set-then-reference; quotation set-then-reference; `'x body`; `'x which`; `'x see`; `'set see`; top-level setp error) and update the inline ohsnap transcript for the full run." }
+      ],
+      "changes": [
+        "Author the two prelude blocks exactly per the equivalence law: stack `v 'name` → swap → literal → swap → push `(-- value)` → swap → def/defp; the nested `(-- value)` is inert in the block's own definition and validates as an effect annotation (words only around `--`; ValidatedEffect inputs 0, outputs 1) when def consumes it at set's call sites.",
+        "The prelude's own annotations for set/setp use the `(value name -- : \"…\")` combined form, satisfying the audit's nonempty-docstring rule; `doc 'set` returns the docstring; the effect portion `(value name --)` is legal (words before `--`, zero after).",
+        "Removing the builtins before the prelude runs is safe: the prelude evaluates against the building core, and its `'set def` publishes the cell fresh; verify bootstrap leaves an empty stack (prelude.zig:84 InvalidPrelude check).",
+        "Verify the equivalence-preserved suites pass unchanged: concurrency_test's `spawn 'x set … x await` chains, oom_test's child-scope `'each-local set` quotations, e2e acceptance fixtures (body-extraction, modules-privacy) — these must be green without edits; if any fails, the sugar violates the equivalence law and the patch is wrong, not the test.",
+        "Run `zig build test test-workers test-oom`; snapshot diff is the intentional review artifact for the reflection deltas (FC-3..FC-8)."
+      ],
+      "requiredContext": ["CR-DEFINE", "CR-ENV", "CR-MACHINE", "CR-PRELUDE", "CR-RULING", "CR-SNAP"],
+      "testStubsIntroduced": null,
+      "testStubsImplemented": [
+        "definitions: set publishes a literal-capture word with a synthesized effect",
+        "definitions: body returns the capture body for set-bound names",
+        "definitions: which and see render set bindings as public defs",
+        "definitions: set never recognizes annotations in captured data",
+        "definitions: top-level setp fails through defp's module-root check",
+        "definitions: def inside a word body writes the caller's scope",
+        "modules: module set and setp publish constants with mandatory effects",
+        "modules: cross-home constant references pass the synthesized effect contract"
+      ],
+      "spec": "module ONE_BINDER_MERGE_PATCH_3.\n\n> The equivalence law: `v 'name set` is observationally\n> `v literal (-- value) 'name def`. After this patch no language path publishes a\n> value-kind binding; the union arm still exists but is unproducible.\n\nValue.\nName.\nQuotation.\nEffect.\nconst-effect => Effect.\nBindingKind.\nword-kind => BindingKind.\nBinding.\nkind b: Binding => BindingKind.\nbody-of b: Binding => Quotation.\neffect-of b: Binding => Effect.\ncapture v: Value => Quotation.\napply-capture q: Quotation, v: Value, q = capture v => Value.\nset-bind v: Value, n: Name => Binding.\nScopeKind.\ntop-scope => ScopeKind.\nmodule-root => ScopeKind.\nsetp-legal? s: ScopeKind => Bool.\n---\n> Every set publication is a word binding carrying the literal capture\n> and the synthesized constant effect — uniformly in every scope.\nall v: Value, n: Name | kind (set-bind v n) = word-kind.\nall v: Value, n: Name | body-of (set-bind v n) = capture v.\nall v: Value, n: Name | effect-of (set-bind v n) = const-effect.\n> Applying a capture yields exactly the captured value (0 inputs,\n> 1 output — the const-effect contract holds by construction).\nall v: Value | apply-capture (capture v) v = v.\n> setp is legal exactly in a module root; elsewhere it fails through\n> defp's module-root check ('domain).\nsetp-legal? module-root.\nall s: ScopeKind | setp-legal? s -> s = module-root.",
+      "precedents": [
+        {
+          "kind": "rfc-spec",
+          "name": "Forth-2012 CONSTANT (forth-standard.org core wordset)",
+          "url": "https://forth-standard.org/standard/core/CONSTANT",
+          "whyApplicable": "The one-kind precedent this patch implements: a constant is an ordinary dictionary word whose execution pushes its value — there is no separate value namespace or binding kind. set becomes ecl's CONSTANT, spelled as visible literal capture."
+        },
+        {
+          "kind": "documentation",
+          "name": "Factor CONSTANT: word",
+          "url": "https://docs.factorcode.org/content/word-CONSTANT__colon__,syntax.html",
+          "whyApplicable": "The same answer in a modern concatenative vocabulary: constants are words defined by an ordinary defining word. Confirms the ergonomics of keeping a named sugar (set) rather than requiring users to hand-roll captures."
+        }
+      ]
+    },
+    {
+      "number": 4,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "Delete the unproducible value arms",
+      "files": [
+        { "path": "src/env.zig", "action": "modify", "description": "Delete Binding.value (:52) with its retain/retire arms (:58, :66); delete TopPublication.value (:155) and ModulePublication.value (:164–167); delete the BindingSpec.fromTop/fromModule value arms (:190, :206–210). Binding = word | builtin | native; TopPublication = word; ModulePublication = word | native." },
+        { "path": "src/machine.zig", "action": "modify", "description": "Delete the `.value` arms in executeResolved: the effect-check switch (:3756 becomes `.word => null`) and the dispatch switch (:3759). Compile-driven sweep of any other exhaustive switch over Binding." },
+        { "path": "src/definition_prims.zig", "action": "modify", "description": "Shrink Mode to `enum { def, defp }` and delete dead set/setp branches in define()/DefineDriver (word_binding/private computations simplify); delete WhichDriver's \"set\" kind arm (:371) and SeeDriver's value arms (:485, :513–517); keep def's error text `def expected a list body; use set for values` (set still exists as the prelude sugar)." },
+        { "path": "src/tests/definition_test.zig", "action": "modify", "description": "Update any tests that construct or match Binding.value / TopPublication.value / ModulePublication.value internals through host APIs (e.g. session.zig:652 TopPublication callers); observable expectations are untouched — patch 3 already pinned them." },
+        { "path": "src/tests/module_test.zig", "action": "modify", "description": "Same internal-construction sweep for module publications." }
+      ],
+      "changes": [
+        "Let the compiler drive the sweep: delete the union arms first, then fix every exhaustive-switch error it reports — that is the complete list of affected sites by construction (Zig switches over these unions are exhaustive).",
+        "Verify no producer remains: `grep -rn '\\.value = ' src/*.zig` over Binding/publication constructions must be empty outside unrelated union types (binder/reader/native_call `.value` fields are span/candidate types, not Binding).",
+        "This patch is observationally invisible: after patch 3 no language path constructs a value binding, and the deleted reflection arms (which \"set\", see \" set\\n\") are unreachable. The full suite, snapshots included, must pass with zero expectation changes.",
+        "Run `zig build test test-workers test-oom`."
+      ],
+      "requiredContext": ["CR-DEFINE", "CR-ENV", "CR-MACHINE"],
+      "testStubsIntroduced": null,
+      "testStubsImplemented": null,
+      "spec": "module ONE_BINDER_MERGE_PATCH_4.\n\n> The value arm is unrepresentable. The type is the claim: a binding is\n> a source-defined word, a host builtin, or a native callable — nothing\n> else can be constructed in any build mode.\n\nWordBody.\nBuiltin.\nNativeCallable.\nBinding = WordBody + Builtin + NativeCallable.\nTopPublication = WordBody.\nModulePublication = WordBody + NativeCallable.\n---\ntrue.",
+      "precedents": null
+    },
+    {
+      "number": 5,
+      "classification": "INFRA",
+      "complexity": 2,
+      "title": "Rewrite SPEC.md and INTERPRETER.md to the merged semantics",
+      "files": [
+        { "path": "design/SPEC.md", "action": "modify", "description": "Bindings section: one binding kind, bare reference always applies; set documented as normative equivalence (`v 'name set` ≡ `v literal (-- value) 'name def` with the synthesized `(-- value)` effect). Definition annotations: replace the set/setp never-recognize sentence with the capture-nesting guarantee. Modules: drop word|value tag language; constants are effect-carrying module words. Word reference: set/setp entries become 'Defined in ecl' with their bodies as normative equivalences; body entry total over def/set-published names; which/see entries updated." },
+        { "path": "design/INTERPRETER.md", "action": "modify", "description": "Environments: binding snapshot contents (no kind tag; Binding = word | builtin | native). Typed publication and control state: the callable/value ValidatedEffect split collapses — every module binding carries a ValidatedEffect or is native with one. Idiom recognition: add the capture entries to the bridged-word list with the fallback discipline. Code representation/dispatch: executeResolved arms match the shrunk union." }
+      ],
+      "changes": [
+        "SPEC.md describes only post-patch-4 observable behavior — verify each rewritten claim against the landed code (which/see output strings, body totality, error attribution) rather than against this gameplan's prose.",
+        "Preserve everything the ruling did not change: annotation validation rules, doc canonicalization, module resolution/shadowing, the def list-body error, locals, printing.",
+        "INTERPRETER.md's typed-publication section must match the shrunk unions exactly (TopPublication word-only; ModulePublication word|native).",
+        "Keep both documents' present-state discipline: no history, no rationale, no future features."
+      ],
+      "requiredContext": ["CR-RULING", "CR-INTERP"],
+      "testStubsIntroduced": null,
+      "testStubsImplemented": null,
+      "spec": "module ONE_BINDER_MERGE_PATCH_5.\n\n> Documentation conformance: the two authoritative documents describe\n> exactly the merged semantics — no kind-tag language survives, and\n> every claim matches the post-patch-4 landed code.\n\nDocument.\nspec-doc => Document.\ninterpreter-doc => Document.\nmentions-kind-tag? d: Document => Bool.\nconforms-to-landed-code? d: Document => Bool.\n---\nall d: Document | ~(mentions-kind-tag? d).\nall d: Document | conforms-to-landed-code? d.",
+      "precedents": null
+    }
+  ],
+  "testMap": [
+    { "testName": "definitions: set publishes a literal-capture word with a synthesized effect", "file": "src/tests/definition_test.zig", "stubPatch": 1, "implPatch": 3 },
+    { "testName": "definitions: body returns the capture body for set-bound names", "file": "src/tests/definition_test.zig", "stubPatch": 1, "implPatch": 3 },
+    { "testName": "definitions: which and see render set bindings as public defs", "file": "src/tests/definition_test.zig", "stubPatch": 1, "implPatch": 3 },
+    { "testName": "definitions: set never recognizes annotations in captured data", "file": "src/tests/definition_test.zig", "stubPatch": 1, "implPatch": 3 },
+    { "testName": "definitions: top-level setp fails through defp's module-root check", "file": "src/tests/definition_test.zig", "stubPatch": 1, "implPatch": 3 },
+    { "testName": "definitions: def inside a word body writes the caller's scope", "file": "src/tests/definition_test.zig", "stubPatch": 1, "implPatch": 3 },
+    { "testName": "modules: module set and setp publish constants with mandatory effects", "file": "src/tests/module_test.zig", "stubPatch": 1, "implPatch": 3 },
+    { "testName": "modules: cross-home constant references pass the synthesized effect contract", "file": "src/tests/module_test.zig", "stubPatch": 1, "implPatch": 3 },
+    { "testName": "idioms: capture shapes match the generic path exactly", "file": "test/idiom_differential.zig", "stubPatch": 1, "implPatch": 2 }
+  ],
+  "dependencyGraph": [
+    { "patch": 1, "classification": "INFRA", "dependsOn": [] },
+    { "patch": 2, "classification": "INFRA", "dependsOn": [1] },
+    { "patch": 3, "classification": "BEHAVIOR", "dependsOn": [1] },
+    { "patch": 4, "classification": "INFRA", "dependsOn": [3] },
+    { "patch": 5, "classification": "INFRA", "dependsOn": [2, 3, 4] }
+  ],
+  "mergabilityChecklist": {
+    "featureFlagStrategyDocumented": true,
+    "earlyPatchesNonFunctional": true,
+    "testStubsInInfraPatches": true,
+    "testImplsColocated": true,
+    "testMapComplete": true,
+    "testMapImplPatchMatchesCode": true,
+    "behaviorPatchesMinimal": true,
+    "dependencyGraphOrdered": true,
+    "behaviorPatchesJustified": true,
+    "functionalChangesOwnedByExactlyOnePatch": true,
+    "operationalConsiderationsSubstantive": true,
+    "observableReachabilityTraced": true,
+    "gameplanIsAtomicAndAutonomous": true
+  },
+  "mergabilityInsight": "4 of 5 patches are INFRA (stubs, invisible recognition, dead-arm removal, docs). The single BEHAVIOR patch is the irreducible semantic flip — two prelude blocks plus builtin removal — with its observable deltas confined to reflection output and error attribution; every value-flow outcome is preserved by the equivalence law, proven by the untouched concurrency/oom/e2e suites passing at that patch.",
+  "finalStateSpec": "module ONE_BINDER_MERGE.\n\n> ═══════════════════════════════════════════════════════════\n> THE GUARANTEE\n> ═══════════════════════════════════════════════════════════\n> One binding kind: bare reference always applies the stored body.\n> `v 'name set` is observationally `v literal (-- value) 'name def` — a word\n> binding with body ((v) first) and synthesized effect (-- value),\n> uniformly at top level and in modules. Reflection is honest and\n> total; capture-shape recognition is invisible acceleration; the\n> value arm is unrepresentable.\n\nValue.\nName.\nQuotation.\nEffect.\nconst-effect => Effect.\nWordBody.\nBuiltin.\nNativeCallable.\nBinding = WordBody + Builtin + NativeCallable.\nTopPublication = WordBody.\nModulePublication = WordBody + NativeCallable.\n\ncapture v: Value => Quotation.\napply-capture q: Quotation, v: Value, q = capture v => Value.\nset-bind v: Value, n: Name => WordBody.\nbody-of w: WordBody => Quotation.\neffect-of w: WordBody => Effect.\n\nScopeKind.\ntop-scope => ScopeKind.\nmodule-root => ScopeKind.\nsetp-legal? s: ScopeKind => Bool.\n\nContext.\ndirect => Context.\ncombinator => Context.\nOutcome.\nrecognized? q: Quotation, c: Context => Bool.\ngeneric-eval q: Quotation, c: Context => Outcome.\nfused-eval q: Quotation, c: Context => Outcome.\n---\n> The equivalence law.\nall v: Value, n: Name | body-of (set-bind v n) = capture v.\nall v: Value, n: Name | effect-of (set-bind v n) = const-effect.\nall v: Value | apply-capture (capture v) v = v.\n> setp scoping is preserved through defp's dynamic module-root check.\nsetp-legal? module-root.\nall s: ScopeKind | setp-legal? s -> s = module-root.\n> Recognition is unobservable — total over success and failure outcomes.\nall q: Quotation, c: Context | fused-eval q c = generic-eval q c.\n> body is total over word bindings: every set/def-published name has a\n> retrievable stored body (the sum type carries no value arm to error on)."
+}

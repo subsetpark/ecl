@@ -36,9 +36,7 @@ const entries = [_]Metadata{
     .{ .name = "infra", .effect = "list quotation -- list", .text = "Run a quotation with a list's elements as its isolated stack and collect the results." },
 
     .{ .name = "def", .effect = null, .text = "Bind a quotation to a public word, with optional effect and documentation metadata." },
-    .{ .name = "set", .effect = "value name --", .text = "Bind a value in the current environment." },
     .{ .name = "defp", .effect = "body annotation name --", .text = "Bind a private module word with required effect metadata." },
-    .{ .name = "setp", .effect = "value name --", .text = "Bind a private value in the current module." },
     .{ .name = "body", .effect = "name -- quotation", .text = "Return the stored quotation body of a resolved word." },
     .{ .name = "doc", .effect = "name -- string", .text = "Return the canonical documentation string of a resolved binding." },
     .{ .name = "which", .effect = "name --", .text = "Print where a word resolves and any bindings it shadows." },

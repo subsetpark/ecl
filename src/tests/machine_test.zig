@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const session = @import("../session.zig");
+const test_heap = @import("test_heap.zig");
 const value = @import("../value.zig");
 const list = @import("../list.zig");
 const dict = @import("../dict.zig");
@@ -28,7 +29,9 @@ fn errorKind(allocator: std.mem.Allocator, error_value: Value) ![]const u8 {
 }
 
 test "twenty-thousand-deep named recursion remains flat" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     const source =
         "(dup 0 > (1 - countdown) (pop) if) 'countdown def " ++
@@ -40,7 +43,9 @@ test "twenty-thousand-deep named recursion remains flat" {
 
 test "machine: boundary truncation is exact through nested attempts" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     const source = "7 (8 (pop) attempt pop pop missing) attempt";
     try std.testing.expect((try runtime.runUnit("boundaries.ecl", source)) == .ok);
@@ -57,7 +62,9 @@ test "machine: boundary truncation is exact through nested attempts" {
 
 test "errors: contract depths are relative to the isolated substack" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     const source = "7 8 ((1 2) () while) attempt";
     try std.testing.expect((try runtime.runUnit("contract.ecl", source)) == .ok);
@@ -76,7 +83,9 @@ test "errors: contract depths are relative to the isolated substack" {
 
 test "errors: lazy trace is innermost-first and retains recursive activations" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     const source =
         "(dup 0 > (1 - f pop) (pop missing) if) 'f def 1 f";
@@ -91,7 +100,9 @@ test "errors: lazy trace is innermost-first and retains recursive activations" {
 
 test "errors: tail-position application continuations retain their enclosing word" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     const failure = (try runtime.runUnit(
         "application-trace.ecl",
@@ -125,8 +136,9 @@ test "errors: tail-position application continuations retain their enclosing wor
 }
 
 test "machine_test: late binding redefinition heals existing callers" {
-    const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit(
         "<test>",
@@ -151,8 +163,9 @@ test "machine_test: late binding redefinition heals existing callers" {
 }
 
 test "early prelude installs source-defined wrap and pair" {
-    const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit(
         "<test>",
@@ -165,7 +178,9 @@ test "early prelude installs source-defined wrap and pair" {
 
 test "provisional scalar primitives enforce the non-finite regime" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
 
     const overflow = (try execute(&runtime, "9223372036854775806 2 +")).?;
@@ -179,8 +194,9 @@ test "provisional scalar primitives enforce the non-finite regime" {
 }
 
 test "division and comparison remain exact across 2^53" {
-    const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "1 2 /")) == null);
     try std.testing.expectEqual(@as(f64, 0.5), runtime.stackItems()[0].float);
@@ -190,7 +206,9 @@ test "division and comparison remain exact across 2^53" {
 
 test "attempt reifies failure and def rejects scalar bodies" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "7 (1 0 /) attempt")) == null);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
@@ -223,7 +241,9 @@ test "attempt reifies failure and def rejects scalar bodies" {
 
 test "raise preserves valid user dicts and validates optional fields" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     const raised = (try execute(&runtime, "{'kind 'custom 'msg \"hello\"} raise")).?;
     defer runtime.release(raised);
@@ -283,8 +303,9 @@ test "raise preserves valid user dicts and validates optional fields" {
 }
 
 test "over compose and at have exact stack effects" {
-    const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
 
     try std.testing.expect((try execute(&runtime, "1 2 over")) == null);
@@ -308,13 +329,17 @@ test "pp and prin write through and writer failures become io errors" {
     const allocator = std.testing.allocator;
     var captured: std.Io.Writer.Allocating = .init(allocator);
     defer captured.deinit();
-    var runtime = try session.Session.initWithOutput(allocator, &.{}, &captured.writer);
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.initWithOutput(runtime_heap.allocator(), &.{}, &captured.writer);
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "\"hi\" prin 'visible pp")) == null);
     try std.testing.expectEqualStrings("hi'visible\n", captured.written());
 
     var failing: std.Io.Writer = .failing;
-    var broken = try session.Session.initWithOutput(allocator, &.{}, &failing);
+    var broken_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&broken_heap);
+    var broken = try session.Session.initWithOutput(broken_heap.allocator(), &.{}, &failing);
     defer broken.deinit();
     const failure = (try execute(&broken, "'broken pp")).?;
     defer broken.release(failure);
@@ -323,7 +348,9 @@ test "pp and prin write through and writer failures become io errors" {
 
 test "inline control and reader-lowered binders execute" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "1 (2 +) call")) == null);
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
@@ -341,7 +368,9 @@ test "inline control and reader-lowered binders execute" {
 
 test "public parse reifies forms without execution and retains provenance" {
     const allocator = std.testing.allocator;
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     try std.testing.expect((try execute(&runtime, "\"42 missing\" parse")) == null);
     var display = try runtime.stackDisplay();
@@ -375,7 +404,9 @@ test "public parse cancellation reaches UTF-8 materialization" {
     @memset(source[1 .. text_len + 1], 'a');
     source[text_len + 1] = '"';
 
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit("<parse-encoding-setup>", source)) == .ok);
     try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
@@ -404,7 +435,9 @@ test "public parse cancellation reaches ignored-source scanning" {
     command[1] = '#';
     @memset(command[2 .. 2 + comment_len], 'a');
     @memcpy(command[2 + comment_len ..], suffix);
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     runtime.requestCancellation();
     const failure = switch (try runtime.runUnit("<parse-cancel-test>", command)) {

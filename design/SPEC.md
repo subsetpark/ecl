@@ -171,8 +171,8 @@ Evaluation walks a list of forms left to right:
 
 - A literal (number, char, string, quoted symbol, list, dict) pushes
   itself.
-- A word resolves in the current environment and applies: a word binding
-  runs its stored body; a value binding pushes its value.
+- A word resolves in the current environment and applies, running its
+  stored body. There is one kind of binding; reference always applies.
 
 Applying a quotation evaluates its forms on some stack; a quotation
 containing only data therefore pushes its elements. All binding is late:
@@ -227,21 +227,32 @@ or environment names, never the ambient stack.
 
 ### Bindings
 
-One namespace holds both words and values; each binding is tagged word or
-value.
+One namespace, one kind of binding: a name binds a body, and reference
+always applies it. Values are bound by capturing them in a body.
 
 - `(body) 'name def` binds a word: reference applies the body. The body
   must be a list (a non-list is an error directing to `set`); a list of
   plain data is legal and yields a multi-value constant word.
-- `value 'name set` binds a value in the current environment: reference
-  pushes it, including quotations as data. `set` is environment
-  assignment, not a lexical binding form. For ordinary local values,
-  prefer stack flow or binder locals.
+- `value 'name set` binds a constant. It is sugar, defined in ecl as
+  `swap literal swap (-- value) swap def`: the value is captured with
+  `literal`, so the published body is `((value) first)` and the
+  synthesized effect is `( -- value )`. Reference applies that body and
+  pushes exactly the captured value, quotations included — the capture is
+  inert, so nothing in it executes or resolves. `v 'name set` is therefore
+  observationally `v literal (-- value) 'name def` — the annotation is part
+  of the equivalence, not incidental: it is what `which` and `see` report,
+  and what satisfies the mandatory module effect. `set` is environment
+  assignment, not a lexical binding form. For ordinary local values, prefer
+  stack flow or binder locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete binding snapshot: omitting an effect or docstring clears the
   old one. Code holding the old body keeps running it safely.
 - `defp`/`setp` are the private forms, legal only inside a module body
   (see Modules); at top level they are errors.
+- Because `set`/`setp` are sugar, their failures are raised by the words
+  they call: an underflowing `set` is `'underflow` from `swap`, and a
+  non-symbol or reserved name is raised by `def`/`defp`. The error kind is
+  unchanged; the trace names `set`/`setp` as the parent.
 
 ### Definition annotations
 
@@ -262,8 +273,10 @@ annotation is validated as a whole before the binding publishes: at most
 one marker of each kind, `--` before `:`, only words around `--`, and
 exactly one string after `:`. A malformed recognized annotation is a
 `'domain` error, never reinterpreted as a body; an annotation with no body
-beneath it is `'underflow`. `set`/`setp` never recognize annotations, so
-lists containing bare marker words remain ordinary values.
+beneath it is `'underflow`. `set`/`setp` capture their value with
+`literal` before `def`/`defp` sees it, so the value sits nested one list
+deep inside the capture body, where markers are inert: a constant holding
+bare marker words is never reinterpreted as an annotation.
 
 Module `def`/`defp` require the effect portion; a documentation-only
 annotation is a registration error there. Top-level `def` accepts no
@@ -355,14 +368,24 @@ maps symbols to modules; files are transport.
   stack-isolated: registration produces no stack values. Modules are
   first-class: enumerable, diffable, constructible by building the body
   quotation programmatically.
+- `values 'name (body) module-with` captures every value inertly and in order
+  before running the same isolated module-registration operation. The values
+  form the body unit's initial stack and the body must consume them.
 - Registration commits only after the body succeeds. A failed
   re-registration leaves the previous registration in place.
+- The registry is flat. A module body may register another module, but that
+  registration creates an independent module with its own unqualified name
+  and lifetime; it does not establish lexical nesting or parent ownership.
+  Registrations commit independently, so a completed inner registration is
+  not rolled back if the registering module's body later fails.
 - **Privacy is set at the definition site**: inside a module body, `def`
-  and `set` bind public (exported); `defp` and `setp` bind private.
-  Privacy is subtractive — privates are absent from the module's public
-  face, not access-checked. Definitions made inside the module body's
-  isolated child units (e.g. inside an `attempt`) are dynamic and are
-  never exported.
+  and `set` bind public (exported); `defp` and `setp` bind private. Every
+  module binding is a word carrying a declared effect; module constants
+  satisfy the mandatory-effect rule automatically, because `set`/`setp`
+  always supply `( -- value )`. Privacy is subtractive — privates are
+  absent from the module's public face, not access-checked. Definitions
+  made inside the module body's isolated child units (e.g. inside an
+  `attempt`) are dynamic and are never exported.
 - **Resolution context is a property of the binding**: an exported word
   carries its home module's name, and its body resolves against that
   module's chain — internal environment, then the module's own `use`s,
@@ -712,7 +735,7 @@ Observationally equivalent to `spawn await`. See Errors.
 by capturing every element of the values list inertly and in order, then
 `attempt` it. The values therefore form the attempted unit's initial stack;
 the quotation cannot reach the caller's ambient stack. Defined in ecl as
-`partial-all attempt`. Observationally equivalent to `spawn-with await`.
+`with attempt`. Observationally equivalent to `spawn-with await`.
 
 ### await
 `( task -- result )` — Park until the task completes; return its cached
@@ -743,7 +766,9 @@ quotations to the same pair of inputs. Equivalent to
 
 ### body
 `( 'name -- quotation )` — Return the stored body of a resolved word, as
-a plain list.
+a plain list. Total over everything defined in ecl, constants included: a
+name bound by `set` returns its capture body `((value) first)`. Host
+builtins and native words have no ecl body and are `'type`.
 
 ### both
 `( x y q -- … )` — *Inline.* Apply one quotation independently to two
@@ -1011,6 +1036,12 @@ Equivalent to `dup first (min) fold`.
 `( 'name body -- )` — *Isolated.* Run the body (contract `( -- )`) on a
 fresh environment and register the result as a module. See Modules.
 
+### module-with
+`( values 'name body -- )` — Capture every element of the values list inertly
+and in order as the isolated module body's initial stack, then register the
+module. The body must consume the supplied values and finish with an empty
+stack. Defined in ecl as `swap (with) dip swap module`.
+
 ### neg
 `( x -- y )` — **Pervasive.** Negation. Equivalent to `-1 *`.
 
@@ -1073,12 +1104,6 @@ an unevaluated quotation. `"42" parse first` is string-to-number.
 pushes the captured value inertly, then runs the quotation. Even a
 captured word remains data. Equivalent to `swap literal swap compose`;
 `3 (+) partial` is `((3) first +)`.
-
-### partial-all
-`( values quotation -- quotation )` — Capture every element of a list as
-an inert input to a quotation, preserving order. Calling the result starts
-with the list's elements as separate stack values. Defined in ecl as
-`((literal) each) dip append raze`.
 
 ### partition
 `( sequence predicate -- matches rejects )` — *Isolated*, contract
@@ -1143,16 +1168,27 @@ accumulator; same length as the input.
 
 ### see
 `( 'name -- )` — Print a canonical, re-readable definition with one
-combined annotation. Native and module origins are displayed.
+combined annotation. What prints is what is stored: a name bound by `set`
+prints its capture body and `( -- value )` effect ending in `'name def`,
+not the `set` spelling that produced it. Native and module origins are
+displayed.
 
 ### set
-`( value 'name -- )` — Bind a value in the current environment.
-References resolve when executed and push the value; `set` never
-recognizes annotations.
+`( value 'name -- )` — Bind a value as a constant word in the current
+environment. Reference applies the constant's body and pushes the exact
+captured value, quotations included. Defined in ecl as
+`swap literal swap (-- value) swap def`, so `v 'name set` is
+observationally `v literal (-- value) 'name def`: the stored body is
+`((v) first)` and the declared effect is `( -- value )`. Dropping the
+annotation is not the same definition — it publishes no effect, which
+`which` and `see` both show, and which a module rejects outright. The
+value is captured before `def` sees it and therefore can never be read as
+an annotation.
 
 ### setp
-`( value 'name -- )` — Bind a private module value. A top-level `setp` is
-an error.
+`( value 'name -- )` — Bind a private module constant. Defined in ecl as
+`swap literal swap (-- value) swap defp`. A top-level `setp` is an error,
+raised by the `defp` it calls.
 
 ### shape
 `( list -- shape )` — The dimensions of rectangular data; `'shape` error
@@ -1178,7 +1214,7 @@ quotation concurrently in a child task. See Concurrency.
 `( values quotation -- task )` — Construct a self-contained quotation by
 capturing every element of the values list inertly and in order, then
 `spawn` it. The values therefore form the child task's initial stack. Defined
-in ecl as `partial-all spawn`; `spawn-with await` is observationally
+in ecl as `with spawn`; `spawn-with await` is observationally
 equivalent to `attempt-with`.
 
 ### split
@@ -1257,11 +1293,19 @@ index replicated its count times. A 0/1 mask is the common case, yielding
 the positions of 1s: `[0 1 1 0] where` is `[1 2]`.
 
 ### which
-`( 'name -- )` — Print where a name resolves (module home, shadowing).
+`( 'name -- )` — Print where a name resolves (module home, shadowing),
+its kind (`def`, `primitive`, or `native`), visibility, and declared
+effect. Constants report `def`, like every other ecl definition.
 
 ### while
 `( cond body -- … )` — *Inline.* Repeatedly run `cond`, which must leave
 one boolean; while it leaves 1, run `body`. Tail-call optimized.
+
+### with
+`( values quotation -- quotation )` — Capture every element of a list as
+an inert input to a quotation, preserving order. Calling the result starts
+with the list's elements as separate stack values. Defined in ecl as
+`((literal) each) dip append raze`.
 
 ### words
 `( -- )` — Print the visible dictionary in sorted order.

@@ -49,13 +49,11 @@ pub fn documentationHeader(document: *const DocumentationString) *value.ListHand
 
 pub const Binding = union(enum) {
     word: *Quotation,
-    value: value.Value,
     builtin: PrimitiveImpl,
     native: NativeCallable,
     pub fn retain(self: Binding) void {
         switch (self) {
             .word => |body| heap.incRef(quotationHeader(body)),
-            .value => |item| heap.retainValue(item),
             .builtin => {},
             .native => |callable| callable.instance.retain(),
         }
@@ -63,7 +61,6 @@ pub const Binding = union(enum) {
     pub fn retire(self: Binding, releases: *heap.ReleaseDomain) void {
         switch (self) {
             .word => |body| releases.releaseHeader(quotationHeader(body)),
-            .value => |item| releases.releaseValue(item),
             .builtin => {},
             .native => |callable| callable.instance.releasePin(),
         }
@@ -152,7 +149,6 @@ pub const TopPublication = union(enum) {
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
     },
-    value: value.Value,
 };
 pub const ModulePublication = union(enum) {
     word: struct {
@@ -160,10 +156,6 @@ pub const ModulePublication = union(enum) {
         visibility: Visibility,
         effect: ValidatedEffect,
         doc: ?*DocumentationString = null,
-    },
-    value: struct {
-        item: value.Value,
-        visibility: Visibility,
     },
     native: struct {
         callable: NativeCallable,
@@ -187,7 +179,6 @@ const BindingSpec = struct {
                 .effect = word.effect,
                 .doc = word.doc,
             },
-            .value => |item| .{ .binding = .{ .value = item } },
         };
     }
     fn fromModule(
@@ -202,11 +193,6 @@ const BindingSpec = struct {
                 .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
                 .effect = word.effect,
                 .doc = word.doc,
-            },
-            .value => |item| .{
-                .binding = .{ .value = item.item },
-                .visibility = item.visibility,
-                .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
             },
             .native => |native| .{
                 .binding = .{ .native = native.callable },
@@ -1541,8 +1527,10 @@ test "environment definition propagates every allocation failure" {
             const body = try @import("list.zig").fromValuesGeneric(allocator, &.{.{ .int = 7 }});
             defer releases.releaseValue(body);
             const name = try intern.trustedNamespace("failure-probe");
+            const replacement = try @import("list.zig").fromValuesGeneric(allocator, &.{.{ .int = 9 }});
+            defer releases.releaseValue(replacement);
             try environment.define(name, .{ .word = .{ .body = quotation(body.list).? } });
-            try environment.define(name, .{ .value = .{ .int = 9 } });
+            try environment.define(name, .{ .word = .{ .body = quotation(replacement.list).? } });
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});

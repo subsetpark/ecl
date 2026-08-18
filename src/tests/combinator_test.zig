@@ -1,5 +1,6 @@
 const std = @import("std");
 const session = @import("../session.zig");
+const test_heap = @import("test_heap.zig");
 const machine = @import("../machine.zig");
 const support = @import("kernel_test_support.zig");
 
@@ -24,7 +25,9 @@ fn expectCancelledAfterSetup(
     source: []const u8,
     mode: machine.IdiomMode,
 ) !void {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     switch (try runtime.runUnit("<combinator-setup>", setup)) {
         .ok => {},
@@ -175,7 +178,9 @@ test "inline times cond and case prevalidate and select" {
 }
 
 test "empty inline iterations remain cancellable and bounded-frame" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     runtime.requestCancellation();
     const failure = switch (try runtime.runUnit("<combinator-cancel>", "70000 () times")) {
@@ -205,12 +210,16 @@ test "combinators: loops guards reductions and result materialization stay cance
 }
 
 test "idioms: automatic hits and forced generic preserves behavior" {
-    var automatic = try session.Session.init(allocator, &.{});
+    var automatic_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&automatic_heap);
+    var automatic = try session.Session.init(automatic_heap.allocator(), &.{});
     defer automatic.deinit();
     try expectStack(&automatic, "[1 2 3] (neg) each", "[-1 -2 -3]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
-    var generic = try session.Session.init(allocator, &.{});
+    var generic_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&generic_heap);
+    var generic = try session.Session.init(generic_heap.allocator(), &.{});
     defer generic.deinit();
     generic.setIdiomMode(.generic_only);
     try expectStack(&generic, "[1 2 3] (neg) each", "[-1 -2 -3]");
@@ -228,7 +237,23 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     try expectStack(&automatic, "pop {'a 1 'b 2} vals", "[1 2]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
-    var fallback = try session.Session.init(allocator, &.{});
+    // The literal-capture shape `((v) first)` that `partial` builds reaches
+    // the same constant-operand kernels a bare constant does, in both operand
+    // orders. A wrapper that is not a one-element list is not a capture: it
+    // falls through to the generic path, where `first` is instead recognized
+    // once per element.
+    try expectStack(&automatic, "pop [1 2 3] 3 (+) partial each", "[4 5 6]");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    try expectStack(&automatic, "pop [1 2 3] 3 (swap -) partial each", "[2 1 0]");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    try expectStack(&automatic, "pop [1 2 3] ((3 4) first +) each", "[4 5 6]");
+    try std.testing.expectEqual(@as(u64, 3), automatic.lastIdiomHits());
+
+    var fallback_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&fallback_heap);
+    var fallback = try session.Session.init(fallback_heap.allocator(), &.{});
     defer fallback.deinit();
     const failure = switch (try fallback.runUnit("<idiom-fallback>", "1 (neg) each")) {
         .err => |item| item,
@@ -237,34 +262,46 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     defer fallback.release(failure);
     try std.testing.expectEqual(@as(u64, 0), fallback.lastIdiomHits());
 
-    var executable_form = try session.Session.init(allocator, &.{});
+    var executable_form_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&executable_form_heap);
+    var executable_form = try session.Session.init(executable_form_heap.allocator(), &.{});
     defer executable_form.deinit();
     try expectStack(&executable_form, "[1 2 3] (dup *) each", "[1 4 9]");
     try std.testing.expectEqual(@as(u64, 0), executable_form.lastIdiomHits());
 }
 
 test "idioms: late binding defeats recognition" {
-    var runtime = try session.Session.init(allocator, &.{});
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
     try expectStack(&runtime, "(pop pop 42) '+ def [1 2 3] 0 (+) fold", "42");
     try std.testing.expectEqual(@as(u64, 0), runtime.lastIdiomHits());
 
-    var rebound_source = try session.Session.init(allocator, &.{});
+    var rebound_source_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&rebound_source_heap);
+    var rebound_source = try session.Session.init(rebound_source_heap.allocator(), &.{});
     defer rebound_source.deinit();
     try expectStack(&rebound_source, "(pop 42) 'neg def [1 2] (neg) each", "[42 42]");
     try std.testing.expectEqual(@as(u64, 0), rebound_source.lastIdiomHits());
 
-    var rebound_dependency = try session.Session.init(allocator, &.{});
+    var rebound_dependency_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&rebound_dependency_heap);
+    var rebound_dependency = try session.Session.init(rebound_dependency_heap.allocator(), &.{});
     defer rebound_dependency.deinit();
     try expectStack(&rebound_dependency, "(pop pop 42) '* def 2 neg", "42");
     try std.testing.expectEqual(@as(u64, 0), rebound_dependency.lastIdiomHits());
 
-    var direct_sort = try session.Session.init(allocator, &.{});
+    var direct_sort_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&direct_sort_heap);
+    var direct_sort = try session.Session.init(direct_sort_heap.allocator(), &.{});
     defer direct_sort.deinit();
     try expectStack(&direct_sort, "(pop [0]) 'grade def [3 1 2] sort", "[3]");
     try std.testing.expectEqual(@as(u64, 0), direct_sort.lastIdiomHits());
 
-    var used_sort = try session.Session.init(allocator, &.{});
+    var used_sort_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&used_sort_heap);
+    var used_sort = try session.Session.init(used_sort_heap.allocator(), &.{});
     defer used_sort.deinit();
     try expectStack(
         &used_sort,
@@ -273,7 +310,9 @@ test "idioms: late binding defeats recognition" {
     );
     try std.testing.expectEqual(@as(u64, 0), used_sort.lastIdiomHits());
 
-    var between_applications = try session.Session.init(allocator, &.{});
+    var between_applications_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&between_applications_heap);
+    var between_applications = try session.Session.init(between_applications_heap.allocator(), &.{});
     defer between_applications.deinit();
     try expectStack(
         &between_applications,
