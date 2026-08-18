@@ -68,6 +68,7 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
         .mode = mode,
         .scope = scope,
         .name = name,
+        .binding_validation = .init(name),
         .item = .init(item.take()),
         .separator = separator,
         .colon = colon,
@@ -81,6 +82,8 @@ const DefineDriver = struct {
     mode: Mode,
     scope: *env.Scope,
     name: u32,
+    binding_validation: intern.NamespaceCursor,
+    binding_name: ?intern.BindingName = null,
     item: ?heap.Owned(Value),
     annotation_source: ?heap.Owned(Value) = null,
     separator: u32,
@@ -212,21 +215,23 @@ const DefineDriver = struct {
                 },
             },
             .validate_name => {
-                const bytes = intern.get(self.name);
-                if (bytes.len == 0 or std.mem.eql(u8, bytes, "--") or std.mem.eql(u8, bytes, ":"))
-                    return evaluator.fail(.domain, "def/set requires an unqualified, non-reserved name");
-                if (self.index != bytes.len) {
-                    if (bytes[self.index] == '.')
-                        return evaluator.fail(.domain, "def/set requires an unqualified, non-reserved name");
-                    self.index += 1;
-                    budget -= 1;
-                    continue;
+                switch (self.binding_validation.advance()) {
+                    .pending => {
+                        budget -= 1;
+                        continue;
+                    },
+                    .complete => |name| self.binding_name = name orelse return evaluator.fail(
+                        .domain,
+                        "def/set requires an unqualified, non-reserved name",
+                    ),
                 }
                 if (self.scope.kind() == .module_root) {
                     self.qualified = .init(try .init(
                         evaluator.allocator(),
-                        intern.namespaceId(evaluator.currentHome().?.name()),
-                        self.name,
+                        intern.qualifiedName(
+                            evaluator.currentHome().?.name(),
+                            self.binding_name.?,
+                        ),
                     ));
                     self.phase = .qualify_name;
                 } else self.phase = .publish;
@@ -243,16 +248,14 @@ const DefineDriver = struct {
                 const module_root = self.scope.kind() == .module_root;
                 if (self.item.?.borrow() != .list)
                     return evaluator.fail(.type, "def expected a list body; use set for values");
-                if (module_root and self.annotation.borrow().effect == null)
-                    return evaluator.fail(.domain, "module def/defp requires an effect declaration");
-                const name: intern.NamespaceName = @enumFromInt(self.name);
+                const name = self.binding_name.?;
                 const visibility: env.Visibility = if (private) .private else .public;
                 if (self.publisher == null) self.publisher = .init(if (module_root)
                     try self.scope.publishModuleCursor(name, self.trace_word.?, .{ .word = .{
                         .body = env.quotation(self.item.?.borrow().list) orelse
                             return evaluator.fail(.domain, "definition body has an invalid heap representation"),
                         .visibility = visibility,
-                        .effect = self.annotation.borrow().effect.?,
+                        .effect = self.annotation.borrow().effect,
                         .doc = self.annotation.borrow().doc_value,
                     } })
                 else

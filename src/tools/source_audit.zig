@@ -123,17 +123,18 @@ const source_groups = [_]SourceGroup{
 };
 
 const test_files = [_][]const u8{
-    "tests/testgen.zig",             "tests/reader_test.zig",
-    "tests/machine_test.zig",        "tests/module_test.zig",
-    "tests/value_test.zig",          "tests/kernel_test_support.zig",
-    "tests/kernel_numeric_test.zig", "tests/kernel_sequence_test.zig",
-    "tests/kernel_order_test.zig",   "tests/kernel_dict_text_test.zig",
-    "tests/combinator_test.zig",     "tests/prelude_test.zig",
-    "tests/definition_test.zig",     "tests/formatter_test.zig",
-    "tests/concurrency_test.zig",    "tests/oom_test.zig",
-    "tests/line_editor_test.zig",    "tests/native_test.zig",
-    "tests/fuzz_test.zig",           "fuzz_root.zig",
-    "tests/test_heap.zig",           "oom_root.zig",
+    "tests/testgen.zig",              "tests/reader_test.zig",
+    "tests/machine_test.zig",         "tests/module_test.zig",
+    "tests/value_test.zig",           "tests/kernel_test_support.zig",
+    "tests/kernel_numeric_test.zig",  "tests/kernel_sequence_test.zig",
+    "tests/kernel_order_test.zig",    "tests/kernel_dict_text_test.zig",
+    "tests/combinator_test.zig",      "tests/prelude_test.zig",
+    "tests/definition_test.zig",      "tests/formatter_test.zig",
+    "tests/concurrency_test.zig",     "tests/oom_test.zig",
+    "tests/line_editor_test.zig",     "tests/native_test.zig",
+    "tests/fuzz_test.zig",            "fuzz_root.zig",
+    "tests/test_heap.zig",            "oom_root.zig",
+    "tests/stateful_module_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
@@ -534,6 +535,23 @@ fn auditSourceBodies() bool {
         for (component.sources, component.files) |source, file| {
             if (std.mem.eql(u8, file, "machine.zig")) continue;
             failed = auditTokens(file, source, &operand_stack_mutations) or failed;
+        }
+    }
+    // A registry outcome that a driver dismisses as `unreachable` is an
+    // interleaving nobody imagined rather than one that cannot happen:
+    // removal can invalidate any name between the snapshot a cursor read and
+    // the turn it is granted. Every registry error must reach an ECL error
+    // kind instead.
+    const dismissed_registry_outcomes = [_][]const []const u8{
+        &.{ "MissingModule", "=>", "unreachable" },
+        &.{ "NameConflict", "=>", "unreachable" },
+        &.{ "InvalidDefinition", "=>", "unreachable" },
+        &.{ "StateApplicationActive", "=>", "unreachable" },
+    };
+    for (source_groups) |component| {
+        if (!component.production) continue;
+        for (component.sources, component.files) |source, file| {
+            failed = auditTokens(file, source, &dismissed_registry_outcomes) or failed;
         }
     }
     const raw_stack_ownership = [_][]const []const u8{&.{"takeStackOwned"}};

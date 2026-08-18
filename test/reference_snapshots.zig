@@ -92,6 +92,16 @@ const cases = [_]Case{
     .{ .name = "see", .source = "3 'x set 'x see" },
     .{ .name = "see set", .source = "'set see" },
     .{ .name = "setp", .source = "1 'x setp" },
+    .{ .name = "qualify execute", .source = "'core.utils ((41) 'f def) module 'core.utils 'f qualify execute" },
+    .{ .name = "execute type", .source = "1 execute" },
+    .{ .name = "doc qualify", .source = "'qualify doc" },
+    .{ .name = "within top level", .source = "(1) within" },
+    .{ .name = "without top level", .source = "without" },
+    .{ .name = "see within", .source = "'within see" },
+    .{ .name = "doc without", .source = "'without doc" },
+    .{ .name = "unmodule unknown", .source = "'nowhere unmodule" },
+    .{ .name = "unmodule then resolve", .source = "'gone ((1) 'x def) module 'gone unmodule gone.x" },
+    .{ .name = "doc unmodule", .source = "'unmodule doc" },
 };
 
 test "promoted Zig CLI behavior matches the reference snapshot" {
@@ -663,21 +673,21 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: 3 'x set 'x which
         \\exit: 0
         \\stdout:
-        \\x -> x def public (-- value)
+        \\x -> x def public
         \\stderr:
         \\<empty>
         \\=== see ===
         \\source: 3 'x set 'x see
         \\exit: 0
         \\stdout:
-        \\([3] first) (-- value) 'x def
+        \\([3] first) 'x def
         \\stderr:
         \\<empty>
         \\=== see set ===
         \\source: 'set see
         \\exit: 0
         \\stdout:
-        \\(swap literal swap (-- value) swap def) (value name -- : "Bind a value as a constant word in the current scope.") 'set def
+        \\(swap literal swap def) (value name -- : "Bind a value as a constant word in the current scope.") 'set def
         \\stderr:
         \\<empty>
         \\=== setp ===
@@ -686,7 +696,77 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 375 'col 36}}
+        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 375 'col 20}}
+        \\=== qualify execute ===
+        \\source: 'core.utils ((41) 'f def) module 'core.utils 'f qualify execute
+        \\exit: 0
+        \\stdout:
+        \\41
+        \\stderr:
+        \\<empty>
+        \\=== execute type ===
+        \\source: 1 execute
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'type 'msg "execute expected a word" 'word 'execute 'trace ['execute] 'data {'source "<command>" 'line 1 'col 3}}
+        \\=== doc qualify ===
+        \\source: 'qualify doc
+        \\exit: 0
+        \\stdout:
+        \\"Construct an executable qualified word without reparsing source text."
+        \\stderr:
+        \\<empty>
+        \\=== within top level ===
+        \\source: (1) within
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'domain 'msg "within is legal only in code homed in a module" 'word 'within 'trace ['within] 'data {'source "<command>" 'line 1 'col 5}}
+        \\=== without top level ===
+        \\source: without
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'domain 'msg "without is legal only inside a within application" 'word 'without 'trace ['without] 'data {'source "<command>" 'line 1 'col 1}}
+        \\=== see within ===
+        \\source: 'within see
+        \\exit: 0
+        \\stdout:
+        \\<primitive> (: "Run a quotation against a private draft of the home module's durable stack and publish the result.") 'within def
+        \\stderr:
+        \\<empty>
+        \\=== doc without ===
+        \\source: 'without doc
+        \\exit: 0
+        \\stdout:
+        \\"Move the draft's top value onto the pending outputs a within application returns to its caller."
+        \\stderr:
+        \\<empty>
+        \\=== unmodule unknown ===
+        \\source: 'nowhere unmodule
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'undefined-word 'msg "undefined word `nowhere`" 'word 'nowhere 'trace ['nowhere] 'data {'name 'nowhere 'source "<command>" 'line 1 'col 10}}
+        \\=== unmodule then resolve ===
+        \\source: 'gone ((1) 'x def) module 'gone unmodule gone.x
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'source "<command>" 'line 1 'col 42}}
+        \\=== doc unmodule ===
+        \\source: 'unmodule doc
+        \\exit: 0
+        \\stdout:
+        \\"Close, quiesce, and retire a registered module named by a symbol."
+        \\stderr:
+        \\<empty>
         \\
     ).diff(transcript.written(), true);
 }

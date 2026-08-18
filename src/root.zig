@@ -78,4 +78,5 @@ test {
     _ = @import("tests/line_editor_test.zig");
     _ = @import("tests/native_test.zig");
     _ = @import("tests/fuzz_test.zig");
+    _ = @import("tests/stateful_module_test.zig");
 }

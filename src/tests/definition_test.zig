@@ -130,7 +130,10 @@ test "module annotations retain contracts documentation qualification and shadow
     defer display.deinit();
     try std.testing.expectEqualStrings("1 1 1 1", display.bytes());
     try expectErrorContains(&runtime, "'m.private doc", "'kind 'undefined-word");
-    try expectErrorContains(&runtime, "'bad ((1) (: \"Documentation only.\") 'f def) module", "'kind 'domain");
+    // A documentation-only module word is one of the four legal forms, and
+    // its documentation is what reflection reports.
+    try expectOk(&runtime, "'docs ((1) (: \"Documentation only.\") 'f def) module " ++
+        "'docs.f doc \"Documentation only.\" match pop");
     try expectErrorContains(&runtime, "'lies ((dup +) (a -- b c : \"An intentionally false contract.\") 'f def) module 1 lies.f", "'kind 'contract");
 }
 
@@ -312,13 +315,13 @@ test "long annotation traversal and reflection observe cancellation" {
 }
 
 // ── Milestone 10 (one-binder-merge) ──────────────────────────────────────
-// The merge makes `v 'name set` observationally `v literal (-- value)`
-// `'name def`:
+// The merge makes `v 'name set` observationally `v literal 'name def`:
 // bindings have one kind, bare reference always applies a stored body, and
-// a "value" is a word whose body is the literal capture `((v) first)`
-// carrying the synthesized effect `(-- value)`.
+// a "value" is a word whose body is the literal capture `((v) first)`. Since
+// M11 made source annotations optional everywhere, the sugar synthesizes no
+// metadata at all and the equivalence is exact.
 
-test "definitions: set publishes a literal-capture word with a synthesized effect" {
+test "definitions: set publishes a literal-capture word with no synthesized metadata" {
     // A constant is a word whose body is the literal capture, so referencing
     // it applies that body and pushes exactly the captured value. The capture
     // is inert for every kind of value: a quotation is pushed rather than run,
@@ -352,20 +355,20 @@ test "definitions: which and see render set bindings as public defs" {
     defer output.deinit();
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
-    // Reflection reports what is stored: one kind, and the effect the sugar
-    // synthesized. There is no `set` label to report, and `see` does not
-    // reconstruct the `set` spelling from the capture shape.
+    // Reflection reports what is stored: one kind, and no metadata, because
+    // the sugar supplies none. There is no `set` label to report, and `see`
+    // does not reconstruct the `set` spelling from the capture shape.
     try expectOk(&runtime, "3 'x set 'x which 'x see");
     try std.testing.expectEqualStrings(
-        "x -> x def public (-- value)\n" ++
-            "([3] first) (-- value) 'x def\n",
+        "x -> x def public\n" ++
+            "([3] first) 'x def\n",
         output.written(),
     );
 
     // The rendering is source: reading it back reproduces the binding.
     var reread = try session.Session.init(std.testing.allocator, &.{});
     defer reread.deinit();
-    try expectOk(&reread, "([3] first) (-- value) 'x def x 'x body");
+    try expectOk(&reread, "([3] first) 'x def x 'x body");
     var display = try reread.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings("3 ([3] first)", display.bytes());

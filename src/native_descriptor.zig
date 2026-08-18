@@ -36,7 +36,7 @@ pub const ValidateError = error{
 };
 
 pub const ValidatedDefinition = struct {
-    name: intern.NamespaceName,
+    name: intern.BindingName,
     doc: *env.DocumentationString,
     effect: env.ValidatedEffect,
     callback_index: u32,
@@ -48,7 +48,7 @@ pub const ValidatedDefinition = struct {
 
 const DescriptorState = struct {
     host: *const heap.HostCleanup,
-    name: intern.NamespaceName,
+    name: intern.ModuleName,
     doc: *env.DocumentationString,
     definitions: []ValidatedDefinition,
     requirements: []abi.CapabilityRequirement,
@@ -81,7 +81,7 @@ pub const ValidatedDescriptor = opaque {
         mutable.deinit();
     }
 
-    pub fn name(self: *const ValidatedDescriptor) intern.NamespaceName {
+    pub fn name(self: *const ValidatedDescriptor) intern.ModuleName {
         return self.state().name;
     }
 
@@ -284,7 +284,7 @@ const EffectBuild = struct {
 
 pub const ValidateCursor = struct {
     host: *const heap.HostCleanup,
-    requested: intern.NamespaceName,
+    requested: intern.ModuleName,
     descriptor_ptr: *const abi.Descriptor,
     descriptor: ?abi.Descriptor = null,
     phase: enum {
@@ -299,7 +299,7 @@ pub const ValidateCursor = struct {
         complete,
         failed,
     } = .header,
-    name: ?intern.NamespaceName = null,
+    name: ?intern.ModuleName = null,
     module_doc_builder: ?DocumentBuild = null,
     module_doc: ?*env.DocumentationString = null,
     requirements: ?[]abi.CapabilityRequirement = null,
@@ -315,7 +315,7 @@ pub const ValidateCursor = struct {
 
     pub fn init(
         host: *const heap.HostCleanup,
-        requested: intern.NamespaceName,
+        requested: intern.ModuleName,
         descriptor: *const abi.Descriptor,
     ) ValidateCursor {
         return .{ .host = host, .requested = requested, .descriptor_ptr = descriptor };
@@ -425,7 +425,7 @@ pub const ValidateCursor = struct {
             self.descriptor.?.module_name_len,
             max_module_name_bytes,
         );
-        const name = intern.internNamespace(bytes) catch |err| switch (err) {
+        const name = intern.internModuleName(bytes) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidName => return error.InvalidName,
         };

@@ -61,7 +61,7 @@ fn await(evaluator: *Machine) MachineError!void {
     var task = try evaluator.popValue();
     defer task.deinit();
     if (task.borrow() != .task) return evaluator.typeError("a task");
-    evaluator.unit.installParkRequest(.{ .task = task.take() });
+    try evaluator.park(.{ .task = task.take() });
 }
 
 fn cancel(evaluator: *Machine) MachineError!void {
@@ -98,7 +98,7 @@ fn awaitFor(evaluator: *Machine) MachineError!void {
     if (task.borrow() != .task) return evaluator.typeError("a task followed by milliseconds");
     if (duration.borrow() != .int) return evaluator.typeError("an integer millisecond duration");
     if (duration.borrow().int < 0) return evaluator.fail(.domain, "await-for duration must be nonnegative");
-    evaluator.unit.installParkRequest(.{ .deadline = .{
+    try evaluator.park(.{ .deadline = .{
         .task = task.take(),
         .milliseconds = duration.borrow().int,
     } });
@@ -180,7 +180,7 @@ const AwaitAnyDriver = struct {
         self.tasks = null;
         evaluator.detachWorkDriver(self);
         heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
-        evaluator.unit.installParkRequest(.{ .any = task_values });
+        try evaluator.park(.{ .any = task_values });
         return .detached;
     }
 };

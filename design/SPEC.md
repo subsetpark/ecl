@@ -69,8 +69,8 @@ only); any other escape is a parse error. A string is a rank-1 char
 vector, not a distinct type.
 
 The exact decimal form `<task:N>` (ASCII digits, no sign) is reserved as an
-unparseable runtime display marker wherever an atom may occur. The same
-bytes inside a string literal are ordinary character data.
+unparseable runtime display marker wherever an atom may occur. The same bytes
+inside a string literal are ordinary character data.
 
 ## Forms
 
@@ -109,7 +109,8 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 ## Values
 
 Every value is one of eight kinds, as reported by `type`: `'int`,
-`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, `'task`.
+`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, or `'task`.
+There is no public module-handle value kind.
 
 All values are immutable. Mutation exists only as environment rebinding
 (`def`/`set`). Performance is a documented guarantee, not a semantic:
@@ -234,16 +235,15 @@ always applies it. Values are bound by capturing them in a body.
   must be a list (a non-list is an error directing to `set`); a list of
   plain data is legal and yields a multi-value constant word.
 - `value 'name set` binds a constant. It is sugar, defined in ecl as
-  `swap literal swap (-- value) swap def`: the value is captured with
-  `literal`, so the published body is `((value) first)` and the
-  synthesized effect is `( -- value )`. Reference applies that body and
+  `swap literal swap def`: the value is captured with `literal`, so the
+  published body is `((value) first)`. Reference applies that body and
   pushes exactly the captured value, quotations included — the capture is
   inert, so nothing in it executes or resolves. `v 'name set` is therefore
-  observationally `v literal (-- value) 'name def` — the annotation is part
-  of the equivalence, not incidental: it is what `which` and `see` report,
-  and what satisfies the mandatory module effect. `set` is environment
-  assignment, not a lexical binding form. For ordinary local values, prefer
-  stack flow or binder locals.
+  observationally `v literal 'name def`, exactly: the sugar synthesizes no
+  annotation, so `which` and `see` report a public `def` with no effect and
+  no documentation, and nothing distinguishes the two spellings. `set` is
+  environment assignment, not a lexical binding form. For ordinary local
+  values, prefer stack flow or binder locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete binding snapshot: omitting an effect or docstring clears the
   old one. Code holding the old body keeps running it safely.
@@ -278,12 +278,16 @@ beneath it is `'underflow`. `set`/`setp` capture their value with
 deep inside the capture body, where markers are inert: a constant holding
 bare marker words is never reinterpreted as an annotation.
 
-Module `def`/`defp` require the effect portion; a documentation-only
-annotation is a registration error there. Top-level `def` accepts no
-annotation, either portion, or both. A top-level effect is reflective
-metadata only; a module word's declared effect is a live contract, checked
-dynamically against the observed effect when application crosses a module
-boundary (violation: `'contract`).
+Annotations are optional everywhere. Module `def`/`defp` accept the same
+four forms as top-level `def`: no annotation, effect only, documentation
+only, or both. A top-level effect is reflective metadata only; a module
+word's declared effect is a live contract, checked dynamically against the
+observed effect when application crosses a module boundary (violation:
+`'contract`). An omitted module effect means there is no such check, not
+an inferred one, and reflection preserves whether each portion is absent.
+This source-language relaxation does not weaken the native ABI, whose
+`Call` effect and documentation remain mandatory; the shipped prelude
+keeps its stronger repository policy requiring meaningful documentation.
 
 Documentation has canonical form. Publication trims source-only
 indentation, folds physical line breaks within prose to spaces, collapses
@@ -293,10 +297,10 @@ returns this canonical string, so source formatting cannot change
 reflective documentation. Strings anywhere else retain their exact decoded
 codepoints.
 
-The exact names `--` and `:` are reserved against binding: they remain
-legal word and symbol values and can be built into annotations at runtime,
-but cannot be introduced as definitions, values, locals, module names,
-aliases, exports, or native entries. Binding attempts are `'domain`;
+The exact names `--` and `:` are reserved against binding:
+they remain legal word and symbol values and can be built into
+annotations at runtime, but cannot be introduced as definitions, values,
+locals, module names, aliases, exports, or native entries. Binding attempts are `'domain`;
 binder use is a parse error. Longer names containing the same punctuation
 remain legal.
 
@@ -364,25 +368,50 @@ A module is a named, registered value — not a file. A per-session registry
 maps symbols to modules; files are transport.
 
 - `'name (body) module` runs the body on a fresh environment and registers
-  the result under the name. The body's contract is `( -- )` and it runs
-  stack-isolated: registration produces no stack values. Modules are
-  first-class: enumerable, diffable, constructible by building the body
-  quotation programmatically.
+  the result under the name. The body runs stack-isolated: it never sees or
+  disturbs the caller's stack, and registration produces no stack values.
+  Modules are first-class: enumerable, diffable, constructible by building
+  the body quotation programmatically.
 - `values 'name (body) module-with` captures every value inertly and in order
   before running the same isolated module-registration operation. The values
-  form the body unit's initial stack and the body must consume them.
+  form the body unit's initial stack; the body may consume, reorder, or
+  extend them.
+- **Module names are validated paths.** A canonical module name is one or
+  more nonempty binding-name segments joined by dots: `stats`, `core.utils`,
+  and `company.data.csv` are valid; leading, trailing, and doubled dots are
+  not. Definition names and aliases remain one unqualified segment. Qualified
+  executable names split at their final dot, so `core.utils.f` always means
+  module `core.utils`, binding `f`, even when module `core` also exists. Host
+  and native factories apply the reader's single scalar-level symbol-segment
+  grammar; ASCII or Unicode whitespace, delimiters, malformed UTF-8, and other
+  unreadable spellings do not become validated names. Reserved syntax markers
+  are interned as syntax only and cannot be minted as binding names through a
+  privileged validation mode.
+- **The registry slot is the singleton identity.** The first successful
+  registration of a canonical module name creates its slot; later registrations
+  replace only its code generation. Separately constructed names own
+  independent slots even when their bodies come from the same quotation.
+  A slot owns one immutable snapshot of a durable operand stack per
+  session, distinct from its replaceable code generation.
+- **Construction produces the initial state stack.** The isolated body's
+  final operand stack becomes the durable initial stack of a newly created
+  slot — it is not required to be empty. On re-registration the candidate's
+  initial stack is discarded and the existing slot's durable stack is
+  retained: initialization happens once per slot identity, not once per
+  code generation.
 - Registration commits only after the body succeeds. A failed
   re-registration leaves the previous registration in place.
 - The registry is flat. A module body may register another module, but that
-  registration creates an independent module with its own unqualified name
+  registration creates an independent module with its own canonical name
   and lifetime; it does not establish lexical nesting or parent ownership.
   Registrations commit independently, so a completed inner registration is
   not rolled back if the registering module's body later fails.
 - **Privacy is set at the definition site**: inside a module body, `def`
-  and `set` bind public (exported); `defp` and `setp` bind private. Every
-  module binding is a word carrying a declared effect; module constants
-  satisfy the mandatory-effect rule automatically, because `set`/`setp`
-  always supply `( -- value )`. Privacy is subtractive — privates are
+  and `set` bind public (exported); `defp` and `setp` bind private. Module
+  bindings carry the same optional annotations as top-level ones, so a
+  module word may be unannotated, documentation-only, effect-only, or
+  both; `set`/`setp` publish the bare literal capture. Privacy is
+  subtractive — privates are
   absent from the module's public face, not access-checked. Definitions
   made inside the module body's isolated child units (e.g. inside an
   `attempt`) are dynamic and are never exported.
@@ -393,17 +422,105 @@ maps symbols to modules; files are transport.
   privates, and callers cannot perturb a module's behavior by shadowing.
   A module word's body is still a plain list: `'stats.stdev body` is data,
   and re-`def`ing that list elsewhere loses the private context.
+- **`within` is the explicit stack boundary.** `within` runs a quotation
+  against a private draft of the home module's durable stack rather than
+  the ambient caller stack. It is legal only while executing a published
+  word whose definition-site home is a live module: session top level, a
+  registration root (which operates on its construction stack directly),
+  and a body extracted and redefined elsewhere are all `'domain`. There is
+  no module-handle-targeted form. Inputs cross the boundary only because
+  the word body captures them explicitly with `partial` or `with`.
+  Semantically `within` is the module-scoped transactional counterpart of
+  `infra`: `infra` takes a supplied list as its temporary stack, `within`
+  selects the invoking word's durable home-module stack.
+- **`without` is the explicit outward boundary.** Inside an active
+  `within` quotation, `without` pops the draft's top value and appends it
+  to a pending output sequence; elsewhere it is `'domain`, and on an empty
+  draft it is `'underflow`. Multiple outward values reach the caller in
+  invocation order. A value remains in the durable stack and is also
+  returned only when the quotation duplicates it before `without`; values
+  captured with `partial` or `with` stay in state unless the quotation
+  consumes or moves them outward.
+- **Each `within` application is the transaction.** Success publishes the
+  remaining draft as the new durable stack exactly once and then transfers
+  the pending outputs to the caller through a window reserved before
+  publication, so no allocation failure can commit state without
+  delivering every output. Error, cancellation, allocation failure,
+  contract failure, and `without` underflow discard both the draft and the
+  pending outputs and publish nothing. A later failure in the enclosing
+  word or unit does not roll back a `within` application that already
+  returned, matching the existing rule that unit stack rollback does not
+  undo completed environment or IO effects.
+- **`within` applications are serialized scheduler work.** One fair
+  per-slot arbiter orders them in arrival order, holding no lock while ECL
+  code runs and permitting ordinary bounded scheduler yields. Parking
+  (`await`, deadline waits, task joins, `exit`), a nested `within`, and an
+  application homed in another module are all `'domain` before parking or
+  acquiring a second slot, so no self- or cross-module deadlock shape is
+  reachable. Ordinary calls, including read-only calls into other modules,
+  remain available inside the quotation.
 - Re-registering a module heals all callers immediately: module words
   resolve through the registry, and each application pins one registry
   generation for the whole body — no mixed-generation execution.
+- **Slot lifetime is an owned capability.** Every published generation owns a
+  non-retargetable slot lease for its whole lifetime. Resolution retains an
+  operation lease before dropping the directory snapshot that supplied the
+  slot entry, and `within`, reload, and removal retain that witness across
+  their complete check/use interval.
+  Removal does not wait for old generation pins, but retired slot storage is
+  not reusable until all such leases, the arbiter, and old directory snapshots
+  have drained. A removed generation can therefore observe only its original
+  closed slot, never an unrelated module that later reuses registry capacity.
+- **Hot reload preserves the stack.** Re-registration constructs a new code
+  generation while retaining the slot and its durable stack, taking an
+  ordinary place in the slot's arbiter order: every `within` application
+  queued before it runs against the old generation and finishes first, and
+  every later one runs against the new one, so no application straddles
+  the swap. A quiescent slot — the sequential common case — commits
+  immediately. Once a replacement representation is current, code from a
+  superseded generation may keep running but may no longer publish state:
+  its `within` is `'domain`. A re-registration initiated from inside *any*
+  state application is `'domain` before any wait: a unit holds at most one
+  slot's turn, and waiting for a second is the same deadlock shape a nested
+  `within` is. Failed
+  registration changes neither code nor state. Stack-layout evolution is
+  an explicit userland protocol: replacement code must understand the
+  retained representation and may migrate it with an ordinary first
+  `within`; the runtime neither inspects nor names positions in the stack.
+- **Removal completes the lifecycle.** `unmodule` accepts a module name; an
+  alias canonicalizes exactly as `use` resolves it. An unregistered name is
+  `'undefined-word`, and removal from inside any state application is
+  `'domain`, like re-registration. It
+  closes new resolution, calls, and `within` applications, waits for
+  queued and active drafts through the same arbiter order, removes every
+  alias targeting the slot in the same
+  publish, then retires the code generation and every value on the durable
+  stack through bounded work. Once the close is published, ownership of the
+  remaining retirement is transferred to scheduler work before cancellation
+  can unwind the initiating unit; post-close cancellation cannot strand a
+  closed slot. Concurrent resolution observes either the
+  live module or `'undefined-word` once close begins, never a half-removed
+  entry. Session shutdown consumes the same `live -> closing -> retired`
+  protocol, and settled memory across repeated construct/remove/name-reuse
+  cycles is bounded by peak simultaneously live state and slot leases rather
+  than by registration history.
+- Module state is process-local: there is no persistence across process
+  restart, and the native ABI exposes no module-state capability, so an
+  `.eclmod` word can neither observe an internal module home nor reach a durable
+  stack.
 - **Surface**: `use` splices a module's exports into scope. Session
   definitions shadow used exports; a later `use` shadows an earlier one;
   re-`use`ing a module moves it to the top of the shadow order; `use` is
   idempotent. Each session binding that shadows an incoming export is
   reported on stderr ("session `mean` shadows `stats.mean`") —
   informational only; shadowing is the documented way to locally patch a
-  module word. Dotted symbols (`stats.mean`) give qualified access with no
-  import. `alias` registers a short registry name; aliases and module
+  module word. Dotted words split at their final dot and give qualified access
+  with no import. `qualify` validates a module-name symbol and an unqualified
+  binding-name symbol and constructs the corresponding executable word;
+  `execute` applies that word through ordinary late-bound dispatch, preserving
+  its module home, private lookup, annotations, tracing, native/builtin path,
+  cancellation, and `within` authority. `alias` registers a short registry
+  name; aliases and module
   names may not collide in either direction. `which` shows any name's
   resolution.
 - **Loading**: `'stats use` on an unregistered name searches each
@@ -678,7 +795,8 @@ masks.
 `'abs body`).
 
 ### alias
-`( 'short 'name -- )` — Register a short registry name for a module.
+`( 'short 'module-name -- )` — Register an unqualified short registry name
+for a canonical, possibly dotted module name.
 Aliases and module names may not collide in either direction.
 
 ### all?
@@ -836,8 +954,9 @@ for the annotation forms and validation; see Modules for module-context
 requirements.
 
 ### defp
-`( body annotation 'name -- )` — Bind a private module word; the
-annotation's effect portion is mandatory. A top-level `defp` is an error.
+`( body annotation? 'name -- )` — Bind a private module word, with
+optional effect and documentation metadata. A top-level `defp` is an
+error.
 
 ### del
 `( dict key -- dict )` — Functionally remove a key.
@@ -880,6 +999,13 @@ result specializes when rectangular. Depth composes by nesting:
 follows dynamic stack behavior: filtering is the mask idiom (or
 `filter`), and flat-map is `each raze`. Derived verbs come free from
 homoiconicity: `((1 +) each) 'inc-all def`.
+
+### execute
+`( word -- … )` — Resolve and apply a word value late through the ordinary
+word-dispatch path, exactly as if that word appeared in executable position.
+Non-words are `'type`; missing words are `'undefined-word`. Module homes,
+private resolution, annotations, tracing, builtins, native calls,
+cancellation, and `within` authority are preserved.
 
 ### empty?
 `( sequence -- bool )` — 1 when the sequence has no elements. Equivalent
@@ -1033,14 +1159,17 @@ Equivalent to `dup first (min) fold`.
 `over over div * -`.
 
 ### module
-`( 'name body -- )` — *Isolated.* Run the body (contract `( -- )`) on a
-fresh environment and register the result as a module. See Modules.
+`( 'module-name body -- )` — *Isolated.* Validate a canonical module path,
+run the body on a fresh environment, and register the result. The body's
+final operand stack becomes a new slot's durable initial stack and is
+discarded on re-registration. See Modules.
 
 ### module-with
-`( values 'name body -- )` — Capture every element of the values list inertly
+`( values 'module-name body -- )` — Capture every element of the values list inertly
 and in order as the isolated module body's initial stack, then register the
-module. The body must consume the supplied values and finish with an empty
-stack. Defined in ecl as `swap (with) dip swap module`.
+module. The body may consume, reorder, or extend the supplied values; what
+remains is the module's durable initial stack. Defined in ecl as
+`swap (with) dip swap module`.
 
 ### neg
 `( x -- y )` — **Pervasive.** Negation. Equivalent to `-1 *`.
@@ -1121,6 +1250,13 @@ returning 0. Defined in ecl.
 layout of Printing. Best-effort: no round-trip guarantee — huge leaves
 may be elided. `str` is the canonical form.
 
+### qualify
+`( 'module-name 'binding-name -- qualified-word )` — Validate a canonical
+module path and one unqualified, non-reserved binding segment, then construct
+their qualified executable word directly from the interned components. It
+does not parse source or grant module-state/lifecycle authority; use `execute`
+to invoke the result dynamically.
+
 ### prin
 `( string -- )` — Write a string's chars raw (UTF-8, no newline).
 Non-string is `'type`.
@@ -1168,27 +1304,24 @@ accumulator; same length as the input.
 
 ### see
 `( 'name -- )` — Print a canonical, re-readable definition with one
-combined annotation. What prints is what is stored: a name bound by `set`
-prints its capture body and `( -- value )` effect ending in `'name def`,
-not the `set` spelling that produced it. Native and module origins are
-displayed.
+combined annotation, omitting each portion that was not supplied. What
+prints is what is stored: a name bound by `set` prints its capture body
+ending in `'name def`, with no annotation, not the `set` spelling that
+produced it. Native and module origins are displayed.
 
 ### set
 `( value 'name -- )` — Bind a value as a constant word in the current
 environment. Reference applies the constant's body and pushes the exact
 captured value, quotations included. Defined in ecl as
-`swap literal swap (-- value) swap def`, so `v 'name set` is
-observationally `v literal (-- value) 'name def`: the stored body is
-`((v) first)` and the declared effect is `( -- value )`. Dropping the
-annotation is not the same definition — it publishes no effect, which
-`which` and `see` both show, and which a module rejects outright. The
-value is captured before `def` sees it and therefore can never be read as
-an annotation.
+`swap literal swap def`, so `v 'name set` is observationally
+`v literal 'name def`: the stored body is `((v) first)` and no metadata is
+published at all, which `which` and `see` both show. The value is captured
+before `def` sees it and therefore can never be read as an annotation.
 
 ### setp
 `( value 'name -- )` — Bind a private module constant. Defined in ecl as
-`swap literal swap (-- value) swap defp`. A top-level `setp` is an error,
-raised by the `defp` it calls.
+`swap literal swap defp`. A top-level `setp` is an error, raised by the
+`defp` it calls.
 
 ### shape
 `( list -- shape )` — The dimensions of rectangular data; `'shape` error
@@ -1260,7 +1393,15 @@ in order. Equivalent to `((keep) dip keep) dip call`.
 
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
-`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, `'task`.
+`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, or `'task`.
+
+### unmodule
+`( 'module-name -- )` — Close, quiesce, and retire the module currently
+registered under a canonical name or unqualified alias, resolved exactly as
+`use` resolves it. An unregistered name is `'undefined-word`. Removal strips
+every alias targeting the slot in the same publish and is `'domain` when
+initiated from inside any state application, since a unit holds at most one
+slot's turn. See Modules.
 
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial
@@ -1275,7 +1416,7 @@ remainder. Equivalent to `dup first swap rest`.
 is 0. Equivalent to `() swap if`.
 
 ### use
-`( 'name -- )` — Splice a module's exports into the current scope,
+`( 'module-name -- )` — Splice a module's exports into the current scope,
 loading `<name>.ecl`/`<name>.eclmod` from `ECL_PATH` when unregistered.
 Reports each shadowed export on stderr. Idempotent; re-use moves the
 module to the top of the shadow order. See Modules.
@@ -1295,7 +1436,22 @@ the positions of 1s: `[0 1 1 0] where` is `[1 2]`.
 ### which
 `( 'name -- )` — Print where a name resolves (module home, shadowing),
 its kind (`def`, `primitive`, or `native`), visibility, and declared
-effect. Constants report `def`, like every other ecl definition.
+effect when one was supplied. Constants report `def` with no effect, like
+every other unannotated ecl definition.
+
+### within
+`( quotation -- outputs… )` — *Isolated.* Run the quotation against a
+private draft of the home module's durable stack, then publish the
+remaining draft as that stack and deliver whatever `without` moved
+outward, in invocation order. Legal only in a published word whose
+definition-site home is a live, current module generation; everywhere else
+it is `'domain`. Parking, nesting, and a second module's slot are
+`'domain`. Any failure publishes nothing. See Modules.
+
+### without
+`( -- )` — Move the draft's top value onto the pending outputs of the
+active `within` application. `'domain` outside one, `'underflow` on an
+empty draft. Outputs reach the caller only if the application publishes.
 
 ### while
 `( cond body -- … )` — *Inline.* Repeatedly run `cond`, which must leave

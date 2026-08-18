@@ -139,7 +139,7 @@ pub const LowerCursor = struct {
         if (self.byte_index == 0) return switch (self.symbol.?.advance()) {
             .pending => .pending,
             .complete => |valid| result: {
-                if (!valid or intern.isReservedBytes(name.bytes)) return self.failName(name);
+                if (!valid or intern.isReservedWordBytes(name.bytes)) return self.failName(name);
                 self.byte_index = 1;
                 break :result .pending;
             },

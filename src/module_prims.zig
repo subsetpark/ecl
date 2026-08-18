@@ -14,12 +14,20 @@ const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 const Definition = struct { name: []const u8, primitive: env.PrimitiveImpl };
+/// Removal advances one owner transition per cursor step. Keep its scheduler
+/// slice small enough that cancellation can run after the directory close edge
+/// while a user-sized durable stack is still retiring.
+const removal_poll_quantum: usize = 256;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]Definition{
         .{ .name = "module", .primitive = moduleWord },
+        .{ .name = "unmodule", .primitive = unmoduleWord },
+        .{ .name = "within", .primitive = withinWord },
+        .{ .name = "without", .primitive = withoutWord },
         .{ .name = "use", .primitive = useModule },
         .{ .name = "alias", .primitive = aliasModule },
+        .{ .name = "qualify", .primitive = qualify },
         .{ .name = "words", .primitive = words },
         .{ .name = "load", .primitive = load },
     };
@@ -35,12 +43,75 @@ fn moduleWord(evaluator: *Machine) MachineError!void {
         .validation = .init(name),
     });
 }
+/// Removal completes the lifecycle. A canonical or alias name is resolved
+/// exactly as `use` resolves it and drives the owner-issued close protocol.
+fn unmoduleWord(evaluator: *Machine) MachineError!void {
+    const name = try evaluator.popSymbol();
+    try evaluator.startDriver(UnmoduleDriver{ .validation = .init(name) });
+}
+
+const UnmoduleDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    validation: intern.ModuleNameCursor,
+    cursor: ?heap.Owned(modules.Registry.RemovalCursor) = null,
+    pub fn advance(evaluator: *Machine, self: *UnmoduleDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = removal_poll_quantum;
+        while (budget != 0) : (budget -= 1) {
+            if (self.cursor == null) switch (self.validation.advance()) {
+                .pending => continue,
+                .complete => |maybe_name| {
+                    const name = maybe_name orelse return evaluator.fail(
+                        .domain,
+                        "unmodule requires a valid module name",
+                    );
+                    const registry = evaluator.unit.inherited.registry orelse
+                        return evaluator.fail(.domain, "module registry is unavailable");
+                    self.cursor = .init(registry.removalCursor(
+                        name,
+                        &evaluator.unit.turn_authority,
+                    ));
+                    continue;
+                },
+            };
+            switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.MissingModule => return evaluator.undefinedName(intern.moduleId(
+                    self.cursor.?.borrow().requested,
+                )),
+                error.StateApplicationActive => return evaluator.fail(
+                    .domain,
+                    "a module cannot be removed from inside a state application",
+                ),
+            }) {
+                .pending => {},
+                // The close edge has transferred all remaining ownership to
+                // scheduler retirement. Yield before polling cancellation
+                // again so abandoning this Unit cannot abandon module state.
+                .detached => return .yielded,
+                .complete => return .completed,
+            }
+        }
+        return .yielded;
+    }
+};
+
+/// The explicit stack boundary: the quotation runs against a private draft
+/// of the home module's durable stack rather than the ambient caller stack.
+fn withinWord(evaluator: *Machine) MachineError!void {
+    var quotation = try evaluator.popQuotation();
+    return evaluator.beginWithin(quotation.take().list);
+}
+
+/// The explicit outward boundary: one draft value joins the pending output
+/// sequence, which reaches the caller only if the transaction publishes.
+fn withoutWord(evaluator: *Machine) MachineError!void {
+    return evaluator.moveWithout();
+}
+
 fn useModule(evaluator: *Machine) MachineError!void {
     const name = try evaluator.popSymbol();
-    try evaluator.startDriver(UseNameDriver{
-        .name = name,
-        .dot = intern.dotCursor(intern.get(name)),
-    });
+    try evaluator.startDriver(UseNameDriver{ .validation = .init(name) });
 }
 fn aliasModule(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
@@ -55,7 +126,7 @@ fn aliasModule(evaluator: *Machine) MachineError!void {
 const ModuleStartDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     body: ?heap.Owned(*value.ListHandle),
-    validation: intern.NamespaceCursor,
+    validation: intern.ModuleNameCursor,
     pub fn advance(evaluator: *Machine, self: *ModuleStartDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
@@ -64,7 +135,7 @@ const ModuleStartDriver = struct {
             .complete => |maybe_name| {
                 const name = maybe_name orelse return evaluator.fail(
                     .domain,
-                    "module requires an unqualified, non-reserved name",
+                    "module requires a valid module name",
                 );
                 const body = self.body.?.take();
                 self.body = null;
@@ -78,16 +149,14 @@ const ModuleStartDriver = struct {
 
 const UseNameDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    name: u32,
-    dot: intern.DotCursor,
+    validation: intern.ModuleNameCursor,
     pub fn advance(evaluator: *Machine, self: *UseNameDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.dot.advance()) {
+        while (budget != 0) : (budget -= 1) switch (self.validation.advance()) {
             .pending => {},
-            .complete => |dot| {
-                if (dot != null) return evaluator.fail(.domain, "use requires an unqualified name");
-                const name = self.name;
+            .complete => |maybe_name| {
+                const name = maybe_name orelse return evaluator.fail(.domain, "use requires a valid module name");
                 evaluator.detachWorkDriver(self);
                 heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
                 try evaluator.useOrLoad(name);
@@ -101,9 +170,9 @@ const UseNameDriver = struct {
 const AliasDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     short_validation: intern.NamespaceCursor,
-    target_validation: intern.NamespaceCursor,
-    short: ?intern.NamespaceName = null,
-    target: ?intern.NamespaceName = null,
+    target_validation: intern.ModuleNameCursor,
+    short: ?intern.BindingName = null,
+    target: ?intern.ModuleName = null,
     cursor: ?heap.Owned(modules.Registry.AliasCursor) = null,
     pub fn advance(evaluator: *Machine, self: *AliasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -114,7 +183,7 @@ const AliasDriver = struct {
                 .complete => |name| {
                     self.target = name orelse return evaluator.fail(
                         .domain,
-                        "alias target requires an unqualified, non-reserved name",
+                        "alias target requires a valid module name",
                     );
                     continue;
                 },
@@ -134,13 +203,66 @@ const AliasDriver = struct {
             if (self.cursor == null) self.cursor = .init(registry.aliasCursor(self.short.?, self.target.?));
             switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.Ecl => unreachable,
                 error.NameConflict => return evaluator.fail(.domain, "alias collides with a module name"),
-                error.MissingModule => return evaluator.undefinedModule(intern.namespaceId(self.target.?)),
-                error.InvalidDefinition => return evaluator.fail(.domain, "module and alias names must be unqualified"),
+                error.MissingModule => return evaluator.undefinedModule(intern.moduleId(self.target.?)),
             }) {
                 .pending => {},
                 .complete => return .completed,
+            }
+        }
+        return .yielded;
+    }
+};
+
+fn qualify(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    const binding = try evaluator.popSymbol();
+    const module_name = try evaluator.popSymbol();
+    try evaluator.startDriver(QualifyDriver{
+        .module_validation = .init(module_name),
+        .binding_validation = .init(binding),
+    });
+}
+
+const QualifyDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    module_validation: intern.ModuleNameCursor,
+    binding_validation: intern.NamespaceCursor,
+    module_name: ?intern.ModuleName = null,
+    binding_name: ?intern.BindingName = null,
+    cursor: ?heap.Owned(intern.QualifiedCursor) = null,
+
+    pub fn advance(evaluator: *Machine, self: *QualifyDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) {
+            if (self.module_name == null) switch (self.module_validation.advance()) {
+                .pending => continue,
+                .complete => |name| {
+                    self.module_name = name orelse return evaluator.fail(
+                        .domain,
+                        "qualify requires a valid module name",
+                    );
+                    continue;
+                },
+            };
+            if (self.binding_name == null) switch (self.binding_validation.advance()) {
+                .pending => continue,
+                .complete => |name| {
+                    self.binding_name = name orelse return evaluator.fail(
+                        .domain,
+                        "qualify requires an unqualified, non-reserved binding name",
+                    );
+                    continue;
+                },
+            };
+            if (self.cursor == null) self.cursor = .init(try .init(
+                evaluator.allocator(),
+                intern.qualifiedName(self.module_name.?, self.binding_name.?),
+            ));
+            switch (try self.cursor.?.borrowMut().advance()) {
+                .pending => {},
+                .complete => |word| return .{ .output = .{ .word = word } },
             }
         }
         return .yielded;

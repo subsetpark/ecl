@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const poll = @import("poll.zig");
+const lexer = @import("lexer.zig");
 
 const entries_per_segment = 256;
 const byte_segment_size = 64 * 1024;
@@ -15,10 +16,48 @@ const no_entry = std.math.maxInt(u32);
 /// Nominal identifier accepted at namespace-publication boundaries. Raw
 /// intern ids remain useful for resolution, but cannot be passed to a binder,
 /// module registry, or environment writer without validation.
-pub const NamespaceName = enum(u32) { _ };
+pub const BindingName = enum(u32) { _ };
+pub const NamespaceName = BindingName;
+pub const ModuleName = enum(u32) { _ };
+pub const QualifiedName = enum(u64) { _ };
+
+const dotted_module_mask: u32 = @as(u32, 1) << 31;
+comptime {
+    if (max_segments * entries_per_segment >= dotted_module_mask)
+        @compileError("intern ids overlap ModuleName brand metadata");
+}
 
 pub fn namespaceId(name: NamespaceName) u32 {
     return @intFromEnum(name);
+}
+
+pub fn bindingId(name: BindingName) u32 {
+    return @intFromEnum(name);
+}
+
+pub fn moduleId(name: ModuleName) u32 {
+    return @intFromEnum(name) & ~dotted_module_mask;
+}
+
+pub fn moduleNameFromBinding(name: BindingName) ModuleName {
+    return @enumFromInt(bindingId(name));
+}
+
+pub fn moduleBindingName(name: ModuleName) ?BindingName {
+    if (@intFromEnum(name) & dotted_module_mask != 0) return null;
+    return @enumFromInt(moduleId(name));
+}
+
+pub fn qualifiedName(module: ModuleName, binding: BindingName) QualifiedName {
+    return @enumFromInt((@as(u64, @intFromEnum(module)) << 32) | bindingId(binding));
+}
+
+pub fn qualifiedModule(name: QualifiedName) ModuleName {
+    return @enumFromInt(@as(u32, @truncate(@intFromEnum(name) >> 32)));
+}
+
+pub fn qualifiedBinding(name: QualifiedName) BindingName {
+    return @enumFromInt(@as(u32, @truncate(@intFromEnum(name))));
 }
 
 pub const NameError = error{InvalidName};
@@ -34,11 +73,15 @@ pub fn internNamespace(bytes: []const u8) error{ OutOfMemory, InvalidName }!Name
     return namespaceName(id);
 }
 
-pub fn trustedNamespace(bytes: []const u8) error{OutOfMemory}!NamespaceName {
-    return internNamespace(bytes) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.InvalidName => unreachable,
-    };
+pub fn moduleName(id: u32) NameError!ModuleName {
+    _ = process_table.getBytes(id) orelse return error.InvalidName;
+    var cursor = ModuleNameCursor.init(id);
+    return poll.drive(?ModuleName, &cursor, .{}) orelse error.InvalidName;
+}
+
+pub fn internModuleName(bytes: []const u8) error{ OutOfMemory, InvalidName }!ModuleName {
+    const id = try intern(bytes);
+    return moduleName(id);
 }
 
 const Entry = struct {
@@ -316,11 +359,12 @@ pub const QualifiedCursor = struct {
     inserter: ?InternInsertionCursor = null,
     pub fn init(
         allocator: std.mem.Allocator,
-        module_name: u32,
-        word: u32,
+        name: QualifiedName,
     ) error{OutOfMemory}!QualifiedCursor {
-        const module = get(module_name);
-        const word_bytes = get(word);
+        const module_name = qualifiedModule(name);
+        const word = qualifiedBinding(name);
+        const module = get(moduleId(module_name));
+        const word_bytes = get(bindingId(word));
         const separator_end = std.math.add(usize, module.len, 1) catch return error.OutOfMemory;
         const length = std.math.add(usize, separator_end, word_bytes.len) catch return error.OutOfMemory;
         return .{
@@ -369,20 +413,81 @@ pub fn dotCursor(bytes: []const u8) DotCursor {
     return .{ .bytes = bytes };
 }
 
+pub const LastDotCursor = struct {
+    bytes: []const u8,
+    index: usize = 0,
+    last: ?usize = null,
+    pub fn advance(self: *LastDotCursor) DotProgress {
+        if (self.index == self.bytes.len) return .{ .complete = self.last };
+        if (self.bytes[self.index] == '.') self.last = self.index;
+        self.index += 1;
+        return .pending;
+    }
+};
+pub fn lastDotCursor(bytes: []const u8) LastDotCursor {
+    return .{ .bytes = bytes };
+}
+
 pub const NamespaceProgress = poll.Progress(?NamespaceName);
 pub const NamespaceCursor = struct {
     id: u32,
     bytes: []const u8,
-    index: usize = 0,
+    lexical: lexer.SymbolCursor,
     pub fn init(id: u32) NamespaceCursor {
-        return .{ .id = id, .bytes = get(id) };
+        const bytes = get(id);
+        return .{ .id = id, .bytes = bytes, .lexical = .initSegment(bytes) };
     }
     pub fn advance(self: *NamespaceCursor) NamespaceProgress {
-        if (self.bytes.len == 0 or isReservedBytes(self.bytes)) return .{ .complete = null };
-        if (self.index == self.bytes.len) return .{ .complete = @enumFromInt(self.id) };
+        if (self.bytes.len == 0 or isReservedWordBytes(self.bytes))
+            return .{ .complete = null };
+        return switch (self.lexical.advance()) {
+            .pending => .pending,
+            .complete => |valid| .{ .complete = if (valid) @enumFromInt(self.id) else null },
+        };
+    }
+};
+
+pub const ModuleNameProgress = poll.Progress(?ModuleName);
+pub const ModuleNameCursor = struct {
+    id: u32,
+    bytes: []const u8,
+    lexical: lexer.SymbolCursor,
+    index: usize = 0,
+    segment_start: usize = 0,
+    dotted: bool = false,
+    phase: enum { lexical, segments } = .lexical,
+
+    pub fn init(id: u32) ModuleNameCursor {
+        const bytes = get(id);
+        return .{ .id = id, .bytes = bytes, .lexical = .init(bytes) };
+    }
+
+    pub fn advance(self: *ModuleNameCursor) ModuleNameProgress {
+        if (self.phase == .lexical) return switch (self.lexical.advance()) {
+            .pending => .pending,
+            .complete => |valid| if (!valid)
+                .{ .complete = null }
+            else result: {
+                self.phase = .segments;
+                break :result .pending;
+            },
+        };
+        if (self.index == self.bytes.len) {
+            const segment = self.bytes[self.segment_start..self.index];
+            return .{ .complete = if (segment.len != 0 and !isReservedBytes(segment))
+                @enumFromInt(self.id | if (self.dotted) dotted_module_mask else 0)
+            else
+                null };
+        }
         const byte = self.bytes[self.index];
+        if (byte == '.') {
+            const segment = self.bytes[self.segment_start..self.index];
+            if (segment.len == 0 or isReservedBytes(segment)) return .{ .complete = null };
+            self.segment_start = self.index + 1;
+            self.dotted = true;
+        }
         self.index += 1;
-        return if (byte == '.') .{ .complete = null } else .pending;
+        return .pending;
     }
 };
 
@@ -392,4 +497,9 @@ pub fn get(id: u32) []const u8 {
 
 pub fn isReservedBytes(name: []const u8) bool {
     return std.mem.eql(u8, name, "--") or std.mem.eql(u8, name, ":");
+}
+
+/// Every binding name the language reserves for itself.
+pub fn isReservedWordBytes(name: []const u8) bool {
+    return isReservedBytes(name);
 }

@@ -14,6 +14,7 @@ const entries = [_]Metadata{
     .{ .name = "cons", .effect = "value list -- list", .text = "Prepend a value or executable form to a list." },
     .{ .name = "match", .effect = "left right -- bool", .text = "Return whether two complete values are structurally equal." },
     .{ .name = "type", .effect = "value -- type", .text = "Return the value kind as a symbol." },
+    .{ .name = "execute", .effect = null, .text = "Execute a word through ordinary name resolution and dispatch." },
     .{ .name = "parse", .effect = "string -- quotation", .text = "Parse source text into an unevaluated quotation." },
     .{ .name = "dict-of", .effect = "entries -- dict", .text = "Build a dictionary from a flat list of adjacent key and value entries." },
     .{ .name = "attempt", .effect = "quotation -- result", .text = "Run a quotation in isolation and return an ok or error result dictionary." },
@@ -36,15 +37,19 @@ const entries = [_]Metadata{
     .{ .name = "infra", .effect = "list quotation -- list", .text = "Run a quotation with a list's elements as its isolated stack and collect the results." },
 
     .{ .name = "def", .effect = null, .text = "Bind a quotation to a public word, with optional effect and documentation metadata." },
-    .{ .name = "defp", .effect = "body annotation name --", .text = "Bind a private module word with required effect metadata." },
+    .{ .name = "defp", .effect = null, .text = "Bind a quotation to a private module word, with optional effect and documentation metadata." },
     .{ .name = "body", .effect = "name -- quotation", .text = "Return the stored quotation body of a resolved word." },
     .{ .name = "doc", .effect = "name -- string", .text = "Return the canonical documentation string of a resolved binding." },
     .{ .name = "which", .effect = "name --", .text = "Print where a word resolves and any bindings it shadows." },
     .{ .name = "see", .effect = "name --", .text = "Print a canonical, re-readable representation of a binding." },
 
+    .{ .name = "unmodule", .effect = "module-name --", .text = "Close, quiesce, and retire a registered module named by a symbol." },
+    .{ .name = "within", .effect = null, .text = "Run a quotation against a private draft of the home module's durable stack and publish the result." },
+    .{ .name = "without", .effect = null, .text = "Move the draft's top value onto the pending outputs a within application returns to its caller." },
     .{ .name = "module", .effect = "name body --", .text = "Evaluate an isolated module body and register its definitions under a name." },
     .{ .name = "use", .effect = "name --", .text = "Import a module's public words into the current resolution scope." },
     .{ .name = "alias", .effect = "short name --", .text = "Register a short alias for a qualified module name." },
+    .{ .name = "qualify", .effect = "module-name binding-name -- qualified-word", .text = "Construct an executable qualified word without reparsing source text." },
     .{ .name = "words", .effect = "--", .text = "Print the visible dictionary in sorted order." },
     .{ .name = "load", .effect = "path --", .text = "Read and evaluate a source file as one transactional unit." },
 

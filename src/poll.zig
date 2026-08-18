@@ -337,6 +337,50 @@ pub fn FixedMap(comptime K: type, comptime V: type) type {
             };
         }
 
+        /// Clone without the entries an owner is removing. Both filters are
+        /// exact matches, so a removal names either the key it retires or the
+        /// value every dependent entry points at.
+        pub const CloneExcludingCursor = struct {
+            inner: CloneCursor,
+            excluded_key: ?K,
+            excluded_value: ?V,
+            pub fn deinit(self: *CloneExcludingCursor) void {
+                self.inner.deinit();
+                self.* = undefined;
+            }
+            pub fn advance(self: *CloneExcludingCursor) error{OutOfMemory}!CloneProgress {
+                const inner = &self.inner;
+                if (inner.result == null or inner.insertion != null)
+                    return inner.advance();
+                return switch (inner.entries.?.advance()) {
+                    .pending => .pending,
+                    .item => |entry| pending: {
+                        const dropped = (self.excluded_key != null and entry.key == self.excluded_key.?) or
+                            (self.excluded_value != null and entry.value == self.excluded_value.?);
+                        if (!dropped)
+                            inner.insertion = inner.result.?.putCursor(entry.key, entry.value);
+                        break :pending .pending;
+                    },
+                    .complete => complete: {
+                        const result = inner.result.?;
+                        inner.result = null;
+                        break :complete .{ .complete = result };
+                    },
+                };
+            }
+        };
+        pub fn cloneExcludingCursor(
+            self: *const Self,
+            excluded_key: ?K,
+            excluded_value: ?V,
+        ) CloneExcludingCursor {
+            return .{
+                .inner = self.cloneCursor(0),
+                .excluded_key = excluded_key,
+                .excluded_value = excluded_value,
+            };
+        }
+
         fn slot(key: K, capacity: usize) usize {
             const raw: u32 = @intFromEnum(key);
             return @as(usize, raw *% 0x9e37_79b9) & (capacity - 1);

@@ -366,13 +366,13 @@
 'await-all def
 
 ### def set
-(swap literal swap (-- value) swap def)
+(swap literal swap def)
 (value name -- :
  "Bind a value as a constant word in the current scope.")
 'set def
 
 ### def setp
-(swap literal swap (-- value) swap defp)
+(swap literal swap defp)
 (value name -- :
  "Bind a private module value as a constant word.")
 'setp def

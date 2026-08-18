@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const poll = @import("poll.zig");
+const lexer = @import("lexer.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
@@ -70,11 +71,11 @@ pub const Visibility = enum { public, private };
 pub const BindingOrigin = union(enum) {
     top,
     module: struct {
-        home: intern.NamespaceName,
+        home: intern.ModuleName,
         trace_word: u32,
     },
 
-    pub fn home(self: BindingOrigin) ?intern.NamespaceName {
+    pub fn home(self: BindingOrigin) ?intern.ModuleName {
         return switch (self) {
             .top => null,
             .module => |module| module.home,
@@ -154,7 +155,7 @@ pub const ModulePublication = union(enum) {
     word: struct {
         body: *Quotation,
         visibility: Visibility,
-        effect: ValidatedEffect,
+        effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
     },
     native: struct {
@@ -182,7 +183,7 @@ const BindingSpec = struct {
         };
     }
     fn fromModule(
-        home: intern.NamespaceName,
+        home: intern.ModuleName,
         trace_word: u32,
         publication: ModulePublication,
     ) BindingSpec {
@@ -293,7 +294,7 @@ pub const BindingLease = struct {
         self.* = undefined;
     }
 
-    pub fn home(self: BindingLease) ?intern.NamespaceName {
+    pub fn home(self: BindingLease) ?intern.ModuleName {
         return self.origin.home();
     }
 
@@ -381,7 +382,7 @@ pub const BindingCell = struct {
 const Shape = struct {
     const NameMap = poll.FixedMap(intern.NamespaceName, *BindingCell);
     names: NameMap,
-    uses: []u32 = &.{},
+    uses: []intern.ModuleName = &.{},
     previous: ?*Shape = null,
     retirement: heap.ReleaseDomain.Retirement = .{},
     pub fn advanceRetirement(
@@ -460,7 +461,7 @@ pub const ShapeLease = struct {
     lease: ShapePublisher.Lease,
     shape: ?*const Shape,
 
-    pub fn useOrder(self: *const ShapeLease) []const u32 {
+    pub fn useOrder(self: *const ShapeLease) []const intern.ModuleName {
         return if (self.shape) |shape| shape.uses else &.{};
     }
 
@@ -506,11 +507,24 @@ pub const DirectLookupProgress = poll.Progress(?BindingLease);
 pub const DirectLookupCursor = struct {
     shape: ShapeLease,
     lookup: ?Shape.NameMap.RawLookupCursor,
+    validation: ?intern.NamespaceCursor,
     pub fn deinit(self: *DirectLookupCursor) void {
         self.shape.deinit();
         self.* = undefined;
     }
     pub fn advance(self: *DirectLookupCursor) DirectLookupProgress {
+        if (self.validation) |*validation| return switch (validation.advance()) {
+            .pending => .pending,
+            .complete => |name| validated: {
+                self.validation = null;
+                const binding_name = name orelse break :validated .{ .complete = null };
+                self.lookup = if (self.shape.shape) |current|
+                    current.names.rawLookup(binding_name)
+                else
+                    null;
+                break :validated .pending;
+            },
+        };
         const lookup = &(self.lookup orelse return .{ .complete = null });
         return switch (lookup.advance()) {
             .pending => .pending,
@@ -609,10 +623,8 @@ pub const Environment = struct {
     pub fn directLookupCursor(self: *const Environment, id: u32) DirectLookupCursor {
         const shape = self.acquireShape();
         return .{
-            .lookup = if (shape.shape) |current|
-                current.names.rawLookup(@enumFromInt(id))
-            else
-                null,
+            .lookup = null,
+            .validation = .init(id),
             .shape = shape,
         };
     }
@@ -629,7 +641,7 @@ pub const Environment = struct {
                 }
             }
         };
-        const Built = struct { shape: ShapeLease, names: Shape.NameMap, uses: []u32 };
+        const Built = struct { shape: ShapeLease, names: Shape.NameMap, uses: []intern.ModuleName };
         const State = union(enum) {
             snapshot,
             lookup: struct { shape: ShapeLease, cursor: ?Shape.NameMap.RawLookupCursor },
@@ -755,7 +767,7 @@ pub const Environment = struct {
                     },
                 },
                 .allocate_uses => |*state| result: {
-                    const uses = try self.environment.allocator.alloc(u32, state.shape.useOrder().len);
+                    const uses = try self.environment.allocator.alloc(intern.ModuleName, state.shape.useOrder().len);
                     self.state = .{ .copy_uses = .{ .built = .{
                         .shape = state.shape,
                         .names = state.names,
@@ -849,7 +861,7 @@ pub const Environment = struct {
     pub fn generation(self: *const Environment) u64 {
         return self.shape_generation.load(.acquire);
     }
-    fn moveUseToTop(self: *Environment, canonical: u32) BindError!void {
+    fn moveUseToTop(self: *Environment, canonical: intern.ModuleName) BindError!void {
         var cursor = MoveUseCursor.init(self, canonical);
         defer cursor.deinit();
         return poll.driveVoidFallible(&cursor, .{});
@@ -857,11 +869,11 @@ pub const Environment = struct {
     pub const MoveUseProgress = poll.Progress(void);
     pub const MoveUseCursor = struct {
         environment: *Environment,
-        canonical: u32,
+        canonical: intern.ModuleName,
         shape: ?ShapeLease = null,
         scan_index: usize = 0,
         found: bool = false,
-        uses: ?[]u32 = null,
+        uses: ?[]intern.ModuleName = null,
         copy_index: usize = 0,
         output_index: usize = 0,
         cloner: ?Shape.NameMap.CloneCursor = null,
@@ -869,7 +881,7 @@ pub const Environment = struct {
         names: ?Shape.NameMap = null,
         phase: enum { snapshot, scan, copy, names, commit, complete } = .snapshot,
 
-        pub fn init(environment: *Environment, canonical: u32) MoveUseCursor {
+        pub fn init(environment: *Environment, canonical: intern.ModuleName) MoveUseCursor {
             return .{ .environment = environment, .canonical = canonical };
         }
         pub fn deinit(self: *MoveUseCursor) void {
@@ -917,7 +929,7 @@ pub const Environment = struct {
                         self.scan_index += 1;
                     } else {
                         self.uses = try self.environment.allocator.alloc(
-                            u32,
+                            intern.ModuleName,
                             prior.len + @as(usize, @intFromBool(!self.found)),
                         );
                         self.phase = .copy;
@@ -1026,7 +1038,7 @@ const ScopeAllocation = enum { embedded, heap };
 const ScopeStorage = union(enum) {
     session: *Environment,
     core_build: *Environment,
-    module_root: struct { target: *Environment, home: intern.NamespaceName },
+    module_root: struct { target: *Environment, home: intern.ModuleName },
     isolated,
 };
 pub const Scope = struct {
@@ -1148,7 +1160,7 @@ pub const Scope = struct {
     pub fn moduleRoot(
         allocator: std.mem.Allocator,
         target: *Environment,
-        home: intern.NamespaceName,
+        home: intern.ModuleName,
     ) Scope {
         return direct(allocator, .{ .module_root = .{ .target = target, .home = home } }, null);
     }
@@ -1267,8 +1279,7 @@ pub const Scope = struct {
             .module_root => |module| {
                 var qualified = try intern.QualifiedCursor.init(
                     self.allocator,
-                    intern.namespaceId(module.home),
-                    intern.namespaceId(name),
+                    intern.qualifiedName(module.home, name),
                 );
                 defer qualified.deinit();
                 const trace_word = try poll.driveFallible(u32, &qualified, .{});
@@ -1294,10 +1305,10 @@ pub const Scope = struct {
             else => unreachable,
         };
     }
-    pub fn moveUseToTop(self: *Scope, canonical: u32) BindError!void {
+    pub fn moveUseToTop(self: *Scope, canonical: intern.ModuleName) BindError!void {
         return (try self.writableEnvironment()).moveUseToTop(canonical);
     }
-    pub fn moveUseCursor(self: *Scope, canonical: u32) error{OutOfMemory}!Environment.MoveUseCursor {
+    pub fn moveUseCursor(self: *Scope, canonical: intern.ModuleName) error{OutOfMemory}!Environment.MoveUseCursor {
         return .init(try self.writableEnvironment(), canonical);
     }
     pub fn freezeModule(self: *Scope) void {
@@ -1447,7 +1458,10 @@ pub const BuildingEnv = struct {
             core.releases.releaseValue(effect.value);
         };
         try self.target.installCoreSpec(
-            try intern.trustedNamespace(name),
+            intern.internNamespace(name) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidName => unreachable,
+            },
             .{
                 .binding = .{ .builtin = primitive },
                 .effect = if (builtin_effect) |effect| effect.validated else null,
@@ -1491,9 +1505,7 @@ fn countEffectTokens(comptime source: []const u8) usize {
     return count;
 }
 pub fn assertStaticNamespace(comptime name: []const u8) void {
-    if (name.len == 0 or intern.isReservedBytes(name) or
-        std.mem.indexOfScalar(u8, name, '.') != null)
-    {
+    if (intern.isReservedBytes(name) or !lexer.validSymbolSegment(name)) {
         @compileError("invalid builtin namespace name: " ++ name);
     }
 }
@@ -1526,7 +1538,7 @@ test "environment definition propagates every allocation failure" {
             defer environment.deinit();
             const body = try @import("list.zig").fromValuesGeneric(allocator, &.{.{ .int = 7 }});
             defer releases.releaseValue(body);
-            const name = try intern.trustedNamespace("failure-probe");
+            const name = try intern.internNamespace("failure-probe");
             const replacement = try @import("list.zig").fromValuesGeneric(allocator, &.{.{ .int = 9 }});
             defer releases.releaseValue(replacement);
             try environment.define(name, .{ .word = .{ .body = quotation(body.list).? } });

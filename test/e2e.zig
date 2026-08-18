@@ -288,9 +288,11 @@ test "e2e: hot reload all access paths acceptance" {
 }
 
 test "e2e: module effect declaration acceptance" {
-    var missing = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) 'bad def) module" });
+    // An omitted effect is legal and adds no inferred check: the word runs
+    // across the home boundary exactly as written.
+    var missing = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) 'fine def) module 2 m.fine" });
     defer missing.deinit();
-    try missing.expect(.{ .exit_code = 1, .stderr_contains = &.{"'kind 'domain"} });
+    try missing.expect(.{ .exit_code = 0, .stdout = "4\n", .stderr = "" });
 
     var lying = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) ( a -- b c ) 'lies def) module 1 m.lies" });
     defer lying.deinit();
@@ -337,6 +339,77 @@ test "e2e: reflection acceptance" {
             "f -> m.f def public generation 1 (-- n)",
         },
         .stdout_excludes = &.{" s "},
+        .stderr = "",
+    });
+}
+
+test "e2e: stateful module instance acceptance" {
+    const expected = "10\n100\n15\n107\n15\n107\n" ++
+        "0\n'word\n1\n" ++
+        "3\n'a\n2\n3\n" ++
+        "65\n" ++
+        "'type\n'domain\n'domain\n";
+    for ([_][]const u8{ "1", "8" }) |workers| {
+        var result = try runWithWorkers(
+            &.{ build_options.ecl_exe, "test/acceptance/stateful-module-instances.ecl" },
+            workers,
+        );
+        defer result.deinit();
+        try result.expect(.{ .exit_code = 0, .stdout = expected, .stderr = "" });
+    }
+}
+
+test "e2e: stateful module reload acceptance" {
+    var result = try run(&.{ build_options.ecl_exe, "test/acceptance/stateful-module-reload.ecl" });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout = "6\n6\n16\n32\n1600\n'domain\n1600\n160000\n160000\n",
+        .stderr = "",
+    });
+}
+
+test "e2e: module removal acceptance" {
+    const module = "[7] 'core.c (((dup without) within) 'peek def) module-with ";
+    var by_name = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        module ++ "'short 'core.c alias 'short unmodule " ++
+            "(core.c.peek) attempt 'err at 'kind at pp (short.peek) attempt 'err at 'kind at pp " ++
+            module ++ "core.c.peek pp",
+    });
+    defer by_name.deinit();
+    try by_name.expect(.{
+        .exit_code = 0,
+        .stdout = "'undefined-word\n'undefined-word\n7\n",
+        .stderr = "",
+    });
+
+    var by_canonical_name = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        module ++ "'core.c unmodule (core.c.peek) attempt 'err at 'kind at pp",
+    });
+    defer by_canonical_name.deinit();
+    try by_canonical_name.expect(.{ .exit_code = 0, .stdout = "'undefined-word\n", .stderr = "" });
+}
+
+test "e2e: optional module annotation acceptance" {
+    var result = try run(&.{ build_options.ecl_exe, "test/acceptance/optional-module-annotations.ecl" });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        .stdout = "(1 +) 'forms.bare def\n" ++
+            "(2 *) (n -- n) 'forms.effected def\n" ++
+            "(3 -) (: \"Subtract three.\") 'forms.documented def\n" ++
+            "(4 div) (n -- n : \"Divide by four.\") 'forms.complete def\n" ++
+            "\"Subtract three.\"\n" ++
+            "11\n20\n7\n3\n59\n" ++
+            "1\n" ++
+            "([42] first) 'answer def\n" ++
+            "([42] first) 'spelled def\n" ++
+            "'contract\n'domain\n'domain\n" ++
+            "(a b)\n(dup)\n",
         .stderr = "",
     });
 }

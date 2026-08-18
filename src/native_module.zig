@@ -58,13 +58,13 @@ const ImagePin = union(enum) {
 pub const Loading = union(enum) {
     opened: struct {
         loader: *Loader,
-        requested: intern.NamespaceName,
+        requested: intern.ModuleName,
         image: ImagePin,
         entry: abi.EntryFn,
     },
     described: struct {
         loader: *Loader,
-        requested: intern.NamespaceName,
+        requested: intern.ModuleName,
         image: ImagePin,
         descriptor: *const abi.Descriptor,
     },
@@ -91,7 +91,7 @@ pub const LoadCursor = struct {
 
     fn init(
         loader: *Loader,
-        requested: intern.NamespaceName,
+        requested: intern.ModuleName,
         image: ImagePin,
         descriptor: *const abi.Descriptor,
     ) LoadCursor {
@@ -275,7 +275,7 @@ pub const ModuleInstance = opaque {
         return result;
     }
 
-    pub fn name(self: *const ModuleInstance) intern.NamespaceName {
+    pub fn name(self: *const ModuleInstance) intern.ModuleName {
         return self.state().descriptor.name();
     }
 
@@ -378,7 +378,7 @@ pub const Loader = opaque {
 
     pub fn startDynamic(
         self: *Loader,
-        requested: intern.NamespaceName,
+        requested: intern.ModuleName,
         path: []const u8,
     ) error{OutOfMemory}!StartResult {
         if (self.state().phase.load(.acquire) != .open) return .{ .failure = .init(
@@ -412,7 +412,7 @@ pub const Loader = opaque {
 
     pub fn startStatic(
         self: *Loader,
-        requested: intern.NamespaceName,
+        requested: intern.ModuleName,
         descriptor: *const abi.Descriptor,
     ) StartResult {
         if (self.state().phase.load(.acquire) != .open) return .{ .failure = .init(

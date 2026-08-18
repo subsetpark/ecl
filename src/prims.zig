@@ -29,6 +29,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "cons", .primitive = cons },
         .{ .name = "match", .primitive = match },
         .{ .name = "type", .primitive = typeWord },
+        .{ .name = "execute", .primitive = execute },
         .{ .name = "parse", .primitive = parse },
         .{ .name = "dict-of", .primitive = dictOf },
         .{ .name = "attempt", .primitive = attempt },
@@ -158,6 +159,15 @@ fn typeWord(evaluator: *Machine) MachineError!void {
         .task => "task",
     };
     try evaluator.pushOwned(.{ .symbol = try intern.intern(spelling) });
+}
+fn execute(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    const word = switch (item.borrow()) {
+        .word => |word| word,
+        else => return evaluator.typeError("a word"),
+    };
+    try evaluator.executeWord(word);
 }
 fn parse(evaluator: *Machine) MachineError!void {
     var source_value = try evaluator.popString();
@@ -429,5 +439,5 @@ fn exit(evaluator: *Machine) MachineError!void {
     if (!evaluator.unit.is_root_unit or evaluator.unit.inAttempt()) {
         return evaluator.fail(.domain, "exit is available only to the root unit outside attempt");
     }
-    evaluator.unit.installParkRequest(.{ .close_scope = @intCast(status.borrow().int) });
+    try evaluator.park(.{ .close_scope = @intCast(status.borrow().int) });
 }

@@ -165,13 +165,22 @@ pub fn validSymbol(token: []const u8) bool {
     return poll.drive(bool, &cursor, .{});
 }
 
+pub fn validSymbolSegment(token: []const u8) bool {
+    var cursor = SymbolCursor.initSegment(token);
+    return poll.drive(bool, &cursor, .{});
+}
+
 pub const SymbolProgress = poll.Progress(bool);
 pub const SymbolCursor = struct {
     token: []const u8,
     index: usize = 0,
     previous_dot: bool = false,
+    allow_dots: bool = true,
     pub fn init(token: []const u8) SymbolCursor {
         return .{ .token = token };
+    }
+    pub fn initSegment(token: []const u8) SymbolCursor {
+        return .{ .token = token, .allow_dots = false };
     }
     pub fn advance(self: *SymbolCursor) SymbolProgress {
         if (self.token.len == 0 or self.token[0] == '\'' or self.token[0] == '\\' or
@@ -179,18 +188,30 @@ pub const SymbolCursor = struct {
             return .{ .complete = false };
         if (self.index == self.token.len) return .{ .complete = true };
         const byte = self.token[self.index];
-        self.index += 1;
-        if (byte == '.') {
+        const codepoint: u21 = if (byte < 0x80) codepoint: {
+            self.index += 1;
+            break :codepoint byte;
+        } else codepoint: {
+            const sequence_len = std.unicode.utf8ByteSequenceLength(byte) catch
+                return .{ .complete = false };
+            const end = self.index + sequence_len;
+            if (end > self.token.len) return .{ .complete = false };
+            const decoded = std.unicode.utf8Decode(self.token[self.index..end]) catch
+                return .{ .complete = false };
+            self.index = end;
+            break :codepoint decoded;
+        };
+        if (codepoint == '.') {
+            if (!self.allow_dots) return .{ .complete = false };
             if (self.previous_dot) return .{ .complete = false };
             self.previous_dot = true;
             return .pending;
         }
         self.previous_dot = false;
-        if (byte < 0x80 and (std.ascii.isWhitespace(byte) or byte == ',' or switch (byte) {
-            '(', ')', '[', ']', '{', '}', '"', '#', '\'', '\\', ';', '|' => true,
-            else => false,
-        })) return .{ .complete = false };
-        return .pending;
+        return if (classifyScalar(codepoint) == .symbol)
+            .pending
+        else
+            .{ .complete = false };
     }
 };
 
@@ -350,10 +371,33 @@ pub const ClassifyCursor = struct {
     }
 };
 
+pub const ScalarClass = enum {
+    symbol,
+    whitespace,
+    separator,
+    delimiter,
+    terminator,
+    dispatch,
+};
+
+/// The reader and every validated symbol brand share this scalar grammar.
+/// Token scanning treats dispatch characters specially only at token start;
+/// symbol validation rejects them wherever they occur.
+pub fn classifyScalar(codepoint: u21) ScalarClass {
+    if (isWhitespace(codepoint)) return .whitespace;
+    return switch (codepoint) {
+        ',' => .separator,
+        '(', ')', '[', ']', '{', '}', '"', '#' => .delimiter,
+        ';', '|' => .terminator,
+        '\'', '\\' => .dispatch,
+        else => .symbol,
+    };
+}
+
 pub fn isTokenBoundary(codepoint: u21) bool {
-    return isWhitespace(codepoint) or codepoint == ',' or switch (codepoint) {
-        '(', ')', '[', ']', '{', '}', '"', '#' => true,
-        else => false,
+    return switch (classifyScalar(codepoint)) {
+        .whitespace, .separator, .delimiter => true,
+        .symbol, .terminator, .dispatch => false,
     };
 }
 

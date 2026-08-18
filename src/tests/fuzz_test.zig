@@ -147,7 +147,7 @@ fn fuzzNativeDescriptor(_: void, smith: *std.testing.Smith) !void {
 
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    const requested = intern.internNamespace(module_name) catch |err| switch (err) {
+    const requested = intern.internModuleName(module_name) catch |err| switch (err) {
         error.OutOfMemory => return err,
         error.InvalidName => return,
     };

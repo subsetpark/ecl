@@ -134,6 +134,37 @@ primitives, operationalized as two rules:
 - **Deep binding** (chain search: child → session → core; module → its
   uses → core). Chains are structurally short because quotations capture
   nothing.
+- **Name domains are nominal and validated.** `BindingName` is exactly one
+  unqualified non-reserved segment, `ModuleName` is one or more valid
+  segments joined by dots, and `QualifiedName` is the validated pair of a
+  module name and binding name. Only their cursors/factories construct these
+  brands from raw intern ids. Environment maps accept `BindingName`, registry
+  maps accept `ModuleName`, and qualified dispatch splits source at the final
+  dot before constructing `QualifiedName`; the types prevent accidentally
+  substituting one id domain for another. The factories and the source reader
+  drive one scalar classifier, including UTF-8 decoding and the complete
+  Unicode whitespace set used by tokenization; a branded host/native name
+  therefore cannot contain whitespace, reader delimiters, malformed bytes,
+  or another spelling the language could not read as that name category.
+  Syntax markers such as `--` and `:` remain raw interned symbols and cannot
+  pass through a privileged binding-name factory. Registry mutation cursors
+  likewise expose operation-specific error sets, so callers cannot retain
+  diagnostics for outcomes a transition cannot produce.
+- **Slot identity is separate from the code generation.** A registry slot is
+  created for the first successful registration of a canonical name and
+  outlives every generation published under that live registration. It owns
+  the fair per-slot arbiter that serializes state applications and one
+  immutable snapshot of the durable operand stack. Re-registration replaces
+  only the generation the slot publishes; the durable stack is retained.
+  Removal and Session teardown consume one `live -> closing -> retired`
+  transition on the same structure. A removed name may later acquire a new
+  slot; no ECL value can name the old one. A retired slot's inventory entry is
+  recycled only after its lifetime witnesses drain, so settled memory tracks
+  peak simultaneously live slots rather than registration history.
+  Each slot owns a nominal `InventoryEntry` for its allocation lifetime. The
+  writer lock links that entry once and later moves the slot between O(1)
+  pending and ready reuse queues; removal never scans or mutates an unlocked
+  backing inventory.
 - **Binding cells:** a binding is one closed sum — a source-defined word
   body, a host builtin, or a native callable. There is no kind tag beyond
   that and no value arm: constants are word bodies holding a literal
@@ -152,10 +183,21 @@ primitives, operationalized as two rules:
   module body succeeds. The generation counter is the observable form of
   binding writes. **Module words pin one generation for a whole body** —
   no mixed-generation execution mid-word.
+- **Dynamic qualification reuses ordinary dispatch.** `qualify` drives the
+  validated module-name and binding-name cursors and materializes their
+  `QualifiedName` as a word value without reparsing source. `execute` consumes
+  only a word and enters the same resumable `DispatchDriver` used by an
+  executable source form; there is no second lookup/application path and no
+  loss of home, private visibility, annotation checks, trace metadata,
+  builtin/native behavior, cancellation, or state authority.
 - **Single-writer rule:** only the session thread writes session-visible
   environments; unit bodies write only their disposable child scopes. The
   registry is the one multi-writer table and takes an explicit
-  synchronized swap. Core is frozen after prelude installation — zero
+  synchronized swap. Registry publication reserves directory, slot-inventory,
+  retired-generation, and loader-admission records before acquiring that
+  lock. The locked transition is allocation-free and O(1): it validates the
+  observed head, links already-owned records, and publishes. Core is frozen
+  after prelude installation — zero
   synchronization forever after.
 - **Lazy child envs:** scope = `{local: Option<EnvRef>, parent}`; the
   child table is allocated only when a `def`/`set` actually executes in
@@ -175,11 +217,10 @@ primitives, operationalized as two rules:
   destroys one typed snapshot/directory record and requeues its successor,
   so superseded chains are reclaimed as their announced readers drain
   without imposing history-sized work on the final reader or writer.
-  Module slots use the same handoff for generation leases; reclaimed
-  generation records return to a registry-owned free list, bounding both
-  record storage and later commit scans by peak simultaneously retired
-  generations rather than total reloads. `GenerationLease` is a narrow
-  nominal observation capability: it exposes identity metadata and cursor
+  Module slots use the same handoff for generation leases; retired generation
+  records form an intrusive FIFO serviced one record per maintenance step,
+  so neither commit nor maintenance scans reload history. `GenerationLease`
+  is a narrow nominal observation capability: it exposes identity metadata and cursor
   factories, not the mutable environment, scope, reference count, or
   retirement operations. Session execution may consume it into a distinct
   `ExecutionGeneration` only with the Session-private `ExecutionAccess`
@@ -190,6 +231,21 @@ primitives, operationalized as two rules:
   the issuing host domain. Each resolve/name cursor takes its own
   `GenerationPin`, so releasing the originating lease cannot retire the
   generation while the cursor still holds an environment snapshot.
+  A published generation also owns a nominal `SlotLease` for its complete
+  lifetime. Directory maps may contain raw slot entries only while their
+  directory lease is held; lookup retains an operation `SlotLease` before
+  releasing that directory lease. Commit, removal, and `within` carry the
+  witness through every later phase, and a
+  `StateTurn` owns it while queued or granted. Closing can retire code and
+  state without draining generation pins, but the allocation cannot be
+  recycled until the arbiter, retired directory chain, and slot-lease count
+  are all quiescent. There is no mutable slot identity to race or revalidate.
+  After removal publishes its directory close edge, it transfers the granted
+  turn and detached durable stack to a typed `RemovalRetirement` in the shared
+  scheduler domain before the initiating Unit can observe cancellation again.
+  That work owns no pointer into Unit storage: transfer returns the Unit's
+  turn authority immediately. Cancellation may discard only an observation
+  lease; it cannot abandon code/state retirement or slot reuse settlement.
 - **Visible-name completion boundary:** `VisibleNameCursor` is the single
   public-name traversal for both `words` and host completion. Its tagged
   root is either one retained scope path or the pre-first-unit session
@@ -339,6 +395,21 @@ Any change to this machinery must preserve:
   with shrinking scheduler scenarios and a process deadline; these cover
   the imperative registrations, handlers, publication, wake, structured
   children, and cancellation-drain behavior directly.
+- **Per-slot state arbitration.** `within` applications are serialized
+  scheduler work, not mutex-held evaluation: a unit whose turn is not yet
+  granted yields as ordinary resumable work and is re-run until the FIFO
+  reaches it, so no OS lock is held across `runSlice` and cancellation
+  unlinks a waiting turn without waking anything. Deadlock is prevented
+  structurally rather than detected: parking is refused at the single
+  `Machine.park` choke point every parking word must traverse, and
+  nesting, a second slot, and a superseded generation are refused at
+  admission. Refusal is structural rather than remembered: a unit owns one
+  turn authority, `request` spends it, and `release` returns it, so a second
+  acquisition — a nested `within`, another module's draft, or a reload or
+  removal issued from inside a state application — has nothing to spend and
+  every acquisition site must handle the resulting error. A turn queued
+  behind a re-registration re-establishes the currency of its home after the
+  grant as well, because the barrier it waited on may have replaced it.
 - **Green units on a fixed pool** (default = CPU count; the 1-worker
   degenerate configuration is supported and tested). One mutex-protected
   global run queue; the invariant to protect is "a unit is a movable
@@ -647,10 +718,32 @@ source with no public dual representation.
 - Namespace publication accepts `NamespaceName`, produced by the polled
   validator, rather than a raw intern id. Top-level and module
   publications are different tagged types — top-level publication is a
-  word body, module publication is a word body or a native callable, and
-  both module arms require a `ValidatedEffect`, so every module binding
-  carries a live contract. The module-root scope supplies the single
-  coherent home.
+  word body, module publication is a word body or a native callable. Both
+  arms carry optional effect and documentation for source definitions, so
+  a module binding's declared effect is a live contract exactly when one
+  was supplied; the native arm keeps its `ValidatedEffect` and
+  documentation mandatory, because the ABI has no unannotated form. The
+  module-root scope supplies the single coherent home.
+- **A state application is one tagged owner.** `within` constructs a
+  single heap-owned structure holding the module-stack draft (the unit
+  window above its boundary base), the pending output sequence, the home
+  authority, and the publication transition; it appears in the frame stack
+  as a third boundary mode beside `attempt` and `module`. Only the
+  definition-site home can create one — the authority comes from the
+  executing home's slot, never from a value — and it is consumed exactly
+  once, by publication on success or by retirement on every failure. The
+  draft never escapes the owning unit, and worker-visible code cannot
+  obtain the lifecycle authority required for blocking teardown.
+- **Mutation authority is a granted turn.** A slot's durable stack can be
+  read or replaced only through a `StateTurn`, a place in the slot's fair
+  FIFO. The arbiter mutex is held for O(1) pointer surgery only, never
+  across ECL execution, and admission is refused from inside the same lock
+  once a slot begins closing, so a turn is never queued against an owner
+  that is about to be destroyed. Re-registration and removal take ordinary
+  turns, which is what makes reload and close order against in-flight
+  applications without a second protocol. Each turn consumes an owned
+  `SlotLease` before it joins the queue and releases it only after unlinking;
+  queued and granted work therefore cannot observe recycled storage.
 - An unpublished module generation is held by an opaque, consumable
   `OwnedCandidate`. Registry publication consumes that capability;
   rollback releases only the provisional guard. Tasks spawned before
@@ -683,10 +776,10 @@ source with no public dual representation.
   always carries keys, values, and hashes plus one optional owned index
   slice. There is no separately mutable initialized bit, nullable payload,
   or pointer/length pair for reclamation and lookup to reconcile.
-- Fixed runtime maps accept only enum key types. Binder locals use a
-  nominal `LocalName`, while environment and module maps use
-  `NamespaceName`; a raw integer-keyed publication map is rejected at
-  `comptime`.
+- Fixed runtime maps accept only enum key types. Binder locals use nominal
+  `LocalName`, environment maps use `BindingName`, registry maps use
+  `ModuleName`, and qualified lookup carries `QualifiedName`; a raw
+  integer-keyed publication map is rejected at `comptime`.
 - Heap values carry nominal `ListHandle`, `DictHandle`, and `TaskHandle`
   pointers. Allocation returns kind-specific initializing capabilities and
   publication consumes the matching capability, so a list cannot be passed
@@ -978,6 +1071,23 @@ value equality, representation parity (brackets), error kind/payload
 equality, and bit-identical floats. The scheduler suite runs at 1 worker
 and N workers, asserting identical results. This is the cheapest guard on
 the entire "fast paths are unobservable" doctrine.
+
+**The stateful-module suite.** `src/tests/stateful_module_test.zig` pins
+the Milestone 11 contracts one test per obligation. Its tests carrying the
+`concurrency: ` name prefix are routed by the build file into
+`test-workers` (1 and 8) and `test-tsan` automatically, so every new
+concurrent surface — arbiter ordering, the reload barrier, and the removal
+close edge — enters those gates without a second manifest. The
+initialized-Session OOM sweep reaches construction stacks, transactional
+updates, a mid-draft failure, and removal. Lifecycle coverage keeps
+superseded code alive across removal and unrelated module creation,
+repeatedly probes old `within`, and proves the replacement's state and code
+remain unchanged. Dynamic `execute` supplies the fresh public resolution used
+to observe the close edge; cancellation is issued only after that resolution
+fails. The counting-allocator property
+compares small and large batches of both post-close-cancel/remove and ordinary
+construct/remove cycles, each run as one Unit, so more history must not retain
+proportionally more memory.
 
 **Snapshots.** The Zig executable is the semantic reference. `zig build
 test-snapshots` runs the real CLI over the promoted reference corpus and

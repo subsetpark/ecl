@@ -87,6 +87,12 @@ test "native runtime: inadmissible values and duplicate keys are language errors
     });
 }
 
+test "native runtime: execute uses ordinary native dispatch" {
+    var result = try run("'sample use 7 'sample 'increment qualify execute", "1", false);
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "8\n", .stderr = "" });
+}
+
 test "native runtime: SDK char scalars enforce Unicode scalar bounds" {
     var upper = try run("'sample use 1114111 sample.make-char type", "1", false);
     defer upper.deinit();

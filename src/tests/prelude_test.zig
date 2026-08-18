@@ -158,7 +158,7 @@ fn expectInvalidPrelude(source: []const u8) !void {
     const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 1 }});
     defer heap.hostDomain(host.cleanup()).releaseValue(body);
     try building.installCore(
-        try intern.trustedNamespace("still-writable"),
+        try intern.internNamespace("still-writable"),
         .{ .word = env.quotation(body.list).? },
     );
 }

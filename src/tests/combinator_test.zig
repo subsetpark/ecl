@@ -4,8 +4,6 @@ const test_heap = @import("test_heap.zig");
 const machine = @import("../machine.zig");
 const support = @import("kernel_test_support.zig");
 
-const allocator = std.testing.allocator;
-
 fn expectStack(runtime: *session.Session, source: []const u8, expected: []const u8) !void {
     switch (try runtime.runUnit("<combinator-test>", source)) {
         .ok => {},

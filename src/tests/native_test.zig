@@ -111,7 +111,7 @@ fn dummyInvoke(_: *const abi.HostTable, _: *anyopaque, _: u32, output: *abi.Invo
 
 fn validate(
     host: *const heap.HostCleanup,
-    requested: intern.NamespaceName,
+    requested: intern.ModuleName,
     raw: *const abi.Descriptor,
 ) descriptor_api.ValidateError!*descriptor_api.ValidatedDescriptor {
     var cursor = descriptor_api.ValidateCursor.init(host, requested, raw);
@@ -125,7 +125,7 @@ fn validate(
 fn expectReject(
     expected: descriptor_api.ValidateError,
     host: *const heap.HostCleanup,
-    requested: intern.NamespaceName,
+    requested: intern.ModuleName,
     raw: *const abi.Descriptor,
 ) !void {
     var cursor = descriptor_api.ValidateCursor.init(host, requested, raw);
@@ -148,7 +148,7 @@ fn expectReject(
 test "native: descriptor validation rejects malformed metadata before publication" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    const requested = try intern.trustedNamespace("sample");
+    const requested = try intern.internModuleName("sample");
     var fixture = Fixture{};
 
     var raw = fixture.descriptor();
@@ -185,12 +185,25 @@ test "native: descriptor validation rejects malformed metadata before publicatio
     fixture.word_name = "bad.name";
     raw = fixture.descriptor();
     try expectReject(error.InvalidName, host.cleanup(), requested, &raw);
+
+    fixture.word_name = "bad name";
+    raw = fixture.descriptor();
+    try expectReject(error.InvalidName, host.cleanup(), requested, &raw);
+
+    fixture.word_name = "bad\u{00a0}name";
+    raw = fixture.descriptor();
+    try expectReject(error.InvalidName, host.cleanup(), requested, &raw);
+
+    fixture.word_name = "increment";
+    fixture.module_name = "bad\u{2000}name";
+    raw = fixture.descriptor();
+    try expectReject(error.InvalidName, host.cleanup(), requested, &raw);
 }
 
 test "native: validation copies names effects and documentation into runtime storage" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    const requested = try intern.trustedNamespace("sample");
+    const requested = try intern.internModuleName("sample");
     var module_name = [_]u8{ 's', 'a', 'm', 'p', 'l', 'e' };
     var word_name = [_]u8{ 'i', 'n', 'c', 'r', 'e', 'm', 'e', 'n', 't' };
     var word_doc = "Increment a number.".*;
@@ -207,7 +220,7 @@ test "native: validation copies names effects and documentation into runtime sto
     @memset(&word_name, 'x');
     @memset(&word_doc, 'x');
 
-    try std.testing.expectEqualStrings("sample", intern.get(intern.namespaceId(validated.name())));
+    try std.testing.expectEqualStrings("sample", intern.get(intern.moduleId(validated.name())));
     try std.testing.expectEqual(@as(usize, 1), validated.definitions().len);
     const definition = validated.definitions()[0];
     try std.testing.expectEqualStrings("increment", intern.get(intern.namespaceId(definition.name)));
@@ -226,7 +239,7 @@ test "native: validation copies names effects and documentation into runtime sto
 fn validationAllocationProbe(allocator: std.mem.Allocator) !void {
     var host = heap.HostOwner.init(allocator);
     defer host.cleanup().drain();
-    const requested = try intern.trustedNamespace("allocation-native");
+    const requested = try intern.internModuleName("allocation-native");
     var fixture = Fixture{ .module_name = "allocation-native" };
     var raw = fixture.descriptor();
     const validated = try validate(host.cleanup(), requested, &raw);
@@ -236,11 +249,11 @@ fn validationAllocationProbe(allocator: std.mem.Allocator) !void {
 test "native: the SDK generates a descriptor the production validator accepts" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    const requested = try intern.trustedNamespace("sample");
+    const requested = try intern.internModuleName("sample");
     const validated = try validate(host.cleanup(), requested, native_sample.Extension.descriptor());
     defer validated.deinit();
 
-    try std.testing.expectEqualStrings("sample", intern.get(intern.namespaceId(validated.name())));
+    try std.testing.expectEqualStrings("sample", intern.get(intern.moduleId(validated.name())));
     try std.testing.expectEqual(@as(usize, 19), validated.definitions().len);
     const expected_names = [_][]const u8{
         "increment",      "discard",       "split",          "forward",    "fail-user",  "fail-kind",
@@ -480,7 +493,7 @@ test "native: the static transport publishes a linked descriptor through the sam
         host.cleanup().drain();
         settled.deinit();
     }
-    const requested = try intern.trustedNamespace("sample");
+    const requested = try intern.internModuleName("sample");
     var loader = switch (owner.loader().startStatic(requested, native_sample.Extension.descriptor())) {
         .loading => |cursor| cursor,
         .failure => |failure| {
@@ -506,9 +519,9 @@ test "native: the static transport publishes a linked descriptor through the sam
     };
     defer candidate.deinit();
     _ = try registry.commit(&candidate);
-    var generation = registry.acquire(intern.namespaceId(requested)).?;
+    var generation = registry.acquire(requested).?;
     defer generation.deinit();
-    const increment = try intern.trustedNamespace("increment");
+    const increment = try intern.internNamespace("increment");
     var resolver = generation.resolveCursor(intern.namespaceId(increment), true);
     defer resolver.deinit();
     var binding = while (true) switch (resolver.advance()) {

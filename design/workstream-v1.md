@@ -878,6 +878,10 @@ Concretely:
   module effect while remaining harmless top-level metadata. The
   never-recognize-annotations guarantee holds mechanically: captured
   marker-bearing data ends up nested and inert.
+  *(Superseded by Milestone 11, which made module annotations optional and
+  dropped the synthesized `(-- value)`: the landed law is
+  `v 'name set == v literal 'name def`, with no annotation at all. The text
+  above records what M10 shipped.)*
 - **Placement is prelude source** —
   `set = (swap literal swap (-- value) swap def)` — demoting both words
   from primitive to prelude (primitives 90 → 88). The gate on this
@@ -890,7 +894,7 @@ Concretely:
   The test "definitions: def inside a word body writes the caller's
   scope" pins the rule; the equivalence law remains the invariant.
 - **Reflection is total and honest.** `body` works on every binding
-  (`'x body` on a set-bound name returns `((3) first)`); `see`/`which`
+  (`'x body` on a set-bound name returns the capture, printed `([3] first)`); `see`/`which`
   print the stored body with no reconstruction of set-sugar spelling (the
   deleted tag must not reappear as a display heuristic). A captured task
   handle makes `see` non-re-readable, matching today's value display.
@@ -935,6 +939,36 @@ follow-ups, item 1) sees constants as ordinary words with known
 
 ### Milestone 11: stateful-modules
 
+**Status**: landed 2026-08-18 — gameplan `gameplans/stateful-modules.json`.
+Nine original patches plus the M11 addendum, ungated pre-`0.1.0`.
+Sub-rulings from planning,
+folded into the DoD below: the reload barrier is uniform with a
+quiescent-slot fast path; self-directed reload/`unmodule` is `'domain`;
+`unmodule` canonicalizes alias names. The 2026-08-18 addendum removes public
+module handles and `__MODULE__`, adds dotted canonical module names with
+final-dot qualification, and adds `qualify` plus `execute`.
+
+Two planning assumptions did not survive contact and the DoD below records
+what landed instead. **Quiescence is arbiter order, not pin drain**:
+generation pins are held for a whole Unit lifetime, so "drain the target's
+pins" can never complete for a script that calls a module and then reloads
+it — exactly what DoD-12's `hot-reload.ecl` does. Re-registration and
+removal therefore take an ordinary place in the slot's fair FIFO, which
+orders publication against every queued and active state application, and
+the invariant "old code cannot publish state after a new representation
+becomes current" is enforced directly: a `within` whose home generation is
+no longer current is `'domain`. **Self-directed therefore means "from
+inside any state application"** — the unit already holds one slot's turn,
+and waiting for a second is the deadlock shape `within` refuses everywhere
+else — rather than "from code holding a pin". A single per-unit turn
+authority, spent by `within`, reload, and removal alike, makes that
+unrepresentable rather than separately guarded. The arbiter is
+a cooperative-yield FIFO — a waiting unit yields as ordinary resumable
+scheduler work rather than parking on a dedicated wake reason; it holds no
+OS lock across ECL execution and cannot starve, but it does consume
+scheduler turns while waiting, and a dedicated wake path remains available
+as a later optimization.
+
 **Definition of Done**:
 The existing dynamically constructible module registry becomes ECL's
 userland durable-state layer without adding an actor, mailbox, or resident
@@ -943,7 +977,13 @@ durable operand stack per Session, distinct from its replaceable immutable code
 generation; the only mutation is transactional publication of a replacement
 stack snapshot. Concretely:
 
-- **The registry slot is the singleton identity.** `'name (body) module` and
+- **Validated names describe the public surface.** `ModuleName` is one or more
+  valid nonempty segments joined by dots, `BindingName` is one unqualified
+  non-reserved segment, and `QualifiedName` is their validated composition.
+  Registry APIs, environment APIs, and qualified dispatch accept the matching
+  nominal brand, so raw intern ids cannot be accidentally substituted. A
+  qualified executable name splits at its final dot; aliases remain
+  unqualified. `'name (body) module` and
   the source-defined `module-with` constructor build a candidate; the first
   successful registration of a canonical name creates its slot, while later
   registrations replace only its code generation. Separately constructed names
@@ -952,10 +992,8 @@ stack snapshot. Concretely:
   registration in the same flat Session registry, not lexical nesting or
   parent ownership; the created slot has an independent lifetime and its
   completed registration is not rolled back if the constructing body later
-  fails. A new nominal `'module` value kind is the opaque Session-local handle
-  to that slot, not its symbol or code generation. Handles compare by slot
-  identity, display non-readably, survive hot reload, cannot be forged, and
-  become closed rather than retargeting if the name is later reused.
+  fails. There is no public slot-identity value; lifecycle operations are
+  name-based, and a removed canonical name may later select a new slot.
 - **Construction produces the initial state stack.** While a module body is
   registering, `def`/`defp` and `set`/`setp` retain M10's one-binding
   representation and build only the immutable candidate code environment. The
@@ -1020,41 +1058,48 @@ stack snapshot. Concretely:
   another slot, preventing self- and cross-module deadlocks. Ordinary calls,
   including read-only calls into other modules, remain available inside the
   quotation; only another `within` boundary is prohibited.
-- **`__MODULE__` exposes definition-site identity without making it ambient.**
-  The reserved, unshadowable word `( -- module )` returns the stable slot
-  handle at module-registration root and in code whose home is that module;
-  session top-level use is `'domain`. Extracting a body and redefining it
-  elsewhere changes its home exactly as it already changes private resolution.
-  The handle supports identity, reflection, and lifecycle operations such as
-  `unmodule`; returning or storing it does not grant `within` authority or expose
-  the durable stack or private bindings.
+- **Dynamic word construction preserves ordinary semantics.** `qualify`
+  validates a `ModuleName` symbol and `BindingName` symbol and constructs their
+  qualified executable word without reparsing source. `execute` applies a word
+  through the ordinary late-bound dispatch driver, preserving definition-site
+  home, private lookup, annotations, tracing, native/builtin behavior,
+  cancellation, and `within` authority. Internal homes remain capabilities,
+  never ECL values.
 - **Bindings remain immutable after registration.** M11 does not contextualize
   `set`/`setp`, add `unset`, or place mutable bindings in name resolution.
   M10's one-binding representation remains unchanged, while optional module
   effects let the prelude definitions simplify to the exact equivalences
-  `value 'name set == value literal (-- value) 'name def` and likewise for
-  `setp`/`defp`,
-  with no synthesized `(-- value)` annotation. `set`/`setp` in the construction
+  `value 'name set == value literal 'name def` and likewise for
+  `setp`/`defp`, with no synthesized `(-- value)` annotation. `set`/`setp` in the construction
   body still define code-generation constants, while a later attempt to mutate
   the frozen module environment fails exactly as it does before M11. Existing
   `del` remains solely the pure `(dict key -- dict)` transformation.
 - **Hot reload preserves the stack.** Re-registration constructs a new code
-  generation while retaining the slot and its durable stack. It closes new
-  calls and waits cooperatively for old-generation calls and active/queued
-  `within` applications to quiesce before publication, so old code cannot
-  publish state after a new representation becomes current. Failed
+  generation while retaining the slot and its durable stack. It takes an
+  ordinary place in the slot's fair arbiter order, so every `within`
+  application queued before it runs against the old generation and finishes
+  first and every later one runs against the new one; no application
+  straddles the swap. Old-generation code may keep running under its pin,
+  but it cannot publish state once a new representation is current: its
+  `within` is `'domain`. The barrier is uniform across stateless and
+  stateful modules; a quiescent slot (the sequential common case) commits
+  immediately as today, and a re-registration initiated from inside any
+  state application is `'domain` before any wait: a unit owns one turn
+  authority, so waiting for a second slot's turn — the target's own or
+  another module's — is the deadlock shape `within` refuses everywhere
+  else. Failed
   registration changes neither code nor state. Stack-layout evolution is an
   explicit userland protocol: replacement code must understand the retained
   representation and may migrate it with an ordinary first `within` operation;
   the runtime neither inspects nor names positions in the stack.
-- **Removal completes the lifecycle.** `unmodule` accepts a canonical module
-  name or exact module handle, closes new resolution, calls, and `within`
-  applications, waits cooperatively for generation pins and queued/active
-  drafts to quiesce, invalidates extant handles, removes aliases targeting the
-  slot, then retires code and every value on the durable stack through bounded
-  work. A minimal closed handle-control record may remain until copied handles
-  release; it owns no module state and can never retarget to a later slot.
-  Concurrent
+- **Removal completes the lifecycle.** `unmodule` accepts a module name
+  (alias names canonicalize exactly as `use` and qualified resolution do);
+  an unregistered name is `'undefined-word`, and removal from inside any state application is
+  `'domain` like re-registration. It closes new resolution, calls, and `within`
+  applications, waits through the same arbiter order for queued and active
+  drafts, removes aliases targeting the slot,
+  then retires code and every value on the durable stack through bounded
+  work. Concurrent
   resolution observes either the live module or `'undefined-word` once close
   begins, never a half-removed entry. Session shutdown consumes the same
   `live -> closing -> retired` protocol.
@@ -1063,8 +1108,8 @@ stack snapshot. Concretely:
   stack/draft capabilities remain later extensions. A future connection module
   supplies opaque connection values natively while its pool policy and
   singleton coordination use this userland state mechanism.
-- SPEC.md and INTERPRETER.md record uniform optional source annotations, the
-  module-handle kind, construction-stack ownership, `within`/`without` boundary
+- SPEC.md and INTERPRETER.md record uniform optional source annotations,
+  branded name domains, construction-stack ownership, `within`/`without` boundary
   and failure semantics, arbiter fairness, hot-reload barrier, removal
   typestate, and ordered Session shutdown. The type
   system makes a state application one tagged owner of the module-stack draft,
@@ -1458,7 +1503,129 @@ INTERPRETER.md and its entry here is retired.
       one-element list per constant reference; whether that is worth any
       dispatch complexity is unknown until M13's benchmarks exist.
 
+15. **`within` draft/publication copy elision** (deferred 2026-08-18,
+    M11 review conversation). Every state application copies the slot's
+    durable snapshot into a private draft (one retain per element) and,
+    during the transaction, the snapshot and the draft coexist — so a
+    value being functionally updated inside `within` has rc >= 2 and the
+    d.23 rc==1 in-place reuse never fires on the mutation itself. A hot
+    shared structure (a work queue held as one composite value on the
+    durable stack) therefore pays a CoW copy per update. Correct and
+    inside the slow-but-correct charter; deliberately not optimized in
+    M11. Constraints pre-written at deferral:
+    - The per-slot arbiter already provides the exclusivity a reuse
+      analysis needs: exactly one draft exists per slot at a time, and
+      the superseded snapshot retires immediately after `turn.publish`.
+      The candidate optimization is to let the draft either borrow the
+      snapshot's spine (publish-by-diff) or take ownership eagerly when
+      the snapshot's only other reference is the slot itself — never a
+      third path visible to user code.
+    - Transactionality is non-negotiable: every failure path must still
+      observe the pre-application snapshot, so any in-place mutation
+      scheme must be undoable or deferred to the publish edge. The
+      all-or-nothing publication and exact caller output-window
+      reservation are invariants, not costs to shave.
+    - Observational invisibility per d.23: no draft-reuse path may
+      change values, representations, error dicts, or float identity;
+      the production-connected stateful-module suite at 1/8 workers and
+      TSan are the proof surface, and the DoD-40 increment-count
+      acceptance must remain schedule-independent.
+    - Measure before building, on M13's benchmarks: the win is bounded
+      by durable-stack element count and update frequency; the guidance
+      that shared state should be one composite value (structure in the
+      value plane, sharing in the module plane) already makes the draft
+      copy O(1) references, so profile whether the remaining CoW copy of
+      the composite's spine matters before adding any reuse machinery.
+
+16. **Frozen module environments as a flat immutable table** (deferred
+    2026-08-18, M11 review conversation). Module environments are frozen
+    at registration (`Scope.freezeModule` at commit) and reload replaces
+    the whole generation, never an individual cell — so nothing ever
+    republishes a module binding in place. The per-cell publisher and
+    snapshot indirection inside a module environment is therefore
+    structurally dead weight for every module in every build mode,
+    inherited only from sharing the generic `Environment` type with the
+    session environment, which genuinely needs cells because top-level
+    `def`/`set` redefine names. A frozen-environment specialization —
+    one flat immutable name -> `BindingSpec` table built at freeze and
+    read directly by resolution — removes that indirection and shrinks
+    the dominant per-module term. Constraints pre-written at deferral:
+    - No semantic fork. This is a representation swap behind the same
+      typestate: `Environment` stays the mutable form the session uses,
+      and freezing produces the flat form. Publication, generation
+      pinning, `BindingLease`, reflection, and the M11 slot lifecycle
+      must be observationally identical, so the differential harness,
+      the snapshot transcript, and the module suites are the proof
+      surface — no new resolution mode and no second lookup path
+      readers must choose between.
+    - Leases still have to work. Old-generation frames keep resolving
+      through a superseded environment while retirement drains, so the
+      flat table must be owned by the generation and retired with it,
+      not freed at freeze. Whatever replaces the per-cell publisher must
+      preserve the existing final-reader/later-writer handoff for the
+      generation as a whole.
+    - Freeze is the one build point. It is already a bounded cursor
+      (`Scope.EmbeddedTeardownCursor`'s counterpart on the publish side);
+      materializing the table must stay bounded work on that same edge
+      and must not turn a failed registration into a half-built
+      environment — candidate rollback already has to retire it.
+    - Measure before building, on M13's benchmarks. The lever is
+      memory-per-module, so the number worth having first is resident
+      bytes per registered module and how it scales with binding count
+      and generation depth; M12's stdlib modules are the realistic
+      corpus. Nothing about it is on the `0.1.0` path.
+
 ## Decisions Made
+
+- **Stateful-module lifecycle sub-rulings (2026-08-17, M11 gameplan
+  dialogue).** Four questions surfaced by grounding the M11 plan
+  (`gameplans/stateful-modules.json`) and resolved conversationally:
+  (1) **superseded by the landed M11 ruling below:** the planning rationale
+  said code pinning the target generation could not satisfy a pin-draining
+  quiescence barrier and therefore made every self-directed reload/`unmodule`
+  `'domain`; the implementation does not drain generation pins—only a unit
+  already holding a state turn is refused, because it cannot spend a second
+  turn authority;
+  (2) the reload quiescence barrier is uniform across stateless and
+  stateful modules — one protocol, with a quiescent-slot fast path
+  keeping sequential reload immediate and new calls waiting
+  cooperatively for publication (the state-only alternative was
+  rejected: it makes reload timing observable inside state applications
+  and leaves old and new code running concurrently without bound);
+  (3) `unmodule` canonicalizes alias names exactly as `use` and
+  qualified resolution do — every name that reaches a module can remove
+  it; (4) **superseded by the M11 addendum below:** the original plan exposed
+  slot identity through module handles and specified closed-handle display.
+  The addendum removes that value kind and makes every public lifecycle
+  operation name-based. During grounding, DoD-36/37's expected strings were
+  corrected to the landed printer (`([3] first)`, not `((3) first)`:
+  capture lists print specialized).
+
+- **Slot lifetime is witnessed, not revalidated (2026-08-18, M11 lifecycle
+  correction).** Arbiter order remains the code/state publication barrier and
+  does not drain old generation pins. Independently, every published
+  generation owns a refcounted, non-retargetable `SlotLease` for its whole
+  lifetime. Directory lookup retains an operation lease before releasing its
+  directory snapshot; commit, removal, and `within` keep that lease across
+  their check/use boundaries, and a turn
+  owns it while queued or granted. Removal may close and retire immediately
+  after its arbiter turn, but slot storage cannot become reusable until
+  admission is closed, the arbiter and retired directory chain are empty, and
+  every lease—including leases held by old generation pins—has released.
+  Consequently no mutable identity field or post-hoc identity recheck is part
+  of the protocol.
+
+- **Module inventory and post-close retirement are owned transitions
+  (2026-08-18, M11 lifecycle correction).** Each slot owns a permanent nominal
+  inventory entry. Under the registry writer lock, publication and reuse only
+  link pre-reserved records or move one slot between intrusive pending/ready
+  queues; they allocate nothing, scan no history, and never mutate inventory
+  outside that lock. Removal transfers its granted turn and detached durable
+  stack to typed scheduler retirement in the same close transition. The
+  initiating Unit retains only an observation lease, so cancellation after the
+  close edge cannot abandon cleanup or retain storage until Session shutdown.
+  Registry maintenance later releases one quiescent generation record or
+  evaluates one empty slot for reuse per step.
 
 - **One-binder merge ruled; LISP-2 rejected (2026-08-17, user ruling).**
   The word|value kind tag is replaced by uniform application with visible
@@ -1483,7 +1650,22 @@ INTERPRETER.md and its entry here is retired.
   annotations optional in modules, removes the no-longer-needed synthesized
   effect from the prelude `set`/`setp` bodies. Durable state is a separate
   module-owned operand stack, not a mutable name-resolution layer.
-- **Modules are ECL's durable state objects (2026-08-17, user ruling).** A
+- **M11 addendum removes public slot identity (2026-08-18, user ruling).**
+  `__MODULE__`, the `'module` value kind, handle-targeted removal, handle
+  rendering, and all handle-control machinery are deleted. Canonical module
+  names may be dotted; qualified execution splits at the final dot. Nominal
+  `ModuleName`, `BindingName`, and `QualifiedName` brands own validation and
+  prevent ordinary cross-domain id misuse. Their factories share the reader's
+  scalar classifier, including the reader's Unicode whitespace set, so host
+  and native inputs cannot mint names the source grammar rejects. There is no
+  trusted validation mode for reserved syntax markers, and commit, removal,
+  and alias publication expose distinct error sets containing only outcomes
+  each transition can produce. `qualify` constructs a validated
+  qualified word and `execute` invokes it through ordinary dispatch. Internal
+  homes and slot leases preserve definition-site and lifetime authority without
+  exposing either as an ECL value.
+- **Modules are ECL's durable state objects (2026-08-17, user ruling; public
+  identity portion superseded by the M11 addendum).** A
   dynamically constructed canonical module registry slot owns one durable
   operand stack per Session, initialized by the module construction body's
   final stack and preserved across code generations. Ordinary module words
@@ -1494,8 +1676,8 @@ INTERPRETER.md and its entry here is retired.
   the caller. No
   state-specific annotation, implicit argument/result movement, or mutable
   binding overlay exists. The slot, not a replaceable code generation, is the
-  singleton identity; `__MODULE__` returns its nominal identity/lifecycle
-  handle, but the handle confers no state authority. There is no resident actor,
+  internal state owner for the duration of a registration; no public value
+  exposes that identity or lifecycle authority. There is no resident actor,
   mailbox, or supervision tree. M11 also adds an explicit quiescing removal
   path; native resource values and SDK access to its internal stack authority
   remain later extensions.
@@ -2226,7 +2408,9 @@ script in CI.
     literal capture: bare reference applies it and pushes the value, and
     `body` returns the capture with no hidden value-binding representation.
   - **Verify by** `cmd`: `ecl -e "3 'x set x 'x body"`.
-  - **Expected**: final stack `3 ((3) first)`.
+  - **Expected**: final stack `3 ([3] first)` (the capture list prints
+    specialized; drift from the plan's `((3) first)` corrected against the
+    landed printer, 2026-08-17).
   - **Traces to**: Milestone 10 — `src/prelude.ecl` `### def set` block +
     `src/definition_prims.zig` reflection over word bindings.
 
@@ -2237,7 +2421,7 @@ script in CI.
   - **Verify by** `cmd`:
     `ecl -e "'m (40 literal (-- value) 'k def) module m.k 'm.k body 'm.k which"`.
   - **Expected**: stdout shows `40` and a `m.k -> m.k def public` which
-    line carrying `(-- value)`; `body` returns `((40) first)` with no distinct
+    line carrying `(-- value)`; `body` returns `([40] first)` with no distinct
     value-binding representation.
   - **Traces to**: Milestone 10 — the literal-capture publication path and the
     shrunk `Binding` union in `src/env.zig`, which M11 leaves unchanged when it
@@ -2265,19 +2449,21 @@ script in CI.
   - **Assert**: two canonical module names registered from the same
     `module-with` body own independent durable stacks initialized from their
     supplied construction values; module-homed `within` reaches only its
-    definition-site slot, and `__MODULE__` returns a distinct stable `'module`
-    handle for each slot.
+    definition-site slot. Dotted canonical names, unqualified aliases, and
+    final-dot qualified resolution select the intended module without exposing
+    slot identity.
   - **Verify by** `cmd`: fixture `stateful-module-instances.ecl` constructs two
     counter modules from one body quotation with different seed values, invokes
     exported `within`-backed operations by different amounts, reads both through
-    `without`, compares their exported handles, and repeats at 1 and 8 workers. A
-    separate top-level `__MODULE__` and handle-targeted `within` are attempted.
+    `without`, exercises a dotted module through `qualify execute`, and repeats
+    at 1 and 8 workers. A non-word passed to `execute` and a non-quotation passed
+    to `within` are attempted.
   - **Expected**: both worker counts produce the same distinct final values;
-    the handles do not match, both invalid authority uses are `'domain`, and
-    neither module can observe or mutate the other's stack.
-  - **Traces to**: Milestone 11 — `module-with`, module-handle identity,
-    construction-stack publication, definition-site `__MODULE__`, and
-    module-home `within` authority.
+    dotted dynamic execution reaches the expected word, both invalid operands
+    are `'type`, and neither module can observe or mutate the other's stack.
+  - **Traces to**: Milestone 11 — `module-with`, branded module/qualified names,
+    construction-stack publication, `qualify`/`execute`, and module-home
+    `within` authority.
 
 - **DoD-40 — explicit state transfers serialize and roll back**
   - **Assert**: concurrent module-homed `within` quotations are linearizable;
@@ -2288,7 +2474,8 @@ script in CI.
     that errors, is cancelled, exhausts allocation, underflows `without`,
     attempts to park, nests `within`, or enters another module's durable stack
     publishes neither draft nor pending outputs.
-  - **Verify by** `cmd`: the production-connected stateful-module suite spawns
+  - **Verify by** `cmd`: the production-connected stateful-module suite
+    (`src/tests/stateful_module_test.zig`) spawns
     contending counter operations implemented as
     `(+ dup without) partial within`, exercises pool-style checkout as
     `(without) within` and checkin as `() partial within`, uses `with` for one
@@ -2320,23 +2507,31 @@ script in CI.
   - **Traces to**: Milestone 11 — the registry-slot stack/code-generation
     identity split and reload quiescence barrier.
 
-- **DoD-42 — module removal and Session shutdown quiesce state owners**
+- **DoD-42 — module removal closes admission and retires state owners**
   - **Assert**: `unmodule` prevents new calls, cooperatively quiesces active
-    `within` drafts and generation pins, closes every extant module
-    handle without retargeting it, removes aliases, and retires the slot
-    through bounded work; Session shutdown uses the same ordering. Repeated
+    `within` drafts through arbiter order without waiting for generation pins,
+    removes aliases, and transfers the detached stack and granted turn to
+    cancellation-independent bounded retirement at the close edge; Session shutdown
+    uses the same ordering. Every published generation and operation that can
+    still name the slot owns a `SlotLease`; removal need not drain those pins,
+    but retired storage is reusable only after every witness releases. Repeated
     construct/remove/name-reuse cycles do not retain memory proportional to
     history.
-  - **Verify by** `cmd`: the production-connected lifecycle suite races
-    qualified calls and `within` applications with name- and handle-based
-    `unmodule`, checks aliases and stale handles after reusing the canonical
-    name, repeats dynamic construction/removal under a counting allocator, and
-    runs the path under the Linux/x86_64 TSan gate.
+  - **Verify by** `cmd`: the production-connected lifecycle suite
+    (`src/tests/stateful_module_test.zig`) races
+    qualified calls and `within` applications with name-based `unmodule`, checks
+    aliases after reusing the canonical name, holds old code across removal
+    while an unrelated replacement is created and probes old `within`, cancels
+    removal only after fresh dynamic resolution observes the close edge, repeats
+    post-close cancellation/removal batches under a warmed counting allocator,
+    exercises dynamic construction/removal, and runs the path
+    under the Linux/x86_64 TSan gate.
   - **Expected**: pre-close calls finish with stable values, post-close calls
-    fail with `'undefined-word`, stale handles report closed and never reach the
-    replacement slot, no alias reaches retired state, and settled memory is
+    fail with `'undefined-word`, old code never reaches the replacement slot,
+    no alias reaches retired state, and settled memory is
     bounded by peak simultaneously live modules, stack values, drafts, outputs,
-    and handles rather than update or registration count.
+    and generation/operation slot leases rather than update or registration
+    count.
   - **Traces to**: Milestone 11 — the opaque module-owner
     `live -> closing -> retired` lifecycle, registry removal, and bounded
     retirement integration.

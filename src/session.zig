@@ -522,14 +522,14 @@ pub const Session = enum(usize) {
         var found = poll.ChunkList(u32).init(core.allocator());
         defer found.retire(core.releaseDomain());
 
-        const dot = firstDot(prefix);
+        const dot = lastDot(prefix);
         if (dot) |separator| {
-            if (separator == 0 or firstDot(prefix[separator + 1 ..]) != null) return .empty;
+            if (separator == 0) return .empty;
             const namespace_bytes = prefix[0..separator];
             const word_prefix = prefix[separator + 1 ..];
             const namespace_id = lookupInterned(namespace_bytes) orelse return .empty;
-            if (!validNamespace(namespace_id)) return .empty;
-            var acquisition = core.registry.acquireCursor(namespace_id);
+            const module_name = intern.moduleName(namespace_id) catch return .empty;
+            var acquisition = core.registry.acquireCursor(module_name);
             defer acquisition.deinit();
             const maybe_generation = poll.drive(?modules.GenerationLease, &acquisition, .{});
             const generation = maybe_generation orelse return .empty;
@@ -568,7 +568,7 @@ pub const Session = enum(usize) {
             .pending => {},
             .complete => break,
             .item => |name| {
-                const id = intern.namespaceId(name);
+                const id = name;
                 if (std.mem.startsWith(u8, intern.get(id), prefix)) try found.append(id);
             },
         };
@@ -796,19 +796,14 @@ comptime {
     }
 }
 
-fn firstDot(bytes: []const u8) ?usize {
-    var cursor = intern.dotCursor(bytes);
+fn lastDot(bytes: []const u8) ?usize {
+    var cursor = intern.lastDotCursor(bytes);
     return poll.drive(?usize, &cursor, .{});
 }
 
 fn lookupInterned(bytes: []const u8) ?u32 {
     var cursor = intern.lookupCursor(bytes);
     return poll.drive(?u32, &cursor, .{});
-}
-
-fn validNamespace(id: u32) bool {
-    var cursor = intern.NamespaceCursor.init(id);
-    return poll.drive(?intern.NamespaceName, &cursor, .{}) != null;
 }
 
 fn materializeCompletion(

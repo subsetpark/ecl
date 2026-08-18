@@ -205,6 +205,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-native.ecl",
         "'sample use 41 sample.increment pop 7 sample.singleton pop " ++
+            "7 'sample 'increment qualify execute pop " ++
             "1000 range sample.sum-list pop {'a 1 'b 2} sample.sum-dict pop " ++
             "'answer 42 sample.pair-dict pop sample.builder-budget pop " ++
             "sample.cooperative pop (9 sample.draft-fail) attempt pop " ++
@@ -216,7 +217,31 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "'allocation-module (1 'x setp (x) ( -- n ) 'get def) module " ++
             "'allocation-module use get pop 'short 'allocation-module alias short.get pop " ++
             "'allocation-module (2 'x setp (x) ( -- n ) 'get def) module get pop " ++
-            "('bad ((dup) 'f def) module) attempt pop",
+            "('bad ((dup) 'f def) module) attempt pop " ++
+            // A non-empty construction stack is captured as durable slot
+            // state, so capture, commit, and re-registration discard each
+            // have an allocation-failure path of their own.
+            "[11 12 13] 'oom-stateful (1 +) module-with " ++
+            "[21 22] 'oom-stateful (2 +) module-with " ++
+            // Transactional updates allocate on the draft, the replacement
+            // snapshot, and the caller window; the failing half must leave
+            // the durable stack and the caller stack untouched.
+            "[0] 'oom-within (((1 + dup without) within) 'bump def " ++
+            "((dup without missing) within) 'boom def " ++
+            "((dup without) within) 'peek def) module-with " ++
+            "oom-within.bump pop (oom-within.boom) attempt pop " ++
+            // The failing half must publish nothing, so the durable stack
+            // still holds exactly what the successful half left.
+            "oom-within.peek 1 match pop " ++
+            // Namespaced registration plus branded qualification and ordinary
+            // late-bound execution each have Session-only allocation paths.
+            "'oom.namespaced ((33) 'dynamic def) module " ++
+            "'oom.namespaced 'dynamic qualify execute pop " ++
+            "3 (dup) first execute pop pop " ++
+            // Removal closes, quiesces, and retires through the same bounded
+            // work, so its allocation-failure paths belong in the sweep too.
+            "[1 2] 'oom-removed (((dup without) within) 'peek def) module-with " ++
+            "oom-removed.peek pop 'oom-removed unmodule",
     );
     var completion = try runtime.completionCandidates("allocation-");
     defer completion.deinit();
