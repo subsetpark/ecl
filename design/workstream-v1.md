@@ -332,22 +332,29 @@ paths.
 
 ### Milestone 5: kernels-and-pervasion
 
-**Status**: executed in the working tree. Debug, ReleaseSafe, ReleaseFast,
-the named TSan suite, formatting, blocking ZLint, the ported walking-skeleton
-coverage, and the promoted CLI snapshots are green locally. Its seven-patch
-design and formal contracts are complete; the durable
-implementation contract now lives in this workstream and the design documents.
+**Status**: executed for public behavior, representation, and error semantics.
+Debug, ReleaseSafe, ReleaseFast, the named TSan suite, formatting, blocking
+ZLint, the ported walking-skeleton coverage, and the promoted CLI snapshots are
+green locally. A post-v1 implementation audit found that one structural
+performance clause in the original seven-patch design did not land: flat leaves
+exist, but kernel pervasion still reboxes each element as `Value`, executes one
+scalar node per element, accumulates an `OwnedValueBuffer`, and only then
+materializes a specialized result. There is no once-per-operation
+`(op × leaf-tag)` dispatch table, monomorphic raw-slice loop family, block fault
+mask, or output-buffer adoption path in the current implementation.
+Post-terminal Step 14 owns that migration. This correction does not reopen any
+accepted M5 semantics.
 
-**Definition of Done**:
-ARCHITECTURE.md §Kernels: the (op × leaf-tag) table of monomorphic
-loops generated via Zig comptime and dispatched once per flat operation,
-reusing `value.HeapKind` as the sole tag domain. Kernel entry consumes
-owned operands and returns one owned result; low-level loops take
-explicit half-open ranges and poll at most every 65,536 logical
-elements. Pervasion is guarded spine recursion with leaf fast paths,
-scalar extension, leading-axis conformability, and dict key-union/value
-alignment. Checked blocks use fault masks, scalar rescan, and the
-mask-before-store aliasing rule; d.22 float semantics reject NaN-producing
+**Definition of Done (semantic surface executed; structural fast-path remainder
+moved to post-terminal Step 14)**:
+The intended kernel boundary reuses `value.HeapKind` as the sole tag domain;
+kernel entry consumes owned operands and returns one owned result. Pervasion is
+bounded explicit-frame descent with scalar extension, leading-axis
+conformability, and dict key-union/value alignment. The missing flat-leaf
+specialization—once-per-operation dispatch, monomorphic typed-slice loops,
+explicit half-open ranges, block fault masks with scalar rescan, and the
+mask-before-store aliasing rule—is now the Step 14 contract rather than a claim
+about M5's as-built state. The landed d.22 float semantics reject NaN-producing
 operations and preserve exact mixed-number comparisons. Full
 numeric/logic, structural/order/search vocabulary works over leaves and
 spines: `at where in find raze cat take drop reverse first rest range
@@ -374,8 +381,9 @@ The M5 `wrap`, `pair`, and `sort` bindings are ordinary target-word bodies
 assembled by Zig as temporary bootstrap scaffolding. They are not new
 primitives; M6 moves their authoritative definitions into ecl source.
 
-**Why this is a safe pause point**: All data-plane words work at kernel
-speed; combinators still per-element via the provisional path.
+**Why this is a safe pause point**: All data-plane behavior is complete and
+bounded; flat-leaf kernels and combinators still pay the provisional
+per-element boxed path that Step 14 removes after the v1 terminal.
 
 **Unlocks**: M6 recognition has kernels to recognize into.
 
@@ -1316,16 +1324,208 @@ already reserves exactly this split (ruled 2026-08-17). A `0.1.0` tag
 exists — the first prerelease tag, not a stable release (ruled 2026-08-17;
 supersedes the earlier `v1.0` prescription).
 
-**Why this is a safe pause point**: It is the end; the tag is the
-pause.
+**Why this is a safe pause point**: It is the end of v1; the tag is the
+pause before the scheduled post-terminal migration.
 
-**Unlocks**: Post-v1 work (the static effect checker bundle, d.9;
-performance evolution toward the K ceiling; exactness revisit) starts
-from a proven baseline. The native capabilities deferred out of M9 — SDK
+**Unlocks**: Post-terminal Step 14 is the first scheduled performance
+completion and migrates flat leaves onto the typed monomorphic kernel seam.
+Other post-v1 work (the static effect checker bundle, d.9; later performance
+evolution toward the K ceiling; exactness revisit) starts from that proven v1
+baseline, with SIMD/fusion/multicore depending on Step 14. The native
+capabilities deferred out of M9 — SDK
 exposure of M11's module-state authority, `Offload`, resource values, external
 wake, package assets, and quotation evaluation — also start here. None blocks
 the `0.1.0` tag: no v1 consumer needs them, and each requires an explicit
 future wire-contract revision.
+
+---
+
+### Post-terminal Step 14: monomorphic-flat-leaf-kernel-migration
+
+**Status**: scheduled after Milestone 13 and the `0.1.0` tag. This is a
+structural completion step, not a condition of the v1 terminal and not an
+optional profiling experiment. It restores the implementation boundary that
+M5's original design text claimed but did not build. Public values, errors,
+representations, scheduling guarantees, and vocabulary remain frozen.
+
+**Verified current state**:
+
+- Milestone 1 already stores homogeneous lists unboxed as width-tagged
+  `leaf_i64`, `leaf_f64`, `leaf_char{1,2,4}`, and `leaf_symbol` buffers, with
+  `generic_spine` for mixed or nested values. No value-representation migration
+  is needed.
+- Flat numeric pervasion in `src/kernel_numeric.zig` currently allocates an
+  `OwnedValueBuffer`, calls `list.atUnchecked` to rebox one leaf cell at a time,
+  pushes one scalar frame per element, and later profiles and copies those
+  boxed results through `ValueMaterializer`. It does not dispatch once on the
+  input leaf kinds or write a typed result buffer directly.
+- `src/kernel_sequence.zig`, `src/kernel_order.zig`,
+  `src/kernel_dict_text.zig`, `src/kernel_storage.zig`, and the recognized
+  drivers in `src/idioms.zig` mix useful bulk copies with the same per-element
+  reboxing/materialization pattern. Generic `each`/`zip-with` must remain
+  generic, but resolution-guarded recognized operations do not yet enter a
+  shared typed loop.
+- There is no production `(operation × left leaf kind × right leaf kind)`
+  dispatch artifact, no checked block-mask/rescan implementation, and no
+  heap-issued consuming capability for safe typed output-buffer adoption.
+  Explicit `@Vector`/ISA variants are also absent, but they are deliberately
+  outside this step.
+
+**Definition of Done**:
+
+1. **One closed, typed dispatch seam.** `src/kernels.zig` owns one comptime-
+   validated registry that classifies every first-party user-sized operation
+   and every applicable `value.HeapKind` combination exactly once as:
+   monomorphic typed loop, bulk copy/fill, deliberately sequential typed loop,
+   or generic spine/dict fallback. Binary entries distinguish leaf×leaf,
+   leaf×scalar, and scalar×leaf without materializing a broadcast. Mixed
+   `i64`/`f64`, character-width, comparison-mask, boolean, bitwise, and shift
+   cases are explicit. Missing and duplicate classifications are compile
+   errors; no second leaf-tag enum or source-audit name list is introduced.
+
+2. **Heap-issued lifetime and mutation capabilities.** Typed loops receive
+   read-only slices only through nominal capabilities that keep the owning
+   list roots alive for the whole cursor lifetime. Typed builders own their
+   allocation and expose only bounded range writes plus one consuming finish
+   transition. Optional input-buffer reuse consumes a heap-issued unique
+   authority tied to that same list owner; callers never correlate a raw
+   slice, allocator, release domain, and header themselves. Success and every
+   failure path state whether the input/output capability was consumed or
+   retained, and retirement remains bounded work outside publication locks.
+
+3. **Unboxed execution from dispatch through publication.** A flat typed path
+   dispatches once per operation/chunk, reads the underlying typed slices, and
+   writes the final typed output buffer directly. It does not call
+   `list.atUnchecked`, allocate an `OwnedValueBuffer` for result cells, invoke
+   `ValueMaterializer`, or push a child per element. Known-width producers
+   (`range`, comparisons, recognized scans, random integer vectors, fixed-width
+   character transforms, and exact-size copy/gather operations) select their
+   builder before filling. Unknown or genuinely heterogeneous results keep the
+   existing bounded profile/materialize path; the migration does not force a
+   type guess.
+
+4. **The whole flat-leaf surface crosses the seam.** Numeric and logical
+   unary/binary pervasion lands first, including scalar extension and dedicated
+   mixed-number loops. Sequence/search/copy operations (`at`, `where`, `in`,
+   `find`, `raze`, `cat`, `take`, `drop`, `reverse`, `range`, `flip`, and
+   `reshape`), ordering/grouping operations where their inputs or outputs are
+   typed leaves, fixed-width string traversal, and known-type materializer
+   passes then use the same capabilities and range contract. Resolution-
+   guarded direct/`each`/`zip-with`/`fold`/`scan` idioms call those same loop
+   entries rather than maintaining a second fast implementation. Generic
+   spines and dicts continue bounded descent and enter the typed registry when
+   they reach a flat leaf. Every operation not profitably monomorphic still has
+   one explicit registry classification explaining its generic or sequential
+   path.
+
+5. **Bounded work is preserved without per-element scheduler turns.** Every
+   loop cursor carries an absolute index and advances one explicit half-open
+   range no larger than the caller's remaining `WorkContext` budget and the
+   kernel quantum. A completed small range returns inline within that budget;
+   an incomplete range yields once at its chunk boundary. Logical-element
+   accounting is conservative for copies and gathers, cancellation is checked
+   between bounded chunks, and one ready task cannot monopolize a worker. Cold
+   and one-worker Sessions still settle retirement on every public turn.
+
+6. **Faults retain exact scalar semantics.** Checked integer arithmetic,
+   division/domain checks, finite/NaN rules, and shift-count validation
+   accumulate a fault mask over a bounded block. A hit replays only that block
+   through the shared scalar semantic function to report the first logical
+   failing index and the existing error kind/message/data. When output storage
+   aliases a consumed input, the block is validated before any store that
+   would destroy evidence needed by the rescan. No partial output is
+   published. Exact mixed-number comparison stays exact, and float
+   `fold`/`scan` association remains strictly sequential and bit-identical on
+   typed and generic paths; autovectorization never licenses reassociation.
+
+7. **Representation and ownership parity are observable invariants.** Typed
+   and generic paths produce the same values, specialized leaf kinds, empty
+   representation, character width, printed brackets/strings, errors, and
+   float bits. Self-aliasing inputs, scalar-on-either-side operations, ragged
+   spine leaf encounters, delayed cancellation, allocation failure, and
+   unique/non-unique output cases are covered. The shared builder stages every
+   borrowed mutation argument before writing so a caller may legitimately pass
+   a borrow from the destination back into the operation.
+
+8. **The old flat boxed route is gone, not retained as a silent fallback.**
+   Production code has one typed flat path and one generic spine/dict path.
+   Static capability surfaces make per-cell boxing unavailable inside a typed
+   loop, and comptime registry validation proves closed coverage. Tests do not
+   gain representation accessors or inspect implementation source. Any scalar
+   reference evaluator used by differential properties is existing production
+   semantics reached through a real generic path, not a second public kernel.
+
+9. **Proof and documentation move with the seam.** The implementing gameplan
+   inventories every producer and consumer in `kernel_numeric.zig`,
+   `kernel_sequence.zig`, `kernel_order.zig`, `kernel_dict_text.zig`,
+   `kernel_storage.zig`, `kernel_random.zig`, `idioms.zig`, and
+   `combinators.zig`; its test ledger names exactly one introducing patch per
+   test. `design/INTERPRETER.md` is updated only when the typed seam is real,
+   and then describes the as-built registry, capabilities, chunking, and fault
+   protocol rather than an aspiration. This M5 correction remains in the
+   history as the explanation for the migration.
+
+**Implementation sequence (one autonomous gameplan; no operator decision
+between patches)**:
+
+1. Introduce the heap-issued typed read/builder/unique capabilities, the
+   exhaustive registry shape, and compile-time matrix validation while all
+   existing behavior still uses the old route.
+2. Move numeric/logic pervasion and its checked block/rescan protocol onto the
+   typed cursor, then connect guarded numeric combinator idioms to the same
+   entries.
+3. Move the classified sequence, order, text, random, and known-type
+   materializer operations; keep explicitly classified heterogeneous paths on
+   the generic cursor.
+4. Cut over every producer and consumer, delete the boxed flat route, close the
+   capability surface, update documentation, and run the complete proof matrix.
+
+**Acceptance evidence required before marking this step executed**:
+
+- `zig build test`, `zig build test -Doptimize=ReleaseSafe`, and
+  `zig build test -Doptimize=ReleaseFast` exit 0; snapshots and the existing
+  idiom differential harness remain byte-for-byte green.
+- `zig build test-oom`, `zig build test-workers -Doptimize=ReleaseSafe`, and
+  Linux/x86_64 `zig build test-tsan` exit 0. Component allocation-failure
+  probes stay beside their builders/cursors; the initialized-Session sweep uses
+  the smallest snippets that reach each new live-Session path.
+- Production-connected differential properties cover every registry entry at
+  sizes `0`, `1`, one below/at/above the kernel quantum, scalar-left,
+  scalar-right, leaf×leaf, mixed numeric leaves, ragged leaf encounters, and
+  the first fault in the first/middle/final block. They assert values,
+  representations, exact error dicts/indexes, and successful float bits.
+- A bounded-work property drives the real kernel cursor through its factory
+  with budgets smaller than the input and proves that a flat operation of
+  length `n` needs at most `ceil(n / budget) + O(1)` advances—not `O(n)`
+  advances—while a competing short Unit completes within the existing
+  scheduler latency bound.
+- A `DebugAllocator{.enable_memory_limit}` property compares warmed baselines
+  and proves temporary requested bytes are bounded by output plus one kernel
+  chunk, independently of element count and publication history; a forced
+  budget failure leaves inputs valid and leaks nothing.
+- A checked-in ReleaseSafe/ReleaseFast benchmark report records public-runtime
+  throughput, allocations/bytes, cursor advances, and cancellation latency for
+  flat and ragged cases at `1`, `32`, `1,024`, `65,535`, `65,536`, `65,537`,
+  and `1,048,576` elements. It is evidence, not a timing threshold gate; the
+  structural/type and bounded-turn assertions above are the blocking proof.
+
+**Why this is a safe pause point**: The step is an observationally invisible
+execution-representation migration behind the already frozen value and kernel
+semantics. At its boundary every operation is statically classified, the old
+flat boxed route is removed, generic data still has one correct bounded path,
+and all scheduler, ownership, OOM, differential, and real-binary gates are
+green. There is no half-migrated dispatch choice left for a later step to
+interpret.
+
+**Unlocks**: Post-v1 item 8's explicit SIMD/packed-mask/fusion and
+kernel-internal multicore work can target one stable typed range ABI. Post-v1
+item 9 can measure and optimize remaining non-kernel `WorkDriver` overhead
+without confusing per-element kernel transitions with scheduler cost. Neither
+is part of this step, and neither may introduce a second semantic loop.
+
+**Operator Actions Before Next Milestone**: None. Later performance work begins
+only through a new gameplan against the checked-in benchmark report; no runtime
+flag, soak window, or conditional cutover is part of this migration.
 
 ## Dependency Graph
 
@@ -1342,12 +1542,15 @@ future wire-contract revision.
 - Milestone 11 (stateful-modules) -> [7, 10]
 - Milestone 12 (stdlib-result-str-csv-json-table-http) -> [6, 9, 10, 11]
 - Milestone 13 (v1-acceptance) -> [7, 8, 9, 10, 11, 12]
+- Post-terminal Step 14 (monomorphic-flat-leaf-kernel-migration) -> [13]
 
 ## Open Questions
 
 None. The stdin-as-data and http-backend questions were closed at M12
 planning and the randomness question was closed the same day (all
-2026-08-18) — see Decisions Made.
+2026-08-18). Step 14's representation, ownership, scheduling, semantic, and
+proof boundaries are fixed above; implementation detail belongs in its
+gameplan rather than in an open workstream decision. See Decisions Made.
 
 ## Post-v1 follow-ups (deferred features)
 
@@ -1432,7 +1635,11 @@ INTERPRETER.md and its entry here is retired.
    reductions (integer, min/max, boolean) may be reassociated, and fused ≡
    generic remains bit-identical.
 
-8. **Kernel evolution toward the K ceiling.** All profiling-gated:
+8. **Kernel evolution beyond the typed Step 14 baseline.** All work here is
+   profiling-gated and depends on the completed monomorphic flat-leaf
+   migration. Step 14 supplies the only typed range ABI; these upgrades add
+   algorithms or machine variants behind it and may not recreate dispatch,
+   fault, ownership, or generic-fallback semantics:
    - Grounding case study: codereport's
      [`WHY_BQN_WINS.md`](https://github.com/codereport/max-odd-binary/blob/main/WHY_BQN_WINS.md)
      dissects a small CBQN workload into six compounding advantages. Five
@@ -1452,7 +1659,7 @@ INTERPRETER.md and its entry here is retired.
      invariant: every ISA variant of a float kernel implements the
      identical association tree.
    - Kernel-internal multicore, deferred entirely: grain around 10⁵
-     elements per thread, memory bandwidth as the ceiling. Kernels already
+     elements per thread, memory bandwidth as the ceiling. Step 14's kernels
      take explicit index ranges, so a future splitter forks block ranges
      without touching kernel bodies. One worker pool under everything:
      kernel splits are scoped fork-join subtasks on the same pool as
@@ -1460,7 +1667,13 @@ INTERPRETER.md and its entry here is retired.
    - The reserved narrow-mask leaf tag (packed bools) —
      representation-only, never semantics.
 
-9. **Work-driver overhead program.** The cursor/`WorkDriver` substrate
+9. **Remaining WorkDriver overhead program after Step 14.** Step 14 owns
+   once-per-operation flat-leaf dispatch, typed chunk loops, and elimination of
+   per-element kernel transitions. This item measures what remains in the
+   general cursor/`WorkDriver` substrate—fixed driver allocation, non-kernel
+   state transitions, ready-queue interaction, and materializers whose result
+   type is genuinely unknown. It must not be used to postpone or condition the
+   Step 14 migration. The substrate
    pays per-operation allocation, per-transition state loads, and
    per-slice indirection; measure before optimizing. Benchmarks: input
    sizes 1, 32, 1,024, 65,535, 65,536, 65,537, and 1,048,576 (fixed cost,
@@ -1477,18 +1690,12 @@ INTERPRETER.md and its entry here is retired.
       validation), per-unit size-class pools, or typed slabs; pools keep
       precise ownership and allocator-failure behavior and never turn
       teardown into unbounded traversal;
-   2. batching transitions inside a bounded slice — dispatch once per
-      slice, monomorphic inner loops per chunk (bulk copy/fill, leaf
-      pervasion, fixed-width string traversal, materializer passes), with
-      conservative accounting: a bounded chunk may count as one
-      transition, an arbitrarily large copy may not, and a parent driver
-      never assumes a completed child consumed one transition;
-   3. specializing hot flat-leaf state machines — monomorphic drivers,
-      compact tagged state with exhaustive transitions,
-      structure-of-arrays temporaries where bandwidth-bound, vectorized
-      chunks with scalar tails, fused profile/fill only when the exact
-      representation is already known; and
-   4. scheduler or quantum policy last — never tune the quantum to hide
+   2. batching non-kernel transitions inside a bounded slice—generic-spine or
+      dict descent, heterogeneous materializer passes, reader/formatter/editor
+      cursors—with conservative accounting: a bounded chunk may count as one
+      transition, an arbitrarily large traversal may not, and a parent driver
+      never assumes a completed child consumed one transition; and
+   3. scheduler or quantum policy last — never tune the quantum to hide
       avoidable allocation or cursor overhead, and any adaptive policy
       preserves a hard maximum non-yield interval.
    Bounded-first-slice promotion (run one bounded slice locally, install
@@ -1752,7 +1959,8 @@ INTERPRETER.md and its entry here is retired.
   mandatory ABI declarations, and shipped prelude documentation remains a
   repository authoring requirement rather than a source-language restriction.
 - **Host = Zig** (user ruling, this session). Consequences absorbed into the
-  plan: the kernel matrix generates via comptime, SIMD rides `@Vector`,
+  plan: Step 14 generates the kernel matrix via comptime; later explicit SIMD
+  rides `@Vector` behind that same typed range ABI;
   RC/atomics use `@atomicRmw` with the d.23 orderings, publication is an atomic
   pointer swap over immutable snapshots, and runtime failures use Zig error
   unions with an out-param error dict.
@@ -1768,13 +1976,17 @@ INTERPRETER.md and its entry here is retired.
 - **The Zig executable is the semantic reference.** The former
   cross-implementation M5/M6 cases are exact CLI snapshots, and the
   superseded walking skeleton is not retained as a second authority.
-- **M5 kernel boundary and ownership are frozen.** Dispatch reuses
-  `value.HeapKind` rather than translating to a second tag enum. A
-  kernel entry consumes its operands and returns one owned result;
-  unique width-compatible buffers may be adopted only after the
-  fault-mask pass succeeds. Leaf loops receive explicit half-open
-  ranges, poll after at most 65,536 elements, and data-spine recursion
-  raises `'domain` beyond 256 levels.
+- **M5 kernel semantics are frozen; its unbuilt structural fast path is owned
+  by post-terminal Step 14.** The as-built `PervadeCursor` consumes operands,
+  performs bounded explicit-frame descent, returns one owned result, and raises
+  `'domain` beyond 256 data levels, but its flat-list branch still reboxes one
+  cell and schedules one scalar node at a time. The intended replacement must
+  dispatch on `value.HeapKind` without a second tag enum, take explicit
+  half-open typed ranges, poll after at most 65,536 elements, and adopt a unique
+  width-compatible input buffer only through the mask-before-store/fault-rescan
+  protocol. Those are Step 14 acceptance constraints, not claims about the M5
+  implementation. Values, errors, representations, scalar extension, and
+  pervasion behavior remain frozen throughout the migration.
 - **M5 pervasion and array transforms are frozen.** Atoms extend over
   lists, conforming list pairs descend by leading axis, and dict pairs
   align over insertion-ordered key union while recursing only on shared
@@ -2231,7 +2443,8 @@ script in CI.
     naming the operation, not a wrapped result.
   - **Verify by** `cmd`: `ecl '9223372036854775806 [1 2] +'`.
   - **Expected**: exit ≠ 0; stderr error dict with `'kind 'overflow`.
-  - **Traces to**: Milestone 5 — blockwise fault masks.
+  - **Traces to**: Milestone 5 — scalar kernel fault identification in
+    `src/kernel_numeric.zig`.
 
 - **DoD-6 — float regime**
   - **Assert**: `inf` is a literal that propagates; NaN-producing ops
