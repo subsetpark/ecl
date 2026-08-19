@@ -229,6 +229,30 @@ test "result: malformed results are rejected before quotations run" {
             .message_contains = "must be a dict tagged",
         },
         .{
+            .name = "err observation rejects malformed input",
+            .source = "7 result.err?",
+            .kind = "type",
+            .message_contains = "must be a dict tagged",
+        },
+        .{
+            .name = "or-raise rejects malformed input",
+            .source = "{'nope 1} result.or-raise",
+            .kind = "type",
+            .message_contains = "exactly one of 'ok or 'err",
+        },
+        .{
+            .name = "or-else rejects malformed input",
+            .source = "{'nope 1} 9 result.or-else",
+            .kind = "type",
+            .message_contains = "exactly one of 'ok or 'err",
+        },
+        .{
+            .name = "map-err rejects before mapping",
+            .source = "{'nope 1} (missing) result.map-err",
+            .kind = "type",
+            .message_contains = "exactly one of 'ok or 'err",
+        },
+        .{
             .name = "recover rejects before recovering",
             .source = "{'ok 5} (missing) result.recover",
             .kind = "type",

@@ -121,6 +121,7 @@ pub fn build(b: *std.Build) void {
         .{ .file = "wrong_return_type", .message = "ecl-native: callback return type must be ecl.CallbackResult" },
         .{ .file = "generic_callback", .message = "ecl-native: callback must be non-generic and non-variadic" },
         .{ .file = "malformed_effect", .message = "ecl-native: effect must contain exactly one -- separator" },
+        .{ .file = "partial_effect", .message = "ecl-native: effect rows are exact; `...` is not a native slot" },
         .{ .file = "output_arity_mismatch", .message = "ecl-native: complete output arity does not match the declared effect" },
         .{ .file = "unknown_capability", .message = "ecl-native: callback parameter is not a supported capability" },
         .{ .file = "duplicate_word", .message = "ecl-native: module contains a duplicate word name" },

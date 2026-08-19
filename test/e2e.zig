@@ -155,7 +155,7 @@ test "e2e: cancellation timeout and @each agree at one and eight workers" {
         defer par_each.deinit();
         try par_each.expect(.{
             .exit_code = 0,
-            .stdout = "[1 4 9]\n'domain\n",
+            .stdout = "[1 4 9]\n'domain\n'left-missing\n",
             .stderr = "",
         });
     }
@@ -297,6 +297,22 @@ test "invalid UTF-8 files surface parse dicts" {
     try result.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{ "'kind 'parse", "not valid UTF-8" },
+    });
+}
+
+test "e2e: grammar negative acceptance" {
+    var mismatched = try run(&.{ build_options.ecl_exe, "-e", "[1 2 3)" });
+    defer mismatched.deinit();
+    try mismatched.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'parse", "mismatched delimiter" },
+    });
+
+    var private_at_top = try run(&.{ build_options.ecl_exe, "-e", "(1) (x) 'x defp" });
+    defer private_at_top.deinit();
+    try private_at_top.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'domain", "defp/setp are legal only in a module root" },
     });
 }
 
@@ -512,6 +528,14 @@ test "e2e: direct load and ECL_PATH acceptance" {
 }
 
 test "e2e: M5 ragged equality overflow float and char acceptance" {
+    var unified_print = try run(&.{ build_options.ecl_exe, "-e", "(1 2 3)" });
+    defer unified_print.deinit();
+    try unified_print.expect(.{ .exit_code = 0, .stdout = "[1 2 3]\n", .stderr = "" });
+
+    var unified_match = try run(&.{ build_options.ecl_exe, "-e", "(1 2 3) [1 2 3] match" });
+    defer unified_match.deinit();
+    try unified_match.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
+
     var ragged = try run(&.{ build_options.ecl_exe, "-e", "[[1 2] [3]] 10 *" });
     defer ragged.deinit();
     try ragged.expect(.{ .exit_code = 0, .stdout = "([10 20] [30])\n", .stderr = "" });
@@ -530,6 +554,60 @@ test "e2e: M5 ragged equality overflow float and char acceptance" {
     var scalar = try run(&.{ build_options.ecl_exe, "-e", "inf 1 + 9007199254740993 9007199254740992.0 = \\a 1 +" });
     defer scalar.deinit();
     try scalar.expect(.{ .exit_code = 0, .stdout = "inf 0 \\b\n", .stderr = "" });
+
+    var float_domain = try run(&.{ build_options.ecl_exe, "-e", "inf inf -" });
+    defer float_domain.deinit();
+    try float_domain.expect(.{ .exit_code = 1, .stderr_contains = &.{"'kind 'domain"} });
+
+    var signed_zero = try run(&.{ build_options.ecl_exe, "-e", "0.0 -0.0 = 0.0 -0.0 match" });
+    defer signed_zero.deinit();
+    try signed_zero.expect(.{ .exit_code = 0, .stdout = "1 1\n", .stderr = "" });
+
+    var codepoints = try run(&.{ build_options.ecl_exe, "-e", "\"café\" len" });
+    defer codepoints.deinit();
+    try codepoints.expect(.{ .exit_code = 0, .stdout = "4\n", .stderr = "" });
+}
+
+test "e2e: annotated literal module constant and partial effect acceptance" {
+    var constant = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        "(40 literal (-- value) 'k def) 'm @module m.k 'm.k body 'm.k which",
+    });
+    defer constant.deinit();
+    try constant.expect(.{
+        .exit_code = 0,
+        .stdout = "m.k -> m.k def public generation 1 (-- value)\n40 ([40] first)\n",
+        .stderr = "",
+    });
+
+    const partial_module = "((pop pop 7 8) (a b -- ...) 'row def) 'm @module ";
+    var partial = try run(&.{ build_options.ecl_exe, "-e", partial_module ++ "1 2 m.row" });
+    defer partial.deinit();
+    try partial.expect(.{ .exit_code = 0, .stdout = "7 8\n", .stderr = "" });
+
+    var short = try run(&.{ build_options.ecl_exe, "-e", partial_module ++ "1 m.row" });
+    defer short.deinit();
+    try short.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'contract", "'word 'm.row", "declared 2 inputs", "'seeded 1" },
+    });
+
+    var reserved = try run(&.{ build_options.ecl_exe, "-e", "(1) '... def" });
+    defer reserved.deinit();
+    try reserved.expect(.{ .exit_code = 1, .stderr_contains = &.{ "'kind 'domain", "non-reserved name" } });
+
+    var inert = try run(&.{ build_options.ecl_exe, "-e", "'..." });
+    defer inert.deinit();
+    try inert.expect(.{ .exit_code = 0, .stdout = "'...\n", .stderr = "" });
+
+    var reflected = try run(&.{ build_options.ecl_exe, "-e", "'result use 'result.either see" });
+    defer reflected.deinit();
+    try reflected.expect(.{
+        .exit_code = 0,
+        .stdout_contains = &.{ "(result on-ok on-err -- ...", "'result.either def" },
+        .stderr = "",
+    });
 }
 
 test "e2e: mask filter acceptance" {
@@ -821,6 +899,27 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
     });
 }
 
+test "e2e: result module exclusively owns the envelope vocabulary" {
+    for ([_][]const u8{ "ok?", "or-raise", "or-else" }) |old| {
+        var result = try run(&.{ build_options.ecl_exe, "-e", old });
+        defer result.deinit();
+        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "'kind 'undefined-word", old } });
+    }
+    for ([_][]const u8{ "result.map-error", "result.case" }) |old| {
+        var result = try run(&.{ build_options.ecl_exe, "-e", old });
+        defer result.deinit();
+        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "'kind 'undefined-word", old } });
+    }
+
+    var unchanged = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        "(\"original\" fail) @attempt dup (result.or-raise) partial @attempt 'err at swap 'err at match",
+    });
+    defer unchanged.deinit();
+    try unchanged.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
+}
+
 test "e2e: stdin is data in -e mode and refuses to be read as program source" {
     var piped = try runWithInput(
         &.{ build_options.ecl_exe, "-e", "stdin \"\\n\" split pp" },
@@ -873,7 +972,20 @@ test "e2e: entropy is the one draw that differs between processes" {
 
 test "e2e: the old unit-constructor spellings are gone and the boundary error guides" {
     // Hard renames, no aliases: the pre-@ spellings resolve to nothing.
-    for ([_][]const u8{ "attempt", "spawn", "par-each", "module", "attempt-with", "spawn-with", "module-with" }) |old| {
+    for ([_][]const u8{
+        "attempt",
+        "spawn",
+        "par-each",
+        "module",
+        "attempt-with",
+        "spawn-with",
+        "par-each-with",
+        "module-with",
+        "@attempt-with",
+        "@spawn-with",
+        "@each-with",
+        "@module-with",
+    }) |old| {
         var result = try run(&.{ build_options.ecl_exe, "-e", old });
         defer result.deinit();
         try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "'kind 'undefined-word", old } });
@@ -896,4 +1008,19 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) with @attempt pp" });
     defer seeded.deinit();
     try seeded.expect(.{ .exit_code = 0, .stdout = "{'ok [4]}\n", .stderr = "" });
+
+    var seeded_each = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        "[1 2] [10] (|x a| x a +) with @each pp",
+    });
+    defer seeded_each.deinit();
+    try seeded_each.expect(.{ .exit_code = 0, .stdout = "[11 12]\n", .stderr = "" });
+
+    var name_first = try run(&.{ build_options.ecl_exe, "-e", "'wrong ((1) 'x def) @module" });
+    defer name_first.deinit();
+    try name_first.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'type", "@module expected a symbol name" },
+    });
 }

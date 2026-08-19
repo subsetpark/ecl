@@ -1320,12 +1320,18 @@ after the manifest's existing behavioral, PTY, native, worker, fuzz,
 differential, TSan, and lint gates. The exhaustive initialized-Session OOM
 sweep runs once against the release candidate instead of on every push; its
 focused component probes remain in the ordinary suite. The README and printing
-contract now match the binary. Property-bearing test artifacts run through a classified child
-runner that suppresses Minish's successful stderr chatter and forwards actual
-failure diagnostics, so CI no longer labels green commands as failed. The
-prerelease tag remains outstanding until this candidate is
-committed and the complete CI job is green; tagging the preceding commit would
-not execute this milestone.
+contract now match the binary. Property-bearing test artifacts run through a
+classified child runner that suppresses Minish's successful stderr chatter and
+forwards actual failure diagnostics, so CI no longer labels green commands as
+failed. The terminal ledger's 50 clauses (DoD-1 through DoD-48, including 25a
+and 34a) have now been audited one by one against their named proof surfaces.
+That pass repaired stale command spellings and added exact runtime coverage for
+grammar negatives, REPL rollback with environment survival, leftmost concurrent
+error selection, unified-value/float/UTF-8 edges, partial effects, the complete
+removed unit-constructor family, and result-envelope ownership. The prerelease
+tag remains outstanding until this audit commit is pushed and its complete CI
+job is green; tagging the preceding commit would not execute this final proof
+pass.
 
 **Definition of Done**:
 The terminal acceptance suite below is implemented as a CI job
@@ -2333,8 +2339,8 @@ INTERPRETER.md and its entry here is retired.
   refusal of `@each-with` and the subsequent complete-the-family ruling
   that added it — the record keeps the chain): once the `@module`
   operand flip made every member exactly the composition `with @X`, the
-  words carried nothing but a name. `with @attempt`, `with @spawn`, and
-  `with 'name @module` are deleted; no `@each-with` exists. Seeding is spelled
+  words carried nothing but a name. `attempt-with`, `spawn-with`, and
+  `module-with` are deleted; no `@each-with` exists. Seeding is spelled
   compositionally at call sites — `values (q) with @attempt`,
   `list values (q) with @each` (each child's stack is its element
   followed by the values, element deepest), `values (body) with 'name
@@ -2512,7 +2518,7 @@ script in CI.
   - **Assert**: privates are reachable from publics, unreachable
     qualified, and extracted bodies lose private context.
   - **Verify by** `cmd`: fixture `modules-privacy.ecl` defines
-    `'m (40 's setp (s 2 +) ( -- n ) 'f def) module`, calls `m.f`,
+    `(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module`, calls `m.f`,
     then attempts `m.s`; companion fixture `body-extraction.ecl`
     defines the same module and runs `'m.f body call` at session scope.
   - **Expected**: the privacy fixture prints `42`, then exits ≠ 0 with
@@ -2547,7 +2553,7 @@ script in CI.
     boundary API rather than recreating environment isolation.
   - **Verify by** `ux`: enter `10`, then
     `(99) 'kept def 20 + missing`, then `dup pp`, then `kept pp`.
-    At M4 run `(1 'k set) attempt pop k`; at M6 run the original probe
+    At M4 run `(1 'k set) @attempt pop k`; at M6 run the original probe
     `[1 2 3] (dup 'k set k *) each pop k`.
   - **Expected**: after the failed line `dup pp` prints `10` and
     `kept pp` prints `99`; both isolation probes error
@@ -2607,10 +2613,11 @@ script in CI.
   - **Assert**: `@each` results are in program order and a failing
     element re-raises the leftmost `'err`; output is identical at 1 and
     N workers.
-  - **Verify by** `cmd`: fixture run twice with `ECL_WORKERS=1` and
-    `ECL_WORKERS=8`; diff outputs.
+  - **Verify by** `cmd`: fixture `at-each.ecl` runs twice with
+    `ECL_WORKERS=1` and `ECL_WORKERS=8`; two failing children name distinct
+    missing words so selection of the index-zero error is observable.
   - **Expected**: identical stdout both runs; the designated leftmost
-    error surfaces.
+    `'left-missing` error surfaces rather than the racing `'right-missing`.
   - **Traces to**: Milestone 7 — join-order determinism.
 
 - **DoD-21 — REPL editing and completion**
@@ -2862,8 +2869,8 @@ script in CI.
     and optional documentation in the same annotation remains visible through
     `doc` and `see`.
   - **Verify by** `cmd`:
-    `ecl -e "'m ((dup +) (a -- b c) 'lies def) module 1 m.lies"`;
-    `ecl -e "'m ((dup +) (a -- b : \"Double.\") 'dbl def) module 'm.dbl see 'm.dbl doc"`;
+    `ecl -e "((dup +) (a -- b c) 'lies def) 'm @module 1 m.lies"`;
+    `ecl -e "((dup +) (a -- b : \"Double.\") 'dbl def) 'm @module 'm.dbl see 'm.dbl doc"`;
     and the `module: effect shape cross-home contract and same-home TCO` fixture
     at depths 20 and 20,000.
   - **Expected**: the false declaration raises `'contract`; `see` includes
@@ -2877,10 +2884,10 @@ script in CI.
     typed `Call`, require nonempty documentation at comptime and load time, and
     expose both through `doc`, `which`, and `see` like ordinary callables; the
     source-language relaxation in M11 does not create an untyped native entry.
-  - **Verify by** `cmd`: `zig build native-fixture` runs the compile-negative
-    missing-`Call` and missing-documentation fixtures, then loads the real
-    fixture and checks all three reflection commands plus
-    callback/effect/capability consistency.
+  - **Verify by** `cmd`: `zig build test-native-sdk-negative` runs the
+    compile-negative missing-`Call` and missing-documentation fixtures;
+    `zig build test-native-runtime` loads the real fixture and checks all three
+    reflection commands plus callback/effect/capability consistency.
   - **Expected**: both incomplete descriptors are rejected; `which` renders
     the loaded binding kind as `native` followed by its inferred capability
     list, and `see` renders `<native:<module>.<word>>` with the ordinary combined
@@ -2922,7 +2929,7 @@ script in CI.
     the same callable binding kind as every other word; qualified cross-home
     reference checks its declared effect, and reflection exposes its body.
   - **Verify by** `cmd`:
-    `ecl -e "'m (40 literal (-- value) 'k def) module m.k 'm.k body 'm.k which"`.
+    `ecl -e "(40 literal (-- value) 'k def) 'm @module m.k 'm.k body 'm.k which"`.
   - **Expected**: stdout shows `40` and a `m.k -> m.k def public` which
     line carrying `(-- value)`; `body` returns `([40] first)` with no distinct
     value-binding representation.
@@ -3084,8 +3091,8 @@ script in CI.
 - **DoD-46 — unit constructors are spelled with `@`**
   - **Assert**: `@attempt @spawn @each @module` are the only first-party
     `@`-spelled words and the only unit constructors; the old spellings
-    and every `-with` variant (`with @attempt`, `with @spawn`,
-    `with 'name @module`, and any `@…-with`) are `'undefined-word`; an
+    and every `-with` variant (`attempt-with`, `spawn-with`, `par-each-with`,
+    `module-with`, and any `@…-with`) are `'undefined-word`; an
     underflow at a unit-constructor substack base carries the guided
     isolation message suggesting `with` seeding or `partial`;
     `[1 2] [10] (|x a| x a +) with @each`
@@ -3097,8 +3104,9 @@ script in CI.
     as `### def <name>`.
   - **Verify by** `cmd`: `zig build source-audit` (the spelling
     manifest); e2e cases for one old spelling raising `'undefined-word`
-    and for `10 20 30 (+ +) @attempt` showing the guided error; the
-    snapshot corpus pins the exact guided error dict.
+    and for `10 20 30 (+ +) @attempt` showing the guided error; the same e2e
+    test runs `[1 2] [10] (|x a| x a +) with @each`; the snapshot corpus pins
+    the exact guided error dict.
   - **Expected**: audit exit 0; the old-spelling and guided-error cases
     match; `(q) @attempt` and `(q) @spawn await` produce structurally
     identical results on a success and an error fixture.
@@ -3113,10 +3121,11 @@ script in CI.
     `'domain`; a native effect declaring `...` fails validation; `...`
     is reserved on namespace introduction and inert as a value;
     `result.either` reflects a partial effect instead of doc-only.
-  - **Verify by** `cmd`: fixture cases defining module words with
-    `-- ...` effects, calling them across the module boundary with wrong
-    and right input arities; `'... def` and a native negative fixture;
-    `'case 'result qualify see` showing the sanctioned form.
+  - **Verify by** `cmd`: e2e cases define a module word with a `-- ...`
+    effect and call it across the module boundary with wrong and right input
+    arities; `(1) '... def` proves reservation while `'...` remains inert;
+    the native `partial_effect` compile-negative fixture rejects the row; and
+    `'result use 'result.either see` shows the sanctioned reflected form.
   - **Expected**: wrong input arity is a `'contract` error naming the
     declared before-slots; variable outputs pass; malformed placements
     are `'domain`; the native fixture is rejected at validation; `see`
@@ -3134,9 +3143,9 @@ script in CI.
     captured error dict unchanged; `result.map-error` and `result.case`
     do not exist; `raise`/`fail`/`assert` remain core.
   - **Verify by** `cmd`: the conformed `test/acceptance/result.ecl`
-    fixture plus snapshot cases for one old bare spelling, one
-    malformed-dict rejection, and one `result.or-raise` re-raise whose
-    error dict matches the originally captured one byte-for-byte.
+    fixture plus e2e cases for every old bare spelling, both removed qualified
+    spellings, one malformed-dict rejection, and one `result.or-raise` re-raise
+    whose error dict matches the originally captured one byte-for-byte.
   - **Expected**: old spellings error `'undefined-word`; the re-raised
     dict is structurally identical to the captured one; malformed input
     is rejected without running any supplied quotation.

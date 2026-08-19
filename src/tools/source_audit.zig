@@ -174,6 +174,7 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/wrong_return_type.zig",
     "test/native/negative/generic_callback.zig",
     "test/native/negative/malformed_effect.zig",
+    "test/native/negative/partial_effect.zig",
     "test/native/negative/output_arity_mismatch.zig",
     "test/native/negative/unknown_capability.zig",
     "test/native/negative/duplicate_word.zig",

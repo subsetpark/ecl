@@ -1272,6 +1272,9 @@ evidence; terminal acceptance does not replay those matrices. The exhaustive
 initialized-Session OOM gate runs once for a release candidate rather than on
 every pushed commit; focused component OOM probes remain in the ordinary test
 task.
+Repository verification classification includes every native SDK
+compile-negative input, including the fixture proving that native effects
+cannot declare the source-only `...` after-row.
 The root and e2e artifacts contain Minish properties, whose upstream runner
 prints a passing summary to stderr. A classified build-only child runner
 captures stderr on success and forwards stdout plus every real nonzero or
