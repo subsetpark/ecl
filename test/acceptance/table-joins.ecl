@@ -27,18 +27,24 @@ orders height pp
 # A left join emits one row per unmatched left row, completed only from the
 # caller's fill — the value is never invented.
 orders customers [["customer" "customer"] ["region" "region"]]
-  {"tier" 'null} left-join-with pp
+{"tier" 'null} left-join-with pp
 orders customers [["customer" "customer"] ["region" "region"]]
-  {"tier" "unknown"} left-join-with "tier" column pp
+{"tier" "unknown"} left-join-with "tier" column pp
 
 # The fill must name exactly the appended right columns: no fewer, no more.
 (orders customers [["customer" "customer"] ["region" "region"]] {} left-join-with)
-  @attempt 'err at 'kind at pp
+@attempt 'err at 'kind at pp
 (orders customers [["customer" "customer"] ["region" "region"]] {"tier" 'null "extra" 1}
-  left-join-with) @attempt 'err at 'kind at pp
+ left-join-with)
+@attempt
+'err
+at
+'kind
+at
+pp
 
 # A JSON null is ordinary data wherever it travels.
 customers "tier" column pp
 customers "tier" column 2 at type pp
 orders customers [["customer" "customer"] ["region" "region"]]
-  {"tier" 'null} left-join-with "tier" column 3 at pp
+{"tier" 'null} left-join-with "tier" column 3 at pp

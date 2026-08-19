@@ -37,11 +37,12 @@
 ### def with
 (((literal) each) dip append raze)
 (values quotation -- quotation :
- "Return a quotation that pushes every value from a list, in order and inertly, before running another quotation.
+ "Return a quotation that pushes every value from a list, in order and inertly, before running
+  another quotation.
 
-  This is how a unit constructor is seeded: an @ word gives its quotation a fresh stack, so
-  values (q) with @attempt, values (q) with @spawn, and values (body) with 'name @module hand
-  that unit exactly the values the caller chose to pass.")
+  This is how a unit constructor is seeded: an @ word gives its quotation a fresh stack, so values
+  (q) with @attempt, values (q) with @spawn, and values (body) with 'name @module hand that unit
+  exactly the values the caller chose to pass.")
 'with def
 
 ### def str
@@ -331,20 +332,17 @@
 
 ### def await-all
 ((await) each)
-(tasks -- results :
- "Wait for every task and return its result in input order.")
+(tasks -- results : "Wait for every task and return its result in input order.")
 'await-all def
 
 ### def set
 (swap literal swap def)
-(value name -- :
- "Bind a value as a constant word in the current scope.")
+(value name -- : "Bind a value as a constant word in the current scope.")
 'set def
 
 ### def setp
 (swap literal swap defp)
-(value name -- :
- "Bind a private module value as a constant word.")
+(value name -- : "Bind a private module value as a constant word.")
 'setp def
 
 ### def assert
@@ -355,12 +353,12 @@
 
 ### def lines
 (slurp "\n" split)
-(path -- list :
- "Read one UTF-8 file and split it into its newline-separated lines.")
+(path -- list : "Read one UTF-8 file and split it into its newline-separated lines.")
 'lines def
 
 ### def rotate
 (|xs n| xs dup len range n + dup len mod dup len + dup len mod at)
 (list count -- rotated :
- "Rotate a list left by a count, wrapping cyclically; a negative count rotates right and an empty list is returned unchanged.")
+ "Rotate a list left by a count, wrapping cyclically; a negative count rotates right and an empty
+  list is returned unchanged.")
 'rotate def

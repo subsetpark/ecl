@@ -65,8 +65,7 @@
 
  ### def or-raise
  (checked dup 'ok has? ('ok at) ('err at raise) if)
- (result -- values :
-  "Return a success payload, or re-raise the captured error dict unchanged.")
+ (result -- values : "Return a success payload, or re-raise the captured error dict unchanged.")
  'or-raise def
 
  ### def or-else
@@ -84,10 +83,10 @@
   "Seed a success payload back onto an isolated stack and run the quotation, returning an existing
    failure unchanged.
 
-   There is no separate map: @attempt's automatic {'ok [...]} wrapping collapses the functor map
-   and the monadic bind into this one word on the success side. The distinction survives only on
-   the failure side, which is why that side carries both map-err, which rewraps and never leaves
-   the failure arm, and recover, which can replace the outcome.")
+   There is no separate map: @attempt's automatic {'ok [...]} wrapping collapses the functor map and
+   the monadic bind into this one word on the success side. The distinction survives only on the
+   failure side, which is why that side carries both map-err, which rewraps and never leaves the
+   failure arm, and recover, which can replace the outcome.")
  'and-then def
 
  ### def map-err

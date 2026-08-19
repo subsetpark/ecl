@@ -1,19 +1,39 @@
 ### A counter whose durable stack is one integer.
-[5] (
-  ((1 +) within) 'tick def
-  ((dup without) within) 'peek def
-) with 'counter @module
+
+### module counter
+[5]
+(
+ ### def tick
+ ((1 +) within) 'tick def
+
+ ### def peek
+ ((dup without) within) 'peek def
+ )
+with
+'counter
+@module
 counter.tick
 counter.peek pp
 
 ### Re-registration proposes a different initial stack and different code.
 ### The proposal is discarded and the retained stack is what the new code
 ### operates on.
-[900] (
-  ((10 +) within) 'tick def
-  ((dup without) within) 'peek def
-  ((dup 2 * without) within) 'doubled def
-) with 'counter @module
+
+### module counter
+[900]
+(
+ ### def tick
+ ((10 +) within) 'tick def
+
+ ### def peek
+ ((dup without) within) 'peek def
+
+ ### def doubled
+ ((dup 2 * without) within) 'doubled def
+ )
+with
+'counter
+@module
 counter.peek pp
 counter.tick
 counter.peek pp
@@ -21,15 +41,34 @@ counter.doubled pp
 
 ### Replacement code may migrate the retained representation with an
 ### ordinary first transactional update; the runtime names no positions.
-[0] (
-  ((dup 100 * swap pop) within) 'migrate def
-  ((dup without) within) 'peek def
-) with 'counter @module
+
+### module counter
+[0]
+(
+ ### def migrate
+ ((dup 100 * swap pop) within) 'migrate def
+
+ ### def peek
+ ((dup without) within) 'peek def
+ )
+with
+'counter
+@module
 counter.migrate
 counter.peek pp
 
 ### A failed registration changes neither the code generation nor the state.
-(((1 2) (bad -- shape -- here) 'x def) 'counter @module) @attempt 'err at 'kind at pp
+((
+  ### def x
+  (1 2) (bad -- shape -- here) 'x def)
+ 'counter
+ @module)
+@attempt
+'err
+at
+'kind
+at
+pp
 counter.peek pp
 counter.migrate
 counter.peek pp

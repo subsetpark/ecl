@@ -45,7 +45,8 @@
  'checked-pair defp
 
  ### def checked-triple
- (type-error (|a b c failure|
+ (type-error
+  (|a b c failure|
    a failure checked-error pop b failure checked-error pop c failure checked-error pop a b c)
   call)
  (first second third message -- first second third :
@@ -53,7 +54,8 @@
  'checked-triple defp
 
  ### def checked-string-int
- (type-error (|text integer failure|
+ (type-error
+  (|text integer failure|
    text failure checked-error pop integer failure checked-int pop text integer)
   call)
  (text integer message -- text integer :

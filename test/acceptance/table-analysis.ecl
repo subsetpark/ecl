@@ -30,7 +30,7 @@ derived [] group-by pp
 # Aggregation returns key columns first, then one column per specification in
 # the order given, one row per group.
 derived ["region"]
-  [["revenue" "revenue" (sum)] ["count" "revenue" (len)] ["mean" "revenue" (mean)]]
-  aggregate pp
+[["revenue" "revenue" (sum)] ["count" "revenue" (len)] ["mean" "revenue" (mean)]]
+aggregate pp
 large ["region"] [["revenue" "revenue" (sum)]] aggregate pp
 derived [] [["total" "revenue" (sum)] ["rows" "revenue" (len)]] aggregate pp

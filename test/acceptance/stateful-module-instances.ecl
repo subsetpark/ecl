@@ -1,9 +1,16 @@
 ### One body quotation, two independently seeded counter slots.
 (
-  ((swap + dup without) partial within) 'add def
-  ((dup without) within) 'peek def
-  ((1 +) within) 'tick def
-) 'counter-body set
+ ### def add
+ ((swap + dup without) partial within) 'add def
+
+ ### def peek
+ ((dup without) within) 'peek def
+
+ ### def tick
+ ((1 +) within) 'tick def
+ )
+'counter-body
+set
 
 [10] counter-body with 'left @module
 [100] counter-body with 'right @module
@@ -17,18 +24,41 @@ left.peek pp
 right.peek pp
 
 ### Namespaced modules and dynamic dispatch use the same final-dot lookup.
-((0) 'utils def) 'core @module
-((1) 'f def) 'core.utils @module
+
+### module core
+(
+ ### def utils
+ (0) 'utils def)
+'core
+@module
+
+### module core.utils
+(
+ ### def f
+ (1) 'f def)
+'core.utils
+@module
 core.utils pp
 'core.utils 'f qualify dup type pp execute pp
 
 ### A pool built from `with`: checkout moves a value outward, checkin
 ### returns one, and both are ordinary transactional updates.
-[['a 'b 'c]] (
-  ((uncons swap without) within) 'checkout def
-  ((append) partial within) 'checkin def
-  ((dup len without) within) 'size def
-) with 'pool @module
+
+### module pool
+[['a 'b 'c]]
+(
+ ### def checkout
+ ((uncons swap without) within) 'checkout def
+
+ ### def checkin
+ ((append) partial within) 'checkin def
+
+ ### def size
+ ((dup len without) within) 'size def
+ )
+with
+'pool
+@module
 pool.size pp
 pool.checkout pp
 pool.size pp

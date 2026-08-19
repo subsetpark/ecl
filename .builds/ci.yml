@@ -25,6 +25,23 @@ tasks:
       set -o pipefail
       cd ecl
       zig fmt --check .
+  - fmt-ecl: |
+      set -eu
+      set -o pipefail
+      cd ecl
+      zig build
+      formatted="$(mktemp)"
+      trap 'rm -f "$formatted"' EXIT
+      # This parser fixture is deliberately invalid input, so it has no canonical format.
+      git ls-files '*.ecl' ':!:test/acceptance/load-parse-error.ecl' |
+        while IFS= read -r source; do
+          ./zig-out/bin/ecl fmt "$source" > "$formatted"
+          if ! cmp -s "$source" "$formatted"; then
+            diff -u "$source" "$formatted" || true
+            echo "ecl fmt check failed: $source" >&2
+            exit 1
+          fi
+        done
   - test: |
       set -eu
       set -o pipefail
