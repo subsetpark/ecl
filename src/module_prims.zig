@@ -21,7 +21,7 @@ const removal_poll_quantum: usize = 256;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]Definition{
-        .{ .name = "module", .primitive = moduleWord },
+        .{ .name = "@module", .primitive = moduleWord },
         .{ .name = "unmodule", .primitive = unmoduleWord },
         .{ .name = "within", .primitive = withinWord },
         .{ .name = "without", .primitive = withoutWord },
@@ -35,9 +35,11 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 }
 fn moduleWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
+    // Name-last, matching `def` and `set`: the bound name sits nearest the
+    // binder, so a seeded registration needs no shuffle above `with`.
+    const name = try evaluator.popSymbol();
     var body = try evaluator.popQuotation();
     defer body.deinit();
-    const name = try evaluator.popSymbol();
     try evaluator.startDriver(ModuleStartDriver{
         .body = .init(body.take().list),
         .validation = .init(name),

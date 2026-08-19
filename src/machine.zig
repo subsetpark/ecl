@@ -10,9 +10,11 @@ const env = @import("env.zig");
 const modules = @import("modules.zig");
 const native_call = @import("native_call.zig");
 const native_module = @import("native_module.zig");
+const native_abi = @import("native-abi");
 const reader = @import("reader.zig");
 const reader_cursor = @import("reader_cursor.zig");
 const poll_api = @import("poll.zig");
+const stdlib = @import("stdlib.zig");
 const reflection = @import("reflection.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
@@ -54,9 +56,12 @@ const ErrorSite = struct {
     code: *Header,
     index: u32,
 };
+pub const UnitConstructor = enum { spawn, each };
+
 const ErrorDataKey = enum {
     needed,
     available,
+    isolation,
     name,
     path,
     seeded,
@@ -739,7 +744,15 @@ pub fn stringValue(
 const Eval = struct {
     code: *Header,
     ip: u32,
+    /// Where this body's own definitions land, and the chain it hands to any
+    /// quotation it invokes on a caller's behalf.
     scope: *env.Scope,
+    /// Where this body's *word references* resolve. For a module word that is
+    /// its home; for a core or prelude word it is the lexical chain that word
+    /// was defined against, never whatever environment happens to be
+    /// executing. Separating the two is what stops a module's exports from
+    /// reaching inside the prelude words it calls.
+    resolution_scope: *env.Scope,
     home: ?*modules.ModuleHome,
     traced_word: u32,
 };
@@ -838,6 +851,9 @@ pub const EffectCheck = struct {
     inputs: u32,
     outputs: u32,
     word: u32,
+    /// An anonymous after row is an input-only contract: entry consumption is
+    /// still verified, the post-condition compare is skipped.
+    row: bool = false,
 };
 pub const StackWindow = enum(u32) {
     _,
@@ -951,6 +967,11 @@ pub const Frame = union(enum(u8)) {
         name: intern.ModuleName,
         path: Value,
     },
+    qualified_after_load: struct {
+        loading: modules.LoadingLease,
+        name: intern.ModuleName,
+        path: Value,
+    },
     boundary: Boundary,
     fn deinit(self: Frame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -958,6 +979,11 @@ pub const Frame = union(enum(u8)) {
             .effect_check => {},
             .application => |frame| frame.deinit(releases, allocator),
             .use_after_load => |frame| {
+                var loading = frame.loading;
+                loading.deinit();
+                releases.releaseValue(frame.path);
+            },
+            .qualified_after_load => |frame| {
                 var loading = frame.loading;
                 loading.deinit();
                 releases.releaseValue(frame.path);
@@ -1026,8 +1052,64 @@ pub const InheritedContext = struct {
     console: ?*console_api.Console = null,
     host_io: ?std.Io = null,
     ecl_path: ?[]const u8 = null,
+    environ: ?*const Environ = null,
+    standard_input: ?*StandardInput = null,
     idiom_mode: IdiomMode = .automatic,
     phrase_recognizer: ?PhraseRecognizer = null,
+};
+
+/// One immutable snapshot of the host environment, captured once at session
+/// init. `getenv` reads only this snapshot, so a session observes one
+/// deterministic environment and no primitive ever races a host `setenv`.
+pub const Environ = struct {
+    pub const Entry = struct { name: []const u8, value: []const u8 };
+
+    entries: []const Entry = &.{},
+
+    /// Resumable lookup: the environment block is host-sized rather than
+    /// constant, so the scan yields on the ordinary polled budget.
+    pub const LookupCursor = struct {
+        entries: []const Entry,
+        name: []const u8,
+        index: usize = 0,
+
+        pub fn advance(self: *LookupCursor, budget: usize) poll_api.Progress(?[]const u8) {
+            std.debug.assert(budget != 0);
+            var remaining = budget;
+            while (remaining != 0 and self.index != self.entries.len) : (remaining -= 1) {
+                const entry = self.entries[self.index];
+                self.index += 1;
+                if (std.mem.eql(u8, entry.name, self.name)) return .{ .complete = entry.value };
+            }
+            if (self.index == self.entries.len) return .{ .complete = null };
+            return .pending;
+        }
+    };
+
+    pub fn lookupCursor(self: *const Environ, name: []const u8) LookupCursor {
+        return .{ .entries = self.entries, .name = name };
+    }
+};
+
+/// Whole-stream standard input. The stream is claimable exactly once per
+/// session, and only in the CLI modes where stdin is not itself the program
+/// source; both refusals are ordinary `'io` errors rather than a partial
+/// read of a stream something else already owns.
+pub const StandardInput = struct {
+    pub const Availability = enum { data, program_source };
+    pub const Claim = enum { granted, program_source, already_read };
+
+    availability: Availability,
+    claimed: std.atomic.Value(bool) = .init(false),
+
+    pub fn init(availability: Availability) StandardInput {
+        return .{ .availability = availability };
+    }
+    pub fn claim(self: *StandardInput) Claim {
+        if (self.availability == .program_source) return .program_source;
+        if (self.claimed.swap(true, .seq_cst)) return .already_read;
+        return .granted;
+    }
 };
 
 fn IdiomFallbackAdapters(comptime Driver: type) type {
@@ -1491,6 +1573,8 @@ pub const Unit = struct {
     scheduler: ?*const anyopaque = null,
     task_scope: ?*anyopaque = null,
     is_root_unit: bool = true,
+    /// For a child unit, the `@` word that constructed it.
+    constructor: UnitConstructor = .spawn,
     execution_scope: ?*env.Scope = null,
     native: NativeContinuation = .idle,
     /// The one state application this unit may own. `within` refuses to
@@ -1543,6 +1627,14 @@ pub const Unit = struct {
 
     fn rootScope(self: *Unit) *env.Scope {
         return self.lifetime.rootScope();
+    }
+
+    /// The chain a homeless binding — a primitive or an embedded prelude
+    /// definition — resolves against. It is the session root over core, so
+    /// session-level redefinition still reaches prelude bodies while a module
+    /// body executing further down the stack does not.
+    pub fn lexicalScope(self: *Unit) *env.Scope {
+        return self.execution_scope orelse self.rootScope();
     }
 
     /// Replaces a stopped root unit's operands from a stable borrowed
@@ -1965,11 +2057,27 @@ pub const Machine = struct {
     pub fn useOrLoad(self: *Machine, name: intern.ModuleName) MachineError!void {
         try self.startDriver(UseDriver.init(self, self.currentScope(), name, true));
     }
-    fn autoLoadModule(self: *Machine, name: intern.ModuleName) MachineError!void {
+    /// What a completed auto-load owes its caller. `use` splices the loaded
+    /// module's exports into a scope; a bare qualified reference only needs
+    /// the module registered before the word is retried once.
+    /// What a completed auto-load owes its caller, and how a failed one is
+    /// reported. `use` names the module; a bare qualified reference names the
+    /// word, so a misspelled dotted name still costs one bounded search and
+    /// then reads as an undefined word.
+    const AutoLoadAfter = union(enum) {
+        use,
+        qualified: u32,
+    };
+    fn autoLoadModule(
+        self: *Machine,
+        name: intern.ModuleName,
+        after: AutoLoadAfter,
+    ) MachineError!void {
         const registry = self.unit.inherited.registry orelse return self.undefinedModule(intern.moduleId(name));
         try self.startDriver(AutoLoadDriver{
             .name = name,
-            .cursor = registry.beginLoadingCursor(name),
+            .after = after,
+            .cursor = registry.beginLoadingCursor(name, .of(self.unit)),
         });
     }
     const AutoLoadDriver = struct {
@@ -1977,7 +2085,9 @@ pub const Machine = struct {
         const FilenameTarget = enum { component_start, candidate };
 
         name: intern.ModuleName,
+        after: AutoLoadAfter,
         cursor: modules.Registry.BeginLoadingCursor,
+        embedded: ?stdlib.Entry = null,
         loading: ?heap.Owned(modules.LoadingLease) = null,
         filename: ?heap.Owned([]u8) = null,
         filename_index: usize = 0,
@@ -1992,7 +2102,18 @@ pub const Machine = struct {
         path_materializer: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
         path_value: ?heap.Owned(Value) = null,
         access_error: ?[]const u8 = null,
-        phase: enum { begin, filename, component_start, component_end, candidate, access, path_value, transfer } = .begin,
+        registration: ?heap.Owned(modules.Registry.AcquireCursor) = null,
+        phase: enum {
+            begin,
+            registered,
+            filename,
+            component_start,
+            component_end,
+            candidate,
+            access,
+            path_value,
+            transfer,
+        } = .begin,
 
         fn resetCandidate(self: *AutoLoadDriver, evaluator: *Machine) void {
             if (self.candidate) |*candidate| candidate.deinit(
@@ -2039,20 +2160,132 @@ pub const Machine = struct {
             self.candidate = .init(try evaluator.unit.allocator.alloc(u8, length));
             self.phase = .candidate;
         }
+        /// Embedded modules reuse the candidate slot for their provenance
+        /// name, so the existing `.path_value` phase materializes exactly the
+        /// value the load continuation reports as `'path`.
+        fn beginEmbedded(
+            self: *AutoLoadDriver,
+            evaluator: *Machine,
+            entry: stdlib.Entry,
+        ) error{OutOfMemory}!void {
+            const provenance = switch (entry) {
+                .source => |source| source.name,
+                .native, .builtin => intern.get(intern.moduleId(self.name)),
+            };
+            self.candidate = .init(try evaluator.unit.allocator.dupe(u8, provenance));
+            self.embedded = entry;
+            self.path_materializer = .init(.init(
+                evaluator.unit.allocator,
+                self.candidate.?.borrow(),
+            ));
+            self.phase = .path_value;
+        }
+        /// The module is already registered, so this driver publishes
+        /// nothing. `use` still has to splice the exports it came for; a
+        /// qualified reference only needed the module to exist.
+        fn finishWithoutLoading(
+            self: *AutoLoadDriver,
+            evaluator: *Machine,
+        ) MachineError!WorkProgress {
+            switch (self.after) {
+                .use => {
+                    var next = UseDriver.init(evaluator, evaluator.currentScope(), self.name, false);
+                    next.after_load = .init(.{
+                        .loading = self.loading.?.borrowMut().move(),
+                        .path = try stringValue(
+                            evaluator.allocator(),
+                            evaluator.releaseDomain(),
+                            intern.get(intern.moduleId(self.name)),
+                        ),
+                    });
+                    self.loading = null;
+                    evaluator.detachWorkDriver(self);
+                    heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+                    try evaluator.startDriver(next);
+                    return .detached;
+                },
+                .qualified => {
+                    self.loading.?.borrowMut().finish();
+                    return .completed;
+                },
+            }
+        }
+        fn notFound(self: *AutoLoadDriver, evaluator: *Machine) MachineError {
+            return switch (self.after) {
+                .use => evaluator.undefinedModule(intern.moduleId(self.name)),
+                .qualified => |word| evaluator.undefinedWord(word),
+            };
+        }
+        fn useCompletion(self: *AutoLoadDriver) SourceCompletion {
+            return switch (self.after) {
+                .use => .{ .use = .{
+                    .name = self.name,
+                    .loading = self.loading.?.borrowMut().move(),
+                    .path = self.path_value.?.take(),
+                } },
+                .qualified => .{ .register = .{
+                    .loading = self.loading.?.borrowMut().move(),
+                    .name = self.name,
+                    .path = self.path_value.?.take(),
+                } },
+            };
+        }
         pub fn advance(evaluator: *Machine, self: *AutoLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             var budget: usize = kernel_poll_quantum;
             while (budget != 0) : (budget -= 1) switch (self.phase) {
                 .begin => switch (try self.cursor.advance()) {
                     .pending => {},
-                    .complete => |maybe_loading| {
-                        self.loading = .init(maybe_loading orelse return evaluator.failFmt(
+                    .complete => |outcome| switch (outcome) {
+                        .cycle => return evaluator.failFmt(
                             .domain,
                             "recursive auto-load of module `{s}`",
                             .{intern.get(intern.moduleId(self.name))},
-                        ));
+                        ),
+                        // Another unit is loading this name. Wait for it
+                        // rather than publishing a second copy; the recheck
+                        // below is what makes the winner's work count.
+                        .contended => {
+                            self.cursor.deinit();
+                            self.cursor = evaluator.unit.inherited.registry.?.beginLoadingCursor(
+                                self.name,
+                                .of(evaluator.unit),
+                            );
+                            return .yielded;
+                        },
+                        .granted => |lease| {
+                            self.loading = .init(lease);
+                            self.registration = .init(
+                                evaluator.unit.inherited.registry.?.acquireCursor(self.name),
+                            );
+                            self.phase = .registered;
+                        },
+                    },
+                },
+                // A load that raced a winner has nothing left to do: the
+                // caller re-resolves against the module the winner published.
+                .registered => switch (self.registration.?.borrowMut().advance()) {
+                    .pending => {},
+                    .complete => |maybe_generation| {
+                        self.registration.?.deinit(
+                            evaluator.releaseDomain(),
+                            evaluator.allocator(),
+                        );
+                        self.registration = null;
+                        if (maybe_generation) |generation| {
+                            var lease = generation;
+                            lease.deinit();
+                            return self.finishWithoutLoading(evaluator);
+                        }
+                        // The embedded manifest is consulted before the
+                        // search path: a stdlib name resolves with no host IO
+                        // and no ECL_PATH, and no path module can shadow one.
+                        if (stdlib.find(intern.get(intern.moduleId(self.name)))) |entry| {
+                            try self.beginEmbedded(evaluator, entry);
+                            continue;
+                        }
                         if (evaluator.unit.inherited.host_io == null or evaluator.unit.inherited.ecl_path == null)
-                            return evaluator.undefinedModule(intern.moduleId(self.name));
+                            return self.notFound(evaluator);
                         try self.beginFilename(evaluator, .source, .component_start);
                     },
                 },
@@ -2075,7 +2308,7 @@ pub const Machine = struct {
                 },
                 .component_start => {
                     const search = evaluator.unit.inherited.ecl_path.?;
-                    if (self.search_index == search.len) return evaluator.undefinedModule(intern.moduleId(self.name));
+                    if (self.search_index == search.len) return self.notFound(evaluator);
                     if (search[self.search_index] == std.fs.path.delimiter) {
                         self.search_index += 1;
                     } else {
@@ -2154,13 +2387,10 @@ pub const Machine = struct {
                     },
                 },
                 .transfer => {
+                    if (self.embedded) |entry| return self.transferEmbedded(evaluator, entry);
                     if (self.file_kind == .native) return self.transferNative(evaluator);
                     const candidate = self.candidate.?.take();
-                    const completion: SourceCompletion = .{ .use = .{
-                        .name = self.name,
-                        .loading = self.loading.?.borrowMut().move(),
-                        .path = self.path_value.?.take(),
-                    } };
+                    const completion = self.useCompletion();
                     self.candidate = null;
                     self.loading = null;
                     self.path_value = null;
@@ -2171,6 +2401,89 @@ pub const Machine = struct {
                 },
             };
             return .yielded;
+        }
+        /// The manifest owns constant bytes, and `sourceOwned` frees what it
+        /// is given, so the text is duped for the reader to consume. A linked
+        /// descriptor needs no transport at all: `startStatic` publishes it
+        /// through the same validate/publish/commit phases as a dynamic
+        /// image, with a no-op image pin.
+        fn transferEmbedded(
+            self: *AutoLoadDriver,
+            evaluator: *Machine,
+            entry: stdlib.Entry,
+        ) MachineError!WorkProgress {
+            const text = switch (entry) {
+                .source => |source| try evaluator.unit.allocator.dupe(u8, source.text),
+                .native => |descriptor| return self.transferStatic(evaluator, descriptor),
+                .builtin => |words| return self.transferBuiltin(evaluator, words),
+            };
+            const source_name = self.candidate.?.take();
+            const completion = self.useCompletion();
+            self.candidate = null;
+            self.loading = null;
+            self.path_value = null;
+            evaluator.detachWorkDriver(self);
+            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            try evaluator.sourceOwned(source_name, text, completion);
+            return .detached;
+        }
+        fn transferBuiltin(
+            self: *AutoLoadDriver,
+            evaluator: *Machine,
+            words: []const env.BuiltinWord,
+        ) MachineError!WorkProgress {
+            // The candidate is created before ownership moves: struct-literal
+            // fields evaluate in order, so a failure here would otherwise
+            // strand the lease and path this driver had already taken.
+            const publication = try modules.Registry.BuiltinCandidateCursor.init(
+                evaluator.unit.inherited.registry.?,
+                self.name,
+                words,
+            );
+            // No errdefer: from here nothing fails until `startDriver`, which
+            // disposes the whole uninstalled driver's owned fields itself.
+            const next = BuiltinLoadDriver{
+                .name = self.name,
+                .after = self.after,
+                .loading = .init(self.loading.?.take()),
+                .path = .init(self.path_value.?.take()),
+                .publication = .init(publication),
+            };
+            self.loading = null;
+            self.path_value = null;
+            evaluator.detachWorkDriver(self);
+            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            try evaluator.startDriver(next);
+            return .detached;
+        }
+        fn transferStatic(
+            self: *AutoLoadDriver,
+            evaluator: *Machine,
+            descriptor: *const native_abi.Descriptor,
+        ) MachineError!WorkProgress {
+            const loader_authority = evaluator.unit.inherited.native_loader orelse
+                return evaluator.fail(.io, "native module loader is unavailable");
+            const loader = switch (loader_authority.startStatic(self.name, descriptor)) {
+                .failure => |failure| {
+                    const failed = evaluator.fail(.io, failure.text());
+                    evaluator.unit.pending.?.addData(.path, self.path_value.?.borrow());
+                    return failed;
+                },
+                .loading => |loading| loading,
+            };
+            const next = NativeLoadDriver{
+                .name = self.name,
+                .after = self.after,
+                .loader = .init(loader),
+                .loading = .init(self.loading.?.take()),
+                .path = .init(self.path_value.?.take()),
+            };
+            self.loading = null;
+            self.path_value = null;
+            evaluator.detachWorkDriver(self);
+            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            try evaluator.startDriver(next);
+            return .detached;
         }
         fn transferNative(self: *AutoLoadDriver, evaluator: *Machine) MachineError!WorkProgress {
             const loader_authority = evaluator.unit.inherited.native_loader orelse
@@ -2189,6 +2502,7 @@ pub const Machine = struct {
             };
             const next = NativeLoadDriver{
                 .name = self.name,
+                .after = self.after,
                 .loader = .init(loader),
                 .loading = .init(self.loading.?.take()),
                 .path = .init(self.path_value.?.take()),
@@ -2200,8 +2514,76 @@ pub const Machine = struct {
         }
         pub const ownership: heap.DriverOwnership = .fields;
     };
+    /// Publishes a builtin-backed module through the same candidate/commit
+    /// protocol as a native one; only the definition source differs.
+    const BuiltinLoadDriver = struct {
+        name: intern.ModuleName,
+        after: AutoLoadAfter,
+        loading: heap.Owned(modules.LoadingLease),
+        path: heap.Owned(Value),
+        publication: heap.Owned(modules.Registry.BuiltinCandidateCursor),
+        candidate: ?heap.Owned(modules.OwnedCandidate) = null,
+        commit: ?heap.Owned(modules.Registry.CommitCursor) = null,
+
+        pub fn advance(evaluator: *Machine, self: *BuiltinLoadDriver) MachineError!WorkProgress {
+            try evaluator.pollKernel();
+            if (self.commit == null) {
+                if (self.candidate == null) {
+                    switch (self.publication.borrowMut().advance() catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.InvalidName => return evaluator.fail(
+                            .contract,
+                            "builtin module declares an invalid word name",
+                        ),
+                    }) {
+                        .pending => return .yielded,
+                        .complete => |candidate| {
+                            self.candidate = .init(candidate);
+                            return .yielded;
+                        },
+                    }
+                }
+                self.commit = .init(evaluator.unit.inherited.registry.?.commitCursor(
+                    self.candidate.?.borrowMut(),
+                    &evaluator.unit.turn_authority,
+                ));
+                return .yielded;
+            }
+            switch (self.commit.?.borrowMut().advance() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return evaluator.failFmt(
+                    .io,
+                    "cannot publish builtin module `{s}`: {s}",
+                    .{ intern.get(intern.moduleId(self.name)), @errorName(err) },
+                ),
+            }) {
+                .pending => return .yielded,
+                .complete => {},
+            }
+            self.commit.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            self.commit = null;
+            switch (self.after) {
+                .qualified => {
+                    self.loading.borrowMut().finish();
+                    return .completed;
+                },
+                .use => {},
+            }
+            var next = UseDriver.init(evaluator, evaluator.currentScope(), self.name, false);
+            next.after_load = .init(.{
+                .loading = self.loading.take(),
+                .path = self.path.take(),
+            });
+            evaluator.detachWorkDriver(self);
+            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            try evaluator.startDriver(next);
+            return .detached;
+        }
+        pub const ownership: heap.DriverOwnership = .fields;
+    };
     const NativeLoadDriver = struct {
         name: intern.ModuleName,
+        after: AutoLoadAfter,
         loader: heap.Owned(native_module.LoadCursor),
         loading: heap.Owned(modules.LoadingLease),
         path: heap.Owned(Value),
@@ -2259,6 +2641,15 @@ pub const Machine = struct {
                     .complete => {
                         self.commit.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.commit = null;
+                        // A qualified reference asked only that the module
+                        // exist; splicing its exports is `use`'s job alone.
+                        switch (self.after) {
+                            .qualified => {
+                                self.loading.borrowMut().finish();
+                                return .completed;
+                            },
+                            .use => {},
+                        }
                         var next = UseDriver.init(evaluator, evaluator.currentScope(), self.name, false);
                         next.after_load = .init(.{
                             .loading = self.loading.take(),
@@ -2361,7 +2752,7 @@ pub const Machine = struct {
             evaluator.detachWorkDriver(self);
             heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
             if (allow_load) {
-                try evaluator.autoLoadModule(name);
+                try evaluator.autoLoadModule(name, .use);
             } else {
                 const failure = evaluator.undefinedModule(intern.moduleId(name));
                 if (path) |item| evaluator.unit.pending.?.addData(.path, item);
@@ -2519,6 +2910,15 @@ pub const Machine = struct {
             loading: ?modules.LoadingLease,
             path: ?Value,
         },
+        /// Registration only: the source runs, the loading lease is
+        /// released, and one qualified word is retried. Nothing is spliced
+        /// into the caller's scope, which is what keeps a bare qualified
+        /// reference distinct from `use`.
+        register: struct {
+            loading: ?modules.LoadingLease,
+            name: intern.ModuleName,
+            path: ?Value,
+        },
 
         pub fn deinit(self: *SourceCompletion, releases: *heap.ReleaseDomain) void {
             switch (self.*) {
@@ -2526,6 +2926,10 @@ pub const Machine = struct {
                 .use => |*use| {
                     if (use.loading) |*loading| loading.deinit();
                     if (use.path) |path| releases.releaseValue(path);
+                },
+                .register => |*register| {
+                    if (register.loading) |*loading| loading.deinit();
+                    if (register.path) |path| releases.releaseValue(path);
                 },
             }
             self.* = undefined;
@@ -2653,6 +3057,36 @@ pub const Machine = struct {
                                 .code = self.root_header.?,
                                 .ip = 0,
                                 .scope = scope,
+                                .resolution_scope = scope,
+                                .home = home,
+                                .traced_word = no_word,
+                            };
+                        },
+                        .register => |*register| {
+                            const scope = evaluator.unit.current.?.scope;
+                            const home = evaluator.unit.current.?.home;
+                            heap.incRef(self.root_header.?);
+                            _ = evaluator.suspendCurrent() catch {
+                                evaluator.releaseDomain().releaseHeader(self.root_header.?);
+                                return error.OutOfMemory;
+                            };
+                            var continuation = OwnedFrame.init(.{ .qualified_after_load = .{
+                                .loading = register.loading.?.move(),
+                                .name = register.name,
+                                .path = register.path.?,
+                            } });
+                            defer continuation.deinit(evaluator.releaseDomain(), self.allocator);
+                            register.loading = null;
+                            register.path = null;
+                            evaluator.appendFrame(&continuation) catch {
+                                evaluator.releaseDomain().releaseHeader(self.root_header.?);
+                                return error.OutOfMemory;
+                            };
+                            evaluator.unit.current = .{
+                                .code = self.root_header.?,
+                                .ip = 0,
+                                .scope = scope,
+                                .resolution_scope = scope,
                                 .home = home,
                                 .traced_word = no_word,
                             };
@@ -2712,7 +3146,11 @@ pub const Machine = struct {
         pub const ownership: heap.DriverOwnership = .bounded_retirement;
     };
     pub fn loadFileOwned(self: *Machine, path: []u8, path_value: Value) MachineError!void {
-        return self.fileSourceOwned(path, path_value, .call);
+        return self.fileTransferOwned(path, path_value, .{ .source = .call });
+    }
+    /// Consumes `path`, `path_value`, and `transfer` on success and failure.
+    pub fn slurpFileOwned(self: *Machine, path: []u8, path_value: Value) MachineError!void {
+        return self.fileTransferOwned(path, path_value, .text);
     }
     fn fileSourceOwned(
         self: *Machine,
@@ -2720,27 +3158,60 @@ pub const Machine = struct {
         path_value: ?Value,
         completion: SourceCompletion,
     ) MachineError!void {
+        return self.fileTransferOwned(path, path_value, .{ .source = completion });
+    }
+    fn fileTransferOwned(
+        self: *Machine,
+        path: []u8,
+        path_value: ?Value,
+        transfer: FileTransfer,
+    ) MachineError!void {
         if (self.unit.inherited.host_io == null) {
             const failure = self.fail(.io, "filesystem access is unavailable");
-            if (path_value) |item| {
+            if (path_value) |item|
+                self.unit.pending.?.addData(.path, item)
+            else if (transfer.diagnosticPath()) |item|
                 self.unit.pending.?.addData(.path, item);
-            } else switch (completion) {
-                .use => |use| if (use.path) |item| self.unit.pending.?.addData(.path, item),
-                .push, .call => {},
-            }
             self.unit.allocator.free(path);
             if (path_value) |item| self.releaseDomain().releaseValue(item);
-            var completion_cleanup = completion;
-            completion_cleanup.deinit(self.releaseDomain());
+            var transfer_cleanup = transfer;
+            transfer_cleanup.deinit(self.releaseDomain());
             return failure;
         }
         try self.startDriver(FileSourceDriver{
             .allocator = self.unit.allocator,
             .path = .init(path),
             .path_value = if (path_value) |item| .init(item) else null,
-            .completion = .init(completion),
+            .transfer = .init(transfer),
         });
     }
+    /// What one read file's bytes become. Both arms are ordinary results of
+    /// the same open/size/read pipeline, so only the terminal handoff differs
+    /// and no second file driver has to repeat the bounded read phases.
+    const FileTransfer = union(enum) {
+        /// Hand the bytes to the reader as source text.
+        source: SourceCompletion,
+        /// Materialize the bytes as one string on the operand stack.
+        text,
+
+        pub fn deinit(self: *FileTransfer, releases: *heap.ReleaseDomain) void {
+            switch (self.*) {
+                .source => |*completion| completion.deinit(releases),
+                .text => {},
+            }
+            self.* = undefined;
+        }
+        fn diagnosticPath(self: FileTransfer) ?Value {
+            return switch (self) {
+                .source => |completion| switch (completion) {
+                    .use => |use| use.path,
+                    .register => |register| register.path,
+                    .push, .call => null,
+                },
+                .text => null,
+            };
+        }
+    };
     const OpenFile = struct {
         io: std.Io,
         file: std.Io.File,
@@ -2753,19 +3224,17 @@ pub const Machine = struct {
         allocator: std.mem.Allocator,
         path: heap.Owned([]u8),
         path_value: ?heap.Owned(Value),
-        completion: heap.Owned(SourceCompletion),
+        transfer: heap.Owned(FileTransfer),
         open_file: ?heap.Owned(OpenFile) = null,
         file_reader: ?std.Io.File.Reader = null,
         source: ?heap.Owned([]u8) = null,
+        text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
         offset: usize = 0,
-        phase: enum { open, size, read, transfer } = .open,
+        phase: enum { open, size, read, transfer, text } = .open,
 
         fn diagnosticPath(self: *FileSourceDriver) ?Value {
             if (self.path_value) |*item| return item.borrow();
-            return switch (self.completion.borrow()) {
-                .use => |use| use.path,
-                .push, .call => null,
-            };
+            return self.transfer.borrow().diagnosticPath();
         }
         fn failIo(self: *FileSourceDriver, evaluator: *Machine, message: []const u8) MachineError {
             const failure = evaluator.fail(.io, message);
@@ -2834,9 +3303,17 @@ pub const Machine = struct {
                     return .yielded;
                 },
                 .transfer => {
+                    switch (self.transfer.borrow()) {
+                        .text => {
+                            self.text = .init(.init(self.allocator, self.source.?.borrow()));
+                            self.phase = .text;
+                            return .yielded;
+                        },
+                        .source => {},
+                    }
                     const path = self.path.take();
                     const source = self.source.?.take();
-                    const completion = self.completion.take();
+                    const completion = self.transfer.take().source;
                     self.source = null;
                     if (self.path_value) |*item| item.deinit(
                         evaluator.releaseDomain(),
@@ -2852,14 +3329,211 @@ pub const Machine = struct {
                     try evaluator.sourceOwned(path, source, completion);
                     return .detached;
                 },
+                .text => switch (self.text.?.borrowMut().advance(kernel_poll_quantum) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidUtf8 => return self.failIo(evaluator, "file is not valid UTF-8"),
+                }) {
+                    .pending => return .yielded,
+                    .complete => |text| {
+                        self.text.?.borrowMut().deinit();
+                        self.text = null;
+                        return .{ .output = text };
+                    },
+                },
             }
         }
         pub const ownership: heap.DriverOwnership = .fields;
     };
+    /// Consumes `path`, `path_value`, and `contents` on success and failure.
+    /// Truncate-and-replace with no temporary file: a failure part-way
+    /// through can leave a partial file, which the caller sees as `'io`.
+    pub fn writeFileOwned(
+        self: *Machine,
+        path: []u8,
+        path_value: Value,
+        contents: []u8,
+    ) MachineError!void {
+        if (self.unit.inherited.host_io == null) {
+            const failure = self.fail(.io, "filesystem access is unavailable");
+            self.unit.pending.?.addData(.path, path_value);
+            self.unit.allocator.free(path);
+            self.unit.allocator.free(contents);
+            self.releaseDomain().releaseValue(path_value);
+            return failure;
+        }
+        try self.startDriver(FileWriteDriver{
+            .path = .init(path),
+            .path_value = .init(path_value),
+            .contents = .init(contents),
+        });
+    }
+    const FileWriteDriver = struct {
+        path: heap.Owned([]u8),
+        path_value: heap.Owned(Value),
+        contents: heap.Owned([]u8),
+        open_file: ?heap.Owned(OpenFile) = null,
+        offset: usize = 0,
+        phase: enum { open, write } = .open,
+
+        fn failIo(
+            self: *FileWriteDriver,
+            evaluator: *Machine,
+            name: []const u8,
+        ) MachineError {
+            const failure = evaluator.failFmt(
+                .io,
+                "cannot write `{s}`: {s}",
+                .{ self.path.borrow(), name },
+            );
+            evaluator.unit.pending.?.addData(.path, self.path_value.borrow());
+            return failure;
+        }
+        pub fn advance(evaluator: *Machine, self: *FileWriteDriver) MachineError!WorkProgress {
+            try evaluator.pollKernel();
+            const io = evaluator.unit.inherited.host_io.?;
+            switch (self.phase) {
+                .open => {
+                    const file = std.Io.Dir.cwd().createFile(io, self.path.borrow(), .{}) catch |err|
+                        return self.failIo(evaluator, @errorName(err));
+                    self.open_file = .init(.{ .io = io, .file = file });
+                    self.phase = .write;
+                    return .yielded;
+                },
+                .write => {
+                    const contents = self.contents.borrow();
+                    if (self.offset != contents.len) {
+                        const end = @min(self.offset + kernel_poll_quantum, contents.len);
+                        const written = self.open_file.?.borrow().file.writeStreaming(
+                            io,
+                            &.{},
+                            &.{contents[self.offset..end]},
+                            1,
+                        ) catch |err| return self.failIo(evaluator, @errorName(err));
+                        self.offset += written;
+                        return .yielded;
+                    }
+                    self.open_file.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.open_file = null;
+                    return .completed;
+                },
+            }
+        }
+        pub const ownership: heap.DriverOwnership = .fields;
+    };
+    /// Consumes nothing: the whole stream is read into one owned string.
+    pub fn readStandardInputOwned(self: *Machine) MachineError!void {
+        const stream = self.unit.inherited.standard_input orelse
+            return self.fail(.io, "standard input is unavailable");
+        if (self.unit.inherited.host_io == null)
+            return self.fail(.io, "standard input is unavailable");
+        switch (stream.claim()) {
+            .granted => {},
+            .program_source => return self.fail(.io, "stdin is the program source"),
+            .already_read => return self.fail(.io, "standard input has already been read"),
+        }
+        try self.startDriver(StandardInputDriver{ .allocator = self.unit.allocator });
+    }
+    const StandardInputDriver = struct {
+        retirement: heap.ReleaseDomain.Retirement = .{},
+        allocator: std.mem.Allocator,
+        buffer: std.ArrayList(u8) = .empty,
+        reader: ?std.Io.File.Reader = null,
+        // SAFETY: only ever read through the prefix a read call just filled.
+        chunk: [read_chunk]u8 = undefined,
+        text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
+        phase: enum { read, text } = .read,
+
+        const read_chunk: usize = 8192;
+
+        pub fn advance(evaluator: *Machine, self: *StandardInputDriver) MachineError!WorkProgress {
+            try evaluator.pollKernel();
+            switch (self.phase) {
+                .read => {
+                    if (self.reader == null)
+                        self.reader = std.Io.File.stdin().reader(
+                            evaluator.unit.inherited.host_io.?,
+                            &.{},
+                        );
+                    const amount = self.reader.?.interface.readSliceShort(&self.chunk) catch {
+                        const name = if (self.reader.?.err) |err| @errorName(err) else "ReadFailed";
+                        return evaluator.failFmt(.io, "cannot read standard input: {s}", .{name});
+                    };
+                    if (amount == 0) {
+                        self.reader = null;
+                        self.text = .init(.init(self.allocator, self.buffer.items));
+                        self.phase = .text;
+                        return .yielded;
+                    }
+                    try self.buffer.appendSlice(self.allocator, self.chunk[0..amount]);
+                    return .yielded;
+                },
+                .text => switch (self.text.?.borrowMut().advance(kernel_poll_quantum) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidUtf8 => return evaluator.fail(
+                        .io,
+                        "standard input is not valid UTF-8",
+                    ),
+                }) {
+                    .pending => return .yielded,
+                    .complete => |text| {
+                        self.text.?.borrowMut().deinit();
+                        self.text = null;
+                        return .{ .output = text };
+                    },
+                },
+            }
+        }
+        pub fn advanceRetirement(
+            releases: *heap.ReleaseDomain,
+            storage_allocator: std.mem.Allocator,
+            self: *StandardInputDriver,
+        ) bool {
+            if (self.text) |*text| text.deinit(releases, storage_allocator);
+            self.text = null;
+            self.buffer.deinit(self.allocator);
+            storage_allocator.destroy(self);
+            return true;
+        }
+        pub const ownership: heap.DriverOwnership = .bounded_retirement;
+    };
+    /// Records the offending path or url on the failure being raised, which is
+    /// the shape every host-IO error reports. Keeps `ErrorDataKey` private
+    /// while letting a builtin module attach the one datum it owns.
+    pub fn addErrorPath(self: *Machine, path: Value) void {
+        self.unit.pending.?.addData(.path, path);
+    }
+    /// The one absence-is-absence failure for `getenv`: an unset variable is
+    /// an error carrying the requested name, never an empty string.
+    pub fn unsetEnvironVariable(
+        self: *Machine,
+        name: []const u8,
+        name_value: Value,
+    ) MachineError {
+        const failure = self.failFmt(.io, "environment variable `{s}` is not set", .{name});
+        self.unit.pending.?.addData(.name, name_value);
+        return failure;
+    }
+    /// Resolves one environment variable against the session snapshot.
+    pub fn environLookup(self: *Machine, name: []const u8) Environ.LookupCursor {
+        const entries: []const Environ.Entry =
+            if (self.unit.inherited.environ) |environ| environ.entries else &.{};
+        return .{ .entries = entries, .name = name };
+    }
     pub fn undefinedModule(self: *Machine, name: u32) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined module `{s}`", .{intern.get(name)});
         self.unit.pending.?.addData(.name, .{ .symbol = name });
         return failure;
+    }
+    /// The dispatcher's miss. Every resolution miss reports the reference the
+    /// program actually wrote, including a dotted one whose module never
+    /// loaded.
+    pub fn undefinedWord(self: *Machine, word: u32) MachineError {
+        const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(word)});
+        self.unit.pending.?.addData(.name, .{ .symbol = word });
+        return failure;
+    }
+    pub fn undefinedActiveWord(self: *Machine) MachineError {
+        return self.undefinedWord(self.unit.active_word);
     }
     pub fn undefinedName(self: *Machine, name: u32) MachineError {
         self.unit.active_word = name;
@@ -2872,7 +3546,22 @@ pub const Machine = struct {
     }
     pub fn require(self: *Machine, count: usize) MachineError!void {
         if (self.available() >= count) return;
-        const failure = self.failFmt(
+        // Underflow against the floor of a unit constructor's substack is the
+        // one underflow whose cause is invisible: the values the caller meant
+        // to pass are right there and unreachable. Name the isolation and the
+        // seeding remedy rather than reporting a bare shortfall.
+        const isolation = self.isolationGuidance();
+        const failure = if (isolation) |guidance| self.failFmt(
+            .underflow,
+            "{s} needs {d} stack value{s}, but found {d}; {s}",
+            .{
+                self.activeWordName(),
+                count,
+                if (count == 1) "" else "s",
+                self.available(),
+                guidance.advice,
+            },
+        ) else self.failFmt(
             .underflow,
             "{s} needs {d} stack value{s}, but found {d}",
             .{
@@ -2884,7 +3573,51 @@ pub const Machine = struct {
         );
         self.unit.pending.?.addData(.needed, .{ .int = @intCast(count) });
         self.unit.pending.?.addData(.available, .{ .int = @intCast(self.available()) });
+        if (isolation) |guidance| self.unit.pending.?.addData(
+            .isolation,
+            .{ .word = intern.intern(guidance.constructor) catch return failure },
+        );
         return failure;
+    }
+    const IsolationGuidance = struct { constructor: []const u8, advice: []const u8 };
+    /// Which unit constructor, if any, owns the floor this underflow hit.
+    fn isolationGuidance(self: *Machine) ?IsolationGuidance {
+        if (self.unit.stack_base > 0) {
+            const boundary = self.unit.boundary_index orelse return null;
+            // During an unwind the index momentarily names the frame that was
+            // just popped, so this is a bounds question, not an invariant.
+            const index: usize = @intFromEnum(boundary);
+            if (index >= self.unit.frames.items.len) return null;
+            const frame = self.unit.frames.items[index];
+            if (frame != .boundary) return null;
+            if (frame.boundary.stack_base != self.unit.stack_base) return null;
+            return switch (frame.boundary.mode) {
+                .attempt => .{
+                    .constructor = "@attempt",
+                    .advice = "the substack is isolated from the caller's stack — " ++
+                        "seed it with `values (q) with @attempt` or capture with `partial`",
+                },
+                .module => .{
+                    .constructor = "@module",
+                    .advice = "the substack is isolated from the caller's stack — " ++
+                        "seed it with `values (body) with 'name @module` or capture with `partial`",
+                },
+                .state => null,
+            };
+        }
+        if (self.unit.is_root_unit) return null;
+        return switch (self.unit.constructor) {
+            .spawn => .{
+                .constructor = "@spawn",
+                .advice = "the child unit's stack is isolated from the caller's — " ++
+                    "seed it with `values (q) with @spawn` or capture with `partial`",
+            },
+            .each => .{
+                .constructor = "@each",
+                .advice = "the child unit's stack holds only its element — " ++
+                    "seed it with `list values (q) with @each` or capture with `partial`",
+            },
+        };
     }
     pub fn popValue(self: *Machine) MachineError!heap.OwnedValue {
         try self.require(1);
@@ -3191,6 +3924,7 @@ pub const Machine = struct {
             .code = quotation,
             .ip = 0,
             .scope = scope,
+            .resolution_scope = scope,
             .home = home,
             .traced_word = inherited_trace,
         };
@@ -3266,6 +4000,7 @@ pub const Machine = struct {
             .code = application.quotation,
             .ip = 0,
             .scope = child orelse application.parent_scope,
+            .resolution_scope = child orelse application.parent_scope,
             .home = application.home,
             .traced_word = inherited_trace,
         };
@@ -3317,6 +4052,7 @@ pub const Machine = struct {
             .code = quotation,
             .ip = 0,
             .scope = generation_scope,
+            .resolution_scope = generation_scope,
             .home = home,
             .traced_word = no_word,
         };
@@ -3454,6 +4190,7 @@ pub const Machine = struct {
             .code = quotation,
             .ip = 0,
             .scope = scope,
+            .resolution_scope = scope,
             .home = home,
             .traced_word = no_word,
         };
@@ -3506,6 +4243,7 @@ pub const Machine = struct {
             .code = quotation,
             .ip = 0,
             .scope = child,
+            .resolution_scope = child,
             .home = home,
             .traced_word = no_word,
         };
@@ -3559,7 +4297,8 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
     unit.current = .{
         .code = code,
         .ip = 0,
-        .scope = unit.execution_scope orelse unit.rootScope(),
+        .scope = unit.lexicalScope(),
+        .resolution_scope = unit.lexicalScope(),
         .home = null,
         .traced_word = no_word,
     };
@@ -3839,7 +4578,7 @@ fn finishTaskJoin(self: *Machine) MachineError!void {
             beginTaskJoinTeardown(self.unit, join, null, .continue_evaluation);
             return self.failAtIndex(
                 .contract,
-                "par-each child must leave exactly one result",
+                "@each child must leave exactly one result",
                 index,
             );
         },
@@ -3947,24 +4686,31 @@ const DispatchDriver = struct {
         var budget: usize = kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) switch (self.resolution.borrowMut().advance()) {
             .pending => {},
-            .complete => |maybe_resolved| {
+            .complete => |outcome| {
                 self.resolution.deinit(self_machine.releaseDomain(), self_machine.allocator());
                 const allocator = self_machine.unit.allocator;
                 self_machine.detachWorkDriver(self);
                 heap.destroyDriver(self_machine.releaseDomain(), allocator, self);
-                var resolved = maybe_resolved orelse {
-                    const word = self_machine.unit.active_word;
-                    const failure = self_machine.failFmt(
-                        .undefined_word,
-                        "undefined word `{s}`",
-                        .{intern.get(word)},
-                    );
-                    self_machine.unit.pending.?.addData(.name, .{ .symbol = word });
-                    return failure;
-                };
-                defer resolved.deinit(allocator);
-                try executeResolved(self_machine, &resolved);
-                return .detached;
+                switch (outcome) {
+                    .resolved => |resolution| {
+                        var resolved = resolution;
+                        defer resolved.deinit(allocator);
+                        try executeResolved(self_machine, &resolved);
+                        return .detached;
+                    },
+                    // A bare qualified reference addresses a module exactly as
+                    // `use` does: load it, then let the caller re-execute the
+                    // reference from the instruction it was rewound to.
+                    .unknown_module_prefix => |prefix| {
+                        const name = intern.internModuleName(prefix) catch |err| switch (err) {
+                            error.OutOfMemory => return error.OutOfMemory,
+                            error.InvalidName => return self_machine.undefinedActiveWord(),
+                        };
+                        return retryAfterLoad(self_machine, name);
+                    },
+                    .unregistered_module => |name| return retryAfterLoad(self_machine, name),
+                    .unresolved => return self_machine.undefinedActiveWord(),
+                }
             },
         };
         return .yielded;
@@ -3973,12 +4719,66 @@ const DispatchDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
+/// Rewinds the caller to the qualified reference and loads its module. The
+/// caller's own frame performs the retry, so nothing has to reconstruct an
+/// execution context the load may have discarded.
+fn retryAfterLoad(self: *Machine, name: intern.ModuleName) MachineError!WorkProgress {
+    if (self.unit.current == null or self.unit.inherited.registry == null)
+        return self.undefinedActiveWord();
+    const word = self.unit.active_word;
+    self.unit.current.?.ip = self.unit.active_index;
+    try self.autoLoadModule(name, .{ .qualified = word });
+    return .detached;
+}
+
+/// After a qualified-miss auto-load, the requested module must actually be
+/// registered. Checking that is what bounds the retry: a source that
+/// registered nothing, or a different name, fails once here instead of being
+/// reloaded on every re-execution of the reference.
+const QualifiedRegistrationDriver = struct {
+    name: intern.ModuleName,
+    path: heap.Owned(Value),
+    acquisition: heap.Owned(modules.Registry.AcquireCursor),
+
+    pub fn advance(evaluator: *Machine, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
+        try evaluator.pollKernel();
+        switch (self.acquisition.borrowMut().advance()) {
+            .pending => return .yielded,
+            .complete => |maybe_generation| {
+                if (maybe_generation) |generation| {
+                    var lease = generation;
+                    lease.deinit();
+                    return .completed;
+                }
+                const failure = evaluator.failFmt(
+                    .io,
+                    "loading module `{s}` registered nothing under that name",
+                    .{intern.get(intern.moduleId(self.name))},
+                );
+                evaluator.unit.pending.?.addData(.path, self.path.borrow());
+                return failure;
+            },
+        }
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
 fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     self.unit.active_word = resolved.trace_word;
     const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home;
     const cross_home_effect = if (cross_home) resolved.lease.effect else null;
     const check: ?EffectCheck = if (cross_home) switch (resolved.lease.binding) {
-        .builtin, .native => try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
+        // A native module word always carries a declared effect, so a missing
+        // one is a malformed module rather than an omission.
+        .native => try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
+        // A builtin module word may omit its effect exactly as a source word
+        // may. One that hands its work to a scheduler driver has to: the check
+        // below reads the stack the instant the primitive returns, which is
+        // before any deferred output exists.
+        .builtin => if (cross_home_effect == null)
+            null
+        else
+            try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
         .word => null,
     } else null;
     switch (resolved.lease.binding) {
@@ -4044,7 +4844,32 @@ pub const Resolution = struct {
     }
 };
 
-pub const ResolutionProgress = poll_api.Progress(?Resolution);
+/// Why resolution finished. Distinguishing an unregistered module from an
+/// unknown name is what lets the dispatcher auto-load exactly once while
+/// reflection keeps treating both as an ordinary miss.
+pub const ResolutionOutcome = union(enum) {
+    /// Nothing by that name is visible.
+    unresolved,
+    /// The reference is dotted and its module prefix has never been interned,
+    /// so nothing can be registered under it yet. The slice borrows the
+    /// interned spelling, which outlives every cursor.
+    unknown_module_prefix: []const u8,
+    /// The name is a well-formed qualified reference whose module is not
+    /// registered; loading that module may make it resolvable.
+    unregistered_module: intern.ModuleName,
+    resolved: Resolution,
+
+    /// The binding, if resolution produced one. Consumers that must not load
+    /// treat every miss alike.
+    pub fn binding(self: ResolutionOutcome) ?Resolution {
+        return switch (self) {
+            .resolved => |resolution| resolution,
+            .unresolved, .unknown_module_prefix, .unregistered_module => null,
+        };
+    }
+};
+
+pub const ResolutionProgress = poll_api.Progress(ResolutionOutcome);
 pub const ResolutionCursor = struct {
     const Phase = enum {
         dot,
@@ -4097,7 +4922,7 @@ pub const ResolutionCursor = struct {
             .word = word,
             .spelling = spelling,
             .dot = intern.lastDotCursor(spelling),
-            .scope = evaluator.unit.current.?.scope,
+            .scope = evaluator.unit.current.?.resolution_scope,
         };
     }
 
@@ -4108,6 +4933,11 @@ pub const ResolutionCursor = struct {
         if (self.export_lookup) |*cursor| cursor.deinit();
         if (self.generation) |*lease| lease.deinit();
         self.* = undefined;
+    }
+
+    fn releaseGeneration(self: *ResolutionCursor) void {
+        if (self.generation) |*lease| lease.deinit();
+        self.generation = null;
     }
 
     fn directResult(self: *ResolutionCursor, lease: env.BindingLease) Resolution {
@@ -4150,7 +4980,7 @@ pub const ResolutionCursor = struct {
                     if (maybe_dot) |dot_index| {
                         if (dot_index == 0 or dot_index + 1 == self.spelling.len or self.registry == null) {
                             self.phase = .complete;
-                            break :result .{ .complete = null };
+                            break :result .{ .complete = .unresolved };
                         }
                         self.dot_index = dot_index;
                         self.atom_lookup = intern.lookupCursor(self.spelling[0..dot_index]);
@@ -4164,50 +4994,28 @@ pub const ResolutionCursor = struct {
                 .complete => |maybe_prefix| result: {
                     const prefix = maybe_prefix orelse {
                         self.phase = .complete;
-                        break :result .{ .complete = null };
+                        break :result .{ .complete = .{
+                            .unknown_module_prefix = self.spelling[0..self.dot_index],
+                        } };
                     };
                     self.module_validation = .init(prefix);
                     self.phase = .prefix_validate;
                     break :result .pending;
                 },
             },
+            // The module is acquired before its export name is even looked
+            // up. Only that ordering makes a qualified miss report an
+            // unregistered *module*: an export atom that no source has
+            // interned yet is exactly the state a first reference is in.
             .prefix_validate => switch (self.module_validation.?.advance()) {
                 .pending => .pending,
                 .complete => |maybe_module| result: {
                     self.prefix = maybe_module orelse {
                         self.phase = .complete;
-                        break :result .{ .complete = null };
+                        break :result .{ .complete = .unresolved };
                     };
                     self.module_validation = null;
-                    self.atom_lookup = intern.lookupCursor(self.spelling[self.dot_index + 1 ..]);
-                    self.phase = .export_name;
-                    break :result .pending;
-                },
-            },
-            .export_name => switch (self.atom_lookup.?.advance()) {
-                .pending => .pending,
-                .complete => |maybe_export| result: {
-                    const export_name = maybe_export orelse {
-                        self.phase = .complete;
-                        break :result .{ .complete = null };
-                    };
-                    self.binding_validation = .init(export_name);
-                    self.phase = .export_validate;
-                    break :result .pending;
-                },
-            },
-            .export_validate => switch (self.binding_validation.?.advance()) {
-                .pending => .pending,
-                .complete => |maybe_binding| result: {
-                    self.export_name = maybe_binding orelse {
-                        self.phase = .complete;
-                        break :result .{ .complete = null };
-                    };
-                    self.binding_validation = null;
-                    self.qualified_name = intern.qualifiedName(self.prefix.?, self.export_name.?);
-                    self.acquisition = self.registry.?.acquireCursor(
-                        intern.qualifiedModule(self.qualified_name.?),
-                    );
+                    self.acquisition = self.registry.?.acquireCursor(self.prefix.?);
                     self.phase = .qualified_acquire;
                     break :result .pending;
                 },
@@ -4218,13 +5026,39 @@ pub const ResolutionCursor = struct {
                     self.acquisition.?.deinit();
                     self.acquisition = null;
                     self.generation = maybe_generation;
-                    const generation = if (self.generation) |lease|
-                        lease
-                    else {
+                    if (self.generation == null) {
                         self.phase = .complete;
-                        break :result .{ .complete = null };
+                        break :result .{ .complete = .{ .unregistered_module = self.prefix.? } };
+                    }
+                    self.atom_lookup = intern.lookupCursor(self.spelling[self.dot_index + 1 ..]);
+                    self.phase = .export_name;
+                    break :result .pending;
+                },
+            },
+            .export_name => switch (self.atom_lookup.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_export| result: {
+                    const export_name = maybe_export orelse {
+                        self.releaseGeneration();
+                        self.phase = .complete;
+                        break :result .{ .complete = .unresolved };
                     };
-                    self.export_lookup = generation.resolveCursor(
+                    self.binding_validation = .init(export_name);
+                    self.phase = .export_validate;
+                    break :result .pending;
+                },
+            },
+            .export_validate => switch (self.binding_validation.?.advance()) {
+                .pending => .pending,
+                .complete => |maybe_binding| result: {
+                    self.export_name = maybe_binding orelse {
+                        self.releaseGeneration();
+                        self.phase = .complete;
+                        break :result .{ .complete = .unresolved };
+                    };
+                    self.binding_validation = null;
+                    self.qualified_name = intern.qualifiedName(self.prefix.?, self.export_name.?);
+                    self.export_lookup = self.generation.?.resolveCursor(
                         intern.bindingId(intern.qualifiedBinding(self.qualified_name.?)),
                         true,
                     );
@@ -4238,13 +5072,12 @@ pub const ResolutionCursor = struct {
                     self.export_lookup.?.deinit();
                     self.export_lookup = null;
                     const lease = maybe_lease orelse {
-                        self.generation.?.deinit();
-                        self.generation = null;
+                        self.releaseGeneration();
                         self.phase = .complete;
-                        break :result .{ .complete = null };
+                        break :result .{ .complete = .unresolved };
                     };
                     self.phase = .complete;
-                    break :result .{ .complete = self.generationResult(lease, .module) };
+                    break :result .{ .complete = .{ .resolved = self.generationResult(lease, .module) } };
                 },
             },
             .scope => result: {
@@ -4268,7 +5101,7 @@ pub const ResolutionCursor = struct {
                     self.direct = null;
                     if (maybe_lease) |lease| {
                         self.phase = .complete;
-                        break :result .{ .complete = self.directResult(lease) };
+                        break :result .{ .complete = .{ .resolved = self.directResult(lease) } };
                     }
                     if (self.registry != null) {
                         self.use_shape = environment.acquireShape();
@@ -4311,7 +5144,7 @@ pub const ResolutionCursor = struct {
                     self.export_lookup = null;
                     if (maybe_lease) |lease| {
                         self.phase = .complete;
-                        break :result .{ .complete = self.generationResult(lease, .used) };
+                        break :result .{ .complete = .{ .resolved = self.generationResult(lease, .used) } };
                     }
                     self.generation.?.deinit();
                     self.generation = null;
@@ -4325,18 +5158,18 @@ pub const ResolutionCursor = struct {
                     self.direct.?.deinit();
                     self.direct = null;
                     self.phase = .complete;
-                    var lease = maybe_lease orelse break :result .{ .complete = null };
+                    var lease = maybe_lease orelse break :result .{ .complete = .unresolved };
                     if (lease.visibility == .private) {
                         lease.deinit();
-                        break :result .{ .complete = null };
+                        break :result .{ .complete = .unresolved };
                     }
-                    break :result .{ .complete = .{
+                    break :result .{ .complete = .{ .resolved = .{
                         .lease = lease,
                         .execution_generation = null,
                         .home = null,
                         .trace_word = self.word,
                         .origin = .core,
-                    } };
+                    } } };
                 },
             },
             .complete => unreachable,
@@ -4375,7 +5208,7 @@ pub const ShadowCursor = struct {
             .core = evaluator.unit.environment.coreView(),
             .word = word,
             .dot = intern.dotCursor(intern.get(word)),
-            .scope = evaluator.unit.current.?.scope,
+            .scope = evaluator.unit.current.?.resolution_scope,
             .found = .init(evaluator.unit.allocator),
         };
     }
@@ -4531,6 +5364,14 @@ fn scheduleWord(
 ) MachineError!void {
     const scope = if (resolved_home) |home| home.scope(self.unit.module_access) else self.unit.current.?.scope;
     const home = resolved_home orelse self.unit.current.?.home;
+    // A module word resolves against its home. A core or prelude word
+    // resolves against the lexical chain it was defined in — not the module
+    // body that happens to be calling it, which is what let a module export
+    // named like a core word reach inside the prelude.
+    const resolution_scope = if (resolved_home) |generation|
+        generation.scope(self.unit.module_access)
+    else
+        self.unit.lexicalScope();
     if (resolved_home) |generation| try self.unit.pinGeneration(generation);
     const check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
     _ = self.suspendCurrent() catch return error.OutOfMemory;
@@ -4544,6 +5385,7 @@ fn scheduleWord(
         .code = body,
         .ip = 0,
         .scope = scope,
+        .resolution_scope = resolution_scope,
         .home = home,
         .traced_word = word,
     };
@@ -4574,6 +5416,7 @@ fn prepareEffectCheck(
         .entry_depth = available,
         .inputs = declared.inputs,
         .outputs = declared.outputs,
+        .row = declared.row,
         .word = word,
     };
 }
@@ -4634,6 +5477,24 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             try self.startDriver(driver);
             return true;
         },
+        .qualified_after_load => |continuation| {
+            var loading = continuation.loading;
+            defer loading.deinit();
+            var path = heap.OwnedValue.init(self.releaseDomain(), continuation.path);
+            defer path.deinit();
+            loading.finish();
+            // The caller's own frame retries the word: its instruction
+            // pointer was rewound to the reference before the load began.
+            // What must be checked here is that the load actually registered
+            // the module, since only that makes the retry terminating.
+            const registry = self.unit.inherited.registry.?;
+            try self.startDriver(QualifiedRegistrationDriver{
+                .name = continuation.name,
+                .path = .init(path.take()),
+                .acquisition = .init(registry.acquireCursor(continuation.name)),
+            });
+            return true;
+        },
         .boundary => |boundary| {
             std.debug.assert(@intFromEnum(self.unit.boundary_index.?) == self.unit.frames.items.len);
             self.unit.boundary_index = boundary.previous_boundary;
@@ -4659,6 +5520,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
     return false;
 }
 pub fn finishEffectCheck(self: *Machine, check: EffectCheck) MachineError!void {
+    if (check.row) return;
     const observed = self.unit.stack.items.len;
     if (observed == check.expected_depth) return;
     self.unit.active_word = check.word;
@@ -5060,7 +5922,7 @@ const FailureDriver = struct {
                 self.frame_index -= 1;
                 switch (evaluator.unit.frames.items[self.frame_index]) {
                     .eval => |frame| if (frame.traced_word != no_word) self.appendTrace(frame.traced_word),
-                    .effect_check, .application, .use_after_load, .boundary => {},
+                    .effect_check, .application, .use_after_load, .qualified_after_load, .boundary => {},
                 }
             },
             .locate => switch (self.location_cursor.?.advance()) {

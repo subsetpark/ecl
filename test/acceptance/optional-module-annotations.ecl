@@ -1,5 +1,5 @@
 ### All four annotation forms are legal in a module root.
-'forms (
+(
   (1 +) 'bare def
   (2 *) ( n -- n ) 'effected def
   (3 -) ( : "Subtract three." ) 'documented def
@@ -9,7 +9,7 @@
   (4 +) ( : "Private and documented." ) 'hidden-doc defp
   (5 -) ( n -- n : "Private, both portions." ) 'hidden-both defp
   (hidden hidden-effect hidden-doc hidden-both) 'via-private def
-) module
+) 'forms @module
 
 ### Reflection reports exactly the portions that were supplied.
 'forms.bare see
@@ -34,18 +34,18 @@
 'spelled see
 
 ### A declared effect that the body violates is still 'contract.
-'liar ((1 2) ( -- n ) 'two def) module
-(liar.two) attempt 'err at 'kind at pp
+((1 2) ( -- n ) 'two def) 'liar @module
+(liar.two) @attempt 'err at 'kind at pp
 
 ### A malformed recognized annotation is still 'domain.
-('broken ((3) ( : ) 'bad def) module) attempt 'err at 'kind at pp
+(((3) ( : ) 'bad def) 'broken @module) @attempt 'err at 'kind at pp
 
 ### An undocumented word has no documentation to report.
-('forms.bare doc) attempt 'err at 'kind at pp
+('forms.bare doc) @attempt 'err at 'kind at pp
 
 ### A list in annotation position that recognizes no marker is the body, not
 ### a malformed annotation: whatever the definition displaces stays on the
 ### construction stack and becomes durable module state.
-'positional (((dup without) within) 'peek def (dup) (a b) 'f def) module
+(((dup without) within) 'peek def (dup) (a b) 'f def) 'positional @module
 'positional.f body pp
 positional.peek pp

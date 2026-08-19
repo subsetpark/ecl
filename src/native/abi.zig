@@ -13,6 +13,10 @@ pub const max_guest_scalar_bytes: u32 = 4096;
 pub const max_builder_slots: u32 = 1024;
 pub const max_continuation_state_bytes: u32 = 4096;
 pub const max_continuation_alignment: u32 = 64;
+/// How deep a nested input read may address. The bound is what keeps one
+/// `read_path` call constant-cost — and, for recursive formats, keeps a
+/// pathological document a bounded error instead of unbounded host work.
+pub const max_read_path_depth: u32 = 64;
 
 pub const CapabilityId = enum(u32) {
     call = 1,
@@ -173,6 +177,18 @@ pub const DictAtFn = *const fn (
     key_output: *ValueView,
     value_output: *ValueView,
 ) callconv(.c) HostStatus;
+/// Reads one value nested inside a declared aggregate input. `path` holds one
+/// step per level from the input's root: a list level is indexed directly,
+/// while a dict level addresses entry `n`'s key as `2 * n` and its value as
+/// `2 * n + 1`. An empty path names the input itself. Cost is bounded by
+/// `max_read_path_depth`, and the budget is charged per step walked.
+pub const ReadPathFn = *const fn (
+    call_context: *anyopaque,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+    output: *ValueView,
+) callconv(.c) HostStatus;
 pub const CompleteFn = *const fn (
     call_context: *anyopaque,
     outputs: [*]const Candidate,
@@ -208,6 +224,7 @@ pub const HostTable = extern struct {
     request_yield: ?RequestYieldFn,
     list_at: ?ListAtFn,
     dict_at: ?DictAtFn,
+    read_path: ?ReadPathFn,
     build_list_append: ?BuildListAppendFn,
     build_list_finish: ?BuildListFinishFn,
     build_dict_append: ?BuildDictAppendFn,
@@ -305,7 +322,7 @@ comptime {
     assertRecord(ValueView, 40, 8);
     assertRecord(Scalar, 32, 8);
     assertRecord(InvokeResult, 16, 8);
-    assertRecord(HostTable, 120, 8);
+    assertRecord(HostTable, 128, 8);
     assertRecord(Descriptor, 88, 8);
     assertRecord(EntryResult, 32, 8);
 

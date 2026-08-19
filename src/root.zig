@@ -26,7 +26,9 @@ pub const prims = @import("prims.zig");
 pub const combinators = @import("combinators.zig");
 pub const idioms = @import("idioms.zig");
 pub const prelude = @import("prelude.zig");
+pub const stdlib = @import("stdlib.zig");
 pub const kernels = @import("kernels.zig");
+pub const kernel_random = @import("kernel_random.zig");
 pub const session = @import("session.zig");
 pub const console = @import("console.zig");
 pub const scheduler = @import("scheduler.zig");
@@ -57,7 +59,9 @@ test {
     _ = combinators;
     _ = idioms;
     _ = prelude;
+    _ = stdlib;
     _ = kernels;
+    _ = kernel_random;
     _ = session;
     _ = console;
     _ = scheduler;
@@ -79,4 +83,13 @@ test {
     _ = @import("tests/native_test.zig");
     _ = @import("tests/fuzz_test.zig");
     _ = @import("tests/stateful_module_test.zig");
+    _ = @import("tests/stdlib_test.zig");
+    _ = @import("tests/hostio_test.zig");
+    _ = @import("tests/result_test.zig");
+    _ = @import("tests/str_test.zig");
+    _ = @import("tests/csv_test.zig");
+    _ = @import("tests/json_test.zig");
+    _ = @import("tests/table_test.zig");
+    _ = @import("tests/http_test.zig");
+    _ = @import("tests/random_test.zig");
 }

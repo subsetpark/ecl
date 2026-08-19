@@ -19,6 +19,7 @@ const reflection = @import("reflection.zig");
 const scheduler_api = @import("scheduler.zig");
 const console_api = @import("console.zig");
 const session_options = @import("session_options");
+const stdlib = @import("stdlib.zig");
 pub const Value = value.Value;
 pub const UnitOutcome = union(enum) {
     ok,
@@ -39,6 +40,21 @@ pub const Config = union(enum) {
     }
 };
 pub const default_worker_count: usize = session_options.default_worker_count;
+
+/// The host services a Session inherits from its process. Grouping them
+/// nominally keeps adding one — an environment snapshot, a standard-input
+/// mode — from turning `init` into a positional checklist whose arguments
+/// only differ by type.
+pub const Host = struct {
+    io: std.Io,
+    output: *std.Io.Writer,
+    diagnostics: *std.Io.Writer,
+    ecl_path: ?[]const u8 = null,
+    /// Borrowed name/value pairs; the Session owns its own copy.
+    environ: []const machine.Environ.Entry = &.{},
+    /// Whether the process has already claimed stdin as the program source.
+    standard_input: machine.StandardInput.Availability = .data,
+};
 
 const CompletionBacking = struct {
     allocator: std.mem.Allocator,
@@ -205,6 +221,47 @@ fn composeDisplayBlocks(
     return allocating.toOwnedSlice();
 }
 
+/// One owned copy of the host environment. Names and values live in a single
+/// byte block so teardown is two frees regardless of how large the
+/// environment was.
+const EnvironSnapshot = struct {
+    entries: []machine.Environ.Entry,
+    bytes: ?[]u8,
+
+    fn capture(
+        allocator: std.mem.Allocator,
+        source: []const machine.Environ.Entry,
+    ) error{OutOfMemory}!EnvironSnapshot {
+        if (source.len == 0) return .{ .entries = &.{}, .bytes = null };
+        var total: usize = 0;
+        for (source) |entry| {
+            total = std.math.add(usize, total, entry.name.len) catch return error.OutOfMemory;
+            total = std.math.add(usize, total, entry.value.len) catch return error.OutOfMemory;
+        }
+        const bytes = try allocator.alloc(u8, total);
+        errdefer allocator.free(bytes);
+        const entries = try allocator.alloc(machine.Environ.Entry, source.len);
+        var offset: usize = 0;
+        for (source, entries) |entry, *copy| {
+            const name_end = offset + entry.name.len;
+            @memcpy(bytes[offset..name_end], entry.name);
+            const value_end = name_end + entry.value.len;
+            @memcpy(bytes[name_end..value_end], entry.value);
+            copy.* = .{
+                .name = bytes[offset..name_end],
+                .value = bytes[name_end..value_end],
+            };
+            offset = value_end;
+        }
+        return .{ .entries = entries, .bytes = bytes };
+    }
+    fn deinit(self: *EnvironSnapshot, allocator: std.mem.Allocator) void {
+        if (self.bytes) |bytes| allocator.free(bytes);
+        if (self.entries.len != 0) allocator.free(self.entries);
+        self.* = undefined;
+    }
+};
+
 const SessionCore = struct {
     module_access_seal: u8 = 0,
     host_owner: *heap.HostOwner,
@@ -217,6 +274,9 @@ const SessionCore = struct {
     diagnostics: ?*std.Io.Writer,
     host_io: ?std.Io,
     ecl_path: ?[]u8,
+    environ: machine.Environ,
+    environ_bytes: ?[]u8,
+    standard_input: machine.StandardInput,
     arguments: Value,
     console: console_api.Console,
     scheduler: scheduler_api.Scheduler,
@@ -272,14 +332,14 @@ pub const Session = enum(usize) {
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, null, null, null, null, .default);
+        return initFull(allocator, arguments, null, null, .default);
     }
     pub fn initWithConfig(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
         config: Config,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, null, null, null, null, config);
+        return initFull(allocator, arguments, null, null, config);
     }
     /// The output writer must outlive the session.
     pub fn initWithOutput(
@@ -287,36 +347,30 @@ pub const Session = enum(usize) {
         arguments: []const []const u8,
         output: *std.Io.Writer,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, output, null, null, null, .default);
+        return initFull(allocator, arguments, output, null, .default);
     }
+    /// Every writer and slice in `host` must outlive the session; the
+    /// environment snapshot is copied.
     pub fn initWithHost(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
-        io: std.Io,
-        output: *std.Io.Writer,
-        diagnostics: *std.Io.Writer,
-        ecl_path: ?[]const u8,
+        host: Host,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, output, diagnostics, io, ecl_path, .default);
+        return initFull(allocator, arguments, host.output, host, .default);
     }
     pub fn initWithHostConfig(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
-        io: std.Io,
-        output: *std.Io.Writer,
-        diagnostics: *std.Io.Writer,
-        ecl_path: ?[]const u8,
+        host: Host,
         config: Config,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, output, diagnostics, io, ecl_path, config);
+        return initFull(allocator, arguments, host.output, host, config);
     }
     fn initFull(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
         output: ?*std.Io.Writer,
-        diagnostics: ?*std.Io.Writer,
-        host_io: ?std.Io,
-        ecl_path: ?[]const u8,
+        host: ?Host,
         config: Config,
     ) error{OutOfMemory}!Session {
         const scheduler_config = config.schedulerConfig();
@@ -343,8 +397,16 @@ pub const Session = enum(usize) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidPrelude => @panic("embedded prelude is invalid"),
         };
-        const owned_ecl_path = if (ecl_path) |path| try allocator.dupe(u8, path) else null;
+        const owned_ecl_path = if (host) |services|
+            if (services.ecl_path) |path| try allocator.dupe(u8, path) else null
+        else
+            null;
         errdefer if (owned_ecl_path) |path| allocator.free(path);
+        var snapshot = try EnvironSnapshot.capture(
+            allocator,
+            if (host) |services| services.environ else &.{},
+        );
+        errdefer snapshot.deinit(allocator);
         var argv = heap.OwnedValue.init(
             release_domain,
             try argumentsValue(allocator, release_domain, arguments),
@@ -361,11 +423,19 @@ pub const Session = enum(usize) {
             .native_owner = native_owner,
             .archive = archive,
             .output = output,
-            .diagnostics = diagnostics,
-            .host_io = host_io,
+            .diagnostics = if (host) |services| services.diagnostics else null,
+            .host_io = if (host) |services| services.io else null,
             .ecl_path = owned_ecl_path,
+            .environ = .{ .entries = snapshot.entries },
+            .environ_bytes = snapshot.bytes,
+            .standard_input = .init(
+                if (host) |services| services.standard_input else .program_source,
+            ),
             .arguments = argv.take(),
-            .console = console_api.Console.init(output, diagnostics),
+            .console = console_api.Console.init(
+                output,
+                if (host) |services| services.diagnostics else null,
+            ),
             .scheduler = scheduler,
             .root_tasks = root_tasks,
         };
@@ -383,6 +453,11 @@ pub const Session = enum(usize) {
         core.stack.deinit(core.allocator());
         core.releaseDomain().releaseValue(core.arguments);
         if (core.ecl_path) |path| core.allocator().free(path);
+        var snapshot = EnvironSnapshot{
+            .entries = @constCast(core.environ.entries),
+            .bytes = core.environ_bytes,
+        };
+        snapshot.deinit(core.allocator());
         core.registry.deinit();
         core.environment.deinit();
         core.archive.deinit();
@@ -470,6 +545,8 @@ pub const Session = enum(usize) {
             .console = &core.console,
             .host_io = core.host_io,
             .ecl_path = core.ecl_path,
+            .environ = &core.environ,
+            .standard_input = &core.standard_input,
             .idiom_mode = core.idiom_mode,
             .phrase_recognizer = idioms.tryApply,
         };
@@ -562,6 +639,16 @@ pub const Session = enum(usize) {
             .item => |name| if (std.mem.startsWith(u8, intern.get(name), prefix))
                 try found.append(name),
         };
+        // An embedded module resolves on first mention, so it is a real
+        // completion before anything has loaded it. The registry knows only
+        // the ones already published, which made the stdlib appear to exist
+        // only after you had already typed its name in full once.
+        const embedded = stdlib.names();
+        var embedded_ids: [embedded.len]?u32 = @splat(null);
+        for (embedded, &embedded_ids) |name, *slot| {
+            if (!std.mem.startsWith(u8, name, prefix)) continue;
+            slot.* = intern.intern(name) catch null;
+        }
         var namespaces = core.registry.namespaceCursor();
         defer namespaces.deinit();
         while (true) switch (namespaces.advance()) {
@@ -569,9 +656,14 @@ pub const Session = enum(usize) {
             .complete => break,
             .item => |name| {
                 const id = name;
+                // A registered stdlib name is offered once, by the registry.
+                for (&embedded_ids) |*slot| {
+                    if (slot.* == id) slot.* = null;
+                }
                 if (std.mem.startsWith(u8, intern.get(id), prefix)) try found.append(id);
             },
         };
+        for (embedded_ids) |slot| if (slot) |id| try found.append(id);
         return materializeCompletion(core.allocator(), &found, null);
     }
     pub fn writeOutput(self: *Session, bytes: []const u8) error{WriteFailed}!void {

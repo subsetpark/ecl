@@ -13,6 +13,8 @@ pub const ValueView = capability.ValueView;
 pub const CursorStep = capability.CursorStep;
 pub const DictCursorStep = capability.DictCursorStep;
 pub const ListCursor = capability.ListCursor;
+pub const NestedStep = capability.NestedStep;
+pub const Path = capability.Path;
 pub const DictCursor = capability.DictCursor;
 pub const BuildValues = capability.BuildValues;
 pub const BuildResult = capability.BuildResult;
@@ -32,6 +34,7 @@ pub fn Call(comptime effect_source: []const u8) type {
             views: [EffectSpec.inputs.len]?capability.ViewState = .{null} ** EffectSpec.inputs.len,
             list_cursors: [EffectSpec.inputs.len]?capability.ListCursorState = .{null} ** EffectSpec.inputs.len,
             dict_cursors: [EffectSpec.inputs.len]?capability.DictCursorState = .{null} ** EffectSpec.inputs.len,
+            nested: [EffectSpec.inputs.len]?capability.NestedState = .{null} ** EffectSpec.inputs.len,
         };
 
         fn initAdapter(
@@ -96,6 +99,40 @@ pub fn Call(comptime effect_source: []const u8) type {
                 view.wire.aggregate_len,
                 start,
             );
+        }
+
+        /// Reads one value nested inside a declared aggregate input. The path
+        /// is the whole position, so it lives happily in continuation state
+        /// and a yield between reads costs nothing. The returned view borrows
+        /// per-input storage and is valid until the next read of that input.
+        pub fn nested(
+            self: *Self,
+            comptime index: usize,
+            path: []const u64,
+        ) NestedStep {
+            if (index >= EffectSpec.inputs.len)
+                @compileError("ecl-native: nested read input exceeds the declared effect");
+            if (path.len > Path.max_depth) return .invalid;
+            const slot = &self.state().nested[index];
+            slot.* = .{
+                .wire = .{ .kind = .int },
+                .invocation = &self.state().invocation,
+                .input_index = @intCast(index),
+            };
+            const status = (self.state().invocation.host.read_path orelse
+                return .invalid)(
+                self.state().invocation.context,
+                @intCast(index),
+                path.ptr,
+                @intCast(path.len),
+                &slot.*.?.wire,
+            );
+            return switch (status) {
+                .ok => .{ .item = @ptrCast(&slot.*.?) },
+                .yield_required => .yield_required,
+                .invalid, .out_of_memory => .invalid,
+                _ => .invalid,
+            };
         }
 
         pub fn forward(self: *Self, comptime index: usize) error{ OutOfMemory, InvalidValue }!Candidate {
@@ -306,9 +343,16 @@ fn writeAdapterFailure(
     }
 }
 
+/// How a module reaches its host. A dynamically loaded extension is found
+/// through the ABI entry symbol, so exactly one may define it per image; a
+/// module linked into a host is handed to the loader as a descriptor and must
+/// not export the symbol at all, which is what lets one image carry several.
+pub const Linkage = enum { dynamic, static };
+
 pub fn module(comptime spec: anytype) type {
     if (!identifier(spec.name)) @compileError("ecl-native: module name must be a nonempty identifier");
     if (spec.doc.len == 0) @compileError("ecl-native: module documentation must not be empty");
+    const module_linkage: Linkage = if (@hasField(@TypeOf(spec), "linkage")) spec.linkage else .dynamic;
     const words = spec.words;
     const word_count = words.len;
     @setEvalBranchQuota(1000 + word_count * word_count * 16);
@@ -385,12 +429,16 @@ pub fn module(comptime spec: anytype) type {
             output.* = .{ .tag = .fail, .adapter_status = 2 };
         }
 
-        pub export fn ecl_module_abi_v1(output: *abi.EntryResult) callconv(.c) void {
+        pub fn entryPoint(output: *abi.EntryResult) callconv(.c) void {
             output.* = .{ .status = .descriptor, .descriptor = descriptor() };
         }
 
         comptime {
-            _ = Self.ecl_module_abi_v1;
+            // Only a dynamically loaded extension claims the ABI entry
+            // symbol, so several statically linked modules can coexist in one
+            // image without colliding on it.
+            if (module_linkage == .dynamic)
+                @export(&entryPoint, .{ .name = abi.entry_symbol });
         }
     };
 }
@@ -433,6 +481,11 @@ fn effectCounts(comptime source: []const u8) EffectCounts {
             before = false;
             continue;
         }
+        // A native `complete` requires the exact output tuple, so the row
+        // token — which exists to leave the after row unchecked — has no
+        // meaning here and is rejected rather than silently treated as a slot.
+        if (std.mem.eql(u8, token, "..."))
+            @compileError("ecl-native: effect rows are exact; `...` is not a native slot");
         if (!identifier(token)) @compileError("ecl-native: effect contains a non-identifier slot");
         for (prior[0..prior_count]) |seen| if (std.mem.eql(u8, seen, token))
             @compileError("ecl-native: effect contains a duplicate slot name");

@@ -1,0 +1,15 @@
+(("name" "qty" "note") ("0012" "3" "a,b") ("x" () "line\nbreak") (()) ("y;z" "1" "say \"hi\"") ("ragged"))
+6
+[3 3 3 1 3 1]
+"0012"
+"y;z"
+"name,qty,note\u{d}\n0012,3,\"a,b\"\u{d}\nx,,\"line\nbreak\"\u{d}\n\u{d}\ny;z,1,\"say \"\"hi\"\"\"\u{d}\nragged\u{d}\n"
+1
+0
+0
+'parse
+'parse
+'type
+'type
+'type
+'shape

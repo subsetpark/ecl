@@ -1,0 +1,57 @@
+# DoD-28: invalid candidates are never implicitly repaired or reclassified, and
+# every exported word validates before running a user quotation.
+'table use
+
+# valid? answers 0 for every convention mismatch, and only for those.
+5 valid? pp
+{} valid? pp
+{"a" [1 2] "b" [3]} valid? pp
+{"a" 5} valid? pp
+{"" [1]} valid? pp
+{"a" [1 2]} valid? pp
+
+# The frozen error kinds, one probe each.
+(5 from-columns) @attempt 'err at 'kind at pp
+({} from-columns) @attempt 'err at 'kind at pp
+({"a" [1 2] "b" [3]} from-columns) @attempt 'err at 'kind at pp
+({"a" 5} from-columns) @attempt 'err at 'kind at pp
+({5 [1]} from-columns) @attempt 'err at 'kind at pp
+({"" [1]} from-columns) @attempt 'err at 'kind at pp
+(["a" "a"] [] from-rows) @attempt 'err at 'kind at pp
+(["a" "b"] [[1]] from-rows) @attempt 'err at 'kind at pp
+([] from-records) @attempt 'err at 'kind at pp
+({"a" 1} {"a" 2 "b" 3} 2 pack from-records) @attempt 'err at 'kind at pp
+({"a" [1 2]} "z" column) @attempt 'err at 'kind at pp
+({"a" [1 2]} ["a" "a"] select) @attempt 'err at 'kind at pp
+({"a" [1 2]} [] select) @attempt 'err at 'kind at pp
+({"a" [1 2] "b" [3 4]} {"a" "b"} rename) @attempt 'err at 'kind at pp
+({"a" [1 2]} {"z" "x"} rename) @attempt 'err at 'kind at pp
+({"a" [1 2]} "c" [7] with-column) @attempt 'err at 'kind at pp
+({"a" [1 2 3]} [1 0] where) @attempt 'err at 'kind at pp
+({"a" [1 2 3]} [1 0 2] where) @attempt 'err at 'kind at pp
+({"a" [1 2]} {"z" (str)} cast) @attempt 'err at 'kind at pp
+({"a" [1 2]} {"a" 5} cast) @attempt 'err at 'kind at pp
+({"a" [1]} [] [] aggregate) @attempt 'err at 'kind at pp
+({"r" ["e"] "v" [1]} ["r"] [["r" "v" (sum)]] aggregate) @attempt 'err at 'kind at pp
+({"r" ["e"] "v" [1]} ["r"] [["t" "zz" (sum)]] aggregate) @attempt 'err at 'kind at pp
+({"r" ["e"] "v" [1]} ["r"] [["t" "v"]] aggregate) @attempt 'err at 'kind at pp
+({"id" [1]} {"cid" [1] "id" [7]} [["id" "cid"]] inner-join) @attempt 'err at 'kind at pp
+({"id" [1]} {"cid" [1]} [] inner-join) @attempt 'err at 'kind at pp
+({"id" [1 2]} {"cid" [2] "n" ["y"]} [["id" "cid"]] {} left-join-with) @attempt 'err at 'kind at pp
+
+# A cast or aggregate quotation never runs before prevalidation completes: each
+# probe below would raise 'user if it were reached.
+({"a" [1 2]} {"z" ("reached" fail)} cast) @attempt 'err at 'kind at pp
+({"r" ["e"] "v" [1]} ["r"] [["t" "zz" ("reached" fail)]] aggregate) @attempt 'err at 'kind at pp
+
+# A quotation of the wrong shape is 'contract, reported by the applying word.
+({"r" ["e"] "v" [1]} ["r"] [["t" "v" (dup)]] aggregate) @attempt 'err at dup 'kind at pp 'word at pp
+
+# Core put can forge an invalid candidate; the next boundary rejects it and
+# core reflection keeps telling the truth.
+{"a" [1 2]} "b" [9] put 'broken set
+broken type pp
+broken valid? pp
+broken wrap (rows) with @attempt 'err at 'kind at pp
+broken wrap (records) with @attempt 'err at 'kind at pp
+broken "b" [9 9] put valid? pp

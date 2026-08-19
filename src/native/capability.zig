@@ -231,6 +231,38 @@ pub const ValueView = opaque {
     }
 };
 
+/// One nested input read. `invalid` covers both a malformed path and a path
+/// that leaves the aggregate, so an author never has to guess which of its
+/// own index computations the host rejected.
+pub const NestedStep = union(enum) {
+    item: *const ValueView,
+    yield_required,
+    invalid,
+};
+
+/// One step of a path into a declared aggregate input. A list level is indexed
+/// directly; a dict level addresses an entry's key or value. Building steps
+/// through these constructors keeps the wire encoding out of author code.
+pub const Path = struct {
+    pub const max_depth: usize = abi.max_read_path_depth;
+
+    pub fn item(index: u64) u64 {
+        return index;
+    }
+    pub fn key(entry: u64) u64 {
+        return entry * 2;
+    }
+    pub fn value(entry: u64) u64 {
+        return entry * 2 + 1;
+    }
+};
+
+pub const NestedState = struct {
+    wire: abi.ValueView,
+    invocation: *Invocation,
+    input_index: u32,
+};
+
 pub const Invocation = struct {
     host: *const abi.HostTable,
     context: *anyopaque,

@@ -71,13 +71,13 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "seeded attempts tasks and modules",
-            .source = "[] (42) attempt-with [2 3] (+) attempt-with " ++
-                "[2 3] (+) spawn-with await [2 0] (/) attempt-with ok? " ++
-                "[2 3] (+) attempt-with [2 3] (+) spawn-with await match " ++
-                "[4 5] 'seeded (+ 'sum set) module-with seeded.sum",
+            .source = "[] (42) with @attempt [2 3] (+) with @attempt " ++
+                "[2 3] (+) with @spawn await [2 0] (/) with @attempt result.ok? " ++
+                "[2 3] (+) with @attempt [2 3] (+) with @spawn await match " ++
+                "[4 5] (+ 'sum set) with 'seeded @module seeded.sum",
             .expected = "{'ok [42]} {'ok [5]} {'ok [5]} 0 1 9",
         },
-        .{ .name = "results", .source = "(2 3 +) attempt ok? (2 3 +) attempt or-raise (missing) attempt 9 or-else", .expected = "1 [5] 9" },
+        .{ .name = "results", .source = "(2 3 +) @attempt result.ok? (2 3 +) @attempt result.or-raise (missing) @attempt 9 result.or-else", .expected = "1 [5] 9" },
         .{
             .name = "cleaves",
             .source = "1 2 nip 3 (1 +) keep 3 (1 +) (2 *) bi 3 (1 +) (2 *) (1 -) tri " ++
@@ -105,22 +105,28 @@ test "embedded prelude exposes source bodies and derived dataflow" {
                 "[1 1 0] (0 >) all? [1 2 3] mean",
             .expected = "(('a 1) ('b 2)) [3 4] 1 0 2.0",
         },
+        .{
+            .name = "cyclic rotation",
+            .source = "[10 20 30 40] 1 rotate [10 20 30 40] -1 rotate " ++
+                "[10 20 30 40] 6 rotate [] 3 rotate \"hello\" 2 rotate [1 2 3] 0 rotate",
+            .expected = "[20 30 40 10] [40 10 20 30] [30 40 10 20] () \"llohe\" [1 2 3]",
+        },
     });
 }
 
 test "all embedded vocabulary entries expose bodies and nonempty documentation" {
     const names = [_][]const u8{
-        "compose",  "first",   "wrap",         "literal",    "dip",         "over",
-        "partial",  "with",    "attempt-with", "spawn-with", "module-with", "str",
-        "mod",      "neg",     "abs",          "<>",         "<=",          ">=",
-        "and",      "or",      "nip",          "keep",       "bi",          "tri",
-        "bi2",      "both",    "when",         "unless",     "case",        "signum",
-        "clamp",    "last",    "pair",         "pack",       "append",      "rest",
-        "reverse",  "uncons",  "unappend",     "empty?",     "zip",         "min-of",
-        "max-of",   "sort",    "distinct",     "at-path",    "vals",        "at-or",
-        "pairs",    "filter",  "partition",    "any?",       "all?",        "sum",
-        "prod",     "mean",    "print",        "inspect",    "fail",        "ok?",
-        "or-raise", "or-else", "find",         "await-all",  "set",         "setp",
+        "compose", "first",  "wrap",   "literal",   "dip",    "over",
+        "partial", "with",   "str",    "mod",       "neg",    "abs",
+        "<>",      "<=",     ">=",     "and",       "or",     "nip",
+        "keep",    "bi",     "tri",    "bi2",       "both",   "when",
+        "unless",  "case",   "signum", "clamp",     "last",   "pair",
+        "pack",    "append", "rest",   "reverse",   "uncons", "unappend",
+        "empty?",  "zip",    "min-of", "max-of",    "sort",   "distinct",
+        "at-path", "vals",   "at-or",  "pairs",     "filter", "partition",
+        "any?",    "all?",   "sum",    "prod",      "mean",   "print",
+        "inspect", "fail",   "find",   "await-all", "set",    "setp",
+        "lines",   "assert", "rotate",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -178,11 +184,25 @@ test "embedded definitions retain provenance and deferred words stay absent" {
             .word = "raise",
             .data = &.{.{ .name = "source", .expected = .{ .string = "prelude.ecl" } }},
         },
-        .{ .name = "lines deferred", .source = "lines", .kind = "undefined-word", .word = "lines" },
-        .{ .name = "slurp deferred", .source = "slurp", .kind = "undefined-word", .word = "slurp" },
-        .{ .name = "spit deferred", .source = "spit", .kind = "undefined-word", .word = "spit" },
-        .{ .name = "getenv deferred", .source = "getenv", .kind = "undefined-word", .word = "getenv" },
-        .{ .name = "or-raise identity", .source = "(missing) attempt or-raise", .kind = "undefined-word", .word = "missing" },
+        .{ .name = "lines needs a path", .source = "lines", .kind = "underflow", .word = "slurp" },
+        .{ .name = "slurp needs a path", .source = "slurp", .kind = "underflow", .word = "slurp" },
+        .{ .name = "spit needs arguments", .source = "spit", .kind = "underflow", .word = "spit" },
+        .{ .name = "getenv needs a name", .source = "getenv", .kind = "underflow", .word = "getenv" },
+        .{
+            .name = "host filesystem access is gated",
+            .source = "\"any\" slurp",
+            .kind = "io",
+            .word = "slurp",
+            .message = "filesystem access is unavailable",
+        },
+        .{
+            .name = "standard input is gated",
+            .source = "stdin",
+            .kind = "io",
+            .word = "stdin",
+            .message = "standard input is unavailable",
+        },
+        .{ .name = "result.or-raise identity", .source = "(missing) @attempt result.or-raise", .kind = "undefined-word", .word = "missing" },
         .{
             .name = "cons inserts executable word forms",
             .source = "(foo) first (7) cons call",

@@ -62,7 +62,7 @@ fn entry(init: std.process.Init) AppError!u8 {
             "-e/--eval requires source text",
             null,
         );
-        return executeSource(init, "<command>", cli[1], cli[2..], true, worker_count);
+        return executeSource(init, "<command>", cli[1], cli[2..], true, .data, worker_count);
     }
     if (std.mem.eql(u8, first, "-")) return runStdin(init, cli[1..], worker_count);
     const is_file: bool = file: {
@@ -80,7 +80,7 @@ fn entry(init: std.process.Init) AppError!u8 {
             .unlimited,
         ) catch |err| return emitIoError(init, "cannot read script", err);
         defer init.gpa.free(source);
-        return executeSource(init, first, source, cli[1..], false, worker_count);
+        return executeSource(init, first, source, cli[1..], false, .data, worker_count);
     }
     if (std.mem.endsWith(u8, first, ".ecl")) {
         var buffer: [512]u8 = undefined;
@@ -91,7 +91,18 @@ fn entry(init: std.process.Init) AppError!u8 {
         ) catch "script file does not exist";
         return emitSyntheticError(init, .io, message, null);
     }
-    return executeSource(init, "<command>", first, cli[1..], true, worker_count);
+    return executeSource(init, "<command>", first, cli[1..], true, .data, worker_count);
+}
+/// One immutable view of the process environment, borrowed from the arena so
+/// the Session can copy it once at init.
+fn environSnapshot(init: std.process.Init) AppError![]const ecl.machine.Environ.Entry {
+    const names = init.environ_map.keys();
+    const values = init.environ_map.values();
+    const entries = init.arena.allocator().alloc(ecl.machine.Environ.Entry, names.len) catch
+        return error.OutOfMemory;
+    for (names, values, entries) |name, value, *variable|
+        variable.* = .{ .name = name, .value = value };
+    return entries;
 }
 fn configuredWorkers(init: std.process.Init) AppError!?usize {
     const raw = init.environ_map.get("ECL_WORKERS") orelse
@@ -122,7 +133,7 @@ fn runStdin(init: std.process.Init, arguments: []const []const u8, worker_count:
         else => return emitIoError(init, "cannot read stdin", err),
     };
     defer init.gpa.free(source);
-    return executeSource(init, "<stdin>", source, arguments, true, worker_count);
+    return executeSource(init, "<stdin>", source, arguments, true, .program_source, worker_count);
 }
 
 fn readFormatStdin(init: std.process.Init) AppError![]u8 {
@@ -166,6 +177,7 @@ fn executeSource(
     source: []const u8,
     arguments: []const []const u8,
     print_stack: bool,
+    standard_input: ecl.machine.StandardInput.Availability,
     worker_count: usize,
 ) AppError!u8 {
     var output_buffer: [4096]u8 = undefined;
@@ -175,10 +187,14 @@ fn executeSource(
     var session = try ecl.session.Session.initWithHostConfig(
         init.gpa,
         arguments,
-        init.io,
-        &output_writer.interface,
-        &diagnostic_writer.interface,
-        init.environ_map.get("ECL_PATH"),
+        .{
+            .io = init.io,
+            .output = &output_writer.interface,
+            .diagnostics = &diagnostic_writer.interface,
+            .ecl_path = init.environ_map.get("ECL_PATH"),
+            .environ = try environSnapshot(init),
+            .standard_input = standard_input,
+        },
         .{ .worker_pool = worker_count },
     );
     defer session.deinit();
@@ -211,10 +227,14 @@ fn repl(init: std.process.Init, worker_count: usize) AppError!u8 {
     var session = try ecl.session.Session.initWithHostConfig(
         init.gpa,
         &.{},
-        init.io,
-        &output_writer.interface,
-        &diagnostic_writer.interface,
-        init.environ_map.get("ECL_PATH"),
+        .{
+            .io = init.io,
+            .output = &output_writer.interface,
+            .diagnostics = &diagnostic_writer.interface,
+            .ecl_path = init.environ_map.get("ECL_PATH"),
+            .environ = try environSnapshot(init),
+            .standard_input = .program_source,
+        },
         .{ .worker_pool = worker_count },
     );
     defer session.deinit();

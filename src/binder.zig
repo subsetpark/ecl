@@ -5,6 +5,7 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const list = @import("list.zig");
+const dict = @import("dict.zig");
 const lexer = @import("lexer.zig");
 const poll = @import("poll.zig");
 
@@ -222,7 +223,30 @@ pub const LowerCursor = struct {
                     try self.walk.push(.{ .item = list.atUnchecked(frame.item, frame.next_child.?) });
                     break :result .pending;
                 },
-                .int, .float, .char, .symbol, .dict, .task => result: {
+                // A dict literal is inert like every other container, so a
+                // local named inside one would silently become an ordinary
+                // word-shaped key or value. Walking keys and values makes
+                // that the same diagnosed mistake it is everywhere else.
+                .dict => |header| result: {
+                    if (frame.next_child == null) {
+                        const entries: usize = @intCast(dict.keysOf(header).list.length());
+                        frame.next_child = entries * 2;
+                        break :result .pending;
+                    }
+                    if (frame.next_child.? == 0) {
+                        _ = self.walk.pop().?;
+                        break :result .pending;
+                    }
+                    frame.next_child.? -= 1;
+                    const child = frame.next_child.?;
+                    const entry = child / 2;
+                    try self.walk.push(.{ .item = if (child % 2 == 0)
+                        dict.keyAt(header, entry)
+                    else
+                        dict.valueAt(header, entry) });
+                    break :result .pending;
+                },
+                .int, .float, .char, .symbol, .task => result: {
                     _ = self.walk.pop().?;
                     break :result .pending;
                 },
@@ -250,7 +274,13 @@ pub const LowerCursor = struct {
                 self.nested_active = true;
                 break :result .pending;
             },
-            .int, .float, .char, .symbol, .dict, .task => result: {
+            .dict => |header| result: {
+                self.local_indices[self.body_index] = null;
+                try self.walk.push(.{ .item = .{ .dict = header } });
+                self.nested_active = true;
+                break :result .pending;
+            },
+            .int, .float, .char, .symbol, .task => result: {
                 self.local_indices[self.body_index] = null;
                 self.body_index += 1;
                 break :result .pending;

@@ -13,8 +13,11 @@ slow-but-correct everywhere the architecture permits, but never violates
 the decision-21 invariants that make it evolvable to K-order later.
 Scope additions ruled in during planning: REPL line editing/completion,
 userland stateful modules, the `result`, `str`, `csv`, `json`, `table`, and
-`http` stdlib modules, and optional target-specific native extension modules
-loaded by the stock binary. Core and stdlib retain the single-binary
+`http` stdlib modules, optional target-specific native extension modules
+loaded by the stock binary, and (ruled 2026-08-18) the bitwise pattern
+words plus the three-layer randomness design — pure counter-based kernels,
+the `entropy` capability, and the userland `rng` stateful module — landing
+as one standalone patch between M12 and M13. Core and stdlib retain the single-binary
 distribution guarantee; `.eclmod` artifacts are explicitly installed trusted
 dependencies, not required runtime pieces.
 
@@ -55,7 +58,10 @@ Verified in the checkout (2026-08-17):
   TTY editing, locked atomic 100-line history, snapshot-safe live and dotted
   completion, continuation cancellation/EOF behavior, and a real-binary PTY
   gate while leaving non-TTY input unchanged. M9 native extensions, M11
-  stateful modules, and M12 stdlib remain future milestones.
+  stateful modules, and M12 stdlib were future milestones when this
+  section was written; M9, M10 (one-binder merge), and M11 have since
+  landed — their Status records are the as-built truth — and M12 is
+  planned (2026-08-18). M13 acceptance remains.
 - All derived core words now live in `src/prelude.ecl`; the loader embeds and
   evaluates that ordinary source with retained provenance before freezing the
   core. Every definition is a documented `### def <name>` block. A standard
@@ -260,7 +266,7 @@ base-index substack isolation, boundary frames with O(1) truncation,
 TCO as frame overwrite, lazy traces built only at unwind, and error
 dicts per d.19. Primitives are core-env bindings with fn-pointer
 payloads (a minimal set: stack words, arithmetic via a provisional
-scalar path, `pp`/`prin`, `def`/`set`, `if`/`call`/`while`, `attempt`/
+scalar path, `pp`/`prin`, `def`/`set`, `if`/`call`/`while`, `@attempt`/
 `raise`, `exit`, `args`). CLI modes: `-e`, script file, stdin, bare-stdin
 REPL with continuation, script-prints-nothing-implicitly (d.22). Cold
 start spawns zero threads.
@@ -288,7 +294,7 @@ ARCHITECTURE.md §Environments in full: binding cells (rebind swaps the
 interior), per-env shape generations, the single `env.bind()` funnel,
 lazy child envs shared by every isolated boundary, deep-binding chain
 resolution, core frozen after prelude install. The d.18 module system:
-`module`/`use`/`alias`, dotted
+`@module`/`use`/`alias`, dotted
 qualified access, `defp`/`setp` (top-level error), registry as
 name → atomically swapped `{env, generation}` with commit-after-success
 and **whole-body generation pinning**, plus the multi-writer registry
@@ -502,7 +508,7 @@ prelude machinery).
 
 **Definition of Done**:
 ARCHITECTURE.md §Scheduler: green units on a lazily-spun fixed worker
-pool (no threads until first `spawn`; 1-worker config supported),
+pool (no threads until first `@spawn`; 1-worker config supported),
 fuel/reduction safe points including kernel chunk polls (~64K
 elements), task cells (write-once, multi-waiter, per-cell mutex) with
 single-winner wait-policy transitions (no double-enqueue), cancellation with
@@ -510,8 +516,8 @@ kill-on-arrival and waiter-list removal, structured lifetime with
 wait-for-quiescence at scope close, cancelled results as
 `{'err {'kind 'cancelled …}}`, one timer thread + binary heap for
 `await-for`, stdout whole-write lock. Vocabulary: `spawn await
-await-any await-for cancel tasks par-each` [P] and `await-all` [E]. The
-bounded `par-each` driver represents each captured element directly as the
+await-any await-for cancel tasks @each` [P] and `await-all` [E]. The
+bounded `@each` driver represents each captured element directly as the
 child Unit's one-value initial stack, publishes tasks without synthesizing or
 copying quotations, and transfers them to an evaluator-owned ordered join
 state. No private join word is installed. The determinism suite runs
@@ -539,7 +545,7 @@ has one explicit cursor implementation. Scheduler-attached drivers preserve
 that cursor and its partial result and return to the scheduler within the
 accounted-work quantum; blocking bootstrap and tool shells drive the same
 cursor without introducing a duplicate traversal mode. Process exit is owned by the
-root Unit outside `attempt`: `exit` in a spawned Unit or inside `attempt`
+root Unit outside `@attempt`: `exit` in a spawned Unit or inside `@attempt`
 raises an ordinary catchable `'domain`, while an allowed root exit
 closes, cancels, and quiesces the root task scope before exposing its
 status to the CLI.
@@ -847,7 +853,7 @@ builtins retired), deletion of the unproducible value arms from `Binding`
 and both publication typestates, and the SPEC.md/INTERPRETER.md rewrite.
 Counts landed at 88 primitives and 66 documented prelude blocks (the plan
 said 62; the working tree also carried the `partial-all` → `with` rename and
-the new `module-with`). One planned piece was dropped during execution as
+the new `with 'name @module`). One planned piece was dropped during execution as
 unreachable — the direct-context capture idiom entry — and its underlying
 cost is carried as post-v1 follow-up 14.
 
@@ -984,7 +990,7 @@ stack snapshot. Concretely:
   nominal brand, so raw intern ids cannot be accidentally substituted. A
   qualified executable name splits at its final dot; aliases remain
   unqualified. `'name (body) module` and
-  the source-defined `module-with` constructor build a candidate; the first
+  the source-defined `with 'name @module` constructor build a candidate; the first
   successful registration of a canonical name creates its slot, while later
   registrations replace only its code generation. Separately constructed names
   own independent stacks even when their bodies come from the same quotation.
@@ -998,9 +1004,9 @@ stack snapshot. Concretely:
   registering, `def`/`defp` and `set`/`setp` retain M10's one-binding
   representation and build only the immutable candidate code environment. The
   isolated body's final operand stack becomes the durable initial stack for a
-  newly created slot instead of being required to be empty. `values 'name body
-  module-with` supplies its values in order as that construction stack's
-  initial contents, using `with` exactly as `attempt-with` and `spawn-with` do;
+  newly created slot instead of being required to be empty. `values (body)
+  with 'name @module` supplies its values in order as that construction stack's
+  initial contents, using `with` exactly as `with @attempt` and `with @spawn` do;
   the body may consume, reorder, or extend them before publication. On
   re-registration, the successfully built candidate's initial-state stack is
   discarded and the existing slot's durable stack is retained: initialization
@@ -1136,38 +1142,100 @@ protocol.
 
 ### Milestone 12: stdlib-result-str-csv-json-table-http
 
+**Status**: landed 2026-08-18 — gameplan
+`gameplans/stdlib-result-str-csv-json-table-http.json` (local, untracked
+per convention; the substance below stands on its own). Ten patches,
+ungated pre-`0.1.0`. Planning rulings folded into the DoD: the http spike
+ran and `std.http.Client` won; qualified reference to an unregistered
+module auto-loads exactly as `use`-miss; embedded stdlib wins over
+`ECL_PATH`; `str` ships thirteen words; `http` ships two fixed-arity words;
+`stdin` closes Open Question 1.
+
+Four planning assumptions did not survive contact, and what landed differs.
+
+**The native SDK could not express `csv.emit` or `json.emit`.** `list_at`
+reaches only a declared input's top level and a `ValueView` of an aggregate
+exposes a length and nothing else, so no module — first-party or otherwise —
+could read a list of lists. The SDK gained a path-addressed nested read
+(`read_path`, gated by the existing `reschedule` capability, so the
+descriptor and capability wire are unchanged), and `ecl.module` gained a
+`linkage` spec so a statically linked module does not claim the ABI entry
+symbol two first-party modules would collide on.
+
+**`json` and `http` are internal builtins, not SDK modules** (user ruling
+during execution). The SDK withholds an allocator and any state that
+outlives a yield, which is exactly what `std.json.Scanner` needs, so
+hand-rolling a JSON grammar was the only SDK-compatible option and was
+rejected in favour of the standard library's. `csv` stays the first-party
+proof of the public callback protocol — Zig has no CSV library, so
+hand-rolling was forced there regardless.
+
+**Two pre-existing defects blocked the milestone and were fixed.** The
+loading lease recorded only that a name was being loaded, never by whom, so
+any interleaving — at one worker too, since the load driver yields
+mid-source — reported a bogus recursive-auto-load `'domain` to every
+requester but one; the node now records its owner, and contention waits and
+re-resolves. And a binding with no module home resolved its word references
+against whatever environment happened to be executing, so a module exporting
+a word named like a core one reached inside every prelude word it called: a
+module defining `where` broke `filter`. `Eval` frames now carry a separate
+resolution scope, so every binding resolves in the chain it was defined
+against, with no exceptions. Late binding is unchanged; dynamic scope is
+what went away. Both are recorded in SPEC.md and INTERPRETER.md.
+
+**A builtin module word cannot declare an enforceable effect.** The
+cross-home effect check runs the instant a builtin primitive returns, which
+precedes any output a scheduler driver it started will produce. Builtin
+module words are therefore exempt exactly as source module words already
+were, and `json`/`http` state their stack shape in prose. `http` also ships
+without a request deadline: the blocking call is the documented v1
+exception, and a half-deadline that only fires between operations was
+declined in favour of recording the limitation.
+
 **Definition of Done**:
 Six stdlib modules ship inside the binary (embedded sources / native
 descriptors registered lazily through M4 plus M9's private static transport,
-so the single-binary story holds; `ECL_PATH` remains for user modules). CSV
+so the single-binary story holds; `ECL_PATH` remains for user modules), each
+resolvable by `use` and by bare qualified reference with no `ECL_PATH` and no
+filesystem. CSV
 and JSON are first-party consumers of the public typed callback/capability
 protocol without becoming external runtime dependencies. The same milestone
 owns the explicit host scripting words needed by that layer:
 - **`result`** — ecl source over the core `{'ok values}` / `{'err error}`
   representation. It exports constructors and observations (`result.ok`,
   `result.err`, `result.ok?`, `result.err?`), success composition
-  (`result.and-then`), failure transformation (`result.map-error`), broad and
+  (`result.and-then`), failure transformation (`result.map-err`), broad and
   kind-selective recovery (`result.recover`, `result.recover-kinds`), an
-  exhaustive eliminator (`result.case`), and list aggregation
+  exhaustive eliminator (`result.either`), and list aggregation
   (`result.all`, `result.partition`). Successful values are always a list
   representing a stack, never one privileged scalar. `result.and-then` seeds
-  that stack into its quotation through `attempt-with`; an existing error is
+  that stack into its quotation through `with @attempt`; an existing error is
   returned unchanged. Recovery seeds the error dict as one value and runs the
-  recovery quotation through `attempt-with`; `recover-kinds` leaves an
+  recovery quotation through `with @attempt`; `recover-kinds` leaves an
   unmatched result unchanged. `result.all` preserves input order and returns
   the leftmost error unchanged, or one successful value containing the list
   of per-result success stacks. `result.partition` returns success-stack lists
   and error dicts separately without re-raising. All operations reject a
   malformed tagged result before invoking a supplied quotation.
-- **`str`** — ecl source: `upper lower trim` (ASCII per d.15) and
-  friends; another embedded-source module built on the ordinary module path.
+- **`str`** — ecl source, exactly thirteen words (ruled 2026-08-18):
+  `upper lower trim trim-left trim-right starts? ends? contains? index-of
+  replace repeat pad-left pad-right`. Case operations are ASCII-only per
+  the character-model ruling; `index-of` is `'domain` when the needle is
+  absent, with `contains?` as the predicate form. Another embedded-source
+  module built on the ordinary module path.
 - **Host scripting words** — `slurp` [P] `( path -- string )` reads one
   UTF-8 file, `spit` [P] `( string path -- )` writes one file, and `getenv`
-  [P] `( name -- string )` reads an environment variable. Unset variables
-  error per absence-is-absence, with `attempt`/`or-else` as the defaulting
-  idiom. `lines` [E] `( path -- list )` lands here, not M6, as the ordinary
+  [P] `( name -- string )` reads an environment variable from an immutable
+  snapshot taken at session init. Unset variables
+  error per absence-is-absence, with `@attempt`/`result.or-else` as the defaulting
+  idiom. `stdin` [P] `( -- string )` (ruled 2026-08-18) reads the whole
+  piped stream once in `-e` and script-file modes and is `'io` in modes
+  where stdin is the program source. `lines` [E] `( path -- list )` lands
+  here, not M6, as the ordinary
   source body `(slurp "\n" split)`. These are explicit capabilities and do
-  not alter the pure M6 `parse` contract.
+  not alter the pure M6 `parse` contract. `spit` is truncate-and-replace
+  with no temp+rename: a mid-write failure may leave a partial file,
+  surfaced as `'io` and documented rather than half-guaranteed.
 - **`csv`** — native: `csv.parse` `( string -- rows )` and `csv.emit`
   `( rows -- string )` for RFC 4180 comma-delimited data. Parsing accepts
   CRLF or LF record endings, quoted commas and newlines, and doubled-quote
@@ -1201,13 +1269,17 @@ owns the explicit host scripting words needed by that layer:
   `( column -- value )`; joins accept explicit left/right name pairs. The
   Decisions Made policy below freezes validation, ordering, collision,
   missingness, error, and reflection behavior.
-- **`http`** — internal native builtin, client only: `http.get`/`http.post`
-  (url [headers-dict] [body] → response dict with 'status, 'headers,
-  'body), TLS included, timeouts surfacing as 'io error dicts. Its blocking
+- **`http`** — internal builtin-backed module, client only:
+  `http.get ( url headers -- response )` and
+  `http.post ( url headers body -- response )` (fixed full arity, `{}` for
+  no headers; ruled 2026-08-18), returning a response dict with 'status,
+  'headers, 'body; TLS included, timeouts surfacing as 'io error dicts.
+  Backend: `std.http.Client` (spike-resolved 2026-08-18); one client per
+  call, no shared pool. Its words publish through the new `builtin`
+  `ModulePublication` arm. Its blocking
   call runs on the unit's worker thread as the one documented first-party v1
   exception; it is not exposed as an SDK capability and migrates to the future
-  `Offload` capability without changing its ECL value-level API. Backend per
-  the resolved Open Question.
+  `Offload` capability without changing its ECL value-level API.
 
 **Why this is a safe pause point**: Modules and the three explicit host
 scripting primitives are additive; evaluator and value semantics are
@@ -1273,21 +1345,9 @@ future wire-contract revision.
 
 ## Open Questions
 
-1. **stdin as data (gap scan 2026-08-12).** The awk positioning implies
-   line-processing of piped input, but piped stdin is currently
-   consumed as *source*. A `stdin` word must coexist with the
-   stdin-as-source CLI modes without ambiguity. Real design
-   conversation; owner: M12 gameplan at the latest.
-2. **Randomness (gap scan 2026-08-12).** No `rand`/roll/deal words
-   exist. First impure-nondeterministic vocabulary: seeding must be
-   ruled against d.20 units (per-session RNG, per-unit, or
-   explicit-seed-only) and determinism testing. Real design
-   conversation; not blocking any current milestone.
-3. **http backend (choice only; procedure is decided).** Which backend
-   wins the spike — Zig `std.http.Client` + `std.crypto.tls` (pure Zig,
-   no C dependency, maturity risk) or a libcurl binding (battle-tested,
-   complicates the static single binary). Resolved by the M12 spike per
-   the agreed criteria in Decisions Made. Owner: M12 gameplan.
+None. The stdin-as-data and http-backend questions were closed at M12
+planning and the randomness question was closed the same day (all
+2026-08-18) — see Decisions Made.
 
 ## Post-v1 follow-ups (deferred features)
 
@@ -1312,7 +1372,7 @@ INTERPRETER.md and its entry here is retired.
      stated contract (success-typing discipline).
    - Statically *verified* applications may skip the dynamic contract
      check — verification licenses the skip, never module residence alone.
-   - Purity checking upgrades `par-each` to full observational equivalence
+   - Purity checking upgrades `@each` to full observational equivalence
      with `each` (no cross-task IO interleaving possible); purity stays
      per-word and scoped to where it pays.
    - Literal-count `pack` is checker-inferable; a nonliteral count has
@@ -1911,11 +1971,210 @@ INTERPRETER.md and its entry here is retired.
 - **http backend is chosen by spike, not by guess** (user ruling, this
   session): at M12 planning, `std.http` wins if it handles TLS 1.3
   against 5 real-world hosts including redirects and chunked encoding;
-  otherwise bind libcurl.
+  otherwise bind libcurl. **Resolved at M12 planning (2026-08-18): the
+  spike ran on pinned Zig 0.16.0 and `std.http.Client` won** — TLS 1.3
+  real-world hosts (ziglang.org, google.com, api.github.com,
+  en.wikipedia.org), a followed redirect chain, chunked transfer, gzip
+  decompression, and a JSON POST all passed. No libcurl; the
+  zero-C-dependency single static binary stands. Timeouts ride
+  `Io.async` futures plus `Io.Timeout` cancellation, since the client
+  itself has no timeout fields.
+- **Qualified reference auto-loads (user ruling, 2026-08-18, M12
+  planning).** The first qualified reference (`stats.mean`) to an
+  unregistered module triggers exactly the `use`-miss auto-load —
+  embedded stdlib and `ECL_PATH` modules are addressable Erlang-style
+  with no ceremony. `use` remains solely the unqualified-export splice
+  with shadow notices. A misspelled dotted word costs one bounded,
+  uncached search before `'undefined-word`; the trust boundary is
+  unchanged (`use` already auto-loads — only the trigger moves).
+  Recorded in SPEC.md's Modules/Loading section at ruling time, ahead of
+  the implementation.
+- **Embedded stdlib wins auto-load precedence over `ECL_PATH`** (user
+  ruling, 2026-08-18, M12 planning), identically for `use`-miss and
+  qualified-miss: stdlib names stay stable — a stray `csv.ecl` on the
+  path cannot silently replace the stdlib; in-session shadowing and
+  explicit `@module` registration remain the documented override; embedded
+  resolution pays no filesystem stat.
+- **stdin is a word, ruled in at M12** (user ruling, 2026-08-18, closing
+  the former open question): `stdin` [P] `( -- string )` reads the whole
+  piped stream once; legal in `-e` and script-file modes; `'io` in modes
+  where stdin is the program source. `"/dev/stdin" slurp` was rejected as
+  the permanent answer — the positioning deserves a word.
+- **The str surface is exactly thirteen words** (user ruling, 2026-08-18):
+  `upper lower trim trim-left trim-right starts? ends? contains? index-of
+  replace repeat pad-left pad-right`; case operations ASCII-only per the
+  character-model ruling; `index-of` is `'domain` when absent, `contains?`
+  is the predicate form. All compact ECL-source definitions over core
+  kernels.
+- **http words are fixed full arity** (user ruling, 2026-08-18):
+  `http.get ( url headers -- response )` and
+  `http.post ( url headers body -- response )`, with `{}` for no headers.
+  No convenience variants.
+- **http publishes through a new `builtin` `ModulePublication` arm**
+  (M12 gameplan ruling, 2026-08-18). The M4-scoped "native-builtin-module
+  mechanism" was never actually built — `ModulePublication` had only
+  `word | native` arms, making a primitive-backed module word
+  unrepresentable. M12 adds the `builtin` arm (primitive plus mandatory
+  effect and documentation) so http's words are ordinary machine
+  primitives with full host authority published under a module name; the
+  SDK surface does not widen.
+- **Stdlib is written in ECL wherever possible, native only when
+  necessary** (user directive, 2026-08-18, standing): `result`, `str`,
+  `table`, and `lines` are embedded ECL source; `csv` and `json` are
+  native solely as the deliberate first-party proof of the M9 public
+  callback protocol; `http` is native-internal because TLS and sockets
+  are host authority no ECL program can express.
+- **Result-envelope vocabulary consolidates into the result module**
+  (user ruling, 2026-08-18): `ok?`, `or-raise`, and `or-else` leave the
+  prelude and join `result`, routed through the module's `checked`
+  validator (a malformed dict is rejected as such instead of failing on
+  a raw missing key). The boundary: envelope *interpreters* live in
+  `result`; error *producers* (`raise`, `fail`, `assert`) stay core —
+  an error dict in flight becomes a result only when `@attempt`/`await`
+  reifies it. Two clarity renames land with the move (user directive:
+  naming consistent and maximally clear): `map-error -> map-err`
+  (every failure-arm word spells `err`, matching the `'err` tag and
+  Rust's `map_err`) and `case -> either` (the old name shadowed prelude
+  `case` with unrelated semantics under `'result use` — an
+  unrelated-homonym trap; `either` is the Haskell-lineage eliminator
+  name and collides with nothing; `result.partition` keeps its name
+  because adjacent-concept shadowing is the benign, documented kind).
+  `and-then` keeps its name — there is deliberately no `result.map`:
+  `@attempt`'s lifting collapses functor map into `and-then` on the
+  success side, and the distinction survives only on the error side
+  (`map-err` rewraps, `recover` replaces the outcome) — now stated in
+  `and-then`'s doc. Made cheap by the same-day qualified-miss
+  auto-load ruling; the common idiom becomes `@attempt result.or-raise`
+  with `'result use` splicing bare names back. Ships as the fourth
+  standalone patch (`gameplans/result-consolidation.json`, local,
+  untracked), after unit-word-spelling.
+- **Bitwise words are pattern words** (user ruling, 2026-08-18): `band
+  bor bxor bnot bsl bsr` (Erlang naming — the logical `and`/`or`/`not`
+  are taken) operate on the i64 two's-complement bit pattern. `bsl`
+  truncates bits off the top and `bsr` zero-fills — bit movement, not
+  arithmetic, so no overflow error by design; `*` and friends keep
+  overflow-is-error untouched. Shift counts outside 0..63 are `'domain`
+  with per-element identification; non-int operands are `'type`;
+  int-leaf-only, fully pervasive. Overflow remaining an error means a
+  PRNG step is inexpressible in arithmetic ECL — bitwise words make a
+  user-authored xorshift expressible in source, which is the
+  inspectability story.
+- **Randomness resolved (user rulings, 2026-08-18 — closing the last
+  open question).** Three layers, no hidden state: (1) pure counter-based
+  step kernels — a SplitMix64 counter construction (ruled 2026-08-18,
+  superseding the initial Philox proposal: `std.Random.SplitMix64`
+  supplies the mixer, the closed-form counter jump, rejection bounding,
+  and float conversion are ours, and tests pin Vigna's published test
+  vectors so sequences are defined by the algorithm, not the pinned
+  stdlib; statistically weaker than Philox, accepted for a documented
+  non-cryptographic scripting RNG) — generator state as plain data
+  `[key counter]` — `rand-int ( state m -- state' x )`,
+  `rand-ints ( state n m -- state' list )`,
+  `rand-float ( state -- state' f )`; deterministic values,
+  differential-testable, safe for the 1-vs-N worker suite because output
+  is a function of visible inputs only. (2) One impure capability word,
+  `entropy ( -- int )`, gated like the filesystem ('io without host
+  authority) and excluded from deterministic fixtures. (3) A userland
+  `rng` stdlib stateful module (the first real M11 showcase): `seed int
+  ints roll float deal shuffle` over `within` transactions; fixed
+  documented initial state so sequential programs are reproducible by
+  default, nondeterminism opt-in via `entropy rng.seed`; concurrent
+  draws through the shared module are arbiter-serialized and honestly
+  worker-count-nondeterministic — reproducible parallel randomness is
+  explicit per-task states through the pure kernels. Per-session and
+  per-unit ambient RNGs were rejected: the former breaks the 1-vs-N
+  determinism gate outright, the latter buys terseness with hidden
+  per-unit state against the language's explicitness doctrine. Bitwise
+  and randomness ship together as one standalone post-M12 patch
+  (`gameplans/bitwise-and-randomness.json`, local, untracked), executed
+  after the M12 gameplan completes and before M13 acceptance.
+- **Unit constructors carry a `@` spelling convention** (user ruling,
+  2026-08-18; `@` chosen over `&` — `&` implies async, wrong for the
+  synchronous attempt; `@` reads as *place*, which is what a
+  share-nothing unit is). A leading `@` marks exactly the words that
+  apply a quotation in a fresh unit — one unit per application for
+  `@each`, whose children are seeded with exactly their element, while
+  `@attempt`/`@spawn`/`@module` substacks receive nothing implicitly
+  (zero-input is a property of three members, not the class invariant).
+  **The `-with` variants are dropped entirely** (ruled 2026-08-18; the
+  ruling superseded, within one planning session, both an initial
+  refusal of `@each-with` and the subsequent complete-the-family ruling
+  that added it — the record keeps the chain): once the `@module`
+  operand flip made every member exactly the composition `with @X`, the
+  words carried nothing but a name. `with @attempt`, `with @spawn`, and
+  `with 'name @module` are deleted; no `@each-with` exists. Seeding is spelled
+  compositionally at call sites — `values (q) with @attempt`,
+  `list values (q) with @each` (each child's stack is its element
+  followed by the values, element deepest), `values (body) with 'name
+  @module` — so one word scales to every future unit constructor,
+  user-defined ones included, with no companion-word obligation; the
+  last `-with` ambiguity with `zip-with` disappears; and the future fast
+  path is phrase-level recognition of `with @each`/`with @attempt`
+  through the M6 matcher — the performance option the equivalence law
+  existed to protect, now needing no dedicated words. The renames:
+  `attempt -> @attempt`, `spawn -> @spawn`, `par-each -> @each`,
+  `module -> @module`. Hard changes, no
+  aliases, pre-`0.1.0`. Two same-patch companions (ruled 2026-08-18):
+  **`@module` flips to name-last operand order** — `( quotation name -- )`,
+  `(body) 'stats @module` — matching `def`/`set`, where the bound name
+  sits nearest the binder (M4's name-first order was an unreconciled
+  Forth reflex); seeded registration is `values (body) with 'name
+  @module`, the name riding above the composition with no shuffle at
+  all, which is what made dropping `with 'name @module` possible. Migration is
+  loud: symbol/list operand types make every
+  un-flipped call site `'type`, never a misregistration. And **`ecl fmt`
+  extends its commenting convention to modules**: a top-level
+  registration ending in a literal quoted name followed by `@module`
+  (bare or `with`-seeded) gains
+  a synthesized `### module <name>` header exactly as definitions gain
+  `### def <name>`; the embedded stdlib sources are reformatted under it.
+  Deliberately unmarked: `each`/`fold`-family
+  (implicitly fed their elements), `infra`/`within` (apply an explicitly
+  named other stack), `use`/`load`/`unmodule` (no quotation), the task
+  observers, and `with`. `@` stays an ordinary word character — the
+  source audit enforces the convention for first-party vocabulary via a
+  spelling manifest; users are encouraged to follow it. The same patch
+  lands the guided isolation error (underflow at a unit-constructor
+  substack base names the isolation and suggests `with` seeding or
+  `partial`, per the binder-suggests-`partial` precedent) and records
+  the identity that motivated the ruling: `(q) @attempt` is
+  observationally `(q) @spawn await`, so attempt-call symmetry was
+  traded away to keep attempt-spawn symmetry, which the shared result
+  contract makes load-bearing. The same patch also sanctions **the
+  after-row annotation token** (user ruling, 2026-08-18): a bare `...`
+  as the entire after portion of a definition annotation —
+  `(result on-ok on-err -- ...)` — declares fixed-before/variable-after;
+  before-slots are boundary-checked as today and the post-condition
+  compare is skipped. Grammar is strict in v1 (after is all named slots
+  or exactly `...`); named Factor-style rows remain the deferred static
+  checker's extension, for which the bare token is the anonymous row;
+  the native SDK excludes it (Call effects stay statically exact);
+  `...` joins `--`/`:` as reserved on namespace introduction while inert
+  as a value. SPEC entries already informally spelling ellipses
+  (`unless`, `within`) become sanctioned, and doc-only stdlib
+  annotations with fixed inputs (`result.case`) upgrade to partial
+  effects. Lineage: ANS Forth's `i*x`/`j*x` comment notation and
+  Factor's checked row variables; ecl takes the anonymous middle.
+  Ships as the third standalone patch
+  (`gameplans/unit-word-spelling.json`, local, untracked), after
+  bitwise-and-randomness; its sweep conforms the runnable acceptance
+  assertions below while as-built milestone narratives keep their
+  historical spellings.
+- **Wait-set publication is terminal for its setup** (found 2026-08-18
+  during the result-consolidation sweep). `WaitSet.advanceSetup` wrote its
+  terminal phase *after* `activate()`, but activation is exactly what lets
+  another selector deliver and drop the wait set's last reference — a
+  use-after-free. The write now precedes the publish and the arm reads
+  nothing afterward. The defect was always in the code; it became
+  reachable only once `result.ok?` moved into a module, so the hot-reload
+  test's racing children each trigger an auto-load. Confirmed by three
+  `test-tsan` runs: crash with the auto-load and no fix, pass without the
+  auto-load, pass with both. That test is now the standing reproducer.
 - **Toolchain pinned: Zig 0.16.0** (resolved at M1 planning, closing the
   former open question). Pinned in `build.zig.zon`
   (`minimum_zig_version`) and by the CI tarball; revisited only at
-  milestone boundaries and at the M12 http spike.
+  milestone boundaries and at the M12 http spike. Revisited at that spike
+  (2026-08-18): 0.16.0 stands.
 - **Forge and CI: sourcehut** (M1 planning ruling). The repo is
   `git.sr.ht/~subsetpark/ecl` (unlisted; flip with
   `hut git update --visibility public`); CI is builds.sr.ht via
@@ -2059,7 +2318,7 @@ script in CI.
     `kept pp` prints `99`; both isolation probes error
     `'undefined-word` for `k`.
   - **Traces to**: Milestone 3 — exact unit stack rollback; Milestone 4
-    — the shared lazy child-scope mechanism proven through `attempt`;
+    — the shared lazy child-scope mechanism proven through `@attempt`;
     Milestone 6 — `each` adopts that mechanism and owns the terminal
     each-specific assertion.
 
@@ -2089,10 +2348,10 @@ script in CI.
   - **Traces to**: Milestone 5 — flip/reshape/group/grade kernels.
 
 - **DoD-18 — spawn/await result protocol**
-  - **Assert**: `spawn`+`await` delivers the same result shape as
-    `attempt`; `await` is idempotent; source-defined `await-all` returns
+  - **Assert**: `@spawn`+`await` delivers the same result shape as
+    `@attempt`; `await` is idempotent; source-defined `await-all` returns
     every ordinary result in input order without re-raising failures.
-  - **Verify by** `cmd`: `ecl '(1 2 +) spawn dup await pop await or-raise call'`
+  - **Verify by** `cmd`: `ecl '(1 2 +) @spawn dup await pop await result.or-raise call'`
     and a mixed success/failure task-list fixture comparing `await-all` with
     `(await) each` at 1 and 8 workers.
   - **Expected**: `3`; the two ordered result lists match at both worker
@@ -2109,8 +2368,8 @@ script in CI.
     results).
   - **Traces to**: Milestone 7 — cancel flags, safe points, timer thread.
 
-- **DoD-20 — par-each determinism and leftmost error**
-  - **Assert**: `par-each` results are in program order and a failing
+- **DoD-20 — @each determinism and leftmost error**
+  - **Assert**: `@each` results are in program order and a failing
     element re-raises the leftmost `'err`; output is identical at 1 and
     N workers.
   - **Verify by** `cmd`: fixture run twice with `ECL_WORKERS=1` and
@@ -2210,7 +2469,7 @@ script in CI.
 
 - **DoD-25a — result algebra**
   - **Assert**: the embedded `result` module constructs and observes canonical
-    results, composes successful stack values through `attempt-with`, maps and
+    results, composes successful stack values through `with @attempt`, maps and
     selectively recovers errors without swallowing unmatched kinds, eliminates
     either variant, and aggregates ordered result lists with the specified
     leftmost-error and partition behavior. Malformed result dicts fail before
@@ -2227,7 +2486,7 @@ script in CI.
     `partition` preserves order within both outputs; malformed inputs are
     rejected without executing probe quotations.
   - **Traces to**: Milestone 12 — embedded source `result` module using the M6
-    result protocol and `attempt-with`.
+    result protocol and `with @attempt`.
 
 - **DoD-25 — json round-trip**
   - **Assert**: `json.parse` maps objects/arrays/numbers per the
@@ -2325,23 +2584,32 @@ script in CI.
   - **Traces to**: Milestone 12 — embedded `table` module join words.
 
 - **DoD-31 — http client**
-  - **Assert**: `http.get` against a local fixture server returns a
-    dict with `'status 200` and the body; a refused connection yields
-    `'kind 'io`.
-  - **Verify by** `cmd`: CI starts a local static server; fixture
-    `http.ecl` gets a known file and one dead port.
+  - **Assert**: `"<url>" {} http.get` against a local fixture server
+    returns a dict with `'status 200` and the body; a refused connection
+    yields `'kind 'io`.
+  - **Verify by** `cmd`: the test suite builds and spawns the loopback
+    fixture server (`test/http_fixture_server.zig`, ephemeral port printed
+    as the readiness handshake); the server-backed cases run in
+    `src/tests/http_test.zig`; the dead-port `'io` case also runs as a
+    network-free real-binary fixture.
   - **Expected**: status/body asserted; the dead port errors `'io`
     without crashing the interpreter.
-  - **Traces to**: Milestone 12 — internal http native module and documented
+  - **Traces to**: Milestone 12 — internal builtin-backed http module
+    (`src/stdlib/http.zig`, `std.http.Client` backend) and documented
     direct-blocking exception.
 
 - **DoD-32 — str module via embedded stdlib**
   - **Assert**: `'str use "hello" str.upper` works with no ECL_PATH
-    set.
-  - **Verify by** `cmd`: `ecl "'str use \"hello\" str.upper pp"` in an
-    empty environment.
-  - **Expected**: `"HELLO"`.
-  - **Traces to**: Milestone 12 — embedded stdlib registration (mechanism Milestone 4).
+    set, and so does the bare qualified form with no `use` at all
+    (qualified-miss auto-load, ruled 2026-08-18).
+  - **Verify by** `cmd`: `ecl "'str use \"hello\" str.upper pp"` and
+    `ecl '"hello" str.upper pp'`, both in an empty environment with a
+    copied binary in an empty directory.
+  - **Expected**: `"HELLO"` from both.
+  - **Traces to**: Milestone 12 — the embedded stdlib manifest
+    (`src/stdlib.zig`) consulted by the auto-load driver before
+    `ECL_PATH`, plus the qualified-miss auto-load trigger (mechanism
+    Milestone 4).
 
 - **DoD-33 — source architecture audit**
   - **Assert**: every first-party Zig input belongs to exactly one production
@@ -2447,7 +2715,7 @@ script in CI.
 
 - **DoD-39 — dynamically constructed modules are independent state singletons**
   - **Assert**: two canonical module names registered from the same
-    `module-with` body own independent durable stacks initialized from their
+    `with 'name @module` body own independent durable stacks initialized from their
     supplied construction values; module-homed `within` reaches only its
     definition-site slot. Dotted canonical names, unqualified aliases, and
     final-dot qualified resolution select the intended module without exposing
@@ -2461,7 +2729,7 @@ script in CI.
   - **Expected**: both worker counts produce the same distinct final values;
     dotted dynamic execution reaches the expected word, both invalid operands
     are `'type`, and neither module can observe or mutate the other's stack.
-  - **Traces to**: Milestone 11 — `module-with`, branded module/qualified names,
+  - **Traces to**: Milestone 11 — `with 'name @module`, branded module/qualified names,
     construction-stack publication, `qualify`/`execute`, and module-home
     `within` authority.
 
@@ -2535,3 +2803,108 @@ script in CI.
   - **Traces to**: Milestone 11 — the opaque module-owner
     `live -> closing -> retired` lifecycle, registry removal, and bounded
     retirement integration.
+
+- **DoD-43 — stdin as data**
+  - **Assert**: `stdin` reads piped input as data in `-e` and script-file
+    modes; in bare-stdin mode, where stdin is the program source, it
+    raises `'io`.
+  - **Verify by** `cmd`: `printf 'a\nb' | ecl -e 'stdin "\n" split len pp'`;
+    and `echo 'stdin' | ecl` for the source-mode case.
+  - **Expected**: `2` from the data path; the source-mode case errors
+    `'io` naming stdin as the program source, without consuming further
+    input.
+  - **Traces to**: Milestone 12 — the stdin host scripting word (ruled
+    2026-08-18, closing the former stdin-as-data open question).
+
+- **DoD-44 — bitwise words are pattern operations**
+  - **Assert**: `band bor bxor bnot bsl bsr` operate on the i64 bit
+    pattern, pervasively, int-only; `bsl` truncates rather than erroring;
+    shift counts outside 0..63 are `'domain` with the failing element's
+    index; arithmetic overflow behavior elsewhere is unchanged.
+  - **Verify by** `cmd`: promoted snapshot cases including
+    `ecl -e '[1 2 3] 60 bsl'` (truncation visible), a `'domain` shift
+    error dict with `'index`, `ecl -e '5 bnot bnot'` → `5`, and a `'type`
+    case on a float operand.
+  - **Expected**: outputs and error dicts match the regenerated snapshot;
+    `zig build differential` covers the new ops' rows.
+  - **Traces to**: the post-M12 standalone patch
+    (`gameplans/bitwise-and-randomness.json`), kernel additions.
+
+- **DoD-45 — randomness is deterministic values plus one capability**
+  - **Assert**: identical generator states produce identical draws;
+    `'rng use` works with no ECL_PATH; a seeded rng sequence is
+    reproducible across runs; `entropy` raises `'io` without host
+    authority and differs across real-binary runs.
+  - **Verify by** `cmd`: promoted snapshot case for a seeded
+    `rand-ints` vector and a seeded `rng` module sequence; e2e runs the
+    binary twice asserting the seeded outputs are byte-identical and two
+    `entropy` outputs differ.
+  - **Expected**: seeded paths byte-identical (and identical at 1 and 8
+    workers); the entropy pair differs; the in-process gate case errors
+    `'io`.
+  - **Traces to**: the post-M12 standalone patch
+    (`gameplans/bitwise-and-randomness.json`), rand kernels, entropy
+    capability, and the `rng` stateful module.
+
+- **DoD-46 — unit constructors are spelled with `@`**
+  - **Assert**: `@attempt @spawn @each @module` are the only first-party
+    `@`-spelled words and the only unit constructors; the old spellings
+    and every `-with` variant (`with @attempt`, `with @spawn`,
+    `with 'name @module`, and any `@…-with`) are `'undefined-word`; an
+    underflow at a unit-constructor substack base carries the guided
+    isolation message suggesting `with` seeding or `partial`;
+    `[1 2] [10] (|x a| x a +) with @each`
+    computes 11 and 12 per child (element deepest, values above),
+    delivered in `@each`'s existing ordered-join result shape;
+    `(body) 'name @module` registers name-last and the former
+    name-first order is `'type`; `ecl fmt` synthesizes
+    `### module <name>` headers for literal-named registrations exactly
+    as `### def <name>`.
+  - **Verify by** `cmd`: `zig build source-audit` (the spelling
+    manifest); e2e cases for one old spelling raising `'undefined-word`
+    and for `10 20 30 (+ +) @attempt` showing the guided error; the
+    snapshot corpus pins the exact guided error dict.
+  - **Expected**: audit exit 0; the old-spelling and guided-error cases
+    match; `(q) @attempt` and `(q) @spawn await` produce structurally
+    identical results on a success and an error fixture.
+  - **Traces to**: the third standalone patch
+    (`gameplans/unit-word-spelling.json`) — renames, spelling manifest,
+    and guided boundary error.
+
+- **DoD-47 — the after-row annotation token**
+  - **Assert**: `(a b -- ...)` annotations validate, store, and reflect;
+    the boundary contract checks the before-slots and skips the
+    post-check; a `...` anywhere but as the entire after portion is
+    `'domain`; a native effect declaring `...` fails validation; `...`
+    is reserved on namespace introduction and inert as a value;
+    `result.either` reflects a partial effect instead of doc-only.
+  - **Verify by** `cmd`: fixture cases defining module words with
+    `-- ...` effects, calling them across the module boundary with wrong
+    and right input arities; `'... def` and a native negative fixture;
+    `'case 'result qualify see` showing the sanctioned form.
+  - **Expected**: wrong input arity is a `'contract` error naming the
+    declared before-slots; variable outputs pass; malformed placements
+    are `'domain`; the native fixture is rejected at validation; `see`
+    round-trips `-- ...` re-readably.
+  - **Traces to**: the third standalone patch
+    (`gameplans/unit-word-spelling.json`) — annotation grammar,
+    EffectCheck, reflection, and reservation.
+
+- **DoD-48 — the result module owns the envelope vocabulary**
+  - **Assert**: bare `ok?`/`or-raise`/`or-else` are `'undefined-word`;
+    `result.ok?`, `result.or-raise`, `result.or-else`, `result.map-err`,
+    and `result.either` resolve via bare qualified reference with no
+    ECL_PATH; every `result.*` word rejects a malformed dict as a
+    malformed result before other work; `result.or-raise` re-raises the
+    captured error dict unchanged; `result.map-error` and `result.case`
+    do not exist; `raise`/`fail`/`assert` remain core.
+  - **Verify by** `cmd`: the conformed `test/acceptance/result.ecl`
+    fixture plus snapshot cases for one old bare spelling, one
+    malformed-dict rejection, and one `result.or-raise` re-raise whose
+    error dict matches the originally captured one byte-for-byte.
+  - **Expected**: old spellings error `'undefined-word`; the re-raised
+    dict is structurally identical to the captured one; malformed input
+    is rejected without running any supplied quotation.
+  - **Traces to**: the fourth standalone patch
+    (`gameplans/result-consolidation.json`) — the move, the `checked`
+    routing, and the `map-err`/`either` renames.

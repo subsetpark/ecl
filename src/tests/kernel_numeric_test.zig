@@ -161,3 +161,76 @@ test "numeric: short kernel loops share the unit poll budget" {
     )) == .ok);
     try std.testing.expect(runtime.lastPolls() >= 1);
 }
+
+test "kernel: bitwise words are pattern words over the integer bit pattern" {
+    try helper.expectStacks(&.{
+        .{
+            .name = "the three total pattern words",
+            .source = "12 10 band 12 10 bor 12 10 bxor",
+            .expected = "8 14 6",
+        },
+        .{
+            .name = "pattern laws",
+            .source = "5 bnot bnot 7 7 bxor 0 bnot -1 bnot",
+            .expected = "5 0 -1 0",
+        },
+        .{
+            // Shifts move bits, so `bsl` truncates off the top instead of
+            // raising the overflow every arithmetic word raises.
+            .name = "shifts move bits rather than scaling",
+            .source = "1 4 bsl 9223372036854775807 1 bsl -8 1 bsl",
+            .expected = "16 -2 -16",
+        },
+        .{
+            // `bsr` is logical: it fills zeros, so a negative pattern becomes
+            // a large positive one rather than staying negative.
+            .name = "right shift fills zeros from the top",
+            .source = "-1 1 bsr 16 4 bsr 5 0 bsl",
+            .expected = "9223372036854775807 1 5",
+        },
+        .{
+            .name = "shifts round-trip inside the pattern width",
+            .source = "6 3 bsl 3 bsr",
+            .expected = "6",
+        },
+        .{
+            .name = "pervasion and dict alignment come from the shared cursor",
+            .source = "[1 2 4] 1 bsl [12 10] bnot {'a 6 'b 3} 1 band",
+            .expected = "[2 4 8] [-13 -11] {'a 0 'b 1}",
+        },
+    });
+    try helper.expectErrors(&.{
+        .{
+            .name = "bitwise words are int-only",
+            .source = "1.5 1 band",
+            .kind = "type",
+            .word = "band",
+        },
+        .{
+            .name = "characters are not patterns",
+            .source = "\\a bnot",
+            .kind = "type",
+            .word = "bnot",
+        },
+        .{
+            .name = "a shift count above the width is domain",
+            .source = "1 64 bsl",
+            .kind = "domain",
+            .word = "bsl",
+        },
+        .{
+            .name = "a negative shift count is domain",
+            .source = "1 -1 bsr",
+            .kind = "domain",
+            .word = "bsr",
+        },
+        .{
+            // A failing element is identified exactly as overflow is.
+            .name = "a failing shift reports its index",
+            .source = "1 [1 64] bsl",
+            .kind = "domain",
+            .word = "bsl",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+    });
+}

@@ -32,12 +32,16 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "execute", .primitive = execute },
         .{ .name = "parse", .primitive = parse },
         .{ .name = "dict-of", .primitive = dictOf },
-        .{ .name = "attempt", .primitive = attempt },
+        .{ .name = "@attempt", .primitive = attempt },
         .{ .name = "raise", .primitive = raise },
         .{ .name = "pp", .primitive = pp },
         .{ .name = "prin", .primitive = prin },
         .{ .name = "args", .primitive = args },
         .{ .name = "exit", .primitive = exit },
+        .{ .name = "slurp", .primitive = slurp },
+        .{ .name = "spit", .primitive = spit },
+        .{ .name = "getenv", .primitive = getenv },
+        .{ .name = "stdin", .primitive = standardInput },
     };
     try core.installBuiltins(definitions);
     try combinators.install(core);
@@ -427,6 +431,176 @@ const PrinDriver = struct {
         };
     }
 };
+/// Reads one whole UTF-8 file. The path decodes through the ordinary
+/// resumable encoder before the read driver owns the byte slice.
+fn slurp(evaluator: *Machine) MachineError!void {
+    var path_value = try evaluator.popValue();
+    defer path_value.deinit();
+    if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
+    const encoder = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), path_value.borrow());
+    try evaluator.startDriver(SlurpDriver{
+        .path_value = .init(path_value.take()),
+        .encoder = .init(encoder),
+    });
+}
+
+const SlurpDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    path_value: heap.Owned(Value),
+    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+    path: ?heap.Owned([]u8) = null,
+
+    pub fn advance(evaluator: *Machine, self: *SlurpDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.path == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return evaluator.fail(.domain, "path contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |path| self.path = .init(path),
+        };
+        const path = self.path.?.take();
+        const path_value = self.path_value.take();
+        self.path = null;
+        evaluator.detachWorkDriver(self);
+        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+        try evaluator.slurpFileOwned(path, path_value);
+        return .detached;
+    }
+};
+
+/// Writes one whole file by truncate-and-replace. Both the contents and the
+/// path encode to bytes before the write driver takes ownership, so a
+/// non-encodable argument fails before the target file is touched.
+fn spit(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var path_value = try evaluator.popValue();
+    errdefer path_value.deinit();
+    if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
+    var contents_value = try evaluator.popValue();
+    errdefer contents_value.deinit();
+    if (!contents_value.borrow().isString()) return evaluator.typeError("a string to write");
+    const contents_encoder = kernel_storage.StringEncoder.init(
+        evaluator.allocator(),
+        contents_value.borrow(),
+    );
+    const path_encoder = kernel_storage.ToUtf8Cursor.init(
+        evaluator.allocator(),
+        path_value.borrow(),
+    );
+    try evaluator.startDriver(SpitDriver{
+        .path_value = .init(path_value.take()),
+        .contents_value = .init(contents_value.take()),
+        .contents_encoder = .init(contents_encoder),
+        .path_encoder = .init(path_encoder),
+    });
+}
+
+const SpitDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    path_value: heap.Owned(Value),
+    contents_value: heap.Owned(Value),
+    contents_encoder: heap.Owned(kernel_storage.StringEncoder),
+    path_encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+    contents: ?heap.Owned([]u8) = null,
+    path: ?heap.Owned([]u8) = null,
+
+    pub fn advance(evaluator: *Machine, self: *SpitDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.contents == null) switch (self.contents_encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return evaluator.fail(.domain, "string contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |contents| self.contents = .init(contents),
+        };
+        if (self.path == null) switch (self.path_encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return evaluator.fail(.domain, "path contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |path| self.path = .init(path),
+        };
+        const path = self.path.?.take();
+        const contents = self.contents.?.take();
+        const path_value = self.path_value.take();
+        self.path = null;
+        self.contents = null;
+        evaluator.detachWorkDriver(self);
+        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+        try evaluator.writeFileOwned(path, path_value, contents);
+        return .detached;
+    }
+};
+
+/// Reads one variable from the immutable session environ snapshot. An unset
+/// variable is an error, not an empty string: absence is absence, and
+/// `@attempt`/`result.or-else` is the defaulting idiom.
+fn getenv(evaluator: *Machine) MachineError!void {
+    var name_value = try evaluator.popValue();
+    defer name_value.deinit();
+    if (!name_value.borrow().isString()) return evaluator.typeError("a string variable name");
+    const encoder = kernel_storage.ToUtf8Cursor.init(evaluator.allocator(), name_value.borrow());
+    try evaluator.startDriver(GetenvDriver{
+        .name_value = .init(name_value.take()),
+        .encoder = .init(encoder),
+    });
+}
+
+const GetenvDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    name_value: heap.Owned(Value),
+    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+    name: ?heap.Owned([]u8) = null,
+    lookup: ?machine.Environ.LookupCursor = null,
+    text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
+
+    pub fn advance(evaluator: *Machine, self: *GetenvDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.name == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return evaluator.fail(
+                .domain,
+                "variable name contains an invalid Unicode scalar",
+            ),
+        }) {
+            .pending => return .yielded,
+            .complete => |name| self.name = .init(name),
+        };
+        if (self.text == null) {
+            if (self.lookup == null)
+                self.lookup = evaluator.environLookup(self.name.?.borrow());
+            switch (self.lookup.?.advance(machine.kernel_poll_quantum)) {
+                .pending => return .yielded,
+                .complete => |found| {
+                    const bytes = found orelse return evaluator.unsetEnvironVariable(
+                        self.name.?.borrow(),
+                        self.name_value.borrow(),
+                    );
+                    self.text = .init(.init(evaluator.allocator(), bytes));
+                    return .yielded;
+                },
+            }
+        }
+        return switch (self.text.?.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => return evaluator.fail(
+                .io,
+                "environment variable value is not valid UTF-8",
+            ),
+        }) {
+            .pending => .yielded,
+            .complete => |text| .{ .output = text },
+        };
+    }
+};
+
+/// Reads the whole standard input stream once. The gate lives in the machine
+/// so the CLI mode that owns stdin as program source cannot be raced.
+fn standardInput(evaluator: *Machine) MachineError!void {
+    return evaluator.readStandardInputOwned();
+}
+
 fn args(evaluator: *Machine) MachineError!void {
     try evaluator.pushBorrowed(evaluator.unit.arguments);
 }
@@ -437,7 +611,7 @@ fn exit(evaluator: *Machine) MachineError!void {
         return evaluator.typeError("an exit status from 0 through 255");
     }
     if (!evaluator.unit.is_root_unit or evaluator.unit.inAttempt()) {
-        return evaluator.fail(.domain, "exit is available only to the root unit outside attempt");
+        return evaluator.fail(.domain, "exit is available only to the root unit outside @attempt");
     }
     try evaluator.park(.{ .close_scope = @intCast(status.borrow().int) });
 }

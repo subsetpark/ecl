@@ -14,13 +14,13 @@ const par_each_work_quantum: usize = 256;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]Definition{
-        .{ .name = "spawn", .primitive = spawn },
+        .{ .name = "@spawn", .primitive = spawn },
         .{ .name = "await", .primitive = await },
         .{ .name = "cancel", .primitive = cancel },
         .{ .name = "tasks", .primitive = tasks },
         .{ .name = "await-any", .primitive = awaitAny },
         .{ .name = "await-for", .primitive = awaitFor },
-        .{ .name = "par-each", .primitive = parEach },
+        .{ .name = "@each", .primitive = parEach },
     };
     try core.installBuiltins(definitions);
 }
@@ -37,6 +37,7 @@ fn spawnTask(
     evaluator: *Machine,
     quotation: *value.ListHandle,
     initial_stack: machine.InitialStack,
+    constructor: machine.UnitConstructor,
 ) MachineError!Value {
     return scheduler(evaluator).spawn(scope(evaluator), .{
         .parent_unit = evaluator.unit,
@@ -44,6 +45,7 @@ fn spawnTask(
         .parent_home = evaluator.currentHome(),
         .quotation = quotation,
         .initial_stack = initial_stack,
+        .constructor = constructor,
     }) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.Io => evaluator.fail(.io, "could not start scheduler worker threads"),
@@ -53,7 +55,7 @@ fn spawnTask(
 fn spawn(evaluator: *Machine) MachineError!void {
     var quotation = try evaluator.popQuotation();
     defer quotation.deinit();
-    const task = try spawnTask(evaluator, quotation.borrow().list, .empty);
+    const task = try spawnTask(evaluator, quotation.borrow().list, .empty, .spawn);
     try evaluator.pushOwned(task);
 }
 
@@ -141,6 +143,7 @@ const ParEachDriver = struct {
                 evaluator,
                 self.quotation.borrow().list,
                 .{ .borrowed_seed = list.atUnchecked(self.sequence.borrow(), self.index) },
+                .each,
             );
             self.tasks.borrowMut().appendOwned(task);
         }

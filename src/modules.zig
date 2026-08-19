@@ -7,6 +7,9 @@ const intern = @import("intern.zig");
 const native_module = @import("native_module.zig");
 const poll = @import("poll.zig");
 const snapshot_api = @import("snapshot.zig");
+const list = @import("list.zig");
+const kernel_storage = @import("kernel_storage.zig");
+const poll_api = @import("poll.zig");
 
 pub const ModuleGeneration = struct {
     allocator: std.mem.Allocator,
@@ -826,10 +829,39 @@ pub const AliasError = error{
     MissingModule,
 };
 
+/// Identifies who holds a loading lease. A second request from the same
+/// owner is a genuine cycle; one from a different owner is ordinary
+/// contention, which must wait rather than fail. Storing the owner *as* the
+/// lease slot makes the two states one atomic read: there is no window where
+/// a node is held by nobody in particular.
+pub const LoadingOwner = enum(usize) {
+    _,
+
+    pub fn of(holder: *const anyopaque) LoadingOwner {
+        return @enumFromInt(@intFromPtr(holder));
+    }
+    fn token(self: LoadingOwner) usize {
+        const raw = @intFromEnum(self);
+        std.debug.assert(raw != free_loading_owner);
+        return raw;
+    }
+};
+const free_loading_owner: usize = 0;
+
+/// What a request for a loading lease produced.
+pub const LoadingOutcome = union(enum) {
+    /// The caller owns the load and must release the lease.
+    granted: LoadingLease,
+    /// This owner already holds a lease on the name.
+    cycle,
+    /// Another owner holds it; the caller must wait and re-resolve.
+    contended,
+};
+
 const LoadingNode = struct {
     registry: *Registry,
     name: intern.ModuleName,
-    active: std.atomic.Value(bool) = .init(true),
+    owner: std.atomic.Value(usize),
     next: ?*LoadingNode,
 };
 pub const LoadingLease = enum(usize) {
@@ -851,13 +883,13 @@ pub const LoadingLease = enum(usize) {
     }
     pub fn finish(self: *LoadingLease) void {
         const loading = self.node();
-        loading.active.store(false, .release);
+        loading.owner.store(free_loading_owner, .release);
         self.* = .finished;
     }
     pub fn deinit(self: *LoadingLease) void {
         if (self.* == .finished) return;
         const loading = self.node();
-        loading.active.store(false, .release);
+        loading.owner.store(free_loading_owner, .release);
         self.* = .finished;
     }
 };
@@ -1242,6 +1274,105 @@ pub const Registry = enum(usize) {
             };
             self.definition_index += 1;
             return .pending;
+        }
+    };
+
+    pub const BuiltinCandidateProgress = poll.Progress(OwnedCandidate);
+
+    /// Publication path for builtin-backed modules. One turn installs one
+    /// word, so a module with many words is as bounded as a native one; the
+    /// effect and documentation values are built from the compiled-in text
+    /// whose size is fixed at compile time.
+    pub const BuiltinCandidateCursor = struct {
+        allocator: std.mem.Allocator,
+        releases: *heap.ReleaseDomain,
+        words: []const env.BuiltinWord,
+        candidate: ?OwnedCandidate,
+        word_index: usize = 0,
+
+        pub fn init(
+            registry: *Registry,
+            name: intern.ModuleName,
+            words: []const env.BuiltinWord,
+        ) error{OutOfMemory}!BuiltinCandidateCursor {
+            return .{
+                .allocator = registry.allocator(),
+                .releases = registry.releaseDomain(),
+                .words = words,
+                .candidate = try registry.createCandidate(name),
+            };
+        }
+
+        pub fn deinit(self: *BuiltinCandidateCursor) void {
+            if (self.candidate) |*candidate| candidate.deinit();
+            self.* = undefined;
+        }
+
+        pub const Error = error{ OutOfMemory, InvalidName };
+
+        pub fn advance(self: *BuiltinCandidateCursor) Error!BuiltinCandidateProgress {
+            if (self.word_index == self.words.len) {
+                const completed = self.candidate.?.move();
+                self.candidate = null;
+                return .{ .complete = completed };
+            }
+            const word = self.words[self.word_index];
+            // Publication retains what it is handed, so this cursor releases
+            // its own reference on every path.
+            const document = try self.buildDocumentation(word.doc);
+            defer self.releases.releaseHeader(env.documentationHeader(document));
+            const effect = if (word.effect) |source| try self.buildEffect(source) else null;
+            defer if (effect) |built| built.retire(self.releases);
+            _ = self.candidate.?.publishDefinition(
+                try intern.internNamespace(word.name),
+                .{ .builtin = .{
+                    .primitive = word.primitive,
+                    .visibility = .public,
+                    .effect = effect,
+                    .doc = document,
+                } },
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // The manifest validates names and holds no duplicates at
+                // compile time, and a fresh candidate is never frozen.
+                error.Frozen => return error.InvalidName,
+            };
+            self.word_index += 1;
+            return .pending;
+        }
+
+        /// Compiled-in documentation is authored already normalized, so the
+        /// text becomes a string value directly.
+        fn buildDocumentation(
+            self: *BuiltinCandidateCursor,
+            source: []const u8,
+        ) error{OutOfMemory}!*env.DocumentationString {
+            var materializer = kernel_storage.TextMaterializer.init(self.allocator, source);
+            defer materializer.retire(self.releases);
+            const text = try poll_api.driveFallible(value.Value, &materializer, .{64});
+            return env.documentation(text.list) orelse {
+                self.releases.releaseValue(text);
+                return error.OutOfMemory;
+            };
+        }
+
+        fn buildEffect(
+            self: *BuiltinCandidateCursor,
+            source: []const u8,
+        ) error{OutOfMemory}!env.ValidatedEffect {
+            var tokens: [env.max_builtin_effect_tokens]value.Value = undefined;
+            var count: usize = 0;
+            var iterator = std.mem.tokenizeAny(u8, source, " \t");
+            while (iterator.next()) |token| {
+                if (count == tokens.len) return error.OutOfMemory;
+                tokens[count] = .{ .word = try intern.intern(token) };
+                count += 1;
+            }
+            const owned = try list.fromValuesGeneric(self.allocator, tokens[0..count]);
+            return env.ValidatedEffect.parse(owned.list, try intern.intern("--")) orelse {
+                self.releases.releaseValue(owned);
+                return error.OutOfMemory;
+            };
         }
     };
 
@@ -2319,16 +2450,18 @@ pub const Registry = enum(usize) {
     pub fn beginLoading(
         self: *Registry,
         name: intern.ModuleName,
-    ) error{OutOfMemory}!?LoadingLease {
-        var cursor = self.beginLoadingCursor(name);
+        owner: LoadingOwner,
+    ) error{OutOfMemory}!LoadingOutcome {
+        var cursor = self.beginLoadingCursor(name, owner);
         defer cursor.deinit();
-        return poll.driveFallible(?LoadingLease, &cursor, .{});
+        return poll.driveFallible(LoadingOutcome, &cursor, .{});
     }
 
-    pub const BeginLoadingProgress = poll.Progress(?LoadingLease);
+    pub const BeginLoadingProgress = poll.Progress(LoadingOutcome);
     pub const BeginLoadingCursor = struct {
         registry: *Registry,
         name: intern.ModuleName,
+        owner: LoadingOwner,
         observed_head: ?*LoadingNode,
         cursor: ?*LoadingNode,
         reservation: ?*LoadingNode = null,
@@ -2339,7 +2472,7 @@ pub const Registry = enum(usize) {
             self.* = undefined;
         }
 
-        fn completeExisting(self: *BeginLoadingCursor, result: ?LoadingLease) BeginLoadingProgress {
+        fn completeExisting(self: *BeginLoadingCursor, result: LoadingOutcome) BeginLoadingProgress {
             if (self.reservation) |node| self.registry.allocator().destroy(node);
             self.reservation = null;
             self.phase = .complete;
@@ -2355,12 +2488,15 @@ pub const Registry = enum(usize) {
                     };
                     self.cursor = node.next;
                     if (node.name == self.name) {
-                        if (node.active.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
-                            break :result self.completeExisting(.init(node));
-                        }
-                        if (node.active.load(.acquire)) {
-                            break :result self.completeExisting(null);
-                        }
+                        const held = node.owner.cmpxchgStrong(
+                            free_loading_owner,
+                            self.owner.token(),
+                            .acq_rel,
+                            .acquire,
+                        ) orelse break :result self.completeExisting(.{ .granted = .init(node) });
+                        if (held == self.owner.token())
+                            break :result self.completeExisting(.cycle);
+                        break :result self.completeExisting(.contended);
                     }
                     break :result .pending;
                 },
@@ -2381,18 +2517,33 @@ pub const Registry = enum(usize) {
                     }
                     const node = self.reservation.?;
                     self.reservation = null;
-                    node.* = .{ .registry = self.registry, .name = self.name, .next = current };
+                    node.* = .{
+                        .registry = self.registry,
+                        .name = self.name,
+                        .owner = .init(self.owner.token()),
+                        .next = current,
+                    };
                     self.registry.privateState().loading.store(node, .release);
                     self.phase = .complete;
-                    break :result .{ .complete = .init(node) };
+                    break :result .{ .complete = .{ .granted = .init(node) } };
                 },
                 .complete => unreachable,
             };
         }
     };
-    pub fn beginLoadingCursor(self: *Registry, name: intern.ModuleName) BeginLoadingCursor {
+    pub fn beginLoadingCursor(
+        self: *Registry,
+        name: intern.ModuleName,
+        owner: LoadingOwner,
+    ) BeginLoadingCursor {
         const head = self.privateState().loading.load(.acquire);
-        return .{ .registry = self, .name = name, .observed_head = head, .cursor = head };
+        return .{
+            .registry = self,
+            .name = name,
+            .owner = owner,
+            .observed_head = head,
+            .cursor = head,
+        };
     }
 };
 comptime {

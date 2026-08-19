@@ -82,9 +82,16 @@ const cases = [_]Case{
     .{ .name = "bi", .source = "2 (1 +) (3 *) bi" },
     .{ .name = "tri", .source = "2 (1 +) (3 *) (4 -) tri" },
     .{ .name = "fail", .source = "\"bad\" fail" },
-    .{ .name = "ok?", .source = "(2 3 +) attempt ok?" },
-    .{ .name = "or-raise", .source = "(2 3 +) attempt or-raise" },
-    .{ .name = "or-else", .source = "(2 3 +) attempt 9 or-else" },
+    .{ .name = "result.ok?", .source = "(2 3 +) @attempt result.ok?" },
+    .{ .name = "result.or-raise", .source = "(2 3 +) @attempt result.or-raise" },
+    .{ .name = "result.or-else", .source = "(2 3 +) @attempt 9 result.or-else" },
+    .{ .name = "result.either", .source = "[7] result.ok (first) (pop 0) result.either" },
+    .{ .name = "result.map-err", .source = "{'kind 'io} result.err (pop {'kind 'domain}) result.map-err" },
+    // The prelude no longer carries these: the envelope interpreters live in
+    // the module, and the old bare spellings resolve to nothing.
+    .{ .name = "bare or-raise", .source = "(2 3 +) @attempt or-raise" },
+    .{ .name = "bare ok?", .source = "(2 3 +) @attempt ok?" },
+    .{ .name = "gone result.case", .source = "[7] result.ok (first) (pop 0) result.case" },
     .{ .name = "set", .source = "3 'x set x" },
     .{ .name = "set quotation", .source = "(dup *) 'q set q" },
     .{ .name = "body", .source = "3 'x set 'x body" },
@@ -92,7 +99,7 @@ const cases = [_]Case{
     .{ .name = "see", .source = "3 'x set 'x see" },
     .{ .name = "see set", .source = "'set see" },
     .{ .name = "setp", .source = "1 'x setp" },
-    .{ .name = "qualify execute", .source = "'core.utils ((41) 'f def) module 'core.utils 'f qualify execute" },
+    .{ .name = "qualify execute", .source = "((41) 'f def) 'core.utils @module 'core.utils 'f qualify execute" },
     .{ .name = "execute type", .source = "1 execute" },
     .{ .name = "doc qualify", .source = "'qualify doc" },
     .{ .name = "within top level", .source = "(1) within" },
@@ -100,8 +107,56 @@ const cases = [_]Case{
     .{ .name = "see within", .source = "'within see" },
     .{ .name = "doc without", .source = "'without doc" },
     .{ .name = "unmodule unknown", .source = "'nowhere unmodule" },
-    .{ .name = "unmodule then resolve", .source = "'gone ((1) 'x def) module 'gone unmodule gone.x" },
+    .{ .name = "unmodule then resolve", .source = "((1) 'x def) 'gone @module 'gone unmodule gone.x" },
     .{ .name = "doc unmodule", .source = "'unmodule doc" },
+    // M12 stdlib and host scripting. Deterministic output only: no network,
+    // and no environment dependence beyond an unset-variable error.
+    .{ .name = "result ok", .source = "[1 2] result.ok" },
+    .{ .name = "result and-then", .source = "[2 3] result.ok (+) result.and-then" },
+    .{ .name = "result all", .source = "[1] result.ok {'kind 'io} result.err 2 pack result.all" },
+    .{ .name = "result malformed", .source = "{'ok 5} (missing) result.and-then" },
+    .{ .name = "str upper", .source = "\"héllo\" str.upper" },
+    .{ .name = "str index-of missing", .source = "\"abc\" \"z\" str.index-of" },
+    .{ .name = "csv parse", .source = "\"a,,c\nd\" csv.parse" },
+    .{ .name = "csv emit", .source = "\"a,b\" csv.parse csv.emit" },
+    .{ .name = "csv malformed", .source = "\"\\\"x\" csv.parse" },
+    .{ .name = "json parse", .source = "\"{\\\"a\\\":[1,null,true]}\" json.parse" },
+    .{ .name = "json emit", .source = "{'a 1} json.emit" },
+    .{ .name = "json emit key", .source = "{1 2} json.emit" },
+    .{ .name = "table rows", .source = "{\"a\" [1 2] \"b\" [\"x\" \"y\"]} table.rows" },
+    .{ .name = "table where", .source = "{\"a\" [1 2 3]} [1 0 1] table.where" },
+    .{
+        .name = "table aggregate",
+        .source = "{\"r\" [\"e\" \"w\" \"e\"] \"v\" [1 2 3]} [\"r\"] " ++
+            "[[\"t\" \"v\" (sum)]] table.aggregate",
+    },
+    .{ .name = "table invalid", .source = "{\"a\" [1 2] \"b\" [3]} table.rows" },
+    .{ .name = "getenv unset", .source = "\"ECL_SNAPSHOT_ABSENT\" getenv" },
+    .{ .name = "slurp missing", .source = "\"no-such-file.ecl\" slurp" },
+    .{ .name = "http dead port", .source = "\"http://127.0.0.1:1/x\" {} http.get" },
+    // Bit patterns and counter-based randomness. Every draw here is seeded, so
+    // the transcript is as reproducible as the arithmetic above it.
+    .{ .name = "band", .source = "[12 10] 6 band" },
+    .{ .name = "bor", .source = "12 10 bor" },
+    .{ .name = "bxor", .source = "12 10 bxor" },
+    .{ .name = "bsl", .source = "[1 -8] 4 bsl" },
+    .{ .name = "bsr", .source = "-1 1 bsr" },
+    .{ .name = "bnot", .source = "[0 5] bnot" },
+    .{ .name = "bsl overshift", .source = "1 64 bsl" },
+    .{ .name = "rand-int", .source = "[7 0] 6 rand-int" },
+    .{ .name = "rand-ints", .source = "[7 0] 4 6 rand-ints" },
+    .{ .name = "rand-float", .source = "[7 0] rand-float" },
+    .{ .name = "rand-int empty range", .source = "[7 0] 0 rand-int" },
+    .{ .name = "rng deal", .source = "'rng use 3 10 deal" },
+    // The unit-constructor convention: the guided boundary error and the
+    // seeding composition that replaced the `-with` family.
+    .{ .name = "isolated substack", .source = "3 (1 +) @attempt" },
+    .{ .name = "isolated child", .source = "3 [1 2] (+ +) @each" },
+    .{ .name = "seeded attempt", .source = "[3] (1 +) with @attempt" },
+    .{ .name = "seeded module", .source = "[7] ('base set) with 'm @module m.base" },
+    .{ .name = "old spelling", .source = "(1) attempt" },
+    .{ .name = "row annotation", .source = "(dup) (a -- ...) 'f def 'f see" },
+    .{ .name = "row after mixing", .source = "(dup) (a -- ... b) 'f def" },
 };
 
 test "promoted Zig CLI behavior matches the reference snapshot" {
@@ -626,28 +681,63 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 333 'col 47}}
-        \\=== ok? ===
-        \\source: (2 3 +) attempt ok?
+        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 319 'col 47}}
+        \\=== result.ok? ===
+        \\source: (2 3 +) @attempt result.ok?
         \\exit: 0
         \\stdout:
         \\1
         \\stderr:
         \\<empty>
-        \\=== or-raise ===
-        \\source: (2 3 +) attempt or-raise
+        \\=== result.or-raise ===
+        \\source: (2 3 +) @attempt result.or-raise
         \\exit: 0
         \\stdout:
         \\[5]
         \\stderr:
         \\<empty>
-        \\=== or-else ===
-        \\source: (2 3 +) attempt 9 or-else
+        \\=== result.or-else ===
+        \\source: (2 3 +) @attempt 9 result.or-else
         \\exit: 0
         \\stdout:
         \\[5]
         \\stderr:
         \\<empty>
+        \\=== result.either ===
+        \\source: [7] result.ok (first) (pop 0) result.either
+        \\exit: 0
+        \\stdout:
+        \\7
+        \\stderr:
+        \\<empty>
+        \\=== result.map-err ===
+        \\source: {'kind 'io} result.err (pop {'kind 'domain}) result.map-err
+        \\exit: 0
+        \\stdout:
+        \\{'err {'kind 'domain}}
+        \\stderr:
+        \\<empty>
+        \\=== bare or-raise ===
+        \\source: (2 3 +) @attempt or-raise
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'undefined-word 'msg "undefined word `or-raise`" 'word 'or-raise 'trace ['or-raise] 'data {'name 'or-raise 'source "<command>" 'line 1 'col 18}}
+        \\=== bare ok? ===
+        \\source: (2 3 +) @attempt ok?
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'undefined-word 'msg "undefined word `ok?`" 'word 'ok? 'trace ['ok?] 'data {'name 'ok? 'source "<command>" 'line 1 'col 18}}
+        \\=== gone result.case ===
+        \\source: [7] result.ok (first) (pop 0) result.case
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'undefined-word 'msg "undefined word `result.case`" 'word 'result.case 'trace ['result.case] 'data {'name 'result.case 'source "<command>" 'line 1 'col 31}}
         \\=== set ===
         \\source: 3 'x set x
         \\exit: 0
@@ -696,9 +786,9 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 375 'col 20}}
+        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 345 'col 20}}
         \\=== qualify execute ===
-        \\source: 'core.utils ((41) 'f def) module 'core.utils 'f qualify execute
+        \\source: ((41) 'f def) 'core.utils @module 'core.utils 'f qualify execute
         \\exit: 0
         \\stdout:
         \\41
@@ -736,7 +826,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: 'within see
         \\exit: 0
         \\stdout:
-        \\<primitive> (: "Run a quotation against a private draft of the home module's durable stack and publish the result.") 'within def
+        \\<primitive> (quotation -- ... : "Run a quotation against a private draft of the home module's durable stack and publish the result.") 'within def
         \\stderr:
         \\<empty>
         \\=== doc without ===
@@ -754,12 +844,12 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'undefined-word 'msg "undefined word `nowhere`" 'word 'nowhere 'trace ['nowhere] 'data {'name 'nowhere 'source "<command>" 'line 1 'col 10}}
         \\=== unmodule then resolve ===
-        \\source: 'gone ((1) 'x def) module 'gone unmodule gone.x
+        \\source: ((1) 'x def) 'gone @module 'gone unmodule gone.x
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'source "<command>" 'line 1 'col 42}}
+        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'source "<command>" 'line 1 'col 43}}
         \\=== doc unmodule ===
         \\source: 'unmodule doc
         \\exit: 0
@@ -767,6 +857,273 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\"Close, quiesce, and retire a registered module named by a symbol."
         \\stderr:
         \\<empty>
+        \\=== result ok ===
+        \\source: [1 2] result.ok
+        \\exit: 0
+        \\stdout:
+        \\{'ok [1 2]}
+        \\stderr:
+        \\<empty>
+        \\=== result and-then ===
+        \\source: [2 3] result.ok (+) result.and-then
+        \\exit: 0
+        \\stdout:
+        \\{'ok [5]}
+        \\stderr:
+        \\<empty>
+        \\=== result all ===
+        \\source: [1] result.ok {'kind 'io} result.err 2 pack result.all
+        \\exit: 0
+        \\stdout:
+        \\{'err {'kind 'io}}
+        \\stderr:
+        \\<empty>
+        \\=== result malformed ===
+        \\source: {'ok 5} (missing) result.and-then
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 351 'col 14}}
+        \\=== str upper ===
+        \\source: "héllo" str.upper
+        \\exit: 0
+        \\stdout:
+        \\"HéLLO"
+        \\stderr:
+        \\<empty>
+        \\=== str index-of missing ===
+        \\source: "abc" "z" str.index-of
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'dip 'str.index-of] 'data {'source "prelude.ecl" 'line 351 'col 14}}
+        \\=== csv parse ===
+        \\source: "a,,c
+        \\d" csv.parse
+        \\exit: 0
+        \\stdout:
+        \\(("a" () "c") ("d"))
+        \\stderr:
+        \\<empty>
+        \\=== csv emit ===
+        \\source: "a,b" csv.parse csv.emit
+        \\exit: 0
+        \\stdout:
+        \\"a,b\u{d}\n"
+        \\stderr:
+        \\<empty>
+        \\=== csv malformed ===
+        \\source: "\"x" csv.parse
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'parse 'msg "csv.parse found malformed quoting at character 2" 'word 'csv.parse 'trace ['csv.parse] 'data {'source "<command>" 'line 1 'col 7}}
+        \\=== json parse ===
+        \\source: "{\"a\":[1,null,true]}" json.parse
+        \\exit: 0
+        \\stdout:
+        \\{"a" (1 'null 'true)}
+        \\stderr:
+        \\<empty>
+        \\=== json emit ===
+        \\source: {'a 1} json.emit
+        \\exit: 0
+        \\stdout:
+        \\"{\"a\":1}"
+        \\stderr:
+        \\<empty>
+        \\=== json emit key ===
+        \\source: {1 2} json.emit
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'type 'msg "json.emit requires string or symbol dictionary keys" 'word 'json.emit 'trace ['json.emit] 'data {'source "<command>" 'line 1 'col 7}}
+        \\=== table rows ===
+        \\source: {"a" [1 2] "b" ["x" "y"]} table.rows
+        \\exit: 0
+        \\stdout:
+        \\((1 "x") (2 "y"))
+        \\stderr:
+        \\<empty>
+        \\=== table where ===
+        \\source: {"a" [1 2 3]} [1 0 1] table.where
+        \\exit: 0
+        \\stdout:
+        \\{"a" [1 3]}
+        \\stderr:
+        \\<empty>
+        \\=== table aggregate ===
+        \\source: {"r" ["e" "w" "e"] "v" [1 2 3]} ["r"] [["t" "v" (sum)]] table.aggregate
+        \\exit: 0
+        \\stdout:
+        \\{"r" ("e" "w") "t" [4 2]}
+        \\stderr:
+        \\<empty>
+        \\=== table invalid ===
+        \\source: {"a" [1 2] "b" [3]} table.rows
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 351 'col 14}}
+        \\=== getenv unset ===
+        \\source: "ECL_SNAPSHOT_ABSENT" getenv
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'io 'msg "environment variable `ECL_SNAPSHOT_ABSENT` is not set" 'word 'getenv 'trace ['getenv] 'data {'name "ECL_SNAPSHOT_ABSENT" 'source "<command>" 'line 1 'col 23}}
+        \\=== slurp missing ===
+        \\source: "no-such-file.ecl" slurp
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'io 'msg "cannot read `no-such-file.ecl`: FileNotFound" 'word 'slurp 'trace ['slurp] 'data {'path "no-such-file.ecl" 'source "<command>" 'line 1 'col 20}}
+        \\=== http dead port ===
+        \\source: "http://127.0.0.1:1/x" {} http.get
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'io 'msg "cannot reach `http://127.0.0.1:1/x`: ConnectionRefused" 'word 'http.get 'trace ['http.get] 'data {'path "http://127.0.0.1:1/x" 'source "<command>" 'line 1 'col 27}}
+        \\=== band ===
+        \\source: [12 10] 6 band
+        \\exit: 0
+        \\stdout:
+        \\[4 2]
+        \\stderr:
+        \\<empty>
+        \\=== bor ===
+        \\source: 12 10 bor
+        \\exit: 0
+        \\stdout:
+        \\14
+        \\stderr:
+        \\<empty>
+        \\=== bxor ===
+        \\source: 12 10 bxor
+        \\exit: 0
+        \\stdout:
+        \\6
+        \\stderr:
+        \\<empty>
+        \\=== bsl ===
+        \\source: [1 -8] 4 bsl
+        \\exit: 0
+        \\stdout:
+        \\[16 -128]
+        \\stderr:
+        \\<empty>
+        \\=== bsr ===
+        \\source: -1 1 bsr
+        \\exit: 0
+        \\stdout:
+        \\9223372036854775807
+        \\stderr:
+        \\<empty>
+        \\=== bnot ===
+        \\source: [0 5] bnot
+        \\exit: 0
+        \\stdout:
+        \\[-1 -6]
+        \\stderr:
+        \\<empty>
+        \\=== bsl overshift ===
+        \\source: 1 64 bsl
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'domain 'msg "a shift count must be from 0 to 63" 'word 'bsl 'trace ['bsl] 'data {'source "<command>" 'line 1 'col 6}}
+        \\=== rand-int ===
+        \\source: [7 0] 6 rand-int
+        \\exit: 0
+        \\stdout:
+        \\[7 1] 3
+        \\stderr:
+        \\<empty>
+        \\=== rand-ints ===
+        \\source: [7 0] 4 6 rand-ints
+        \\exit: 0
+        \\stdout:
+        \\[7 4] [3 0 0 3]
+        \\stderr:
+        \\<empty>
+        \\=== rand-float ===
+        \\source: [7 0] rand-float
+        \\exit: 0
+        \\stdout:
+        \\[7 1] 0.3898297483912715
+        \\stderr:
+        \\<empty>
+        \\=== rand-int empty range ===
+        \\source: [7 0] 0 rand-int
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'domain 'msg "rand-int expected a positive bound, not 0" 'word 'rand-int 'trace ['rand-int] 'data {'source "<command>" 'line 1 'col 9}}
+        \\=== rng deal ===
+        \\source: 'rng use 3 10 deal
+        \\exit: 0
+        \\stdout:
+        \\[5 0 7]
+        \\stderr:
+        \\<empty>
+        \\=== isolated substack ===
+        \\source: 3 (1 +) @attempt
+        \\exit: 0
+        \\stdout:
+        \\3 {'err {'kind 'underflow 'msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — seed it with `values (q) with @attempt` or capture with `partial`" 'word '+ 'trace ['+] 'data {'needed 2 'available 1 'isolation @attempt 'source "<command>" 'line 1 'col 6}}}
+        \\stderr:
+        \\<empty>
+        \\=== isolated child ===
+        \\source: 3 [1 2] (+ +) @each
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'underflow 'msg "+ needs 2 stack values, but found 1; the child unit's stack holds only its element — seed it with `list values (q) with @each` or capture with `partial`" 'word '+ 'trace ['+] 'data {'needed 2 'available 1 'isolation @each 'source "<command>" 'line 1 'col 10}}
+        \\=== seeded attempt ===
+        \\source: [3] (1 +) with @attempt
+        \\exit: 0
+        \\stdout:
+        \\{'ok [4]}
+        \\stderr:
+        \\<empty>
+        \\=== seeded module ===
+        \\source: [7] ('base set) with 'm @module m.base
+        \\exit: 0
+        \\stdout:
+        \\7
+        \\stderr:
+        \\<empty>
+        \\=== old spelling ===
+        \\source: (1) attempt
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'undefined-word 'msg "undefined word `attempt`" 'word 'attempt 'trace ['attempt] 'data {'name 'attempt 'source "<command>" 'line 1 'col 5}}
+        \\=== row annotation ===
+        \\source: (dup) (a -- ...) 'f def 'f see
+        \\exit: 0
+        \\stdout:
+        \\(dup) (a -- ...) 'f def
+        \\stderr:
+        \\<empty>
+        \\=== row after mixing ===
+        \\source: (dup) (a -- ... b) 'f def
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'domain 'msg "malformed definition annotation" 'word 'def 'trace ['def] 'data {'source "<command>" 'line 1 'col 23}}
         \\
     ).diff(transcript.written(), true);
 }

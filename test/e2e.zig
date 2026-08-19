@@ -93,7 +93,7 @@ test "e2e: worker configuration rejects every non-positive decimal form" {
     }
 }
 
-test "e2e: cancellation timeout and par-each agree at one and eight workers" {
+test "e2e: cancellation timeout and @each agree at one and eight workers" {
     for ([_][]const u8{ "1", "8" }) |workers| {
         var cancel_timeout = try runWithWorkers(
             &.{ build_options.ecl_exe, "test/acceptance/cancel-timeout.ecl" },
@@ -107,7 +107,7 @@ test "e2e: cancellation timeout and par-each agree at one and eight workers" {
         });
 
         var par_each = try runWithWorkers(
-            &.{ build_options.ecl_exe, "test/acceptance/par-each.ecl" },
+            &.{ build_options.ecl_exe, "test/acceptance/at-each.ecl" },
             workers,
         );
         defer par_each.deinit();
@@ -290,18 +290,18 @@ test "e2e: hot reload all access paths acceptance" {
 test "e2e: module effect declaration acceptance" {
     // An omitted effect is legal and adds no inferred check: the word runs
     // across the home boundary exactly as written.
-    var missing = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) 'fine def) module 2 m.fine" });
+    var missing = try run(&.{ build_options.ecl_exe, "-e", "((dup +) 'fine def) 'm @module 2 m.fine" });
     defer missing.deinit();
     try missing.expect(.{ .exit_code = 0, .stdout = "4\n", .stderr = "" });
 
-    var lying = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) ( a -- b c ) 'lies def) module 1 m.lies" });
+    var lying = try run(&.{ build_options.ecl_exe, "-e", "((dup +) ( a -- b c ) 'lies def) 'm @module 1 m.lies" });
     defer lying.deinit();
     try lying.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{ "'kind 'contract", "'word 'm.lies" },
     });
 
-    var visible = try run(&.{ build_options.ecl_exe, "-e", "'m ((dup +) ( a -- b ) 'dbl def) module 'm.dbl see" });
+    var visible = try run(&.{ build_options.ecl_exe, "-e", "((dup +) ( a -- b ) 'dbl def) 'm @module 'm.dbl see" });
     defer visible.deinit();
     try visible.expect(.{
         .exit_code = 0,
@@ -314,7 +314,7 @@ test "e2e: use shadow notice acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "1 'mean set 2 'count set 'stats (3 'mean set 4 'count set) module 'stats use mean count",
+        "1 'mean set 2 'count set (3 'mean set 4 'count set) 'stats @module 'stats use mean count",
     });
     defer result.deinit();
     try result.expect(.{
@@ -329,7 +329,7 @@ test "e2e: reflection acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "'m (40 's setp (s 2 +) ( -- n ) 'f def) module 'm use 'm.f see 'f which words",
+        "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module 'm use 'm.f see 'f which words",
     });
     defer result.deinit();
     try result.expect(.{
@@ -370,12 +370,12 @@ test "e2e: stateful module reload acceptance" {
 }
 
 test "e2e: module removal acceptance" {
-    const module = "[7] 'core.c (((dup without) within) 'peek def) module-with ";
+    const module = "[7] (((dup without) within) 'peek def) with 'core.c @module ";
     var by_name = try run(&.{
         build_options.ecl_exe,
         "-e",
         module ++ "'short 'core.c alias 'short unmodule " ++
-            "(core.c.peek) attempt 'err at 'kind at pp (short.peek) attempt 'err at 'kind at pp " ++
+            "(core.c.peek) @attempt 'err at 'kind at pp (short.peek) @attempt 'err at 'kind at pp " ++
             module ++ "core.c.peek pp",
     });
     defer by_name.deinit();
@@ -388,7 +388,7 @@ test "e2e: module removal acceptance" {
     var by_canonical_name = try run(&.{
         build_options.ecl_exe,
         "-e",
-        module ++ "'core.c unmodule (core.c.peek) attempt 'err at 'kind at pp",
+        module ++ "'core.c unmodule (core.c.peek) @attempt 'err at 'kind at pp",
     });
     defer by_canonical_name.deinit();
     try by_canonical_name.expect(.{ .exit_code = 0, .stdout = "'undefined-word\n", .stderr = "" });
@@ -484,6 +484,44 @@ test "e2e: cmp exactness and string-grade agreement" {
     try result.expect(.{ .exit_code = 0, .stdout = "1 -1 [1 0]\n", .stderr = "" });
 }
 
+test "e2e: stdlib acceptance fixtures match their expected output" {
+    // Every fixture is a Definition-of-Done assertion: DoD-25a result,
+    // DoD-26 csv, DoD-25 json, DoD-27/28/29/30 table.
+    const fixtures = [_]struct { path: []const u8, expected: []const u8 }{
+        .{ .path = "test/acceptance/result.ecl", .expected = @embedFile("acceptance/result.out") },
+        .{ .path = "test/acceptance/csv.ecl", .expected = @embedFile("acceptance/csv.out") },
+        .{ .path = "test/acceptance/json.ecl", .expected = @embedFile("acceptance/json.out") },
+        .{
+            .path = "test/acceptance/table-values.ecl",
+            .expected = @embedFile("acceptance/table-values.out"),
+        },
+        .{
+            .path = "test/acceptance/table-invalid.ecl",
+            .expected = @embedFile("acceptance/table-invalid.out"),
+        },
+        .{
+            .path = "test/acceptance/table-analysis.ecl",
+            .expected = @embedFile("acceptance/table-analysis.out"),
+        },
+        .{
+            .path = "test/acceptance/table-joins.ecl",
+            .expected = @embedFile("acceptance/table-joins.out"),
+        },
+    };
+    for (fixtures) |fixture| {
+        var result = try run(&.{ build_options.ecl_exe, fixture.path });
+        defer result.deinit();
+        result.expect(.{
+            .exit_code = 0,
+            .stdout = fixture.expected,
+            .stderr = "",
+        }) catch |err| {
+            std.log.err("acceptance fixture `{s}` failed", .{fixture.path});
+            return err;
+        };
+    }
+}
+
 test "e2e: array words fixture matches display output" {
     var result = try run(&.{ build_options.ecl_exe, "test/acceptance/array-words.ecl" });
     defer result.deinit();
@@ -555,16 +593,243 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .stderr = "",
     });
 
-    for (&[_][]const u8{ "slurp", "spit", "getenv", "lines" }) |word| {
-        var missing = try cli.runOptions(.{
-            .argv = &.{ "./ecl", "-e", word },
+    // The host scripting words landed with M12; the same empty environment
+    // proves they are ordinary vocabulary rather than ECL_PATH-dependent.
+    var round_trip = try cli.runOptions(.{
+        .argv = &.{
+            "./ecl",
+            "-e",
+            "\"alpha\\nbeta\\n\" \"round-trip.txt\" spit " ++
+                "\"round-trip.txt\" slurp pp \"round-trip.txt\" lines pp",
+        },
+        .cwd = .{ .dir = temporary.dir },
+        .environ_map = &environment,
+    });
+    defer round_trip.deinit();
+    try round_trip.expect(.{
+        .exit_code = 0,
+        .stdout = "\"alpha\\nbeta\\n\"\n(\"alpha\" \"beta\" \"\")\n",
+        .stderr = "",
+    });
+
+    var missing_file = try cli.runOptions(.{
+        .argv = &.{ "./ecl", "-e", "\"absent.txt\" slurp" },
+        .cwd = .{ .dir = temporary.dir },
+        .environ_map = &environment,
+    });
+    defer missing_file.deinit();
+    try missing_file.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'io", "'word 'slurp", "'path \"absent.txt\"" },
+    });
+
+    var unset = try cli.runOptions(.{
+        .argv = &.{ "./ecl", "-e", "\"ECL_M12_ABSENT\" getenv" },
+        .cwd = .{ .dir = temporary.dir },
+        .environ_map = &environment,
+    });
+    defer unset.deinit();
+    try unset.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'io", "'word 'getenv", "'name \"ECL_M12_ABSENT\"" },
+    });
+
+    var defaulted = try cli.runOptions(.{
+        .argv = &.{
+            "./ecl",
+            "-e",
+            "(\"ECL_M12_ABSENT\" getenv) @attempt \"fallback\" result.or-else pp",
+        },
+        .cwd = .{ .dir = temporary.dir },
+        .environ_map = &environment,
+    });
+    defer defaulted.deinit();
+    try defaulted.expect(.{ .exit_code = 0, .stdout = "\"fallback\"\n", .stderr = "" });
+
+    var present = std.process.Environ.Map.init(allocator);
+    defer present.deinit();
+    try present.put("ECL_M12_PRESENT", "visible");
+    var read = try cli.runOptions(.{
+        .argv = &.{ "./ecl", "-e", "\"ECL_M12_PRESENT\" getenv pp" },
+        .cwd = .{ .dir = temporary.dir },
+        .environ_map = &present,
+    });
+    defer read.deinit();
+    try read.expect(.{ .exit_code = 0, .stdout = "\"visible\"\n", .stderr = "" });
+}
+
+test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    try std.Io.Dir.copyFile(std.Io.Dir.cwd(), exe, temporary.dir, "ecl", io, .{});
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+
+    // DoD-32, to the letter.
+    var dod32 = try cli.runOptions(.{
+        .argv = &.{ "./ecl", "'str use \"hello\" str.upper pp" },
+        .cwd = .{ .dir = temporary.dir },
+        .environ_map = &environment,
+    });
+    defer dod32.deinit();
+    try dod32.expect(.{ .exit_code = 0, .stdout = "\"HELLO\"\n", .stderr = "" });
+
+    // Both spellings of the first reference, for all six modules, from a
+    // copied binary in an empty directory with an empty environment.
+    const modules = [_]struct { name: []const u8, use: []const u8, qualified: []const u8 }{
+        // The moved envelope words prove the whole point of the consolidation:
+        // `result.or-raise` needs no `use` at all under qualified-miss
+        // auto-load, with no `ECL_PATH` and no readable directory.
+        .{
+            .name = "result",
+            .use = "'result use (2 3 +) @attempt or-raise pp",
+            .qualified = "(2 3 +) @attempt result.or-raise pp",
+        },
+        .{ .name = "str", .use = "'str use \"hi\" upper pp", .qualified = "\"hi\" str.upper pp" },
+        .{ .name = "csv", .use = "'csv use \"a,b\" parse pp", .qualified = "\"a,b\" csv.parse pp" },
+        .{ .name = "json", .use = "'json use \"[1]\" parse pp", .qualified = "\"[1]\" json.parse pp" },
+        .{
+            .name = "table",
+            .use = "'table use {\"a\" [1]} valid? pp",
+            .qualified = "{\"a\" [1]} table.valid? pp",
+        },
+        .{
+            .name = "rng",
+            // The default key is fixed, so an unseeded draw from a fresh
+            // process is as reproducible as any other embedded module's output.
+            .use = "'rng use 6 int pp",
+            .qualified = "6 rng.int pp",
+        },
+        .{
+            .name = "http",
+            .use = "'http use 'http.get doc len 0 > pp",
+            // Reflection resolves without loading, so the qualified spelling
+            // must execute a word; a refused port does that without a server.
+            .qualified = "(\"http://127.0.0.1:1/x\" {} http.get) @attempt result.ok? pp",
+        },
+    };
+    const used_output = [_][]const u8{
+        "[5]\n", "\"HI\"\n", "((\"a\" \"b\"))\n",
+        "[1]\n", "1\n",      "1\n",
+        "1\n",
+    };
+    const qualified_output = [_][]const u8{
+        "[5]\n", "\"HI\"\n", "((\"a\" \"b\"))\n",
+        "[1]\n", "1\n",      "1\n",
+        "0\n",
+    };
+    for (modules, used_output, qualified_output) |module, want, qualified_want| {
+        var used = try cli.runOptions(.{
+            .argv = &.{ "./ecl", module.use },
             .cwd = .{ .dir = temporary.dir },
             .environ_map = &environment,
         });
-        defer missing.deinit();
-        try missing.expect(.{
-            .exit_code = 1,
-            .stderr_contains = &.{ "'kind 'undefined-word", word },
+        defer used.deinit();
+        used.expect(.{ .exit_code = 0, .stdout = want }) catch |err| {
+            std.log.err("`use` of stdlib module `{s}` failed", .{module.name});
+            return err;
+        };
+        var qualified = try cli.runOptions(.{
+            .argv = &.{ "./ecl", module.qualified },
+            .cwd = .{ .dir = temporary.dir },
+            .environ_map = &environment,
         });
+        defer qualified.deinit();
+        qualified.expect(.{ .exit_code = 0, .stdout = qualified_want }) catch |err| {
+            std.log.err("qualified reference to stdlib module `{s}` failed", .{module.name});
+            return err;
+        };
     }
+
+    // The network word reaches the network, and a refused connection is a
+    // value-level error rather than a crash (DoD-31's non-network half).
+    var refused = try cli.runOptions(.{
+        .argv = &.{ "./ecl", "\"http://127.0.0.1:1/nope\" {} http.get" },
+        .cwd = .{ .dir = temporary.dir },
+        .environ_map = &environment,
+    });
+    defer refused.deinit();
+    try refused.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'io", "'word 'http.get", "'path \"http://127.0.0.1:1/nope\"" },
+    });
+}
+
+test "e2e: stdin is data in -e mode and refuses to be read as program source" {
+    var piped = try runWithInput(
+        &.{ build_options.ecl_exe, "-e", "stdin \"\\n\" split pp" },
+        "one\ntwo\n",
+    );
+    defer piped.deinit();
+    try piped.expect(.{
+        .exit_code = 0,
+        .stdout = "(\"one\" \"two\" \"\")\n",
+        .stderr = "",
+    });
+
+    var twice = try runWithInput(&.{ build_options.ecl_exe, "-e", "stdin pop stdin" }, "data");
+    defer twice.deinit();
+    try twice.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'io", "standard input has already been read" },
+    });
+
+    var as_source = try runWithInput(&.{build_options.ecl_exe}, "stdin\n");
+    defer as_source.deinit();
+    try as_source.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'kind 'io", "stdin is the program source" },
+    });
+}
+
+test "e2e: entropy is the one draw that differs between processes" {
+    // Every other random word is a pure function of its state, so only a real
+    // process can show that `entropy` reaches the host and returns something
+    // new each time. Two 128-bit keys colliding is not a flake worth guarding.
+    var first = try run(&.{ build_options.ecl_exe, "-e", "entropy pp" });
+    defer first.deinit();
+    try first.expect(.{ .exit_code = 0, .stderr = "" });
+    var second = try run(&.{ build_options.ecl_exe, "-e", "entropy pp" });
+    defer second.deinit();
+    try second.expect(.{ .exit_code = 0, .stderr = "" });
+    try std.testing.expect(!std.mem.eql(u8, first.stdout, second.stdout));
+
+    // A drawn key is a usable key: seeding with it keeps the module working,
+    // and the same key twice reproduces the same draw.
+    var seeded = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        "'rng use entropy dup 'k set seed 100 6 ints 'a set k seed 100 6 ints a match pp",
+    });
+    defer seeded.deinit();
+    try seeded.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
+}
+
+test "e2e: the old unit-constructor spellings are gone and the boundary error guides" {
+    // Hard renames, no aliases: the pre-@ spellings resolve to nothing.
+    for ([_][]const u8{ "attempt", "spawn", "par-each", "module", "attempt-with", "spawn-with", "module-with" }) |old| {
+        var result = try run(&.{ build_options.ecl_exe, "-e", old });
+        defer result.deinit();
+        try result.expect(.{ .exit_code = 1, .stderr_contains = &.{ "'kind 'undefined-word", old } });
+    }
+    // The trap the convention exists to make visible: the caller's value is
+    // on screen and out of reach, so the error names the isolation.
+    var isolated = try run(&.{ build_options.ecl_exe, "-e", "3 (1 +) @attempt pp" });
+    defer isolated.deinit();
+    try isolated.expect(.{
+        .exit_code = 0,
+        .stdout_contains = &.{ "'isolation @attempt", "with @attempt", "partial" },
+    });
+    var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] (+ +) @each pp" });
+    defer child.deinit();
+    try child.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'isolation @each", "only its element" },
+    });
+    // And the seeding composition that fixes it.
+    var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) with @attempt pp" });
+    defer seeded.deinit();
+    try seeded.expect(.{ .exit_code = 0, .stdout = "{'ok [4]}\n", .stderr = "" });
 }

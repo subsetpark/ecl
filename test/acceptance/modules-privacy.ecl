@@ -1,3 +1,3 @@
-'m (40 's setp (s 2 +) ( -- n ) 'f def) module
+(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module
 m.f pp
 m.s

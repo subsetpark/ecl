@@ -1,0 +1,23 @@
+{"name" "Ada" "tags" ("math" "logic") "scores" {"a" 1 "b" 2.5} "active" 'true "retired" 'false "note" 'null "big" 9007199254740993 "neg" -17}
+("math" "logic")
+{"a" 1 "b" 2.5}
+'int
+'float
+'int
+'int
+'null
+'symbol
+'true
+'false
+1
+1
+1
+1
+1
+1
+'type
+'type
+'type
+'parse
+'parse
+'parse

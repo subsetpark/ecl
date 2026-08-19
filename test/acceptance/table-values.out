@@ -1,0 +1,32 @@
+'dict
+1
+("id" "city")
+[1 2 3]
+1
+"{\"id\" [1 2 3] \"city\" (\"Oslo\" \"Lima\" \"Oslo\")}"
+"{\"id\":[1,2,3],\"city\":[\"Oslo\",\"Lima\",\"Oslo\"]}"
+{"id" [1 2] "city" ("Oslo" "Lima")}
+{"id" [1 2] "city" ("Oslo" "Lima")}
+{"id" [1 2] "city" ("Oslo" "Lima")}
+{"id" [1 2] "city" ("Oslo" "Lima")}
+{"id" () "city" ()}
+{"id" () "city" ()}
+0
+1
+((1 "Oslo") (2 "Lima") (3 "Oslo"))
+(("id" "city") (1 "Oslo") (2 "Lima") (3 "Oslo"))
+({"id" 1 "city" "Oslo"} {"id" 2 "city" "Lima"} {"id" 3 "city" "Oslo"})
+1
+1
+1
+0
+("id" "city")
+3
+("Oslo" "Lima" "Oslo")
+{"n" [1 2]}
+{"city" ("Oslo" "Lima" "Oslo") "id" [1 2 3]}
+{"id" [1 2 3] "town" ("Oslo" "Lima" "Oslo")}
+{"id" [9 9 9] "city" ("Oslo" "Lima" "Oslo")}
+{"id" [1 2 3] "city" ("Oslo" "Lima" "Oslo") "flag" [1 0 1]}
+{"id" [1 3] "city" ("Oslo" "Oslo")}
+{"id" ("1" "2" "3") "city" ("Oslo" "Lima" "Oslo")}

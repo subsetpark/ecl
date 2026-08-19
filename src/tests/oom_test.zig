@@ -115,10 +115,16 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     var runtime = try session.Session.initWithHostConfig(
         thread_safe_allocator,
         &.{"argument"},
-        std.testing.io,
-        &output,
-        &diagnostics,
-        search,
+        .{
+            .io = std.testing.io,
+            .output = &output,
+            .diagnostics = &diagnostics,
+            .ecl_path = search,
+            .environ = &.{.{ .name = "ECL_OOM_PROBE", .value = "probe" }},
+            // The sweep must never block on the test runner's own stdin;
+            // the refusal path is what has allocation ordinals here.
+            .standard_input = .program_source,
+        },
         .cooperative,
     );
     defer runtime.deinit();
@@ -155,16 +161,68 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-primitives.ecl",
-        "(3 4 +) 'sum def sum pop (1 0 /) attempt pop (5 6 +) attempt pop " ++
-            "({'kind 'custom 'data {'detail 7}} raise) attempt pop " ++
-            "[3 4] (+) with call pop [5 6] (+) attempt-with pop " ++
-            "[7 8] (+) spawn-with await pop " ++
-            "[9 10] 'oom-seeded (+ 'x set) module-with oom-seeded.x pop",
+        "(3 4 +) 'sum def sum pop (1 0 /) @attempt pop (5 6 +) @attempt pop " ++
+            "({'kind 'custom 'data {'detail 7}} raise) @attempt pop " ++
+            "[3 4] (+) with call pop [5 6] (+) with @attempt pop " ++
+            "[7 8] (+) with @spawn await pop " ++
+            "[9 10] (+ 'x set) with 'oom-seeded @module oom-seeded.x pop",
     );
     try runOk(
         &runtime,
         "oom-session.ecl",
         "args pop \"42 missing\" parse pop",
+    );
+    // The host scripting words allocate on the read buffer, the decoded
+    // path, the materialized string, and the environ snapshot lookup; only
+    // this sweep injects failure at each of those ordinals.
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    const scratch_path = try scratch.dir.realPathFileAlloc(
+        std.testing.io,
+        ".",
+        thread_safe_allocator,
+    );
+    defer thread_safe_allocator.free(scratch_path);
+    const host_io_source = try std.fmt.allocPrint(
+        thread_safe_allocator,
+        "\"probe\\ntext\" \"{s}{c}probe.txt\" spit " ++
+            "\"{s}{c}probe.txt\" slurp pop " ++
+            "\"{s}{c}probe.txt\" lines pop " ++
+            "\"{s}{c}absent.txt\" (slurp) partial @attempt pop " ++
+            "\"ECL_OOM_PROBE\" getenv pop " ++
+            "(\"ECL_OOM_ABSENT\" getenv) @attempt pop (stdin) @attempt pop",
+        .{
+            scratch_path, std.fs.path.sep,
+            scratch_path, std.fs.path.sep,
+            scratch_path, std.fs.path.sep,
+            scratch_path, std.fs.path.sep,
+        },
+    );
+    defer thread_safe_allocator.free(host_io_source);
+    try runOk(&runtime, "oom-hostio.ecl", host_io_source);
+    // Each stdlib module has its own Session-reachable load path: embedded
+    // source, a linked native descriptor, and a builtin word table. One short
+    // call per module reaches the publication path and the module's own work.
+    try runOk(
+        &runtime,
+        "oom-stdlib.ecl",
+        "[1 2] result.ok (+) result.and-then result.or-raise pop " ++
+            "\"  hi  \" str.trim str.upper pop " ++
+            "\"a,b\\nc,d\" csv.parse dup csv.emit pop pop " ++
+            "\"{\\\"a\\\":[1,null]}\" json.parse json.emit pop " ++
+            "{\"r\" [\"e\" \"w\" \"e\"] \"v\" [1 2 3]} " ++
+            "[\"r\"] [[\"t\" \"v\" (sum)]] table.aggregate pop " ++
+            "{\"id\" [1 2]} {\"cid\" [2] \"n\" [9]} [[\"id\" \"cid\"]] " ++
+            "{\"n\" 0} table.left-join-with pop " ++
+            "(\"http://127.0.0.1:1/x\" {} http.get) @attempt pop",
+    );
+    // `rng` reaches the vector-draw driver, which builds its result across
+    // resumptions, and the state list each primitive returns.
+    try runOk(
+        &runtime,
+        "oom-random.ecl",
+        "'rng use 42 seed 2 4 deal shuffle pop 2 6 ints pop float pop " ++
+            "[7 0] 2 6 rand-ints nip pop",
     );
     try runOk(
         &runtime,
@@ -185,18 +243,18 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-concurrency.ecl",
-        "([1 2 3] str) spawn await pop " ++
-            "(1) spawn dup pair await-any pop pop " ++
-            "(1) spawn dup await pop 0 await-for pop " ++
-            "(1) spawn 1000000 await-for pop " ++
-            "((1) () while) spawn dup cancel await pop " ++
-            "[(1) (missing) (2 3)] (spawn) each await-all pop " ++
-            "[1 2 3] (dup *) par-each pop",
+        "([1 2 3] str) @spawn await pop " ++
+            "(1) @spawn dup pair await-any pop pop " ++
+            "(1) @spawn dup await pop 0 await-for pop " ++
+            "(1) @spawn 1000000 await-for pop " ++
+            "((1) () while) @spawn dup cancel await pop " ++
+            "[(1) (missing) (2 3)] (@spawn) each await-all pop " ++
+            "[1 2 3] (dup *) @each pop",
     );
     try runOk(
         &runtime,
         "oom-reflection.ecl",
-        "'reflection-module ((1) ( -- n ) 'f def) module " ++
+        "((1) ( -- n ) 'f def) 'reflection-module @module " ++
             "'reflection-module use 'reflection-module.f body pop words " ++
             "'f which 'reflection-module.f see",
     );
@@ -208,39 +266,39 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "7 'sample 'increment qualify execute pop " ++
             "1000 range sample.sum-list pop {'a 1 'b 2} sample.sum-dict pop " ++
             "'answer 42 sample.pair-dict pop sample.builder-budget pop " ++
-            "sample.cooperative pop (9 sample.draft-fail) attempt pop " ++
-            "(9 sample.yield-forever) spawn dup cancel await pop",
+            "sample.cooperative pop (9 sample.draft-fail) @attempt pop " ++
+            "(9 sample.yield-forever) @spawn dup cancel await pop",
     );
     try runOk(
         &runtime,
         "oom-module.ecl",
-        "'allocation-module (1 'x setp (x) ( -- n ) 'get def) module " ++
+        "(1 'x setp (x) ( -- n ) 'get def) 'allocation-module @module " ++
             "'allocation-module use get pop 'short 'allocation-module alias short.get pop " ++
-            "'allocation-module (2 'x setp (x) ( -- n ) 'get def) module get pop " ++
-            "('bad ((dup) 'f def) module) attempt pop " ++
+            "(2 'x setp (x) ( -- n ) 'get def) 'allocation-module @module get pop " ++
+            "(((dup) 'f def) 'bad @module) @attempt pop " ++
             // A non-empty construction stack is captured as durable slot
             // state, so capture, commit, and re-registration discard each
             // have an allocation-failure path of their own.
-            "[11 12 13] 'oom-stateful (1 +) module-with " ++
-            "[21 22] 'oom-stateful (2 +) module-with " ++
+            "[11 12 13] (1 +) with 'oom-stateful @module " ++
+            "[21 22] (2 +) with 'oom-stateful @module " ++
             // Transactional updates allocate on the draft, the replacement
             // snapshot, and the caller window; the failing half must leave
             // the durable stack and the caller stack untouched.
-            "[0] 'oom-within (((1 + dup without) within) 'bump def " ++
+            "[0] (((1 + dup without) within) 'bump def " ++
             "((dup without missing) within) 'boom def " ++
-            "((dup without) within) 'peek def) module-with " ++
-            "oom-within.bump pop (oom-within.boom) attempt pop " ++
+            "((dup without) within) 'peek def) with 'oom-within @module " ++
+            "oom-within.bump pop (oom-within.boom) @attempt pop " ++
             // The failing half must publish nothing, so the durable stack
             // still holds exactly what the successful half left.
             "oom-within.peek 1 match pop " ++
             // Namespaced registration plus branded qualification and ordinary
             // late-bound execution each have Session-only allocation paths.
-            "'oom.namespaced ((33) 'dynamic def) module " ++
+            "((33) 'dynamic def) 'oom.namespaced @module " ++
             "'oom.namespaced 'dynamic qualify execute pop " ++
             "3 (dup) first execute pop pop " ++
             // Removal closes, quiesces, and retires through the same bounded
             // work, so its allocation-failure paths belong in the sweep too.
-            "[1 2] 'oom-removed (((dup without) within) 'peek def) module-with " ++
+            "[1 2] (((dup without) within) 'peek def) with 'oom-removed @module " ++
             "oom-removed.peek pop 'oom-removed unmodule",
     );
     var completion = try runtime.completionCandidates("allocation-");

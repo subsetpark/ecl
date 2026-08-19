@@ -134,6 +134,27 @@ primitives, operationalized as two rules:
 - **Deep binding** (chain search: child → session → core; module → its
   uses → core). Chains are structurally short because quotations capture
   nothing.
+- **A binding resolves in the chain it was defined against, with no
+  exceptions.** An `Eval` frame carries two scopes, not one. `scope` is where
+  the body's own definitions land and what it hands to any quotation it
+  invokes on a caller's behalf; `resolution_scope` is where the body's *word
+  references* resolve. `scheduleWord` sets the second to the module home for a
+  homed binding and to the unit's lexical scope — the session root over core —
+  for a primitive or embedded prelude definition. Before that split, a
+  homeless binding inherited whichever environment happened to be executing,
+  so a module exporting a word named like a core one reached inside every
+  prelude word that module called: a module defining `where` broke `filter`,
+  whose body is `over swap each where at`. Late binding is untouched — lookup
+  is still performed at call time, which is why redefining `cons` at the
+  session level still changes `wrap`. What went away is dynamic scope.
+- **A quotation resolves where its invoker runs.** Quotations are plain lists
+  that capture nothing, so `call`, `each`, `@attempt`, `@module`, and `within`
+  all set the new frame's `resolution_scope` from the invoking frame's
+  `scope`. That is what keeps a module word's `(private-helper)` resolving
+  when it is handed to a combinator defined in core. It also means a
+  session-level `use` that shadows a core name still reaches prelude bodies —
+  that path is the documented way to patch a binding, and it reports a shadow
+  notice.
 - **Name domains are nominal and validated.** `BindingName` is exactly one
   unqualified non-reserved segment, `ModuleName` is one or more valid
   segments joined by dots, and `QualifiedName` is the validated pair of a
@@ -414,7 +435,7 @@ Any change to this machinery must preserve:
   degenerate configuration is supported and tested). One mutex-protected
   global run queue; the invariant to protect is "a unit is a movable
   object," not the queueing policy. No worker threads or timer thread
-  start until first `spawn`; prelude installation is bounded; nothing else
+  start until first `@spawn`; prelude installation is bounded; nothing else
   spins up at launch — cold start (`ecl '3 4 +'`) is a budget.
 - **Fuel safe points:** a per-unit counter decremented per dispatch step
   and per kernel chunk; at zero, check the atomic cancel flag, maybe
@@ -452,7 +473,7 @@ Any change to this machinery must preserve:
   consumes those same fixed roots through one bounded cleanup advance
   before leaving the evaluator; abandoned Units use the scheduler teardown
   cursor. No result-sized loop survives.
-- **`par-each` owns construction and joining without dictionary
+- **`@each` owns construction and joining without dictionary
   authority.** Its public primitive installs a `WorkDriver` that owns the
   input sequence, quotation, and exact task buffer. Each slice publishes
   the unchanged quotation with an explicit borrowed seed; initialization
@@ -572,6 +593,13 @@ Any change to this machinery must preserve:
   retirement are resumable scheduler jobs. This is deliberately
   reference-counted rather than lock-free reclamation. Cancel also removes
   parked units from waiter lists.
+- **Publishing a wait set is the last thing its setup may do.** Activation
+  is precisely what lets another selector deliver and drop the wait set's
+  final reference, so the resumable setup job advances its own phase
+  *before* the publish and reads nothing afterward. Writing the terminal
+  phase after activating is a use-after-free that only a racing delivery
+  reveals — found by `test-tsan` in the hot-reload-against-concurrent-callers
+  case, where an auto-load inside the racing children widened the window.
 - **Task result publication** exposes only `constructing`, a stable active
   `TaskExecution`, or a published terminal result/OOM state. The
   execution's evaluating/finishing union is worker-private, so advancing a
@@ -634,7 +662,7 @@ Any change to this machinery must preserve:
   no caller can retain or mismatch a writer/lock lease. This preserves
   whole-write atomicity and the cross-task interleaving contract.
 - **Determinism lives at join points**, never in scheduling:
-  program-order `await-all` results and `par-each` leftmost-error are
+  program-order `await-all` results and `@each` leftmost-error are
   schedule-invariant. The only sanctioned nondeterminism is `await-any`
   and cross-unit IO interleaving. Enforced by running the suite at 1 and N
   workers.
@@ -664,8 +692,8 @@ Any change to this machinery must preserve:
   fast path is unobservable down to the last float bit.
 - **Loop shapes are autovectorization-friendly:** monomorphic branchless
   bodies, block fault masks, scalar tails. Every kernel takes an explicit
-  index range. Kernels never own threads; units (`spawn`/`par-each`) are
-  the sole concurrency grain, and `par-each` guarantees no cross-element
+  index range. Kernels never own threads; units (`@spawn`/`@each`) are
+  the sole concurrency grain, and `@each` guarantees no cross-element
   rendezvous, so a chunking driver is observationally conformant.
 - **The kernel list is closed and written down** — adding a kernel is a
   design event, and every kernel ships with its idiom-table entry (one
@@ -673,6 +701,27 @@ Any change to this machinery must preserve:
 - **Representation parity is a tested invariant:** fused and generic paths
   must produce identical values *and* identical representations —
   printing makes brackets observable at the prompt.
+- **Bitwise kernels reuse the numeric cursor, not the numeric contract.**
+  `band`/`bor`/`bxor`/`bnot`/`bsl`/`bsr` are ordinary pervasive entries in
+  the same table, so pervasion, dict alignment, polling, and failing-index
+  identification come for free. What they do not share is the fault
+  vocabulary: a pattern has no magnitude, so there is no overflow mask to
+  test, and the shift words carry their own `ShiftCount` scalar fault so
+  an out-of-range count reports as a shift problem rather than as
+  arithmetic outside its domain.
+- **Random draws are addressed, not stepped.** The generator state is a
+  `[key counter]` pair, and the mixer is SplitMix64 over
+  `key + counter * gamma`. Nothing in the kernel is mutable: element *i*
+  of a vector draw is a function of `counter + i` alone, so the driver may
+  build the result across resumptions, in blocks, or out of order and
+  still produce the same list. Bounded draws reject candidates in the
+  incomplete top range (`threshold = (0 -% bound) % bound`) rather than
+  folding them, which keeps the distribution exactly uniform at the cost
+  of an unbounded — but geometrically improbable — retry.
+- **`entropy` is the one kernel that reads the host.** It is gated on the
+  host IO capability and calls the platform CSPRNG. Every other random
+  word is pure, which is what makes an ecl program reproducible without a
+  recording layer.
 
 ## Idiom recognition
 
@@ -728,7 +777,7 @@ source with no public dual representation.
   single heap-owned structure holding the module-stack draft (the unit
   window above its boundary base), the pending output sequence, the home
   authority, and the publication transition; it appears in the frame stack
-  as a third boundary mode beside `attempt` and `module`. Only the
+  as a third boundary mode beside `@attempt` and `@module`. Only the
   definition-site home can create one — the authority comes from the
   executing home's slot, never from a value — and it is consumed exactly
   once, by publication on success or by retirement on every failure. The
@@ -801,6 +850,83 @@ source with no public dual representation.
   after storage growth succeeds. Failure leaves the same capability with
   the caller — there is no implicit "append also deinitializes" contract.
 
+## The embedded standard library
+
+- **One manifest, three transports.** `src/stdlib.zig` is a comptime table
+  mapping a module name to exactly one entry arm: embedded ECL source
+  (`@embedFile`), a linked native descriptor (`*const abi.Descriptor`), or a
+  builtin word table (`[]const env.BuiltinWord`). Duplicate names, empty
+  sources, and undocumented builtin words are compile errors, so the manifest
+  cannot describe a module the loader would have to repair.
+- **The manifest is consulted before `ECL_PATH`.** `AutoLoadDriver` acquires
+  the loading lease, checks whether the module is already registered, then
+  consults the manifest, and only then walks the search path. So a stdlib name
+  resolves with no host IO and no `ECL_PATH`, and no path module can shadow
+  one. The host-IO/search-path bail moved after the manifest check for exactly
+  this reason.
+- **A qualified miss auto-loads exactly as a `use` miss does.** Resolution
+  acquires the module *before* looking up the export atom, because a first
+  reference is precisely the state in which that atom has never been interned;
+  checking the export first made the trigger depend on whether some unrelated
+  source happened to intern the name. On a miss the dispatcher rewinds the
+  caller's instruction pointer to the reference and loads; the caller's own
+  frame then retries, so nothing has to reconstruct an execution context the
+  load may have discarded. A `.qualified_after_load` frame verifies the module
+  actually registered, which is what bounds the retry. Reflection —
+  `body`, `doc`, `see`, `which` — resolves without loading.
+- **Contention and recursion are different states.** A `LoadingNode` stores
+  its owner rather than a bare active flag, so a second request from the same
+  owner is a cycle and one from another owner is contention. A cycle raises
+  `'domain`; a contender waits and re-resolves, and a load that finds the
+  module already published publishes nothing. Before that, any interleaving —
+  even at one worker, since the load driver yields mid-source — reported a
+  bogus recursive-auto-load error to every requester but one.
+- **The builtin publication arm completes the M4-scoped mechanism.**
+  `ModulePublication` gained a `builtin` arm carrying a primitive pointer plus
+  documentation, mapping onto the `Binding.builtin` arm that already existed;
+  only the publication typestate had been missing. `BuiltinCandidateCursor`
+  publishes one word per turn through the same candidate/commit protocol as a
+  native module, building each word's documentation value from compiled-in
+  text. Publication retains what it is handed, so the cursor releases its own
+  reference on every path.
+- **A builtin module word cannot declare an enforceable effect.** The
+  cross-home effect check runs the instant a builtin primitive returns, which
+  is before a scheduler driver it started has produced anything. Builtin
+  module words are therefore exempt from the declared-effect requirement that
+  native words carry, exactly as source module words are, and `json` and
+  `http` state their stack shape in prose instead.
+- **Static linkage needs no entry symbol.** `ecl.module` takes a `linkage`
+  spec: a dynamically loaded extension exports `ecl_module_abi_v1`, while a
+  module linked into this image does not, so several first-party SDK modules
+  can coexist in one binary. `Loader.startStatic` publishes a linked
+  descriptor through the same validate/publish/commit phases as a dynamic
+  image, differing only in a no-op image pin.
+- **The `@` convention is enforced by the audit, both directions.** A
+  hardcoded manifest in `source_audit.zig` lists the unit constructors; the
+  audit asserts each is installed and documented under its `@` spelling, and
+  that no other first-party primitive or prelude/stdlib definition begins with
+  `@`. The compiler cannot express "applies its quotation in a fresh unit", so
+  the rule is written down once and checked, which is what keeps the
+  convention from eroding as vocabulary grows. `@` stays an ordinary word
+  character: user vocabulary may use it freely.
+- **An anonymous after row is an input-only contract.** `ValidatedEffect`
+  carries a `row` flag set when the after portion is exactly the `...` token;
+  `prepareEffectCheck` forwards it and `finishEffectCheck` returns before the
+  post-condition compare. Entry consumption is still verified, so a word with
+  a variable output regains input checking instead of dropping to a
+  documentation-only annotation. The token lexes as an ordinary word — one
+  special case in `SymbolCursor`, since it is the only dotted name the
+  language spells for itself — and joins `--` and `:` in `isReservedBytes`.
+  The native SDK rejects it at comptime: a native `complete` requires the
+  exact output tuple, so there is nothing for a row to mean there.
+- **`rng` is source, not native, because its state has nowhere else to go.**
+  A module's own binding is the only place a threaded generator state can
+  live without becoming ambient — a native module holding a state would be
+  process-global mutable data, which is precisely what the kernels are
+  designed to avoid. Writing it in ECL over `within`/`without` puts the
+  state in a binding the user can inspect, seed, and shadow, and costs
+  nothing: the arithmetic is already in the kernels.
+
 ## Native extension boundary
 
 - **One artifact is one module and one lifetime unit.** A target-specific
@@ -812,6 +938,16 @@ source with no public dual representation.
   entry in order, resolution tries `<name>.ecl` and then `<name>.eclmod`;
   the first existing candidate is authoritative, including its errors, and
   a native descriptor's canonical name must equal the requested name.
+- **Nested input reads are addressed by path.** `list_at`/`dict_at` reach only
+  a declared input's top level, and a `ValueView` of an aggregate exposes a
+  length and nothing else — so no module, first-party or otherwise, could read
+  a list of lists. `read_path` walks one bounded path from an input root: a
+  list level is indexed directly and a dict level addresses entry `n`'s key as
+  `2n` and its value as `2n+1`. Depth is capped by `max_read_path_depth`,
+  which keeps one read constant-cost and makes a pathological document a
+  bounded error rather than unbounded host work. The budget is charged per
+  step walked. Like the cursors, it is gated by the `reschedule` capability,
+  so the descriptor and capability wire are unchanged.
 - **Trusted, Zig-only authoring over an exact wire ABI.** The supported
   author surface is the separately distributed `ecl-native` Zig SDK, built
   with the pinned Zig toolchain. It emits the descriptor and a

@@ -1,0 +1,14 @@
+{"order" ("1" "2" "3" "4") "customer" ("ada" "lin" "ada" "zoe") "region" ("north" "south" "north" "west")}
+{"customer" ("ada" "ada" "lin") "region" ("north" "north" "south") "tier" ("gold" "silver" 'null)}
+0
+{"order" ("1" "1" "2" "3" "3") "customer" ("ada" "ada" "lin" "ada" "ada") "region" ("north" "north" "south" "north" "north") "home" ("north" "north" "south" "north" "north") "tier" ("gold" "silver" 'null "gold" "silver")}
+{"order" ("1" "1" "2" "3" "3") "customer" ("ada" "ada" "lin" "ada" "ada") "region" ("north" "north" "south" "north" "north") "tier" ("gold" "silver" 'null "gold" "silver")}
+5
+4
+{"order" ("1" "1" "2" "3" "3" "4") "customer" ("ada" "ada" "lin" "ada" "ada" "zoe") "region" ("north" "north" "south" "north" "north" "west") "tier" ("gold" "silver" 'null "gold" "silver" 'null)}
+("gold" "silver" 'null "gold" "silver" "unknown")
+'domain
+'domain
+("gold" "silver" 'null)
+'symbol
+"gold"

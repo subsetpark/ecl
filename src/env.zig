@@ -93,6 +93,9 @@ pub const ValidatedEffect = struct {
     quotation: *EffectQuotation,
     inputs: u32,
     outputs: u32,
+    /// The after portion is the anonymous row token rather than named slots:
+    /// the before row is checked at boundaries, the after row is not.
+    row: bool = false,
     pub fn header(self: ValidatedEffect) *value.ListHandle {
         return @ptrCast(@alignCast(self.quotation));
     }
@@ -108,7 +111,15 @@ pub const ValidatedEffect = struct {
             .quotation = @ptrCast(@alignCast(effect_header)),
             .inputs = @intCast(separator_index),
             .outputs = @intCast(@as(usize, @intCast(effect_header.length())) - separator_index - 1),
+            .row = isRowEffect(effect_header, separator_index),
         };
+    }
+    /// The after portion is the row token exactly when it is that one word.
+    pub fn isRowEffect(effect_header: *value.ListHandle, separator_index: usize) bool {
+        const count: usize = @intCast(effect_header.length());
+        if (count != separator_index + 2) return false;
+        const after = list.atUnchecked(.{ .list = effect_header }, separator_index + 1);
+        return after == .word and std.mem.eql(u8, intern.get(after.word), lexer.row_token);
     }
     pub const ParseProgress = poll.Progress(?ValidatedEffect);
     pub const ParseCursor = struct {
@@ -125,6 +136,7 @@ pub const ValidatedEffect = struct {
                     .quotation = @ptrCast(@alignCast(self.header)),
                     .inputs = @intCast(split),
                     .outputs = @intCast(count - split - 1),
+                    .row = isRowEffect(self.header, split),
                 } };
             }
             const atom = list.atUnchecked(.{ .list = self.header }, self.index);
@@ -151,6 +163,23 @@ pub const TopPublication = union(enum) {
         doc: ?*DocumentationString = null,
     },
 };
+/// One word of a builtin-backed module: a host primitive published under a
+/// module name. The metadata is authored as plain text because these modules
+/// are compiled in, not loaded — there is no descriptor to carry it.
+/// Slots either side of `--` in a builtin word's declared effect. Fixed
+/// because these effects are compiled-in text, not user data.
+pub const max_builtin_effect_tokens: usize = 16;
+
+pub const BuiltinWord = struct {
+    name: []const u8,
+    /// Required: the repository holds module words to a documentation policy
+    /// even though M11 made annotations optional as language semantics.
+    doc: []const u8,
+    /// Slot names either side of `--`, when the successful effect is fixed.
+    effect: ?[]const u8 = null,
+    primitive: PrimitiveImpl,
+};
+
 pub const ModulePublication = union(enum) {
     word: struct {
         body: *Quotation,
@@ -162,6 +191,15 @@ pub const ModulePublication = union(enum) {
         callable: NativeCallable,
         visibility: Visibility,
         effect: ValidatedEffect,
+        doc: *DocumentationString,
+    },
+    /// A primitive published as a module word. `Binding` already had this
+    /// arm; only the publication typestate was missing, which is why a
+    /// primitive-backed module was unrepresentable.
+    builtin: struct {
+        primitive: PrimitiveImpl,
+        visibility: Visibility,
+        effect: ?ValidatedEffect = null,
         doc: *DocumentationString,
     },
 };
@@ -201,6 +239,13 @@ const BindingSpec = struct {
                 .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
                 .effect = native.effect,
                 .doc = native.doc,
+            },
+            .builtin => |primitive| .{
+                .binding = .{ .builtin = primitive.primitive },
+                .visibility = primitive.visibility,
+                .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
+                .effect = primitive.effect,
+                .doc = primitive.doc,
             },
         };
     }
@@ -1480,6 +1525,7 @@ pub const BuildingEnv = struct {
                 }
             }
         }
+        @setEvalBranchQuota(4000);
         inline for (definitions) |definition| {
             try self.installBuiltin(definition.name, definition.primitive);
         }

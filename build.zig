@@ -36,6 +36,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     native_sdk.addImport("ecl-native-abi", native_abi);
+    // First-party stdlib modules are authored against the public SDK and
+    // linked into the shipped image, so the runtime module imports it too.
+    mod.addImport("ecl-native", native_sdk);
     const native_sample = b.createModule(.{
         .root_source_file = b.path("test/native/sample.zig"),
         .target = target,
@@ -161,6 +164,19 @@ pub fn build(b: *std.Build) void {
         fixture_files.getDirectory(),
     );
 
+    // Loopback HTTP fixture for the http module's server-backed tests.
+    const http_fixture_mod = b.createModule(.{
+        .root_source_file = b.path("test/http_fixture_server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const http_fixture = b.addExecutable(.{
+        .name = "ecl-http-fixture",
+        .root_module = http_fixture_mod,
+    });
+    const http_fixture_options = b.addOptions();
+    http_fixture_options.addOptionPath("server_exe", http_fixture.getEmittedBin());
+
     const repl_tests = b.addSystemCommand(&.{"expect"});
     repl_tests.addFileArg(b.path("test/repl.exp"));
     repl_tests.addArtifactArg(exe);
@@ -177,9 +193,11 @@ pub fn build(b: *std.Build) void {
     test_mod.addOptions("session_options", test_options);
     test_mod.addImport("minish", minish);
     test_mod.addImport("native-abi", native_abi);
+    test_mod.addImport("ecl-native", native_sdk);
     test_mod.addImport("native-sample", native_sample);
     test_mod.addOptions("native_fixture_options", native_fixture_options);
     test_mod.addOptions("native_runtime_options", native_runtime_options);
+    test_mod.addOptions("http_fixture_options", http_fixture_options);
     test_mod.link_libc = true;
     const tests = b.addTest(.{ .root_module = test_mod });
     tests.linkage = runtime_linkage;
@@ -279,6 +297,7 @@ pub fn build(b: *std.Build) void {
         });
         fuzz_mod.addOptions("session_options", test_options);
         fuzz_mod.addImport("native-abi", native_abi);
+        fuzz_mod.addImport("ecl-native", native_sdk);
         fuzz_mod.addOptions("native_runtime_options", native_runtime_options);
         const fuzz_tests = b.addTest(.{
             .root_module = fuzz_mod,
@@ -304,6 +323,7 @@ pub fn build(b: *std.Build) void {
     });
     oom_mod.addOptions("session_options", test_options);
     oom_mod.addImport("native-abi", native_abi);
+    oom_mod.addImport("ecl-native", native_sdk);
     oom_mod.addOptions("native_fixture_options", native_fixture_options);
     oom_mod.link_libc = true;
     const oom_tests = b.addTest(.{
@@ -364,9 +384,11 @@ pub fn build(b: *std.Build) void {
         worker_test_mod.addOptions("session_options", worker_options);
         worker_test_mod.addImport("minish", minish);
         worker_test_mod.addImport("native-abi", native_abi);
+        worker_test_mod.addImport("ecl-native", native_sdk);
         worker_test_mod.addImport("native-sample", native_sample);
         worker_test_mod.addOptions("native_fixture_options", native_fixture_options);
         worker_test_mod.addOptions("native_runtime_options", native_runtime_options);
+        worker_test_mod.addOptions("http_fixture_options", http_fixture_options);
         worker_test_mod.link_libc = true;
         const worker_tests = b.addTest(.{
             .root_module = worker_test_mod,
@@ -392,9 +414,11 @@ pub fn build(b: *std.Build) void {
     tsan_mod.addOptions("session_options", test_options);
     tsan_mod.addImport("minish", minish);
     tsan_mod.addImport("native-abi", native_abi);
+    tsan_mod.addImport("ecl-native", native_sdk);
     tsan_mod.addImport("native-sample", native_sample);
     tsan_mod.addOptions("native_fixture_options", native_fixture_options);
     tsan_mod.addOptions("native_runtime_options", native_runtime_options);
+    tsan_mod.addOptions("http_fixture_options", http_fixture_options);
     tsan_mod.link_libc = true;
     const tsan_tests = b.addTest(.{
         .root_module = tsan_mod,

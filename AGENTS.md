@@ -14,6 +14,33 @@
   field, or other representation merely so a test can inspect it. Enforce static
   completeness, size, and layout rules with production `comptime` validation or the
   source audit; keep runtime tests about observable results and errors.
+- Never let a test read an ambient resource: standard input, a tty, the network,
+  or the wall clock. An in-process test that reads real stdin blocks forever on
+  whatever pipe the runner inherited, and the suite looks slow rather than hung.
+  Prove a capability that genuinely needs a real stream against the built binary
+  through an explicit pipe in `test/e2e.zig`, and keep the in-process test on the
+  part that needs no stream — the mode gate, the claim, the error kind.
+- Run every build, test, or script invocation with standard input closed
+  (`< /dev/null`) and under a `timeout` shorter than whatever will give up on it
+  first. Closing stdin turns an accidental blocking read into immediate EOF, and
+  a timeout that fires later than its supervisor reports nothing about why the
+  run died. `zig build test` is roughly three minutes and `build.zig` exposes no
+  test filter, so iterate on `zig build` plus real behavior against
+  `./zig-out/bin/ecl`, and run the whole suite in the background at boundaries
+  that matter.
+- Reviewers do not rerun the test suites: running the gates is the implementer's
+  job, and a reviewer's rerun measures the shared working tree — a moving target
+  during patch execution — rather than the change under review. Review by reading
+  the diff and by executing targeted inputs against `./zig-out/bin/ecl` to test
+  suspected findings empirically; verify a finding reproduces before reporting
+  it. The testing *layer* is in scope for review like any other code: whether the
+  new tests assert the ruled contracts, whether coverage reaches the edges the
+  policy names, and whether a passing suite would actually catch the regression
+  in question. Never report a performance observation from a Debug binary: the
+  default `zig build` output runs the DebugAllocator, whose per-allocation
+  machinery can be hundreds of times slower on allocation-heavy paths and can
+  fabricate a convincing per-operation "defect" with clean-looking scaling
+  curves. Rebuild with `-Doptimize=ReleaseSafe` before timing anything.
 - Keep focused allocator failure sweeps in the normal suite. Consolidate exhaustive
   initialized-Session coverage in `src/tests/oom_test.zig`, run by `zig build test-oom`, so
   the embedded prelude is not bootstrapped independently for every runtime surface.
@@ -28,6 +55,12 @@
     so any surface reachable only through a live one — words, prelude, modules, scheduler,
     reflection, loader — has no allocation-failure coverage unless a snippet in that
     enumerated probe reaches it, however well the behavioral suites cover it.
+  - **An `oom_test` snippet must be the smallest program that reaches its paths.** The
+    sweep replays a snippet once per allocation point, so its cost is quadratic in how
+    much the snippet allocates and every snippet pays into one shared wall clock. Reach a
+    path with 2 elements, not 40: volume adds no new allocation sites. Note the gate's
+    own baseline is over ten minutes regardless — background it with a generous timeout,
+    and do not read a timeout as evidence about any one snippet.
   - **Bounded-memory claims need `DebugAllocator{.enable_memory_limit}`**, the only
     allocator populating `total_requested_bytes`. Assert a measured delta against a warmed
     baseline, never a fixed number, and set `requested_memory_limit` to force failure at a
@@ -44,19 +77,32 @@
   `heap.freePayload`, far from the line at fault. Suites that pass only source strings to a
   session may use the shared session heap; suites that mix host-built values in stay on
   `std.testing.allocator`, where value and session already agree.
+- **`test-tsan` is the only gate that finds scheduler lifetime bugs**, so run it for any
+  change that alters *when* modules load, *when* tasks park, or how long scheduler objects
+  live — not only for edits to `scheduler.zig`. A real use-after-free in
+  `WaitSet.advanceSetup` sat green under `zig build test`, `test-workers` at 1 and 8, and
+  `test-oom`; it fired only once a module auto-load inside racing children widened the
+  window. When TSan does crash, isolate with a counterfactual run — remove the suspected
+  trigger with the fix still absent — before claiming a cause.
 - On macOS, run the TSan gate in the same Linux/x86_64 Alpine environment used by CI;
   Zig 0.16's native arm64 macOS sanitizer runtime may segfault before tests start, and
   its Linux/arm64 runtime may fail while unmapping shadow memory under Docker Desktop.
   Keep the checkout read-only and caches container-local:
 
+  Copy the checkout to a writable directory inside the container rather than
+  building in the read-only mount: suites that call `std.testing.tmpDir` create
+  their directory under the working directory, so a read-only `-w /work` aborts
+  them with `ReadOnlyFileSystem` before any race can be observed.
+
   ```sh
   docker run --rm --platform linux/amd64 \
-    -v "$PWD":/work:ro -w /work alpine:latest sh -euxc '
+    -v "$PWD":/work:ro alpine:latest sh -euxc '
       apk add --no-cache curl xz linux-headers
       curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
       echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
       mkdir -p /tmp/zig
       tar -C /tmp/zig --strip-components=1 -xf /tmp/zig.tar.xz
+      mkdir -p /build && cp -a /work/. /build/ && cd /build
       /tmp/zig/zig build --cache-dir /tmp/ecl-cache --global-cache-dir /tmp/ecl-global test-tsan
     '
   ```

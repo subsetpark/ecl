@@ -178,41 +178,41 @@ test "binding: set installs and replaces values while let is absent" {
     try expectErrorContains(&runtime, "3 'bad def", &.{ "'kind 'type", "use set for values" });
 }
 
-test "scope: isolated attempt and child use do not leak" {
+test "scope: isolated @attempt and child use do not leak" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "(1 'k set) attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
-    try expectErrorContains(&runtime, "((1 'k set missing) attempt pop) attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
-    try expectOk(&runtime, "'m (7 'x set) module");
-    try expectErrorContains(&runtime, "('m use x) attempt pop x", &.{ "'kind 'undefined-word", "'word 'x" });
+    try expectErrorContains(&runtime, "(1 'k set) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
+    try expectErrorContains(&runtime, "((1 'k set missing) @attempt pop) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
+    try expectOk(&runtime, "(7 'x set) 'm @module");
+    try expectErrorContains(&runtime, "('m use x) @attempt pop x", &.{ "'kind 'undefined-word", "'word 'x" });
 }
 
 test "module: privacy module-body contract top-level private and qualified trace" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "'m (40 's setp (s 2 +) ( -- n ) 'f def) module m.f");
+    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module m.f");
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
     try expectErrorContains(&runtime, "m.s", &.{ "'kind 'undefined-word", "'word 'm.s" });
-    try expectOk(&runtime, "'private-word ((41) ( -- n ) 'g defp (g 1 +) ( -- n ) 'f def) module private-word.f");
+    try expectOk(&runtime, "((41) ( -- n ) 'g defp (g 1 +) ( -- n ) 'f def) 'private-word @module private-word.f");
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
     try expectErrorContains(&runtime, "private-word.g", &.{ "'kind 'undefined-word", "'word 'private-word.g" });
     try expectErrorContains(&runtime, "1 'x setp", &.{ "'kind 'domain", "defp/setp" });
     // A body that leaves values behind registers: they become the slot's
     // durable stack, not bindings, so no name appears for them.
-    try expectOk(&runtime, "'bad (1) module");
+    try expectOk(&runtime, "(1) 'bad @module");
     try expectErrorContains(&runtime, "bad.x", &.{"'kind 'undefined-word"});
-    try expectOk(&runtime, "'temporary ((1 'hidden set) attempt pop) module");
+    try expectOk(&runtime, "((1 'hidden set) @attempt pop) 'temporary @module");
     try expectErrorContains(&runtime, "temporary.hidden", &.{"'kind 'undefined-word"});
-    try expectOk(&runtime, "'trace-module ((missing) ( -- n ) 'boom def) module");
+    try expectOk(&runtime, "((missing) ( -- n ) 'boom def) 'trace-module @module");
     try expectErrorContains(&runtime, "trace-module.boom", &.{ "'word 'missing", "'trace ['missing 'trace-module.boom]" });
-    try expectOk(&runtime, "'recursive ((dup 0 > (1 - f 1 +) (pop missing) if) ( n -- n ) 'f def) module");
+    try expectOk(&runtime, "((dup 0 > (1 - f 1 +) (pop missing) if) ( n -- n ) 'f def) 'recursive @module");
     try expectErrorContains(&runtime, "2 recursive.f", &.{"'trace ['missing 'recursive.f 'recursive.f 'recursive.f]"});
 }
 
 test "modules: removal strips aliases and leaves no half-removed entry" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "'a ((1) 'x def) module 'b ((2) 'x def) module " ++
+    try expectOk(&runtime, "((1) 'x def) 'a @module ((2) 'x def) 'b @module " ++
         "'short 'a alias 'a use short.x a.x x");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try expectOk(&runtime, "'a unmodule");
@@ -230,7 +230,7 @@ test "modules: removal strips aliases and leaves no half-removed entry" {
 test "module: qualified use alias ordering idempotence and collisions" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "'a (1 'x set) module 'b (2 'x set) module " ++
+    try expectOk(&runtime, "(1 'x set) 'a @module (2 'x set) 'b @module " ++
         "'a use 'b use x 'a use x 'short 'a alias short.x");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
@@ -238,7 +238,7 @@ test "module: qualified use alias ordering idempotence and collisions" {
     try expectErrorContains(&runtime, "'a 'b alias", &.{"'kind 'domain"});
     try expectOk(&runtime, "'short 'b alias short.x");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[3].int);
-    try expectErrorContains(&runtime, "'future 'a alias 'future (3 'x set) module", &.{"'kind 'domain"});
+    try expectErrorContains(&runtime, "'future 'a alias (3 'x set) 'future @module", &.{"'kind 'domain"});
     try expectErrorContains(&runtime, "'dotted.name 'a alias", &.{"'kind 'domain"});
 }
 
@@ -249,21 +249,21 @@ test "module: provisional tasks keep rollback generations alive until quiescence
         .{ .worker_pool = 1 },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "('bad (((1) () while) spawn pop missing) module) attempt pop");
+    try expectOk(&runtime, "((((1) () while) @spawn pop missing) 'bad @module) @attempt pop");
 }
 
 test "module: hot reload commit failure and whole-body pinning" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "'m (1 'x setp " ++
-        "('m (2 'x setp (x) ( -- n ) 'get def) module x) ( -- n ) 'probe def " ++
-        "(x) ( -- n ) 'get def) module m.probe m.get");
+    try expectOk(&runtime, "(1 'x setp " ++
+        "((2 'x setp (x) ( -- n ) 'get def) 'm @module x) ( -- n ) 'probe def " ++
+        "(x) ( -- n ) 'get def) 'm @module m.probe m.get");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
-    try expectErrorContains(&runtime, "'m (3 'x setp missing) module", &.{"'kind 'undefined-word"});
+    try expectErrorContains(&runtime, "(3 'x setp missing) 'm @module", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "m.get");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[2].int);
-    try expectErrorContains(&runtime, "'kept ((9) ( -- n ) 'get def) module missing", &.{"'kind 'undefined-word"});
+    try expectErrorContains(&runtime, "((9) ( -- n ) 'get def) 'kept @module missing", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "kept.get");
     try std.testing.expectEqual(@as(i64, 9), runtime.stackItems()[3].int);
 }
@@ -273,17 +273,17 @@ test "module: effect shape cross-home contract and same-home TCO" {
     defer runtime.deinit();
     // A module word may omit its annotation entirely; only a malformed
     // recognized annotation is 'domain.
-    try expectOk(&runtime, "'fine ((dup) 'f def) module");
-    try expectErrorContains(&runtime, "'bad ((dup) (a -- b -- c) 'f def) module", &.{"'kind 'domain"});
-    try expectErrorContains(&runtime, "'bad ((dup) (a 1 -- b) 'f def) module", &.{"'kind 'domain"});
-    try expectOk(&runtime, "'m ((dup 0 > (1 - countdown) (pop) if) ( n -- ) 'countdown def) module");
+    try expectOk(&runtime, "((dup) 'f def) 'fine @module");
+    try expectErrorContains(&runtime, "((dup) (a -- b -- c) 'f def) 'bad @module", &.{"'kind 'domain"});
+    try expectErrorContains(&runtime, "((dup) (a 1 -- b) 'f def) 'bad @module", &.{"'kind 'domain"});
+    try expectOk(&runtime, "((dup 0 > (1 - countdown) (pop) if) ( n -- ) 'countdown def) 'm @module");
     try expectOk(&runtime, "20 m.countdown");
     const shallow_frames = runtime.lastMaxFrames();
     try expectOk(&runtime, "20000 m.countdown");
     try std.testing.expectEqual(shallow_frames, runtime.lastMaxFrames());
-    try expectErrorContains(&runtime, "'lies ((dup +) ( a -- b c ) 'f def) module 1 lies.f", &.{ "'kind 'contract", "'word 'lies.f" });
-    try expectErrorContains(&runtime, "'needs ((dup) ( a -- a a ) 'f def) module needs.f", &.{ "'kind 'contract", "seeded 0" });
-    try expectErrorContains(&runtime, "'throws ((missing) ( -- n ) 'f def) module throws.f", &.{ "'kind 'undefined-word", "'word 'missing" });
+    try expectErrorContains(&runtime, "((dup +) ( a -- b c ) 'f def) 'lies @module 1 lies.f", &.{ "'kind 'contract", "'word 'lies.f" });
+    try expectErrorContains(&runtime, "((dup) ( a -- a a ) 'f def) 'needs @module needs.f", &.{ "'kind 'contract", "seeded 0" });
+    try expectErrorContains(&runtime, "((missing) ( -- n ) 'f def) 'throws @module throws.f", &.{ "'kind 'undefined-word", "'word 'missing" });
     try expectOk(&runtime, "(dup +) 'session-double def 4 session-double");
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[runtime.stackItems().len - 1].int);
 }
@@ -296,13 +296,15 @@ test "module: use shadow notices are exact and non-blocking" {
     var runtime = try session.Session.initWithHost(
         std.testing.allocator,
         &.{},
-        std.testing.io,
-        &output.writer,
-        &diagnostics.writer,
-        null,
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = null,
+        },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "1 'mean set 2 'count set 'stats (3 'mean set 4 'count set 5 'other set) module 'stats use mean count");
+    try expectOk(&runtime, "1 'mean set 2 'count set (3 'mean set 4 'count set 5 'other set) 'stats @module 'stats use mean count");
     try std.testing.expectEqualStrings(
         "session `count` shadows `stats.count`\n" ++
             "session `mean` shadows `stats.mean`\n",
@@ -311,7 +313,7 @@ test "module: use shadow notices are exact and non-blocking" {
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
     const notice_len = diagnostics.written().len;
-    try expectOk(&runtime, "('stats use other pop) attempt pop 'consumer ('stats use (other) ( -- n ) 'get def) module consumer.get pop");
+    try expectOk(&runtime, "('stats use other pop) @attempt pop ('stats use (other) ( -- n ) 'get def) 'consumer @module consumer.get pop");
     try std.testing.expectEqual(notice_len, diagnostics.written().len);
 
     var output_buffer: [64]u8 = undefined;
@@ -321,13 +323,15 @@ test "module: use shadow notices are exact and non-blocking" {
     var broken = try session.Session.initWithHost(
         std.testing.allocator,
         &.{},
-        std.testing.io,
-        &fixed_output,
-        &broken_diagnostics,
-        null,
+        .{
+            .io = std.testing.io,
+            .output = &fixed_output,
+            .diagnostics = &broken_diagnostics,
+            .ecl_path = null,
+        },
     );
     defer broken.deinit();
-    try expectErrorContains(&broken, "1 'x set 'm (2 'x set 3 'y set) module 'm use", &.{"'kind 'io"});
+    try expectErrorContains(&broken, "1 'x set (2 'x set 3 'y set) 'm @module 'm use", &.{"'kind 'io"});
     try expectErrorContains(&broken, "y", &.{"'kind 'undefined-word"});
 }
 
@@ -344,16 +348,18 @@ test "module: use shadow notices stay within the cancellation bound" {
     var runtime = try session.Session.initWithHost(
         allocator,
         &.{},
-        std.testing.io,
-        &output.writer,
-        &diagnostics.writer,
-        null,
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = null,
+        },
     );
     defer runtime.deinit();
     const binding = try TestBinding.init(allocator);
     defer runtime.release(binding.body);
     try runtime.define(long_name, binding.top());
-    const module_source = try std.fmt.allocPrint(allocator, "'wide (2 '{s} set) module", .{name_bytes});
+    const module_source = try std.fmt.allocPrint(allocator, "(2 '{s} set) 'wide @module", .{name_bytes});
     defer allocator.free(module_source);
     try expectOk(&runtime, module_source);
     runtime.requestCancellation();
@@ -370,7 +376,7 @@ test "module: use shadow notices stay within the cancellation bound" {
     try name_runtime.pushOwned(.{ .symbol = intern.namespaceId(long_name) });
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
     name_runtime.requestCancellation();
-    try expectErrorContains(&name_runtime, "module", &.{"unit cancelled"});
+    try expectErrorContains(&name_runtime, "@module", &.{"unit cancelled"});
     try std.testing.expect(name_runtime.lastPolls() >= 1);
 }
 
@@ -382,13 +388,15 @@ test "reflection: which and see expose home shadow and effect" {
     var runtime = try session.Session.initWithHost(
         std.testing.allocator,
         &.{},
-        std.testing.io,
-        &output.writer,
-        &diagnostics.writer,
-        null,
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = null,
+        },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "'m (40 's setp (s 2 +) ( -- n ) 'f def) module 'm use " ++
+    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module 'm use " ++
         "'m.f see 9 'f set 'f which 'f see words");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(s 2 +) (-- n) 'm.f def") != null);
     // One binding kind: a session constant reports as a public def with no
@@ -404,7 +412,7 @@ test "reflection: which and see expose home shadow and effect" {
 test "reflection: body extraction loses home context" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "'m (40 's setp (s 2 +) ( -- n ) 'f def) module");
+    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module");
     try expectErrorContains(&runtime, "'m.f body call", &.{ "'kind 'undefined-word", "'word 's" });
 }
 
@@ -416,13 +424,15 @@ test "reflection: words is sorted unique and private-safe" {
     var runtime = try session.Session.initWithHost(
         std.testing.allocator,
         &.{},
-        std.testing.io,
-        &output.writer,
-        &diagnostics.writer,
-        null,
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = null,
+        },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "'m (1 'hidden setp 2 'zebra set 3 'alpha set) module 'm use 4 'zebra set words");
+    try expectOk(&runtime, "(1 'hidden setp 2 'zebra set 3 'alpha set) 'm @module 'm use 4 'zebra set words");
     const rendered = output.written();
     try std.testing.expect(std.mem.indexOf(u8, rendered, "alpha") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "hidden") == null);
@@ -468,7 +478,7 @@ test "session completion: live and registered names are sorted unique" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     try expectOk(
         &runtime,
-        "'completion-module (1 'hidden setp 2 'public set) module " ++
+        "(1 'hidden setp 2 'public set) 'completion-module @module " ++
             "'completion-module use 'cm 'completion-module alias " ++
             "3 'repl-live set",
     );
@@ -498,9 +508,9 @@ test "session completion: dotted aliases expose only public exports" {
     defer runtime.deinit();
     try expectOk(
         &runtime,
-        "'completion-module (1 'old-public set 2 'private-name setp) module " ++
+        "(1 'old-public set 2 'private-name setp) 'completion-module @module " ++
             "'cm 'completion-module alias " ++
-            "'completion-module (3 'new-public set 4 'new-private setp) module",
+            "(3 'new-public set 4 'new-private setp) 'completion-module @module",
     );
     var canonical = try runtime.completionCandidates("completion-module.");
     defer canonical.deinit();
@@ -572,7 +582,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     defer qualified_runtime.deinit();
     const module_source = try std.fmt.allocPrint(
         allocator,
-        "'poll-module (1 '{s} set) module",
+        "(1 '{s} set) 'poll-module @module",
         .{first_bytes},
     );
     defer allocator.free(module_source);
@@ -931,7 +941,7 @@ test "session: mutation settlement is independent of a busy sole worker" {
     {
         var runtime = try session.Session.initWithConfig(allocator, &.{}, .{ .worker_pool = 1 });
         defer runtime.deinit();
-        try expectOk(&runtime, "((1) () while) spawn");
+        try expectOk(&runtime, "((1) () while) @spawn");
         const name = try intern.internNamespace("busy-worker-retirement");
         const binding = try TestBinding.init(allocator);
         defer runtime.release(binding.body);
@@ -1165,10 +1175,12 @@ test "loader: load is one unit and preserves file provenance" {
     var runtime = try session.Session.initWithHost(
         std.testing.allocator,
         &.{},
-        std.testing.io,
-        &output.writer,
-        &diagnostics.writer,
-        null,
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = null,
+        },
     );
     defer runtime.deinit();
     try expectOk(&runtime, "10");
@@ -1180,7 +1192,7 @@ test "loader: load is one unit and preserves file provenance" {
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);
     try expectOk(&runtime, "loaded.answer");
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[2].int);
-    try expectOk(&runtime, "(\"test/acceptance/load-stack.ecl\" load) attempt pop");
+    try expectOk(&runtime, "(\"test/acceptance/load-stack.ecl\" load) @attempt pop");
     try expectOk(&runtime, "\"test/acceptance/load-provenance.ecl\" load");
     try expectErrorContains(&runtime, "loaded-boom", &.{ "'word 'missing", "'source \"test/acceptance/load-provenance.ecl\"" });
     try expectOk(&runtime, "\"test/acceptance/load-stack.ecl\" load");
@@ -1202,13 +1214,15 @@ test "loader: ECL_PATH loads first candidate and retries use" {
     var runtime = try session.Session.initWithHost(
         std.testing.allocator,
         &.{},
-        std.testing.io,
-        &output.writer,
-        &diagnostics.writer,
-        search,
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = search,
+        },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "('attempted use answer) attempt pop attempted.answer");
+    try expectOk(&runtime, "('attempted use answer) @attempt pop attempted.answer");
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try expectErrorContains(&runtime, "answer", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "'stats use answer");
@@ -1217,10 +1231,12 @@ test "loader: ECL_PATH loads first candidate and retries use" {
     var no_path = try session.Session.initWithHost(
         std.testing.allocator,
         &.{},
-        std.testing.io,
-        &output.writer,
-        &diagnostics.writer,
-        "",
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = "",
+        },
     );
     defer no_path.deinit();
     try expectErrorContains(&no_path, "'stats use", &.{ "'kind 'undefined-word", "'name 'stats" });
@@ -1234,10 +1250,12 @@ test "loader: failures and cycles are total" {
     var runtime = try session.Session.initWithHost(
         std.testing.allocator,
         &.{},
-        std.testing.io,
-        &output.writer,
-        &diagnostics.writer,
-        "test/acceptance/modules",
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .ecl_path = "test/acceptance/modules",
+        },
     );
     defer runtime.deinit();
     try expectErrorContains(&runtime, "'missing-module use", &.{ "'kind 'undefined-word", "'name 'missing-module" });
@@ -1354,7 +1372,7 @@ test "modules: module set and setp publish unannotated constants" {
     // Registration succeeding is itself the proof that a module definition
     // may carry no effect at all: `set` publishes the bare literal capture,
     // so constants need no value exception and no synthesized metadata.
-    try expectOk(&runtime, "'m (7 'x set 8 'h setp (h) (-- n) 'peek def) module");
+    try expectOk(&runtime, "(7 'x set 8 'h setp (h) (-- n) 'peek def) 'm @module");
     try expectOk(&runtime, "m.x m.peek");
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[1].int);
@@ -1373,7 +1391,7 @@ test "modules: cross-home constant references cross unchecked while declared eff
     // A constant reached across a home boundary declares no effect, so no
     // check frame is installed at all: qualified access, spliced access, and
     // module-internal access agree without one.
-    try expectOk(&runtime, "'m (7 'x set 8 'h setp (h) (-- n) 'peek def) module");
+    try expectOk(&runtime, "(7 'x set 8 'h setp (h) (-- n) 'peek def) 'm @module");
     try expectOk(&runtime, "m.x 'm use x m.peek");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
@@ -1383,7 +1401,7 @@ test "modules: cross-home constant references cross unchecked while declared eff
     // word declaring it and leaving two values is a contract violation.
     try expectErrorContains(
         &runtime,
-        "'liar ((1 2) (-- value) 'two def) module liar.two",
+        "((1 2) (-- value) 'two def) 'liar @module liar.two",
         // Seeded/observed are absolute stack depths, so assert the parts that
         // do not depend on what this session left on the stack.
         &.{ "'kind 'contract", "'word 'liar.two", "declared (0 -- 1)" },

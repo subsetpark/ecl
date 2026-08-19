@@ -396,10 +396,22 @@ const Formatter = struct {
                         newlines = 0;
                         continue;
                     }
+                    if (existingModuleHeader(sequence, part_index, trivia.bytes)) |header| {
+                        if (have_content) try self.rootBreak(&output, &line, 2);
+                        try line.append(self.allocator(), try self.moduleHeader(header.name));
+                        have_content = true;
+                        previous_comment = true;
+                        pending_definition = header.part;
+                        newlines = 0;
+                        continue;
+                    }
                     if (attachedDefinitionAfterComment(sequence, part_index)) |header| {
                         if (pending_definition != header.part) {
                             if (have_content) try self.rootBreak(&output, &line, 2);
-                            try line.append(self.allocator(), try self.definitionHeader(header.name));
+                            try line.append(self.allocator(), if (header.module)
+                                try self.moduleHeader(header.name)
+                            else
+                                try self.definitionHeader(header.name));
                             have_content = true;
                             previous_comment = true;
                             pending_definition = header.part;
@@ -419,10 +431,18 @@ const Formatter = struct {
             },
             .form => {
                 var fill_pair = false;
-                const name = if (pending_definition == part_index) null else definitionName(sequence, part_index);
-                if (name) |definition_name| {
+                const skip_header = pending_definition == part_index;
+                const name = if (skip_header) null else definitionName(sequence, part_index);
+                const module_name = if (skip_header or name != null)
+                    null
+                else
+                    moduleRegistrationName(sequence, part_index);
+                if (name orelse module_name) |header_name| {
                     if (have_content) try self.rootBreak(&output, &line, 2);
-                    try line.append(self.allocator(), try self.definitionHeader(definition_name));
+                    try line.append(self.allocator(), if (name != null)
+                        try self.definitionHeader(header_name)
+                    else
+                        try self.moduleHeader(header_name));
                     try self.rootBreak(&output, &line, 1);
                 } else if (have_content) {
                     if (previous_comment or newlines > 0) {
@@ -480,6 +500,9 @@ const Formatter = struct {
     }
     fn definitionHeader(self: *Formatter, name: []const u8) Error!*const Doc {
         return self.docs.concat(&.{ try self.docs.text("### def "), try self.docs.text(name) });
+    }
+    fn moduleHeader(self: *Formatter, name: []const u8) Error!*const Doc {
+        return self.docs.concat(&.{ try self.docs.text("### module "), try self.docs.text(name) });
     }
     fn prepare(self: *Formatter, syntax: Syntax) Error!void {
         for (syntax.containers) |form_item| {
@@ -814,6 +837,52 @@ fn definitionName(sequence: Sequence, start: usize) ?[]const u8 {
     const quoted = sequence.parts[nextFormPart(sequence, anchor).?].form.kind.atom;
     return quoted[1..];
 }
+/// `(body) 'name @module`, or its seeded spelling `values (body) with 'name
+/// @module`: the registration shape that earns a navigation header, mirroring
+/// `### def`. A computed name gets no header, exactly as a definition does.
+fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
+    if (!sequence.definitions) return null;
+    const head = sequence.parts[start].form;
+    if (!isListForm(head) or isAnnotationCandidate(head)) return null;
+    // The header belongs to the whole phrase, so a seeded registration is
+    // claimed by its values list rather than by the body that follows it.
+    var body_seen = false;
+    var named: ?[]const u8 = null;
+    for (sequence.parts[start + 1 ..]) |part| switch (part) {
+        .trivia => {},
+        .form => |form_item| {
+            const bytes = switch (form_item.kind) {
+                .atom => |atom| atom,
+                else => {
+                    if (body_seen or named != null or !isListForm(form_item)) return null;
+                    body_seen = true;
+                    continue;
+                },
+            };
+            if (named) |name| return if (std.mem.eql(u8, bytes, "@module")) name else null;
+            if (std.mem.eql(u8, bytes, "with")) {
+                // `head with` means `head` is the body of a phrase whose seed
+                // list, if any, already owns the header.
+                if (!body_seen and precedingSeedList(sequence, start)) return null;
+                continue;
+            }
+            if (bytes.len < 2 or bytes[0] != '\'' or !lexer.validSymbol(bytes[1..])) return null;
+            named = bytes[1..];
+        },
+    };
+    return null;
+}
+fn precedingSeedList(sequence: Sequence, start: usize) bool {
+    var index = start;
+    while (index > 0) {
+        index -= 1;
+        switch (sequence.parts[index]) {
+            .trivia => {},
+            .form => |form_item| return isListForm(form_item) and !isAnnotationCandidate(form_item),
+        }
+    }
+    return false;
+}
 fn nextFormPart(sequence: Sequence, after: usize) ?usize {
     for (sequence.parts[after + 1 ..], after + 1..) |part, index| switch (part) {
         .form => return index,
@@ -839,12 +908,18 @@ fn isAnnotationCandidate(form_item: *const Form) bool {
     };
     return false;
 }
-const HeaderTarget = struct { part: usize, name: []const u8 };
+const HeaderTarget = struct { part: usize, name: []const u8, module: bool = false };
 fn existingDefinitionHeader(sequence: Sequence, index: usize, bytes: []const u8) ?HeaderTarget {
     if (!std.mem.startsWith(u8, bytes, "# def ") and
         !std.mem.startsWith(u8, bytes, "### def ")) return null;
     const part = nextFormPart(sequence, index) orelse return null;
     return .{ .part = part, .name = definitionName(sequence, part) orelse return null };
+}
+fn existingModuleHeader(sequence: Sequence, index: usize, bytes: []const u8) ?HeaderTarget {
+    if (!std.mem.startsWith(u8, bytes, "# module ") and
+        !std.mem.startsWith(u8, bytes, "### module ")) return null;
+    const part = nextFormPart(sequence, index) orelse return null;
+    return .{ .part = part, .name = moduleRegistrationName(sequence, part) orelse return null, .module = true };
 }
 fn attachedDefinitionAfterComment(sequence: Sequence, index: usize) ?HeaderTarget {
     const first = switch (sequence.parts[index]) {
@@ -869,7 +944,9 @@ fn attachedDefinitionAfterComment(sequence: Sequence, index: usize) ?HeaderTarge
         },
         .form => {
             if (newlines != 1) return null;
-            return .{ .part = part_index, .name = definitionName(sequence, part_index) orelse return null };
+            const name = definitionName(sequence, part_index) orelse
+                moduleRegistrationName(sequence, part_index) orelse return null;
+            return .{ .part = part_index, .name = name, .module = definitionName(sequence, part_index) == null };
         },
     };
     return null;

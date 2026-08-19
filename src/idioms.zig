@@ -380,10 +380,10 @@ const IdiomDriver = struct {
         while (budget != 0) : (budget -= 1) {
             if (self.resolution) |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => continue,
-                .complete => |maybe_resolved| {
+                .complete => |outcome| {
                     cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.resolution = null;
-                    var resolved = maybe_resolved orelse {
+                    var resolved = outcome.binding() orelse {
                         self.rejectEntry();
                         continue;
                     };

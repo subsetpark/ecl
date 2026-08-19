@@ -162,13 +162,13 @@ test "inline times cond and case prevalidate and select" {
         .{ .name = "case prevalidation", .source = "1 [1 (10) 2 20 (30)] case", .kind = "type", .word = "len" },
         .{
             .name = "cond prevalidation precedes effects",
-            .source = "([(1 'k set 1) (10) 20] cond) attempt pop k",
+            .source = "([(1 'k set 1) (10) 20] cond) @attempt pop k",
             .kind = "undefined-word",
             .word = "k",
         },
         .{
             .name = "case prevalidation precedes actions",
-            .source = "(1 [1 (7 'k set) 2 20 (30)] case) attempt pop k",
+            .source = "(1 [1 (7 'k set) 2 20 (30)] case) @attempt pop k",
             .kind = "undefined-word",
             .word = "k",
         },
@@ -303,7 +303,7 @@ test "idioms: late binding defeats recognition" {
     defer used_sort.deinit();
     try expectStack(
         &used_sort,
-        "'m ((pop [0]) (a -- b) 'grade def) module 'm use [3 1 2] sort",
+        "((pop [0]) (a -- b) 'grade def) 'm @module 'm use [3 1 2] sort",
         "[3]",
     );
     try std.testing.expectEqual(@as(u64, 0), used_sort.lastIdiomHits());
@@ -314,7 +314,7 @@ test "idioms: late binding defeats recognition" {
     defer between_applications.deinit();
     try expectStack(
         &between_applications,
-        "[1 2] (dup 1 = ('m ((pop 42) (a -- b) 'f def) module) () if m.f) each",
+        "[1 2] (dup 1 = (((pop 42) (a -- b) 'f def) 'm @module) () if m.f) each",
         "[42 42]",
     );
     try std.testing.expectEqual(@as(u64, 0), between_applications.lastIdiomHits());

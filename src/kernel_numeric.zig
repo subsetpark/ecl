@@ -17,7 +17,7 @@ const MachineError = support.MachineError;
 pub const BinaryOp = support.BinaryOp;
 pub const UnaryOp = support.UnaryOp;
 
-const ScalarError = error{ Type, Overflow, Domain };
+const ScalarError = error{ Type, Overflow, Domain, ShiftCount };
 const ScalarBinary = *const fn (Value, Value) ScalarError!Value;
 const ScalarUnary = *const fn (Value) ScalarError!Value;
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
@@ -612,12 +612,13 @@ fn scalarFailure(evaluator: *Machine, fault: ScalarError, index: ?usize) Machine
     const kind: @import("machine.zig").ErrorKind = switch (fault) {
         error.Type => .type,
         error.Overflow => .overflow,
-        error.Domain => .domain,
+        error.Domain, error.ShiftCount => .domain,
     };
     const message = switch (fault) {
         error.Type => "kernel received incompatible scalar operands",
         error.Overflow => "kernel arithmetic overflow",
         error.Domain => "kernel arithmetic is outside its domain",
+        error.ShiftCount => "a shift count must be from 0 to 63",
     };
     if (index) |logical_index| return evaluator.failAtIndex(kind, message, logical_index);
     return evaluator.fail(kind, message);
@@ -636,6 +637,8 @@ fn scalarBinary(comptime operation: BinaryOp, left: Value, right: Value) ScalarE
         .min, .max => minMax(left, right, operation == .min),
         .eq, .ne, .lt, .gt, .le, .ge => comparison(left, right, operation),
         .and_word, .or_word => booleanBinary(left, right, operation == .and_word),
+        .band, .bor, .bxor => bitwiseBinary(left, right, operation),
+        .bsl, .bsr => bitwiseShift(left, right, operation == .bsl),
     };
 }
 
@@ -677,7 +680,38 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
             .char, .symbol, .word, .list, .dict, .task => error.Type,
         },
         .exp, .log, .sin, .cos => transcendental(operation, operand),
+        .bnot => switch (operand) {
+            .int => |integer| .{ .int = ~integer },
+            .char, .float, .symbol, .word, .list, .dict, .task => error.Type,
+        },
     };
+}
+
+/// Bitwise words are *pattern* words: they read the i64 two's-complement bit
+/// pattern and cannot overflow, which is why they carry no overflow arm while
+/// every arithmetic word does. Int-only, following `integerDivision`.
+fn bitwiseBinary(left: Value, right: Value, operation: BinaryOp) ScalarError!Value {
+    if (left != .int or right != .int) return error.Type;
+    return .{ .int = switch (operation) {
+        .band => left.int & right.int,
+        .bor => left.int | right.int,
+        .bxor => left.int ^ right.int,
+        else => unreachable,
+    } };
+}
+
+/// Shifts move bits rather than scaling a magnitude: `bsl` truncates off the
+/// top instead of raising overflow, and `bsr` fills zeros from the top. A
+/// count outside 0..63 has no bit-movement meaning and is `'domain`.
+fn bitwiseShift(left: Value, right: Value, shift_left: bool) ScalarError!Value {
+    if (left != .int or right != .int) return error.Type;
+    if (right.int < 0 or right.int > 63) return error.ShiftCount;
+    const amount: u6 = @intCast(right.int);
+    const pattern: u64 = @bitCast(left.int);
+    return .{ .int = @bitCast(if (shift_left)
+        pattern << amount
+    else
+        pattern >> amount) };
 }
 
 fn add(left: Value, right: Value) ScalarError!Value {
@@ -763,7 +797,7 @@ fn transcendental(operation: UnaryOp, operand: Value) ScalarError!Value {
         .log => @log(number),
         .sin => @sin(number),
         .cos => @cos(number),
-        .neg, .abs, .sqrt, .floor, .ceil, .round, .not_word => unreachable,
+        .neg, .abs, .sqrt, .floor, .ceil, .round, .not_word, .bnot => unreachable,
     };
     return checkedFloat(result, !std.math.isFinite(number));
 }

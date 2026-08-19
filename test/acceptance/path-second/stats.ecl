@@ -1,1 +1,1 @@
-'stats (2 'answer set) module
+(2 'answer set) 'stats @module

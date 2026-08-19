@@ -1,0 +1,41 @@
+{'ok [1 2]}
+{'err {'kind 'io}}
+{'ok ()}
+1
+0
+1
+1
+{'ok [5]}
+{'ok [42]}
+{'err {'kind 'io 'msg "boom"}}
+{'ok [50]}
+1
+{'err {'kind 'domain 'msg "mapped"}}
+{'ok [1]}
+{'ok (['io])}
+{'ok [1]}
+{'ok ([99])}
+{'err {'kind 'type}}
+{'ok [5]}
+1
+7
+'io
+[5]
+9
+[5]
+'type
+{'ok ([1 2] [3] ())}
+{'err {'kind 'io}}
+{'ok ()}
+({'kind 'io} {'kind 'type})
+([1] [2 3])
+()
+()
+'type
+'type
+'type
+'type
+'type
+'type
+'type
+'type

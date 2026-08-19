@@ -81,7 +81,7 @@ ECL_PATH=test/acceptance/modules \
 ./zig-out/bin/ecl test/acceptance/hot-reload.ecl
 
 # Concurrency is configured per process.
-ECL_WORKERS=8 ./zig-out/bin/ecl '[1 2 3] (dup *) par-each'
+ECL_WORKERS=8 ./zig-out/bin/ecl '[1 2 3] (dup *) @each'
 
 # Format a file, or pipe source through standard input. Output is stdout-only.
 ./zig-out/bin/ecl fmt src/prelude.ecl
@@ -253,16 +253,59 @@ retain raw newlines exactly. For example:
 
 The public
 `parse` word uses the same bounded reader to return unevaluated forms with
-`<parse>` provenance; it performs no filesystem access. `slurp`, `spit`,
-`getenv`, and `lines` remain deferred to M9.
+`<parse>` provenance; it performs no filesystem access.
+
+## M12 standard library and host scripting
+
+Six modules ship inside the binary and load on first mention — by `use` or by
+a bare qualified reference — with no `ECL_PATH` and no filesystem:
+
+```sh
+ecl '"hello" str.upper pp'                      # "HELLO"
+ecl '"a,b\nc,d" csv.parse pp'                   # (("a" "b") ("c" "d"))
+ecl '"{\"a\":[1,null]}" json.parse pp'           # {"a" [1 'null]}
+```
+
+- **`result`** — `ok`/`err`/`ok?`/`err?`, `or-raise`/`or-else`, `and-then`, `map-err`, `recover`,
+  `recover-kinds`, `case`, `all`, `partition`, over the same
+  `{'ok values}`/`{'err error}` shape `@attempt` produces.
+- **`str`** — `upper lower trim trim-left trim-right starts? ends? contains?
+  index-of replace repeat pad-left pad-right`. Case mapping is ASCII-only.
+- **`csv`** — RFC 4180 `parse`/`emit`, text-preserving: no header
+  interpretation, no delimiter sniffing, no scalar inference.
+- **`json`** — RFC 8259 `parse`/`emit`. `null`, `true`, and `false` become the
+  ordinary symbols of those names, so a document round-trips.
+- **`table`** — validated ordinary column dicts, never a new runtime kind:
+  constructors, conversions, `select`/`rename`/`with-column`/`where`/`cast`,
+  and `group-by`/`aggregate`/`inner-join`/`left-join-with`.
+- **`http`** — client-only `get`/`post` returning
+  `{'status 'headers 'body}`.
+
+`csv` is a first-party consumer of the public native SDK; `json` and `http`
+are internal builtins because they need host authority — an allocator, TLS,
+sockets — that the SDK deliberately withholds from external modules.
+
+**Trust posture for `http`.** It reaches arbitrary hosts over TLS using the
+system CA bundle, sends only caller-supplied headers and bodies, and holds no
+credentials or proxy configuration. Its request blocks the calling unit's
+worker thread, which is the one documented v1 exception to cooperative
+scheduling, and v1 imposes no request deadline: an unresponsive server
+occupies its worker until the host gives up.
+
+The explicit host scripting words are `slurp` `( path -- string )`, `spit`
+`( string path -- )`, `getenv` `( name -- string )`, `stdin` `( -- string )`,
+and the derived `lines` `( path -- list )`. Absence is an error, never a
+blank: an unset variable or unreadable file raises `'io`, and `@attempt`/
+`result.or-else` is the defaulting idiom. `spit` truncates and replaces with no
+temporary file, so a failure part-way through can leave a partial file.
 
 ## M7 tasks and structured concurrency
 
-`spawn` runs a quotation with an empty isolated stack and returns an opaque
+`@spawn` runs a quotation in a fresh unit with an empty stack and returns an opaque
 identity handle. `await` parks the calling unit and returns the child's cached
 `{'ok [...]}` or `{'err {...}}` result; duplicated handles and multiple
 waiters observe the same result. `cancel` recursively flags a task tree,
-`tasks` snapshots pending descendants in spawn preorder, `await-any` selects
+`tasks` snapshots pending descendants in `@spawn` preorder, `await-any` selects
 one indexed completion, and `await-for` limits a wait without cancelling the
 task. Source-defined `await-all` waits for a list of tasks and returns every
 ordinary result in input order without re-raising task failures. Task
@@ -272,14 +315,14 @@ Large native operations, result publication, joins, and cancellation walks
 resume in bounded scheduler slices; no task runs another task recursively on
 its suspended native stack.
 
-`par-each` is a public primitive backed by a bounded native driver. It spawns
+`@each` is a public primitive backed by a bounded native driver. It spawns
 each child with the element as an explicit initial stack value, then transfers
 the exact task list into the evaluator's ordered join state. That state
 enforces the one-result-per-child, suffix-cancellation, and leftmost-failure
 contract; it is not a word and grants no private dictionary authority.
 Successful results and the leftmost failure are stable across worker counts.
 Cross-task console calls and genuinely concurrent `await-any` completions may
-reorder. Use `par-each` for coarse independent work; ordinary pervasive array
+reorder. Use `@each` for coarse independent work; ordinary pervasive array
 kernels are the efficient choice for element-wise arithmetic. `ECL_WORKERS`
 accepts only a positive base-10 integer and defaults to the available CPU
 count. Workers and the single timer thread are both started lazily.

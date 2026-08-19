@@ -30,6 +30,11 @@ pub const BinaryOp = enum {
     ge,
     and_word,
     or_word,
+    band,
+    bor,
+    bxor,
+    bsl,
+    bsr,
 
     pub fn spelling(self: BinaryOp) []const u8 {
         return switch (self) {
@@ -51,6 +56,11 @@ pub const BinaryOp = enum {
             .ge => ">=",
             .and_word => "and",
             .or_word => "or",
+            .band => "band",
+            .bor => "bor",
+            .bxor => "bxor",
+            .bsl => "bsl",
+            .bsr => "bsr",
         };
     }
 };
@@ -67,6 +77,7 @@ pub const UnaryOp = enum {
     sin,
     cos,
     not_word,
+    bnot,
 
     pub fn spelling(self: UnaryOp) []const u8 {
         return switch (self) {
@@ -81,6 +92,7 @@ pub const UnaryOp = enum {
             .sin => "sin",
             .cos => "cos",
             .not_word => "not",
+            .bnot => "bnot",
         };
     }
 };

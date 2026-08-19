@@ -4,6 +4,7 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
+const lexer = @import("lexer.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const native_module = @import("native_module.zig");
@@ -147,7 +148,14 @@ const DefineDriver = struct {
             .validate_annotation => {
                 if (self.separator_at) |split| {
                     if (self.index != self.effect_end) {
-                        if (self.index != split and list.atUnchecked(self.item.?.borrow(), self.index) != .word)
+                        const slot = list.atUnchecked(self.item.?.borrow(), self.index);
+                        if (self.index != split and slot != .word)
+                            return malformed(evaluator);
+                        // The after portion is all named slots or exactly the
+                        // row token; the before portion never names a row.
+                        if (slot == .word and
+                            std.mem.eql(u8, intern.get(slot.word), lexer.row_token) and
+                            (self.index <= split or self.effect_end != split + 2))
                             return malformed(evaluator);
                         self.index += 1;
                         budget -= 1;
@@ -311,8 +319,8 @@ const LookupDriver = struct {
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) switch (self.resolution.borrowMut().advance()) {
             .pending => {},
-            .complete => |maybe_resolved| {
-                var resolved = maybe_resolved orelse return evaluator.undefinedName(self.requested);
+            .complete => |outcome| {
+                var resolved = outcome.binding() orelse return evaluator.undefinedName(self.requested);
                 defer resolved.deinit(evaluator.allocator());
                 switch (self.mode) {
                     .body => {
@@ -398,8 +406,8 @@ const WhichDriver = struct {
             var budget: usize = machine.kernel_poll_quantum;
             while (budget != 0) : (budget -= 1) switch (self.resolution.?.borrowMut().advance()) {
                 .pending => {},
-                .complete => |maybe_resolved| {
-                    self.resolved = .init(maybe_resolved orelse return evaluator.undefinedName(self.requested));
+                .complete => |outcome| {
+                    self.resolved = .init(outcome.binding() orelse return evaluator.undefinedName(self.requested));
                     self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.resolution = null;
                     self.shadow_cursor = .init(machine.ShadowCursor.init(evaluator, self.requested));
@@ -521,8 +529,8 @@ const SeeDriver = struct {
             var budget: usize = machine.kernel_poll_quantum;
             while (budget != 0) : (budget -= 1) switch (self.resolution.?.borrowMut().advance()) {
                 .pending => {},
-                .complete => |maybe_resolved| {
-                    self.resolved = .init(maybe_resolved orelse return evaluator.undefinedName(self.requested));
+                .complete => |outcome| {
+                    self.resolved = .init(outcome.binding() orelse return evaluator.undefinedName(self.requested));
                     self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.resolution = null;
                     break;

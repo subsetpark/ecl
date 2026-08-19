@@ -496,7 +496,8 @@ pub fn get(id: u32) []const u8 {
 }
 
 pub fn isReservedBytes(name: []const u8) bool {
-    return std.mem.eql(u8, name, "--") or std.mem.eql(u8, name, ":");
+    return std.mem.eql(u8, name, "--") or std.mem.eql(u8, name, ":") or
+        std.mem.eql(u8, name, lexer.row_token);
 }
 
 /// Every binding name the language reserves for itself.

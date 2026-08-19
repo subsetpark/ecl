@@ -633,8 +633,13 @@ const WaitSet = struct {
                 budget -= 1;
             },
             .activate => {
-                self.activate();
+                // `activate` publishes the wait set, and publication is what
+                // lets another selector deliver and drop the last reference —
+                // so `self` may be freed the moment it returns. The phase
+                // therefore advances *before* the publish, and this arm
+                // touches nothing afterward.
                 self.setup_phase = .complete;
+                self.activate();
                 return true;
             },
             .complete => return true,
@@ -927,6 +932,9 @@ pub const SpawnRequest = struct {
     parent_home: ?*modules.ModuleHome,
     quotation: *ListHandle,
     initial_stack: machine.InitialStack = .empty,
+    /// Which constructor made this child, so an underflow against its floor
+    /// can name the word the caller actually wrote.
+    constructor: machine.UnitConstructor = .spawn,
 };
 
 pub const SpawnError = error{ OutOfMemory, Io };
@@ -1076,6 +1084,7 @@ pub const WorkerScheduler = enum(usize) {
         unit.scheduler = self;
         unit.task_scope = &cell.scope;
         unit.is_root_unit = false;
+        unit.constructor = request.constructor;
         if (request.parent_home) |generation| try unit.pinGeneration(generation);
         try machine.initialize(unit, request.quotation, request.initial_stack);
         const identity = state_.next_identity.fetchAdd(1, .monotonic);

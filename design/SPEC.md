@@ -200,7 +200,7 @@ survive. Units are delimited by the reader:
   failing script dies whole — error dict to stderr, nonzero exit.
 - **`load`**: the loaded file is one unit inside the calling session and
   fails atomically.
-- **`attempt` and `spawn`**: each runs its quotation as a new unit on an
+- **`@attempt` and `@spawn`**: each runs its quotation as a new unit on an
   isolated substack (see Errors, Concurrency).
 
 A dying unit also cancels its unawaited tasks (see Concurrency).
@@ -215,16 +215,62 @@ Two kinds of quotation application exist:
 - **Isolated**: the quotation runs on a fresh substack per application,
   seeded with its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
-  `fold`, `scan`, `infra`, `attempt`, `spawn`, `par-each`, and `module`.
+  `fold`, `scan`, `infra`, `@attempt`, `@spawn`, `@each`, and `@module`.
 
 Every isolated combinator states the stack effect it requires of its
 quotation argument (given per word in the reference). The contract is
 checked dynamically at each application; a violation is an immediate
 `'contract` error naming the element and the observed effect.
 
-Quotations given to `attempt` and `spawn` must be self-contained: their
-effect is `( -- ... )`, inputs arrive via `literal`/`partial`/`compose`
-or environment names, never the ambient stack.
+#### The `@` spelling convention
+
+A leading `@` marks exactly the words that apply their quotation **in a
+fresh unit** — one unit per application for `@each`. There are four:
+`@attempt`, `@spawn`, `@each`, and `@module`. Unit construction is the
+whole of the class invariant; the marked word may or may not seed the
+unit it makes. `@attempt`, `@spawn`, and `@module` seed nothing, so their
+quotations must be self-contained: their effect is `( -- ... )` and
+inputs arrive via `literal`/`partial`/`compose`/`with` or environment
+names, never the ambient stack. `@each` seeds each child with exactly its
+element.
+
+Words that are isolated but *not* marked, with their reasons:
+
+- `each`, `zip-with`, `fold`, `scan`, `for` — they apply in the **same**
+  unit, on a substack, and are implicitly fed their elements.
+- `infra` and `within` — they apply on an explicitly named *other* stack;
+  the substitution is the word's meaning, not a new unit.
+- `use`, `load`, `unmodule` — they construct or retire units but take no
+  quotation.
+- `await`, `await-all`, `await-any`, `await-for`, `cancel`, `tasks` —
+  they consume tasks rather than making them.
+- `with` — pure composition; it constructs nothing.
+
+`@` is an ordinary word character, not reader-reserved: a user's `@retry`
+lexes and defines normally. The convention is enforced for first-party
+vocabulary by the source audit and is the recommended spelling for any
+user-defined word that wraps its quotation in a unit.
+
+#### Seeding a unit
+
+There are no `-with` words. A unit constructor is seeded by composition
+over `with`, which captures every element of a values list inertly and in
+order:
+
+    values (q) with @attempt
+    values (q) with @spawn
+    list values (q) with @each          ( element deepest in each child )
+    values (body) with 'name @module
+
+One composition scales to every unit constructor, including ones users
+write, with no companion-word obligation. Any future phrase-level fast
+path for these idioms must preserve the composition observationally.
+
+Underflow against the floor of a constructed unit is reported specially:
+the message names the isolation and the seeding remedy, and the error
+dict carries `'isolation` naming the constructor. It is the one underflow
+whose cause is invisible — the values the caller meant to pass are on
+screen and out of reach.
 
 ### Bindings
 
@@ -297,7 +343,31 @@ returns this canonical string, so source formatting cannot change
 reflective documentation. Strings anywhere else retain their exact decoded
 codepoints.
 
-The exact names `--` and `:` are reserved against binding:
+#### The after row
+
+The after portion of an effect is either **all named slots** or exactly
+the token `...`:
+
+```
+(body) (result on-ok on-err -- ...) 'case def
+```
+
+`...` declares a **fixed before row and a variable after row**: how many
+values the word consumes is known, how many it leaves is not. The before
+slots are checked at boundaries exactly as today; the after check is
+skipped. This is a genuine partial contract, not the absence of one — a
+word that would otherwise carry a documentation-only annotation regains
+input checking and honest reflection, and `see` renders the annotation
+back with `-- ...`.
+
+The grammar is strict: no mixing (`(a -- ... b)` is `'domain`), and the
+token never appears in a before row (`(... -- b)` is `'domain`). Named row
+variables in the Factor style (`..a`, `..b`) are deferred to the static
+checker; `...` is the anonymous row that reads the same way today. The
+native ABI is deliberately excluded: a native `complete` requires the
+exact output tuple, so `...` in a `Call` effect is a compile error.
+
+The exact names `--`, `:`, and `...` are reserved against binding:
 they remain legal word and symbol values and can be built into
 annotations at runtime, but cannot be introduced as definitions, values,
 locals, module names, aliases, exports, or native entries. Binding attempts are `'domain`;
@@ -350,6 +420,38 @@ so `(1 2 3) 10 *` is simply `[10 20 30]`.
   int-ness keeps integer pipelines integer. `pow` returns float.
 - `str` output for numbers round-trips (see Printing); float equality is
   numeric everywhere (see Equality).
+- The bitwise words `band`, `bor`, `bxor`, `bnot`, `bsl`, and `bsr` are
+  *pattern* words, not arithmetic: they read an int as its 64-bit
+  two's-complement pattern and are int-only, so a float or a char is
+  `'type` rather than a coercion. Because a pattern has no magnitude,
+  they never overflow — `bsl` truncates bits off the top where `*` would
+  raise. Their `count` operand is the one place they can fail on a value:
+  a shift outside `0..63` is `'domain`. They pervade and align dicts like
+  every other pervasive word.
+
+## Randomness
+
+Randomness is *counter-based*, not stateful: a generator state is a
+two-element list `[key counter]`, and every draw is a pure function of
+it. `rand-int`, `rand-ints`, and `rand-float` each take a state and
+return the advanced state alongside the result, so a program's draws are
+reproducible by construction — running it twice from the same key
+produces the same values, and nothing hidden accumulates between units,
+tasks, or module loads.
+
+- The mixer is SplitMix64 applied to `key + counter * gamma`. Each draw
+  addresses its own counter position rather than stepping a register, so
+  `rand-ints` produces the same list whatever order its elements are
+  materialized in, and two states that share a key but differ in counter
+  do not correlate.
+- `entropy` is the only word that reads the host, and the only
+  nondeterministic word in the language. A program is reproducible unless
+  it explicitly seeds from `entropy`; there is no ambient default seed
+  drawn at startup, and no word silently reaches a CSPRNG.
+- The `rng` module carries a state so ordinary code need not thread one
+  by hand (see The standard library). It is threaded state, not global
+  state: the module's own binding holds it, `rng.seed` replaces it, and a
+  fresh process starts from the same fixed key.
 
 ## Chars and strings
 
@@ -372,7 +474,7 @@ maps symbols to modules; files are transport.
   disturbs the caller's stack, and registration produces no stack values.
   Modules are first-class: enumerable, diffable, constructible by building
   the body quotation programmatically.
-- `values 'name (body) module-with` captures every value inertly and in order
+- `values (body) with 'name @module` captures every value inertly and in order
   before running the same isolated module-registration operation. The values
   form the body unit's initial stack; the body may consume, reorder, or
   extend them.
@@ -414,7 +516,7 @@ maps symbols to modules; files are transport.
   subtractive — privates are
   absent from the module's public face, not access-checked. Definitions
   made inside the module body's isolated child units (e.g. inside an
-  `attempt`) are dynamic and are never exported.
+  `@attempt`) are dynamic and are never exported.
 - **Resolution context is a property of the binding**: an exported word
   carries its home module's name, and its body resolves against that
   module's chain — internal environment, then the module's own `use`s,
@@ -422,6 +524,21 @@ maps symbols to modules; files are transport.
   privates, and callers cannot perturb a module's behavior by shadowing.
   A module word's body is still a plain list: `'stats.stdev body` is data,
   and re-`def`ing that list elsewhere loses the private context.
+  The rule has no exceptions. A binding with no module home — a primitive
+  or an embedded prelude definition — resolves against the lexical chain it
+  was defined in, the session root over core, and not against whatever
+  environment happens to be executing. So a module exporting a word named
+  like a core one shadows it for that module's own callers, never inside the
+  prelude words the module calls: `table.where` does not become the `where`
+  that `filter` is written against. Late binding is unaffected — the lookup
+  still happens at call time, which is why redefining `cons` at the session
+  level still changes `wrap`.
+- **A quotation resolves where its invoker runs, because a quotation is
+  plain data.** Passing a quotation into a combinator therefore keeps the
+  caller's chain: a module word may hand `(private-helper)` to `each` and
+  the private still resolves. What a word *defines* — `def`, `set`, `setp` —
+  also lands in the invoking context, which is how `setp` inside a module
+  body binds a module private. Only a word's own references are lexical.
 - **`within` is the explicit stack boundary.** `within` runs a quotation
   against a private draft of the home module's durable stack rather than
   the ambient caller stack. It is legal only while executing a published
@@ -523,11 +640,24 @@ maps symbols to modules; files are transport.
   name; aliases and module
   names may not collide in either direction. `which` shows any name's
   resolution.
-- **Loading**: `'stats use` on an unregistered name searches each
+- **Loading**: `'stats use` on an unregistered name — and equally the
+  first qualified reference (`stats.mean`) to an unregistered module —
+  consults the embedded standard library first, then searches each
   `ECL_PATH` entry in order, trying `stats.ecl` and then `stats.eclmod`;
-  the first existing candidate is authoritative, including its errors. A
-  loaded `.ecl` file registers a module as an ordinary side effect of
-  running; `load` replays any file as one unit in the calling session.
+  the first existing candidate is authoritative, including its errors.
+  Embedded names therefore always win: a `csv.ecl` on the search path
+  cannot silently replace the stdlib `csv`, and in-session shadowing or
+  explicit `@module` registration remain the way to override one. Every
+  module is addressable by qualified name with no ceremony; `use` remains
+  the word that splices unqualified exports into scope and reports shadows.
+  Loading is triggered by *executing* a reference: reflection — `body`,
+  `doc`, `see`, `which` — resolves without loading, so name a module or
+  call one of its words first. A misspelled dotted word costs one bounded
+  search before raising `'undefined-word`. Two units racing the first
+  reference to one module converge on a single published module; only a
+  unit re-entering its own in-progress load is a `'domain` cycle. A loaded
+  `.ecl` file registers a module as an ordinary side effect of running;
+  `load` replays any file as one unit in the calling session.
 
 ### Native modules
 
@@ -547,13 +677,171 @@ Opening a shared library executes arbitrary machine code before ecl can
 inspect it, so every directory on an `ECL_PATH` used for native loading is
 a trusted-code boundary.
 
+## The standard library
+
+Seven modules ship inside the binary. They are ordinary modules — registered,
+enumerable, shadowable — and they load lazily on the first mention of their
+name, whether that is `'str use` or a bare `str.upper`. Resolution consults
+the embedded manifest before `ECL_PATH`, so a stray `csv.ecl` on the search
+path cannot silently replace a stdlib name; in-session shadowing and explicit
+`@module` registration remain the documented overrides. All seven resolve with no
+`ECL_PATH` set and no filesystem access at all.
+
+Three transports back them, chosen per module rather than uniformly:
+embedded ECL source (`result`, `str`, `table`, `rng`), a linked first-party
+native descriptor published through the same contract as an external
+extension (`csv`), and host primitives published under a module name
+(`json`, `http`).
+The last is reserved for authority the native SDK deliberately withholds — an
+allocator, TLS, sockets — which is why `json` and `http` are not SDK modules
+and `csv` is.
+
+### result
+
+Over the same `{'ok values}` / `{'err error}` shape `@attempt` produces. A
+success payload is always a list standing for a stack, never one privileged
+scalar. Every word rejects a malformed tagged result *before* invoking any
+quotation it was given.
+
+Every word that *interprets* an envelope lives here — that is the boundary.
+The words that *produce* an error — `raise`, `fail`, `assert` — stay core,
+because an error dict in flight is not a result: it becomes one only when
+`@attempt` or `await` reifies it.
+
+- `result.ok` `( values -- result )`, `result.err` `( error -- result )`
+- `result.ok?` / `result.err?` `( result -- bool )`
+- `result.or-raise` `( result -- values )` — the success payload, or the
+  captured error dict re-raised unchanged. (`result.or-raise call` unpacks
+  the values onto the stack.)
+- `result.or-else` `( result fallback -- value )` — the success payload, or
+  the fallback value.
+- `result.and-then` `( result quotation -- result )` — seeds the success
+  stack through `with @attempt`; an existing failure is returned unchanged.
+  There is no separate `result.map`: `@attempt`'s automatic `{'ok [...]}`
+  wrapping collapses the functor map and the monadic bind into one word on
+  the success side. The distinction survives only on the failure side, which
+  is why that side carries both `map-err` and `recover`.
+- `result.map-err` `( result quotation -- result )` — replaces a failure's
+  error dict with what its `( error -- error )` quotation returns, never
+  leaving the failure arm.
+- `result.recover` `( result quotation -- result )` — seeds the error dict as
+  one value; `result.recover-kinds` `( result kinds quotation -- result )`
+  does so only for a listed kind and leaves every other result unchanged.
+- `result.either` `( result on-ok on-err -- ... )` — exhaustive eliminator;
+  neither branch is isolated.
+- `result.all` `( results -- result )` — the leftmost failure unchanged, or
+  one success holding every success stack in input order.
+- `result.partition` `( results -- successes errors )` — both in input order,
+  without re-raising.
+
+### str
+
+ASCII-only case mapping per the character model: a non-ASCII scalar passes
+through untouched, and codepoint count is preserved. `str.upper`,
+`str.lower`, `str.trim`, `str.trim-left`, `str.trim-right`, `str.starts?`,
+`str.ends?`, `str.contains?`, `str.index-of` (`'domain` when absent),
+`str.replace`, `str.repeat`, `str.pad-left`, `str.pad-right`.
+
+### csv
+
+`csv.parse` `( string -- rows )` and `csv.emit` `( rows -- string )`,
+RFC 4180 and text-preserving. Parsing accepts CRLF or LF record endings,
+quoted commas and newlines, and doubled-quote escapes; it preserves empty
+fields and record widths and returns every field as a string, with no header
+interpretation, delimiter sniffing, or scalar inference. Emission is
+canonical CRLF-terminated output quoting exactly the fields that require it.
+Empty input is an empty record list. Malformed quoting is `'parse`, non-list
+rows and non-string cells are `'type`, and a zero-field row is `'shape`.
+
+### json
+
+`json.parse` `( string -- value )` and `json.emit` `( value -- string )` per
+RFC 8259. Integral in-range numbers become ints and everything else numeric
+becomes a float; objects become dicts with string keys and arrays become
+lists. **`null`, `true`, and `false` become the ordinary symbols `'null`,
+`'true`, and `'false`** — data, not language nil and not language booleans,
+which is what lets a document round-trip. Emission requires string or symbol
+dict keys (`'type` otherwise) and rejects any other symbol.
+
+### table
+
+A table is a validated ordinary column dictionary, never a new runtime kind:
+a nonempty insertion-ordered dict whose keys are unique nonempty strings and
+whose values are lists sharing one length. Zero rows are legal; zero columns
+never. Core reflection stays honest — `type` reports `'dict`, and
+`keys`/`at`/`put`/`match` behave as they do for any dict — so a core
+operation can produce an invalid candidate, which the next `table.*` boundary
+rejects rather than repairing.
+
+- construction: `from-columns`, `from-rows`, `from-header-rows`,
+  `from-records`
+- conversion: `rows`, `header-rows` (schema-preserving, zero rows included),
+  `records` (necessarily schema-less when empty)
+- inspection: `valid?`, `names`, `height`, `column`
+- transformation: `cast`, `select`, `rename`, `with-column`, `where`
+- analysis: `group-by`, `aggregate`, `inner-join`, `left-join-with`
+
+`table.valid?` answers 0 only for a convention mismatch; cancellation and
+allocation failure still propagate. Failures follow the frozen kinds:
+non-dicts, non-string names, non-list columns, and invalid masks or spec
+members are `'type`; zero-column schemas, unequal column lengths, and
+width mismatches are `'shape`; missing, empty, or duplicate names, schema
+disagreement, join and rename collisions, and incomplete fills are
+`'domain`; an aggregation quotation of the wrong shape is `'contract`.
+
+Joins are stable equijoins on `[left-name right-name]` pairs. Duplicate keys
+expand to the full many-to-many product in left-row order and, within one
+left row, right-row order. Results carry every left column in its original
+order followed by the right non-key columns in right order.
+`table.left-join-with` emits one row for an unmatched left row and requires a
+fill dict covering exactly every appended right column — it never invents a
+value.
+
+### http
+
+Client only. `http.get` `( url headers -- response )` and `http.post`
+`( url headers body -- response )`, with `{}` for no headers, returning
+`{'status int, 'headers dict, 'body string}`. A refused connection, TLS
+failure, unparseable url, or protocol error is `'io` carrying the url in
+`'path`; a non-2xx status is an ordinary value, not an error.
+
+**The request blocks the calling unit's worker thread.** That is the one
+documented first-party exception to cooperative scheduling: a `@each`
+over N urls at N workers runs at most N concurrent requests, and at one
+worker it serializes. v1 imposes no request deadline, so an unresponsive
+server occupies its worker until the host gives up. Both change with the
+future `Offload` capability without changing this value-level API.
+
+### rng
+
+Threaded generator state over the counter-based kernels, so ordinary code
+draws without carrying a `[key counter]` list by hand (see Randomness).
+The module's binding holds one state; each word reads it, draws, and
+stores the advanced state back.
+
+- `rng.seed` `( key -- )` — rekey and reset the counter. Every later draw
+  is a function of this key.
+- `rng.int` `( bound -- result )`, `rng.ints` `( count bound -- results )`,
+  and `rng.roll`, the dice-roll spelling of `rng.ints`.
+- `rng.float` `( -- result )` — one uniform float in `[0, 1)`.
+- `rng.deal` `( count pool -- results )` — `count` distinct values below
+  `pool`, drawn without replacement. Selection sampling, so the sample is
+  unbiased rather than a filtered sequence of independent draws; `count`
+  above `pool` is `'domain`.
+- `rng.shuffle` `( values -- values )` — a uniform permutation, defined as
+  `deal` over the list's own length.
+
+A fresh process starts from a fixed key, so a program using `rng` and
+never calling `rng.seed` is fully reproducible. Seeding from `entropy` is
+the explicit opt out.
+
 ## Errors
 
 Errors are crash-only. There is no try/catch and no handler quotation: an
 error propagates until the enclosing unit dies, and the transactional
 stack makes that death clean. Failure is observed from outside, as data,
-at one explicit boundary word: `attempt` (and its concurrent form,
-`spawn`/`await`). The REPL is the implicit top-level boundary; a script's
+at one explicit boundary word: `@attempt` (and its concurrent form,
+`@spawn`/`await`). The REPL is the implicit top-level boundary; a script's
 boundary is the process.
 
 Every error is a dict:
@@ -577,26 +865,28 @@ The core kinds are a closed set: `'underflow`, `'undefined-word`, `'type`,
 `raise` throws a dict; `fail` is sugar for raising
 `{'kind 'user 'msg msg}`.
 
-`(q) attempt` runs a self-contained quotation as a new unit on an isolated
+`(q) @attempt` runs a self-contained quotation as a new unit on an isolated
 substack and always pushes exactly one result value: `{'ok (values)}`
 or `{'err <error dict>}`. Uniform arity is what makes reified failure safe
 in a stack language: a failure never shares a stack with the code
-observing it. Handling is ordinary dict handling — `ok?`, `or-raise`,
-`or-else`. Errors are plain immutable data and cross task boundaries
-unchanged.
+observing it. A result is an ordinary dict, so raw `at`/`has?` reach into
+it directly; the named vocabulary that validates the envelope first —
+`result.ok?`, `result.or-raise`, `result.or-else` and the rest — is the
+`result` module (see The standard library). Errors are plain immutable data
+and cross task boundaries unchanged.
 
 ## Concurrency
 
 Concurrency is structured tasks — futures with enforced lifetime — over
 share-nothing units. Immutability makes sharing safe without copying.
 
-- `spawn` `( q -- task )` runs a self-contained quotation (the `attempt`
+- `@spawn` `( q -- task )` runs a self-contained quotation (the `@attempt`
   contract: inputs via `partial`/environment, never the ambient stack) on
   its own isolated substack, concurrently.
 - `await` `( task -- result )` parks the current unit until the task
   completes and delivers the same `{'ok …}`/`{'err …}` result shape as
-  `attempt`. It is idempotent — the result is cached — so task handles
-  are observationally value-like. **`attempt` is observationally
+  `@attempt`. It is idempotent — the result is cached — so task handles
+  are observationally value-like. **`@attempt` is observationally
   equivalent to `spawn await`.**
 - `await-for` adds a deadline in milliseconds: on expiry it returns
   `{'err {'kind 'timeout}}` without cancelling the task. A task that is
@@ -610,7 +900,7 @@ share-nothing units. Immutability makes sharing safe without copying.
 - `await-all` (defined as `(await) each`) waits for every task and
   preserves each result as data, in input order; it never re-raises and
   never cancels siblings.
-- `par-each` `( l q -- l' )` applies the quotation to every element
+- `@each` `( l q -- l' )` applies the quotation to every element
   concurrently, enforcing exactly one result per element, and returns
   results in input order. After the leftmost failure it cancels the
   remaining elements, waits for quiescence, and re-raises that failure —
@@ -621,17 +911,17 @@ share-nothing units. Immutability makes sharing safe without copying.
 **Structured lifetime.** A dying unit cancels its unawaited tasks — "a
 failed unit leaves nothing" extends to processes. Dropped handles are
 cancelled at scope end; there are no detached daemons. The session is the
-root scope. `tasks` lists pending descendant tasks in spawn preorder.
+root scope. `tasks` lists pending descendant tasks in `@spawn` preorder.
 
 **Determinism.** Await order is program order, so `await-all` results and
-`par-each`'s leftmost-error rule are schedule-invariant. Nondeterminism
+`@each`'s leftmost-error rule are schedule-invariant. Nondeterminism
 enters only where chosen (`await-any`) and in IO interleaving across
 concurrent tasks; within one task IO is ordered. Sequential combinators
 (`each`, `for`, `fold`) guarantee left-to-right order, so IO inside them
 is well-defined.
 
-**Process exit.** `exit` belongs to the root unit outside `attempt`: a
-call from a descendant task or inside `attempt` raises a catchable
+**Process exit.** `exit` belongs to the root unit outside `@attempt`: a
+call from a descendant task or inside `@attempt` raises a catchable
 `'domain` error. An allowed exit first cancels and quiesces the root task
 scope, then terminates the process with the given status.
 
@@ -737,16 +1027,56 @@ Conventions:
 - Words marked **pervasive** follow the Pervasion section.
 - "Equivalent to `…`" names a word defined in ecl itself; the definition
   is normative and `body` returns it.
-- Words applying quotations are marked *inline* or *isolated* (see
-  Application contexts); isolated combinators state the contract required
-  of their quotation, enforced at each application.
-- Effects containing `…` are informal pictures: those words have no fixed
-  declared effect.
+- Words applying quotations are marked *inline* or *unit constructor*
+  (see Application contexts); a unit constructor states the contract
+  required of its quotation, enforced at each application.
+- An effect ending in `...` declares a fixed before row and a variable
+  after row (see Definition annotations) and is the word's real declared
+  effect. A typographic `…` *inside* an effect is an informal picture, not
+  a declaration.
 - Indexing is 0-based throughout: `range` counts from 0, `at` indexes
   from 0, `where` and `grade` produce 0-based indices, and `find` returns
   the length on a miss.
 - Booleans are the ints 0 and 1; a word requiring a boolean rejects every
   other value.
+
+### @attempt
+`( quotation -- result )` — *Unit constructor.* Run a self-contained
+quotation (contract `( -- ... )`; inputs via `literal`/`partial`/`with`)
+as a new unit on an isolated substack. Always pushes exactly one result:
+`{'ok (values)}` with the successful stack values as a list, or
+`{'err <error dict>}`.
+
+Observationally `@spawn await` — same result shape, same error protocol,
+same self-contained-quotation contract — differing only in scheduling.
+That identity is what makes the isolation non-arbitrary rather than an
+implementation accident. Seed it with `values (q) with @attempt`. See
+Errors.
+
+### @each
+`( sequence quotation -- results )` — *Unit constructor*, one fresh unit
+per element, contract `( a -- b )` enforced per element. Concurrent
+`each`: ordered results, leftmost failure re-raised after cancelling and
+quiescing the remainder. Each child's stack is seeded with exactly its
+element; `list values (q) with @each` adds shared values beneath it. See
+Concurrency.
+
+### @module
+`( body 'module-name -- )` — *Unit constructor.* Validate a canonical
+module path, run the body on a fresh environment, and register the result.
+The body's final operand stack becomes a new slot's durable initial stack
+and is discarded on re-registration.
+
+The name is last, matching `def` and `set`: the bound name sits nearest
+the binder. Seeded registration is therefore `values (body) with 'name
+@module`, with the name riding above the composition and no shuffle at
+all. See Modules.
+
+### @spawn
+`( quotation -- task )` — *Unit constructor*, contract `( -- ... )`
+(inputs via `partial`/`with`, never the ambient stack). Run a
+self-contained quotation concurrently in a child task. Seed it with
+`values (q) with @spawn`. See Concurrency.
 
 ### *
 `( x y -- z )` — **Pervasive.** Multiply. Integer overflow is
@@ -840,21 +1170,6 @@ Equivalent to `swap (at) fold`.
 ### atan2
 `( y x -- z )` — **Pervasive.** Two-argument arctangent; returns float.
 
-### attempt
-`( quotation -- result )` — *Isolated.* Run a self-contained quotation
-(contract `( -- … )`; inputs via `literal`/`partial`/environment) as a
-new unit on an isolated substack. Always pushes exactly one result:
-`{'ok (values)}` with the successful stack values as a list, or
-`{'err <error dict>}`.
-Observationally equivalent to `spawn await`. See Errors.
-
-### attempt-with
-`( values quotation -- result )` — Construct a self-contained quotation
-by capturing every element of the values list inertly and in order, then
-`attempt` it. The values therefore form the attempted unit's initial stack;
-the quotation cannot reach the caller's ambient stack. Defined in ecl as
-`with attempt`. Observationally equivalent to `spawn-with await`.
-
 ### await
 `( task -- result )` — Park until the task completes; return its cached
 `{'ok …}`/`{'err …}` result. Idempotent. See Concurrency.
@@ -873,14 +1188,22 @@ completion.
 deadline; expiry returns `{'err {'kind 'timeout}}` without cancelling the
 task. A terminal task beats even a zero deadline.
 
+### band
+`( x y -- z )` — **Pervasive.** Bitwise and over the two's-complement bit
+patterns of ints. Non-int leaves are `'type`.
+
 ### bi
-`( x p q -- … )` — *Inline.* Apply two quotations to the same input,
+`( x p q -- ... )` — *Inline.* Apply two quotations to the same input,
 first `p`, then `q`. Equivalent to `(keep) dip call`.
 
 ### bi2
-`( x y p q -- … )` — *Inline.* Binary cleave: apply each of two
+`( x y p q -- ... )` — *Inline.* Binary cleave: apply each of two
 quotations to the same pair of inputs. Equivalent to
 `(|x y p q| x y p call x y q call)`.
+
+### bnot
+`( x -- y )` — **Pervasive.** Invert every bit. `bnot bnot` is identity;
+`0 bnot` is `-1`.
 
 ### body
 `( 'name -- quotation )` — Return the stored body of a resolved word, as
@@ -888,12 +1211,31 @@ a plain list. Total over everything defined in ecl, constants included: a
 name bound by `set` returns its capture body `((value) first)`. Host
 builtins and native words have no ecl body and are `'type`.
 
+### bor
+`( x y -- z )` — **Pervasive.** Bitwise or. See `band`.
+
 ### both
-`( x y q -- … )` — *Inline.* Apply one quotation independently to two
+`( x y q -- ... )` — *Inline.* Apply one quotation independently to two
 values, `x` first. Equivalent to `(|x y q| x q call y q call)`.
 
+### bsl
+`( x count -- y )` — **Pervasive.** Shift the bit pattern left by `count`
+places, truncating bits shifted off the top rather than raising
+`'overflow`: `maxint 1 bsl` is `-2`. A `count` outside `0..63` is
+`'domain`.
+
+### bsr
+`( x count -- y )` — **Pervasive.** Shift the bit pattern right by
+`count` places, filling zeros from the top. The shift is logical, not
+arithmetic: `-1 1 bsr` is `maxint`, not `-1`. A `count` outside `0..63`
+is `'domain`.
+
+### bxor
+`( x y -- z )` — **Pervasive.** Bitwise exclusive or. On 0/1 masks `<>`
+does the same job on any leaf type; `bxor` is for whole patterns.
+
 ### call
-`( q -- … )` — *Inline.* Run a quotation on the current stack. A data
+`( q -- ... )` — *Inline.* Run a quotation on the current stack. A data
 list pushes its elements.
 
 ### cancel
@@ -901,7 +1243,7 @@ list pushes its elements.
 `{'err {'kind 'cancelled …}}`. No-op when already terminal.
 
 ### case
-`( x clauses -- … )` — *Inline.* The clause list is flat, nonempty, and
+`( x clauses -- ... )` — *Inline.* The clause list is flat, nonempty, and
 odd: `[key action … else]`. Keys are inert data — any value, never
 executed, duplicates legal with the first `match` winning; every action
 and the else must be a quotation, validated before any comparison. The
@@ -932,7 +1274,7 @@ ordering: `-` errors on int64 overflow where an ordering must be total.
 order.
 
 ### cond
-`( clauses -- … )` — *Inline.* The clause list is flat, nonempty, and
+`( clauses -- ... )` — *Inline.* The clause list is flat, nonempty, and
 odd: `[test action … else]`, all quotations. The whole list is validated
 before the first test runs (empty or even lists are `'shape`; a non-list
 or non-quotation member is `'type`). The first test leaving 1 selects its
@@ -1001,7 +1343,7 @@ follows dynamic stack behavior: filtering is the mask idiom (or
 homoiconicity: `((1 +) each) 'inc-all def`.
 
 ### execute
-`( word -- … )` — Resolve and apply a word value late through the ordinary
+`( word -- ... )` — Resolve and apply a word value late through the ordinary
 word-dispatch path, exactly as if that word appeared in executable position.
 Non-words are `'type`; missing words are `'undefined-word`. Module homes,
 private resolution, annotations, tracing, builtins, native calls,
@@ -1011,8 +1353,13 @@ cancellation, and `within` authority are preserved.
 `( sequence -- bool )` — 1 when the sequence has no elements. Equivalent
 to `len 0 =`.
 
+### entropy
+`( -- result )` — Read one int of entropy from the host. The only
+nondeterministic word in the language; see Randomness. Requires the host
+IO capability, and is `'io` without it.
+
 ### exit
-`( status -- )` — Root-only outside `attempt` (`'domain` otherwise):
+`( status -- )` — Root-only outside `@attempt` (`'domain` otherwise):
 cancel and quiesce all descendants, then terminate the process with the
 given status.
 
@@ -1057,6 +1404,12 @@ template's `{}` positional placeholders, each filled with the value's
 `str`; `{{` and `}}` are literal braces. `[3.14 2] "pi={} n={}" format`
 is `"pi=3.14 n=2"`.
 
+### getenv
+`( name -- string )` — The value of an environment variable, read from an
+immutable snapshot taken once at session start. An unset variable is an
+error, never a blank: absence is absence, and `@attempt`/`or-else` is the
+defaulting idiom. Absent host IO is `'io`.
+
 ### grade
 `( list -- indices )` — The stable ascending sort permutation. Orders by
 `cmp`, so every element pair must be mutually comparable.
@@ -1071,7 +1424,7 @@ only absence is false: lookup machinery failures are errors, never
 converted to 0.
 
 ### if
-`( bool then else -- … )` — *Inline.* Run `then` when the condition is 1,
+`( bool then else -- ... )` — *Inline.* Run `then` when the condition is 1,
 `else` when it is 0; any other condition value is `'type`.
 
 ### in
@@ -1113,6 +1466,10 @@ Equivalent to `dup len 1 - at`.
 ### len
 `( list -- count )` — Top-level element count; works on any list,
 including ragged data.
+
+### lines
+`( path -- list )` — A file's newline-separated lines. Defined in the
+prelude as `slurp "\n" split`.
 
 ### literal
 `( value -- quotation )` — Return the plain quotation `((x) first)`:
@@ -1158,19 +1515,6 @@ Equivalent to `dup first (min) fold`.
 `( x y -- z )` — **Pervasive.** Checked integer remainder. Equivalent to
 `over over div * -`.
 
-### module
-`( 'module-name body -- )` — *Isolated.* Validate a canonical module path,
-run the body on a fresh environment, and register the result. The body's
-final operand stack becomes a new slot's durable initial stack and is
-discarded on re-registration. See Modules.
-
-### module-with
-`( values 'module-name body -- )` — Capture every element of the values list inertly
-and in order as the isolated module body's initial stack, then register the
-module. The body may consume, reorder, or extend the supplied values; what
-remains is the module's durable initial stack. Defined in ecl as
-`swap (with) dip swap module`.
-
 ### neg
 `( x -- y )` — **Pervasive.** Negation. Equivalent to `-1 *`.
 
@@ -1181,23 +1525,10 @@ remains is the module's durable initial stack. Defined in ecl as
 ### not
 `( bool -- bool )` — **Pervasive.** Invert 0/1 values.
 
-### ok?
-`( result -- bool )` — 1 when a result is a success. Equivalent to
-`'ok has?`.
-
 ### or
 `( x y -- bool )` — **Pervasive.** Boolean disjunction on 0/1 values.
 Both operands are already evaluated — there is no short-circuiting.
 Defined in ecl.
-
-### or-else
-`( result fallback -- value )` — The success values list, or the
-fallback on failure. Defined in ecl.
-
-### or-raise
-`( result -- values )` — The values list of a success, or re-raise the
-captured error unchanged. (`or-raise call` unpacks the values onto the
-stack.) Defined in ecl.
 
 ### over
 `( x y -- x y x )` — Copy the value beneath the top onto the top.
@@ -1217,12 +1548,6 @@ to `() cons cons`.
 dict-iteration form (`pairs (…) each`). Equivalent to
 `dup keys swap vals zip`; the inverse round-trip is
 `dup keys swap vals to-dict`.
-
-### par-each
-`( sequence quotation -- results )` — *Isolated*, contract `( a -- b )`
-enforced per element. Concurrent `each`: ordered results, leftmost
-failure re-raised after cancelling and quiescing the remainder. See
-Concurrency.
 
 ### parse
 `( string -- quotation )` — The reader, reified: parse source text into
@@ -1275,6 +1600,22 @@ index or dict key, producing a new value.
 ### raise
 `( error -- )` — Raise a language error from an error dict.
 
+### rand-float
+`( state -- state result )` — Draw one uniform float in `[0, 1)` and
+return the advanced state. See Randomness.
+
+### rand-int
+`( state bound -- state result )` — Draw one uniform int in `[0, bound)`
+and return the advanced state. A `bound` below 1 is `'domain`. The draw
+is unbiased: candidates in the incomplete top range are rejected rather
+than folded.
+
+### rand-ints
+`( state count bound -- state results )` — Draw `count` uniform ints in
+`[0, bound)` as a list, returning the state advanced by `count`. Each
+element is the draw at its own counter position, so the list does not
+depend on the order in which it was built.
+
 ### range
 `( bound -- list )` — The ints `[0 1 … bound-1]`; the bound must be a
 nonnegative int.
@@ -1292,6 +1633,13 @@ shape; a zero axis must be final.
 ### reverse
 `( list -- list )` — Reverse top-level element order. Defined in ecl as
 an index permutation.
+
+### rotate
+`( list count -- list )` — Rotate top-level element order left by a
+count, wrapping cyclically; a negative count rotates right, counts
+beyond the length wrap, and the empty list is returned unchanged.
+Defined in ecl as a modular index permutation (the K lineage's
+composed form; APL/J make dyadic reverse a primitive).
 
 ### round
 `( x -- integer )` — **Pervasive.** Round to nearest; the result is
@@ -1334,21 +1682,20 @@ int, by sign. Equivalent to `dup 0 > swap 0 < -`.
 ### sin
 `( x -- y )` — **Pervasive.** Sine; float transcendental.
 
+### slurp
+`( path -- string )` — Read one whole UTF-8 file. A missing or unreadable
+file raises `'io` carrying the offending `'path`; so does a file that is
+not valid UTF-8. Absent host IO is `'io`.
+
 ### sort
 `( sequence -- sorted )` — Stable ascending sort by `cmp`. Equivalent to
 `dup grade at`.
 
-### spawn
-`( quotation -- task )` — *Isolated*, contract `( -- … )` (inputs via
-`partial`/environment, never the ambient stack). Run a self-contained
-quotation concurrently in a child task. See Concurrency.
-
-### spawn-with
-`( values quotation -- task )` — Construct a self-contained quotation by
-capturing every element of the values list inertly and in order, then
-`spawn` it. The values therefore form the child task's initial stack. Defined
-in ecl as `with spawn`; `spawn-with await` is observationally
-equivalent to `attempt-with`.
+### spit
+`( string path -- )` — Write one file, truncating and replacing it. There
+is no temporary file and no rename, so a failure part-way through can
+leave a partial file; that is the documented v1 contract, surfaced to the
+program as `'io` with the offending `'path`.
 
 ### split
 `( string separator -- parts )` — Split a string at every occurrence of a
@@ -1357,6 +1704,11 @@ separator string; the parts are strings.
 ### sqrt
 `( x -- y )` — **Pervasive.** Square root. `'domain` on negative inputs
 (the result would be NaN).
+
+### stdin
+`( -- string )` — Read the whole standard input stream, once. Legal where
+stdin carries data — `-e` and script-file modes — and `'io` in the modes
+where stdin is itself the program source. A second read is `'io`.
 
 ### str
 `( value -- string )` — The canonical printed representation; carries the
@@ -1380,7 +1732,7 @@ cycles.
 preorder.
 
 ### times
-`( n q -- … )` — *Inline.* Run the quotation `n` times; `n` must be a
+`( n q -- ... )` — *Inline.* Run the quotation `n` times; `n` must be a
 nonnegative int. Tail-call optimized.
 
 ### to-dict
@@ -1388,7 +1740,7 @@ nonnegative int. Tail-call optimized.
 keys error.
 
 ### tri
-`( x p q r -- … )` — *Inline.* Apply three quotations to the same input
+`( x p q r -- ... )` — *Inline.* Apply three quotations to the same input
 in order. Equivalent to `((keep) dip keep) dip call`.
 
 ### type
@@ -1412,20 +1764,22 @@ elements and last element. Equivalent to `reverse uncons reverse swap`.
 remainder. Equivalent to `dup first swap rest`.
 
 ### unless
-`( bool else -- … )` — *Inline.* Run the quotation when the condition
+`( bool else -- ... )` — *Inline.* Run the quotation when the condition
 is 0. Equivalent to `() swap if`.
 
 ### use
 `( 'module-name -- )` — Splice a module's exports into the current scope,
-loading `<name>.ecl`/`<name>.eclmod` from `ECL_PATH` when unregistered.
-Reports each shadowed export on stderr. Idempotent; re-use moves the
-module to the top of the shadow order. See Modules.
+loading `<name>.ecl`/`<name>.eclmod` from `ECL_PATH` when unregistered
+(qualified reference to an unregistered module triggers the same load;
+`use` adds only the unqualified splice and shadow notices). Reports each
+shadowed export on stderr. Idempotent; re-use moves the module to the top
+of the shadow order. See Modules.
 
 ### vals
 `( dict -- values )` — Values in insertion order. Defined in ecl.
 
 ### when
-`( bool then -- … )` — *Inline.* Run the quotation when the condition
+`( bool then -- ... )` — *Inline.* Run the quotation when the condition
 is 1. Equivalent to `() if`.
 
 ### where
@@ -1440,7 +1794,7 @@ effect when one was supplied. Constants report `def` with no effect, like
 every other unannotated ecl definition.
 
 ### within
-`( quotation -- outputs… )` — *Isolated.* Run the quotation against a
+`( quotation -- ... )` — Run the quotation against a
 private draft of the home module's durable stack, then publish the
 remaining draft as that stack and deliver whatever `without` moved
 outward, in invocation order. Legal only in a published word whose
@@ -1454,7 +1808,7 @@ active `within` application. `'domain` outside one, `'underflow` on an
 empty draft. Outputs reach the caller only if the application publishes.
 
 ### while
-`( cond body -- … )` — *Inline.* Repeatedly run `cond`, which must leave
+`( cond body -- ... )` — *Inline.* Repeatedly run `cond`, which must leave
 one boolean; while it leaves 1, run `body`. Tail-call optimized.
 
 ### with

@@ -271,6 +271,7 @@ pub const ModuleInstance = opaque {
             result.request_yield = null;
             result.list_at = null;
             result.dict_at = null;
+            result.read_path = null;
         }
         return result;
     }

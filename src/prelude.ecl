@@ -1,5 +1,5 @@
 ### def compose
-(cat dup len 0 = (pop ()) () if)
+(cat dup len 0 = (pop ()) when)
 (left right -- quotation : "Concatenate two quotations in execution order.")
 'compose def
 
@@ -37,26 +37,12 @@
 ### def with
 (((literal) each) dip append raze)
 (values quotation -- quotation :
- "Return a quotation that pushes every value from a list, in order and inertly, before running another quotation.")
+ "Return a quotation that pushes every value from a list, in order and inertly, before running another quotation.
+
+  This is how a unit constructor is seeded: an @ word gives its quotation a fresh stack, so
+  values (q) with @attempt, values (q) with @spawn, and values (body) with 'name @module hand
+  that unit exactly the values the caller chose to pass.")
 'with def
-
-### def attempt-with
-(with attempt)
-(values quotation -- result :
- "Run a quotation as an isolated attempted unit whose initial stack is the supplied list of values.")
-'attempt-with def
-
-### def spawn-with
-(with spawn)
-(values quotation -- task :
- "Spawn an isolated child task whose initial stack is the supplied list of values.")
-'spawn-with def
-
-### def module-with
-(swap (with) dip swap module)
-(values name quotation -- :
- "Register a module whose isolated body receives every supplied value on its initial stack.")
-'module-with def
 
 ### def str
 (wrap "{}" format)
@@ -334,22 +320,6 @@
 (: "Raise a user-kind error whose message is the supplied value.")
 'fail def
 
-### def ok?
-('ok has?)
-(result -- bool : "Return true when an attempt result represents success.")
-'ok? def
-
-### def or-raise
-(dup 'ok has? ('ok at) ('err at raise) if)
-(result -- values : "Return an attempt result's success values, or re-raise its captured error unchanged.")
-'or-raise def
-
-### def or-else
-(over 'ok has? (pop 'ok at) (nip) if)
-(result fallback -- value :
- "Return an attempt's result list on success, or the fallback value on failure.")
-'or-else def
-
 ### def find
 (|sequence needle| sequence needle (match) partial each dup where swap len swap dup len 0 =
  (pop)
@@ -376,3 +346,21 @@
 (value name -- :
  "Bind a private module value as a constant word.")
 'setp def
+
+### def assert
+(swap (pop) (raise) if)
+(bool error -- :
+ "Raise an error dict unless the condition is the boolean 1, discarding the dict when it holds.")
+'assert def
+
+### def lines
+(slurp "\n" split)
+(path -- list :
+ "Read one UTF-8 file and split it into its newline-separated lines.")
+'lines def
+
+### def rotate
+(|xs n| xs dup len range n + dup len mod dup len + dup len mod at)
+(list count -- rotated :
+ "Rotate a list left by a count, wrapping cyclically; a negative count rotates right and an empty list is returned unchanged.")
+'rotate def

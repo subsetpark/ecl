@@ -447,6 +447,7 @@ const full_host_table = abi.HostTable{
     .request_yield = hostRequestYield,
     .list_at = hostListAt,
     .dict_at = hostDictAt,
+    .read_path = hostReadPath,
     .build_list_append = hostBuildListAppend,
     .build_list_finish = hostBuildListFinish,
     .build_dict_append = hostBuildDictAppend,
@@ -521,6 +522,45 @@ fn hostListAt(
     if (item_index >= header.length()) return .invalid;
     if (charge(call, 1) != .ok) return .yield_required;
     return writeView(list.atUnchecked(source, @intCast(item_index)), output);
+}
+
+/// Walks a declared input down one bounded path. Charging one unit per step
+/// keeps the whole read constant-cost against the scheduler budget, and every
+/// rejection is a wire status rather than a host-side assumption about the
+/// author's arithmetic.
+fn hostReadPath(
+    context: *anyopaque,
+    input_index: u32,
+    path_ptr: [*]const u64,
+    path_len: u32,
+    output: *abi.ValueView,
+) callconv(.c) abi.HostStatus {
+    const call = transactionFrom(context);
+    if (call.terminal != .idle or call.continuation == null or
+        input_index >= call.definition.effect.inputs)
+        return .invalid;
+    if (path_len > abi.max_read_path_depth) return .invalid;
+    if (charge(call, @max(path_len, 1)) != .ok) return .yield_required;
+    var current = call.activeEvaluator().nativeInputBorrowed(
+        call.definition.effect.inputs,
+        input_index,
+    );
+    for (path_ptr[0..path_len]) |step| switch (current) {
+        .list => |header| {
+            if (step >= header.length()) return .invalid;
+            current = list.atUnchecked(current, @intCast(step));
+        },
+        .dict => |header| {
+            const entry = step / 2;
+            if (entry >= dict.keysOf(header).list.length()) return .invalid;
+            current = if (step % 2 == 0)
+                dict.keyAt(header, @intCast(entry))
+            else
+                dict.valueAt(header, @intCast(entry));
+        },
+        .int, .float, .char, .symbol, .word, .task => return .invalid,
+    };
+    return writeView(current, output);
 }
 
 fn hostDictAt(

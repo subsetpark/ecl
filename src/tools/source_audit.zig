@@ -58,10 +58,27 @@ const source_groups = [_]SourceGroup{
         @embedFile("../snapshot.zig"),   @embedFile("../module_prims.zig"),
         @embedFile("../reflection.zig"), @embedFile("../session.zig"),
     } },
+    // The embedded prelude loader and the embedded stdlib manifest are one
+    // bootstrap surface: both hand constant source to the ordinary reader.
     .{ .production = true, .files = &.{
-        "prelude.zig",
+        "prelude.zig", "stdlib.zig",
     }, .sources = &.{
-        @embedFile("../prelude.zig"),
+        @embedFile("../prelude.zig"), @embedFile("../stdlib.zig"),
+    } },
+    // First-party native stdlib modules are authored against the public SDK
+    // and hold no host authority; they are user-sized traversal files whose
+    // resumable state is the SDK's own continuation record.
+    .{ .production = true, .files = &.{
+        "stdlib/csv.zig",
+    }, .sources = &.{
+        @embedFile("../stdlib/csv.zig"),
+    } },
+    // Builtin-backed stdlib modules hold host authority the SDK withholds, so
+    // they are ordinary production sources under the bounded-traversal rules.
+    .{ .production = true, .files = &.{
+        "stdlib/json.zig", "stdlib/http.zig",
+    }, .sources = &.{
+        @embedFile("../stdlib/json.zig"), @embedFile("../stdlib/http.zig"),
     } },
     .{ .production = true, .files = &.{
         "combinators.zig",
@@ -91,11 +108,13 @@ const source_groups = [_]SourceGroup{
     .{ .production = true, .files = &.{
         "kernel_support.zig",  "kernels.zig",      "kernel_storage.zig",   "kernel_numeric.zig",
         "kernel_sequence.zig", "kernel_order.zig", "kernel_dict_text.zig", "idioms.zig",
+        "kernel_random.zig",
     }, .sources = &.{
         @embedFile("../kernel_support.zig"),   @embedFile("../kernels.zig"),
         @embedFile("../kernel_storage.zig"),   @embedFile("../kernel_numeric.zig"),
         @embedFile("../kernel_sequence.zig"),  @embedFile("../kernel_order.zig"),
         @embedFile("../kernel_dict_text.zig"), @embedFile("../idioms.zig"),
+        @embedFile("../kernel_random.zig"),
     } },
     .{ .production = false, .files = &.{
         "source_audit.zig", "tools/source_audit.zig",
@@ -134,7 +153,11 @@ const test_files = [_][]const u8{
     "tests/line_editor_test.zig",     "tests/native_test.zig",
     "tests/fuzz_test.zig",            "fuzz_root.zig",
     "tests/test_heap.zig",            "oom_root.zig",
-    "tests/stateful_module_test.zig",
+    "tests/stateful_module_test.zig", "tests/stdlib_test.zig",
+    "tests/hostio_test.zig",          "tests/result_test.zig",
+    "tests/str_test.zig",             "tests/csv_test.zig",
+    "tests/json_test.zig",            "tests/table_test.zig",
+    "tests/http_test.zig",            "tests/random_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
@@ -154,6 +177,7 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/unknown_capability.zig",
     "test/native/negative/duplicate_word.zig",
     "test/native/negative/empty_doc.zig",
+    "test/http_fixture_server.zig",
 };
 pub fn main(init: std.process.Init) !void {
     var failed = false;
@@ -164,6 +188,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditSourceBodies() or failed;
     failed = auditUnsafeCasts() or failed;
     failed = auditPreludeLayout() or failed;
+    failed = auditUnitConstructorSpelling() or failed;
     if (failed) return error.SourceAuditFailed;
 }
 
@@ -485,6 +510,8 @@ fn auditSourceBodies() bool {
         .{ .name = "reflection", .text = @embedFile("../reflection.zig") },
         .{ .name = "definition primitives", .text = @embedFile("../definition_prims.zig") },
         .{ .name = "documentation", .text = @embedFile("../doc.zig") },
+        .{ .name = "csv module", .text = @embedFile("../stdlib/csv.zig") },
+        .{ .name = "random kernels", .text = @embedFile("../kernel_random.zig") },
     };
     const traversal_forbidden = [_][]const []const u8{
         &.{ "std", ".", "ArrayList" },
@@ -781,4 +808,81 @@ fn hasForbiddenTokens(
         }
     }
     return failed;
+}
+
+/// The `@` mark means one thing: the word applies its quotation in a fresh
+/// unit. Nothing in the compiler can express that, so the manifest is written
+/// down here and the audit enforces both directions — every listed word is
+/// marked, and nothing else in first-party vocabulary is.
+const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@each", "@module" };
+
+fn auditUnitConstructorSpelling() bool {
+    var failed = false;
+    const installers = [_][:0]const u8{
+        @embedFile("../prims.zig"),
+        @embedFile("../task_prims.zig"),
+        @embedFile("../module_prims.zig"),
+    };
+    const documentation = @embedFile("../primitive_docs.zig");
+    for (unit_constructors) |name| {
+        var installed = false;
+        for (installers) |source| {
+            if (installedPrimitiveName(source, name)) installed = true;
+        }
+        if (!installed) {
+            std.log.err("unit constructors: `{s}` is not installed under that spelling", .{name});
+            failed = true;
+        }
+        if (!installedPrimitiveName(documentation, name)) {
+            std.log.err("unit constructors: `{s}` has no documentation entry", .{name});
+            failed = true;
+        }
+    }
+    // The other direction: a marked word that constructs no unit teaches the
+    // reader a rule the vocabulary then breaks.
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, documentation, index, ".name = \"@")) |found| {
+        const start = found + ".name = \"".len;
+        const end = std.mem.indexOfScalarPos(u8, documentation, start, '"') orelse documentation.len;
+        const name = documentation[start..end];
+        if (!isUnitConstructor(name)) {
+            std.log.err("unit constructors: primitive `{s}` is marked but constructs no unit", .{name});
+            failed = true;
+        }
+        index = end;
+    }
+    const definition_sources = [_][:0]const u8{
+        @embedFile("../prelude.ecl"),
+        @embedFile("../stdlib/result.ecl"),
+        @embedFile("../stdlib/str.ecl"),
+        @embedFile("../stdlib/table.ecl"),
+        @embedFile("../stdlib/rng.ecl"),
+    };
+    for (definition_sources) |source| {
+        var scan: usize = 0;
+        while (std.mem.indexOfPos(u8, source, scan, "'@")) |found| {
+            const start = found + 1;
+            const end = preludeTokenEnd(source, start);
+            const name = source[start..end];
+            if (!isUnitConstructor(name)) {
+                std.log.err("unit constructors: `{s}` is marked but constructs no unit", .{name});
+                failed = true;
+            }
+            scan = end;
+        }
+    }
+    return failed;
+}
+
+fn isUnitConstructor(name: []const u8) bool {
+    for (unit_constructors) |listed| {
+        if (std.mem.eql(u8, listed, name)) return true;
+    }
+    return false;
+}
+
+fn installedPrimitiveName(source: []const u8, name: []const u8) bool {
+    var buffer: [64]u8 = undefined;
+    const needle = std.fmt.bufPrint(&buffer, ".name = \"{s}\"", .{name}) catch return false;
+    return std.mem.indexOf(u8, source, needle) != null;
 }

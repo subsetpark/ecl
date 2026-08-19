@@ -39,7 +39,7 @@ test "fuzz: reader accepts arbitrary bounded input" {
         "\xff",
         "(1 2)",
         "\"unterminated",
-        "'m (1 'public set 2 'private setp) module",
+        "(1 'public set 2 'private setp) 'm @module",
     } });
 }
 
@@ -58,13 +58,21 @@ fn fuzzFormatterRoundTrip(_: void, smith: *std.testing.Smith) !void {
 }
 
 test "fuzz: formatter is idempotent for every accepted source" {
-    try std.testing.fuzz({}, fuzzFormatterRoundTrip, .{ .corpus = &.{
-        "",
-        "1 2 +",
-        "# comment\n(foo [bar] {baz})",
-        "\"raw\n  string\" \\space",
-        "(dup) (value -- value : \"documentation\") 'same def",
-    } });
+    try std.testing.fuzz({}, fuzzFormatterRoundTrip, .{
+        .corpus = &.{
+            "",
+            "1 2 +",
+            "# comment\n(foo [bar] {baz})",
+            "\"raw\n  string\" \\space",
+            "(dup) (value -- value : \"documentation\") 'same def",
+            // The `### module` header path: bare, seeded, and with a stale header
+            // the formatter must rewrite from the registration itself.
+            "((1) 'x def) 'stats @module",
+            "[[0]] ((1 +) 'tick def) with 'counter @module",
+            "### module wrong\n# attached\n((1) 'x def) 'stats @module",
+            "(dup) (a -- ...) 'row def",
+        },
+    });
 }
 
 fn fuzzInvoke(
@@ -644,7 +652,7 @@ test "fuzz: pending unit accumulates lines and lexical state" {
         "1 2 +",
         "\"unterminated",
         "# comment",
-        "'stats (1 'x set) module",
+        "(1 'x set) 'stats @module",
     } });
 }
 
@@ -685,14 +693,14 @@ fn fuzzCompletionMutation(_: void, smith: *std.testing.Smith) !void {
     try std.testing.expectEqualStrings("sqrt", initial.items()[0]);
     try runOk(
         &runtime,
-        "'fuzzmod (1 'alpha set 2 'private setp) module " ++
+        "(1 'alpha set 2 'private setp) 'fuzzmod @module " ++
             "'fm 'fuzzmod alias 'fuzzmod use 3 'fuzz-live set",
     );
     var steps: usize = 0;
     while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1) {
         switch (smith.value(u3)) {
-            0 => try runOk(&runtime, "'fuzzmod (4 'alpha set 5 'private setp) module"),
-            1 => try runOk(&runtime, "'fuzzmod (6 'beta set 7 'hidden setp) module"),
+            0 => try runOk(&runtime, "(4 'alpha set 5 'private setp) 'fuzzmod @module"),
+            1 => try runOk(&runtime, "(6 'beta set 7 'hidden setp) 'fuzzmod @module"),
             2 => try runOk(&runtime, "8 'fuzz-live set"),
             3 => try runOk(&runtime, "9 'fuzz-second set"),
             4, 5, 6, 7 => |action| {
@@ -815,13 +823,13 @@ test "fuzz: history parsing merging and corruption preservation" {
 
 fn fuzzSchedulerRuntime(_: void, smith: *std.testing.Smith) !void {
     const programs = [_][]const u8{
-        "(1) spawn await pop",
-        "(1) spawn dup cancel await pop",
-        "(1) spawn dup await pop await pop",
-        "[] (missing) par-each pop",
-        "[1 2 3] (dup *) par-each pop",
-        "((1) () while) spawn dup cancel await pop",
-        "(7) spawn 'fuzz-task set fuzz-task await pop",
+        "(1) @spawn await pop",
+        "(1) @spawn dup cancel await pop",
+        "(1) @spawn dup await pop await pop",
+        "[] (missing) @each pop",
+        "[1 2 3] (dup *) @each pop",
+        "((1) () while) @spawn dup cancel await pop",
+        "(7) @spawn 'fuzz-task set fuzz-task await pop",
     };
     var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .cooperative);
     defer runtime.deinit();
@@ -839,7 +847,7 @@ test "fuzz: real scheduler publication cancellation and join traces settle" {
         "",
         "spawn-await",
         "cancel-before-dispatch",
-        "par-each-order",
+        "@each-order",
         "\x00\x01\x02\x03\x04\x05\x06",
     } });
 }
@@ -849,9 +857,9 @@ fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
         "7 sample.forward pop",
         "7 sample.split pop pop",
         "7 sample.singleton pop",
-        "(7 sample.draft-fail) attempt pop",
+        "(7 sample.draft-fail) @attempt pop",
         "sample.cooperative pop",
-        "(9 sample.yield-forever) spawn dup cancel await pop",
+        "(9 sample.yield-forever) @spawn dup cancel await pop",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();

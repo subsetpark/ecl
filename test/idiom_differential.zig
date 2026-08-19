@@ -171,11 +171,18 @@ fn phraseSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
 }
 
 fn unaryDirectInput(operation: ecl.kernels.numeric.UnaryOp, variant: Variant) []const u8 {
+    if (operation == .bnot) return switch (variant) {
+        .atom, .float => "-2",
+        .empty => "[]",
+        .spine => "[[-2] [3]]",
+        .failure => "{}",
+    };
     return switch (variant) {
         .atom => switch (operation) {
             .sqrt => "4",
             .log => "1.0",
             .not_word => "0",
+            .bnot => "-2",
             .abs, .neg => "-2",
             .floor, .ceil, .round, .exp, .sin, .cos => "1.25",
         },
@@ -187,11 +194,18 @@ fn unaryDirectInput(operation: ecl.kernels.numeric.UnaryOp, variant: Variant) []
 }
 
 fn unaryInput(operation: ecl.kernels.numeric.UnaryOp, variant: Variant) []const u8 {
+    if (operation == .bnot) return switch (variant) {
+        .atom, .float => "[-2 3]",
+        .empty => "[]",
+        .spine => "[[-2] [3]]",
+        .failure => "[{}]",
+    };
     return switch (variant) {
         .atom => switch (operation) {
             .sqrt => "[4 9]",
             .log => "[1.0 2.0]",
             .not_word => "[0 1]",
+            .bnot => "[-2 3]",
             .abs => "[-2 3]",
             .floor, .ceil, .round, .exp, .sin, .cos => "[1.25 2.5]",
             .neg => "[1 2]",
@@ -203,12 +217,33 @@ fn unaryInput(operation: ecl.kernels.numeric.UnaryOp, variant: Variant) []const 
     };
 }
 
+fn isBitwise(operation: ecl.kernels.numeric.BinaryOp) bool {
+    return switch (operation) {
+        .band, .bor, .bxor, .bsl, .bsr => true,
+        else => false,
+    };
+}
+
 fn binaryInput(
     operation: ecl.kernels.numeric.BinaryOp,
     variant: Variant,
     right: bool,
 ) []const u8 {
     const boolean = operation == .and_word or operation == .or_word;
+    // Bitwise words are int-only, so a float variant would compare two
+    // identical 'type errors instead of two values. Feed them ints, and keep
+    // the right operand inside the 0..63 shift domain.
+    if (isBitwise(operation)) return if (right) switch (variant) {
+        .atom, .float => "[1 2]",
+        .empty => "[]",
+        .spine => "[[1] [2]]",
+        .failure => "[1]",
+    } else switch (variant) {
+        .atom, .float => "[6 12]",
+        .empty => "[]",
+        .spine => "[[6] [12]]",
+        .failure => "[{}]",
+    };
     return if (right) switch (variant) {
         .atom => if (boolean) "[1 0]" else "[4 5]",
         .empty => "[]",
@@ -226,6 +261,10 @@ fn binaryInput(
 
 fn binaryConstant(operation: ecl.kernels.numeric.BinaryOp, variant: Variant) []const u8 {
     const boolean = operation == .and_word or operation == .or_word;
+    if (isBitwise(operation)) return switch (variant) {
+        .failure => "{}",
+        else => "3",
+    };
     return switch (variant) {
         .failure => "{}",
         .float => "0.5",

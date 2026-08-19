@@ -48,7 +48,7 @@ test "native runtime: loaded artifacts behave identically at one and eight worke
 }
 
 test "native runtime: spawned units inherit native loading context" {
-    const source = "('sample use 41 sample.increment) spawn await";
+    const source = "('sample use 41 sample.increment) @spawn await";
     var one = try run(source, "1", false);
     defer one.deinit();
     var eight = try run(source, "8", false);
@@ -70,7 +70,7 @@ test "native runtime: aggregates larger than one quantum complete" {
 }
 
 test "native runtime: inadmissible values and duplicate keys are language errors" {
-    var task_input = try run("'sample use () spawn sample.forward", "1", false);
+    var task_input = try run("'sample use () @spawn sample.forward", "1", false);
     defer task_input.deinit();
     try task_input.expect(.{
         .exit_code = 1,
@@ -130,7 +130,7 @@ test "native runtime: source precedence and path-root order are observable" {
     defer same_root.cleanup();
     try same_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "'sample (100 'increment set) module",
+        .data = "(100 'increment set) 'sample @module",
     });
     try std.Io.Dir.copyFile(
         std.Io.Dir.cwd(),
@@ -164,7 +164,7 @@ test "native runtime: source precedence and path-root order are observable" {
     defer source_root.cleanup();
     try source_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "'sample (100 'increment set) module",
+        .data = "(100 'increment set) 'sample @module",
     });
     const native_root_path = try native_root.dir.realPathFileAlloc(
         std.testing.io,

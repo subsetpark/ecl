@@ -160,6 +160,10 @@ pub fn classify(token: []const u8) Classification {
     return poll.drive(Classification, &cursor, .{});
 }
 
+/// The after portion of an effect is either all named slots or exactly this
+/// token, which declares a fixed before row and a variable after row.
+pub const row_token = "...";
+
 pub fn validSymbol(token: []const u8) bool {
     var cursor = SymbolCursor.init(token);
     return poll.drive(bool, &cursor, .{});
@@ -183,6 +187,10 @@ pub const SymbolCursor = struct {
         return .{ .token = token, .allow_dots = false };
     }
     pub fn advance(self: *SymbolCursor) SymbolProgress {
+        // The one dotted name the language spells for itself: the anonymous
+        // after row of a stack effect. It lexes as an ordinary word so an
+        // annotation needs no reader mode, and is reserved as a binding name.
+        if (std.mem.eql(u8, self.token, row_token)) return .{ .complete = self.allow_dots };
         if (self.token.len == 0 or self.token[0] == '\'' or self.token[0] == '\\' or
             self.token[0] == '.' or self.token[self.token.len - 1] == '.')
             return .{ .complete = false };
