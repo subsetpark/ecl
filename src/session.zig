@@ -604,23 +604,44 @@ pub const Session = enum(usize) {
             if (separator == 0) return .empty;
             const namespace_bytes = prefix[0..separator];
             const word_prefix = prefix[separator + 1 ..];
-            const namespace_id = lookupInterned(namespace_bytes) orelse return .empty;
-            const module_name = intern.moduleName(namespace_id) catch return .empty;
-            var acquisition = core.registry.acquireCursor(module_name);
-            defer acquisition.deinit();
-            const maybe_generation = poll.drive(?modules.GenerationLease, &acquisition, .{});
-            const generation = maybe_generation orelse return .empty;
-            var generation_lease = generation;
-            defer generation_lease.deinit();
-            var names = generation_lease.publicNameCursor();
-            defer names.deinit();
-            while (true) switch (names.advance()) {
-                .pending => {},
-                .complete => break,
-                .item => |name| if (std.mem.startsWith(u8, intern.get(name), word_prefix))
-                    try found.append(name),
+            // A published generation, including an in-session override of a
+            // stdlib name, is authoritative. A cold canonical builtin has no
+            // generation yet, but its compiled word table is already a
+            // complete public interface and must complete before the first
+            // Unit causes auto-loading.
+            if (lookupInterned(namespace_bytes)) |namespace_id| {
+                if (intern.moduleName(namespace_id) catch null) |module_name| {
+                    var acquisition = core.registry.acquireCursor(module_name);
+                    defer acquisition.deinit();
+                    if (poll.drive(?modules.GenerationLease, &acquisition, .{})) |generation| {
+                        var generation_lease = generation;
+                        defer generation_lease.deinit();
+                        var names = generation_lease.publicNameCursor();
+                        defer names.deinit();
+                        while (true) switch (names.advance()) {
+                            .pending => {},
+                            .complete => break,
+                            .item => |name| if (std.mem.startsWith(
+                                u8,
+                                intern.get(name),
+                                word_prefix,
+                            )) try found.append(name),
+                        };
+                        return materializeCompletion(core.allocator(), &found, namespace_bytes);
+                    }
+                }
+            }
+            if (stdlib.find(namespace_bytes)) |entry| switch (entry) {
+                .builtin => |words| {
+                    for (words) |word| {
+                        if (std.mem.startsWith(u8, word.name, word_prefix))
+                            try found.append(try intern.intern(word.name));
+                    }
+                    return materializeCompletion(core.allocator(), &found, namespace_bytes);
+                },
+                .source, .native => {},
             };
-            return materializeCompletion(core.allocator(), &found, namespace_bytes);
+            return .empty;
         }
 
         const root: reflection.VisibleNameRoot = if (core.root_scope) |scope|

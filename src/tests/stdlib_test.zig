@@ -162,3 +162,21 @@ test "stdlib: embedded module names complete before anything has loaded them" {
     }
     try std.testing.expectEqual(@as(usize, 1), occurrences);
 }
+
+test "stdlib: builtin exports complete before the first unit" {
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var runtime = try session.Session.init(heap.allocator(), &.{});
+    defer runtime.deinit();
+
+    var all = try runtime.completionCandidates("json.");
+    defer all.deinit();
+    try std.testing.expectEqual(@as(usize, 2), all.items().len);
+    try std.testing.expectEqualStrings("json.emit", all.items()[0]);
+    try std.testing.expectEqualStrings("json.parse", all.items()[1]);
+
+    var partial = try runtime.completionCandidates("json.pa");
+    defer partial.deinit();
+    try std.testing.expectEqual(@as(usize, 1), partial.items().len);
+    try std.testing.expectEqualStrings("json.parse", partial.items()[0]);
+}

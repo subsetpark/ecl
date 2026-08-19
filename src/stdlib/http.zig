@@ -211,6 +211,10 @@ const RequestDriver = struct {
         const header_dict = self.headers_value.borrow().dict;
         const count: usize = @intCast(dict.keysOf(header_dict).list.length());
         if (self.field_index == count) {
+            // Response-header materialization starts its own traversal after
+            // the exchange. Do not let the number of request headers skip
+            // that many response headers.
+            self.field_index = 0;
             self.phase = if (self.body_value == null) .exchange else .request_body;
             return .yielded;
         }
@@ -297,7 +301,21 @@ const RequestDriver = struct {
             errdefer self.allocator.free(name);
             const item = try self.allocator.dupe(u8, header.value);
             errdefer self.allocator.free(item);
-            try self.response_fields.append(self.allocator, .{ .name = name, .value = item });
+            // HTTP field names are case-insensitive and repeated fields are
+            // legal. The value-level API exposes a dict, so retain the last
+            // occurrence under its spelling instead of asking the dict
+            // materializer to reject a duplicate.
+            for (self.response_fields.items) |*field| {
+                if (std.ascii.eqlIgnoreCase(field.name, name)) {
+                    self.allocator.free(field.name);
+                    self.allocator.free(field.value);
+                    field.* = .{ .name = name, .value = item };
+                    break;
+                }
+            } else try self.response_fields.append(
+                self.allocator,
+                .{ .name = name, .value = item },
+            );
         }
 
         const decompress_bytes: usize = switch (response.head.content_encoding) {
@@ -357,13 +375,9 @@ const RequestDriver = struct {
             self.dictionary = try .init(self.allocator, self.pairs.items, true);
         switch (try self.dictionary.?.advance(machine.kernel_poll_quantum)) {
             .pending => return .yielded,
-            // A server may repeat a header name; the dict keeps the last.
-            .duplicate_key => {
-                self.dictionary.?.deinit();
-                self.dictionary = null;
-                _ = self.pairs.pop();
-                return .yielded;
-            },
+            // `exchange` coalesces case-insensitive HTTP field names before
+            // they reach this ordinary, case-sensitive ECL dictionary.
+            .duplicate_key => unreachable,
             .complete => |built| {
                 self.dictionary.?.deinit();
                 self.dictionary = null;

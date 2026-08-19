@@ -58,6 +58,14 @@ fn serve(request: *std.http.Server.Request, allocator: std.mem.Allocator) !void 
             .extra_headers = &.{.{ .name = "x-fixture", .value = "hello" }},
         });
     }
+    if (std.mem.eql(u8, target, "/duplicate")) {
+        return request.respond("repeated headers\n", .{
+            .extra_headers = &.{
+                .{ .name = "X-Repeated", .value = "first" },
+                .{ .name = "x-repeated", .value = "last" },
+            },
+        });
+    }
     if (std.mem.eql(u8, target, "/echo")) {
         // Echo the request body and one caller header, so a POST test can see
         // that both actually crossed the wire.

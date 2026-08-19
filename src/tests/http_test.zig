@@ -92,6 +92,20 @@ test "http: get returns a response dict from the fixture server" {
     );
 }
 
+test "http: repeated response headers keep the last value" {
+    var fixture = Fixture.start(39475) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer fixture.stop();
+    try expectStack(
+        fixture.port,
+        "\"http://127.0.0.1:{d}/duplicate\" {{}} http.get " ++
+            "'headers at \"x-repeated\" at",
+        "\"last\"",
+    );
+}
+
 test "http: post sends headers and body" {
     var fixture = Fixture.start(39511) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -103,8 +117,8 @@ test "http: post sends headers and body" {
     try expectStack(
         fixture.port,
         "\"http://127.0.0.1:{d}/echo\" {{\"x-probe\" \"probed\"}} \"payload\" http.post " ++
-            "dup 'status at swap 'body at",
-        "200 \"probed|payload\"",
+            "dup 'status at swap dup 'body at swap 'headers at \"x-fixture\" at",
+        "200 \"probed|payload\" \"echo\"",
     );
 }
 

@@ -129,6 +129,11 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     );
     defer runtime.deinit();
 
+    // Cold dotted completion reaches the embedded builtin manifest before
+    // any Unit has loaded or published that module.
+    var cold_completion = try runtime.completionCandidates("json.pa");
+    cold_completion.deinit();
+
     try runOk(
         &runtime,
         "oom-numeric.ecl",
