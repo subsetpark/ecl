@@ -1234,13 +1234,15 @@ the same gate is part of `zig build test`.
 
 **Allocation-failure topology.** Focused constructors and other low-level
 allocation paths use exhaustive failure injection in the ordinary
-`zig build test` suite. Initialized-Session coverage is one consolidated
-probe in the separate ReleaseSafe `zig build test-oom` gate. That probe
-crosses kernels, primitives, session services, reflection, source and
-native loading, native call transactions, modules, and definition
-replacement in one deterministic lifetime, so each injected failure index
-pays for the embedded prelude bootstrap once. Native fixture code uses the
-real generated descriptor and public loader. The probe's tagged
+`zig build test` suite. Initialized-Session coverage is two coarse probes in
+the separate ReleaseSafe `zig build test-oom` gate. The established core
+bundle crosses kernels, primitives, session services, reflection, source and
+native loading, native call transactions, modules, and definition replacement
+in one deterministic lifetime. The M12 bundle crosses its embedded data
+modules and host IO surfaces in another. This removes the quadratic
+cross-product between two large allocation sets while still paying for one
+embedded-prelude bootstrap per bundle rather than per word. Native fixture
+code uses the real generated descriptor and public loader. The probes' tagged
 cooperative scheduler mode executes the same queue, wait-set, native
 continuation, cancellation, publication, and reclamation transitions on
 the root thread while starting no worker pool, making ordinal failure
@@ -1249,11 +1251,11 @@ a thread race; the 1/N-worker suites and TSan separately validate the
 threaded executor. `checkAllAllocationFailures` supplies exact
 allocated/freed accounting over the standard backing allocator; the debug
 test allocator is deliberately not nested underneath this already
-exhaustive wrapper. Because the wrapper replays the complete prefix for each
-later allocation ordinal, expensive fixed-work fixtures are ordered at the
-tail: embedded data modules precede host filesystem IO, and the attempted HTTP
-call is last. This changes no failure site or Session lifetime; it prevents
-unrelated later ordinals from repeatedly paying for earlier IO. Reaching
+exhaustive wrapper. Within the M12 bundle, expensive fixed-work fixtures are
+ordered at the tail: embedded data modules precede host filesystem IO, and the
+attempted HTTP call is last. This changes no failure site or Session lifetime;
+it prevents unrelated later ordinals from repeatedly paying for earlier IO.
+Reaching
 snippets use the smallest collection that enters each path, because additional
 elements add work but no allocation site.
 

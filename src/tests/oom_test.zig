@@ -1,13 +1,14 @@
 //! Slow, exhaustive allocation-failure coverage across initialized sessions.
 //!
-//! Keeping these surfaces in one probe avoids replaying the embedded prelude
-//! bootstrap independently for every feature-specific failure index.
+//! Two coarse probes keep the established core and the M12 data/host surfaces
+//! separate. Each still shares one embedded-prelude bootstrap across all of
+//! its related paths instead of bootstrapping once per word.
 //!
 //! Component-level probes elsewhere inject failures into a directly
 //! constructed subject (`list.zig`, `dict.zig`, `env.zig`, `equal.zig`, the
 //! reader, formatter, line-editor, registry, and native-validation probes);
-//! none of them bootstraps a Session. This is the only sweep over a fully
-//! initialized one, so a surface reachable only through a live Session — a
+//! none of them bootstraps a Session. These are the only sweeps over fully
+//! initialized Sessions, so a surface reachable only through one — a
 //! word, a prelude definition, a module, reflection, the loader, the
 //! scheduler — has no allocation-failure coverage unless a snippet below
 //! reaches it, and its behavioral tests still pass. Adding such a surface
@@ -281,12 +282,35 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             return error.UnexpectedLanguageError;
         },
     }
+}
 
-    // These fixtures have comparatively expensive fixed work. Keep them at
-    // the tail of the one consolidated Session sweep: checkAllAllocationFailures
-    // replays every prefix for every later allocation ordinal, so placing file
-    // IO, module parsing, and networking in the middle makes the sweep
-    // needlessly quadratic without reaching another failure site.
+fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
+    var locked_allocator = LockedAllocator{ .child = allocator };
+    const thread_safe_allocator = locked_allocator.allocator();
+    var output_buffer: [16384]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    var diagnostics_buffer: [1024]u8 = undefined;
+    var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+    var runtime = try session.Session.initWithHostConfig(
+        thread_safe_allocator,
+        &.{"argument"},
+        .{
+            .io = std.testing.io,
+            .output = &output,
+            .diagnostics = &diagnostics,
+            .environ = &.{.{ .name = "ECL_OOM_PROBE", .value = "probe" }},
+            .standard_input = .program_source,
+        },
+        .cooperative,
+    );
+    defer runtime.deinit();
+
+    // M12's embedded modules and host effects form a second coarse Session
+    // bundle. checkAllAllocationFailures is quadratic in one probe's total
+    // allocation count; keeping these paths in the older core bundle creates
+    // an enormous cross-product between unrelated ordinals. Two bundles still
+    // share one bootstrap across every related surface rather than starting a
+    // Session per word.
     // `rng` reaches the vector-draw driver, which builds its result across
     // resumptions, and the state list each primitive returns.
     try runOk(
@@ -353,6 +377,14 @@ test "oom: full-session surfaces propagate every allocation failure" {
     try std.testing.checkAllAllocationFailures(
         std.heap.smp_allocator,
         fullSessionAllocationProbe,
+        .{},
+    );
+}
+
+test "oom: standard-library and host surfaces propagate every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.heap.smp_allocator,
+        stdlibSessionAllocationProbe,
         .{},
     );
 }

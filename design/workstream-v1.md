@@ -462,10 +462,12 @@ build source audit scans comments, quotations, and multiline strings to
 enforce this layout without turning source substrings into runtime tests.
 
 Exhaustive failure injection is stratified by cost. Focused low-level probes
-remain in `zig build test`; initialized-Session paths share one ReleaseSafe
-probe under `zig build test-oom`, preserving kernel, primitive, reflection,
-loader, module, and metadata-publication coverage without independently
-replaying the embedded prelude for each surface.
+remain in `zig build test`; initialized-Session paths share two coarse
+ReleaseSafe probes under `zig build test-oom`. The established runtime and the
+M12 data/host surfaces each pay one prelude bootstrap, avoiding both a Session
+per surface and the quadratic cross-product of one ever-growing probe while
+preserving kernel, primitive, reflection, loader, module, host, and
+metadata-publication coverage.
 
 **`parse` is the pure reader boundary.** `( string -- q )` UTF-8-encodes the
 character vector, invokes the ordinary reader with source name `<parse>`,

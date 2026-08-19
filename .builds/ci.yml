@@ -42,6 +42,13 @@ tasks:
             exit 1
           fi
         done
+  # Run the longest independent proof first so an OOM regression does not sit
+  # behind the complete behavioral matrix before it becomes observable.
+  - test-oom: |
+      set -eu
+      set -o pipefail
+      cd ecl
+      zig build test-oom
   - test: |
       set -eu
       set -o pipefail
@@ -83,11 +90,6 @@ tasks:
       set -o pipefail
       cd ecl
       zig build test-workers -Doptimize=ReleaseSafe
-  - test-oom: |
-      set -eu
-      set -o pipefail
-      cd ecl
-      zig build test-oom
   - differential: |
       set -eu
       set -o pipefail
