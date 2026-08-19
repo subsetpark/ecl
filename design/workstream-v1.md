@@ -1312,7 +1312,10 @@ ReleaseSafe CI target is intentionally nonduplicative: it runs the M13
 retention, installed-binary, display-bounding, and architecture assertions
 after the manifest's existing behavioral, PTY, native, worker, fuzz, OOM,
 differential, TSan, and lint gates. The README and printing contract now match
-the binary. The prerelease tag remains outstanding until this candidate is
+the binary. Property-bearing test artifacts run through a classified child
+runner that suppresses Minish's successful stderr chatter and forwards actual
+failure diagnostics, so CI no longer labels green commands as failed. The
+prerelease tag remains outstanding until this candidate is
 committed and the complete CI job is green; tagging the preceding commit would
 not execute this milestone.
 

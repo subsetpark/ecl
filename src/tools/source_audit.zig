@@ -117,9 +117,10 @@ const source_groups = [_]SourceGroup{
         @embedFile("../kernel_random.zig"),
     } },
     .{ .production = false, .files = &.{
-        "source_audit.zig", "tools/source_audit.zig",
+        "source_audit.zig", "tools/source_audit.zig", "tools/captured_test_runner.zig",
     }, .sources = &.{
-        @embedFile("../source_audit.zig"), @embedFile("source_audit.zig"),
+        @embedFile("../source_audit.zig"),      @embedFile("source_audit.zig"),
+        @embedFile("captured_test_runner.zig"),
     } },
     .{ .production = true, .files = &.{
         "scheduler.zig", "scheduler_core.zig", "console.zig", "task_prims.zig",

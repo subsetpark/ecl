@@ -1264,6 +1264,11 @@ display rendering, and the source architecture audit. The SourceHut manifest
 runs it last. Earlier sequential tasks remain the owners of the general
 behavioral, PTY, native, worker-count, fuzz, exhaustive OOM, differential,
 TSan, and lint evidence; terminal acceptance does not replay those matrices.
+The root and e2e artifacts contain Minish properties, whose upstream runner
+prints a passing summary to stderr. A classified build-only child runner
+captures stderr on success and forwards stdout plus every real nonzero or
+abnormal-termination diagnostic. This keeps Zig 0.16 from rendering a passing
+test artifact as `failed command` without hiding actionable failure output.
 
 **Coverage-guided fuzz topology.** The parser, formatter, shrinkable
 arbitrary-byte edit-buffer model, pending-unit accumulator, Session

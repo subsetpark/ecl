@@ -177,6 +177,16 @@ pub fn build(b: *std.Build) void {
     const http_fixture_options = b.addOptions();
     http_fixture_options.addOptionPath("server_exe", http_fixture.getEmittedBin());
 
+    const captured_test_runner_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/captured_test_runner.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const captured_test_runner = b.addExecutable(.{
+        .name = "ecl-captured-test-runner",
+        .root_module = captured_test_runner_mod,
+    });
+
     const repl_tests = b.addSystemCommand(&.{"expect"});
     repl_tests.addFileArg(b.path("test/repl.exp"));
     repl_tests.addArtifactArg(exe);
@@ -201,7 +211,10 @@ pub fn build(b: *std.Build) void {
     test_mod.link_libc = true;
     const tests = b.addTest(.{ .root_module = test_mod });
     tests.linkage = runtime_linkage;
-    const run_tests = b.addRunArtifact(tests);
+    // Minish writes a passing summary to stderr. Run the two property-bearing
+    // artifacts as explicit children so Zig 0.16 does not report a successful
+    // test process as a failed command; the wrapper forwards real failures.
+    const run_tests = addCapturedTestRun(b, captured_test_runner, tests);
     run_tests.step.dependOn(&fixture_files.step);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
@@ -368,7 +381,7 @@ pub fn build(b: *std.Build) void {
     e2e_mod.addOptions("build_options", e2e_options);
     e2e_mod.addImport("minish", minish);
     const e2e_tests = b.addTest(.{ .root_module = e2e_mod });
-    const run_e2e_tests = b.addRunArtifact(e2e_tests);
+    const run_e2e_tests = addCapturedTestRun(b, captured_test_runner, e2e_tests);
     run_e2e_tests.step.dependOn(&fixture_files.step);
     test_step.dependOn(&run_e2e_tests.step);
 
@@ -502,4 +515,15 @@ pub fn build(b: *std.Build) void {
         acceptance_step.dependOn(&run_acceptance_unit_tests.step);
         acceptance_step.dependOn(&run_acceptance_e2e_tests.step);
     }
+}
+
+fn addCapturedTestRun(
+    b: *std.Build,
+    runner: *std.Build.Step.Compile,
+    tests: *std.Build.Step.Compile,
+) *std.Build.Step.Run {
+    const run = b.addRunArtifact(runner);
+    run.addArtifactArg(tests);
+    run.addArg(b.fmt("--seed=0x{x}", .{b.graph.random_seed}));
+    return run;
 }
