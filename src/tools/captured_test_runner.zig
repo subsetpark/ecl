@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) void {
 const Output = enum { stdout, stderr };
 
 fn fail(io: std.Io, message: []const u8) noreturn {
-    writeFile(io, .stderr, message) catch {};
+    writeFile(io, .stderr, message) catch std.process.exit(1);
     std.process.exit(1);
 }
 
