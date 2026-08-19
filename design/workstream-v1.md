@@ -467,7 +467,11 @@ ReleaseSafe probes under `zig build test-oom`. The established runtime and the
 M12 data/host surfaces each pay one prelude bootstrap, avoiding both a Session
 per surface and the quadratic cross-product of one ever-growing probe while
 preserving kernel, primitive, reflection, loader, module, host, and
-metadata-publication coverage.
+metadata-publication coverage. Separate filtered test artifacts execute the
+two exhaustive ordinal replays concurrently; completion of both is required
+for the gate. Because replay cost grows quadratically with the initialized
+Session's allocation count, this full-system proof is a release-candidate gate,
+not a per-push CI task; focused component probes remain blocking per push.
 
 **`parse` is the pure reader boundary.** `( string -- q )` UTF-8-encodes the
 character vector, invokes the ordinary reader with source name `<parse>`,
@@ -1312,9 +1316,11 @@ aggregate → emit) — the awk/sed/jq positioning made literal.
 **Status**: acceptance candidate exercised on 2026-08-19. The final
 ReleaseSafe CI target is intentionally nonduplicative: it runs the M13
 retention, installed-binary, display-bounding, and architecture assertions
-after the manifest's existing behavioral, PTY, native, worker, fuzz, OOM,
-differential, TSan, and lint gates. The README and printing contract now match
-the binary. Property-bearing test artifacts run through a classified child
+after the manifest's existing behavioral, PTY, native, worker, fuzz,
+differential, TSan, and lint gates. The exhaustive initialized-Session OOM
+sweep runs once against the release candidate instead of on every push; its
+focused component probes remain in the ordinary suite. The README and printing
+contract now match the binary. Property-bearing test artifacts run through a classified child
 runner that suppresses Minish's successful stderr chatter and forwards actual
 failure diagnostics, so CI no longer labels green commands as failed. The
 prerelease tag remains outstanding until this candidate is
@@ -2404,9 +2410,11 @@ INTERPRETER.md and its entry here is retired.
 - **Forge and CI: sourcehut** (M1 planning ruling). The repo is
   `git.sr.ht/~subsetpark/ecl` (unlisted; flip with
   `hut git update --visibility public`); CI is builds.sr.ht via
-  `.builds/ci.yml`. Every milestone's CI additions land in that
+  `.builds/ci.yml`. Every milestone's per-push CI additions land in that
   manifest — the workstream's earlier generic "CI" references mean
-  builds.sr.ht.
+  builds.sr.ht. The quadratic initialized-Session `test-oom` replay is an
+  explicit release-candidate proof rather than a per-push task; its focused
+  component probes remain in the blocking ordinary suite.
 - **Strictness posture, workstream-wide** (user directive at M1
   planning): blocking first-party gates — `zig fmt --check`, Debug +
   ReleaseSafe test matrix, a ThreadSanitizer test variant,

@@ -264,10 +264,11 @@ zig build acceptance -Doptimize=ReleaseSafe
 
 This is a narrow final gate: it runs the M13 release assertions and the
 source-architecture audit. In CI it follows, rather than repeats, the ordinary
-behavioral, PTY, snapshot, native-runtime, one/eight-worker, fuzz,
+behavioral, PTY, snapshot, native-runtime, one/eight-worker, fuzz, focused
 allocation-failure, differential, sanitizer, and lint gates.
 
-The exhaustive allocation-failure and sanitizer proofs remain separate:
+The exhaustive initialized-Session allocation-failure proof is run once for a
+release candidate, while the sanitizer proof remains in per-push CI:
 
 ```sh
 zig build test-oom < /dev/null

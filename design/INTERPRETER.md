@@ -1235,14 +1235,17 @@ the same gate is part of `zig build test`.
 **Allocation-failure topology.** Focused constructors and other low-level
 allocation paths use exhaustive failure injection in the ordinary
 `zig build test` suite. Initialized-Session coverage is two coarse probes in
-the separate ReleaseSafe `zig build test-oom` gate. The established core
-bundle crosses kernels, primitives, session services, reflection, source and
-native loading, native call transactions, modules, and definition replacement
-in one deterministic lifetime. The M12 bundle crosses its embedded data
-modules and host IO surfaces in another. This removes the quadratic
-cross-product between two large allocation sets while still paying for one
-embedded-prelude bootstrap per bundle rather than per word. Native fixture
-code uses the real generated descriptor and public loader. The probes' tagged
+the separate ReleaseSafe `zig build test-oom` release-candidate gate; its
+quadratic ordinal replay is intentionally not part of per-push CI. The
+established core bundle crosses kernels, primitives, session services,
+reflection, source and native loading, native call transactions, modules, and
+definition replacement in one deterministic lifetime. The M12 bundle crosses
+its embedded data modules and host IO surfaces in another. The build schedules
+the two filtered test artifacts independently, so their exhaustive ordinal
+replays run in parallel while each bundle remains deterministic. This removes
+the quadratic cross-product between two large allocation sets while still
+paying for one embedded-prelude bootstrap per bundle rather than per word.
+Native fixture code uses the real generated descriptor and public loader. The probes' tagged
 cooperative scheduler mode executes the same queue, wait-set, native
 continuation, cancellation, publication, and reclamation transitions on
 the root thread while starting no worker pool, making ordinal failure
@@ -1264,8 +1267,11 @@ and owns only the M13-specific ReleaseSafe assertions: the public
 definition/module retention soak, the installed-binary soul check, bounded
 display rendering, and the source architecture audit. The SourceHut manifest
 runs it last. Earlier sequential tasks remain the owners of the general
-behavioral, PTY, native, worker-count, fuzz, exhaustive OOM, differential,
-TSan, and lint evidence; terminal acceptance does not replay those matrices.
+behavioral, PTY, native, worker-count, fuzz, differential, TSan, and lint
+evidence; terminal acceptance does not replay those matrices. The exhaustive
+initialized-Session OOM gate runs once for a release candidate rather than on
+every pushed commit; focused component OOM probes remain in the ordinary test
+task.
 The root and e2e artifacts contain Minish properties, whose upstream runner
 prints a passing summary to stderr. A classified build-only child runner
 captures stderr on success and forwards stdout plus every real nonzero or

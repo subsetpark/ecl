@@ -24,82 +24,75 @@ tasks:
       set -eu
       set -o pipefail
       cd ecl
-      zig fmt --check .
+      timeout 2m zig fmt --check . < /dev/null
   - fmt-ecl: |
       set -eu
       set -o pipefail
       cd ecl
-      zig build
+      timeout 10m zig build < /dev/null
       formatted="$(mktemp)"
       trap 'rm -f "$formatted"' EXIT
       # This parser fixture is deliberately invalid input, so it has no canonical format.
       git ls-files '*.ecl' ':!:test/acceptance/load-parse-error.ecl' |
         while IFS= read -r source; do
-          ./zig-out/bin/ecl fmt "$source" > "$formatted"
+          timeout 30s ./zig-out/bin/ecl fmt "$source" < /dev/null > "$formatted"
           if ! cmp -s "$source" "$formatted"; then
             diff -u "$source" "$formatted" || true
             echo "ecl fmt check failed: $source" >&2
             exit 1
           fi
         done
-  # Run the longest independent proof first so an OOM regression does not sit
-  # behind the complete behavioral matrix before it becomes observable.
-  - test-oom: |
-      set -eu
-      set -o pipefail
-      cd ecl
-      zig build test-oom
   - test: |
       set -eu
       set -o pipefail
       cd ecl
-      zig build test
+      timeout 15m zig build test < /dev/null
   - test-safe: |
       set -eu
       set -o pipefail
       cd ecl
-      zig build test -Doptimize=ReleaseSafe
+      timeout 15m zig build test -Doptimize=ReleaseSafe < /dev/null
   - test-fast: |
       set -eu
       set -o pipefail
       cd ecl
-      zig build test -Doptimize=ReleaseFast
+      timeout 15m zig build test -Doptimize=ReleaseFast < /dev/null
   - test-repl: |
       set -eu
       set -o pipefail
       cd ecl
-      zig build test-repl
-      zig build test-repl -Doptimize=ReleaseSafe
+      timeout 10m zig build test-repl < /dev/null
+      timeout 10m zig build test-repl -Doptimize=ReleaseSafe < /dev/null
   - native: |
       set -eu
       set -o pipefail
       cd ecl
-      zig build native-fixture
-      zig build test-native-sdk-negative
-      zig build test-native-runtime
-      zig build test-native-runtime -Doptimize=ReleaseSafe
+      timeout 10m zig build native-fixture < /dev/null
+      timeout 10m zig build test-native-sdk-negative < /dev/null
+      timeout 10m zig build test-native-runtime < /dev/null
+      timeout 10m zig build test-native-runtime -Doptimize=ReleaseSafe < /dev/null
   - fuzz: |
       set -eu
       set -o pipefail
       cd ecl
       for target in reader formatter editor completion history pending scheduler native-descriptor native-call; do
-        zig build "fuzz-$target" --fuzz=100
+        timeout 10m zig build "fuzz-$target" --fuzz=100 < /dev/null
       done
   - test-workers: |
       set -eu
       set -o pipefail
       cd ecl
-      zig build test-workers -Doptimize=ReleaseSafe
+      timeout 15m zig build test-workers -Doptimize=ReleaseSafe < /dev/null
   - differential: |
       set -eu
       set -o pipefail
       cd ecl
-      zig build differential
+      timeout 10m zig build differential < /dev/null
   - test-tsan: |
       set -eu
       set -o pipefail
       cd ecl
-      zig build test-tsan
+      timeout 20m zig build test-tsan < /dev/null
   - lint: |
       set -eu
       set -o pipefail
@@ -107,9 +100,9 @@ tasks:
       echo '3290bd511d37e4f6ccca3621b9894cd6c378195cdaac27520d0bd894058b2b9b  /tmp/zlint' | sha256sum -c -
       chmod +x /tmp/zlint
       cd ecl
-      git ls-files '*.zig' | /tmp/zlint -S --deny-warnings
+      git ls-files '*.zig' | timeout 5m /tmp/zlint -S --deny-warnings
   - acceptance: |
       set -eu
       set -o pipefail
       cd ecl
-      zig build acceptance -Doptimize=ReleaseSafe
+      timeout 10m zig build acceptance -Doptimize=ReleaseSafe < /dev/null
