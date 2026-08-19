@@ -1307,6 +1307,15 @@ aggregate → emit) — the awk/sed/jq positioning made literal.
 
 ### Milestone 13: v1-acceptance
 
+**Status**: acceptance candidate exercised on 2026-08-19. The final
+ReleaseSafe CI target is intentionally nonduplicative: it runs the M13
+retention, installed-binary, display-bounding, and architecture assertions
+after the manifest's existing behavioral, PTY, native, worker, fuzz, OOM,
+differential, TSan, and lint gates. The README and printing contract now match
+the binary. The prerelease tag remains outstanding until this candidate is
+committed and the complete CI job is green; tagging the preceding commit would
+not execute this milestone.
+
 **Definition of Done**:
 The terminal acceptance suite below is implemented as a CI job
 (fixtures + expect scripts where interactive) and green. README rewritten

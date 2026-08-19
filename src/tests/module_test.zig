@@ -935,6 +935,44 @@ test "session: public definition mutation settles retirement every turn" {
     try std.testing.expectEqual(.ok, counting.deinit());
 }
 
+test "acceptance: definition and module re-registration soak keeps live memory bounded" {
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
+        defer runtime.deinit();
+        const soak = try std.Io.Dir.cwd().readFileAlloc(
+            std.testing.io,
+            "test/acceptance/retention-soak.ecl",
+            std.testing.allocator,
+            .unlimited,
+        );
+        defer std.testing.allocator.free(soak);
+
+        // The fixture consumes its count and leaves the operand stack empty.
+        // Warm both publication paths before measuring their settled live
+        // memory. Increasing the update history by 64x must not retain a
+        // corresponding chain of binding snapshots or module generations.
+        try expectOk(&runtime, "16");
+        try expectOk(&runtime, soak);
+        const warmed_live_bytes = counting.total_requested_bytes;
+
+        try expectOk(&runtime, "16");
+        try expectOk(&runtime, soak);
+        const after_small = counting.total_requested_bytes;
+
+        try expectOk(&runtime, "1024");
+        try expectOk(&runtime, soak);
+        const after_large = counting.total_requested_bytes;
+
+        const small_growth = after_small -| warmed_live_bytes;
+        const large_growth = after_large -| after_small;
+        try std.testing.expect(large_growth <= small_growth * 2 + 4096);
+        try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
+}
+
 test "session: mutation settlement is independent of a busy sole worker" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();

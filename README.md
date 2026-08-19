@@ -1,105 +1,175 @@
 # ecl
 
-ecl is a clean-slate homoiconic concatenative array language. Its reference
-implementation is the Zig interpreter at the repository root.
+ecl is a small homoiconic concatenative array language for command-line data
+work. The shipped implementation is the Zig interpreter in this repository:
+one executable containing the evaluator, interactive editor, core vocabulary,
+and standard library.
 
-## Repository map
+Version `0.1.0` is the first prerelease. The language is usable, but source and
+native-extension compatibility are not yet promised across prereleases.
 
-- [`design/`](design/) contains the language specification
-  ([`SPEC.md`](design/SPEC.md)) and the interpreter description
-  ([`INTERPRETER.md`](design/INTERPRETER.md)), plus the workstream plan and
-  preserved research.
-- [`src/`](src/) contains the Zig implementation. The value core, reader,
-  frame machine, chained environments, and module registry are live:
-  `zig build` produces a working calculator with transactional units,
-  definition-site privacy, declared module effects, hot reload, reflection,
-  direct `load`, `ECL_PATH` auto-loading, pervasive checked arithmetic,
-  sequence/shape/order/group kernels, exact whole-value `cmp`, immutable
-  list/dict updates and construction, kind reflection, cycling take,
-  count-vector where, canonical `str`, pervasive transcendentals, Unicode
-  split/join/format, isolated quotation combinators, inline control, pure
-  `parse`, guarded phrase recognition, identity task values, structured
-  concurrency on a lazy fixed worker pool, deadline waits, whole-call console
-  serialization, and an embedded source prelude.
-  Test suites and their helpers live under [`src/tests/`](src/tests/);
-  build-only architecture checks live under [`src/tools/`](src/tools/).
-To test the Zig implementation with the pinned Zig 0.16 toolchain:
+## Install
+
+Building requires Zig 0.16.0, the version pinned by `build.zig.zon` and CI.
 
 ```sh
-zig build test
-zig build test -Doptimize=ReleaseSafe
-zig build test -Doptimize=ReleaseFast
-zig build test-workers
-zig build test-oom
-zig build test-tsan
-zig build test-repl
-zig build test-repl -Doptimize=ReleaseSafe
-zig build native-fixture
-zig build test-native-sdk-negative
-zig build test-native-runtime
-zig build fuzz
-zig build source-audit
-zig build differential
-zig build test-snapshots
+git clone https://git.sr.ht/~subsetpark/ecl
+cd ecl
+zig build -Doptimize=ReleaseSafe
+install -m 0755 zig-out/bin/ecl ~/.local/bin/ecl
+ecl --version
 ```
 
-`zig build fuzz` runs the seed corpus as an ordinary smoke test. Add a bounded
-coverage-guided campaign for one independently wired target, for example
-`zig build fuzz-editor --fuzz=10K`. The available suffixes are `reader`,
-`formatter`, `editor`, `completion`, `history`, `pending`, `scheduler`,
-`native-descriptor`, and `native-call`; CI invokes
-every target separately for 100 generated iterations so Zig's single-target
-fuzz runner cannot silently select only one surface.
-The editor target is a shrinkable arbitrary-byte/action state machine that
-checks exact byte preservation, cursor and UTF-8 boundary invariants, the line
-limit, and owned-line cleanup after every transition.
+The executable does not need a separate prelude or standard-library directory.
+Optional source and native modules are discovered through `ECL_PATH`.
 
-`test-workers` runs the worker-sensitive public Session suite with build-time
-defaults of one and eight workers. CLI scheduler and native-runtime tests select
-their own one/eight-worker configurations without repeating unrelated parser,
-value, or formatter cases. `test` keeps focused allocator checks alongside
-ordinary behavioral coverage. `test-oom` is the separate ReleaseSafe gate for the
-costlier full-session sweep; it initializes one session and traverses every
-runtime surface under each injected allocation failure without repeatedly
-bootstrapping the embedded prelude.
+## A quick tour
 
-Scheduler interleavings are generated through the production scheduler and CLI
-with the pinned Minish property-testing library. Failures retain a fixed replay
-seed and are automatically shrunk to a smaller event trace.
-
-To run the calculator:
+ecl reads values and words from left to right. Values accumulate on a stack;
+words consume inputs and leave results.
 
 ```sh
-zig build
-./zig-out/bin/ecl '3 4 +'
-
-# Source modules are named registry values; files are transport.
-ECL_PATH=test/acceptance/modules \
-  ./zig-out/bin/ecl -e "'stats use answer"
-
-# Re-registering heals qualified, used, and aliased callers.
-./zig-out/bin/ecl test/acceptance/hot-reload.ecl
-
-# Concurrency is configured per process.
-ECL_WORKERS=8 ./zig-out/bin/ecl '[1 2 3] (dup *) @each'
-
-# Format a file, or pipe source through standard input. Output is stdout-only.
-./zig-out/bin/ecl fmt src/prelude.ecl
-./zig-out/bin/ecl fmt - < src/prelude.ecl
+ecl '3 4 +'                               # 7
+ecl '[1 2 3] 10 *'                        # [10 20 30]
+ecl '[[1 2] [3]] 10 *'                    # ([10 20] [30])
+ecl '[5 -3 8 -1] dup 0 > where at'        # [5 8]
 ```
+
+Parentheses quote code and generic data. Square brackets are the same list
+value with a request for flat specialization; printing exposes the resulting
+representation. Quotations can be applied sequentially or in isolated units:
+
+```sh
+ecl '6 (dup *) call'                       # 36
+ecl '[1 2 3] (dup *) each'                # [1 4 9]
+ECL_WORKERS=8 ecl '[1 2 3] (dup *) @each' # [1 4 9]
+ecl '(1 0 /) @attempt'                     # {'err {...}}
+```
+
+Definitions are ordinary quoted bodies. The optional annotation is reflective
+documentation and, when it contains an effect, a live module-boundary
+contract.
+
+```ecl
+### def square
+(dup *)
+(number -- square : "Return a number multiplied by itself.")
+'square def
+
+9 square
+```
+
+Run a source file without implicitly printing its final stack, or use `-e` to
+print the final stack. Scripts print explicitly with `pp` or `prin`.
+
+```sh
+ecl program.ecl
+ecl -e '9 square'
+printf 'a\nb\n' | ecl -e 'stdin lines len'
+```
+
+`str` is the canonical, round-trippable value rendering. `pp` and the REPL
+favor readable matrix layout and elide very large flat leaves, so a mistaken
+terminal probe stays bounded.
+
+## Standard library and data pipelines
+
+The `result`, `str`, `csv`, `json`, `table`, `http`, and `rng` modules are
+embedded and load on first use. A qualified name is enough; `use` additionally
+imports a module's public names into the current environment.
+
+```sh
+ecl '"hello" str.upper'                         # "HELLO"
+ecl '"a,b\nc,d" csv.parse'                      # (("a" "b") ("c" "d"))
+ecl '"{\"a\":[1,null]}" json.parse'            # {"a" (1 'null)}
+ecl -e "'result use 3 result.ok result.or-raise call"
+```
+
+Tables are validated ordinary dictionaries whose string keys name equal-length
+list columns. There is no hidden table runtime kind. CSV and JSON preserve
+their external data models; scalar conversion is explicit through
+`table.cast`.
+
+Host scripting words include `args`, `getenv`, `stdin`, `slurp`, `spit`,
+`lines`, and `exit`. `http.get` and `http.post` return ordinary response
+dictionaries. See [`design/SPEC.md`](design/SPEC.md) for the complete grammar,
+vocabulary, errors, and module contracts.
+
+## Interactive use
+
+Running `ecl` on a terminal starts the built-in line editor. It supports
+UTF-8-scalar cursor movement, common Emacs keys, a shared 100-line history,
+multiline continuation, and completion from the live environment. Tab
+completion understands qualified module names such as `str.<Tab>`.
+
+```sh
+ecl
+> 10
+10
+> dup *
+10 100
+```
+
+Ctrl-C abandons the current edit or continuation. Ctrl-D deletes at a nonempty
+cursor, exits at an empty primary prompt, and reports incomplete input at an
+empty continuation prompt. Raw editing is supported on Linux and macOS;
+non-TTY stdin remains a single noninteractive source unit.
+
+`ecl fmt FILE` formats source without evaluating it. Use `ecl fmt -` for
+standard input. Literal definitions and modules receive navigable
+`### def <name>` and `### module <name>` headers.
+
+## Source modules
+
+A source module is an ordinary `.ecl` file that registers a canonical module
+name. The filename is transport, not identity. For example, save this as
+`modules/stats.ecl`:
+
+```ecl
+### module stats
+(
+ ### def twice
+ (2 *)
+ (x -- y : "Double a number.")
+ 'twice def)
+'stats
+@module
+```
+
+Place the containing directory on `ECL_PATH`. On the first unresolved
+qualified reference or `use`, ecl loads `stats.ecl`, requires it to register
+`stats`, and retries resolution.
+
+```sh
+ECL_PATH="$PWD/modules" ecl '21 stats.twice'
+ECL_PATH="$PWD/modules" ecl "'stats use 21 twice"
+```
+
+Inside a module, `def` publishes a public word and `defp` publishes a private
+word. Public bodies can resolve their definition-site privates; callers cannot
+name them. Re-registering the same canonical name atomically publishes a new
+code generation, healing qualified, used, and aliased access paths.
+
+A module body may leave construction values behind. Those values initialize
+the module slot's durable stack exactly once. Module-homed code accesses that
+stack transactionally with `within` and transfers explicit outputs with
+`without`; re-registration preserves the durable stack. `unmodule` closes new
+admission and retires the slot after active operations quiesce.
+
+`ECL_PATH` is an ordered platform path list. For each root, ecl tries
+`<name>.ecl` before `<name>.eclmod`; the first existing candidate is
+authoritative, including parse, validation, or initialization failure.
 
 ## Native extensions
 
-Native extensions are optional, target-specific installed dependencies. Core
-and the standard library remain part of the single `ecl` binary; ecl does not
-generate machine code. When a module is absent from the registry, each
-`ECL_PATH` root is searched for `<name>.ecl` and then `<name>.eclmod`.
-The first existing candidate is authoritative, including load or validation
-failure.
+Native extensions are optional target-specific `.eclmod` shared libraries.
+They are for trusted Zig code that needs host performance or facilities not in
+the source language. Core and the embedded standard library do not depend on
+them.
 
-Zig authors on the pinned Zig 0.16 toolchain use the `ecl-native` SDK. A word's
-first parameter declares its effect, while additional typed parameters request
-capabilities; the SDK derives the descriptor and capability manifest:
+Author against the public `ecl-native` module on Zig 0.16.0. A callback's
+typed `Call` declares its exact effect. Additional typed parameters request
+the narrow capabilities the adapter will expose.
 
 ```zig
 const ecl = @import("ecl-native");
@@ -113,224 +183,102 @@ fn increment(call: *ecl.Call("n -- result")) ecl.CallbackResult {
 pub const Extension = ecl.module(.{
     .name = "sample",
     .doc = "Example native extension.",
-    .words = .{ecl.word("increment", "Increment an integer.", increment)},
+    .words = .{
+        ecl.word("increment", "Increment an integer.", increment),
+    },
 });
+
+comptime {
+    _ = Extension;
+}
 ```
 
-Add this repository as a `build.zig.zon` dependency, import its `ecl-native`
-module, and call `src/native/build_helper.zig`'s `addExtension` plus
-`installExtension` from the extension build. The helper emits
-`<name>.eclmod`; build it for the same target and ABI as the `ecl` process,
-install its directory on `ECL_PATH`, then use it normally:
+Add ecl as a package dependency and build one dynamic library whose installed
+name is exactly `<module>.eclmod`. This minimal `build.zig` uses the exported
+SDK module directly:
+
+```zig
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const ecl_dep = b.dependency("ecl", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const root = b.createModule(.{
+        .root_source_file = b.path("src/sample.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    root.addImport("ecl-native", ecl_dep.module("ecl-native"));
+    const extension = b.addLibrary(.{
+        .name = "sample",
+        .root_module = root,
+        .linkage = .dynamic,
+    });
+    const install = b.addInstallFileWithDir(
+        extension.getEmittedBin(),
+        .{ .custom = "ecl" },
+        "sample.eclmod",
+    );
+    b.getInstallStep().dependOn(&install.step);
+}
+```
+
+Then load it from its installed directory:
 
 ```sh
-ECL_PATH=/opt/ecl/extensions ./zig-out/bin/ecl -e \
-  "'sample use 41 sample.increment"
+zig build -Doptimize=ReleaseSafe
+ECL_PATH="$PWD/zig-out/ecl" ecl '41 sample.increment'
 ```
 
-An `ECL_PATH` containing `.eclmod` files is a trusted-code path. Opening a
-dynamic library executes arbitrary machine code before ecl can inspect its
-descriptor; validation is an ABI and capability check, not a sandbox. Native
-side effects are also outside operand-stack rollback.
+The loader validates the exact ABI version and record sizes, module identity,
+word uniqueness, effects, documentation, continuation layout, and declared
+capabilities before publishing anything. Validation is not sandboxing:
+opening a shared library executes arbitrary machine code, native side effects
+are outside operand-stack rollback, and a callback that does not return cannot
+be preempted. Only put trusted directories on `ECL_PATH`.
 
-Cooperative extensions request `ecl.Reschedule(Spec)` and explicitly consume
-scheduler budget. They cannot obtain the host allocator or scheduler. Machine
-code still cannot be preempted: setting `ECL_NATIVE_DIAGNOSTICS=1` enables a
-rate-limited, after-the-fact duration warning for long native slices, but it
-does not impose instruction limits or provide sandboxing. With the variable
-unset, the runtime samples no clock and emits no native timing diagnostics.
+Long or aggregate native work must be cooperative. Request
+`ecl.Reschedule(State)` and consume scheduler budget; request
+`*ecl.BuildValues` for incremental list or dictionary construction. Candidate
+handles live for one callback turn, while the host-owned builder carries
+validated values across yields. `ECL_NATIVE_DIAGNOSTICS=1` enables an
+after-the-fact warning for long callback slices; it does not impose a deadline
+or make untrusted code safe.
 
-Aggregate-producing words also request `*ecl.BuildValues`. Use
-`appendList`/`finishList` or `appendDict`/`finishDict` with a bounded logical
-slot, retain only an index/count in `Reschedule` state, and yield when either
-operation reports `yield_required`. Candidate handles are valid for one
-callback turn; the host-owned builder, not the candidate, carries appended
-values across turns. This incremental v2 path is required for aggregates that
-can exceed one 65,536-unit scheduler quantum.
+The supported SDK deliberately exposes no allocator, raw operand stack,
+environment, scheduler, reclamation root, external wake handle, quotation
+evaluator, or durable module-state authority.
 
-## Interactive REPL
+## Build and verification
 
-With no arguments and a TTY on stdin, ecl uses a dependency-free single-row
-ANSI/VT100 editor. Left/Right and Ctrl-B/Ctrl-F move by UTF-8 scalar; Home/End
-and Ctrl-A/Ctrl-E move to the ends. Backspace, Delete, Ctrl-H, Ctrl-D,
-Ctrl-K, Ctrl-U, Ctrl-W, and Ctrl-T provide the usual deletion, kill, and
-transpose operations. Up/Down and Ctrl-P/Ctrl-N navigate history; Ctrl-L
-clears and redraws the screen. Editing is scalar-safe rather than
-grapheme-aware, and a physical line is limited to 1 MiB.
-
-Tab completes the current atom from live public session/core names, public
-exports of used modules, and registered module and alias names. A unique match
-is inserted. Multiple matches extend their common prefix; pressing Tab again
-prints the sorted candidates. Dotted input such as `stats.<Tab>` completes
-only public exports and preserves the namespace or alias spelling that was
-typed. Completion does not intern partial input.
-
-Every nonempty submitted physical line enters a 100-entry history. When HOME
-is available, processes share `$HOME/.ecl_history`; writers merge under a
-sibling lock and replace the UTF-8 newline-delimited file atomically. Missing,
-corrupt, oversized, locked, or unwritable history never disables the REPL and
-emits at most one warning per Session. Ctrl-C abandons both the current edit
-and an incomplete continuation. Ctrl-D deletes at a nonempty cursor, exits at
-an empty primary prompt, and retains the incomplete-at-EOF diagnostic at an
-empty continuation prompt.
-
-Raw editing is supported on Linux and macOS, with terminal attributes restored
-on every return and error path. Other targets build with canonical line input.
-Piped stdin and explicit `-` remain one-unit noninteractive modes: they do not
-load history, interpret escape keys, or request completion. The Expect-based
-PTY contract is exercised with `zig build test-repl -Doptimize=ReleaseSafe`.
-Its binary corpus includes first-turn completion, queued lines, malformed and
-truncated UTF-8/escape input, EOF/error recovery, durable-history parseability,
-and terminal restoration.
-
-`ecl fmt` parses a trivia-preserving source tree without evaluating it and
-renders through a 100-column document algebra. Delimited forms use uniform
-structural alignment; comments and ordinary literal contents are preserved.
-Literal `def`/`defp` blocks receive canonical `### def <name>` section headers.
-Definition docstrings are the one reflowable string position: their canonical
-text folds physical prose lines, retains paragraphs and Markdown `- ` items,
-and therefore remains unchanged when the formatted definition is loaded.
-
-To check the promoted CLI reference behavior:
+The terminal release-candidate gate uses a ReleaseSafe binary:
 
 ```sh
-zig build test-snapshots
+zig build acceptance -Doptimize=ReleaseSafe
 ```
 
-The checked-in `ohsnap` transcript records the exact exit status, stdout, and
-stderr from the Zig executable for the 74 CLI cases that formerly defined the
-shared M5/M6 comparison surface. Updating it is an explicit source edit and
-review event. It also runs as part of ordinary `zig build test`; the named step
-keeps the semantic-reference gate independently runnable. To accept an
-intentional change, put `<!update>` at the start of the inline snapshot, run
-the named step once to rewrite it, inspect the diff, and rerun the step.
+This is a narrow final gate: it runs the M13 release assertions and the
+source-architecture audit. In CI it follows, rather than repeats, the ordinary
+behavioral, PTY, snapshot, native-runtime, one/eight-worker, fuzz,
+allocation-failure, differential, sanitizer, and lint gates.
 
-The separate in-process differential requires a fast-path hit for every
-registered idiom and compares it with forced-generic Zig execution. Successful
-applications must have identical representations and float bits; failing
-applications must both fail, while their exact error dictionaries may evolve
-independently. `flip`, `reshape`, `group`, `cmp`, `type`, `to-dict`, the
-transcendental floor, and the extended list-`put`/cycling-`take`/count-`where`
-semantics retain native unit and real-binary acceptance coverage.
-
-## M6 quotation and source surface
-
-`each`, `zip-with`, `for`, `fold`, and `scan` run each application on a fresh
-isolated stack and scope, enforcing `(a -- b)`, `(a b -- c)`, `(a --)`, and
-`(acc a -- acc)` contracts as appropriate. `infra` also isolates its
-quotation but collects any number of results. `times`, `cond`, and `case` run
-inline: `cond` is `[test action ... else]`, while `case` is
-`subject [key action ... else]` with inert keys. Both clause lists are
-nonempty, odd, exhaustive, and prevalidated before selection.
-
-The embedded, commented [`src/prelude.ecl`](src/prelude.ecl) is the sole body
-for the derived vocabulary: cleaves and control adapters, compact numeric and
-comparison compositions, collection helpers, aggregates, `find`, and the
-failure/result protocol. Performance-sensitive compact definitions may be
-recognized into private host callbacks, but those callbacks are not words and
-are unreachable through reflection or higher-order application. Each source
-definition is a navigable `### def <name>` block with reflective documentation:
-
-```ecl
-### def signum
-(dup 0 > swap 0 < -)
-(number -- sign : "Return -1, 0, or 1 according to the sign of a number.")
-'signum def
-```
-
-Top-level `def` accepts no annotation, an effect, a docstring, or both; module
-`def`/`defp` require the effect portion. The annotation is ordinary quotation
-data, `doc` retrieves its string through normal name resolution, and `see`
-prints a canonical re-readable definition. Documentation is canonicalized at
-definition time: formatting indentation and soft prose line breaks disappear,
-while paragraph boundaries and Markdown `- ` items remain. Ordinary strings
-retain raw newlines exactly. For example:
+The exhaustive allocation-failure and sanitizer proofs remain separate:
 
 ```sh
-./zig-out/bin/ecl -e \
-  '(dup *) (x -- y : "Square a numeric value.") '\''square def 4 square '\''square doc '\''square see'
+zig build test-oom < /dev/null
+zig build test-tsan < /dev/null        # Linux/x86_64 CI environment
 ```
 
-The public
-`parse` word uses the same bounded reader to return unevaluated forms with
-`<parse>` provenance; it performs no filesystem access.
+Useful focused gates include `zig build test`, `test-repl`, `test-workers`,
+`test-native-runtime`, `test-native-sdk-negative`, `differential`,
+`source-audit`, and `test-snapshots`. `zig build fuzz` runs all seed corpora;
+the named `fuzz-*` steps start bounded coverage-guided campaigns.
 
-## M12 standard library and host scripting
-
-Six modules ship inside the binary and load on first mention — by `use` or by
-a bare qualified reference — with no `ECL_PATH` and no filesystem:
-
-```sh
-ecl '"hello" str.upper pp'                      # "HELLO"
-ecl '"a,b\nc,d" csv.parse pp'                   # (("a" "b") ("c" "d"))
-ecl '"{\"a\":[1,null]}" json.parse pp'           # {"a" [1 'null]}
-```
-
-- **`result`** — `ok`/`err`/`ok?`/`err?`, `or-raise`/`or-else`, `and-then`, `map-err`, `recover`,
-  `recover-kinds`, `case`, `all`, `partition`, over the same
-  `{'ok values}`/`{'err error}` shape `@attempt` produces.
-- **`str`** — `upper lower trim trim-left trim-right starts? ends? contains?
-  index-of replace repeat pad-left pad-right`. Case mapping is ASCII-only.
-- **`csv`** — RFC 4180 `parse`/`emit`, text-preserving: no header
-  interpretation, no delimiter sniffing, no scalar inference.
-- **`json`** — RFC 8259 `parse`/`emit`. `null`, `true`, and `false` become the
-  ordinary symbols of those names, so a document round-trips.
-- **`table`** — validated ordinary column dicts, never a new runtime kind:
-  constructors, conversions, `select`/`rename`/`with-column`/`where`/`cast`,
-  and `group-by`/`aggregate`/`inner-join`/`left-join-with`.
-- **`http`** — client-only `get`/`post` returning
-  `{'status 'headers 'body}`.
-
-`csv` is a first-party consumer of the public native SDK; `json` and `http`
-are internal builtins because they need host authority — an allocator, TLS,
-sockets — that the SDK deliberately withholds from external modules.
-
-**Trust posture for `http`.** It reaches arbitrary hosts over TLS using the
-system CA bundle, sends only caller-supplied headers and bodies, and holds no
-credentials or proxy configuration. Its request blocks the calling unit's
-worker thread, which is the one documented v1 exception to cooperative
-scheduling, and v1 imposes no request deadline: an unresponsive server
-occupies its worker until the host gives up.
-
-The explicit host scripting words are `slurp` `( path -- string )`, `spit`
-`( string path -- )`, `getenv` `( name -- string )`, `stdin` `( -- string )`,
-and the derived `lines` `( path -- list )`. Absence is an error, never a
-blank: an unset variable or unreadable file raises `'io`, and `@attempt`/
-`result.or-else` is the defaulting idiom. `spit` truncates and replaces with no
-temporary file, so a failure part-way through can leave a partial file.
-
-## M7 tasks and structured concurrency
-
-`@spawn` runs a quotation in a fresh unit with an empty stack and returns an opaque
-identity handle. `await` parks the calling unit and returns the child's cached
-`{'ok [...]}` or `{'err {...}}` result; duplicated handles and multiple
-waiters observe the same result. `cancel` recursively flags a task tree,
-`tasks` snapshots pending descendants in `@spawn` preorder, `await-any` selects
-one indexed completion, and `await-for` limits a wait without cancelling the
-task. Source-defined `await-all` waits for a list of tasks and returns every
-ordinary result in input order without re-raising task failures. Task
-displays such as `<task:1>` are intentionally rejected by the reader because
-they are live Session capabilities, not serializable values.
-Large native operations, result publication, joins, and cancellation walks
-resume in bounded scheduler slices; no task runs another task recursively on
-its suspended native stack.
-
-`@each` is a public primitive backed by a bounded native driver. It spawns
-each child with the element as an explicit initial stack value, then transfers
-the exact task list into the evaluator's ordered join state. That state
-enforces the one-result-per-child, suffix-cancellation, and leftmost-failure
-contract; it is not a word and grants no private dictionary authority.
-Successful results and the leftmost failure are stable across worker counts.
-Cross-task console calls and genuinely concurrent `await-any` completions may
-reorder. Use `@each` for coarse independent work; ordinary pervasive array
-kernels are the efficient choice for element-wise arithmetic. `ECL_WORKERS`
-accepts only a positive base-10 integer and defaults to the available CPU
-count. Workers and the single timer thread are both started lazily.
-
-Scheduler policy is an allocation-free functional core; the threaded runtime
-is its imperative shell. Minish drives the production scheduler and shrinking
-public-CLI scenarios under a liveness deadline, so wait-registration and handler
-paths are exercised rather than inferred from a separate model. The core also
-tracks directory, cell, detached-delivery, and retired registration ownership;
-the shell uses stable owning wake handles and publishes a root wake only as its
-final access to that stack generation.
+Implementation architecture and proof boundaries are documented in
+[`design/INTERPRETER.md`](design/INTERPRETER.md). The historical milestone and
+decision record is [`design/workstream-v1.md`](design/workstream-v1.md).

@@ -941,9 +941,11 @@ as `[1 2 3]`, and the ragged result of `[[1 2] [3]] 10 *` prints as
 - `pp` and the REPL stack display are best-effort human layout: the same
   delimiters and atom spellings, with the rows of rectangular matrices
   (and one enclosing group axis) separated by newline-plus-indentation.
-  Their output carries no round-trip guarantee — huge leaves may be
-  elided so that displaying a large value cannot flood the terminal.
-  Only `str` is canonical.
+  Their output carries no round-trip guarantee. A flat numeric or symbol
+  leaf longer than 256 elements displays as `[<N-values-elided>]`; a
+  character leaf longer than 256 elements displays as
+  `"<N-characters-elided>"`. This whole-leaf marker keeps ordinary terminal
+  probes bounded. Only `str` is canonical and never elides.
 - The stack display keeps stack order left to right whatever a value's
   height. Each value occupies the rectangle its own layout needs, and the
   rectangles sit side by side sharing a bottom row, so a matrix grows the

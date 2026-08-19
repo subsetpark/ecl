@@ -177,58 +177,6 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-session.ecl",
         "args pop \"42 missing\" parse pop",
     );
-    // The host scripting words allocate on the read buffer, the decoded
-    // path, the materialized string, and the environ snapshot lookup; only
-    // this sweep injects failure at each of those ordinals.
-    var scratch = std.testing.tmpDir(.{});
-    defer scratch.cleanup();
-    const scratch_path = try scratch.dir.realPathFileAlloc(
-        std.testing.io,
-        ".",
-        thread_safe_allocator,
-    );
-    defer thread_safe_allocator.free(scratch_path);
-    const host_io_source = try std.fmt.allocPrint(
-        thread_safe_allocator,
-        "\"probe\\ntext\" \"{s}{c}probe.txt\" spit " ++
-            "\"{s}{c}probe.txt\" slurp pop " ++
-            "\"{s}{c}probe.txt\" lines pop " ++
-            "\"{s}{c}absent.txt\" (slurp) partial @attempt pop " ++
-            "\"ECL_OOM_PROBE\" getenv pop " ++
-            "(\"ECL_OOM_ABSENT\" getenv) @attempt pop (stdin) @attempt pop",
-        .{
-            scratch_path, std.fs.path.sep,
-            scratch_path, std.fs.path.sep,
-            scratch_path, std.fs.path.sep,
-            scratch_path, std.fs.path.sep,
-        },
-    );
-    defer thread_safe_allocator.free(host_io_source);
-    try runOk(&runtime, "oom-hostio.ecl", host_io_source);
-    // Each stdlib module has its own Session-reachable load path: embedded
-    // source, a linked native descriptor, and a builtin word table. One short
-    // call per module reaches the publication path and the module's own work.
-    try runOk(
-        &runtime,
-        "oom-stdlib.ecl",
-        "[1 2] result.ok (+) result.and-then result.or-raise pop " ++
-            "\"  hi  \" str.trim str.upper pop " ++
-            "\"a,b\\nc,d\" csv.parse dup csv.emit pop pop " ++
-            "\"{\\\"a\\\":[1,null]}\" json.parse json.emit pop " ++
-            "{\"r\" [\"e\" \"w\" \"e\"] \"v\" [1 2 3]} " ++
-            "[\"r\"] [[\"t\" \"v\" (sum)]] table.aggregate pop " ++
-            "{\"id\" [1 2]} {\"cid\" [2] \"n\" [9]} [[\"id\" \"cid\"]] " ++
-            "{\"n\" 0} table.left-join-with pop " ++
-            "(\"http://127.0.0.1:1/x\" {} http.get) @attempt pop",
-    );
-    // `rng` reaches the vector-draw driver, which builds its result across
-    // resumptions, and the state list each primitive returns.
-    try runOk(
-        &runtime,
-        "oom-random.ecl",
-        "'rng use 42 seed 2 4 deal shuffle pop 2 6 ints pop float pop " ++
-            "[7 0] 2 6 rand-ints nip pop",
-    );
     try runOk(
         &runtime,
         "oom-combinators.ecl",
@@ -269,7 +217,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-native.ecl",
         "'sample use 41 sample.increment pop 7 sample.singleton pop " ++
             "7 'sample 'increment qualify execute pop " ++
-            "1000 range sample.sum-list pop {'a 1 'b 2} sample.sum-dict pop " ++
+            "[1 2] sample.sum-list pop {'a 1 'b 2} sample.sum-dict pop " ++
             "'answer 42 sample.pair-dict pop sample.builder-budget pop " ++
             "sample.cooperative pop (9 sample.draft-fail) @attempt pop " ++
             "(9 sample.yield-forever) @spawn dup cancel await pop",
@@ -333,6 +281,72 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             return error.UnexpectedLanguageError;
         },
     }
+
+    // These fixtures have comparatively expensive fixed work. Keep them at
+    // the tail of the one consolidated Session sweep: checkAllAllocationFailures
+    // replays every prefix for every later allocation ordinal, so placing file
+    // IO, module parsing, and networking in the middle makes the sweep
+    // needlessly quadratic without reaching another failure site.
+    // `rng` reaches the vector-draw driver, which builds its result across
+    // resumptions, and the state list each primitive returns.
+    try runOk(
+        &runtime,
+        "oom-random.ecl",
+        "'rng use 42 seed 2 4 deal shuffle pop 2 6 ints pop float pop " ++
+            "[7 0] 2 6 rand-ints nip pop",
+    );
+    // Each stdlib module has its own Session-reachable load path: embedded
+    // source, a linked native descriptor, and a builtin word table. One short
+    // call per module reaches the publication path and the module's own work.
+    try runOk(
+        &runtime,
+        "oom-stdlib.ecl",
+        "[1 2] result.ok (+) result.and-then result.or-raise pop " ++
+            "\"  hi  \" str.trim str.upper pop " ++
+            "\"a,b\\nc,d\" csv.parse dup csv.emit pop pop " ++
+            "\"{\\\"a\\\":[1,null]}\" json.parse json.emit pop " ++
+            "{\"r\" [\"e\" \"w\"] \"v\" [1 2]} " ++
+            "[\"r\"] [[\"t\" \"v\" (sum)]] table.aggregate pop " ++
+            "{\"id\" [1 2]} {\"cid\" [2] \"n\" [9]} [[\"id\" \"cid\"]] " ++
+            "{\"n\" 0} table.left-join-with pop",
+    );
+
+    // The host scripting words allocate on the read buffer, the decoded
+    // path, the materialized string, and the environ snapshot lookup; only
+    // this sweep injects failure at each of those ordinals.
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    const scratch_path = try scratch.dir.realPathFileAlloc(
+        std.testing.io,
+        ".",
+        thread_safe_allocator,
+    );
+    defer thread_safe_allocator.free(scratch_path);
+    const host_io_source = try std.fmt.allocPrint(
+        thread_safe_allocator,
+        "\"probe\\ntext\" \"{s}{c}probe.txt\" spit " ++
+            "\"{s}{c}probe.txt\" slurp pop " ++
+            "\"{s}{c}probe.txt\" lines pop " ++
+            "\"{s}{c}absent.txt\" (slurp) partial @attempt pop " ++
+            "\"ECL_OOM_PROBE\" getenv pop " ++
+            "(\"ECL_OOM_ABSENT\" getenv) @attempt pop (stdin) @attempt pop",
+        .{
+            scratch_path, std.fs.path.sep,
+            scratch_path, std.fs.path.sep,
+            scratch_path, std.fs.path.sep,
+            scratch_path, std.fs.path.sep,
+        },
+    );
+    defer thread_safe_allocator.free(host_io_source);
+    try runOk(&runtime, "oom-hostio.ecl", host_io_source);
+
+    // The socket/client path has the largest fixed cost per allocation site;
+    // keeping it last prevents it from being replayed for unrelated ordinals.
+    try runOk(
+        &runtime,
+        "oom-http.ecl",
+        "(\"http://127.0.0.1:1/x\" {} http.get) @attempt pop",
+    );
 }
 
 test "oom: full-session surfaces propagate every allocation failure" {

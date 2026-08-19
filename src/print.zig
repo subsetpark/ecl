@@ -11,6 +11,7 @@ const poll_api = @import("poll.zig");
 pub const Value = value.Value;
 
 const RenderStyle = enum { canonical, display };
+const display_leaf_limit: u64 = 256;
 
 const DisplayScan = struct {
     collection: Value,
@@ -101,6 +102,10 @@ pub const RenderCursor = struct {
                 .word => |id| try self.pushBytes(intern.get(id)),
                 .list => |header| switch (header.kind()) {
                     .leaf_char1, .leaf_char2, .leaf_char4 => {
+                        if (self.style == .display and header.length() > display_leaf_limit) {
+                            try self.writeFmt(writer, "\"<{d}-characters-elided>\"", .{header.length()});
+                            return;
+                        }
                         try self.writeByte(writer, '"');
                         if (header.length() == 0) try self.writeByte(writer, '"') else try self.actions.push(.{ .string = .{ .collection = render.item, .index = 0 } });
                     },
@@ -114,6 +119,10 @@ pub const RenderCursor = struct {
                         try self.pushSequence(render.item, render.indent + 1, false);
                     },
                     .leaf_i64, .leaf_f64, .leaf_symbol => {
+                        if (self.style == .display and header.length() > display_leaf_limit) {
+                            try self.writeFmt(writer, "[<{d}-values-elided>]", .{header.length()});
+                            return;
+                        }
                         try self.writeByte(writer, '[');
                         try self.pushSequence(render.item, render.indent + 1, false);
                     },
@@ -578,6 +587,36 @@ test "char and string escapes follow the grammar" {
     });
     defer cleanup.releaseValue(string);
     try expectPrint("\"\\\"\\n\\\\\"", string);
+}
+
+test "display rendering elides huge leaves without changing canonical strings" {
+    const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+
+    var integers: [display_leaf_limit + 1]i64 = undefined;
+    for (&integers, 0..) |*item, index| item.* = @intCast(index);
+    const leaf = try list.fromI64Slice(allocator, &integers);
+    defer cleanup.releaseValue(leaf);
+
+    const displayed = try toOwnedDisplayString(allocator, leaf);
+    defer allocator.free(displayed);
+    try std.testing.expectEqualStrings("[<257-values-elided>]", displayed);
+
+    const canonical = try toOwnedString(allocator, leaf);
+    defer allocator.free(canonical);
+    try std.testing.expect(std.mem.startsWith(u8, canonical, "[0 1 2"));
+    try std.testing.expect(std.mem.endsWith(u8, canonical, "255 256]"));
+
+    var codepoints: [display_leaf_limit + 1]u32 = @splat('x');
+    const string = try list.fromCodepoints(allocator, &codepoints);
+    defer cleanup.releaseValue(string);
+    const displayed_string = try toOwnedDisplayString(allocator, string);
+    defer allocator.free(displayed_string);
+    try std.testing.expectEqualStrings("\"<257-characters-elided>\"", displayed_string);
+    const canonical_string = try toOwnedString(allocator, string);
+    defer allocator.free(canonical_string);
+    try std.testing.expectEqual(@as(usize, codepoints.len + 2), canonical_string.len);
 }
 
 test "deep rendering uses an explicit worklist" {

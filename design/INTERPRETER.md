@@ -63,10 +63,11 @@ primitives, operationalized as two rules:
   both styles. `str`, errors, and reflective source use compact canonical
   whitespace. REPL stack display and `pp` select the display style, which
   changes only the separators between rectangular matrix rows (and one
-  enclosing matrix-group axis) to newline-plus-indentation. Delimiters and
-  atom spellings are unchanged, so displayed arrays remain valid,
-  round-trippable source; the worklist keeps both styles free of host
-  recursion.
+  enclosing matrix-group axis) to newline-plus-indentation and replaces a
+  flat leaf longer than 256 elements with one count-bearing whole-leaf
+  marker. Canonical rendering never elides. The worklist keeps both styles
+  free of host recursion, and display elision happens before any element or
+  character from the huge leaf is scheduled.
 - **Dicts:** keys vector + values vector (insertion order for free) +
   cached per-entry hashes + linear scan below ~16 entries, one u32 hash
   index above. Hash agrees with `=`: numerics hash by numeric value (2 and
@@ -1248,7 +1249,21 @@ a thread race; the 1/N-worker suites and TSan separately validate the
 threaded executor. `checkAllAllocationFailures` supplies exact
 allocated/freed accounting over the standard backing allocator; the debug
 test allocator is deliberately not nested underneath this already
-exhaustive wrapper.
+exhaustive wrapper. Because the wrapper replays the complete prefix for each
+later allocation ordinal, expensive fixed-work fixtures are ordered at the
+tail: embedded data modules precede host filesystem IO, and the attempted HTTP
+call is last. This changes no failure site or Session lifetime; it prevents
+unrelated later ordinals from repeatedly paying for earlier IO. Reaching
+snippets use the smallest collection that enters each path, because additional
+elements add work but no allocation site.
+
+**Terminal acceptance topology.** `zig build acceptance` rejects Debug builds
+and owns only the M13-specific ReleaseSafe assertions: the public
+definition/module retention soak, the installed-binary soul check, bounded
+display rendering, and the source architecture audit. The SourceHut manifest
+runs it last. Earlier sequential tasks remain the owners of the general
+behavioral, PTY, native, worker-count, fuzz, exhaustive OOM, differential,
+TSan, and lint evidence; terminal acceptance does not replay those matrices.
 
 **Coverage-guided fuzz topology.** The parser, formatter, shrinkable
 arbitrary-byte edit-buffer model, pending-unit accumulator, Session

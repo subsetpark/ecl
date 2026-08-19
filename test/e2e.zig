@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const cli = @import("cli_test_support.zig");
 
@@ -61,6 +62,47 @@ test "soul test executes the installed artifact" {
     var result = try run(&.{ build_options.ecl_exe, "3 4 +" });
     defer result.deinit();
     try result.expect(.{ .exit_code = 0, .stdout = "7\n", .stderr = "" });
+
+    if (builtin.os.tag == .linux) {
+        // Hold the release binary at an explicit stdin pipe only after the
+        // soul result has been printed. /proc then observes the live process
+        // after Session execution began, proving the lazy scheduler did not
+        // create workers for an ordinary unit.
+        var child = try std.process.spawn(io, .{
+            .argv = &.{ build_options.ecl_exe, "-e", "3 4 + pp stdin pop" },
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        });
+        errdefer child.kill(io);
+        var stdout_buffer: [64]u8 = undefined;
+        var stdout_reader = child.stdout.?.reader(io, &stdout_buffer);
+        try std.testing.expectEqualStrings(
+            "7",
+            try stdout_reader.interface.takeDelimiterExclusive('\n'),
+        );
+
+        var task_path_buffer: [64]u8 = undefined;
+        const task_path = try std.fmt.bufPrint(
+            &task_path_buffer,
+            "/proc/{d}/task",
+            .{child.id.?},
+        );
+        var task_dir = try std.Io.Dir.openDirAbsolute(io, task_path, .{ .iterate = true });
+        defer task_dir.close(io);
+        var tasks = task_dir.iterate();
+        var thread_count: usize = 0;
+        while (try tasks.next(io)) |_| thread_count += 1;
+        try std.testing.expectEqual(@as(usize, 1), thread_count);
+
+        child.stdin.?.close(io);
+        child.stdin = null;
+        const term = try child.wait(io);
+        switch (term) {
+            .exited => |status| try std.testing.expectEqual(@as(u8, 0), status),
+            else => return error.UnexpectedTermination,
+        }
+    }
 }
 
 test "e2e: native extension discovery ABI and reflection acceptance" {
@@ -214,6 +256,28 @@ test "scripts print only explicitly" {
     });
     defer loud.deinit();
     try loud.expect(.{ .exit_code = 0, .stdout = "hi'visible\n", .stderr = "" });
+}
+
+test "e2e: pp and final stack display elide huge leaves while str stays canonical" {
+    var pretty = try run(&.{ build_options.ecl_exe, "-e", "4096 range pp" });
+    defer pretty.deinit();
+    try pretty.expect(.{
+        .exit_code = 0,
+        .stdout = "[<4096-values-elided>]\n",
+        .stderr = "",
+    });
+
+    var final_stack = try run(&.{ build_options.ecl_exe, "-e", "4096 range" });
+    defer final_stack.deinit();
+    try final_stack.expect(.{
+        .exit_code = 0,
+        .stdout = "[<4096-values-elided>]\n",
+        .stderr = "",
+    });
+
+    var canonical = try run(&.{ build_options.ecl_exe, "-e", "4096 range str len 4096 >" });
+    defer canonical.deinit();
+    try canonical.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
 }
 
 test "invalid UTF-8 files surface parse dicts" {

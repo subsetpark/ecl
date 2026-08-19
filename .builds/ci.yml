@@ -106,3 +106,8 @@ tasks:
       chmod +x /tmp/zlint
       cd ecl
       git ls-files '*.zig' | /tmp/zlint -S --deny-warnings
+  - acceptance: |
+      set -eu
+      set -o pipefail
+      cd ecl
+      zig build acceptance -Doptimize=ReleaseSafe

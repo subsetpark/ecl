@@ -464,4 +464,42 @@ pub fn build(b: *std.Build) void {
     );
     reference_step.dependOn(&run_reference_tests.step);
     test_step.dependOn(&run_reference_tests.step);
+
+    const acceptance_step = b.step(
+        "acceptance",
+        "Run the v1 terminal acceptance suite with a release binary",
+    );
+    if (optimize == .Debug) {
+        const release_required = b.addFail(
+            "v1 acceptance requires a release binary; pass -Doptimize=ReleaseSafe or ReleaseFast",
+        );
+        acceptance_step.dependOn(&release_required.step);
+    } else {
+        // SourceHut runs manifest tasks sequentially. The preceding named CI
+        // gates already own the full behavioral, PTY, native, worker-count,
+        // OOM, differential, TSan, and lint matrices; replaying them here
+        // would add no evidence. This target owns only the M13-specific
+        // release assertions and the architecture audit they rely on.
+        const acceptance_unit_tests = b.addTest(.{
+            .root_module = test_mod,
+            .filters = &.{"acceptance:"},
+        });
+        acceptance_unit_tests.linkage = runtime_linkage;
+        const run_acceptance_unit_tests = b.addRunArtifact(acceptance_unit_tests);
+        run_acceptance_unit_tests.step.dependOn(&fixture_files.step);
+
+        const acceptance_e2e_tests = b.addTest(.{
+            .root_module = e2e_mod,
+            .filters = &.{
+                "soul test executes the installed artifact",
+                "e2e: pp and final stack display elide huge leaves",
+            },
+        });
+        const run_acceptance_e2e_tests = b.addRunArtifact(acceptance_e2e_tests);
+        run_acceptance_e2e_tests.step.dependOn(&fixture_files.step);
+
+        acceptance_step.dependOn(&run_audit.step);
+        acceptance_step.dependOn(&run_acceptance_unit_tests.step);
+        acceptance_step.dependOn(&run_acceptance_e2e_tests.step);
+    }
 }
