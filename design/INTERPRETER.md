@@ -1272,6 +1272,12 @@ evidence; terminal acceptance does not replay those matrices. The exhaustive
 initialized-Session OOM gate runs once for a release candidate rather than on
 every pushed commit; focused component OOM probes remain in the ordinary test
 task.
+The complete behavioral suite runs per push in Debug and in the distributed
+ReleaseSafe mode. ReleaseFast disables checks rather than adding a detector,
+and ecl does not distribute that configuration, so its per-push gate compiles
+the real binary and runs the broad promoted CLI snapshot instead of replaying
+every internal test. The complete ReleaseFast suite remains a release-candidate
+matrix entry, where mode-specific optimized code generation is still checked.
 Repository verification classification includes every native SDK
 compile-negative input, including the fixture proving that native effects
 cannot declare the source-only `...` after-row.

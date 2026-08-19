@@ -267,6 +267,12 @@ source-architecture audit. In CI it follows, rather than repeats, the ordinary
 behavioral, PTY, snapshot, native-runtime, one/eight-worker, fuzz, focused
 allocation-failure, differential, sanitizer, and lint gates.
 
+Per-push CI runs the complete suite in Debug and in the distributed
+ReleaseSafe mode. ReleaseFast, which disables safety checks and is not a
+distributed configuration, compiles the real binary and runs the promoted CLI
+snapshot corpus per push; its complete suite belongs to the release-candidate
+matrix.
+
 The exhaustive initialized-Session allocation-failure proof is run once for a
 release candidate, while the sanitizer proof remains in per-push CI:
 

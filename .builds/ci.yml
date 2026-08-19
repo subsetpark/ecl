@@ -52,11 +52,15 @@ tasks:
       set -o pipefail
       cd ecl
       timeout 15m zig build test -Doptimize=ReleaseSafe < /dev/null
-  - test-fast: |
+  - smoke-fast: |
       set -eu
       set -o pipefail
       cd ecl
-      timeout 15m zig build test -Doptimize=ReleaseFast < /dev/null
+      # ReleaseFast removes checks rather than adding an analysis, and is not
+      # the distributed mode. Compile the real binary and exercise the broad
+      # promoted CLI transcript here; the full ReleaseFast suite belongs to
+      # the release-candidate matrix.
+      timeout 10m zig build test-snapshots -Doptimize=ReleaseFast < /dev/null
   - test-repl: |
       set -eu
       set -o pipefail

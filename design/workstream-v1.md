@@ -1331,7 +1331,10 @@ error selection, unified-value/float/UTF-8 edges, partial effects, the complete
 removed unit-constructor family, and result-envelope ownership. The prerelease
 tag remains outstanding until this audit commit is pushed and its complete CI
 job is green; tagging the preceding commit would not execute this final proof
-pass.
+pass. The per-push optimization matrix now runs the complete suite under Debug
+and the distributed ReleaseSafe mode, while ReleaseFast compiles and exercises
+the promoted real-binary snapshot corpus; the complete ReleaseFast suite joins
+the exhaustive OOM proof on the release-candidate matrix.
 
 **Definition of Done**:
 The terminal acceptance suite below is implemented as a CI job
