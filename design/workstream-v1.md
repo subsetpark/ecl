@@ -2314,6 +2314,29 @@ INTERPRETER.md and its entry here is retired.
 
 ## Decisions Made
 
+- **Verification is tiered, and the local tier is not a copy of CI
+  (2026-08-20, user ruling).** Local runs had become a repetition of the CI
+  matrix: `zig build test` alone measures 5m06s after a one-line change (about
+  120s of compilation and 184s of execution), which is too big to be an inner
+  loop, so it was skipped exactly when refactors needed it. There are now three
+  tiers. `zig build precommit` is the local gate at about 80 seconds: Zig and
+  ECL formatting, the source-architecture audit, the installed binary,
+  `zig build check`, and `zig build test-precommit`. Per-push CI
+  (`.builds/ci.yml`) keeps the complete matrix, and the release-candidate matrix
+  keeps the exhaustive initialized-Session OOM sweep and the complete
+  ReleaseFast suite. Two properties make the local tier honest rather than
+  merely short. Analysis is separated from execution: `check` builds every test
+  root with `generated_bin` unset, so all six roots are fully type-checked in
+  about 17 seconds and a filtered execution tier never silently becomes a
+  filtered compilation tier — the very first run of it found a stale
+  non-exhaustive `Value` switch in `test/idiom_differential.zig`. And execution
+  is selected by fully qualified test name, so a new test in an included source
+  or family joins the tier with no second manifest, while the families excluded
+  on measured cost or ambient resource (`concurrency:`, `typed differential:`,
+  `dict-text:`, `module:`, `native:`, `fuzz:`, `acceptance:`, PTY, sockets) are
+  listed in `build.zig` beside the measurement that justifies them. 205 of the
+  suite's 304 tests run in the local tier.
+
 - **Counted random floats and index-map fusion are separate optimizations
   (2026-08-20, user ruling).** The random vocabulary gains
   `rand-floats`/`rng.floats`, because a vector draw can fill one typed result

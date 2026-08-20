@@ -269,6 +269,31 @@ evaluator, or durable module-state authority.
 
 ## Build and verification
 
+Verification has three tiers. Only the first is meant to be run by hand.
+
+**Local — before every commit:**
+
+```sh
+zig build precommit < /dev/null
+```
+
+About eighty seconds after a source change. It checks Zig and ECL source
+formatting, runs the source-architecture audit, builds the binary,
+semantically analyzes every test root with codegen suppressed, and executes the
+fast core of the test suite. Its halves are also available alone: `zig build
+check` for whole-tree analysis, `zig build test-precommit` for the fast core,
+and `zig build check-ecl` for the checked-in ECL source conventions.
+
+**Per-push CI** (`.builds/ci.yml`) owns the complete matrix: the whole suite in
+Debug and in the distributed ReleaseSafe mode, plus PTY, native, snapshot,
+one/eight-worker, fuzz, differential, sanitizer, lint, and terminal-acceptance
+gates. Running that matrix locally is a slower copy of evidence CI already
+produces; `zig build test` alone is a five-minute round trip after a one-line
+change.
+
+**Release candidate** adds the exhaustive initialized-Session
+allocation-failure sweep and the complete ReleaseFast suite.
+
 The terminal release-candidate gate uses a ReleaseSafe binary:
 
 ```sh
@@ -294,10 +319,11 @@ zig build test-oom < /dev/null
 zig build test-tsan < /dev/null        # Linux/x86_64 CI environment
 ```
 
-Useful focused gates include `zig build test`, `test-repl`, `test-workers`,
-`test-native-runtime`, `test-native-sdk-negative`, `differential`,
-`source-audit`, and `test-snapshots`. `zig build fuzz` runs all seed corpora;
-the named `fuzz-*` steps start bounded coverage-guided campaigns.
+Focused CI gates are individually available for when a specific one is expected
+to fail: `zig build test`, `test-repl`, `test-workers`, `test-native-runtime`,
+`test-native-sdk-negative`, `differential`, `test-kernels`, `source-audit`, and
+`test-snapshots`. `zig build fuzz` runs all seed corpora; the named `fuzz-*`
+steps start bounded coverage-guided campaigns.
 
 Implementation architecture and proof boundaries are documented in
 [`design/INTERPRETER.md`](design/INTERPRETER.md). The historical milestone and

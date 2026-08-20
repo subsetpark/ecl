@@ -1356,6 +1356,29 @@ preceding material by one empty line.
 
 ## Verification
 
+**Three tiers, one of them local.** Verification is deliberately tiered by
+cost, because a gate nobody runs proves nothing. `zig build precommit` is the
+local tier: Zig and ECL formatting, the source-architecture audit, the binary,
+whole-tree semantic analysis, and the fast core of the suite, in about eighty
+seconds after a source change. Per-push CI owns the complete matrix, and the
+release-candidate matrix owns the exhaustive initialized-Session OOM sweep and
+the complete ReleaseFast suite.
+
+The local tier separates *analysis* from *execution*, and that separation is
+the load-bearing part. `zig build check` builds every test root — the in-process
+suite, the CLI e2e artifact, the native-runtime artifact, the differential
+harness, the snapshot transcript, and the OOM root — with `generated_bin` unset,
+so each one is fully type-checked while the codegen and link stages never run.
+That costs seconds rather than the minutes the same analysis costs when a binary
+is emitted, and it means a filtered execution tier never becomes a filtered
+*compilation* tier: a stale call in a test the local tier does not run is still
+a local failure. Execution is then selected by fully qualified test name, so a
+new test in an included source or family joins the tier without a second
+manifest, exactly as the `concurrency: ` prefix routes tests into `test-workers`
+and `test-tsan`. The excluded families are excluded on measured cost or on
+ambient resource — a PTY, a socket, a built native fixture — and `build.zig`
+records both the list and the measurement beside it.
+
 **The differential harness.** Every kernel and every idiom entry runs
 against the generic frame-machine path on generated inputs, asserting:
 value equality, representation parity (brackets), error kind/payload

@@ -1,3 +1,8 @@
+# Tier 2 of three. Tier 1 is `zig build precommit`, the ~80-second gate a
+# developer runs before every commit (formatting, source audit, whole-tree
+# analysis, fast core tests); it is a strict subset of what follows. Tier 3 is
+# the release-candidate matrix: the exhaustive initialized-Session
+# `zig build test-oom` sweep and the complete ReleaseFast suite.
 image: alpine/latest
 packages:
   - curl
@@ -25,6 +30,10 @@ tasks:
       set -o pipefail
       cd ecl
       timeout 2m zig fmt --check . < /dev/null
+  # `zig build check-ecl` makes the same assertion in-process for the precommit
+  # tier, alongside the standard-module `@defm` rule. This task keeps checking
+  # formatting through the installed binary's `fmt` subcommand, which is the
+  # surface a user actually runs.
   - fmt-ecl: |
       set -eu
       set -o pipefail

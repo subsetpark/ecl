@@ -575,6 +575,137 @@ pub fn build(b: *std.Build) void {
         acceptance_step.dependOn(&run_acceptance_unit_tests.step);
         acceptance_step.dependOn(&run_acceptance_e2e_tests.step);
     }
+
+    // ── Tier 1: the local precommit gate ───────────────────────────────────
+    //
+    // `zig build test` is a five-minute round trip after a one-line change,
+    // and a handful of volume-heavy tests own most of it: the concurrency
+    // fan-in, the typed differential, the dict-text update sweep, the
+    // cross-home effect/TCO walk, the maximum-nesting formatter case, and the
+    // twenty-thousand-deep recursion. None of those is the check that catches
+    // an ordinary edit. This tier is what a developer runs on every commit
+    // instead; CI (`.builds/ci.yml`) owns the complete matrix, and the
+    // release-candidate matrix owns the exhaustive initialized-Session OOM
+    // sweep plus the full ReleaseFast suite.
+    //
+    // The tier deliberately separates *analysis* from *execution*. Every test
+    // root is semantically analyzed with codegen suppressed, so a stale API
+    // call anywhere — including in a test this tier does not run — is still a
+    // local failure rather than a CI surprise. Only the fast core is then
+    // executed.
+    const analyzed_roots = [_]*std.Build.Module{
+        test_mod,
+        e2e_mod,
+        native_acceptance_mod,
+        differential_mod,
+        reference_mod,
+        full_session_oom_mod,
+    };
+    const analysis_step = b.step(
+        "check",
+        "Semantically analyze every test root without running or linking it",
+    );
+    for (analyzed_roots) |analyzed| {
+        const analysis = b.addTest(.{ .root_module = analyzed });
+        analysis.linkage = runtime_linkage;
+        // No binary is requested, so this is analysis only: the expensive
+        // codegen and link stages never run.
+        analysis.generated_bin = null;
+        analysis_step.dependOn(&analysis.step);
+    }
+
+    // Selection is by fully qualified test name, so a new test in an included
+    // source or family joins the tier automatically. Excluded by measured cost
+    // or by ambient resource: `concurrency:`, `typed differential:`,
+    // `dict-text:`, `module:`, `native:`, `fuzz:`, `acceptance:`,
+    // `line editor:` (PTY), and `http:` (sockets).
+    const precommit_tests = b.addTest(.{
+        .root_module = test_mod,
+        .filters = &.{
+            // Whole verification sources whose every test is fast.
+            "session.test.",
+            "heap.test.",
+            "list.test.",
+            "dict.test.",
+            "equal.test.",
+            "print.test.",
+            "env.test.",
+            "console.test.",
+            "tests.value_test.",
+            "tests.reader_test.",
+            "tests.machine_test.",
+            "tests.kernel_numeric_test.",
+            "tests.kernel_sequence_test.",
+            "tests.kernel_order_test.",
+            "tests.combinator_test.",
+            "tests.prelude_test.",
+            "tests.definition_test.",
+            "tests.formatter_test.",
+            "tests.module_value_test.",
+            "tests.stdlib_test.",
+            "tests.result_test.",
+            "tests.str_test.",
+            "tests.csv_test.",
+            "tests.json_test.",
+            "tests.table_test.",
+            "tests.random_test.",
+            "tests.hostio_test.",
+            // Fast families inside sources that also hold heavy tests.
+            "env:",
+            "modules:",
+            "module names:",
+            "registry:",
+            "loader:",
+            "reflection",
+            "session completion:",
+            "binding:",
+            "scope:",
+        },
+    });
+    precommit_tests.linkage = runtime_linkage;
+    const run_precommit_tests = addCapturedTestRun(b, captured_test_runner, precommit_tests);
+    run_precommit_tests.step.dependOn(&fixture_files.step);
+    const precommit_test_step = b.step(
+        "test-precommit",
+        "Run the fast core test tier (the test half of `precommit`)",
+    );
+    precommit_test_step.dependOn(&run_precommit_tests.step);
+
+    // Zig sources are canonically formatted; so is every checked-in ECL source,
+    // and every standard module still ends in `@defm`. All of it is cheap
+    // enough that there is no reason to discover it in CI instead.
+    const check_zig_fmt = b.addFmt(.{
+        .paths = &.{ "build.zig", "src", "test" },
+        .check = true,
+    });
+    const ecl_source_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/ecl_source_check.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    ecl_source_mod.addImport("ecl", mod);
+    ecl_source_mod.link_libc = true;
+    const ecl_source_exe = b.addExecutable(.{
+        .name = "ecl-source-check",
+        .root_module = ecl_source_mod,
+    });
+    const run_ecl_source = b.addRunArtifact(ecl_source_exe);
+    const ecl_source_step = b.step(
+        "check-ecl",
+        "Check checked-in ECL source conventions: canonical formatting and module registration",
+    );
+    ecl_source_step.dependOn(&run_ecl_source.step);
+
+    const precommit_step = b.step(
+        "precommit",
+        "The local gate: formatting, architecture audit, whole-tree analysis, and the fast test tier",
+    );
+    precommit_step.dependOn(&check_zig_fmt.step);
+    precommit_step.dependOn(&run_audit.step);
+    precommit_step.dependOn(&run_ecl_source.step);
+    precommit_step.dependOn(b.getInstallStep());
+    precommit_step.dependOn(analysis_step);
+    precommit_step.dependOn(&run_precommit_tests.step);
 }
 
 fn addCapturedTestRun(

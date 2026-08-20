@@ -24,10 +24,35 @@
   (`< /dev/null`) and under a `timeout` shorter than whatever will give up on it
   first. Closing stdin turns an accidental blocking read into immediate EOF, and
   a timeout that fires later than its supervisor reports nothing about why the
-  run died. `zig build test` is roughly three minutes and `build.zig` exposes no
-  test filter, so iterate on `zig build` plus real behavior against
-  `./zig-out/bin/ecl`, and run the whole suite in the background at boundaries
-  that matter.
+  run died.
+- **There are exactly three test tiers, and only the first one is yours.**
+  - **Local: `zig build precommit`.** Roughly 80 seconds after a source change.
+    It checks Zig formatting and the checked-in ECL source conventions
+    (`check-ecl`: canonical formatting, and a standard module's terminal form is
+    `@defm`), runs the architecture audit, builds the binary, semantically
+    analyzes *every* test root with codegen suppressed, and then executes the
+    fast core of the suite (`zig build test-precommit` alone).
+    Run it before every commit and after every patch in a stack. Iterate faster
+    still with `zig build` plus real behavior against `./zig-out/bin/ecl`, and
+    `zig build check` when all you need is "does the tree still compile".
+  - **CI: `.builds/ci.yml`.** The complete matrix in Debug and ReleaseSafe, plus
+    PTY, native, fuzz, worker-count, differential, TSan, lint, and terminal
+    acceptance. Do not run this locally. `zig build test` alone is a five-minute
+    round trip after a one-line change, and re-running the matrix by hand
+    replaces CI's evidence with a slower copy of it.
+  - **Release candidate.** The exhaustive initialized-Session `zig build
+    test-oom` sweep and the complete ReleaseFast suite, run once against a
+    candidate commit.
+  Run a single CI gate locally only when you have a specific reason to expect
+  *that* gate to fail — a scheduler lifetime change wants `test-tsan`, a new
+  allocation site in an initialized Session wants `test-oom`. Reach for the
+  reason first, not the matrix.
+- The precommit tier's fast-core filter list lives in `build.zig` beside its
+  measured justification. A test that costs more than about a second belongs
+  outside it; when you add one, either keep it in an already-excluded family or
+  say in the filter comment why the budget grew. Analysis is separate from
+  execution on purpose: excluding a test from the fast core must never exclude
+  it from compiling.
 - Reviewers do not rerun the test suites: running the gates is the implementer's
   job, and a reviewer's rerun measures the shared working tree — a moving target
   during patch execution — rather than the change under review. Review by reading
