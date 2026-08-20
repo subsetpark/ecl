@@ -1,4 +1,4 @@
-//! The embedded `str` module: the ruled thirteen-word text vocabulary.
+//! The embedded `str` module: text operations and prelude-derived string words.
 const std = @import("std");
 const support = @import("kernel_test_support.zig");
 
@@ -25,8 +25,8 @@ test "str: case operations are ASCII-only per the character ruling" {
         },
         .{
             .name = "case folding is idempotent",
-            .source = "\"MiXeD\" str.upper dup str.upper match " ++
-                "\"MiXeD\" str.lower dup str.lower match",
+            .source = "\"MiXeD\" str.upper dup str.upper match? " ++
+                "\"MiXeD\" str.lower dup str.lower match?",
             .expected = "1 1",
         },
         .{
@@ -61,7 +61,7 @@ test "str: trimming removes exactly the ASCII whitespace scalars" {
         },
         .{
             .name = "trimming is idempotent",
-            .source = "\"  hi  \" str.trim dup str.trim match",
+            .source = "\"  hi  \" str.trim dup str.trim match?",
             .expected = "1",
         },
     });
@@ -95,6 +95,12 @@ test "str: prefix suffix and search words agree on their edge cases" {
                 "\"hello\" \"l\" str.index-of \"hello\" \"hello\" str.index-of",
             .expected = "1 0 2 0",
         },
+        .{
+            .name = "the empty needle occurs at index zero",
+            .source = "\"a\" \"\" str.contains? \"\" \"\" str.contains? " ++
+                "\"a\" \"\" str.index-of \"\" \"\" str.index-of",
+            .expected = "1 1 0 0",
+        },
     });
     try support.expectErrors(&.{
         .{
@@ -111,8 +117,8 @@ test "str: replace repeat and padding build strings by explicit width" {
         .{
             .name = "replace every occurrence",
             .source = "\"a-b-c\" \"-\" \"+\" str.replace \"a-b\" \"-\" \"\" str.replace " ++
-                "\"abc\" \"z\" \"!\" str.replace",
-            .expected = "\"a+b+c\" \"ab\" \"abc\"",
+                "\"abc\" \"z\" \"!\" str.replace \"ab\" \"\" \"-\" str.replace",
+            .expected = "\"a+b+c\" \"ab\" \"abc\" \"a-b\"",
         },
         .{
             .name = "repeat concatenates copies",

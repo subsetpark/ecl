@@ -11,6 +11,7 @@ const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
 const sequence = @import("kernel_sequence.zig");
 const dict_text = @import("kernel_dict_text.zig");
+const combinators = @import("combinators.zig");
 
 const Value = value.Value;
 const Machine = machine.Machine;
@@ -24,6 +25,7 @@ pub const DirectOp = enum {
     reverse,
     distinct,
     vals,
+    dip,
 
     pub fn spelling(self: DirectOp) []const u8 {
         return @tagName(self);
@@ -158,6 +160,12 @@ const distinct_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "group" } },
     .{ .word = .{ .spelling = "keys" } },
 };
+const dip_pattern = [_]PatternAtom{
+    .{ .word = .{ .spelling = "swap" } },
+    .{ .word = .{ .spelling = "literal", .binding = .source } },
+    .{ .word = .{ .spelling = "compose", .binding = .source } },
+    .{ .word = .{ .spelling = "call" } },
+};
 const vals_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "dup" } },
     .{ .word = .{ .spelling = "keys" } },
@@ -170,7 +178,7 @@ const vals_pattern = [_]PatternAtom{
 const unary_count = std.meta.fields(numeric.UnaryOp).len;
 const binary_count = std.meta.fields(numeric.BinaryOp).len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 5 + 8 + 14]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 5 + 8 + 15]RegistryEntry = undefined;
     var index: usize = 0;
     for (std.meta.fields(numeric.UnaryOp)) |field| {
         entries[index] = .{
@@ -249,6 +257,7 @@ pub const registry = blk: {
         .{ .operation = .reverse, .pattern = &reverse_pattern },
         .{ .operation = .distinct, .pattern = &distinct_pattern },
         .{ .operation = .vals, .pattern = &vals_pattern },
+        .{ .operation = .dip, .pattern = &dip_pattern },
     }) |direct| {
         entries[index] = .{
             .context = .direct,
@@ -510,7 +519,13 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
             .fold, .scan => stack[stack.len - 3] == .list,
             .direct => evaluator.available() >= 2,
         },
-        .direct => evaluator.available() >= 1,
+        // `dip` is the one direct entry that needs a second input, and a
+        // non-list top must reach the generic composition so the type error
+        // still names the word that observed it.
+        .direct => |operation| switch (operation) {
+            .dip => evaluator.available() >= 2 and stack[stack.len - 1] == .list,
+            else => evaluator.available() >= 1,
+        },
     };
 }
 
@@ -545,6 +560,7 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
         .reverse => sequence.reverseForIdiom(evaluator),
         .distinct => order.distinctForIdiom(evaluator),
         .vals => dict_text.valsForIdiom(evaluator),
+        .dip => combinators.dipForIdiom(evaluator),
     };
 }
 
@@ -552,6 +568,16 @@ fn applyUnaryEach(evaluator: *Machine, operation: numeric.UnaryOp) MachineError!
     const stack = evaluator.unit.stack.items;
     const input = stack[stack.len - 2];
     std.debug.assert(input == .list);
+    // Over a numeric leaf, applying the operation to each element and pervading
+    // over the leaf are the same computation, so the recognizer enters the typed
+    // loop rather than driving one cursor and one scheduler turn per element.
+    if (numeric.typedUnaryCandidate(input)) {
+        var quotation = try evaluator.popValue();
+        defer quotation.deinit();
+        var operand = try evaluator.popValue();
+        defer operand.deinit();
+        return numeric.idiomUnaryStart(operation)(evaluator, &operand);
+    }
     const count: usize = @intCast(input.list.length());
     try PervadeEachDriver.install(evaluator, .{ .unary = operation }, input, null, count, 2);
 }
@@ -565,6 +591,21 @@ fn applyConstantEach(
     const stack = evaluator.unit.stack.items;
     const input = stack[stack.len - 2];
     std.debug.assert(input == .list);
+    if (numeric.typedConstantCandidate(operation, input, constant, constant_left)) {
+        var quotation = try evaluator.popValue();
+        defer quotation.deinit();
+        var operand = try evaluator.popValue();
+        defer operand.deinit();
+        // The captured constant is an atom, so it needs no reference of its own:
+        // the typed loop reads it with stride zero.
+        var scalar = heap.OwnedValue.init(evaluator.releaseDomain(), constant);
+        heap.retainValue(constant);
+        defer scalar.deinit();
+        return if (constant_left)
+            numeric.idiomBinaryStart(operation)(evaluator, &scalar, &operand)
+        else
+            numeric.idiomBinaryStart(operation)(evaluator, &operand, &scalar);
+    }
     const count: usize = @intCast(input.list.length());
     try PervadeEachDriver.install(
         evaluator,
@@ -584,6 +625,15 @@ fn applyZipWith(evaluator: *Machine, operation: numeric.BinaryOp) MachineError!v
     const right_list = right == .list;
     std.debug.assert(left_list or right_list);
     std.debug.assert(!left_list or !right_list or left.list.length() == right.list.length());
+    if (numeric.typedBinaryCandidate(operation, left, right)) {
+        var quotation = try evaluator.popValue();
+        defer quotation.deinit();
+        var right_operand = try evaluator.popValue();
+        defer right_operand.deinit();
+        var left_operand = try evaluator.popValue();
+        defer left_operand.deinit();
+        return numeric.idiomBinaryStart(operation)(evaluator, &left_operand, &right_operand);
+    }
     const count: usize = if (left_list) @intCast(left.list.length()) else @intCast(right.list.length());
     try PervadeEachDriver.install(
         evaluator,
@@ -711,6 +761,13 @@ fn applyReduction(
         popRelease(evaluator, 1);
         try evaluator.pushOwned(accumulator.take());
         return;
+    }
+    // Over a numeric leaf with an accumulator the operation preserves, the
+    // reduction is one typed sequential pass instead of one cursor and one
+    // scheduler turn per element. Association stays strictly left-to-right, so
+    // float sums keep the generic route's bits.
+    if (numeric.typedReduceCandidate(operation, input, initial)) {
+        return numeric.idiomReduceStart(operation)(evaluator, input, initial, scan);
     }
     const results: ?heap.OwnedValueBuffer = if (scan)
         try .init(evaluator.releaseDomain(), count)

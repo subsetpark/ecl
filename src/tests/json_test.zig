@@ -21,17 +21,17 @@ test "json: canonical corpus round-trips byte-identically" {
         },
         .{
             .name = "nested corpora round-trip",
-            .source = "\"{\\\"a\\\":1,\\\"b\\\":[2,3],\\\"c\\\":null}\" dup json.parse json.emit match " ++
-                "\"[1,2,[3,{\\\"x\\\":true}]]\" dup json.parse json.emit match " ++
-                "\"{\\\"nested\\\":{\\\"deep\\\":[1,{\\\"x\\\":null}]}}\" dup json.parse json.emit match",
+            .source = "\"{\\\"a\\\":1,\\\"b\\\":[2,3],\\\"c\\\":null}\" dup json.parse json.emit match? " ++
+                "\"[1,2,[3,{\\\"x\\\":true}]]\" dup json.parse json.emit match? " ++
+                "\"{\\\"nested\\\":{\\\"deep\\\":[1,{\\\"x\\\":null}]}}\" dup json.parse json.emit match?",
             .expected = "1 1 1",
         },
         .{
             .name = "escapes and empty aggregates round-trip",
-            .source = "\"\\\"a\\\\nb\\\\\\\"c\\\"\" dup json.parse json.emit match " ++
-                "\"[]\" dup json.parse json.emit match " ++
-                "\"{}\" dup json.parse json.emit match " ++
-                "\"\\\"\\\"\" dup json.parse json.emit match",
+            .source = "\"\\\"a\\\\nb\\\\\\\"c\\\"\" dup json.parse json.emit match? " ++
+                "\"[]\" dup json.parse json.emit match? " ++
+                "\"{}\" dup json.parse json.emit match? " ++
+                "\"\\\"\\\"\" dup json.parse json.emit match?",
             .expected = "1 1 1 1",
         },
         .{
@@ -75,7 +75,7 @@ test "json: null maps to the symbol null in both directions" {
             // the ints 0 and 1 and that mapping is not reversible.
             .name = "the other two literals are symbols too",
             .source = "\"[true,false,null]\" json.parse " ++
-                "\"[true,false,null]\" dup json.parse json.emit match",
+                "\"[true,false,null]\" dup json.parse json.emit match?",
             .expected = "['true 'false 'null] 1",
         },
         .{

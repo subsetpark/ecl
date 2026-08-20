@@ -165,6 +165,53 @@ fn times(evaluator: *Machine) MachineError!void {
     try evaluator.beginInlineApplication(state.application());
 }
 
+/// The private callback behind `dip` recognition. The prelude definition
+/// `(swap literal compose call)` stays authoritative; matching it lets the
+/// protected value ride in a continuation instead of building a capture
+/// quotation and a composition on every application.
+pub fn dipForIdiom(evaluator: *Machine) MachineError!void {
+    std.debug.assert(evaluator.available() >= 2);
+    var quotation = try evaluator.popQuotation();
+    defer quotation.deinit();
+    var protected = try evaluator.popValue();
+    defer protected.deinit();
+    const state = try evaluator.allocator().create(DipState);
+    state.* = .{
+        .quotation = .init(quotation.take().list),
+        .protected = .init(protected.take()),
+        .parent = evaluator.currentScope(),
+        .home = evaluator.currentHome(),
+        .word = evaluator.activeWordId(),
+    };
+    const word = state.word;
+    try evaluator.beginInlineApplication(state.application());
+    evaluator.setApplicationTraceParent(word);
+}
+
+const DipState = struct {
+    quotation: heap.Owned(*Header),
+    protected: heap.Owned(Value),
+    parent: *env.Scope,
+    home: ?*modules.ModuleHome,
+    word: u32,
+
+    fn application(self: *DipState) Application {
+        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, 0);
+    }
+
+    /// The protected value returns exactly once, after the quotation's own
+    /// application completes, so a failing quotation leaves it to this
+    /// driver's field ownership rather than to the rolled-back stack.
+    pub fn resumeApplication(evaluator: *Machine, self: *DipState, _: StackWindow) MachineError!?ApplicationStep {
+        evaluator.setActiveWord(self.word);
+        try evaluator.yieldNativeStep();
+        try evaluator.pushOwned(self.protected.take());
+        return null;
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
 const CondState = struct {
     clauses: heap.Owned(Value),
     expected: heap.Owned(Value),

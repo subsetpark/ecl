@@ -138,24 +138,36 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-numeric.ecl",
-        "[[1 2] [3]] 10 * pop [0 1] exp pop [0 1] [1 1] atan2 pop",
+        // The last three reach the typed seam's own allocation points and
+        // nothing else: a solely-owned operand taking the reuse claim, a
+        // recognized idiom entering the same loop, and the typed reduction.
+        // Each stays two elements long because the sweep replays a snippet once
+        // per allocation point.
+        "[[1 2] [3]] 10 * pop [0 1] exp pop [0 1] [1 1] atan2 pop " ++
+            "[1 2] 1 + pop [1 2] (1 +) each pop [1 2] 0 (+) fold pop " ++
+            "\"aλ\" 1 + pop \"aλ\" \"bβ\" - pop",
     );
     try runOk(
         &runtime,
         "oom-sequence.ecl",
         "[[1 2] [3 4]] flip pop [1 2 3] [2 3] reshape pop " ++
             "[[1 2] [3]] raze pop [1 2] 5 take pop [2 0 3] where pop " ++
+            // The typed copy and gather capabilities, and the typed draw fill.
+            "[1 2] reverse pop [1 2] [0 1] at pop [3 1] 2 4 rand-ints pop pop " ++
+            // Scalar and flat-list needles reach both typed membership drivers.
+            "1 [1 2] in? pop [1 3] [1 2] in? pop [1 2] dup 0 9 put pop pop " ++
+            "[1 2] [3] reshape pop " ++
             "{'rows ([10 20] [30 40])} ['rows 1 0] at-path pop",
     );
     try runOk(
         &runtime,
         "oom-display.ecl",
-        "[0 1 2 3 4 5] [2 3] reshape dup pp",
+        "[0 1 2 3 4 5] [2 3] reshape dup io.pp",
     );
     var display = try runtime.stackDisplay();
     display.deinit();
     try runOk(&runtime, "oom-display-cleanup.ecl", "pop");
-    try runOk(&runtime, "oom-order.ecl", "[2 1 2 1] grade group pop");
+    try runOk(&runtime, "oom-order.ecl", "[2 1 2 1] grade group pop [1 2 1] distinct pop");
     try runOk(
         &runtime,
         "oom-dict-text.ecl",
@@ -244,7 +256,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "oom-within.bump pop (oom-within.boom) @attempt pop " ++
             // The failing half must publish nothing, so the durable stack
             // still holds exactly what the successful half left.
-            "oom-within.peek 1 match pop " ++
+            "oom-within.peek 1 match? pop " ++
             // Namespaced registration plus branded qualification and ordinary
             // late-bound execution each have Session-only allocation paths.
             "((33) 'dynamic def) 'oom.namespaced @module " ++
@@ -270,7 +282,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         try runOk(
             &runtime,
             "oom-definition-preserved.ecl",
-            "allocation-target 1 match 'allocation-target doc \"Old.\" match",
+            "allocation-target 1 match? 'allocation-target doc \"Old.\" match?",
         );
         return err;
     };
@@ -348,12 +360,12 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     defer thread_safe_allocator.free(scratch_path);
     const host_io_source = try std.fmt.allocPrint(
         thread_safe_allocator,
-        "\"probe\\ntext\" \"{s}{c}probe.txt\" spit " ++
-            "\"{s}{c}probe.txt\" slurp pop " ++
-            "\"{s}{c}probe.txt\" lines pop " ++
-            "\"{s}{c}absent.txt\" (slurp) partial @attempt pop " ++
+        "\"probe\\ntext\" \"{s}{c}probe.txt\" io.spit " ++
+            "\"{s}{c}probe.txt\" io.slurp pop " ++
+            "\"{s}{c}probe.txt\" io.lines pop " ++
+            "\"{s}{c}absent.txt\" (io.slurp) partial @attempt pop " ++
             "\"ECL_OOM_PROBE\" getenv pop " ++
-            "(\"ECL_OOM_ABSENT\" getenv) @attempt pop (stdin) @attempt pop",
+            "(\"ECL_OOM_ABSENT\" getenv) @attempt pop (io.stdin) @attempt pop",
         .{
             scratch_path, std.fs.path.sep,
             scratch_path, std.fs.path.sep,

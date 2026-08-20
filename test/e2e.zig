@@ -69,7 +69,7 @@ test "soul test executes the installed artifact" {
         // after Session execution began, proving the lazy scheduler did not
         // create workers for an ordinary unit.
         var child = try std.process.spawn(io, .{
-            .argv = &.{ build_options.ecl_exe, "-e", "3 4 + pp stdin pop" },
+            .argv = &.{ build_options.ecl_exe, "-e", "3 4 + io.pp io.stdin pop" },
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .pipe,
@@ -248,7 +248,7 @@ test "scripts print only explicitly" {
 
     try temporary.dir.writeFile(io, .{
         .sub_path = "loud.ecl",
-        .data = "\"hi\" prin 'visible pp",
+        .data = "\"hi\" io.prin 'visible io.pp",
     });
     var loud = try cli.runOptions(.{
         .argv = &.{ exe, "loud.ecl" },
@@ -258,8 +258,8 @@ test "scripts print only explicitly" {
     try loud.expect(.{ .exit_code = 0, .stdout = "hi'visible\n", .stderr = "" });
 }
 
-test "e2e: pp and final stack display elide huge leaves while str stays canonical" {
-    var pretty = try run(&.{ build_options.ecl_exe, "-e", "4096 range pp" });
+test "e2e: io.pp and final stack display elide huge lists while str stays canonical" {
+    var pretty = try run(&.{ build_options.ecl_exe, "-e", "4096 range io.pp" });
     defer pretty.deinit();
     try pretty.expect(.{
         .exit_code = 0,
@@ -272,6 +272,18 @@ test "e2e: pp and final stack display elide huge leaves while str stays canonica
     try final_stack.expect(.{
         .exit_code = 0,
         .stdout = "[<4096-values-elided>]\n",
+        .stderr = "",
+    });
+
+    var parsed_rows = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        "\"a,b\\n\" 300 str.repeat csv.parse io.pp",
+    });
+    defer parsed_rows.deinit();
+    try parsed_rows.expect(.{
+        .exit_code = 0,
+        .stdout = "(<300-values-elided>)\n",
         .stderr = "",
     });
 
@@ -455,8 +467,8 @@ test "e2e: module removal acceptance" {
         build_options.ecl_exe,
         "-e",
         module ++ "'short 'core.c alias 'short unmodule " ++
-            "(core.c.peek) @attempt 'err at 'kind at pp (short.peek) @attempt 'err at 'kind at pp " ++
-            module ++ "core.c.peek pp",
+            "(core.c.peek) @attempt 'err at 'kind at io.pp (short.peek) @attempt 'err at 'kind at io.pp " ++
+            module ++ "core.c.peek io.pp",
     });
     defer by_name.deinit();
     try by_name.expect(.{
@@ -468,7 +480,7 @@ test "e2e: module removal acceptance" {
     var by_canonical_name = try run(&.{
         build_options.ecl_exe,
         "-e",
-        module ++ "'core.c unmodule (core.c.peek) @attempt 'err at 'kind at pp",
+        module ++ "'core.c unmodule (core.c.peek) @attempt 'err at 'kind at io.pp",
     });
     defer by_canonical_name.deinit();
     try by_canonical_name.expect(.{ .exit_code = 0, .stdout = "'undefined-word\n", .stderr = "" });
@@ -495,7 +507,7 @@ test "e2e: optional module annotation acceptance" {
 }
 
 test "e2e: direct load and ECL_PATH acceptance" {
-    var direct = try run(&.{ build_options.ecl_exe, "-e", "\"test/acceptance/load-stack.ecl\" load pp" });
+    var direct = try run(&.{ build_options.ecl_exe, "-e", "\"test/acceptance/load-stack.ecl\" load io.pp" });
     defer direct.deinit();
     try direct.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 
@@ -532,7 +544,7 @@ test "e2e: M5 ragged equality overflow float and char acceptance" {
     defer unified_print.deinit();
     try unified_print.expect(.{ .exit_code = 0, .stdout = "[1 2 3]\n", .stderr = "" });
 
-    var unified_match = try run(&.{ build_options.ecl_exe, "-e", "(1 2 3) [1 2 3] match" });
+    var unified_match = try run(&.{ build_options.ecl_exe, "-e", "(1 2 3) [1 2 3] match?" });
     defer unified_match.deinit();
     try unified_match.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
 
@@ -540,7 +552,7 @@ test "e2e: M5 ragged equality overflow float and char acceptance" {
     defer ragged.deinit();
     try ragged.expect(.{ .exit_code = 0, .stdout = "([10 20] [30])\n", .stderr = "" });
 
-    var equality = try run(&.{ build_options.ecl_exe, "-e", "[1 2] [1 2] = [1 2] [1 2] match" });
+    var equality = try run(&.{ build_options.ecl_exe, "-e", "[1 2] [1 2] = [1 2] [1 2] match?" });
     defer equality.deinit();
     try equality.expect(.{ .exit_code = 0, .stdout = "[1 1] 1\n", .stderr = "" });
 
@@ -559,7 +571,7 @@ test "e2e: M5 ragged equality overflow float and char acceptance" {
     defer float_domain.deinit();
     try float_domain.expect(.{ .exit_code = 1, .stderr_contains = &.{"'kind 'domain"} });
 
-    var signed_zero = try run(&.{ build_options.ecl_exe, "-e", "0.0 -0.0 = 0.0 -0.0 match" });
+    var signed_zero = try run(&.{ build_options.ecl_exe, "-e", "0.0 -0.0 = 0.0 -0.0 match?" });
     defer signed_zero.deinit();
     try signed_zero.expect(.{ .exit_code = 0, .stdout = "1 1\n", .stderr = "" });
 
@@ -741,8 +753,8 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .argv = &.{
             "./ecl",
             "-e",
-            "\"alpha\\nbeta\\n\" \"round-trip.txt\" spit " ++
-                "\"round-trip.txt\" slurp pp \"round-trip.txt\" lines pp",
+            "\"alpha\\nbeta\\n\" \"round-trip.txt\" io.spit " ++
+                "\"round-trip.txt\" io.slurp io.pp \"round-trip.txt\" io.lines io.pp",
         },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
@@ -755,14 +767,14 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
     });
 
     var missing_file = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "-e", "\"absent.txt\" slurp" },
+        .argv = &.{ "./ecl", "-e", "\"absent.txt\" io.slurp" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });
     defer missing_file.deinit();
     try missing_file.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'io", "'word 'slurp", "'path \"absent.txt\"" },
+        .stderr_contains = &.{ "'kind 'io", "'word 'io.slurp", "'path \"absent.txt\"" },
     });
 
     var unset = try cli.runOptions(.{
@@ -780,7 +792,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .argv = &.{
             "./ecl",
             "-e",
-            "(\"ECL_M12_ABSENT\" getenv) @attempt \"fallback\" result.or-else pp",
+            "(\"ECL_M12_ABSENT\" getenv) @attempt \"fallback\" result.or-else io.pp",
         },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
@@ -792,7 +804,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
     defer present.deinit();
     try present.put("ECL_M12_PRESENT", "visible");
     var read = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "-e", "\"ECL_M12_PRESENT\" getenv pp" },
+        .argv = &.{ "./ecl", "-e", "\"ECL_M12_PRESENT\" getenv io.pp" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &present,
     });
@@ -811,14 +823,14 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
 
     // DoD-32, to the letter.
     var dod32 = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "'str use \"hello\" str.upper pp" },
+        .argv = &.{ "./ecl", "'str use \"hello\" str.upper io.pp" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });
     defer dod32.deinit();
     try dod32.expect(.{ .exit_code = 0, .stdout = "\"HELLO\"\n", .stderr = "" });
 
-    // Both spellings of the first reference, for all six modules, from a
+    // Both spellings of the first reference, for every embedded module, from a
     // copied binary in an empty directory with an empty environment.
     const modules = [_]struct { name: []const u8, use: []const u8, qualified: []const u8 }{
         // The moved envelope words prove the whole point of the consolidation:
@@ -826,41 +838,38 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
         // auto-load, with no `ECL_PATH` and no readable directory.
         .{
             .name = "result",
-            .use = "'result use (2 3 +) @attempt or-raise pp",
-            .qualified = "(2 3 +) @attempt result.or-raise pp",
+            .use = "'result use (2 3 +) @attempt or-raise io.pp",
+            .qualified = "(2 3 +) @attempt result.or-raise io.pp",
         },
-        .{ .name = "str", .use = "'str use \"hi\" upper pp", .qualified = "\"hi\" str.upper pp" },
-        .{ .name = "csv", .use = "'csv use \"a,b\" parse pp", .qualified = "\"a,b\" csv.parse pp" },
-        .{ .name = "json", .use = "'json use \"[1]\" parse pp", .qualified = "\"[1]\" json.parse pp" },
+        .{ .name = "str", .use = "'str use \"hi\" upper io.pp", .qualified = "\"hi\" str.upper io.pp" },
+        .{ .name = "io", .use = "'io use \"hi\" print", .qualified = "\"hi\" io.print" },
+        .{ .name = "csv", .use = "'csv use \"a,b\" parse io.pp", .qualified = "\"a,b\" csv.parse io.pp" },
+        .{ .name = "json", .use = "'json use \"[1]\" parse io.pp", .qualified = "\"[1]\" json.parse io.pp" },
         .{
             .name = "table",
-            .use = "'table use {\"a\" [1]} valid? pp",
-            .qualified = "{\"a\" [1]} table.valid? pp",
+            .use = "'table use {\"a\" [1]} valid? io.pp",
+            .qualified = "{\"a\" [1]} table.valid? io.pp",
         },
         .{
             .name = "rng",
             // The default key is fixed, so an unseeded draw from a fresh
             // process is as reproducible as any other embedded module's output.
-            .use = "'rng use 6 int pp",
-            .qualified = "6 rng.int pp",
+            .use = "'rng use 6 int io.pp",
+            .qualified = "6 rng.int io.pp",
         },
         .{
             .name = "http",
-            .use = "'http use 'http.get doc len 0 > pp",
-            // Reflection resolves without loading, so the qualified spelling
-            // must execute a word; a refused port does that without a server.
-            .qualified = "(\"http://127.0.0.1:1/x\" {} http.get) @attempt result.ok? pp",
+            .use = "'http use 'http.get doc len 0 > io.pp",
+            .qualified = "'http.get doc len 0 > io.pp",
         },
     };
     const used_output = [_][]const u8{
-        "[5]\n", "\"HI\"\n", "((\"a\" \"b\"))\n",
-        "[1]\n", "1\n",      "1\n",
-        "1\n",
+        "[5]\n", "\"HI\"\n", "hi\n", "((\"a\" \"b\"))\n",
+        "[1]\n", "1\n",      "1\n",  "1\n",
     };
     const qualified_output = [_][]const u8{
-        "[5]\n", "\"HI\"\n", "((\"a\" \"b\"))\n",
-        "[1]\n", "1\n",      "1\n",
-        "0\n",
+        "[5]\n", "\"HI\"\n", "hi\n", "((\"a\" \"b\"))\n",
+        "[1]\n", "1\n",      "1\n",  "1\n",
     };
     for (modules, used_output, qualified_output) |module, want, qualified_want| {
         var used = try cli.runOptions(.{
@@ -914,7 +923,7 @@ test "e2e: result module exclusively owns the envelope vocabulary" {
     var unchanged = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(\"original\" fail) @attempt dup (result.or-raise) partial @attempt 'err at swap 'err at match",
+        "(\"original\" fail) @attempt dup (result.or-raise) partial @attempt 'err at swap 'err at match?",
     });
     defer unchanged.deinit();
     try unchanged.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
@@ -922,7 +931,7 @@ test "e2e: result module exclusively owns the envelope vocabulary" {
 
 test "e2e: stdin is data in -e mode and refuses to be read as program source" {
     var piped = try runWithInput(
-        &.{ build_options.ecl_exe, "-e", "stdin \"\\n\" split pp" },
+        &.{ build_options.ecl_exe, "-e", "io.stdin \"\\n\" split io.pp" },
         "one\ntwo\n",
     );
     defer piped.deinit();
@@ -932,14 +941,14 @@ test "e2e: stdin is data in -e mode and refuses to be read as program source" {
         .stderr = "",
     });
 
-    var twice = try runWithInput(&.{ build_options.ecl_exe, "-e", "stdin pop stdin" }, "data");
+    var twice = try runWithInput(&.{ build_options.ecl_exe, "-e", "io.stdin pop io.stdin" }, "data");
     defer twice.deinit();
     try twice.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{ "'kind 'io", "standard input has already been read" },
     });
 
-    var as_source = try runWithInput(&.{build_options.ecl_exe}, "stdin\n");
+    var as_source = try runWithInput(&.{build_options.ecl_exe}, "io.stdin\n");
     defer as_source.deinit();
     try as_source.expect(.{
         .exit_code = 1,
@@ -951,10 +960,10 @@ test "e2e: entropy is the one draw that differs between processes" {
     // Every other random word is a pure function of its state, so only a real
     // process can show that `entropy` reaches the host and returns something
     // new each time. Two 128-bit keys colliding is not a flake worth guarding.
-    var first = try run(&.{ build_options.ecl_exe, "-e", "entropy pp" });
+    var first = try run(&.{ build_options.ecl_exe, "-e", "entropy io.pp" });
     defer first.deinit();
     try first.expect(.{ .exit_code = 0, .stderr = "" });
-    var second = try run(&.{ build_options.ecl_exe, "-e", "entropy pp" });
+    var second = try run(&.{ build_options.ecl_exe, "-e", "entropy io.pp" });
     defer second.deinit();
     try second.expect(.{ .exit_code = 0, .stderr = "" });
     try std.testing.expect(!std.mem.eql(u8, first.stdout, second.stdout));
@@ -964,7 +973,7 @@ test "e2e: entropy is the one draw that differs between processes" {
     var seeded = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "'rng use entropy dup 'k set seed 100 6 ints 'a set k seed 100 6 ints a match pp",
+        "'rng use entropy dup 'k set seed 100 6 ints 'a set k seed 100 6 ints a match? io.pp",
     });
     defer seeded.deinit();
     try seeded.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });
@@ -992,27 +1001,27 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     }
     // The trap the convention exists to make visible: the caller's value is
     // on screen and out of reach, so the error names the isolation.
-    var isolated = try run(&.{ build_options.ecl_exe, "-e", "3 (1 +) @attempt pp" });
+    var isolated = try run(&.{ build_options.ecl_exe, "-e", "3 (1 +) @attempt io.pp" });
     defer isolated.deinit();
     try isolated.expect(.{
         .exit_code = 0,
         .stdout_contains = &.{ "'isolation @attempt", "with @attempt", "partial" },
     });
-    var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] (+ +) @each pp" });
+    var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] (+ +) @each io.pp" });
     defer child.deinit();
     try child.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{ "'isolation @each", "only its element" },
     });
     // And the seeding composition that fixes it.
-    var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) with @attempt pp" });
+    var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) with @attempt io.pp" });
     defer seeded.deinit();
     try seeded.expect(.{ .exit_code = 0, .stdout = "{'ok [4]}\n", .stderr = "" });
 
     var seeded_each = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[1 2] [10] (|x a| x a +) with @each pp",
+        "[1 2] [10] (|x a| x a +) with @each io.pp",
     });
     defer seeded_each.deinit();
     try seeded_each.expect(.{ .exit_code = 0, .stdout = "[11 12]\n", .stderr = "" });

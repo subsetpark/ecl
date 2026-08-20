@@ -88,9 +88,9 @@ send "10\r"
 expect_stack $name 10
 send "(99) 'kept def 20 + missing\r"
 expect_input_error $name "failing unit"
-send "dup pp\r"
+send "dup io.pp\r"
 expect_stack $name 10
-send "kept pp\r"
+send "kept io.pp\r"
 expect_stack $name 99
 clean_eof $name
 puts "PASS: $name"

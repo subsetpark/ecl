@@ -96,10 +96,10 @@ test "long top-level runs pack locally to the configured width" {
 }
 
 test "comments break only their local structural run" {
-    const source = "(dup type 'list match (# nested comment\n dup len dup 0 > swap 2 mod 1 = and) if)";
+    const source = "(dup type 'list match? (# nested comment\n dup len dup 0 > swap 2 mod 1 = and) if)";
     try expectFormat(
         source,
-        "(dup type 'list match\n" ++
+        "(dup type 'list match?\n" ++
             " (# nested comment\n" ++
             "  dup len dup 0 > swap 2 mod 1 = and)\n" ++
             " if)\n",

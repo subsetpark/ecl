@@ -21,7 +21,7 @@ test "table: constructors validate the column convention" {
         .{
             .name = "from-columns and from-rows agree",
             .source = "{\"a\" [1 2] \"b\" [3 4]} table.from-columns " ++
-                "[\"a\" \"b\"] [[1 3] [2 4]] table.from-rows match",
+                "[\"a\" \"b\"] [[1 3] [2 4]] table.from-rows match?",
             .expected = "1",
         },
         .{
@@ -101,7 +101,7 @@ test "table: conversions round-trip populated and zero-row schemas" {
         .{
             .name = "names and rows round-trip",
             .source = "{\"a\" [1 2] \"b\" [3 4]} dup dup table.names swap table.rows " ++
-                "table.from-rows match",
+                "table.from-rows match?",
             .expected = "1",
         },
         .{
@@ -121,14 +121,14 @@ test "table: conversions round-trip populated and zero-row schemas" {
         .{
             .name = "header-rows round-trips through from-header-rows",
             .source = "{\"a\" [1 2] \"b\" [3 4]} dup table.header-rows " ++
-                "table.from-header-rows match " ++
+                "table.from-header-rows match? " ++
                 "[\"a\" \"b\"] [] table.from-rows dup table.header-rows " ++
-                "table.from-header-rows match",
+                "table.from-header-rows match?",
             .expected = "1 1",
         },
         .{
             .name = "records round-trip when populated",
-            .source = "{\"a\" [1 2] \"b\" [3 4]} dup table.records table.from-records match",
+            .source = "{\"a\" [1 2] \"b\" [3 4]} dup table.records table.from-records match?",
             .expected = "1",
         },
         .{

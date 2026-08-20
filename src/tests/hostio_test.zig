@@ -1,5 +1,4 @@
-//! Explicit host scripting capabilities: `slurp`, `spit`, `getenv`,
-//! `stdin`, and the derived `lines`.
+//! Explicit host scripting capabilities in `io`, plus global `getenv`.
 //!
 //! Every case drives a whole Session over source strings only, so the
 //! traceless session heap is the right allocator (see `test_heap.zig`). The
@@ -121,22 +120,22 @@ test "hostio: slurp reads a UTF-8 file" {
     try scratch.write("greeting.txt", "héllo\nworld\n");
     try scratch.write("raw.bin", "\xff\xfe");
 
-    const read = try scratch.source("\"{s}\" slurp dup len swap", "greeting.txt");
+    const read = try scratch.source("\"{s}\" io.slurp dup len swap", "greeting.txt");
     defer allocator.free(read);
     try expectStack(.{ .source = read }, "12 \"héllo\\nworld\\n\"");
 
-    const empty = try scratch.source("\"{s}\" slurp", "empty.txt");
+    const empty = try scratch.source("\"{s}\" io.slurp", "empty.txt");
     defer allocator.free(empty);
     try scratch.write("empty.txt", "");
     try expectStack(.{ .source = empty }, "\"\"");
 
-    const invalid = try scratch.source("\"{s}\" slurp", "raw.bin");
+    const invalid = try scratch.source("\"{s}\" io.slurp", "raw.bin");
     defer allocator.free(invalid);
     try expectError(.{ .source = invalid }, .{
         .name = "invalid encoding",
         .source = invalid,
         .kind = "io",
-        .word = "slurp",
+        .word = "io.slurp",
         .message = "file is not valid UTF-8",
     });
 }
@@ -145,22 +144,22 @@ test "hostio: slurp missing file is io with path data" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
 
-    const missing = try scratch.source("\"{s}\" slurp", "absent.txt");
+    const missing = try scratch.source("\"{s}\" io.slurp", "absent.txt");
     defer allocator.free(missing);
     try expectError(.{ .source = missing }, .{
         .name = "missing file",
         .source = missing,
         .kind = "io",
-        .word = "slurp",
+        .word = "io.slurp",
         .message_contains = "FileNotFound",
-        .data = &.{.{ .name = "path", .expected = .{ .string = missing[1 .. missing.len - 7] } }},
+        .data = &.{.{ .name = "path", .expected = .{ .string = missing[1 .. missing.len - 10] } }},
     });
 
-    try expectError(.{ .source = "42 slurp" }, .{
+    try expectError(.{ .source = "42 io.slurp" }, .{
         .name = "non-string path",
-        .source = "42 slurp",
+        .source = "42 io.slurp",
         .kind = "type",
-        .word = "slurp",
+        .word = "io.slurp",
     });
 }
 
@@ -170,33 +169,33 @@ test "hostio: spit writes and slurp round-trips" {
 
     // Truncate-and-replace: the shorter second write leaves no tail behind.
     const round_trip = try scratch.source(
-        "\"first\\ntext\" \"{s}\" spit \"{s}\" slurp \"2nd\" \"{s}\" spit \"{s}\" slurp",
+        "\"first\\ntext\" \"{s}\" io.spit \"{s}\" io.slurp \"2nd\" \"{s}\" io.spit \"{s}\" io.slurp",
         "out.txt",
     );
     defer allocator.free(round_trip);
     try expectStack(.{ .source = round_trip }, "\"first\\ntext\" \"2nd\"");
 
-    const unwritable = try scratch.source("\"x\" \"{s}\" spit", "no-such-dir/out.txt");
+    const unwritable = try scratch.source("\"x\" \"{s}\" io.spit", "no-such-dir/out.txt");
     defer allocator.free(unwritable);
     try expectError(.{ .source = unwritable }, .{
         .name = "unwritable path",
         .source = unwritable,
         .kind = "io",
-        .word = "spit",
+        .word = "io.spit",
         .message_contains = "cannot write",
     });
 
-    try expectError(.{ .source = "42 \"p\" spit" }, .{
+    try expectError(.{ .source = "42 \"p\" io.spit" }, .{
         .name = "non-string contents",
-        .source = "42 \"p\" spit",
+        .source = "42 \"p\" io.spit",
         .kind = "type",
-        .word = "spit",
+        .word = "io.spit",
     });
-    try expectError(.{ .source = "\"x\" 42 spit" }, .{
+    try expectError(.{ .source = "\"x\" 42 io.spit" }, .{
         .name = "non-string path",
-        .source = "\"x\" 42 spit",
+        .source = "\"x\" 42 io.spit",
         .kind = "type",
-        .word = "spit",
+        .word = "io.spit",
     });
 }
 
@@ -241,17 +240,17 @@ test "hostio: lines splits slurped text" {
     defer scratch.deinit();
     try scratch.write("rows.txt", "a\nbb\n\nccc");
 
-    const split = try scratch.source("\"{s}\" lines", "rows.txt");
+    const split = try scratch.source("\"{s}\" io.lines", "rows.txt");
     defer allocator.free(split);
     try expectStack(.{ .source = split }, "(\"a\" \"bb\" \"\" \"ccc\")");
 
-    const missing = try scratch.source("\"{s}\" lines", "absent.txt");
+    const missing = try scratch.source("\"{s}\" io.lines", "absent.txt");
     defer allocator.free(missing);
     try expectError(.{ .source = missing }, .{
         .name = "lines propagates slurp failure",
         .source = missing,
         .kind = "io",
-        .word = "slurp",
+        .word = "io.slurp",
     });
 }
 
@@ -259,14 +258,30 @@ test "hostio: stdin reads piped data and errors when stdin is the source" {
     // The mode gate is a Session capability, so it is observable without a
     // child process: a session whose stdin is the program source refuses the
     // read outright. `test/e2e.zig` covers the real piped-data case.
-    try expectError(.{ .source = "stdin", .standard_input = .program_source }, .{
+    try expectError(.{ .source = "io.stdin", .standard_input = .program_source }, .{
         .name = "stdin is the program source",
-        .source = "stdin",
+        .source = "io.stdin",
         .kind = "io",
-        .word = "stdin",
+        .word = "io.stdin",
         .message = "stdin is the program source",
     });
     // Reading the real stream needs a real pipe, so the piped-data case and
     // the once-only claim are proven against the binary in `test/e2e.zig`
     // rather than by making this suite depend on the test runner's stdin.
+}
+
+test "hostio: io exports are documented and importable" {
+    const names = [_][]const u8{
+        "pp", "prin", "print", "inspect", "stdin", "slurp", "spit", "lines",
+    };
+    for (names) |name| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "'io.{s} doc len 0 >",
+            .{name},
+        );
+        defer allocator.free(source);
+        try expectStack(.{ .source = source }, "1");
+    }
+    try expectStack(.{ .source = "'io use 7 inspect" }, "7");
 }

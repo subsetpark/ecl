@@ -44,7 +44,7 @@ const cases = [_]Case{
     .{ .name = "drop", .source = "[1 2 3] -1 drop \"a\" 1 drop" },
     .{ .name = "at", .source = "[10 20 30] [2 0] at" },
     .{ .name = "where", .source = "[1 0 1] where" },
-    .{ .name = "in", .source = "[2 4] [1 2 3] in" },
+    .{ .name = "in?", .source = "[2 4] [1 2 3] in?" },
     .{ .name = "find", .source = "[2 3 2] 3 find" },
     .{ .name = "raze", .source = "[[1 2] [3]] raze" },
     .{ .name = "cat", .source = "\"ab\" \"cd\" cat \"\" \"\" cat" },
@@ -65,7 +65,7 @@ const cases = [_]Case{
     .{ .name = "parse", .source = "\"42\" parse first" },
     .{ .name = "each", .source = "[1 2 3] (dup *) each" },
     .{ .name = "zip-with", .source = "[1 2] [3 4] (+) zip-with" },
-    .{ .name = "for", .source = "[1 2] (pp) for" },
+    .{ .name = "for", .source = "[1 2] (io.pp) for" },
     .{ .name = "fold", .source = "[1 2 3] 0 (+) fold" },
     .{ .name = "scan", .source = "[1 2 3] 0 (+) scan" },
     .{ .name = "nip", .source = "1 2 nip" },
@@ -76,8 +76,8 @@ const cases = [_]Case{
     .{ .name = "sum", .source = "[1 2 3] sum" },
     .{ .name = "prod", .source = "[1 2 3] prod" },
     .{ .name = "mean", .source = "[1 2 3] mean" },
-    .{ .name = "print", .source = "\"hi\" print" },
-    .{ .name = "inspect", .source = "7 inspect" },
+    .{ .name = "print", .source = "\"hi\" io.print" },
+    .{ .name = "io.inspect", .source = "7 io.inspect" },
     .{ .name = "keep", .source = "2 (1 +) keep" },
     .{ .name = "bi", .source = "2 (1 +) (3 *) bi" },
     .{ .name = "tri", .source = "2 (1 +) (3 *) (4 -) tri" },
@@ -132,7 +132,7 @@ const cases = [_]Case{
     },
     .{ .name = "table invalid", .source = "{\"a\" [1 2] \"b\" [3]} table.rows" },
     .{ .name = "getenv unset", .source = "\"ECL_SNAPSHOT_ABSENT\" getenv" },
-    .{ .name = "slurp missing", .source = "\"no-such-file.ecl\" slurp" },
+    .{ .name = "slurp missing", .source = "\"no-such-file.ecl\" io.slurp" },
     .{ .name = "http dead port", .source = "\"http://127.0.0.1:1/x\" {} http.get" },
     // Bit patterns and counter-based randomness. Every draw here is seeded, so
     // the transcript is as reproducible as the arithmetic above it.
@@ -414,8 +414,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\[0 2]
         \\stderr:
         \\<empty>
-        \\=== in ===
-        \\source: [2 4] [1 2 3] in
+        \\=== in? ===
+        \\source: [2 4] [1 2 3] in?
         \\exit: 0
         \\stdout:
         \\[1 0]
@@ -562,7 +562,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== for ===
-        \\source: [1 2] (pp) for
+        \\source: [1 2] (io.pp) for
         \\exit: 0
         \\stdout:
         \\1
@@ -640,14 +640,14 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== print ===
-        \\source: "hi" print
+        \\source: "hi" io.print
         \\exit: 0
         \\stdout:
         \\hi
         \\stderr:
         \\<empty>
-        \\=== inspect ===
-        \\source: 7 inspect
+        \\=== io.inspect ===
+        \\source: 7 io.inspect
         \\exit: 0
         \\stdout:
         \\7
@@ -681,7 +681,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 320 'col 47}}
+        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 310 'col 47}}
         \\=== result.ok? ===
         \\source: (2 3 +) @attempt result.ok?
         \\exit: 0
@@ -786,7 +786,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 344 'col 20}}
+        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 334 'col 20}}
         \\=== qualify execute ===
         \\source: ((41) 'f def) 'core.utils @module 'core.utils 'f qualify execute
         \\exit: 0
@@ -884,7 +884,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 349 'col 14}}
+        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 339 'col 14}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0
@@ -898,7 +898,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'dip 'str.index-of] 'data {'source "prelude.ecl" 'line 349 'col 14}}
+        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'str.index-of] 'data {'source "prelude.ecl" 'line 339 'col 14}}
         \\=== csv parse ===
         \\source: "a,,c
         \\d" csv.parse
@@ -969,7 +969,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 349 'col 14}}
+        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 339 'col 14}}
         \\=== getenv unset ===
         \\source: "ECL_SNAPSHOT_ABSENT" getenv
         \\exit: 1
@@ -978,12 +978,12 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'io 'msg "environment variable `ECL_SNAPSHOT_ABSENT` is not set" 'word 'getenv 'trace ['getenv] 'data {'name "ECL_SNAPSHOT_ABSENT" 'source "<command>" 'line 1 'col 23}}
         \\=== slurp missing ===
-        \\source: "no-such-file.ecl" slurp
+        \\source: "no-such-file.ecl" io.slurp
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'io 'msg "cannot read `no-such-file.ecl`: FileNotFound" 'word 'slurp 'trace ['slurp] 'data {'path "no-such-file.ecl" 'source "<command>" 'line 1 'col 20}}
+        \\{'kind 'io 'msg "cannot read `no-such-file.ecl`: FileNotFound" 'word 'io.slurp 'trace ['io.slurp] 'data {'path "no-such-file.ecl" 'source "<command>" 'line 1 'col 20}}
         \\=== http dead port ===
         \\source: "http://127.0.0.1:1/x" {} http.get
         \\exit: 1

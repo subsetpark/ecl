@@ -92,4 +92,8 @@ test {
     _ = @import("tests/table_test.zig");
     _ = @import("tests/http_test.zig");
     _ = @import("tests/random_test.zig");
+    _ = @import("tests/kernel_typed_test.zig");
+    // The typed kernel machinery keeps its own probes; nothing in production
+    // dispatch references it yet, so the test build needs this to analyze it.
+    _ = @import("kernel_flat.zig");
 }

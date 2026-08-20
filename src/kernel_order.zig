@@ -10,15 +10,33 @@ const machine = @import("machine.zig");
 const support = @import("kernel_support.zig");
 const storage = @import("kernel_storage.zig");
 const poll = @import("poll.zig");
+const kernel_flat = @import("kernel_flat.zig");
 
 const Value = value.Value;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 
+/// The sized-operation taxonomy lives in `kernel_support` so the registry in
+/// `kernels.zig` classifies exactly the operations this installer publishes.
+const Op = support.OrderOp;
+
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    try support.installPrimitive(core, "cmp", cmpPrimitive);
-    try support.installPrimitive(core, "grade", gradePrimitive);
-    try support.installPrimitive(core, "group", groupPrimitive);
+    inline for (std.meta.fields(Op)) |field| {
+        const operation: Op = @enumFromInt(field.value);
+        try support.installPrimitive(core, operation.spelling(), bind(operation));
+    }
+}
+
+fn bind(comptime operation: Op) env.PrimitiveImpl {
+    return struct {
+        fn run(evaluator: *Machine) MachineError!void {
+            return switch (operation) {
+                .cmp => cmpPrimitive(evaluator),
+                .grade => gradePrimitive(evaluator),
+                .group => groupPrimitive(evaluator),
+            };
+        }
+    }.run;
 }
 
 fn cmpPrimitive(evaluator: *Machine) MachineError!void {
@@ -29,11 +47,88 @@ fn cmpPrimitive(evaluator: *Machine) MachineError!void {
     defer left.deinit();
     const left_item = left.borrow();
     const right_item = right.borrow();
+    if (try startTypedStringCompare(evaluator, left_item, right_item)) return;
     try evaluator.startDriver(CompareDriver{
         .left = .init(left.take()),
         .right = .init(right.take()),
         .cursor = .init(left_item, right_item),
     });
+}
+
+const order_leaf_kinds = [_]value.HeapKind{
+    .leaf_i64,
+    .leaf_f64,
+    .leaf_char1,
+    .leaf_char2,
+    .leaf_char4,
+    .leaf_symbol,
+};
+
+const char_leaf_kinds = [_]value.HeapKind{ .leaf_char1, .leaf_char2, .leaf_char4 };
+
+fn TypedStringCompareDriver(comptime left_kind: value.HeapKind, comptime right_kind: value.HeapKind) type {
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        left: heap.Owned(heap.LeafReader(left_kind)),
+        right: heap.Owned(heap.LeafReader(right_kind)),
+        cursor: kernel_flat.FlatCursor,
+
+        fn done(self: *Self, evaluator: *Machine, ordering: std.math.Order) machine.WorkProgress {
+            self.left.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            self.right.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            return .{ .output = .{ .int = switch (ordering) {
+                .lt => -1,
+                .eq => 0,
+                .gt => 1,
+            } } };
+        }
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            const context = support.Context{ .evaluator = evaluator };
+            const left = self.left.borrow().slice();
+            const right = self.right.borrow().slice();
+            if (try self.cursor.nextRange(context)) |range| {
+                for (range.start..range.end) |index| {
+                    const left_char: u32 = left[index];
+                    const right_char: u32 = right[index];
+                    if (left_char < right_char) return self.done(evaluator, .lt);
+                    if (left_char > right_char) return self.done(evaluator, .gt);
+                }
+            }
+            if (!self.cursor.complete()) return .yielded;
+            return self.done(evaluator, if (left.len < right.len)
+                .lt
+            else if (left.len > right.len)
+                .gt
+            else
+                .eq);
+        }
+    };
+}
+
+fn startTypedStringCompare(evaluator: *Machine, left: Value, right: Value) MachineError!bool {
+    if (!left.isString() or !right.isString()) return false;
+    const left_kind = left.list.kind();
+    const right_kind = right.list.kind();
+    inline for (char_leaf_kinds) |candidate_left| {
+        if (left_kind == candidate_left) inline for (char_leaf_kinds) |candidate_right| {
+            if (right_kind == candidate_right) {
+                const Driver = TypedStringCompareDriver(candidate_left, candidate_right);
+                try evaluator.startDriver(Driver{
+                    .left = .init(heap.LeafReader(candidate_left).acquire(left.list)),
+                    .right = .init(heap.LeafReader(candidate_right).acquire(right.list)),
+                    .cursor = kernel_flat.FlatCursor.init(@min(
+                        @as(usize, @intCast(left.list.length())),
+                        @as(usize, @intCast(right.list.length())),
+                    )),
+                });
+                return true;
+            }
+        };
+    }
+    unreachable;
 }
 
 fn gradePrimitive(evaluator: *Machine) MachineError!void {
@@ -44,6 +139,7 @@ fn startGrade(evaluator: *Machine, sorted_values: bool) MachineError!void {
     var collection = try evaluator.popValue();
     defer collection.deinit();
     if (collection.borrow() != .list) return evaluator.typeError("a comparable list");
+    if (try startTypedGrade(evaluator, collection.borrow(), sorted_values)) return;
     const count: usize = @intCast(collection.borrow().list.length());
     const indices = try evaluator.allocator().alloc(usize, count);
     try evaluator.startDriver(GradeDriver{
@@ -51,6 +147,148 @@ fn startGrade(evaluator: *Machine, sorted_values: bool) MachineError!void {
         .sorted_values = sorted_values,
         .indices = .init(indices),
     });
+}
+
+fn typedOrder(comptime kind: value.HeapKind, left: heap.LeafElement(kind), right: heap.LeafElement(kind)) std.math.Order {
+    return switch (kind) {
+        .leaf_i64, .leaf_char1, .leaf_char2, .leaf_char4 => if (left < right)
+            .lt
+        else if (left > right)
+            .gt
+        else
+            .eq,
+        .leaf_f64 => if (left < right) .lt else if (left > right) .gt else .eq,
+        .leaf_symbol => unreachable,
+        .generic_spine, .dict, .task, .reserved_mask => unreachable,
+    };
+}
+
+fn TypedGradeComparator(comptime kind: value.HeapKind) type {
+    const Element = heap.LeafElement(kind);
+    return struct {
+        pub const Context = []const Element;
+        pub const Cursor = struct { ordering: std.math.Order };
+
+        pub fn init(collection: Context, left: usize, right: usize) Cursor {
+            return .{ .ordering = typedOrder(kind, collection[left], collection[right]) };
+        }
+
+        pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
+            _ = budget;
+            return .{ .complete = cursor.ordering };
+        }
+    };
+}
+
+fn TypedGradeDriver(comptime kind: value.HeapKind) type {
+    const Element = heap.LeafElement(kind);
+    const Sort = poll.MergeSortCursor(usize, TypedGradeComparator(kind));
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        collection: heap.Owned(heap.LeafReader(kind)),
+        indices: heap.Owned([]usize),
+        sorted_values: bool,
+        phase: enum { initialize, sort, output } = .initialize,
+        cursor: kernel_flat.FlatCursor,
+        sort: ?heap.Owned(Sort) = null,
+        index_writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
+        value_writer: ?heap.Owned(heap.LeafWriter(kind)) = null,
+
+        fn finish(self: *Self, evaluator: *Machine) machine.WorkProgress {
+            self.collection.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            return .{ .output = if (self.sorted_values)
+                self.value_writer.?.borrowMut().finish()
+            else
+                self.index_writer.?.borrowMut().finish() };
+        }
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            const context = support.Context{ .evaluator = evaluator };
+            switch (self.phase) {
+                .initialize => {
+                    const range = (try self.cursor.nextRange(context)).?;
+                    const indices = self.indices.borrow();
+                    for (range.start..range.end) |index| indices[index] = index;
+                    if (!self.cursor.complete()) return .yielded;
+                    self.sort = .init(try Sort.init(
+                        evaluator.allocator(),
+                        indices,
+                        self.collection.borrow().slice(),
+                    ));
+                    self.phase = .sort;
+                    return .yielded;
+                },
+                .sort => {
+                    const charge = @max(context.remaining(), 1);
+                    try context.advance(charge);
+                    switch (self.sort.?.borrowMut().advance(charge)) {
+                        .pending => return .yielded,
+                        .complete => {
+                            self.sort.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                            self.sort = null;
+                            const count = self.indices.borrow().len;
+                            if (self.sorted_values) {
+                                self.value_writer = .init(try heap.LeafWriter(kind).init(evaluator.allocator(), count));
+                            } else {
+                                self.index_writer = .init(try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), count));
+                            }
+                            self.cursor = kernel_flat.FlatCursor.init(count);
+                            self.phase = .output;
+                            return .yielded;
+                        },
+                    }
+                },
+                .output => {
+                    const range = (try self.cursor.nextRange(context)).?;
+                    const indices = self.indices.borrow();
+                    var value_block: [kernel_flat.block_size]Element = undefined;
+                    var index_block: [kernel_flat.block_size]i64 = undefined;
+                    var offset: usize = 0;
+                    while (offset != range.len()) {
+                        const piece = kernel_flat.blockRange(range, offset);
+                        if (self.sorted_values) {
+                            const source = self.collection.borrow().slice();
+                            for (piece.start..piece.end) |index| value_block[index - piece.start] = source[indices[index]];
+                            self.value_writer.?.borrowMut().writeRange(piece.start, value_block[0..piece.len()]);
+                        } else {
+                            for (piece.start..piece.end) |index| index_block[index - piece.start] = @intCast(indices[index]);
+                            self.index_writer.?.borrowMut().writeRange(piece.start, index_block[0..piece.len()]);
+                        }
+                        offset += piece.len();
+                    }
+                    if (!self.cursor.complete()) return .yielded;
+                    return self.finish(evaluator);
+                },
+            }
+        }
+    };
+}
+
+fn startTypedGrade(evaluator: *Machine, collection: Value, sorted_values: bool) MachineError!bool {
+    const count: usize = @intCast(collection.list.length());
+    if (count == 0 or collection.list.kind() == .generic_spine) return false;
+    const kind = collection.list.kind();
+    if (kind == .leaf_symbol) return evaluator.failAtIndex(
+        .type,
+        "grade expected mutually comparable numbers, chars, or strings",
+        0,
+    );
+    inline for (order_leaf_kinds) |candidate| {
+        if (kind == candidate) {
+            const Driver = TypedGradeDriver(candidate);
+            const indices = try evaluator.allocator().alloc(usize, count);
+            try evaluator.startDriver(Driver{
+                .collection = .init(heap.LeafReader(candidate).acquire(collection.list)),
+                .indices = .init(indices),
+                .sorted_values = sorted_values,
+                .cursor = kernel_flat.FlatCursor.init(count),
+            });
+            return true;
+        }
+    }
+    unreachable;
 }
 
 pub fn sortForIdiom(evaluator: *Machine) MachineError!void {
@@ -140,9 +378,8 @@ const GradeDriver = struct {
     phase: enum { validate, initialize, sort, prepare, materialize } = .validate,
     index: usize = 0,
     comparator: ?CompareCursor = null,
-    integers: ?heap.Owned([]i64) = null,
     values: ?heap.Owned([]Value) = null,
-    i64_materializer: ?heap.Owned(storage.I64Materializer) = null,
+    index_writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
     value_materializer: ?heap.Owned(storage.ValueMaterializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *GradeDriver) MachineError!machine.WorkProgress {
@@ -220,37 +457,30 @@ const GradeDriver = struct {
                         self.phase = .materialize;
                     }
                 } else {
-                    if (self.integers == null) self.integers = .init(try evaluator.allocator().alloc(
-                        i64,
+                    if (self.index_writer == null) self.index_writer = .init(try heap.LeafWriter(.leaf_i64).init(
+                        evaluator.allocator(),
                         self.indices.borrow().len,
                     ));
-                    const integers = self.integers.?.borrow();
                     const indices = self.indices.borrow();
                     const end = @min(self.index + budget, indices.len);
                     const prepared = end - self.index;
-                    while (self.index != end) : (self.index += 1)
-                        integers[self.index] = @intCast(indices[self.index]);
-                    budget -= prepared;
-                    if (self.index == indices.len) {
-                        self.i64_materializer = .init(storage.I64Materializer.init(
-                            evaluator.allocator(),
-                            integers,
-                        ));
-                        self.phase = .materialize;
+                    var block: [kernel_flat.block_size]i64 = undefined;
+                    var offset = self.index;
+                    while (offset != end) {
+                        const piece_end = @min(offset + kernel_flat.block_size, end);
+                        for (offset..piece_end) |index| block[index - offset] = @intCast(indices[index]);
+                        self.index_writer.?.borrowMut().writeRange(offset, block[0 .. piece_end - offset]);
+                        offset = piece_end;
                     }
+                    self.index = end;
+                    budget -= prepared;
+                    if (self.index == indices.len)
+                        return .{ .output = self.index_writer.?.borrowMut().finish() };
                 }
             },
             .materialize => {
-                const progress: union(enum) { pending, complete: Value } = if (self.sorted_values)
-                    switch (try self.value_materializer.?.borrowMut().advance(budget)) {
-                        .pending => .pending,
-                        .complete => |result| .{ .complete = result },
-                    }
-                else switch (try self.i64_materializer.?.borrowMut().advance(budget)) {
-                    .pending => .pending,
-                    .complete => |result| .{ .complete = result },
-                };
-                return switch (progress) {
+                std.debug.assert(self.sorted_values);
+                return switch (try self.value_materializer.?.borrowMut().advance(budget)) {
                     .pending => .yielded,
                     .complete => |result| .{ .output = result },
                 };
@@ -264,11 +494,84 @@ fn distinctPrimitive(evaluator: *Machine) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
     const count: usize = @intCast(collection.borrow().list.length());
+    if (count != 0) {
+        const kind = collection.borrow().list.kind();
+        inline for (order_leaf_kinds) |candidate| {
+            if (kind == candidate) {
+                const Driver = TypedDistinctDriver(candidate);
+                try evaluator.startDriver(Driver{
+                    .source = .init(heap.LeafReader(candidate).acquire(collection.borrow().list)),
+                });
+                return;
+            }
+        }
+    }
     const results = try evaluator.allocator().alloc(Value, count);
     try evaluator.startDriver(DistinctDriver{
         .collection = .init(collection.take()),
         .results = .init(results),
     });
+}
+
+fn TypedDistinctDriver(comptime kind: value.HeapKind) type {
+    const Element = heap.LeafElement(kind);
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        source: heap.Owned(heap.LeafReader(kind)),
+        writer: ?heap.Owned(heap.LeafWriter(kind)) = null,
+        phase: enum { count, fill } = .count,
+        item_index: usize = 0,
+        candidate: usize = 0,
+        distinct_count: usize = 0,
+        output_index: usize = 0,
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            const context = support.Context{ .evaluator = evaluator };
+            var budget = @max(context.remaining(), 1);
+            try context.advance(budget);
+            const source: []const Element = self.source.borrow().slice();
+            while (budget != 0) {
+                if (self.item_index == source.len) {
+                    if (self.phase == .count) {
+                        self.writer = .init(try heap.LeafWriter(kind).init(
+                            evaluator.allocator(),
+                            self.distinct_count,
+                        ));
+                        self.phase = .fill;
+                        self.item_index = 0;
+                        self.candidate = 0;
+                        continue;
+                    }
+                    std.debug.assert(self.output_index == self.distinct_count);
+                    self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    return .{ .output = self.writer.?.borrowMut().finish() };
+                }
+                if (self.candidate == self.item_index) {
+                    if (self.phase == .count) {
+                        self.distinct_count += 1;
+                    } else {
+                        self.writer.?.borrowMut().writeRange(
+                            self.output_index,
+                            &.{source[self.item_index]},
+                        );
+                        self.output_index += 1;
+                    }
+                    self.item_index += 1;
+                    self.candidate = 0;
+                    budget -= 1;
+                    continue;
+                }
+                if (source[self.candidate] == source[self.item_index]) {
+                    self.item_index += 1;
+                    self.candidate = 0;
+                } else self.candidate += 1;
+                budget -= 1;
+            }
+            return .yielded;
+        }
+    };
 }
 
 pub fn distinctForIdiom(evaluator: *Machine) MachineError!void {
@@ -342,7 +645,198 @@ const DistinctDriver = struct {
 fn groupPrimitive(evaluator: *Machine) MachineError!void {
     var collection = try evaluator.popList();
     defer collection.deinit();
+    if (try startTypedGroup(evaluator, collection.borrow())) return;
     try evaluator.startDriver(GroupDriver{ .collection = .init(collection.take()) });
+}
+
+fn typedValue(comptime kind: value.HeapKind, item: heap.LeafElement(kind)) Value {
+    return switch (kind) {
+        .leaf_i64 => .{ .int = item },
+        .leaf_f64 => .{ .float = item },
+        .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = @intCast(item) },
+        .leaf_symbol => .{ .symbol = item },
+        .generic_spine, .dict, .task, .reserved_mask => unreachable,
+    };
+}
+
+fn TypedGroupDriver(comptime kind: value.HeapKind) type {
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        collection: heap.Owned(heap.LeafReader(kind)),
+        key_indices: ?heap.Owned([]usize) = null,
+        assignments: ?heap.Owned([]usize) = null,
+        frequencies: ?heap.Owned([]usize) = null,
+        offsets: ?heap.Owned([]usize) = null,
+        cursors: ?heap.Owned([]usize) = null,
+        indices: ?heap.Owned([]i64) = null,
+        pairs: ?heap.Owned([]dict.Pair) = null,
+        phase: enum { allocate, scan, offsets, cursors, scatter, groups, dictionary } = .allocate,
+        item_index: usize = 0,
+        key_count: usize = 0,
+        candidate: usize = 0,
+        index: usize = 0,
+        group_writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
+        group_cursor: kernel_flat.FlatCursor = .{ .length = 0 },
+        dict_materializer: ?heap.Owned(storage.DictMaterializer) = null,
+        group_values: ?heap.Owned(heap.OwnedValueBuffer) = null,
+
+        fn allocate(self: *Self, evaluator: *Machine) error{OutOfMemory}!void {
+            const allocator = evaluator.allocator();
+            const count = self.collection.borrow().len();
+            self.key_indices = .init(try allocator.alloc(usize, count));
+            self.assignments = .init(try allocator.alloc(usize, count));
+            self.frequencies = .init(try allocator.alloc(usize, count));
+            self.offsets = .init(try allocator.alloc(usize, count + 1));
+            self.cursors = .init(try allocator.alloc(usize, count));
+            self.indices = .init(try allocator.alloc(i64, count));
+            self.pairs = .init(try allocator.alloc(dict.Pair, count));
+            self.group_values = .init(try .init(evaluator.releaseDomain(), count));
+            self.offsets.?.borrow()[0] = 0;
+            self.phase = .scan;
+        }
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            const context = support.Context{ .evaluator = evaluator };
+
+            if (self.phase == .groups) {
+                if (self.index == self.key_count) {
+                    self.dict_materializer = .init(try storage.DictMaterializer.init(
+                        evaluator.allocator(),
+                        self.pairs.?.borrow()[0..self.key_count],
+                        false,
+                    ));
+                    self.phase = .dictionary;
+                    return .yielded;
+                }
+                if (self.group_writer == null) {
+                    const start = self.offsets.?.borrow()[self.index];
+                    const end = self.offsets.?.borrow()[self.index + 1];
+                    self.group_writer = .init(try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), end - start));
+                    self.group_cursor = kernel_flat.FlatCursor.init(end - start);
+                }
+                if (try self.group_cursor.nextRange(context)) |range| {
+                    const start = self.offsets.?.borrow()[self.index];
+                    self.group_writer.?.borrowMut().writeRange(
+                        range.start,
+                        self.indices.?.borrow()[start + range.start .. start + range.end],
+                    );
+                }
+                if (!self.group_cursor.complete()) return .yielded;
+                const group = self.group_writer.?.borrowMut().finish();
+                self.group_writer = null;
+                const key_position = self.key_indices.?.borrow()[self.index];
+                self.pairs.?.borrow()[self.index] = .{
+                    typedValue(kind, self.collection.borrow().slice()[key_position]),
+                    group,
+                };
+                self.group_values.?.borrowMut().appendOwned(group);
+                self.index += 1;
+                return .yielded;
+            }
+
+            if (self.phase == .dictionary) {
+                const charge = @max(context.remaining(), 1);
+                try context.advance(charge);
+                return switch (try self.dict_materializer.?.borrowMut().advance(charge)) {
+                    .pending => .yielded,
+                    .duplicate_key => unreachable,
+                    .complete => |result| completed: {
+                        self.dict_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.dict_materializer = null;
+                        self.group_values.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.group_values = null;
+                        self.collection.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        break :completed .{ .output = result };
+                    },
+                };
+            }
+
+            const charge = @max(context.remaining(), 1);
+            try context.advance(charge);
+            var budget = charge;
+            const source = self.collection.borrow().slice();
+            while (budget != 0) switch (self.phase) {
+                .allocate => try self.allocate(evaluator),
+                .scan => {
+                    if (self.item_index == source.len) {
+                        self.phase = .offsets;
+                        self.index = 0;
+                        continue;
+                    }
+                    if (self.candidate == self.key_count) {
+                        self.key_indices.?.borrow()[self.key_count] = self.item_index;
+                        self.frequencies.?.borrow()[self.key_count] = 0;
+                        self.key_count += 1;
+                        self.assignments.?.borrow()[self.item_index] = self.key_count - 1;
+                        self.frequencies.?.borrow()[self.key_count - 1] += 1;
+                        self.item_index += 1;
+                        self.candidate = 0;
+                    } else if (source[self.key_indices.?.borrow()[self.candidate]] == source[self.item_index]) {
+                        self.assignments.?.borrow()[self.item_index] = self.candidate;
+                        self.frequencies.?.borrow()[self.candidate] += 1;
+                        self.item_index += 1;
+                        self.candidate = 0;
+                    } else {
+                        self.candidate += 1;
+                    }
+                    budget -= 1;
+                },
+                .offsets => {
+                    if (self.index == self.key_count) {
+                        self.phase = .cursors;
+                        self.index = 0;
+                        continue;
+                    }
+                    self.offsets.?.borrow()[self.index + 1] =
+                        self.offsets.?.borrow()[self.index] + self.frequencies.?.borrow()[self.index];
+                    self.index += 1;
+                    budget -= 1;
+                },
+                .cursors => {
+                    if (self.index == self.key_count) {
+                        self.phase = .scatter;
+                        self.index = 0;
+                        continue;
+                    }
+                    self.cursors.?.borrow()[self.index] = self.offsets.?.borrow()[self.index];
+                    self.index += 1;
+                    budget -= 1;
+                },
+                .scatter => {
+                    if (self.index == source.len) {
+                        self.phase = .groups;
+                        self.index = 0;
+                        return .yielded;
+                    }
+                    const group_index = self.assignments.?.borrow()[self.index];
+                    self.indices.?.borrow()[self.cursors.?.borrow()[group_index]] = @intCast(self.index);
+                    self.cursors.?.borrow()[group_index] += 1;
+                    self.index += 1;
+                    budget -= 1;
+                },
+                .groups, .dictionary => unreachable,
+            };
+            return .yielded;
+        }
+    };
+}
+
+fn startTypedGroup(evaluator: *Machine, collection: Value) MachineError!bool {
+    const count: usize = @intCast(collection.list.length());
+    const kind = collection.list.kind();
+    if (count == 0 or kind == .generic_spine) return false;
+    inline for (order_leaf_kinds) |candidate| {
+        if (kind == candidate) {
+            const Driver = TypedGroupDriver(candidate);
+            try evaluator.startDriver(Driver{
+                .collection = .init(heap.LeafReader(candidate).acquire(collection.list)),
+            });
+            return true;
+        }
+    }
+    unreachable;
 }
 
 const GroupDriver = struct {
@@ -361,7 +855,8 @@ const GroupDriver = struct {
     candidate: usize = 0,
     index: usize = 0,
     matcher: ?heap.Owned(equal.MatchCursor) = null,
-    group_materializer: ?heap.Owned(storage.I64Materializer) = null,
+    group_writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
+    group_fill: usize = 0,
     dict_materializer: ?heap.Owned(storage.DictMaterializer) = null,
     group_values: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
@@ -469,21 +964,27 @@ const GroupDriver = struct {
                     self.phase = .dictionary;
                     continue;
                 }
-                if (self.group_materializer == null) self.group_materializer = .init(storage.I64Materializer.init(
+                const start = self.offsets.?.borrow()[self.index];
+                const end = self.offsets.?.borrow()[self.index + 1];
+                if (self.group_writer == null) self.group_writer = .init(try heap.LeafWriter(.leaf_i64).init(
                     evaluator.allocator(),
-                    self.indices.?.borrow()[self.offsets.?.borrow()[self.index]..self.offsets.?.borrow()[self.index + 1]],
+                    end - start,
                 ));
-                switch (try self.group_materializer.?.borrowMut().advance(budget)) {
-                    .pending => return .yielded,
-                    .complete => |group| {
-                        self.group_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.group_materializer = null;
-                        self.pairs.?.borrow()[self.index] = .{ self.keys.?.borrow()[self.index], group };
-                        self.group_values.?.borrowMut().appendOwned(group);
-                        self.index += 1;
-                        return .yielded;
-                    },
-                }
+                const copied = @min(budget, end - start - self.group_fill);
+                self.group_writer.?.borrowMut().writeRange(
+                    self.group_fill,
+                    self.indices.?.borrow()[start + self.group_fill .. start + self.group_fill + copied],
+                );
+                self.group_fill += copied;
+                budget -= copied;
+                if (self.group_fill != end - start) return .yielded;
+                const group = self.group_writer.?.borrowMut().finish();
+                self.group_writer = null;
+                self.group_fill = 0;
+                self.pairs.?.borrow()[self.index] = .{ self.keys.?.borrow()[self.index], group };
+                self.group_values.?.borrowMut().appendOwned(group);
+                self.index += 1;
+                if (budget == 0) return .yielded;
             },
             .dictionary => switch (try self.dict_materializer.?.borrowMut().advance(budget)) {
                 .pending => return .yielded,

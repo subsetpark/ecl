@@ -13,16 +13,16 @@
 # reifies it.
 (
  ### def checked
- (dup type 'dict match
+ (dup type 'dict match?
   {'kind 'type 'msg "a result must be a dict tagged {'ok values} or {'err error}"} assert
   dup keys len 1 =
   {'kind 'type 'msg "a result must carry exactly one of 'ok or 'err"} assert
   dup 'ok has?
-  (dup 'ok at type 'list match
+  (dup 'ok at type 'list match?
    {'kind 'type 'msg "an ok result must carry a list of success values"} assert)
   (dup 'err has?
    {'kind 'type 'msg "a result must carry exactly one of 'ok or 'err"} assert
-   dup 'err at type 'dict match
+   dup 'err at type 'dict match?
    {'kind 'type 'msg "an err result must carry an error dict"} assert)
   if)
  (result -- result :
@@ -31,7 +31,7 @@
  'checked defp
 
  ### def checked-all
- (dup type 'list match
+ (dup type 'list match?
   {'kind 'type 'msg "expected a list of results"} assert
   dup (checked pop) for)
  (results -- results :
@@ -39,7 +39,7 @@
  'checked-all defp
 
  ### def ok
- (dup type 'list match
+ (dup type 'list match?
   {'kind 'type 'msg "result.ok expects a list of success values"} assert
   'ok swap pair dict-of)
  (values -- result :
@@ -47,7 +47,7 @@
  'ok def
 
  ### def err
- (dup type 'dict match
+ (dup type 'dict match?
   {'kind 'type 'msg "result.err expects an error dict"} assert
   'err swap pair dict-of)
  (error -- result : "Tag an error dict as a failed result.")
@@ -95,7 +95,7 @@
    dup 'ok has?
    ('ok at dup len 1 =
     {'kind 'contract 'msg "result.map-err expects ( error -- error )"} assert
-    first dup type 'dict match
+    first dup type 'dict match?
     {'kind 'type 'msg "result.map-err must produce an error dict"} assert
     err)
    when)
@@ -119,13 +119,13 @@
  ### def recover-kinds
  ((|result kinds handler|
    result checked pop
-   kinds type 'list match
+   kinds type 'list match?
    {'kind 'type 'msg "result.recover-kinds expects a list of kind symbols"} assert
    kinds
-   (type 'symbol match
+   (type 'symbol match?
     {'kind 'type 'msg "result.recover-kinds expects a list of kind symbols"} assert)
    for
-   result 'err {} at-or 'kind 'no-kind-present at-or kinds in
+   result 'err {} at-or 'kind 'no-kind-present at-or kinds in?
    result 'err has? and
    result handler pair (recover) with
    result literal

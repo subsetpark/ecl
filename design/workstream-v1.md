@@ -59,9 +59,10 @@ Verified in the checkout (2026-08-17):
   completion, continuation cancellation/EOF behavior, and a real-binary PTY
   gate while leaving non-TTY input unchanged. M9 native extensions, M11
   stateful modules, and M12 stdlib were future milestones when this
-  section was written; M9, M10 (one-binder merge), and M11 have since
-  landed — their Status records are the as-built truth — and M12 is
-  planned (2026-08-18). M13 acceptance remains.
+  section was written; M9, M10 (one-binder merge), M11, M12, and M13 have
+  since landed — their Status records are the as-built truth. The
+  workstream is terminal: `0.1.0` is tagged (2026-08-19) and only
+  post-terminal Step 14 remains scheduled.
 - All derived core words now live in `src/prelude.ecl`; the loader embeds and
   evaluates that ordinary source with retained provenance before freezing the
   core. Every definition is a documented `### def <name>` block. A standard
@@ -250,8 +251,8 @@ depth cannot recover a pre-existing value consumed before failure;
 attempt/dict isolation remains base-index truncation. Post-audit hardening
 also locks nested-boundary restoration, substack-relative contract data,
 recursive trace multiplicity, attach-if-absent context for `raise`, direct
-and flushed `pp`/`prin` output, and single-EOF REPL exit.
-REPL stack display and `pp` now use delimiter-preserving K-style row breaks
+and flushed `io.pp`/`io.prin` output, and single-EOF REPL exit.
+REPL stack display and `io.pp` now use delimiter-preserving K-style row breaks
 for rectangular matrices and nested matrix groups; `str` remains compact, and
 the displayed form is reparsed in the runtime suite to prove round-trip.
 
@@ -266,7 +267,7 @@ base-index substack isolation, boundary frames with O(1) truncation,
 TCO as frame overwrite, lazy traces built only at unwind, and error
 dicts per d.19. Primitives are core-env bindings with fn-pointer
 payloads (a minimal set: stack words, arithmetic via a provisional
-scalar path, `pp`/`prin`, `def`/`set`, `if`/`call`/`while`, `@attempt`/
+scalar path, `io.pp`/`io.prin`, `def`/`set`, `if`/`call`/`while`, `@attempt`/
 `raise`, `exit`, `args`). CLI modes: `-e`, script file, stdin, bare-stdin
 REPL with continuation, script-prints-nothing-implicitly (d.22). Cold
 start spawns zero threads.
@@ -357,14 +358,14 @@ mask-before-store aliasing rule—is now the Step 14 contract rather than a clai
 about M5's as-built state. The landed d.22 float semantics reject NaN-producing
 operations and preserve exact mixed-number comparisons. Full
 numeric/logic, structural/order/search vocabulary works over leaves and
-spines: `at where in find raze cat take drop reverse first rest range
+spines: `at where in? find raze cat take drop reverse first rest range
 shape len`, **new words** `flip`, `reshape`, `group`, `type`,
 canonical `str`, `to-dict`, the early source-defined `wrap`/`pair`,
 list `put` (functional element update, same word as dict
 put, CoW-in-place when unique), the awk-floor transcendentals
 `exp log sin cos atan2`, and `cmp`
 (three-way whole-value ordering, ruled 2026-08-12: −1/0/1,
-non-pervasive — `cmp` is to `<` what `match` is to `=`; numbers exact,
+non-pervasive — `cmp` is to `<` what `match?` is to `=`; numbers exact,
 chars by codepoint, strings codepoint-lexicographic, all else `'type`),
 plus stable `grade`/`sort` ordering by exactly `cmp`'s order,
 hash-backed `distinct`, dict kernels (`put del merge has? keys vals`),
@@ -403,7 +404,7 @@ installed from embedded ecl source ([E] words including `filter`,
 `signum`, `clamp`, `empty?`, `append`, `pack` (literal-count effect
 inference per d.9), `zip`, `min-of`, `max-of`,
 `at-path`, `at-or`, `pairs`, plus compact former primitives `over`, `compose`,
-`str`, `dip`, `mod`, `neg`, `abs`, `<>`, `<=`, `>=`, `and`, `or`, `first`,
+`dip`, `mod`, `neg`, `abs`, `<>`, `<=`, `>=`, `and`, `or`, `first`,
 `rest`, `reverse`, `distinct`, and `vals`; `body` returns the real list); and pure reader
 reification through `parse` [P].
 
@@ -415,7 +416,7 @@ test selects its adjacent action, and `[()] cond` is the no-op-else case.
 `case` uses the parallel shape `( subject [key action ... else] -- …)`, but
 its left slots are inert Values rather than predicate quotations. It
 prevalidates every action/else quotation, compares keys left-to-right with
-whole-value `match`, permits duplicate keys with the first match winning,
+whole-value `match?`, permits duplicate keys with the first match winning,
 and executes exactly the selected action or else after consuming the
 subject and clause list. Word-, quotation-, list-, dict-, and numeric-valued
 keys are never resolved or called merely because they occupy a key slot.
@@ -481,8 +482,8 @@ provenance archive, so a later `call` reports `<parse>`. Non-string input is
 `'type`; malformed and incomplete source are `'parse`; cancellation and OOM
 leave no partial result. Encoding, lexer/parser scans, binder lowering, and
 result/span materialization poll inside their actual traversals. This adds
-no host capability: `slurp`, `spit`, `getenv`, and the source-defined
-`lines` remain absent until M12.
+no host capability: `io.slurp`, `io.spit`, `getenv`, and the source-defined
+`io.lines` remain absent until M12.
 
 **Idiom recognition** uses one context-parameterized exact-phrase matcher,
 not a combinator-only switch plus special cases. Phrase shape may be
@@ -548,7 +549,7 @@ long-lived sessions stop growing with distinct-name insertions and
 module re-registrations.
 
 **Settled M7 semantics.** Task values are identity-bearing capabilities
-linked to live Session state. Both `str` and `pp` render a task as its
+linked to live Session state. Both `str` and `io.pp` render a task as its
 stable per-Session `<task:N>` marker; the reader rejects that exact
 runtime marker wherever an atom may occur, so a task or any rendered
 structure containing one is deliberately unparseable. Decision 16's
@@ -1162,7 +1163,7 @@ per convention; the substance below stands on its own). Ten patches,
 ungated pre-`0.1.0`. Planning rulings folded into the DoD: the http spike
 ran and `std.http.Client` won; qualified reference to an unregistered
 module auto-loads exactly as `use`-miss; embedded stdlib wins over
-`ECL_PATH`; `str` ships thirteen words; `http` ships two fixed-arity words;
+`ECL_PATH`; `str` ships sixteen words; `http` ships two fixed-arity words;
 `stdin` closes Open Question 1.
 
 Four planning assumptions did not survive contact, and what landed differs.
@@ -1207,7 +1208,7 @@ exception, and a half-deadline that only fires between operations was
 declined in favour of recording the limitation.
 
 **Definition of Done**:
-Six stdlib modules ship inside the binary (embedded sources / native
+Eight stdlib modules ship inside the binary (embedded sources / native
 descriptors registered lazily through M4 plus M9's private static transport,
 so the single-binary story holds; `ECL_PATH` remains for user modules), each
 resolvable by `use` and by bare qualified reference with no `ECL_PATH` and no
@@ -1231,23 +1232,26 @@ owns the explicit host scripting words needed by that layer:
   of per-result success stacks. `result.partition` returns success-stack lists
   and error dicts separately without re-raising. All operations reject a
   malformed tagged result before invoking a supplied quotation.
-- **`str`** — ecl source, exactly thirteen words (ruled 2026-08-18):
+- **`str`** — ecl source, exactly thirteen words (reaffirmed 2026-08-19):
   `upper lower trim trim-left trim-right starts? ends? contains? index-of
   replace repeat pad-left pad-right`. Case operations are ASCII-only per
   the character-model ruling; `index-of` is `'domain` when the needle is
   absent, with `contains?` as the predicate form. Another embedded-source
   module built on the ordinary module path.
-- **Host scripting words** — `slurp` [P] `( path -- string )` reads one
-  UTF-8 file, `spit` [P] `( string path -- )` writes one file, and `getenv`
+- **`io`** — builtin module with `pp`, `prin`, `print`, `inspect`, `stdin`,
+  `slurp`, `spit`, and `lines`. `io.slurp` [P] `( path -- string )` reads one
+  UTF-8 file, `io.spit` [P] `( string path -- )` writes one file, and `getenv`
   [P] `( name -- string )` reads an environment variable from an immutable
   snapshot taken at session init. Unset variables
   error per absence-is-absence, with `@attempt`/`result.or-else` as the defaulting
-  idiom. `stdin` [P] `( -- string )` (ruled 2026-08-18) reads the whole
+  idiom. `io.stdin` [P] `( -- string )` (ruled 2026-08-18) reads the whole
   piped stream once in `-e` and script-file modes and is `'io` in modes
-  where stdin is the program source. `lines` [E] `( path -- list )` lands
-  here, not M6, as the ordinary
-  source body `(slurp "\n" split)`. These are explicit capabilities and do
-  not alter the pure M6 `parse` contract. `spit` is truncate-and-replace
+  where stdin is the program source. `io.lines` `( path -- list )` composes
+  `io.slurp "\n" split`. `io.pp`, `io.prin`, `io.print`, and `io.inspect`
+  group the observable output operations, including those that accept arbitrary
+  values; this is an I/O boundary, not a string-receiver boundary.
+  These are explicit capabilities and do
+  not alter the pure M6 `parse` contract. `io.spit` is truncate-and-replace
   with no temp+rename: a mid-write failure may leave a partial file,
   surfaced as `'io` and documented rather than half-guaranteed.
 - **`csv`** — native: `csv.parse` `( string -- rows )` and `csv.emit`
@@ -1313,25 +1317,30 @@ aggregate → emit) — the awk/sed/jq positioning made literal.
 
 ### Milestone 13: v1-acceptance
 
-**Status**: acceptance candidate exercised on 2026-08-19. The final
+**Status**: executed 2026-08-19 — the v1 terminal. `0.1.0` is tagged at
+commit `27f47f3` and pushed; the complete per-push CI manifest is green on
+that commit (builds.sr.ht job 1866102, all fourteen tasks through
+acceptance), and the release-candidate matrix — the exhaustive
+initialized-Session `test-oom` sweep plus the complete ReleaseFast suite —
+ran green against the same commit (operator-attested at finalization,
+2026-08-19). The final
 ReleaseSafe CI target is intentionally nonduplicative: it runs the M13
 retention, installed-binary, display-bounding, and architecture assertions
 after the manifest's existing behavioral, PTY, native, worker, fuzz,
 differential, TSan, and lint gates. The exhaustive initialized-Session OOM
-sweep runs once against the release candidate instead of on every push; its
+sweep runs once against a release candidate instead of on every push; its
 focused component probes remain in the ordinary suite. The README and printing
-contract now match the binary. Property-bearing test artifacts run through a
+contract match the binary. Property-bearing test artifacts run through a
 classified child runner that suppresses Minish's successful stderr chatter and
 forwards actual failure diagnostics, so CI no longer labels green commands as
 failed. The terminal ledger's 50 clauses (DoD-1 through DoD-48, including 25a
-and 34a) have now been audited one by one against their named proof surfaces.
-That pass repaired stale command spellings and added exact runtime coverage for
+and 34a) were audited one by one against their named proof surfaces before
+tagging. That pass repaired stale command spellings and added exact runtime
+coverage for
 grammar negatives, REPL rollback with environment survival, leftmost concurrent
 error selection, unified-value/float/UTF-8 edges, partial effects, the complete
-removed unit-constructor family, and result-envelope ownership. The prerelease
-tag remains outstanding until this audit commit is pushed and its complete CI
-job is green; tagging the preceding commit would not execute this final proof
-pass. The per-push optimization matrix now runs the complete suite under Debug
+removed unit-constructor family, and result-envelope ownership. The per-push
+optimization matrix runs the complete suite under Debug
 and the distributed ReleaseSafe mode, while ReleaseFast compiles and exercises
 the promoted real-binary snapshot corpus; the complete ReleaseFast suite joins
 the exhaustive OOM proof on the release-candidate matrix.
@@ -1346,8 +1355,8 @@ inputs and checks only source-body boundedness, unsafe cast confinement, and
 prelude layout where compiler guarantees cannot express the rule. Snapshot
 retention is bounded (the M7
 reclamation obligation): a soak fixture that defines and re-registers in a loop
-shows stable memory. `pp` and the REPL stack display implement best-effort
-huge-leaf elision so a unit producing a huge value cannot flood the terminal;
+shows stable memory. `io.pp` and the REPL stack display implement best-effort
+huge-list elision so a unit producing a huge value cannot flood the terminal;
 `str` alone carries the round-trip guarantee, and SPEC.md's printing contract
 already reserves exactly this split (ruled 2026-08-17). A `0.1.0` tag
 exists — the first prerelease tag, not a stable release (ruled 2026-08-17;
@@ -1371,34 +1380,220 @@ future wire-contract revision.
 
 ### Post-terminal Step 14: monomorphic-flat-leaf-kernel-migration
 
-**Status**: scheduled after Milestone 13 and the `0.1.0` tag. This is a
+**Status**: executed 2026-08-19 — gameplan
+`gameplans/monomorphic-flat-leaf-kernel-migration.json` (local, untracked
+per convention). Patches 1-6 and the acceptance matrix are complete. The
+exact boundary and gate ledger are inventoried below. The
+typed seam now carries numeric and character pervasion, membership, rank-one
+reshape, typed list replacement, sequence, ordering, grouping, distinct, and
+text traversal, while generic spine/dictionary descent embeds the same typed
+states at flat leaves. Also
+landed, beyond the plan: `zig build test-kernels`
+and `zig build test-e2e` as named steps, so the kernel slice and the CLI
+acceptance run can be gated without building the whole suite. The plan below is
+the original six patches: proof stubs; heap-issued typed capabilities
+plus the closed comptime registry in `src/kernels.zig` with the shared
+typed machinery in a new `src/kernel_flat.zig`; numeric/logical/bitwise
+migration with block fault masks and the guarded numeric idioms; the
+sequence/order/text/random migration; the cutover with capability closure,
+audit extension, and INTERPRETER.md; and the benchmark tool plus checked-in
+report at `design/benchmarks/step14-flat-leaf-kernels.md`. Two planning
+rulings folded in (2026-08-19): **dead-code removal is an explicit cutover
+deliverable** (user ruling) — kernel-layer helpers left without consumers
+after the migration are removed, each verified by reference search before
+deletion; and the dormant `kernel_support.Context` seam (zero call sites
+as-built — every kernel bypasses `Unit.kernel_fuel` with bare `pollKernel`
+plus local budgets) becomes the mandatory kernel budget seam rather than
+being deleted, making the DoD's "WorkContext budget" concrete. The
+grounding inventory also fixed the differential reference:
+`list.fromValuesGeneric` builds generic-representation inputs so the
+typed-vs-generic parity properties reach production semantics through a
+real generic path, per clause 8. A third ruling (2026-08-19) reframed the
+benchmark report: it is a post-state characterization whose durable
+content is the deterministic counters, with timing as dated context —
+never before/after migration proof, so no pre-migration re-run is
+attempted (the deleted boxed route's per-element advances are
+unobservable without rebuilding it, and the qualitative before-shape is
+already recorded in this section's inventory). This is a
 structural completion step, not a condition of the v1 terminal and not an
 optional profiling experiment. It restores the implementation boundary that
-M5's original design text claimed but did not build. Public values, errors,
-representations, scheduling guarantees, and vocabulary remain frozen.
+M5's original design text claimed but did not build. The kernel migration
+leaves public values, errors, representations, and scheduling guarantees
+unchanged; the same finalization pass separately normalized the predicate
+spellings to `in?` and `match?`.
+
+**Execution ledger** (inventoried and completed 2026-08-19). The operation,
+structural, and acceptance items are implemented. `src/kernels.zig` is the closed classification
+ledger, with rationale kept as comments beside rows rather than unused runtime
+metadata.
+
+*Operation migration*
+
+1. **`in?` (membership) — complete 2026-08-19.** Flat scalar and flat-list
+   needles now scan a pinned typed haystack, using `equal.intFloatEqual` as
+   the shared exact cross-kind numeric rule; flat-list results write their
+   `leaf_i64` mask directly and scalar needles stay stride zero. Recursive
+   generic-spine needles retain the bounded structural cursor and have their
+   own explicit registry row. The parity matrix covers needle-in/out across
+   all six leaf representations, both mixed numeric directions, a needle
+   list, staging-block boundaries, and the kernel quantum; the initialized-
+   Session OOM sweep reaches both new drivers.
+
+2. **`cmp`, `grade`, `group`, and derived `distinct` — complete
+   2026-08-19.** String `cmp` scans two pinned width-specialized character
+   slices; flat `grade` keeps the stable `poll.MergeSortCursor` but compares
+   raw typed keys and gathers either its i64 indices or sorted values directly;
+   flat `group` preserves first-appearance order while comparing pinned raw
+   keys and publishes each stable index leaf through `LeafWriter(.leaf_i64)`.
+   Generic-spine ordering retains the structural comparator, but its known i64
+   outputs now also publish directly rather than through `I64Materializer`.
+   Parity covers every leaf kind, stability, symbol rejection, staging-block
+   and kernel-quantum boundaries; the focused suite pins exact mixed-number
+   ordering, cross-width strings, first-key order, and sorted representation.
+
+3. **`split` and `join` — complete 2026-08-19.** Split dispatches once on
+   subject/separator widths, scans pinned monomorphic slices, and profiles each
+   result piece before selecting its exact-width writer. Join's outer spine
+   selects one pinned child reader per string, profiles count and maximum
+   codepoint in a bounded first pass, then fills one exact-width `LeafWriter`
+   through a 256-codepoint staging block—no full-width output staging remains.
+   An empty separator produces exactly the subject's Unicode scalar strings,
+   without synthetic empty boundary pieces. Focused coverage pins char1/2/4
+   boundaries, ordinary empty pieces, empty separators,
+   separator-wider-than-subject, subject-wider-than-separator, and unused wide
+   separators; the initialized-Session OOM snippet reaches both paths.
+
+4. **`put` on a list — complete 2026-08-19.** A same-class replacement now
+   performs an exact-size typed copy, or a single store when the input is
+   solely owned under `UniqueLeafAdoption`; a replacement of another class
+   still widens through the profiling route. The parity matrix covers every
+   leaf representation, shared-input copy-on-write, cross-class widening,
+   staging-block and kernel-quantum boundaries; the focused dict/text suite
+   pins the unchanged original and index errors, and the initialized-Session
+   OOM sweep reaches the allocating shared-input path.
+
+5. **`reshape`, rank one — complete 2026-08-19.** A flat source and a
+   one-axis shape now dispatch directly to the typed cyclic-copy driver;
+   higher ranks retain the nested spine builder and a zero-length result
+   retains its historical empty representation. The parity matrix covers
+   every leaf representation, cyclic extension, staging-block and kernel-
+   quantum boundaries, while the focused shape suite continues to pin the
+   higher-rank, zero-axis, row-major, and validation rulings. The initialized-
+   Session OOM sweep reaches the new typed writer.
+
+6. **Char-element pervasion — complete 2026-08-19.** Character subtraction
+   and comparison write fixed i64 results in one pass. Character offsets and
+   character `min`/`max` first profile faults and maximum produced codepoint,
+   then fill the exact char1/2/4 writer through one bounded block. Invalid
+   character and symbol combinations reject at logical index zero without a
+   boxed traversal. Parity covers ASCII, BMP, astral, both scalar sides,
+   char×char and char×int leaves, width crossings in both directions, block and
+   kernel-quantum boundaries, and recognized `each`; the initialized-Session
+   OOM sweep reaches both fixed and dynamic outputs.
+
+*Structural obligations*
+
+7. **Generic descent re-enters the typed loop — complete 2026-08-19.**
+   `PervadeCursor` carries a `NestedTyped` frame whose variants own the same
+   numeric, fixed-character, and dynamic-character states and step functions
+   as top-level drivers. Ragged spines and dictionary values therefore stop
+   structural descent at each flat leaf, keep their bounded cursor, and report
+   a fault's inner logical index. Focused coverage pins nested numeric and
+   character leaves, dict-contained leaves, and an overflow in a later child.
+
+8. **Known-type materializer passes — complete.** `ShapeDriver` now publishes
+   its rank vector directly through `LeafWriter(.leaf_i64)`; rank is bounded
+   by nesting depth, so its fixed stack staging is at most 256 integers.
+   `GradeDriver` and `GroupDriver` publish their already-typed index vectors
+   through `LeafWriter(.leaf_i64)` on flat and generic paths. The empty-list
+   materializer in `src/binder.zig` builds a single empty
+   list at lowering time and is not user-sized work. `ValueMaterializer`
+   stays: it is the profiling pass that genuinely unknown or heterogeneous
+   results need, and item 9 removes only its flat-route callers.
+
+9. **The cutover — complete 2026-08-19.** Every specialized leaf route enters
+   a typed/bulk/sequential state before the generic drivers; the surviving
+   `PervadeCursor` list frame, idiom drivers, and sequence/text copy drivers are
+   reachable for generic spines, dictionaries, empty-representation rulings,
+   cross-class widening, or the explicitly heterogeneous mixed-number
+   `min`/`max` result—not as a silent specialized-leaf fallback. Reference
+   search confirmed the remaining materializers are still consumed by reader,
+   documentation, binder-empty, dict-hash, structural-output, or genuine
+   profiling paths. The source audit forbids boxed primitives in
+   `kernel_flat.zig` and rejects a migrated function that combines a typed
+   reader with per-cell access or a profiling materializer.
+
+*Proof obligations*
+
+10. **Parity coverage follows each migration.** `src/tests/kernel_typed_test.zig`
+    already has the shape — the same values built as a specialized leaf and
+    through `list.fromValuesGeneric`, compared as rendered outcomes — so each
+    item above adds cases rather than machinery. An item is not done until its
+    operations appear in that matrix at lengths 1, 2, 3, one below/at/above the
+    staging block size, and around the kernel quantum, with the length-zero case
+    covered by the dedicated empty-representation assertion rather than by the
+    matrix (the two representations of an empty list render differently by
+    design, which is why the matrix starts at one).
+
+11. **Allocation-failure coverage follows each migration.** Every new
+    live-Session path needs the smallest snippet that reaches it in
+    `src/tests/oom_test.zig`; the sweep replays each snippet once per
+    allocation point, so snippets stay two or three elements long. The
+    double-retire this discipline caught on 2026-08-19 — a driver install
+    failure retiring capabilities that the caller's `errdefer` then retired
+    again — is the reason the gate is not optional.
+
+12. **The acceptance matrix is green.** The complete per-push manifest ran on
+    2026-08-19: full Debug and ReleaseSafe suites, ReleaseFast snapshots, both
+    PTY modes, native positive and negative surfaces, all nine bounded fuzz
+    campaigns, one/eight-worker scheduling, differential comparison,
+    Linux/x86_64 TSan, formatting, lint, and ReleaseSafe terminal acceptance.
+    The release-candidate-only exhaustive initialized-Session OOM sweep and
+    complete ReleaseFast suite had already run green for the M14 migration
+    before the namespace, reflection, predicate-spelling, and display
+    refinements; repository policy does not replay those quadratic/non-analysis
+    gates on every push. The earlier 193-program byte-for-byte ReleaseSafe
+    comparison against a pre-migration binary covers numeric, idiom,
+    reduction, sequence, binder, and dip surfaces.
+
+*Asymmetries that are settled, not TODOs*
+
+These look like defects to a reader who has not read the clauses, and must
+not be "fixed" by a later patch:
+
+- **An empty result keeps its operand's representation**, which printing
+  shows as brackets: an empty typed leaf renders `[]`, an empty spine `()`.
+  This is a per-producer choice that predates the migration; typed paths
+  therefore decline length-zero work rather than forking that decision.
+  A typed producer that has no operand to inherit from — `rand-ints` with
+  count zero — keeps the generic empty it always produced.
+- **`min`/`max` on a mixed numeric pair is heterogeneous by definition**:
+  they return an operand, so the result holds ints and floats element by
+  element. That pair stays on the profiling route permanently.
+- **A recognized `each`/`zip-with`/`fold`/`scan` fault carries no list
+  index**, because the combinator it stands in for applies its quotation to
+  one element at a time. Direct pervasion does carry one. Both routes were
+  like this before the migration and the typed path threads a flag to keep
+  it so.
+- **Float `fold`/`scan` association is strictly sequential** on both
+  routes. `sequential_typed` is a classification, not a missing
+  optimization.
 
 **Verified current state**:
 
-- Milestone 1 already stores homogeneous lists unboxed as width-tagged
-  `leaf_i64`, `leaf_f64`, `leaf_char{1,2,4}`, and `leaf_symbol` buffers, with
-  `generic_spine` for mixed or nested values. No value-representation migration
-  is needed.
-- Flat numeric pervasion in `src/kernel_numeric.zig` currently allocates an
-  `OwnedValueBuffer`, calls `list.atUnchecked` to rebox one leaf cell at a time,
-  pushes one scalar frame per element, and later profiles and copies those
-  boxed results through `ValueMaterializer`. It does not dispatch once on the
-  input leaf kinds or write a typed result buffer directly.
-- `src/kernel_sequence.zig`, `src/kernel_order.zig`,
-  `src/kernel_dict_text.zig`, `src/kernel_storage.zig`, and the recognized
-  drivers in `src/idioms.zig` mix useful bulk copies with the same per-element
-  reboxing/materialization pattern. Generic `each`/`zip-with` must remain
-  generic, but resolution-guarded recognized operations do not yet enter a
-  shared typed loop.
-- There is no production `(operation × left leaf kind × right leaf kind)`
-  dispatch artifact, no checked block-mask/rescan implementation, and no
-  heap-issued consuming capability for safe typed output-buffer adoption.
-  Explicit `@Vector`/ISA variants are also absent, but they are deliberately
-  outside this step.
+- Milestone 1's homogeneous width-tagged leaves remain the value
+  representation; Step 14 changes execution, not values or the wire contract.
+- `kernels.zig` now owns the closed comptime classification, `kernel_flat.zig`
+  owns the bounded range/fault/output machinery, and heap-issued readers,
+  writers, and unique-adoption capabilities close their lifetime and mutation
+  surfaces.
+- Numeric, sequence, ordering, grouping/distinct, text, random, and recognized
+  idiom paths dispatch once on flat representations. Generic spines and dicts
+  keep bounded structural descent and embed the same typed state at leaves.
+- Generic materialization remains only where the output is genuinely
+  heterogeneous, structural, cross-class, or governed by the historical empty
+  representation. Explicit `@Vector`/ISA variants remain deliberately outside
+  this step.
 
 **Definition of Done**:
 
@@ -1435,7 +1630,7 @@ representations, scheduling guarantees, and vocabulary remain frozen.
 
 4. **The whole flat-leaf surface crosses the seam.** Numeric and logical
    unary/binary pervasion lands first, including scalar extension and dedicated
-   mixed-number loops. Sequence/search/copy operations (`at`, `where`, `in`,
+   mixed-number loops. Sequence/search/copy operations (`at`, `where`, `in?`,
    `find`, `raze`, `cat`, `take`, `drop`, `reverse`, `range`, `flip`, and
    `reshape`), ordering/grouping operations where their inputs or outputs are
    typed leaves, fixed-width string traversal, and known-type materializer
@@ -1509,15 +1704,16 @@ between patches)**:
 4. Cut over every producer and consumer, delete the boxed flat route, close the
    capability surface, update documentation, and run the complete proof matrix.
 
-**Acceptance evidence required before marking this step executed**:
+**Acceptance evidence for this executed step**:
 
-- `zig build test`, `zig build test -Doptimize=ReleaseSafe`, and
-  `zig build test -Doptimize=ReleaseFast` exit 0; snapshots and the existing
-  idiom differential harness remain byte-for-byte green.
-- `zig build test-oom`, `zig build test-workers -Doptimize=ReleaseSafe`, and
-  Linux/x86_64 `zig build test-tsan` exit 0. Component allocation-failure
-  probes stay beside their builders/cursors; the initialized-Session sweep uses
-  the smallest snippets that reach each new live-Session path.
+- Per push, `zig build test` and `zig build test -Doptimize=ReleaseSafe` run
+  the complete suite; ReleaseFast runs the promoted snapshot corpus. PTY,
+  native, fuzz, worker-count, differential, Linux/x86_64 TSan, formatting,
+  lint, and ReleaseSafe terminal-acceptance gates are independently green.
+- For a release candidate, the complete ReleaseFast suite and `zig build
+  test-oom` also exit 0. Component allocation-failure probes stay beside their
+  builders/cursors; the initialized-Session sweep uses the smallest snippets
+  that reach each new live-Session path.
 - Production-connected differential properties cover every registry entry at
   sizes `0`, `1`, one below/at/above the kernel quantum, scalar-left,
   scalar-right, leaf×leaf, mixed numeric leaves, ragged leaf encounters, and
@@ -1532,11 +1728,20 @@ between patches)**:
   and proves temporary requested bytes are bounded by output plus one kernel
   chunk, independently of element count and publication history; a forced
   budget failure leaves inputs valid and leaks nothing.
-- A checked-in ReleaseSafe/ReleaseFast benchmark report records public-runtime
-  throughput, allocations/bytes, cursor advances, and cancellation latency for
+- A checked-in benchmark report characterizes the migrated post-state for
   flat and ragged cases at `1`, `32`, `1,024`, `65,535`, `65,536`, `65,537`,
-  and `1,048,576` elements. It is evidence, not a timing threshold gate; the
-  structural/type and bounded-turn assertions above are the blocking proof.
+  and `1,048,576` elements in ReleaseSafe and ReleaseFast. Its durable
+  content is the machine-independent counters — allocations, bytes, and
+  cursor advances are deterministic facts about the code: the actuals the
+  pass/fail bounds deliberately discard. Wall-clock throughput and
+  cancellation latency are dated context under a mandatory
+  machine/toolchain header; later work re-measures them and never trusts
+  them from the file. The report is not before/after migration proof — the
+  structural/type and bounded-turn assertions above are the blocking proof,
+  and the pre-migration shape is the qualitative record in this section's
+  verified current state (one scalar node and roughly two frame transitions
+  per element, three boxed passes). Evidence, never a timing threshold
+  gate.
 
 **Why this is a safe pause point**: The step is an observationally invisible
 execution-representation migration behind the already frozen value and kernel
@@ -1545,6 +1750,12 @@ flat boxed route is removed, generic data still has one correct bounded path,
 and all scheduler, ownership, OOM, differential, and real-binary gates are
 green. There is no half-migrated dispatch choice left for a later step to
 interpret.
+
+The implementation is at that structural boundary and item 12's acceptance
+matrix is green and recorded. The generic drivers still present in source are
+the explicit spine/dict,
+cross-class, empty, and heterogeneous paths described above, not a hidden flat
+fallback.
 
 **Unlocks**: Post-v1 item 8's explicit SIMD/packed-mask/fusion and
 kernel-internal multicore work can target one stable typed range ABI. Post-v1
@@ -1797,7 +2008,11 @@ INTERPRETER.md and its entry here is retired.
       new `Operation` variant.
     - Measure before building. The cost is one frame plus one transient
       one-element list per constant reference; whether that is worth any
-      dispatch complexity is unknown until M13's benchmarks exist.
+      dispatch complexity is unknown until it is measured with Step 14's
+      `bench-kernels` tool. (Earlier text said "M13's benchmarks" — a
+      defect: the benchmark harness was ruled out of v1, so M13 shipped
+      none; Step 14 owns the tool and the checked-in deterministic
+      baseline, corrected 2026-08-19.)
 
 15. **`within` draft/publication copy elision** (deferred 2026-08-18,
     M11 review conversation). Every state application copies the slot's
@@ -1826,7 +2041,9 @@ INTERPRETER.md and its entry here is retired.
       the production-connected stateful-module suite at 1/8 workers and
       TSan are the proof surface, and the DoD-40 increment-count
       acceptance must remain schedule-independent.
-    - Measure before building, on M13's benchmarks: the win is bounded
+    - Measure before building, with Step 14's `bench-kernels` tool re-run
+      on current hardware (not "M13's benchmarks" — none exist; corrected
+      2026-08-19): the win is bounded
       by durable-stack element count and update frequency; the guidance
       that shared state should be one composite value (structure in the
       value plane, sharing in the module plane) already makes the draft
@@ -1865,7 +2082,9 @@ INTERPRETER.md and its entry here is retired.
       materializing the table must stay bounded work on that same edge
       and must not turn a failed registration into a half-built
       environment — candidate rollback already has to retire it.
-    - Measure before building, on M13's benchmarks. The lever is
+    - Measure before building, with Step 14's `bench-kernels` tool
+      extended to a module-registration case (not "M13's benchmarks" —
+      none exist; corrected 2026-08-19). The lever is
       memory-per-module, so the number worth having first is resident
       bytes per registered module and how it scales with binding count
       and generation depth; M12's stdlib modules are the realistic
@@ -2141,7 +2360,7 @@ INTERPRETER.md and its entry here is retired.
   this convention and every other exported `table.*` word validates every
   table input before doing work; it returns 0 only for a convention mismatch,
   while cancellation and OOM still propagate. Core reflection remains honest:
-  `type` reports `'dict`; printing, `match`, `keys`/`vals`/`at`/`put`,
+  `type` reports `'dict`; printing, `match?`, `keys`/`vals`/`at`/`put`,
   pervasion, and `json.emit` retain their ordinary dict behavior; `csv.emit`
   consumes an explicit `table.rows` or `table.header-rows` result. No reader,
   evaluator, value tag, heap kind, kernel dispatch, or generic serializer
@@ -2230,23 +2449,37 @@ INTERPRETER.md and its entry here is retired.
   unchanged (`use` already auto-loads — only the trigger moves).
   Recorded in SPEC.md's Modules/Loading section at ruling time, ahead of
   the implementation.
+- **Qualified observation auto-loads too** (user ruling, 2026-08-19):
+  registration state is an implementation detail. `body`, `doc`, `see`,
+  `which`, and qualified completion resolve through the same embedded-stdlib/
+  `ECL_PATH` loader as execution. Completion performs a load-only turn: it
+  executes no export and imports nothing. Thus every fully qualified operation
+  depends on the available module transports, never on whether some earlier
+  call happened to load the module.
 - **Embedded stdlib wins auto-load precedence over `ECL_PATH`** (user
   ruling, 2026-08-18, M12 planning), identically for `use`-miss and
   qualified-miss: stdlib names stay stable — a stray `csv.ecl` on the
   path cannot silently replace the stdlib; in-session shadowing and
   explicit `@module` registration remain the documented override; embedded
   resolution pays no filesystem stat.
-- **stdin is a word, ruled in at M12** (user ruling, 2026-08-18, closing
-  the former open question): `stdin` [P] `( -- string )` reads the whole
+- **stdin is an io word, ruled in at M12** (user ruling, 2026-08-18, closing
+  the former open question): `io.stdin` [P] `( -- string )` reads the whole
   piped stream once; legal in `-e` and script-file modes; `'io` in modes
-  where stdin is the program source. `"/dev/stdin" slurp` was rejected as
+  where stdin is the program source. `"/dev/stdin" io.slurp` was rejected as
   the permanent answer — the positioning deserves a word.
-- **The str surface is exactly thirteen words** (user ruling, 2026-08-18):
+- **The str surface is exactly thirteen words** (reaffirmed 2026-08-19):
   `upper lower trim trim-left trim-right starts? ends? contains? index-of
   replace repeat pad-left pad-right`; case operations ASCII-only per the
   character-model ruling; `index-of` is `'domain` when absent, `contains?`
   is the predicate form. All compact ECL-source definitions over core
   kernels.
+- **Observable text I/O is one `io` module** (user ruling, 2026-08-19):
+  `pp prin print inspect stdin slurp spit lines`. Arbitrary-value input does
+  not make `pp` or `inspect` a poor I/O fit—the words perform output.
+  Conversely, canonical `str` stays in the prelude because it returns a value
+  without an I/O effect, and `lines` belongs in `io` because its subject is a
+  path/stream, not a string. No compatibility globals remain for the eight
+  module words.
 - **http words are fixed full arity** (user ruling, 2026-08-18):
   `http.get ( url headers -- response )` and
   `http.post ( url headers body -- response )`, with `{}` for no headers.
@@ -2260,11 +2493,12 @@ INTERPRETER.md and its entry here is retired.
   primitives with full host authority published under a module name; the
   SDK surface does not widen.
 - **Stdlib is written in ECL wherever possible, native only when
-  necessary** (user directive, 2026-08-18, standing): `result`, `str`,
-  `table`, and `lines` are embedded ECL source; `csv` and `json` are
-  native solely as the deliberate first-party proof of the M9 public
-  callback protocol; `http` is native-internal because TLS and sockets
-  are host authority no ECL program can express.
+  necessary** (user directive, 2026-08-18, standing): `result`, `str`, and
+  `table` are embedded ECL source; `io`, `json`, and `http` are builtin
+  modules where runtime authority or internal representation access is
+  required; `csv` alone is native as the deliberate first-party proof of the
+  M9 public callback protocol. `http` is builtin because TLS and sockets are
+  host authority no ECL program can express through the SDK.
 - **Result-envelope vocabulary consolidates into the result module**
   (user ruling, 2026-08-18): `ok?`, `or-raise`, and `or-else` leave the
   prelude and join `result`, routed through the module's `checked`
@@ -2451,7 +2685,7 @@ script in CI.
 - **DoD-2 — unified value printing**
   - **Assert**: `(1 2 3)` and `[1 2 3]` are the same value and print
     specialized.
-  - **Verify by** `cmd`: `ecl '(1 2 3)'` and `ecl '(1 2 3) [1 2 3] match'`.
+  - **Verify by** `cmd`: `ecl '(1 2 3)'` and `ecl '(1 2 3) [1 2 3] match?'`.
   - **Expected**: `[1 2 3]` and `1`.
   - **Traces to**: Milestone 1 — `src/list.zig` (construction
     specialization) + `src/print.zig` (representation-exposing printer).
@@ -2463,11 +2697,11 @@ script in CI.
   - **Traces to**: Milestone 5 — pervasion spine recursion.
 
 - **DoD-4 — mask vs match equality**
-  - **Assert**: `=` is pervasive, `match` is whole-value.
-  - **Verify by** `cmd`: `ecl '[1 2] [1 2] ='` and `ecl '[1 2] [1 2] match'`.
+  - **Assert**: `=` is pervasive, `match?` is whole-value.
+  - **Verify by** `cmd`: `ecl '[1 2] [1 2] ='` and `ecl '[1 2] [1 2] match?'`.
   - **Expected**: `[1 1]` and `1`.
   - **Traces to**: Milestone 5 — comparison kernels; Milestone 1 —
-    `src/equal.zig` (structural `match` and hash).
+    `src/equal.zig` (structural `match?` and hash).
 
 - **DoD-5 — overflow is an error with element identification**
   - **Assert**: int overflow inside a leaf kernel raises `'overflow`
@@ -2479,9 +2713,9 @@ script in CI.
 
 - **DoD-6 — float regime**
   - **Assert**: `inf` is a literal that propagates; NaN-producing ops
-    are `'domain`; `0.0`/`-0.0` agree under `=` and `match`.
+    are `'domain`; `0.0`/`-0.0` agree under `=` and `match?`.
   - **Verify by** `cmd`: `ecl 'inf 1 +'`; `ecl 'inf inf -'`;
-    `ecl '0.0 -0.0 match'`.
+    `ecl '0.0 -0.0 match?'`.
   - **Expected**: `inf`; exit ≠ 0 with `'kind 'domain`; `1`.
   - **Traces to**: Milestone 2 — `src/lexer.zig` (inf/-inf float
     literals); Milestone 5 — float_result kernels.
@@ -2513,7 +2747,7 @@ script in CI.
   - **Assert**: re-`def`ing `+` makes `(+) fold` take the generic path
     with the user's semantics.
   - **Verify by** `cmd`: fixture `redefined-plus.ecl`:
-    `(pop pop 42) '+ def [1 2 3] 0 (+) fold pp`.
+    `(pop pop 42) '+ def [1 2 3] 0 (+) fold io.pp`.
   - **Expected**: `42`.
   - **Traces to**: Milestone 6 — resolution-identity guards.
 
@@ -2555,11 +2789,11 @@ script in CI.
     child scope; the eventual `each` implementation consumes that same
     boundary API rather than recreating environment isolation.
   - **Verify by** `ux`: enter `10`, then
-    `(99) 'kept def 20 + missing`, then `dup pp`, then `kept pp`.
+    `(99) 'kept def 20 + missing`, then `dup io.pp`, then `kept io.pp`.
     At M4 run `(1 'k set) @attempt pop k`; at M6 run the original probe
     `[1 2 3] (dup 'k set k *) each pop k`.
-  - **Expected**: after the failed line `dup pp` prints `10` and
-    `kept pp` prints `99`; both isolation probes error
+  - **Expected**: after the failed line `dup io.pp` prints `10` and
+    `kept io.pp` prints `99`; both isolation probes error
     `'undefined-word` for `k`.
   - **Traces to**: Milestone 3 — exact unit stack rollback; Milestone 4
     — the shared lazy child-scope mechanism proven through `@attempt`;
@@ -2768,7 +3002,7 @@ script in CI.
     transformations preserve its ordered equal-length-column convention.
   - **Verify by** `cmd`: fixture `table-values.ecl` constructs populated
     tables through every constructor and zero-row tables through the explicit
-    column, named-row, and header-row constructors; observes `type`, `match`,
+    column, named-row, and header-row constructors; observes `type`, `match?`,
     `keys`, `at`, `str`, and `json.emit`; round-trips through
     `table.rows`, `table.header-rows`, and `table.records`; and exercises
     `table.names`, `table.column`, `table.cast`, `table.select`,
@@ -2802,7 +3036,7 @@ script in CI.
   - **Assert**: CSV text can be explicitly cast, filtered, grouped by named
     columns, and aggregated with ordinary ECL quotations while preserving
     first-key occurrence order and stable rows within each group.
-  - **Verify by** `cmd`: fixture `table-analysis.ecl` uses `slurp`,
+  - **Verify by** `cmd`: fixture `table-analysis.ecl` uses `io.slurp`,
     `csv.parse`, and `table.from-header-rows` on `sales.csv`; explicitly casts
     `amount` and `quantity`, derives `revenue` with `table.with-column`, filters
     by an exact 0/1 mask, inspects `table.group-by`, and calls
@@ -2818,8 +3052,8 @@ script in CI.
     expand duplicate matches many-to-many in stable left-major/right-minor
     order, reject non-key column collisions, and never invent a missing value.
   - **Verify by** `cmd`: fixture `table-joins.ecl` loads an orders CSV through
-    `slurp`/`csv.parse` and a JSON array of customer records through
-    `slurp`/`json.parse`, converts both to tables, then exercises
+    `io.slurp`/`csv.parse` and a JSON array of customer records through
+    `io.slurp`/`json.parse`, converts both to tables, then exercises
     `table.inner-join` and `table.left-join-with` using duplicate, unmatched,
     composite-key, collision, and exact-fill cases.
   - **Expected**: inner and left results match expected ordered column dicts;
@@ -2847,8 +3081,8 @@ script in CI.
   - **Assert**: `'str use "hello" str.upper` works with no ECL_PATH
     set, and so does the bare qualified form with no `use` at all
     (qualified-miss auto-load, ruled 2026-08-18).
-  - **Verify by** `cmd`: `ecl "'str use \"hello\" str.upper pp"` and
-    `ecl '"hello" str.upper pp'`, both in an empty environment with a
+  - **Verify by** `cmd`: `ecl "'str use \"hello\" str.upper io.pp"` and
+    `ecl '"hello" str.upper io.pp'`, both in an empty environment with a
     copied binary in an empty directory.
   - **Expected**: `"HELLO"` from both.
   - **Traces to**: Milestone 12 — the embedded stdlib manifest
@@ -3050,11 +3284,11 @@ script in CI.
     retirement integration.
 
 - **DoD-43 — stdin as data**
-  - **Assert**: `stdin` reads piped input as data in `-e` and script-file
+  - **Assert**: `io.stdin` reads piped input as data in `-e` and script-file
     modes; in bare-stdin mode, where stdin is the program source, it
     raises `'io`.
-  - **Verify by** `cmd`: `printf 'a\nb' | ecl -e 'stdin "\n" split len pp'`;
-    and `echo 'stdin' | ecl` for the source-mode case.
+  - **Verify by** `cmd`: `printf 'a\nb' | ecl -e 'io.stdin "\n" split len io.pp'`;
+    and `echo 'io.stdin' | ecl` for the source-mode case.
   - **Expected**: `2` from the data path; the source-mode case errors
     `'io` naming stdin as the program source, without consuming further
     input.

@@ -11,7 +11,7 @@ const poll_api = @import("poll.zig");
 pub const Value = value.Value;
 
 const RenderStyle = enum { canonical, display };
-const display_leaf_limit: u64 = 256;
+const display_list_limit: u64 = 256;
 
 const DisplayScan = struct {
     collection: Value,
@@ -102,7 +102,7 @@ pub const RenderCursor = struct {
                 .word => |id| try self.pushBytes(intern.get(id)),
                 .list => |header| switch (header.kind()) {
                     .leaf_char1, .leaf_char2, .leaf_char4 => {
-                        if (self.style == .display and header.length() > display_leaf_limit) {
+                        if (self.style == .display and header.length() > display_list_limit) {
                             try self.writeFmt(writer, "\"<{d}-characters-elided>\"", .{header.length()});
                             return;
                         }
@@ -110,6 +110,10 @@ pub const RenderCursor = struct {
                         if (header.length() == 0) try self.writeByte(writer, '"') else try self.actions.push(.{ .string = .{ .collection = render.item, .index = 0 } });
                     },
                     .generic_spine => if (self.style == .display) {
+                        if (header.length() > display_list_limit) {
+                            try self.writeFmt(writer, "(<{d}-values-elided>)", .{header.length()});
+                            return;
+                        }
                         try self.actions.push(.{ .display_scan = .{
                             .collection = render.item,
                             .indent = self.column + 1,
@@ -119,7 +123,7 @@ pub const RenderCursor = struct {
                         try self.pushSequence(render.item, render.indent + 1, false);
                     },
                     .leaf_i64, .leaf_f64, .leaf_symbol => {
-                        if (self.style == .display and header.length() > display_leaf_limit) {
+                        if (self.style == .display and header.length() > display_list_limit) {
                             try self.writeFmt(writer, "[<{d}-values-elided>]", .{header.length()});
                             return;
                         }
@@ -594,7 +598,7 @@ test "display rendering elides huge leaves without changing canonical strings" {
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
 
-    var integers: [display_leaf_limit + 1]i64 = undefined;
+    var integers: [display_list_limit + 1]i64 = undefined;
     for (&integers, 0..) |*item, index| item.* = @intCast(index);
     const leaf = try list.fromI64Slice(allocator, &integers);
     defer cleanup.releaseValue(leaf);
@@ -608,7 +612,7 @@ test "display rendering elides huge leaves without changing canonical strings" {
     try std.testing.expect(std.mem.startsWith(u8, canonical, "[0 1 2"));
     try std.testing.expect(std.mem.endsWith(u8, canonical, "255 256]"));
 
-    var codepoints: [display_leaf_limit + 1]u32 = @splat('x');
+    var codepoints: [display_list_limit + 1]u32 = @splat('x');
     const string = try list.fromCodepoints(allocator, &codepoints);
     defer cleanup.releaseValue(string);
     const displayed_string = try toOwnedDisplayString(allocator, string);

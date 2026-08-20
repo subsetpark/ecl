@@ -133,7 +133,7 @@
 
 ### def case
 # Validate the clause container before inspecting any clause.
-(dup type 'list match
+(dup type 'list match?
  # A case table is [key action ... else]: nonempty and odd in length.
  (dup len dup 0 > swap 2 mod 1 = and
   ((|subject clauses|
@@ -148,7 +148,7 @@
     # Extract the even key slots, compare the captured subject with each,
     # and let find's len-on-miss result select the final else quotation.
     clauses dup len 2 div range 2 * at
-    subject (match) partial each 1 find at call)
+    subject (match?) partial each 1 find at call)
    call)
   (pop pop {'kind 'shape 'msg "case requires a nonempty odd clause list ending in else"} raise)
   if)
@@ -306,23 +306,13 @@
 (sequence -- mean : "Return the arithmetic mean of a nonempty numeric sequence.")
 'mean def
 
-### def print
-(prin "\n" prin)
-(text -- : "Print a string followed by a newline.")
-'print def
-
-### def inspect
-(dup pp)
-(value -- value : "Pretty-print a value while leaving the original value on the stack.")
-'inspect def
-
 ### def fail
 (wrap ('kind 'user 'msg) swap compose dict-of raise)
 (: "Raise a user-kind error whose message is the supplied value.")
 'fail def
 
 ### def find
-(|sequence needle| sequence needle (match) partial each dup where swap len swap dup len 0 =
+((match?) partial each dup where swap len swap dup len 0 =
  (pop)
  (first nip)
  if)
@@ -350,11 +340,6 @@
 (bool error -- :
  "Raise an error dict unless the condition is the boolean 1, discarding the dict when it holds.")
 'assert def
-
-### def lines
-(slurp "\n" split)
-(path -- list : "Read one UTF-8 file and split it into its newline-separated lines.")
-'lines def
 
 ### def rotate
 (|xs n| xs dup len range n + dup len mod dup len + dup len mod at)

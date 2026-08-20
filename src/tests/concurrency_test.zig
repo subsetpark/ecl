@@ -123,7 +123,7 @@ test "concurrency: task identity rendering dict keys and cached await are observ
     try runOk(
         &runtime,
         "pop 'identity-task set " ++
-            "identity-task type identity-task dup match " ++
+            "identity-task type identity-task dup match? " ++
             "identity-task 9 pair dict-of identity-task has?",
     );
     {
@@ -332,7 +332,7 @@ test "concurrency: source await-all is ordered result fan-in" {
             var source_bytes: [512]u8 = undefined;
             const source = try std.fmt.bufPrint(
                 &source_bytes,
-                "{s} (@spawn) each dup await-all swap (await) each match",
+                "{s} (@spawn) each dup await-all swap (await) each match?",
                 .{quotations},
             );
             try runOk(&runtime, source);
@@ -356,7 +356,7 @@ test "concurrency: complete console calls do not interleave bytes" {
     var writer = std.Io.Writer.fixed(&bytes);
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &writer);
     defer runtime.deinit();
-    try runOk(&runtime, "[(\"aaaa\" prin 0) (\"bbbb\" prin 0)] (call) @each pop");
+    try runOk(&runtime, "[(\"aaaa\" io.prin 0) (\"bbbb\" io.prin 0)] (call) @each pop");
     const written = writer.buffered();
     try std.testing.expect(std.mem.eql(u8, written, "aaaabbbb") or
         std.mem.eql(u8, written, "bbbbaaaa"));
@@ -380,7 +380,7 @@ test "concurrency: primitive @each is reflective and task-join is absent" {
     try runOk(
         &runtime,
         "'@each doc " ++
-            "\"Apply a quotation concurrently in one fresh unit per element and return one result per element in input order.\" match " ++
+            "\"Apply a quotation concurrently in one fresh unit per element and return one result per element in input order.\" match? " ++
             "'@each which '@each see words",
     );
     var reflected = try display(&runtime);

@@ -27,6 +27,8 @@ const env = @import("env.zig");
 const machine = @import("machine.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const poll_api = @import("poll.zig");
+const support = @import("kernel_support.zig");
+const flat = @import("kernel_flat.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
@@ -35,11 +37,28 @@ const MachineError = machine.MachineError;
 /// per-counter stride so consecutive counters land in unrelated sub-streams.
 const gamma: u64 = 0x9E3779B97F4A7C15;
 
+/// The sized-operation taxonomy lives in `kernel_support` so the registry in
+/// `kernels.zig` classifies exactly the operations this installer publishes.
+const Op = support.RandomOp;
+
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    try core.installBuiltin("rand-int", randInt);
-    try core.installBuiltin("rand-ints", randInts);
-    try core.installBuiltin("rand-float", randFloat);
-    try core.installBuiltin("entropy", entropy);
+    inline for (std.meta.fields(Op)) |field| {
+        const operation: Op = @enumFromInt(field.value);
+        try core.installBuiltin(operation.spelling(), bind(operation));
+    }
+}
+
+fn bind(comptime operation: Op) env.PrimitiveImpl {
+    return struct {
+        fn run(evaluator: *Machine) MachineError!void {
+            return switch (operation) {
+                .rand_int => randInt(evaluator),
+                .rand_ints => randInts(evaluator),
+                .rand_float => randFloat(evaluator),
+                .entropy => entropy(evaluator),
+            };
+        }
+    }.run;
 }
 
 /// One decoded generator state. The ECL representation stays a plain list;
@@ -137,44 +156,52 @@ fn randInts(evaluator: *Machine) MachineError!void {
     // The advanced state is pushed before the vector so the driver's single
     // output lands on top, matching ( state n m -- state' list ).
     try evaluator.pushOwned(try stateValue(evaluator, state.advanced(count)));
-    const values = try evaluator.allocator().alloc(Value, @intCast(count));
+    // A zero-length draw has no element to type, and the representation of an
+    // empty result is the value layer's existing choice: it stays the generic
+    // empty list this word has always produced.
+    if (count == 0) {
+        return evaluator.pushOwned(try list.fromValues(evaluator.allocator(), &.{}));
+    }
+    // Every element of a draw vector is an int: the output representation is
+    // known before the first draw, so the fill writes the typed buffer directly
+    // and nothing is profiled afterwards.
+    const writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), @intCast(count));
     try evaluator.startDriver(DrawDriver{
         .state = state,
         .bound = bound,
-        .values = .init(values),
-        .materializer = .init(.init(evaluator.allocator(), values)),
+        .writer = .init(writer),
+        .cursor = flat.FlatCursor.init(@intCast(count)),
     });
 }
 
-/// Fills an exact-size draw vector under the ordinary kernel budget. Because
-/// element `i` comes from counter `+ i`, a resumed fill needs no replay of
-/// what earlier turns produced.
+/// Fills an exact-size typed draw vector under the ordinary kernel budget.
+/// Because element `i` comes from counter `+ i`, a resumed fill needs no replay
+/// of what earlier turns produced, and because every element is an int the fill
+/// writes `leaf_i64` storage directly rather than boxing a cell per draw and
+/// profiling the result afterwards.
 const DrawDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     state: State,
     bound: u64,
-    values: heap.Owned([]Value),
-    index: usize = 0,
-    filling: bool = true,
-    materializer: heap.Owned(kernel_storage.ValueMaterializer),
+    writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
+    cursor: flat.FlatCursor,
 
     pub fn advance(evaluator: *Machine, self: *DrawDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        var budget = machine.kernel_poll_quantum;
-        const values = self.values.borrow();
-        while (self.filling and budget != 0 and self.index != values.len) : (budget -= 1) {
-            values[self.index] = .{
-                .int = @bitCast(boundedDraw(self.state, self.index, self.bound)),
-            };
-            self.index += 1;
+        const context = support.Context{ .evaluator = evaluator };
+        var block: [flat.block_size]i64 = undefined;
+        const range = try self.cursor.nextRange(context) orelse
+            return .{ .output = self.writer.borrowMut().finish() };
+        var offset: usize = 0;
+        while (offset != range.len()) {
+            const piece = flat.blockRange(range, offset);
+            for (piece.start..piece.end) |index| {
+                block[index - piece.start] = @bitCast(boundedDraw(self.state, index, self.bound));
+            }
+            self.writer.borrowMut().writeRange(piece.start, block[0..piece.len()]);
+            offset += piece.len();
         }
-        if (self.index != values.len) return .yielded;
-        self.filling = false;
-        if (budget == 0) return .yielded;
-        return switch (try self.materializer.borrowMut().advance(budget)) {
-            .pending => .yielded,
-            .complete => |result| .{ .output = result },
-        };
+        if (!self.cursor.complete()) return .yielded;
+        return .{ .output = self.writer.borrowMut().finish() };
     }
 };
 

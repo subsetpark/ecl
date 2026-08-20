@@ -11,17 +11,17 @@
 # any work, rather than repairing or reclassifying what it is handed.
 (
  ### def text?
- ((type 'char match) all?)
+ ((type 'char match?) all?)
  (value -- bool : "Return 1 when a value is a list of characters, which is what a string is.")
  'text? defp
 
  ### def string?
- (dup type 'list match (text?) (pop 0) if)
+ (dup type 'list match? (text?) (pop 0) if)
  (value -- bool : "Return 1 when a value is a string, without raising for other kinds.")
  'string? defp
 
  ### def checked
- (dup type 'dict match
+ (dup type 'dict match?
   {'kind 'type 'msg "a table must be a dict of columns"} assert
   dup keys len 0 >
   {'kind 'shape 'msg "a table must have at least one column"} assert
@@ -29,7 +29,7 @@
   {'kind 'type 'msg "table column names must be strings"} assert
   dup keys (len 0 >) all?
   {'kind 'domain 'msg "table column names must not be empty"} assert
-  dup vals (type 'list match) all?
+  dup vals (type 'list match?) all?
   {'kind 'type 'msg "table columns must be lists"} assert
   dup vals (len) each distinct len 2 <
   {'kind 'shape 'msg "table columns must share one length"} assert)
@@ -38,7 +38,7 @@
  'checked defp
 
  ### def convention-miss?
- (dup 'err at 'kind at ['type 'shape 'domain] in (pop 0) ('err at raise) if)
+ (dup 'err at 'kind at ['type 'shape 'domain] in? (pop 0) ('err at raise) if)
  (result -- bool :
   "Report a convention mismatch as 0, re-raising anything else so cancellation still propagates.")
  'convention-miss? defp
@@ -69,7 +69,7 @@
 
  ### def from-rows
  ((|names rows|
-   names type 'list match
+   names type 'list match?
    {'kind 'type 'msg "table.from-rows expects a list of column names"} assert
    names len 0 >
    {'kind 'shape 'msg "a table must have at least one column"} assert
@@ -79,9 +79,9 @@
    {'kind 'domain 'msg "table column names must not be empty"} assert
    names distinct len names len =
    {'kind 'domain 'msg "table.from-rows rejects duplicate column names"} assert
-   rows type 'list match
+   rows type 'list match?
    {'kind 'type 'msg "table.from-rows expects a list of rows"} assert
-   rows (type 'list match) all?
+   rows (type 'list match?) all?
    {'kind 'type 'msg "table.from-rows expects every row to be a list"} assert
    rows names (len swap len =) partial all?
    {'kind 'shape 'msg "every row must have one cell per column name"} assert
@@ -96,7 +96,7 @@
  'from-rows def
 
  ### def from-header-rows
- (dup type 'list match
+ (dup type 'list match?
   {'kind 'type 'msg "table.from-header-rows expects a list of rows"} assert
   dup len 0 >
   {'kind 'shape 'msg "table.from-header-rows needs a header row"} assert
@@ -119,11 +119,11 @@
 
  ### def from-records
  ((|records|
-   records type 'list match
+   records type 'list match?
    {'kind 'type 'msg "table.from-records expects a list of records"} assert
    records len 0 >
    {'kind 'shape 'msg "table.from-records cannot infer a schema from no records"} assert
-   records (type 'dict match) all?
+   records (type 'dict match?) all?
    {'kind 'type 'msg "table.from-records expects every record to be a dict"} assert
    records first keys (string?) all?
    {'kind 'type 'msg "table column names must be strings"} assert
@@ -172,11 +172,11 @@
  ### def cast
  ((|table spec|
    table checked pop
-   spec type 'dict match
+   spec type 'dict match?
    {'kind 'type 'msg "table.cast expects a dict from column name to quotation"} assert
    spec keys table (swap has?) partial all?
    {'kind 'domain 'msg "table.cast requires existing column names"} assert
-   spec vals (type 'list match) all?
+   spec vals (type 'list match?) all?
    {'kind 'type 'msg "table.cast expects a quotation for every named column"} assert
    spec pairs table (cast-column) fold)
   call)
@@ -199,7 +199,7 @@
  ### def select
  ((|table names|
    table checked pop
-   names type 'list match
+   names type 'list match?
    {'kind 'type 'msg "table.select expects a list of column names"} assert
    names len 0 >
    {'kind 'shape 'msg "a table must have at least one column"} assert
@@ -217,7 +217,7 @@
  ### def rename
  ((|table mapping|
    table checked pop
-   mapping type 'dict match
+   mapping type 'dict match?
    {'kind 'type 'msg "table.rename expects a dict from old name to new name"} assert
    mapping keys table (swap has?) partial all?
    {'kind 'domain 'msg "table.rename requires existing column names"} assert
@@ -241,7 +241,7 @@
    {'kind 'type 'msg "table column names must be strings"} assert
    name len 0 >
    {'kind 'domain 'msg "table column names must not be empty"} assert
-   column type 'list match
+   column type 'list match?
    {'kind 'type 'msg "table.with-column expects a list"} assert
    column len table height =
    {'kind 'shape 'msg "a replacement column must match the table's row count"} assert
@@ -294,7 +294,7 @@
  (names -- set :
   "Build a dict whose keys are the given names, for membership tests.
 
-   `in` pervades into a sought string rather than comparing it whole, and `find` reaches the core
+   `in?` pervades into a sought string rather than comparing it whole, and `find` reaches the core
    `where` this module shadows, so name membership goes through `has?` on a dict instead.")
  'name-set defp
 
@@ -309,9 +309,9 @@
  ### def where
  ((|table mask|
    table checked pop
-   mask type 'list match
+   mask type 'list match?
    {'kind 'type 'msg "table.where expects a mask list"} assert
-   mask ([0 1] in) all?
+   mask ([0 1] in?) all?
    {'kind 'type 'msg "a table mask holds only 0 and 1"} assert
    mask len table height =
    {'kind 'shape 'msg "a table mask must match the table's row count"} assert
@@ -357,7 +357,7 @@
  ### def group-by
  ((|table names|
    table checked pop
-   names type 'list match
+   names type 'list match?
    {'kind 'type 'msg "table.group-by expects a list of column names"} assert
    names (string?) all?
    {'kind 'type 'msg "table column names must be strings"} assert
@@ -417,9 +417,9 @@
  'composite-key-columns defp
 
  ### def spec-shaped?
- (dup type 'list match
+ (dup type 'list match?
   (dup len 3 =
-   (dup first string? over 1 at string? and swap 2 at type 'list match and)
+   (dup first string? over 1 at string? and swap 2 at type 'list match? and)
    (pop 0)
    if)
   (pop 0)
@@ -442,7 +442,7 @@
  ### def aggregate
  ((|table names specs|
    table checked pop
-   names type 'list match
+   names type 'list match?
    {'kind 'type 'msg "table.aggregate expects a list of column names"} assert
    names (string?) all?
    {'kind 'type 'msg "table column names must be strings"} assert
@@ -450,7 +450,7 @@
    {'kind 'domain 'msg "table.aggregate requires existing column names"} assert
    names distinct len names len =
    {'kind 'domain 'msg "table.aggregate rejects duplicate column names"} assert
-   specs type 'list match
+   specs type 'list match?
    {'kind 'type 'msg "table.aggregate expects a list of specifications"} assert
    specs (spec-shaped?) all?
    {'kind 'type
@@ -473,7 +473,7 @@
 
  ### def key-matches
  ((|index left-keys right-keys|
-   right-keys left-keys index at (match) partial each selected)
+   right-keys left-keys index at (match?) partial each selected)
   call)
  (index left-keys right-keys -- indices :
   "Right-row indices whose key equals the left row's key, in ascending order.")
@@ -540,7 +540,7 @@
  'left-step defp
 
  ### def pair-shaped?
- (dup type 'list match
+ (dup type 'list match?
   (dup len 2 =
    (dup first string? swap 1 at string? and)
    (pop 0)
@@ -552,7 +552,7 @@
 
  ### def join-plan
  ((|left right pairs|
-   pairs type 'list match
+   pairs type 'list match?
    {'kind 'type 'msg "join keys are a list of [left-name right-name] pairs"} assert
    pairs len 0 >
    {'kind 'domain 'msg "a join needs at least one key pair"} assert
@@ -638,7 +638,7 @@
  ((|left right pairs fill|
    left checked pop
    right checked pop
-   fill type 'dict match
+   fill type 'dict match?
    {'kind 'type 'msg "table.left-join-with expects a fill dict"} assert
    left right pairs fill
    left right pairs join-plan

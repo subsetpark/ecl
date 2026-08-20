@@ -514,7 +514,10 @@ fn numberEqual(a: Value, b: Value) bool {
     };
 }
 
-fn intFloatEqual(integer: i64, floating: f64) bool {
+/// Exact identity between the two numeric storage widths. Typed leaf kernels
+/// use this same rule instead of rounding an integer through `f64` or growing a
+/// second notion of numeric equality beside structural `match?`.
+pub fn intFloatEqual(integer: i64, floating: f64) bool {
     const i64_min_f64: f64 = -9_223_372_036_854_775_808.0;
     const i64_max_exclusive_f64: f64 = 9_223_372_036_854_775_808.0;
     if (!std.math.isFinite(floating) or @trunc(floating) != floating) return false;

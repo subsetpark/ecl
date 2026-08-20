@@ -326,6 +326,19 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .float => "{'a 0.1 'b -0.0}",
             .failure => "1",
         },
+        // `dip` needs a value below the protected one for its quotation to
+        // work on, and quotations built only from builtins so the pass counts
+        // one recognition rather than a nested one. The failure variant fails
+        // inside the quotation: a non-list top would fall through to the
+        // generic composition instead, which is a fallback rather than a
+        // fused-versus-generic comparison.
+        .dip => switch (variant) {
+            .atom => "5 9 (1 +)",
+            .empty => "[] 9 (len)",
+            .spine => "[[1] [2]] 9 (len)",
+            .float => "0.5 9 (1 +)",
+            .failure => "'sym 9 (1 +)",
+        },
     };
 }
 

@@ -13,7 +13,7 @@ with
 'counter
 @module
 counter.tick
-counter.peek pp
+counter.peek io.pp
 
 ### Re-registration proposes a different initial stack and different code.
 ### The proposal is discarded and the retained stack is what the new code
@@ -34,10 +34,10 @@ counter.peek pp
 with
 'counter
 @module
-counter.peek pp
+counter.peek io.pp
 counter.tick
-counter.peek pp
-counter.doubled pp
+counter.peek io.pp
+counter.doubled io.pp
 
 ### Replacement code may migrate the retained representation with an
 ### ordinary first transactional update; the runtime names no positions.
@@ -55,7 +55,7 @@ with
 'counter
 @module
 counter.migrate
-counter.peek pp
+counter.peek io.pp
 
 ### A failed registration changes neither the code generation nor the state.
 ((
@@ -68,12 +68,12 @@ counter.peek pp
 at
 'kind
 at
-pp
-counter.peek pp
+io.pp
+counter.peek io.pp
 counter.migrate
-counter.peek pp
+counter.peek io.pp
 
 ### Access through a previously used qualified path and through an alias
 ### both resolve the current generation over the retained stack.
 'c 'counter alias
-c.peek pp
+c.peek io.pp

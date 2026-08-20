@@ -18,8 +18,8 @@
 
  ### def checked-error
  ((|candidate failure|
-   candidate type 'list match failure assert
-   candidate (type 'char match) all? failure assert
+   candidate type 'list match? failure assert
+   candidate (type 'char match?) all? failure assert
    candidate)
   call)
  (candidate failure -- string :
@@ -33,7 +33,7 @@
  'checked defp
 
  ### def checked-int
- ((|candidate failure| candidate type 'int match failure assert candidate) call)
+ ((|candidate failure| candidate type 'int match? failure assert candidate) call)
  (candidate failure -- integer :
   "Return an integer unchanged, using the supplied error when validation fails.")
  'checked-int defp
@@ -77,7 +77,7 @@
  'lower def
 
  ### def trim-left-valid
- (dup blanks in not where dup len 0 =
+ (dup blanks in? not where dup len 0 =
   (pop pop "")
   (first drop)
   if)
@@ -91,7 +91,7 @@
  'trim-left def
 
  ### def trim-right-valid
- (dup blanks in not where dup len 0 =
+ (dup blanks in? not where dup len 0 =
   (pop pop "")
   (last 1 + take)
   if)
@@ -110,12 +110,12 @@
  'trim def
 
  ### def opens-with?
- ((|s p| s p len take p match) call)
+ ((|s p| s p len take p match?) call)
  (string prefix -- bool : "Compare a string's opening scalars with a prefix no longer than it.")
  'opens-with? defp
 
  ### def closes-with?
- ((|s p| s p len neg take p match) call)
+ ((|s p| s p len neg take p match?) call)
  (string suffix -- bool : "Compare a string's closing scalars with a suffix no longer than it.")
  'closes-with? defp
 
@@ -133,15 +133,20 @@
 
  ### def contains?
  ("str.contains? expects a string and a string needle" checked-pair
-  (|s n| s n split len 1 >) call)
- (string needle -- bool : "Return 1 when a nonempty needle occurs anywhere in a string.")
+  (|s n| n len 0 = s n split len 1 > or) call)
+ (string needle -- bool : "Return 1 when a needle occurs anywhere in a string, including empty.")
  'contains? def
 
  ### def index-of
  ("str.index-of expects a string and a string needle" checked-pair
-  (|s n| s n split dup len 1 >
-   {'kind 'domain 'msg "str.index-of found no occurrence of the needle"} assert
-   first len)
+  (|s n| n len 0 =
+   (0)
+   s n pair
+   (split dup len 1 >
+    {'kind 'domain 'msg "str.index-of found no occurrence of the needle"} assert
+    first len)
+   with
+   if)
   call)
  (string needle -- index :
   "Return the zero-based index of a needle's first occurrence, raising 'domain when it is absent.")

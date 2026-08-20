@@ -55,7 +55,7 @@ test "random: a vector draw is counter-indexed and order-independent" {
             .name = "vector elements equal their individual draws",
             .source = "[0 0] 3 100 rand-ints nip " ++
                 "[0 0] 100 rand-int nip [0 1] 100 rand-int nip [0 2] 100 rand-int nip 3 pack " ++
-                "match",
+                "match?",
             .expected = "1",
         },
         .{
@@ -157,7 +157,7 @@ test "random: the rng module draws from durable module state" {
         },
         .{
             .name = "ints and its roll spelling agree",
-            .source = "'rng use 42 seed 3 6 ints 42 seed 3 6 roll match",
+            .source = "'rng use 42 seed 3 6 ints 42 seed 3 6 roll match?",
             .expected = "1",
         },
         .{

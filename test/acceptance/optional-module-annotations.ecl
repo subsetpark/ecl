@@ -37,20 +37,20 @@
 'forms.effected see
 'forms.documented see
 'forms.complete see
-'forms.documented doc pp
+'forms.documented doc io.pp
 
 ### Unannotated module words cross the home boundary unchecked, and a
 ### supplied effect stays a live caller-stack contract.
-10 forms.bare pp
-10 forms.effected pp
-10 forms.documented pp
-12 forms.complete pp
-10 forms.via-private pp
+10 forms.bare io.pp
+10 forms.effected io.pp
+10 forms.documented io.pp
+12 forms.complete io.pp
+10 forms.via-private io.pp
 
 ### `set` is exactly literal capture plus unannotated `def`.
 42 'answer set
 42 literal 'spelled def
-'answer body 'spelled body match pp
+'answer body 'spelled body match? io.pp
 'answer see
 'spelled see
 
@@ -62,7 +62,7 @@
  (1 2) (-- n) 'two def)
 'liar
 @module
-(liar.two) @attempt 'err at 'kind at pp
+(liar.two) @attempt 'err at 'kind at io.pp
 
 ### A malformed recognized annotation is still 'domain.
 ((
@@ -75,10 +75,10 @@
 at
 'kind
 at
-pp
+io.pp
 
 ### An undocumented word has no documentation to report.
-('forms.bare doc) @attempt 'err at 'kind at pp
+('forms.bare doc) @attempt 'err at 'kind at io.pp
 
 ### A list in annotation position that recognizes no marker is the body, not
 ### a malformed annotation: whatever the definition displaces stays on the
@@ -93,5 +93,5 @@ pp
  (a b) 'f def)
 'positional
 @module
-'positional.f body pp
-positional.peek pp
+'positional.f body io.pp
+positional.peek io.pp

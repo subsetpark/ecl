@@ -8,49 +8,16 @@ const env = @import("env.zig");
 const machine = @import("machine.zig");
 const support = @import("kernel_support.zig");
 const storage = @import("kernel_storage.zig");
+const kernel_flat = @import("kernel_flat.zig");
 const poll = @import("poll.zig");
 
 const Value = value.Value;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 
-const Op = enum {
-    at,
-    where,
-    in_word,
-    raze,
-    cat,
-    take,
-    drop,
-    reverse,
-    first,
-    rest,
-    range,
-    shape,
-    len,
-    flip,
-    reshape,
-
-    fn spelling(self: Op) []const u8 {
-        return switch (self) {
-            .at => "at",
-            .where => "where",
-            .in_word => "in",
-            .raze => "raze",
-            .cat => "cat",
-            .take => "take",
-            .drop => "drop",
-            .reverse => "reverse",
-            .first => "first",
-            .rest => "rest",
-            .range => "range",
-            .shape => "shape",
-            .len => "len",
-            .flip => "flip",
-            .reshape => "reshape",
-        };
-    }
-};
+/// The sized-operation taxonomy lives in `kernel_support` so the registry in
+/// `kernels.zig` classifies exactly the operations this installer publishes.
+const Op = support.SequenceOp;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(Op)) |field| {
@@ -94,6 +61,18 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
     defer index.deinit();
     var collection = try evaluator.popValue();
     defer collection.deinit();
+    // A typed index vector over a typed source is one gather: the result's
+    // representation is the source's, known before the first read.
+    if (index.borrow() == .list and index.borrow().list.kind() == .leaf_i64) {
+        if (try startTypedCopy(
+            evaluator,
+            collection.borrow(),
+            null,
+            index.borrow(),
+            .gather,
+            @intCast(index.borrow().list.length()),
+        )) return;
+    }
     const cursor = try IndexCursor.init(
         evaluator.releaseDomain(),
         evaluator.allocator(),
@@ -282,19 +261,42 @@ fn wherePrimitive(evaluator: *Machine) MachineError!void {
     var counts = try evaluator.popValue();
     defer counts.deinit();
     if (counts.borrow() != .list) return evaluator.typeError("a non-negative integer count list");
-    try evaluator.startDriver(WhereDriver{ .counts = .init(counts.take()) });
+    // A typed count list is pinned once for the driver's whole life, which is
+    // what lets the counting pass read a slice instead of one boxed cell at a
+    // time; a boxed list keeps the bounded per-element read.
+    const reader: ?heap.LeafReader(.leaf_i64) = if (counts.borrow().list.kind() == .leaf_i64)
+        heap.LeafReader(.leaf_i64).acquire(counts.borrow().list)
+    else
+        null;
+    try evaluator.startDriver(WhereDriver{
+        .counts = .init(counts.take()),
+        .reader = if (reader) |acquired| .init(acquired) else null,
+    });
 }
 
+/// Counts, then fills. The result is an exact-size index vector whose element
+/// type is known before the first store, so the fill writes `leaf_i64` storage
+/// directly; a run of equal indices is one bounded fill rather than a loop.
+///
+/// A typed count list is read through a pinned typed slice. A boxed one keeps
+/// the bounded per-element read, which is its registry classification.
 const WhereDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     counts: heap.Owned(Value),
     phase: enum { count, fill, materialize } = .count,
     index: usize = 0,
     total: usize = 0,
-    indices: ?heap.Owned([]i64) = null,
+    writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
+    reader: ?heap.Owned(heap.LeafReader(.leaf_i64)) = null,
     destination: usize = 0,
     repetition: usize = 0,
-    materializer: ?heap.Owned(storage.I64Materializer) = null,
+
+    /// The count at one position: from the pinned typed slice when the input is
+    /// a typed leaf, through the bounded boxed read otherwise.
+    fn countAt(self: *const WhereDriver, index: usize) Value {
+        if (self.reader) |*pinned| return .{ .int = pinned.borrow().slice()[index] };
+        return list.atUnchecked(self.counts.borrow(), index);
+    }
 
     pub fn advance(evaluator: *Machine, self: *WhereDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -303,12 +305,15 @@ const WhereDriver = struct {
         while (budget != 0) switch (self.phase) {
             .count => {
                 if (self.index == count) {
-                    self.indices = .init(try evaluator.allocator().alloc(i64, self.total));
+                    self.writer = .init(try heap.LeafWriter(.leaf_i64).init(
+                        evaluator.allocator(),
+                        self.total,
+                    ));
                     self.index = 0;
                     self.phase = .fill;
                     continue;
                 }
-                const item = list.atUnchecked(self.counts.borrow(), self.index);
+                const item = self.countAt(self.index);
                 if (item != .int) return evaluator.failAtIndex(
                     .type,
                     "where expected integer counts",
@@ -332,31 +337,32 @@ const WhereDriver = struct {
             },
             .fill => {
                 if (self.index == count) {
-                    self.materializer = .init(storage.I64Materializer.init(
-                        evaluator.allocator(),
-                        self.indices.?.borrow(),
-                    ));
                     self.phase = .materialize;
                     continue;
                 }
                 if (self.repetition == 0) {
-                    self.repetition = @intCast(list.atUnchecked(self.counts.borrow(), self.index).int);
+                    self.repetition = @intCast(self.countAt(self.index).int);
                     if (self.repetition == 0) {
                         self.index += 1;
                         budget -= 1;
                         continue;
                     }
                 }
-                self.indices.?.borrow()[self.destination] = std.math.cast(i64, self.index) orelse
+                const element = std.math.cast(i64, self.index) orelse
                     return evaluator.fail(.overflow, "where index exceeds integer range");
-                self.destination += 1;
-                self.repetition -= 1;
+                // One run of equal indices is one bounded fill, charged for the
+                // elements it actually wrote.
+                const run = @min(self.repetition, budget);
+                self.writer.?.borrowMut().fillRange(self.destination, run, element);
+                self.destination += run;
+                self.repetition -= run;
+                budget -= run;
                 if (self.repetition == 0) self.index += 1;
-                budget -= 1;
             },
-            .materialize => return switch (try self.materializer.?.borrowMut().advance(budget)) {
-                .pending => .yielded,
-                .complete => |result| .{ .output = result },
+            .materialize => {
+                if (self.reader) |*pinned| pinned.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.reader = null;
+                return .{ .output = self.writer.?.borrowMut().finish() };
             },
         };
         return .yielded;
@@ -370,6 +376,7 @@ fn inPrimitive(evaluator: *Machine) MachineError!void {
     var needle = try evaluator.popValue();
     defer needle.deinit();
     if (collection.borrow() != .list) return evaluator.typeError("a list haystack");
+    if (try startTypedMembership(evaluator, needle.borrow(), collection.borrow())) return;
     const cursor = try MembershipCursor.init(
         evaluator.releaseDomain(),
         evaluator.allocator(),
@@ -381,6 +388,227 @@ fn inPrimitive(evaluator: *Machine) MachineError!void {
         .collection = .init(collection.take()),
         .cursor = .init(cursor),
     });
+}
+
+fn membershipKindsCompatible(comptime needle_kind: value.HeapKind, comptime haystack_kind: value.HeapKind) bool {
+    const needle_numeric = needle_kind == .leaf_i64 or needle_kind == .leaf_f64;
+    const haystack_numeric = haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64;
+    const needle_char = needle_kind == .leaf_char1 or needle_kind == .leaf_char2 or needle_kind == .leaf_char4;
+    const haystack_char = haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4;
+    return (needle_numeric and haystack_numeric) or
+        (needle_char and haystack_char) or
+        (needle_kind == .leaf_symbol and haystack_kind == .leaf_symbol);
+}
+
+fn typedElementsMatch(
+    comptime needle_kind: value.HeapKind,
+    comptime haystack_kind: value.HeapKind,
+    needle: heap.LeafElement(needle_kind),
+    candidate: heap.LeafElement(haystack_kind),
+) bool {
+    if (needle_kind == .leaf_i64 and haystack_kind == .leaf_i64) return needle == candidate;
+    if (needle_kind == .leaf_i64 and haystack_kind == .leaf_f64)
+        return equal.intFloatEqual(needle, candidate);
+    if (needle_kind == .leaf_f64 and haystack_kind == .leaf_i64)
+        return equal.intFloatEqual(candidate, needle);
+    if (needle_kind == .leaf_f64 and haystack_kind == .leaf_f64) return needle == candidate;
+
+    const needle_char = needle_kind == .leaf_char1 or needle_kind == .leaf_char2 or needle_kind == .leaf_char4;
+    const haystack_char = haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4;
+    if (needle_char and haystack_char) return @as(u32, needle) == @as(u32, candidate);
+    if (needle_kind == .leaf_symbol and haystack_kind == .leaf_symbol) return needle == candidate;
+    return false;
+}
+
+fn scalarMatchesElement(
+    comptime haystack_kind: value.HeapKind,
+    needle: Value,
+    candidate: heap.LeafElement(haystack_kind),
+) bool {
+    return switch (haystack_kind) {
+        .leaf_i64 => switch (needle) {
+            .int => |integer| integer == candidate,
+            .float => |floating| equal.intFloatEqual(candidate, floating),
+            else => false,
+        },
+        .leaf_f64 => switch (needle) {
+            .int => |integer| equal.intFloatEqual(integer, candidate),
+            .float => |floating| floating == candidate,
+            else => false,
+        },
+        .leaf_char1, .leaf_char2, .leaf_char4 => switch (needle) {
+            .char => |codepoint| codepoint == @as(u32, candidate),
+            else => false,
+        },
+        .leaf_symbol => switch (needle) {
+            .symbol => |symbol| symbol == candidate,
+            else => false,
+        },
+        .generic_spine, .dict, .task, .reserved_mask => unreachable,
+    };
+}
+
+fn scalarCanMatchKind(needle: Value, haystack_kind: value.HeapKind) bool {
+    return switch (needle) {
+        .int, .float => haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64,
+        .char => haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4,
+        .symbol => haystack_kind == .leaf_symbol,
+        .word, .list, .dict, .task => false,
+    };
+}
+
+fn ScalarMembershipDriver(comptime haystack_kind: value.HeapKind) type {
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        haystack: heap.Owned(heap.LeafReader(haystack_kind)),
+        needle: Value,
+        cursor: kernel_flat.FlatCursor,
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            const context = support.Context{ .evaluator = evaluator };
+            if (try self.cursor.nextRange(context)) |range| {
+                const candidates = self.haystack.borrow().slice();
+                for (candidates[range.start..range.end]) |candidate| {
+                    if (scalarMatchesElement(haystack_kind, self.needle, candidate)) {
+                        self.haystack.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        return .{ .output = .{ .int = 1 } };
+                    }
+                }
+            }
+            if (!self.cursor.complete()) return .yielded;
+            self.haystack.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            return .{ .output = .{ .int = 0 } };
+        }
+    };
+}
+
+fn LeafMembershipDriver(
+    comptime needle_kind: value.HeapKind,
+    comptime haystack_kind: value.HeapKind,
+) type {
+    const compatible = membershipKindsCompatible(needle_kind, haystack_kind);
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        needles: heap.Owned(heap.LeafReader(needle_kind)),
+        haystack: heap.Owned(heap.LeafReader(haystack_kind)),
+        writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
+        cursor: kernel_flat.FlatCursor,
+        needle_index: usize = 0,
+
+        fn finish(self: *Self, evaluator: *Machine) machine.WorkProgress {
+            self.needles.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            self.haystack.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            return .{ .output = self.writer.borrowMut().finish() };
+        }
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            const context = support.Context{ .evaluator = evaluator };
+            const needles = self.needles.borrow().slice();
+            const candidates = self.haystack.borrow().slice();
+
+            // A disjoint leaf domain, or an empty haystack, is a typed fill.
+            // It is still chunked by the needle count so a large mask cannot
+            // bypass cancellation merely because no comparisons are needed.
+            if (!compatible or candidates.len == 0) {
+                if (try self.cursor.nextRange(context)) |range| {
+                    self.writer.borrowMut().fillRange(range.start, range.len(), 0);
+                }
+                if (!self.cursor.complete()) return .yielded;
+                return self.finish(evaluator);
+            }
+
+            // Spend one unit-wide fuel interval across as many short searches
+            // as fit. A long haystack is one charged range; a short one does
+            // not force one scheduler handoff per needle.
+            var first = true;
+            while (first or context.remaining() != 0) {
+                first = false;
+                const range = (try self.cursor.nextRange(context)).?;
+                var found = false;
+                for (candidates[range.start..range.end]) |candidate| {
+                    if (typedElementsMatch(
+                        needle_kind,
+                        haystack_kind,
+                        needles[self.needle_index],
+                        candidate,
+                    )) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (found or self.cursor.complete()) {
+                    self.writer.borrowMut().fillRange(
+                        self.needle_index,
+                        1,
+                        @intFromBool(found),
+                    );
+                    self.needle_index += 1;
+                    if (self.needle_index == needles.len) return self.finish(evaluator);
+                    self.cursor = kernel_flat.FlatCursor.init(candidates.len);
+                }
+            }
+            return .yielded;
+        }
+    };
+}
+
+/// Dispatch membership once on the two leaf representations. A scalar needle
+/// is a stride-zero register value; a flat needle list writes its final i64
+/// mask directly. Generic-spine needles retain the recursive structural cursor
+/// because their result shape is itself recursive.
+fn startTypedMembership(evaluator: *Machine, needle: Value, haystack: Value) MachineError!bool {
+    const haystack_kind = haystack.list.kind();
+    if (haystack_kind == .generic_spine) return false;
+
+    if (needle != .list) {
+        if (!scalarCanMatchKind(needle, haystack_kind)) {
+            try evaluator.pushOwned(.{ .int = 0 });
+            return true;
+        }
+        inline for (leaf_kinds) |candidate_haystack| {
+            if (haystack_kind == candidate_haystack) {
+                const Driver = ScalarMembershipDriver(candidate_haystack);
+                try evaluator.startDriver(Driver{
+                    .haystack = .init(heap.LeafReader(candidate_haystack).acquire(haystack.list)),
+                    .needle = needle,
+                    .cursor = kernel_flat.FlatCursor.init(@intCast(haystack.list.length())),
+                });
+                return true;
+            }
+        }
+        unreachable;
+    }
+
+    const needle_kind = needle.list.kind();
+    if (needle_kind == .generic_spine or needle.list.length() == 0) return false;
+    inline for (leaf_kinds) |candidate_needle| {
+        if (needle_kind == candidate_needle) inline for (leaf_kinds) |candidate_haystack| {
+            if (haystack_kind == candidate_haystack) {
+                const Driver = LeafMembershipDriver(candidate_needle, candidate_haystack);
+                var writer = try heap.LeafWriter(.leaf_i64).init(
+                    evaluator.allocator(),
+                    @intCast(needle.list.length()),
+                );
+                var held_locally = true;
+                errdefer if (held_locally) writer.retirePartial(evaluator.releaseDomain());
+                const candidate_count: usize = @intCast(haystack.list.length());
+                const driver = Driver{
+                    .needles = .init(heap.LeafReader(candidate_needle).acquire(needle.list)),
+                    .haystack = .init(heap.LeafReader(candidate_haystack).acquire(haystack.list)),
+                    .writer = .init(writer),
+                    .cursor = kernel_flat.FlatCursor.init(if (membershipKindsCompatible(candidate_needle, candidate_haystack) and candidate_count != 0) candidate_count else @intCast(needle.list.length())),
+                };
+                held_locally = false;
+                try evaluator.startDriver(driver);
+                return true;
+            }
+        };
+    }
+    unreachable;
 }
 
 const MembershipDriver = struct {
@@ -689,6 +917,14 @@ fn takePrimitive(evaluator: *Machine) MachineError!void {
         0
     else
         (source_count - (result_count % source_count)) % source_count;
+    if (try startTypedCopy(
+        evaluator,
+        collection.borrow(),
+        null,
+        null,
+        .{ .cyclic = .{ .start = start } },
+        result_count,
+    )) return;
     const values = try evaluator.allocator().alloc(Value, result_count);
     try evaluator.startDriver(TakeDriver{
         .collection = .init(collection.take()),
@@ -783,7 +1019,15 @@ const ListCopyDriver = struct {
         start: usize,
         end: usize,
         reverse: bool,
-    ) error{OutOfMemory}!void {
+    ) MachineError!void {
+        if (try startTypedCopy(
+            evaluator,
+            collection.borrow(),
+            null,
+            null,
+            if (reverse) .{ .reversed = .{ .end = end } } else .{ .contiguous = .{ .start = start } },
+            end - start,
+        )) return;
         const values = try evaluator.allocator().alloc(Value, end - start);
         try evaluator.startDriver(ListCopyDriver{
             .left = .init(collection.take()),
@@ -801,7 +1045,15 @@ const ListCopyDriver = struct {
         right: *heap.OwnedValue,
         left_count: usize,
         right_count: usize,
-    ) error{OutOfMemory}!void {
+    ) MachineError!void {
+        if (try startTypedCopy(
+            evaluator,
+            left.borrow(),
+            right.borrow(),
+            null,
+            .{ .concat = .{ .left_count = left_count } },
+            left_count + right_count,
+        )) return;
         const values = try evaluator.allocator().alloc(Value, left_count + right_count);
         try evaluator.startDriver(ListCopyDriver{
             .left = .init(left.take()),
@@ -852,30 +1104,36 @@ fn rangePrimitive(evaluator: *Machine) MachineError!void {
     if (count_value.borrow().int < 0) return evaluator.fail(.domain, "range requires a non-negative integer");
     const count = std.math.cast(usize, count_value.borrow().int) orelse
         return evaluator.fail(.overflow, "range length exceeds addressable size");
-    const values = try evaluator.allocator().alloc(i64, count);
+    // A known-width producer selects its builder before filling: `range` is
+    // exactly the shape that never needed a boxed intermediate.
+    const writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), count);
     try evaluator.startDriver(RangeDriver{
-        .values = .init(values),
-        .materializer = .init(.init(evaluator.allocator(), values)),
+        .writer = .init(writer),
+        .cursor = kernel_flat.FlatCursor.init(count),
     });
 }
 
+/// Fills the typed result buffer in place, one charged chunk at a time. There is
+/// no intermediate: the element type was known before the first store.
 const RangeDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    values: heap.Owned([]i64),
-    index: usize = 0,
-    materializer: heap.Owned(storage.I64Materializer),
+    writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
+    cursor: kernel_flat.FlatCursor,
 
     pub fn advance(evaluator: *Machine, self: *RangeDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        const values = self.values.borrow();
-        const end = @min(self.index + machine.kernel_poll_quantum, values.len);
-        while (self.index != end) : (self.index += 1)
-            values[self.index] = @intCast(self.index);
-        if (self.index != values.len) return .yielded;
-        return switch (try self.materializer.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
-            .complete => |result| .{ .output = result },
-        };
+        const context = support.Context{ .evaluator = evaluator };
+        var block: [kernel_flat.block_size]i64 = undefined;
+        if (try self.cursor.nextRange(context)) |range| {
+            var offset: usize = 0;
+            while (offset != range.len()) {
+                const piece = kernel_flat.blockRange(range, offset);
+                for (piece.start..piece.end) |index| block[index - piece.start] = @intCast(index);
+                self.writer.borrowMut().writeRange(piece.start, block[0..piece.len()]);
+                offset += piece.len();
+            }
+        }
+        if (!self.cursor.complete()) return .yielded;
+        return .{ .output = self.writer.borrowMut().finish() };
     }
 };
 
@@ -978,28 +1236,22 @@ const ShapeDriver = struct {
     collection: heap.Owned(Value),
     cursor: heap.Owned(ShapeCursor),
     dimensions: ?heap.Owned([]usize) = null,
-    values: ?heap.Owned([]i64) = null,
-    materializer: ?heap.Owned(storage.I64Materializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *ShapeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.materializer == null) {
-            if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
-                .ragged => return evaluator.fail(.shape, "shape requires a rectangular list"),
-                .too_deep => return evaluator.fail(.shape, "shape nesting exceeds 256 levels"),
-                .complete => |dimensions| self.dimensions = .init(dimensions),
-            };
-            const values = try evaluator.allocator().alloc(i64, self.dimensions.?.borrow().len);
-            for (self.dimensions.?.borrow(), values) |dimension, *destination| destination.* = @intCast(dimension);
-            self.values = .init(values);
-            self.materializer = .init(storage.I64Materializer.init(evaluator.allocator(), values));
-            return .yielded;
-        }
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
-            .complete => |result| .{ .output = result },
+        if (self.dimensions == null) switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
+            .pending => return .yielded,
+            .ragged => return evaluator.fail(.shape, "shape requires a rectangular list"),
+            .too_deep => return evaluator.fail(.shape, "shape nesting exceeds 256 levels"),
+            .complete => |dimensions| self.dimensions = .init(dimensions),
         };
+        const dimensions = self.dimensions.?.borrow();
+        var writer = try heap.LeafWriter(.leaf_i64).init(evaluator.allocator(), dimensions.len);
+        errdefer writer.retirePartial(evaluator.releaseDomain());
+        var values: [support.max_depth]i64 = undefined;
+        for (dimensions, values[0..dimensions.len]) |dimension, *destination| destination.* = @intCast(dimension);
+        writer.writeRange(0, values[0..dimensions.len]);
+        return .{ .output = writer.finish() };
     }
 };
 
@@ -1098,6 +1350,36 @@ fn reshapePrimitive(evaluator: *Machine) MachineError!void {
     const rank: usize = @intCast(shape_value.borrow().list.length());
     if (rank == 0) return evaluator.fail(.shape, "reshape requires a non-empty shape");
     if (rank > support.max_depth) return evaluator.fail(.shape, "reshape rank exceeds 256");
+    // A flat source reshaped to rank one is exactly a typed cyclic copy. The
+    // higher-rank builder still owns nested spine construction, and a
+    // zero-length result stays there so its historical empty representation
+    // does not change merely because the source happened to be a leaf.
+    if (collection.borrow().list.kind() != .generic_spine) {
+        const dimension = list.atUnchecked(shape_value.borrow(), 0);
+        if (dimension != .int) return evaluator.typeError("an integer shape");
+        if (dimension.int < 0) return evaluator.failAtIndex(
+            .shape,
+            "reshape dimensions must be non-negative",
+            0,
+        );
+        const count = std.math.cast(usize, dimension.int) orelse
+            return evaluator.failAtIndex(.overflow, "reshape dimension exceeds addressable size", 0);
+        const source_count: usize = @intCast(collection.borrow().list.length());
+        if (rank == 1 and count != 0) {
+            if (source_count == 0) return evaluator.fail(
+                .domain,
+                "reshape cannot fill a non-empty shape from empty data",
+            );
+            if (try startTypedCopy(
+                evaluator,
+                collection.borrow(),
+                null,
+                null,
+                .{ .cyclic = .{ .start = 0 } },
+                count,
+            )) return;
+        }
+    }
     const dimensions = try evaluator.allocator().alloc(usize, rank);
     var dimensions_owner: ?[]usize = dimensions;
     errdefer if (dimensions_owner) |owned| evaluator.allocator().free(owned);
@@ -1361,4 +1643,164 @@ const ReshapeDriver = struct {
 fn unsignedMagnitude(integer: i64) u64 {
     if (integer >= 0) return @intCast(integer);
     return @as(u64, @intCast(-(integer + 1))) + 1;
+}
+
+// ===========================================================================
+// Typed copies
+//
+// `cat`, `take`, `drop`, `rest`, and `reverse` move elements without touching
+// them. When every operand and the result share one leaf representation, the
+// move is a typed range copy: one reader per pinned source, one exact-size typed
+// writer, and a bounded block per charged chunk. Mixed representations keep the
+// boxed route, because their result kind is the profiling pass's decision rather
+// than the dispatch's.
+// ===========================================================================
+
+/// Which source position each result position reads. The shape is chosen once
+/// per operation and switched per block, never per element.
+const CopyShape = union(enum) {
+    /// `result[i] = source[start + i]`
+    contiguous: struct { start: usize },
+    /// `result[i] = source[end - 1 - i]`
+    reversed: struct { end: usize },
+    /// `result[i] = source[(start + i) % source.len]`
+    cyclic: struct { start: usize },
+    /// `result[i] = i < left_count ? left[i] : right[i - left_count]`
+    concat: struct { left_count: usize },
+    /// `result[i] = source[indices[i]]`, with the same bounds and sign checks
+    /// the scalar index path applies, reported identically.
+    gather,
+};
+
+const leaf_kinds = [_]value.HeapKind{
+    .leaf_i64,
+    .leaf_f64,
+    .leaf_char1,
+    .leaf_char2,
+    .leaf_char4,
+    .leaf_symbol,
+};
+
+fn TypedCopyDriver(comptime kind: value.HeapKind) type {
+    const Element = heap.LeafElement(kind);
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+
+        source: heap.Owned(heap.LeafReader(kind)),
+        other: ?heap.Owned(heap.LeafReader(kind)) = null,
+        /// A typed index vector, pinned for the gather's whole life.
+        indices: ?heap.Owned(heap.LeafReader(.leaf_i64)) = null,
+        writer: heap.Owned(heap.LeafWriter(kind)),
+        shape: CopyShape,
+        cursor: kernel_flat.FlatCursor,
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            const context = support.Context{ .evaluator = evaluator };
+            var block: [kernel_flat.block_size]Element = undefined;
+            if (try self.cursor.nextRange(context)) |range| {
+                const source = self.source.borrow().slice();
+                var offset: usize = 0;
+                while (offset != range.len()) {
+                    const piece = kernel_flat.blockRange(range, offset);
+                    switch (self.shape) {
+                        .contiguous => |contiguous| {
+                            const from = contiguous.start + piece.start;
+                            @memcpy(block[0..piece.len()], source[from..][0..piece.len()]);
+                        },
+                        .reversed => |reversed| {
+                            for (piece.start..piece.end) |index| {
+                                block[index - piece.start] = source[reversed.end - index - 1];
+                            }
+                        },
+                        .cyclic => |cyclic| {
+                            for (piece.start..piece.end) |index| {
+                                block[index - piece.start] = source[(cyclic.start + index) % source.len];
+                            }
+                        },
+                        .concat => |concat| {
+                            const right = self.other.?.borrow().slice();
+                            for (piece.start..piece.end) |index| {
+                                block[index - piece.start] = if (index < concat.left_count)
+                                    source[index]
+                                else
+                                    right[index - concat.left_count];
+                            }
+                        },
+                        .gather => {
+                            const indices = self.indices.?.borrow().slice();
+                            for (piece.start..piece.end) |index| {
+                                const position = indices[index];
+                                if (position < 0)
+                                    return context.fail(.domain, "at index is negative");
+                                const offset_position = std.math.cast(usize, position) orelse
+                                    return context.fail(.domain, "at index is out of bounds");
+                                if (offset_position >= source.len)
+                                    return context.fail(.domain, "at index is out of bounds");
+                                block[index - piece.start] = source[offset_position];
+                            }
+                        },
+                    }
+                    self.writer.borrowMut().writeRange(piece.start, block[0..piece.len()]);
+                    offset += piece.len();
+                }
+            }
+            if (!self.cursor.complete()) return .yielded;
+            self.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            if (self.other) |*other| other.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            self.other = null;
+            if (self.indices) |*indices| indices.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            self.indices = null;
+            return .{ .output = self.writer.borrowMut().finish() };
+        }
+    };
+}
+
+/// Starts a typed copy when every operand shares one leaf representation.
+/// Returns false without consuming anything when they do not, which is the
+/// registry's generic classification for a mixed-representation move.
+fn startTypedCopy(
+    evaluator: *Machine,
+    source: Value,
+    other: ?Value,
+    indices: ?Value,
+    shape: CopyShape,
+    length: usize,
+) MachineError!bool {
+    if (length == 0) return false;
+    if (source != .list) return false;
+    const source_kind = source.list.kind();
+    if (other) |right| {
+        if (right != .list or right.list.kind() != source_kind) return false;
+    }
+    if (indices) |vector| {
+        if (vector != .list or vector.list.kind() != .leaf_i64) return false;
+    }
+    inline for (leaf_kinds) |candidate| {
+        if (candidate == source_kind) {
+            const Driver = TypedCopyDriver(candidate);
+            var writer = try heap.LeafWriter(candidate).init(evaluator.allocator(), length);
+            // Ownership passes to the driver below; a failing `startDriver`
+            // retires the driver's fields, so this guard covers only the window
+            // before the hand-off.
+            var held_locally = true;
+            errdefer if (held_locally) writer.retirePartial(evaluator.releaseDomain());
+            var driver = Driver{
+                .source = .init(heap.LeafReader(candidate).acquire(source.list)),
+                .writer = .init(writer),
+                .shape = shape,
+                .cursor = kernel_flat.FlatCursor.init(length),
+            };
+            if (other) |right| {
+                driver.other = .init(heap.LeafReader(candidate).acquire(right.list));
+            }
+            if (indices) |vector| {
+                driver.indices = .init(heap.LeafReader(.leaf_i64).acquire(vector.list));
+            }
+            held_locally = false;
+            try evaluator.startDriver(driver);
+            return true;
+        }
+    }
+    return false;
 }

@@ -302,6 +302,31 @@ fn doc(evaluator: *Machine) MachineError!void {
 }
 
 const LookupMode = enum { body, doc };
+const ReflectionResolution = union(enum) {
+    resolved: machine.Resolution,
+    retry: machine.WorkProgress,
+};
+
+/// Reflection consumes its symbol before resolution. On a cold qualified
+/// module, destroy the current driver and hand the symbol plus primitive call
+/// back to the machine's ordinary load/retry protocol.
+fn resolveForReflection(
+    evaluator: *Machine,
+    driver: anytype,
+    requested: u32,
+    outcome: machine.ResolutionOutcome,
+) MachineError!ReflectionResolution {
+    return switch (outcome) {
+        .resolved => |resolved| .{ .resolved = resolved },
+        .unresolved => evaluator.undefinedName(requested),
+        .unknown_module_prefix, .unregistered_module => {
+            evaluator.detachWorkDriver(driver);
+            heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), driver);
+            return .{ .retry = try evaluator.retryQualifiedOperandAfterLoad(requested, outcome) };
+        },
+    };
+}
+
 fn installLookup(evaluator: *Machine, requested: u32, mode: LookupMode) MachineError!void {
     try evaluator.startDriver(LookupDriver{
         .requested = requested,
@@ -320,7 +345,15 @@ const LookupDriver = struct {
         while (budget != 0) : (budget -= 1) switch (self.resolution.borrowMut().advance()) {
             .pending => {},
             .complete => |outcome| {
-                var resolved = outcome.binding() orelse return evaluator.undefinedName(self.requested);
+                var resolved = switch (try resolveForReflection(
+                    evaluator,
+                    self,
+                    self.requested,
+                    outcome,
+                )) {
+                    .retry => |progress| return progress,
+                    .resolved => |resolution| resolution,
+                };
                 defer resolved.deinit(evaluator.allocator());
                 switch (self.mode) {
                     .body => {
@@ -407,7 +440,15 @@ const WhichDriver = struct {
             while (budget != 0) : (budget -= 1) switch (self.resolution.?.borrowMut().advance()) {
                 .pending => {},
                 .complete => |outcome| {
-                    self.resolved = .init(outcome.binding() orelse return evaluator.undefinedName(self.requested));
+                    self.resolved = .init(switch (try resolveForReflection(
+                        evaluator,
+                        self,
+                        self.requested,
+                        outcome,
+                    )) {
+                        .retry => |progress| return progress,
+                        .resolved => |resolution| resolution,
+                    });
                     self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.resolution = null;
                     self.shadow_cursor = .init(machine.ShadowCursor.init(evaluator, self.requested));
@@ -530,7 +571,15 @@ const SeeDriver = struct {
             while (budget != 0) : (budget -= 1) switch (self.resolution.?.borrowMut().advance()) {
                 .pending => {},
                 .complete => |outcome| {
-                    self.resolved = .init(outcome.binding() orelse return evaluator.undefinedName(self.requested));
+                    self.resolved = .init(switch (try resolveForReflection(
+                        evaluator,
+                        self,
+                        self.requested,
+                        outcome,
+                    )) {
+                        .retry => |progress| return progress,
+                        .resolved => |resolution| resolution,
+                    });
                     self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     self.resolution = null;
                     break;

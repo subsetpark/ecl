@@ -526,6 +526,23 @@ pub const Session = enum(usize) {
         var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
         defer checkpoint.deinit();
         for (core.stack.items) |item| checkpoint.appendBorrowed(item);
+        var unit = initRootUnit(core);
+        core.stack = .empty;
+        defer finishRootUnit(core, &unit);
+        core.scheduler.runRoot(&unit, root_header) catch |err| switch (err) {
+            error.OutOfMemory => {
+                restoreCheckpoint(&unit, checkpoint.values());
+                return error.OutOfMemory;
+            },
+            error.Ecl => {
+                restoreCheckpoint(&unit, checkpoint.values());
+                return .{ .err = unit.takeError().? };
+            },
+        };
+        return .ok;
+    }
+
+    fn initRootUnit(core: *SessionCore) machine.Unit {
         var unit = machine.Unit.init(
             core.allocator(),
             core.releaseDomain(),
@@ -554,26 +571,79 @@ pub const Session = enum(usize) {
         unit.task_scope = &core.root_tasks;
         unit.is_root_unit = true;
         unit.execution_scope = core.root_scope.?;
-        core.stack = .empty;
-        defer {
-            core.stack = unit.takeStack();
-            core.last_max_frames = unit.max_frames;
-            core.last_polls = unit.polls;
-            core.requested_exit = unit.exit_status;
-            core.last_idiom_hits = unit.idiom_hits;
-            unit.deinit();
+        return unit;
+    }
+
+    fn finishRootUnit(core: *SessionCore, unit: *machine.Unit) void {
+        core.stack = unit.takeStack();
+        core.last_max_frames = unit.max_frames;
+        core.last_polls = unit.polls;
+        core.requested_exit = unit.exit_status;
+        core.last_idiom_hits = unit.idiom_hits;
+        unit.deinit();
+    }
+
+    /// Resolve a module name through the ordinary embedded/ECL_PATH loader
+    /// without importing or executing one of its exports. A missing or broken
+    /// candidate simply offers no completion; invoking or reflecting on the
+    /// same qualified name will surface the loader's full language error.
+    fn loadModuleForObservation(
+        self: *Session,
+        namespace: []const u8,
+    ) error{OutOfMemory}!bool {
+        const core = self.coreState();
+        const name = intern.internModuleName(namespace) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidName => return false,
+        };
+        var acquisition = core.registry.acquireCursor(name);
+        defer acquisition.deinit();
+        if (poll.drive(?modules.GenerationLease, &acquisition, .{})) |generation| {
+            var lease = generation;
+            lease.deinit();
+            return true;
         }
-        core.scheduler.runRoot(&unit, root_header) catch |err| switch (err) {
+        if (core.root_scope == null)
+            core.root_scope = try core.environment.createSessionRoot(core.allocator());
+        var root = heap.OwnedValue.init(
+            core.releaseDomain(),
+            try list.fromValuesGeneric(core.allocator(), &.{}),
+        );
+        defer root.deinit();
+        var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
+        defer checkpoint.deinit();
+        for (core.stack.items) |item| checkpoint.appendBorrowed(item);
+        var unit = initRootUnit(core);
+        core.stack = .empty;
+        defer finishRootUnit(core, &unit);
+        try machine.initialize(&unit, root.borrow().list, .empty);
+        var evaluator = machine.Machine{ .unit = &unit };
+        evaluator.loadModuleOnly(name) catch |err| switch (err) {
             error.OutOfMemory => {
                 restoreCheckpoint(&unit, checkpoint.values());
                 return error.OutOfMemory;
             },
             error.Ecl => {
                 restoreCheckpoint(&unit, checkpoint.values());
-                return .{ .err = unit.takeError().? };
+                const failure = unit.takeError().?;
+                core.releaseDomain().releaseValue(failure);
+                return false;
             },
         };
-        return .ok;
+        core.scheduler.runInitializedRoot(&unit) catch |err| switch (err) {
+            error.OutOfMemory => {
+                restoreCheckpoint(&unit, checkpoint.values());
+                return error.OutOfMemory;
+            },
+            error.Ecl => {
+                restoreCheckpoint(&unit, checkpoint.values());
+                const failure = unit.takeError().?;
+                core.releaseDomain().releaseValue(failure);
+                return false;
+            },
+        };
+        restoreCheckpoint(&unit, checkpoint.values());
+        return true;
     }
     pub fn stackDisplay(self: *const Session) error{OutOfMemory}!RenderedText {
         const core = self.coreState();
@@ -593,22 +663,23 @@ pub const Session = enum(usize) {
         self: *Session,
         prefix: []const u8,
     ) error{OutOfMemory}!CompletionSet {
+        const dot = lastDot(prefix);
+        if (dot) |separator| {
+            if (separator == 0) return .empty;
+            if (!try self.loadModuleForObservation(prefix[0..separator])) return .empty;
+        }
         const core = self.coreState();
         var turn = BlockingMutationTurn{ .scheduler = &core.scheduler };
         defer turn.deinit();
         var found = poll.ChunkList(u32).init(core.allocator());
         defer found.retire(core.releaseDomain());
 
-        const dot = lastDot(prefix);
         if (dot) |separator| {
-            if (separator == 0) return .empty;
             const namespace_bytes = prefix[0..separator];
             const word_prefix = prefix[separator + 1 ..];
-            // A published generation, including an in-session override of a
-            // stdlib name, is authoritative. A cold canonical builtin has no
-            // generation yet, but its compiled word table is already a
-            // complete public interface and must complete before the first
-            // Unit causes auto-loading.
+            // Observation has already resolved the cold module through the
+            // ordinary loader, so completion sees one authoritative published
+            // generation regardless of transport or prior execution.
             if (lookupInterned(namespace_bytes)) |namespace_id| {
                 if (intern.moduleName(namespace_id) catch null) |module_name| {
                     var acquisition = core.registry.acquireCursor(module_name);
@@ -631,16 +702,6 @@ pub const Session = enum(usize) {
                     }
                 }
             }
-            if (stdlib.find(namespace_bytes)) |entry| switch (entry) {
-                .builtin => |words| {
-                    for (words) |word| {
-                        if (std.mem.startsWith(u8, word.name, word_prefix))
-                            try found.append(try intern.intern(word.name));
-                    }
-                    return materializeCompletion(core.allocator(), &found, namespace_bytes);
-                },
-                .source, .native => {},
-            };
             return .empty;
         }
 

@@ -61,13 +61,13 @@ primitives, operationalized as two rules:
   recomputed by inspection — the printer reads a bit.
 - **Value rendering:** `print.zig` uses one explicit action worklist for
   both styles. `str`, errors, and reflective source use compact canonical
-  whitespace. REPL stack display and `pp` select the display style, which
+  whitespace. REPL stack display and `io.pp` select the display style, which
   changes only the separators between rectangular matrix rows (and one
   enclosing matrix-group axis) to newline-plus-indentation and replaces a
-  flat leaf longer than 256 elements with one count-bearing whole-leaf
-  marker. Canonical rendering never elides. The worklist keeps both styles
-  free of host recursion, and display elision happens before any element or
-  character from the huge leaf is scheduled.
+  list longer than 256 elements with one count-bearing whole-list marker.
+  Canonical rendering never elides. The worklist keeps both styles free of
+  host recursion, and display elision happens before matrix-shape scanning or
+  before any element or character from the huge list is scheduled.
 - **Dicts:** keys vector + values vector (insertion order for free) +
   cached per-entry hashes + linear scan below ~16 entries, one u32 hash
   index above. Hash agrees with `=`: numerics hash by numeric value (2 and
@@ -122,6 +122,16 @@ primitives, operationalized as two rules:
   frame stack is touched only at word calls, combinator suspensions,
   returns, and unit boundaries. Tail calls overwrite the in-register
   (code, ip, env) triple — TCO is frame reuse.
+- **Binder lowering retires its environment at the last local read.** A
+  head binder lowers to the environment build, one `dup i at swap` per
+  local reference, and one `pop`. A body form that is not a local read has
+  to run under `dip` only while that environment is still on top of the
+  stack, so the `pop` position decides how many forms pay for it: hoisting
+  it to one past the last local read — to the start of the body when no
+  local is read at all — emits every later form as ordinary code. The
+  common shape `(|x| x …)` therefore pays for its locals once rather than
+  once per form, and failures raised by the forms after that boundary
+  trace without a `dip` activation and carry their own source span.
 - **Primitives are ordinary core-env bindings** carrying a primitive
   id/function pointer; core is the outermost environment. This eliminates
   string-match dispatch, makes shadowing uniform, and gives every word
@@ -368,6 +378,13 @@ allocation failure interrupt it at bounded intervals.
   `ChunkedMaterializer`; action-producing reflection drivers accumulate
   through `ActionPlan`, which owns counting, exact allocation, filling,
   and rendering.
+- **One accounted native step per unwind pass.** An application
+  continuation that resumes records a bounded native step, and the machine
+  loop consumes exactly one of those per pass before returning the Unit to
+  the scheduler. Frame unwinding therefore stops after a continuation that
+  finished with a step recorded, exactly as it stops for one that installed
+  a work driver; nested in-place applications completing in a single
+  unwind — `(q) dip` inside `bi` — are the ordinary case, not an exception.
 - **Bounded probes are lazy.** Formatter group lookahead uses a
   fixed-capacity command stack and expands concatenations one child at a
   time; its step and stack ceilings apply before child expansion, and
@@ -670,23 +687,91 @@ Any change to this machinery must preserve:
 
 ## Kernels
 
-- **Dispatch:** a static (op × leaf-tag) table of monomorphic loops over
-  raw slices, selected once per array operation. Char operands normalize
-  to a common width at kernel entry to contain the instantiation matrix.
-  Generic spines fall back to recursive descent (host-stack over *data*
-  depth, with a depth guard) whose leaf encounters call the same kernels.
+The typed seam described here is the one built by post-terminal Step 14. The
+milestone-5 text this section replaced described the same shape as if it
+existed; what existed was flat *storage* with a boxed execution route over it.
+The classification table below is the artifact that makes the difference
+checkable rather than claimed: it names how every operation executes for every
+operand shape, and rows that still run boxed say so.
+
+- **Dispatch is one closed, comptime-validated table** in `kernels.zig`. It
+  classifies every sized kernel operation against every operand shape it can
+  meet — aggregates named by `value.HeapKind`, atoms by the `Value` tag, so
+  there is no second representation vocabulary to drift — as one of
+  `typed_loop`, `bulk_copy` (movement with no per-element semantics),
+  `sequential_typed` (unboxed but order-carrying), or `generic_fallback`.
+  Coverage is exactly-once over the whole domain: a missing or duplicated
+  classification is a compile error, and a scalar pair is outside the domain
+  because it carries no representation. Each row's adjacent rationale comment
+  keeps a generic classification reviewable without pretending that prose is
+  runtime registry data.
+- **Typed loops receive memory only through heap-issued capabilities.**
+  `heap.LeafReader(kind)` retains its list's root for the reader's whole
+  lifetime, so a slice cannot outlive its owner across a suspension.
+  `heap.LeafWriter(kind)` owns an exact-size allocation and exposes only
+  bounded range writes plus one consuming `finish`; it has no whole-slice
+  accessor, which is what keeps a block's stores under the fault protocol's
+  control. Both refuse `generic_spine` at comptime: per-cell boxing is not
+  reachable from inside a typed loop, and `kernel_flat.zig` imports neither
+  `list.zig` nor the materializers — the source audit enforces that boundary.
+- **Reuse is a claimed authority, not an optimization guess.**
+  `heap.UniqueLeafAdoption(result_kind)` claims a list only when it is solely
+  owned and its elements are the result's width, and it is consumed exactly
+  once — by `finish`, which republishes that same list retagged, or by
+  `abandon`, which leaves the input untouched. A shared or self-aliased operand
+  fails the claim, which is why aliasing needs no special case.
+- **One cursor rule for bounded work.** `kernel_flat.FlatCursor` carries an
+  absolute logical index and plans one half-open range per advance, bounded by
+  the caller's remaining `WorkContext` budget and by the kernel quantum, and at
+  least one element so progress is guaranteed. The charge goes through
+  `kernel_support.Context`, the only seam that touches `Unit.kernel_fuel`, which
+  polls at the interval boundary — so cancellation is checked between chunks
+  rather than per element. A flat operation of length n therefore costs
+  `ceil(n / budget) + O(1)` advances; the planner's arithmetic is unit-tested
+  apart from the charging, and the session-level bound is a test that counts
+  kernel safe points.
 - **Broadcast by scalar operand** (stride-0 style), never a materialized
   replicated vector.
-- **Fault handling:** overflow/NaN checks accumulate a block mask
-  (~64–512 elements), tested once per block; on a hit, a scalar rescan
-  identifies the exact element for the error dict. This is sound because
-  crash-only rollback makes computation past the fault unobservable.
-  **When output aliases a stolen input buffer, the mask is tested before
-  the block's stores** — the rescan must read pristine input.
-- **Order:** grade = range-adaptive counting/radix on leaves (a min/max
-  prepass shrinks key width; the float bit-flip trick is safe because NaN
-  cannot exist), stable everywhere; comparison sort on spines. The sort
-  idiom runs a direct sort. distinct/group are hash-based.
+- **Fault handling:** a block of up to 256 staged results carries one fault
+  flag rather than a check per element. A block that faults is replayed through
+  the same scalar semantic function the generic route uses, which is what makes
+  the reported index, kind, message, and data the scalar path's rather than a
+  reimplementation's. Nothing is stored until a block is known clean, so a
+  result sharing a reused input buffer never destroys the operands the replay
+  reads. Recognized `each`/`zip-with`/`fold`/`scan` reach the same loop entries
+  and report faults *without* a list index, because the combinator they stand in
+  for applies its quotation to one element at a time and its fault has no list
+  position.
+- **The typed bodies are the scalar semantics.** A monomorphic body calls
+  `scalarBinary`/`scalarUnary` with statically known operand tags, so an
+  optimized build folds the tag switches away while the meaning stays in one
+  place. Nothing about arithmetic, comparison, boolean, bitwise, or shift
+  behavior is written twice.
+- **Result width is decided before the first element or the operation stays
+  generic.** The numeric width map is exact for every operation except `min`
+  and `max` on a mixed int/float pair, which return one of their operands and
+  are therefore genuinely heterogeneous; that pair keeps the profiling route, as
+  does a length-zero result, whose representation is the value layer's existing
+  per-producer choice and observable as printed brackets.
+- **What crosses the seam today.** Numeric, comparison, logical, bitwise, and
+  shift pervasion, including the guarded idioms; `range`; `where`; `rand-ints`;
+  and the exact-size copies and gathers behind `cat`, `take`, `drop`, `rest`,
+  `reverse`, and `at` with a typed index vector; typed membership over scalar
+  or flat-list needles; rank-one `reshape`; same-kind list `put`; and `shape`'s
+  known-width result; cross-width string `cmp`; stable typed `grade`/`sort`;
+  and first-seen typed `group`/`distinct`; pinned width-specialized `split`;
+  and two-pass exact-width `join`. Character-element pervasion uses a fixed
+  i64 writer for subtraction and comparison and a profile/fill pass for
+  character offsets and selection; invalid character and symbol combinations
+  reject at the first logical element without a boxed traversal. `format` is
+  value-shaped by definition rather than a pending flat traversal. Generic
+  spine and dictionary descent embeds these same typed states when it reaches
+  a flat leaf, preserving the inner logical fault index.
+- **Order:** grade is a stable merge sort (`poll.MergeSortCursor`) over an index
+  vector. Flat keys are read from pinned typed slices and both grade indices
+  and sorted values publish directly; generic keys retain the structural
+  comparator. Flat group compares typed keys in first-seen order and writes
+  each i64 index leaf directly; generic group retains structural equality.
 - **Float folds are strictly sequential on every path.** Only exact
   reductions — integer (with fault masks), min/max, boolean — may be
   reassociated for SIMD. Fused and generic paths are bit-identical; the
@@ -747,9 +832,24 @@ constant does — guarded on `first` resolving to its core source binding
 and on the capture being a one-element list, and falling through
 generically otherwise;
 `sort = (dup grade at)` runs a direct sort, and `sum = (0 (+) fold)`
-reaches the sum kernel through fold's entry recognition. Cheap
-compositions such as `over`, `compose`, `str`, and `dip` have no host
-callback at all. Per-application guard cost is O(phrase length) against
+reaches the sum kernel through fold's entry recognition.
+`dip = (swap literal compose call)` is recognized as well, and it is the
+one entry whose callback is control flow rather than a kernel: rather than
+capture the protected value in a synthesized quotation and compose that
+onto the argument, it holds the value in an application continuation and
+pushes it back when the quotation finishes, which turns three list
+allocations per application into none. It is also the hottest composition
+in the language, because binder lowering emits one `dip` per body form
+that still precedes a local read. The phrase falls through to the generic
+composition whenever it cannot apply — fewer than two operands, or a
+non-list on top — so those errors still name the word that observed them.
+Since the callback installs an application frame where dip's own body
+frame would have been, that frame inherits the word for tracing and a
+failure inside the quotation still traces through `dip`; nested
+activations collapse to the innermost one, which the generic composition
+reported only because its capture quotation forced an extra frame. Cheap
+compositions such as `over` and `compose` have no host callback at
+all. Per-application guard cost is O(phrase length) against
 O(n) work, with no cache and no invalidation. A combinator may resolve its
 quotation's words once at entry to choose a fused kernel — that snapshot
 is scoped to the recognition guard only; the generic path keeps full
@@ -760,8 +860,11 @@ a word in the prelude when its definition in ecl is compact, or when its
 performance does not justify a host idiom; keep a word entirely primitive
 only when its source definition would be substantial and its performance
 characteristics justify the host implementation (`zip-with`, `range`,
-`to-dict`, `has?`, `del`, `merge`). Prelude words therefore stay honest
-source with no public dual representation.
+`to-dict`, `has?`, `del`, `merge`). Recognition is the third option and
+the one for a definition that is both compact and hot: `dip` reaches a
+host implementation without becoming one, which also keeps it a source
+binding for the patterns that guard on it. Prelude words therefore stay
+honest source with no public dual representation.
 
 ## Typed publication and control state
 
@@ -873,8 +976,11 @@ source with no public dual representation.
   caller's instruction pointer to the reference and loads; the caller's own
   frame then retries, so nothing has to reconstruct an execution context the
   load may have discarded. A `.qualified_after_load` frame verifies the module
-  actually registered, which is what bounds the retry. Reflection —
-  `body`, `doc`, `see`, `which` — resolves without loading.
+  actually registered, which is what bounds the retry. Reflection restores
+  its already-consumed symbol and rewinds its primitive call through that same
+  protocol. Session completion drives the same loader on an initialized empty
+  root, without executing an export or splicing a `use`; transport and prior
+  registration are therefore unobservable to every qualified-name operation.
 - **Contention and recursion are different states.** A `LoadingNode` stores
   its owner rather than a bare active flag, so a second request from the same
   owner is a cycle and one from another owner is contention. A cycle raises
@@ -896,6 +1002,14 @@ source with no public dual representation.
   module words are therefore exempt from the declared-effect requirement that
   native words carry, exactly as source module words are, and `json` and
   `http` state their stack shape in prose instead.
+- **`io` is the observable-I/O boundary.** Its builtin table publishes
+  `pp`, `prin`, `print`, `inspect`, `stdin`, `slurp`, `spit`, and `lines`;
+  qualified names and `'io use` are the only routes to those words. The
+  primitive callbacks keep host authority private, while `print`, `inspect`,
+  and `lines` schedule fixed quotations over sibling exports. The canonical
+  any-value renderer `str` remains in the prelude because it produces a value
+  and performs no I/O; the `str` module contains only transformations whose
+  subject is a string.
 - **Static linkage needs no entry symbol.** `ecl.module` takes a `linkage`
   spec: a dynamically loaded extension exports `ecl_module_abi_v1`, while a
   module linked into this image does not, so several first-party SDK modules
@@ -1208,6 +1322,23 @@ value equality, representation parity (brackets), error kind/payload
 equality, and bit-identical floats. The scheduler suite runs at 1 worker
 and N workers, asserting identical results. This is the cheapest guard on
 the entire "fast paths are unobservable" doctrine.
+
+**The typed-kernel proof surface.** `src/tests/kernel_typed_test.zig` guards the
+typed seam with four properties the differential harness cannot state, because
+that harness compares idiom recognition against its absence rather than typed
+storage against boxed storage. Parity builds the same values twice — once as the
+specialized leaf a typed loop dispatches on, once through
+`list.fromValuesGeneric` — and compares the whole rendered outcome, which puts
+values, brackets, string forms, float bits, error kinds, messages, and failing
+indexes under one assertion. A bounded-work property counts kernel safe points
+for an operation of three quanta, separating a chunked loop from a per-element
+one by four orders of magnitude rather than by a tuned constant. A fault-block
+property places the first fault in the first, a middle, and the final block and
+pins the reported index. A memory bound runs the session under a
+`DebugAllocator` live-byte limit of output plus one kernel chunk, and then
+starves it below the output to prove the limit is doing work. Registry closure is
+asserted independently of the comptime validation, so a validator that stopped
+checking shows up as a failing test rather than as silence.
 
 **The stateful-module suite.** `src/tests/stateful_module_test.zig` pins
 the Milestone 11 contracts one test per obligation. Its tests carrying the

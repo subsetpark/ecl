@@ -50,7 +50,7 @@ pub const LowerCursor = struct {
     locals: ?LocalMap = null,
     local_indices: []?usize,
     walk: poll.ChunkStack(WalkFrame),
-    phase: enum { locals_init, names, body, words, size, empty, output, complete } = .locals_init,
+    phase: enum { locals_init, names, body, live, words, size, empty, output, complete } = .locals_init,
     name_index: usize = 0,
     body_index: usize = 0,
     byte_index: usize = 0,
@@ -69,6 +69,10 @@ pub const LowerCursor = struct {
     output_index: usize = 0,
     emit_body_index: usize = 0,
     emit_step: usize = 0,
+    /// The last body position that reads a local, which is where the
+    /// environment list stops being live.
+    last_local: ?usize = null,
+    pop_emitted: bool = false,
     empty_materializer: ?storage.I64Materializer = null,
     wrapper_source: [1]Value = .{.{ .int = 0 }},
     wrapper_materializer: ?storage.ValueMaterializer = null,
@@ -259,7 +263,7 @@ pub const LowerCursor = struct {
         }
         if (self.body_index == self.body.len) {
             self.body_index = 0;
-            self.phase = .words;
+            self.phase = .live;
             return .pending;
         }
         return switch (self.body[self.body_index].value) {
@@ -298,9 +302,24 @@ pub const LowerCursor = struct {
         self.append(.{ .value = item, .span = self.binder_span });
     }
 
+    /// The first body position that runs after the environment list is gone:
+    /// one past the last local reference, or the very start when the body
+    /// reads no local at all.
+    fn popIndex(self: *const LowerCursor) usize {
+        return if (self.last_local) |index| index + 1 else 0;
+    }
+
     fn advanceOutput(self: *LowerCursor) (error{OutOfMemory})!LowerProgress {
-        if (self.emit_body_index == self.body.len) {
+        // The environment list dies with the last local read. Retiring it
+        // exactly there is what lets every later form run directly on the
+        // stack: a form emitted after the `pop` needs no `dip` to see past an
+        // environment that no longer exists.
+        if (!self.pop_emitted and self.emit_body_index == self.popIndex()) {
             self.atom(.{ .word = self.words[5] });
+            self.pop_emitted = true;
+            return .pending;
+        }
+        if (self.emit_body_index == self.body.len) {
             const output = self.output.?;
             self.output = null;
             const values = self.output_values.?.take();
@@ -321,6 +340,13 @@ pub const LowerCursor = struct {
                 self.emit_step = 0;
                 self.emit_body_index += 1;
             }
+            return .pending;
+        }
+        if (self.pop_emitted) {
+            const form = self.body[self.emit_body_index];
+            heap.retainValue(form.value);
+            self.append(form);
+            self.emit_body_index += 1;
             return .pending;
         }
         if (self.emit_step == 0) {
@@ -361,6 +387,16 @@ pub const LowerCursor = struct {
             },
             .names => try self.advanceName(),
             .body => try self.advanceBody(),
+            .live => result: {
+                if (self.body_index != self.body.len) {
+                    if (self.local_indices[self.body_index] != null) self.last_local = self.body_index;
+                    self.body_index += 1;
+                    break :result .pending;
+                }
+                self.body_index = 0;
+                self.phase = .words;
+                break :result .pending;
+            },
             .words => result: {
                 const names = [_][]const u8{ "cons", "dup", "at", "swap", "dip", "pop" };
                 if (self.inserter == null) self.inserter = intern.insertionCursor(names[self.word_index]);
@@ -377,7 +413,12 @@ pub const LowerCursor = struct {
             },
             .size => result: {
                 if (self.body_index != self.body.len) {
-                    const additional: usize = if (self.local_indices[self.body_index] != null) 4 else 2;
+                    const additional: usize = if (self.local_indices[self.body_index] != null)
+                        4
+                    else if (self.body_index < self.popIndex())
+                        2
+                    else
+                        1;
                     self.output_count = std.math.add(usize, self.output_count, additional) catch
                         return error.OutOfMemory;
                     self.body_index += 1;

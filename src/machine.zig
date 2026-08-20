@@ -2057,6 +2057,38 @@ pub const Machine = struct {
     pub fn useOrLoad(self: *Machine, name: intern.ModuleName) MachineError!void {
         try self.startDriver(UseDriver.init(self, self.currentScope(), name, true));
     }
+    /// Start the ordinary qualified-name loader without executing or importing
+    /// an export. The caller supplies an initialized root and drives it through
+    /// `runInitializedRoot`; reflection and completion use this same path.
+    pub fn loadModuleOnly(self: *Machine, name: intern.ModuleName) MachineError!void {
+        self.unit.active_word = intern.moduleId(name);
+        try self.autoLoadModule(name, .{ .qualified = self.unit.active_word });
+    }
+
+    /// A reflection primitive already consumed its symbol before discovering
+    /// a cold qualified module. Restore that operand and rewind the primitive
+    /// call, then use the same loader/retry protocol as executable dispatch.
+    pub fn retryQualifiedOperandAfterLoad(
+        self: *Machine,
+        requested: u32,
+        outcome: ResolutionOutcome,
+    ) MachineError!WorkProgress {
+        if (self.unit.current == null or self.unit.inherited.registry == null)
+            return self.undefinedName(requested);
+        const name = switch (outcome) {
+            .unknown_module_prefix => |prefix| intern.internModuleName(prefix) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidName => return self.undefinedName(requested),
+            },
+            .unregistered_module => |name| name,
+            .unresolved => return self.undefinedName(requested),
+            .resolved => unreachable,
+        };
+        try self.pushBorrowed(.{ .symbol = requested });
+        self.unit.current.?.ip = self.unit.active_index;
+        try self.autoLoadModule(name, .{ .qualified = requested });
+        return .detached;
+    }
     /// What a completed auto-load owes its caller. `use` splices the loaded
     /// module's exports into a scope; a bare qualified reference only needs
     /// the module registered before the word is retried once.
@@ -3724,6 +3756,19 @@ pub const Machine = struct {
         if (self.unit.workDriver()) |driver| driver.trace_parent = word;
     }
 
+    /// Attributes the application the caller just began to `word`. A
+    /// recognized idiom whose callback applies a quotation stands in for the
+    /// source body frame that would otherwise have carried the word, so
+    /// failures inside that quotation still trace through the word the caller
+    /// wrote. Only the installing callback may claim an application this way:
+    /// an unrelated enclosing application owns its own attribution.
+    pub fn setApplicationTraceParent(self: *Machine, word: u32) void {
+        const frame = &self.unit.frames.items[self.unit.frames.items.len - 1];
+        std.debug.assert(frame.* == .application);
+        frame.application.traced_word = word;
+        self.unit.current.?.traced_word = word;
+    }
+
     /// The single parking choke point. A parked unit would hold its slot's
     /// turn across an unbounded wait, so a state application refuses to park
     /// here — before any wait — rather than in each parking word, which is
@@ -3899,6 +3944,13 @@ pub const Machine = struct {
     /// interval in full.
     pub fn advanceKernel(self: *Machine, amount: usize) MachineError!void {
         _ = try self.chargeKernel(amount);
+    }
+    /// What a typed cursor may still charge before the interval ends. A loop
+    /// bounds its next half-open range by this so the range it commits to is
+    /// the range the budget can pay for, rather than discovering the boundary
+    /// mid-chunk.
+    pub fn remainingKernelFuel(self: *const Machine) usize {
+        return self.unit.kernel_fuel;
     }
     fn chargeKernel(self: *Machine, amount: usize) MachineError!bool {
         std.debug.assert(amount <= kernel_poll_quantum);
@@ -4845,8 +4897,7 @@ pub const Resolution = struct {
 };
 
 /// Why resolution finished. Distinguishing an unregistered module from an
-/// unknown name is what lets the dispatcher auto-load exactly once while
-/// reflection keeps treating both as an ordinary miss.
+/// unknown name lets every qualified-name consumer auto-load exactly once.
 pub const ResolutionOutcome = union(enum) {
     /// Nothing by that name is visible.
     unresolved,
@@ -4859,8 +4910,7 @@ pub const ResolutionOutcome = union(enum) {
     unregistered_module: intern.ModuleName,
     resolved: Resolution,
 
-    /// The binding, if resolution produced one. Consumers that must not load
-    /// treat every miss alike.
+    /// The binding, if resolution produced one.
     pub fn binding(self: ResolutionOutcome) ?Resolution {
         return switch (self) {
             .resolved => |resolution| resolution,
@@ -5465,6 +5515,12 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             // continuation's tail. Do not cross later continuation frames until
             // that owned work has produced its stack result.
             if (self.unit.hasWorkDriver()) return true;
+            // The same rule holds for the bounded native step a finished
+            // continuation records: the machine loop consumes exactly one per
+            // pass, so a second continuation resumed here would assert against
+            // a yield nobody observed. Nested in-place applications finishing
+            // in one unwind are the ordinary case — `(q) dip` inside `bi`.
+            if (self.unit.native == .yielded) return true;
         },
         .use_after_load => |continuation| {
             var loading = continuation.loading;

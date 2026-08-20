@@ -108,19 +108,20 @@ const source_groups = [_]SourceGroup{
     .{ .production = true, .files = &.{
         "kernel_support.zig",  "kernels.zig",      "kernel_storage.zig",   "kernel_numeric.zig",
         "kernel_sequence.zig", "kernel_order.zig", "kernel_dict_text.zig", "idioms.zig",
-        "kernel_random.zig",
+        "kernel_random.zig",   "kernel_flat.zig",
     }, .sources = &.{
         @embedFile("../kernel_support.zig"),   @embedFile("../kernels.zig"),
         @embedFile("../kernel_storage.zig"),   @embedFile("../kernel_numeric.zig"),
         @embedFile("../kernel_sequence.zig"),  @embedFile("../kernel_order.zig"),
         @embedFile("../kernel_dict_text.zig"), @embedFile("../idioms.zig"),
-        @embedFile("../kernel_random.zig"),
+        @embedFile("../kernel_random.zig"),    @embedFile("../kernel_flat.zig"),
     } },
     .{ .production = false, .files = &.{
-        "source_audit.zig", "tools/source_audit.zig", "tools/captured_test_runner.zig",
+        "source_audit.zig",               "tools/source_audit.zig",
+        "tools/captured_test_runner.zig", "tools/bench_kernels.zig",
     }, .sources = &.{
         @embedFile("../source_audit.zig"),      @embedFile("source_audit.zig"),
-        @embedFile("captured_test_runner.zig"),
+        @embedFile("captured_test_runner.zig"), @embedFile("bench_kernels.zig"),
     } },
     .{ .production = true, .files = &.{
         "scheduler.zig", "scheduler_core.zig", "console.zig", "task_prims.zig",
@@ -133,12 +134,12 @@ const source_groups = [_]SourceGroup{
     .{ .production = true, .files = &.{
         "native/abi.zig",          "native/capability.zig", "native/sdk.zig",
         "native/build_helper.zig", "native_descriptor.zig", "native_module.zig",
-        "native_call.zig",
+        "native_call.zig",         "stdlib/io.zig",
     }, .sources = &.{
         @embedFile("../native/abi.zig"),        @embedFile("../native/capability.zig"),
         @embedFile("../native/sdk.zig"),        @embedFile("../native/build_helper.zig"),
         @embedFile("../native_descriptor.zig"), @embedFile("../native_module.zig"),
-        @embedFile("../native_call.zig"),
+        @embedFile("../native_call.zig"),       @embedFile("../stdlib/io.zig"),
     } },
 };
 
@@ -159,6 +160,7 @@ const test_files = [_][]const u8{
     "tests/str_test.zig",             "tests/csv_test.zig",
     "tests/json_test.zig",            "tests/table_test.zig",
     "tests/http_test.zig",            "tests/random_test.zig",
+    "tests/kernel_typed_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
@@ -596,6 +598,48 @@ fn auditSourceBodies() bool {
         for (component.sources, component.files) |source, file| {
             failed = auditWorkDriverOutputs(file, source) or failed;
         }
+    }
+    // The typed loop boundary. A flat kernel loop reads unboxed slices through
+    // heap-issued capabilities and writes typed storage; the two names below are
+    // the boxed route — one cell at a time, then a profiling pass to recover a
+    // representation the dispatch already knew. A typed loop that could reach
+    // them would not be a typed loop, and the boundary is not something the
+    // compiler can state, so it is stated here.
+    const boxed_flat_route = [_][]const []const u8{
+        &.{ "list", ".", "atUnchecked" },
+        &.{"OwnedValueBuffer"},
+        &.{ "storage", ".", "ValueMaterializer" },
+        &.{ "kernel_storage", ".", "ValueMaterializer" },
+    };
+    failed = auditTokens(
+        "typed flat loops",
+        @embedFile("../kernel_flat.zig"),
+        &boxed_flat_route,
+    ) or failed;
+    // Migrated kernel files still contain deliberately generic spine/dict
+    // drivers, so a whole-file denylist would outlaw the second half of the
+    // design. The boundary is instead semantic at function granularity: a
+    // production function that acquires a typed leaf capability may not also
+    // rebox cells or invoke a profiling materializer.
+    const migrated_kernel_files = [_]struct { name: []const u8, source: [:0]const u8 }{
+        .{ .name = "kernel_numeric.zig", .source = @embedFile("../kernel_numeric.zig") },
+        .{ .name = "kernel_sequence.zig", .source = @embedFile("../kernel_sequence.zig") },
+        .{ .name = "kernel_order.zig", .source = @embedFile("../kernel_order.zig") },
+        .{ .name = "kernel_random.zig", .source = @embedFile("../kernel_random.zig") },
+    };
+    for (migrated_kernel_files) |kernel| {
+        failed = auditProductionFunctionTokenPair(
+            kernel.name,
+            kernel.source,
+            "LeafReader",
+            "atUnchecked",
+        ) or failed;
+        failed = auditProductionFunctionTokenPair(
+            kernel.name,
+            kernel.source,
+            "LeafReader",
+            "ValueMaterializer",
+        ) or failed;
     }
     return failed;
 }

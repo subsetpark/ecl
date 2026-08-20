@@ -60,26 +60,27 @@ contract.
 ```
 
 Run a source file without implicitly printing its final stack, or use `-e` to
-print the final stack. Scripts print explicitly with `pp` or `prin`.
+print the final stack. Scripts print explicitly with `io.pp` or `io.prin`.
 
 ```sh
 ecl program.ecl
 ecl -e '9 square'
-printf 'a\nb\n' | ecl -e 'stdin lines len'
+printf 'a\nb\n' | ecl -e 'io.stdin "\n" split len'
 ```
 
-`str` is the canonical, round-trippable value rendering. `pp` and the REPL
-favor readable matrix layout and elide very large flat leaves, so a mistaken
-terminal probe stays bounded.
+`str` is the canonical, round-trippable value rendering. `io.pp` and the REPL
+favor readable matrix layout and elide very large lists, so a mistaken terminal
+probe stays bounded.
 
 ## Standard library and data pipelines
 
-The `result`, `str`, `csv`, `json`, `table`, `http`, and `rng` modules are
+The `result`, `str`, `io`, `csv`, `json`, `table`, `http`, and `rng` modules are
 embedded and load on first use. A qualified name is enough; `use` additionally
 imports a module's public names into the current environment.
 
 ```sh
 ecl '"hello" str.upper'                         # "HELLO"
+ecl "['a 1] str"                                # "('a 1)"
 ecl '"a,b\nc,d" csv.parse'                      # (("a" "b") ("c" "d"))
 ecl '"{\"a\":[1,null]}" json.parse'            # {"a" (1 'null)}
 ecl -e "'result use 3 result.ok result.or-raise call"
@@ -90,8 +91,10 @@ list columns. There is no hidden table runtime kind. CSV and JSON preserve
 their external data models; scalar conversion is explicit through
 `table.cast`.
 
-Host scripting words include `args`, `getenv`, `stdin`, `slurp`, `spit`,
-`lines`, and `exit`. `http.get` and `http.post` return ordinary response
+The `io` module contains `pp`, `prin`, `print`, `inspect`, `stdin`, `slurp`,
+`spit`, and `lines`; the last composes `io.slurp` with newline splitting.
+Process capabilities `args`, `getenv`, and `exit` remain global. `http.get` and
+`http.post` return ordinary response
 dictionaries. See [`design/SPEC.md`](design/SPEC.md) for the complete grammar,
 vocabulary, errors, and module contracts.
 

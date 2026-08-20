@@ -379,6 +379,22 @@ pub fn build(b: *std.Build) void {
     });
     const audit_exe = b.addExecutable(.{ .name = "ecl-source-audit", .root_module = audit_mod });
     const run_audit = b.addRunArtifact(audit_exe);
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/bench_kernels.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_mod.addImport("ecl", mod);
+    bench_mod.link_libc = true;
+    const bench_exe = b.addExecutable(.{ .name = "ecl-bench-kernels", .root_module = bench_mod });
+    const run_bench = b.addRunArtifact(bench_exe);
+    if (b.args) |args| run_bench.addArgs(args);
+    const bench_step = b.step(
+        "bench-kernels",
+        "Characterize the typed kernel seam (select a mode with -Doptimize)",
+    );
+    bench_step.dependOn(&run_bench.step);
+
     const audit_step = b.step("source-audit", "Check source architecture");
     audit_step.dependOn(&run_audit.step);
     fuzz_step.dependOn(&run_audit.step);
@@ -404,6 +420,30 @@ pub fn build(b: *std.Build) void {
     const run_e2e_tests = addCapturedTestRun(b, captured_test_runner, e2e_tests);
     run_e2e_tests.step.dependOn(&fixture_files.step);
     test_step.dependOn(&run_e2e_tests.step);
+    // The same CLI acceptance run as a named step, so it can be gated on its
+    // own without building the whole suite.
+    const e2e_step = b.step("test-e2e", "Run the CLI acceptance tests");
+    e2e_step.dependOn(&run_e2e_tests.step);
+    // A filtered slice of the same suite, for iterating on one area without
+    // paying for the whole run. Name fragments select tests by their fully
+    // qualified name: `zig build test-kernels` covers the kernel, capability,
+    // idiom, and combinator surfaces.
+    const kernel_slice_tests = b.addTest(.{
+        .root_module = test_mod,
+        .filters = &.{
+            "typed kernels",
+            "typed differential",
+            "kernel",
+            "leaf capabilities",
+            "idiom",
+            "combinator",
+        },
+    });
+    kernel_slice_tests.linkage = runtime_linkage;
+    const run_kernel_slice_tests = b.addRunArtifact(kernel_slice_tests);
+    run_kernel_slice_tests.step.dependOn(&fixture_files.step);
+    const kernel_slice_step = b.step("test-kernels", "Run the kernel and capability test slice");
+    kernel_slice_step.dependOn(&run_kernel_slice_tests.step);
 
     const worker_step = b.step("test-workers", "Run worker-sensitive Session tests at one and eight workers");
     for ([_]usize{ 1, 8 }) |worker_count| {

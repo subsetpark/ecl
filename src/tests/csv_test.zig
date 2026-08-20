@@ -14,7 +14,7 @@ test "csv: parse preserves fields, widths, and quoting per RFC 4180" {
             // Both record endings are accepted; the policy fixes only what
             // emission produces.
             .name = "LF and CRLF both end records",
-            .source = "\"a,b\\nc,d\" csv.parse \"a,b\\u{D}\\nc,d\\u{D}\\n\" csv.parse match",
+            .source = "\"a,b\\nc,d\" csv.parse \"a,b\\u{D}\\nc,d\\u{D}\\n\" csv.parse match?",
             .expected = "1",
         },
         .{
@@ -83,22 +83,22 @@ test "csv: emit produces canonical CRLF output quoting exactly as required" {
         .{
             // The round trip is the contract, in both directions.
             .name = "canonical text round-trips byte-identically",
-            .source = "\"a,b\\u{D}\\nc,d\\u{D}\\n\" dup csv.parse csv.emit match " ++
-                "\"\\\"a\\\"\\\"b\\\",\\\"c,d\\\"\\u{D}\\n\" dup csv.parse csv.emit match " ++
-                "\"a,,c\\u{D}\\n\" dup csv.parse csv.emit match",
+            .source = "\"a,b\\u{D}\\nc,d\\u{D}\\n\" dup csv.parse csv.emit match? " ++
+                "\"\\\"a\\\"\\\"b\\\",\\\"c,d\\\"\\u{D}\\n\" dup csv.parse csv.emit match? " ++
+                "\"a,,c\\u{D}\\n\" dup csv.parse csv.emit match?",
             .expected = "1 1 1",
         },
         .{
             // Larger than one 65,536-unit scheduler quantum, so the parse and
             // the emit both cross yields and resume mid-record.
             .name = "input beyond one budget quantum resumes correctly",
-            .source = "'str use \"ab,cd\\u{D}\\n\" 12000 repeat dup csv.parse csv.emit match",
+            .source = "'str use \"ab,cd\\u{D}\\n\" 12000 repeat dup csv.parse csv.emit match?",
             .expected = "1",
         },
         .{
             .name = "quoted fields beyond one quantum resume correctly",
             .source = "'str use \"\\\"a\\\"\\\"b\\\",\\\"c,d\\\"\\u{D}\\n\" 8000 repeat " ++
-                "dup csv.parse csv.emit match",
+                "dup csv.parse csv.emit match?",
             .expected = "1",
         },
     });

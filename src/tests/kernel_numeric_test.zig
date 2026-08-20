@@ -57,10 +57,19 @@ test "numeric: transcendental non-finite edges" {
 
 test "numeric: ragged broadcast dict alignment and representation parity" {
     try helper.expectStack("[[1 2] [3]] 10 *", "([10 20] [30])");
+    try helper.expectStack("[[1 2] [3 4]] 1 +", "([2 3]\n [4 5])");
+    try helper.expectStack("[\"az\" \"λ🙂\"] 1 +", "(\"b{\" \"μ🙃\")");
     try helper.expectStack(
         "{'a 1 'b 2} {'b 10 'c 30} + {'a 1} [10 20] +",
         "{'a 1 'b 12 'c 30} {'a [11 21]}",
     );
+    try helper.expectError(.{
+        .name = "a fault in a nested typed leaf reports its inner index",
+        .source = "[[1 2] [3 9223372036854775807]] 1 +",
+        .kind = "overflow",
+        .word = "+",
+        .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+    });
 }
 
 test "numeric: fault blocks report first index before aliased stores" {

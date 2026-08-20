@@ -72,6 +72,20 @@ test "stdlib: qualified reference auto-loads an unregistered module" {
     });
 }
 
+test "stdlib: qualified reflection auto-loads every module transport" {
+    try support.expectStack("'str.upper body type 'io.pp doc len 0 >", "'list 1");
+
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var runtime = try session.Session.initWithOutput(heap.allocator(), &.{}, &output.writer);
+    defer runtime.deinit();
+    try expectOk(&runtime, "'csv.parse which 'result.ok see");
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "csv.parse") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "result.ok") != null);
+}
+
 test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling" {
     var directory = std.testing.tmpDir(.{});
     defer directory.cleanup();
@@ -83,6 +97,10 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "site-local.ecl",
         .data = "((7) 'answer def) 'site-local @module",
+    });
+    try directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "cold-local.ecl",
+        .data = "((8) 'answer def (9) 'also def) 'cold-local @module",
     });
     const search = try directory.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(search);
@@ -104,6 +122,13 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     // The embedded module wins for both spellings of the miss.
     try expectDisplay(&runtime, "[1 2] result.ok", "{'ok [1 2]}");
     try expectDisplay(&runtime, "'result use [3] ok", "{'ok [1 2]} {'ok [3]}");
+    // Completion reaches the same ECL_PATH module before any execution or
+    // reflection has registered it.
+    var completed = try runtime.completionCandidates("cold-local.a");
+    defer completed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), completed.items().len);
+    try std.testing.expectEqualStrings("cold-local.also", completed.items()[0]);
+    try std.testing.expectEqualStrings("cold-local.answer", completed.items()[1]);
     // The same search path still serves a name the stdlib does not claim, so
     // this is precedence rather than ECL_PATH being ignored.
     try expectDisplay(&runtime, "site-local.answer", "{'ok [1 2]} {'ok [3]} 7");
@@ -163,7 +188,7 @@ test "stdlib: embedded module names complete before anything has loaded them" {
     try std.testing.expectEqual(@as(usize, 1), occurrences);
 }
 
-test "stdlib: builtin exports complete before the first unit" {
+test "stdlib: qualified exports complete before execution for every transport" {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var runtime = try session.Session.init(heap.allocator(), &.{});
@@ -179,4 +204,16 @@ test "stdlib: builtin exports complete before the first unit" {
     defer partial.deinit();
     try std.testing.expectEqual(@as(usize, 1), partial.items().len);
     try std.testing.expectEqualStrings("json.parse", partial.items()[0]);
+
+    var source = try runtime.completionCandidates("str.trim");
+    defer source.deinit();
+    try std.testing.expectEqual(@as(usize, 3), source.items().len);
+    try std.testing.expectEqualStrings("str.trim", source.items()[0]);
+    try std.testing.expectEqualStrings("str.trim-left", source.items()[1]);
+    try std.testing.expectEqualStrings("str.trim-right", source.items()[2]);
+
+    var native = try runtime.completionCandidates("csv.e");
+    defer native.deinit();
+    try std.testing.expectEqual(@as(usize, 1), native.items().len);
+    try std.testing.expectEqualStrings("csv.emit", native.items()[0]);
 }

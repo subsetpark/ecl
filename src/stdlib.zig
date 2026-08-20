@@ -14,6 +14,7 @@ const env = @import("env.zig");
 const Csv = @import("stdlib/csv.zig").Extension;
 const json_module = @import("stdlib/json.zig");
 const http_module = @import("stdlib/http.zig");
+const io_module = @import("stdlib/io.zig");
 
 /// One complete transport for one embedded module. Each arm carries
 //  everything its publication path needs, so no loader has to repair a
@@ -52,6 +53,7 @@ const modules = [_]Module{
         .name = "<stdlib:str>",
         .text = @embedFile("stdlib/str.ecl"),
     } } },
+    .{ .name = "io", .entry = .{ .builtin = &io_module.words } },
     .{ .name = "csv", .entry = .{ .native = Csv.descriptor() } },
     .{ .name = "json", .entry = .{ .builtin = &json_module.words } },
     .{ .name = "table", .entry = .{ .source = .{

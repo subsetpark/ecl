@@ -10,6 +10,315 @@ pub const ListHandle = value.ListHandle;
 pub const DictHandle = value.DictHandle;
 pub const TaskHandle = value.TaskHandle;
 pub const HeapKind = value.HeapKind;
+/// A read capability over one list's unboxed payload.
+///
+/// Acquiring it retains the owning root for the reader's whole lifetime, which
+/// is the structural reason a typed loop can hold a slice across a suspension:
+/// the list cannot be retired underneath it, and no caller correlates a raw
+/// pointer, an allocator, and a release domain by hand. `slice` is bounded by
+/// the header length, unlike the capacity-sliced payload accessors above.
+pub fn LeafReader(comptime kind_value: HeapKind) type {
+    requireLeafRepresentation(kind_value, "LeafReader");
+    const Element = LeafElement(kind_value);
+    return struct {
+        const Self = @This();
+        pub const Item = Element;
+
+        /// The retained root. Null only after `release`, which is the one
+        /// transition that consumes this capability's reference.
+        root: ?*ListHandle,
+
+        /// Retains `handle`; the caller keeps its own reference. The reader
+        /// owns a second one until `release`, on every path including failure.
+        pub fn acquire(handle: *ListHandle) Self {
+            std.debug.assert(listKind(handle) == kind_value);
+            incRef(handle);
+            return .{ .root = handle };
+        }
+
+        pub fn slice(self: *const Self) []const Element {
+            const root = self.root.?;
+            const items = payloadItems(Element, mutableHeader(root));
+            return items[0..@intCast(listLength(root))];
+        }
+
+        pub fn len(self: *const Self) usize {
+            return @intCast(listLength(self.root.?));
+        }
+
+        /// Consumes the retained reference through the release domain, so
+        /// reclamation stays bounded work outside any publication lock.
+        pub fn release(self: *Self, releases: *ReleaseDomain) void {
+            if (self.root) |root| releases.releaseHeader(root);
+            self.root = null;
+        }
+
+        /// The `heap.Owned` disposal protocol, so a driver can hold a reader as
+        /// an owned field and have cancellation retire it with everything else.
+        pub fn retire(self: *Self, releases: *ReleaseDomain) void {
+            self.release(releases);
+        }
+    };
+}
+
+/// A write capability over one freshly allocated typed output buffer.
+///
+/// It owns its allocation, exposes only bounded range writes, and publishes
+/// through exactly one consuming `finish`. There is deliberately no
+/// whole-slice accessor: a caller that must know a block's faults before
+/// storing it cannot be handed the destination to scribble on, which is what
+/// keeps the rescan evidence of an aliased input intact.
+pub fn LeafWriter(comptime kind_value: HeapKind) type {
+    requireLeafRepresentation(kind_value, "LeafWriter");
+    const Element = LeafElement(kind_value);
+    return struct {
+        const Self = @This();
+        pub const Item = Element;
+
+        builder: ?ListBuilder(kind_value),
+        length: usize,
+
+        /// Allocates exactly `len_value` elements at full length: a typed
+        /// producer knows its result size before it fills anything. On failure
+        /// this capability owns nothing.
+        pub fn init(allocator: std.mem.Allocator, len_value: usize) error{OutOfMemory}!Self {
+            return .{
+                .builder = try ListBuilder(kind_value).init(allocator, len_value, len_value),
+                .length = len_value,
+            };
+        }
+
+        pub fn len(self: *const Self) usize {
+            return self.length;
+        }
+
+        /// Stores one bounded half-open range. Asserts containment rather than
+        /// clamping: an out-of-range store is a loop bug, not an input error.
+        pub fn writeRange(self: *Self, offset: usize, source: []const Element) void {
+            std.debug.assert(offset + source.len <= self.length);
+            if (source.len == 0) return;
+            @memcpy(self.builder.?.items()[offset..][0..source.len], source);
+        }
+
+        /// The fill counterpart, for producers whose block is one repeated
+        /// element and which therefore need no staging buffer at all.
+        pub fn fillRange(self: *Self, offset: usize, count: usize, element: Element) void {
+            std.debug.assert(offset + count <= self.length);
+            if (count == 0) return;
+            @memset(self.builder.?.items()[offset..][0..count], element);
+        }
+
+        /// The one publishing transition. Consumes the capability: the caller
+        /// owns the returned value's only reference.
+        pub fn finish(self: *Self) Value {
+            var builder = self.builder.?;
+            self.builder = null;
+            return .{ .list = builder.finish() };
+        }
+
+        /// Abandonment. Consumes the capability and retires the partially
+        /// written buffer through the release domain; nothing is published.
+        pub fn retirePartial(self: *Self, releases: *ReleaseDomain) void {
+            if (self.builder) |*builder| {
+                var owned = builder.*;
+                owned.retirePartial(releases);
+            }
+            self.builder = null;
+        }
+
+        /// The `heap.Owned` disposal protocol: abandoning is what an owner does
+        /// with an unfinished writer.
+        pub fn retire(self: *Self, releases: *ReleaseDomain) void {
+            self.retirePartial(releases);
+        }
+    };
+}
+
+/// The unique-input reuse authority.
+///
+/// Claiming it proves the list is solely owned and that its stored elements
+/// occupy the same bytes as the result's, so the result can take over the
+/// buffer by retag instead of by allocation. The authority is consumed exactly
+/// once — by `finish`, which republishes that same list as the result, or by
+/// `abandon`, which leaves the input exactly as it was. Callers never see the
+/// header: the claim is the only door to in-place reuse, and `writeRange`
+/// stores nothing a caller has not already decided is fault-free.
+pub fn UniqueLeafAdoption(comptime result_kind: HeapKind) type {
+    requireLeafRepresentation(result_kind, "UniqueLeafAdoption");
+    const Element = LeafElement(result_kind);
+    return struct {
+        const Self = @This();
+        pub const Item = Element;
+
+        claimed: ?*UniqueList,
+        handle: *ListHandle,
+        length: usize,
+
+        /// Null when the list is shared, when its element width differs from
+        /// the result's, or when it cannot hold `len_value` elements. A null
+        /// claim retains nothing and leaves the caller's reference untouched.
+        pub fn claim(handle: *ListHandle, len_value: usize) ?Self {
+            const source_kind = listKind(handle);
+            if (leafElementSize(source_kind) != leafElementSize(result_kind)) return null;
+            if (source_kind == .generic_spine or result_kind == .generic_spine) return null;
+            if (capacity(handle) < len_value) return null;
+            const unique = claimUniqueList(handle) orelse return null;
+            return .{ .claimed = unique, .handle = handle, .length = len_value };
+        }
+
+        pub fn len(self: *const Self) usize {
+            return self.length;
+        }
+
+        /// The reused buffer read as its original representation, bounded by the
+        /// claimed length. Reads stay const and stores stay ranged, which is
+        /// what makes reuse safe: an element is read in its own block, before
+        /// that block's mask is known and therefore before anything is stored.
+        pub fn sourceSlice(self: *const Self, comptime source_kind: HeapKind) []const LeafElement(source_kind) {
+            std.debug.assert(leafElementSize(source_kind) == leafElementSize(result_kind));
+            const items = payloadItems(LeafElement(source_kind), mutableHeader(self.handle));
+            return items[0..self.length];
+        }
+
+        pub fn writeRange(self: *Self, offset: usize, source: []const Element) void {
+            std.debug.assert(self.claimed != null);
+            std.debug.assert(offset + source.len <= self.length);
+            if (source.len == 0) return;
+            const items = payloadItems(Element, mutableHeader(self.handle));
+            @memcpy(items[offset..][0..source.len], source);
+        }
+
+        /// Consumes the authority and republishes the claimed list under the
+        /// result representation. The caller's existing reference becomes the
+        /// result's reference: it must not also release the input.
+        pub fn finish(self: *Self) Value {
+            const claimed = self.claimed.?;
+            self.claimed = null;
+            setUniqueListKind(claimed, result_kind);
+            setUniqueListLength(claimed, self.length);
+            return .{ .list = self.handle };
+        }
+
+        /// Consumes the authority without publishing. The input keeps its
+        /// representation, its length, and the caller's reference.
+        pub fn abandon(self: *Self) void {
+            self.claimed = null;
+        }
+
+        /// The `heap.Owned` disposal protocol. Abandoning consumes the authority
+        /// and touches neither the input nor any reference.
+        pub fn retire(self: *Self, releases: *ReleaseDomain) void {
+            _ = releases;
+            self.abandon();
+        }
+    };
+}
+
+/// Retag a solely-owned list. Legal only between representations whose
+/// elements occupy the same bytes, because the payload allocation is freed
+/// against the element type the kind names.
+fn setUniqueListKind(list_header: *UniqueList, kind_value: HeapKind) void {
+    const header: *UniqueHeader = @ptrCast(@alignCast(list_header));
+    std.debug.assert(leafElementSize(uniqueImpl(header).kind()) == leafElementSize(kind_value));
+    uniqueImpl(header).setKind(kind_value);
+}
+
+test "leaf capabilities keep roots alive publish once and reuse only unique buffers" {
+    const allocator = std.testing.allocator;
+    var cleanup = testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+
+    // A reader outliving its caller's reference is the whole point of the
+    // capability: the root stays retained until the reader releases it.
+    var source = try ListBuilder(.leaf_i64).init(allocator, 3, 3);
+    @memcpy(source.items(), &[_]i64{ 7, 8, 9 });
+    const numbers = source.finish();
+    var reader = LeafReader(.leaf_i64).acquire(numbers);
+    cleanup.domain().releaseHeader(numbers);
+    try std.testing.expectEqual(@as(usize, 3), reader.len());
+    try std.testing.expectEqualSlices(i64, &.{ 7, 8, 9 }, reader.slice());
+    reader.release(cleanup.domain());
+
+    // The writer publishes through finish and only through finish.
+    var writer = try LeafWriter(.leaf_f64).init(allocator, 4);
+    writer.writeRange(0, &.{ 1.5, 2.5 });
+    writer.fillRange(2, 2, -0.5);
+    const published = writer.finish();
+    defer cleanup.releaseValue(published);
+    try std.testing.expectEqual(HeapKind.leaf_f64, listKind(published.list));
+    try std.testing.expectEqual(@as(u64, 4), listLength(published.list));
+    var published_reader = LeafReader(.leaf_f64).acquire(published.list);
+    defer published_reader.release(cleanup.domain());
+    try std.testing.expectEqualSlices(f64, &.{ 1.5, 2.5, -0.5, -0.5 }, published_reader.slice());
+
+    // An abandoned writer publishes nothing and leaks nothing.
+    var abandoned = try LeafWriter(.leaf_i64).init(allocator, 2);
+    abandoned.writeRange(0, &.{1});
+    abandoned.retirePartial(cleanup.domain());
+
+    // Reuse: same-width claims succeed on a solely-owned list, and the retag
+    // republishes that same list rather than allocating a second one.
+    var reusable = try ListBuilder(.leaf_i64).init(allocator, 2, 2);
+    @memcpy(reusable.items(), &[_]i64{ 4, 5 });
+    const reused_input = reusable.finish();
+    var adoption = UniqueLeafAdoption(.leaf_f64).claim(reused_input, 2).?;
+    try std.testing.expectEqualSlices(i64, &.{ 4, 5 }, adoption.sourceSlice(.leaf_i64));
+    adoption.writeRange(0, &.{ 4.25, 5.25 });
+    const reused = adoption.finish();
+    defer cleanup.releaseValue(reused);
+    try std.testing.expectEqual(reused_input, reused.list);
+    try std.testing.expectEqual(HeapKind.leaf_f64, listKind(reused.list));
+    var reused_reader = LeafReader(.leaf_f64).acquire(reused.list);
+    defer reused_reader.release(cleanup.domain());
+    try std.testing.expectEqualSlices(f64, &.{ 4.25, 5.25 }, reused_reader.slice());
+
+    // A shared list refuses the claim, and so does a width change.
+    var shared_builder = try ListBuilder(.leaf_i64).init(allocator, 1, 1);
+    @memcpy(shared_builder.items(), &[_]i64{6});
+    const shared = shared_builder.finish();
+    defer cleanup.domain().releaseHeader(shared);
+    incRef(shared);
+    defer cleanup.domain().releaseHeader(shared);
+    try std.testing.expect(UniqueLeafAdoption(.leaf_f64).claim(shared, 1) == null);
+    var narrow_builder = try ListBuilder(.leaf_char1).init(allocator, 1, 1);
+    narrow_builder.items()[0] = 'a';
+    const narrow = narrow_builder.finish();
+    defer cleanup.domain().releaseHeader(narrow);
+    try std.testing.expect(UniqueLeafAdoption(.leaf_i64).claim(narrow, 1) == null);
+
+    // An abandoned claim leaves the input exactly as it was.
+    var keeper_builder = try ListBuilder(.leaf_i64).init(allocator, 1, 1);
+    keeper_builder.items()[0] = 11;
+    const keeper = keeper_builder.finish();
+    defer cleanup.domain().releaseHeader(keeper);
+    var keeper_claim = UniqueLeafAdoption(.leaf_f64).claim(keeper, 1).?;
+    keeper_claim.abandon();
+    try std.testing.expectEqual(HeapKind.leaf_i64, listKind(keeper));
+}
+
+fn leafCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
+    var cleanup = testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    var writer = try LeafWriter(.leaf_i64).init(allocator, 3);
+    errdefer writer.retirePartial(cleanup.domain());
+    writer.writeRange(0, &.{ 1, 2, 3 });
+    const published = writer.finish();
+    defer cleanup.releaseValue(published);
+    var reader = LeafReader(.leaf_i64).acquire(published.list);
+    defer reader.release(cleanup.domain());
+    try std.testing.expectEqual(@as(usize, 3), reader.slice().len);
+    var adoption = UniqueLeafAdoption(.leaf_f64).claim(published.list, 3) orelse return;
+    adoption.abandon();
+}
+
+test "leaf capabilities exhaust allocation failures" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        leafCapabilityFailureProbe,
+        .{},
+    );
+}
+
 pub const DictPayload = value.DictPayload;
 
 /// Capabilities are nominal opaque pointers with the same address as Header.
@@ -261,16 +570,47 @@ fn allocListHeader(
     return @ptrCast(@alignCast(try allocObject(allocator, kind_value, len_value, capacity_value)));
 }
 
-pub fn ListBuilder(comptime kind_value: HeapKind) type {
-    const Element = switch (kind_value) {
+/// The unboxed element each list representation stores. One mapping serves the
+/// builder, the typed read capability, and the typed write capabilities, so a
+/// representation cannot acquire a second element type by being reached through
+/// a different door.
+pub fn LeafElement(comptime kind_value: HeapKind) type {
+    return switch (kind_value) {
         .generic_spine => Value,
         .leaf_i64 => i64,
         .leaf_f64 => f64,
         .leaf_char1 => u8,
         .leaf_char2 => u16,
         .leaf_char4, .leaf_symbol => u32,
-        .dict, .task, .reserved_mask => @compileError("ListBuilder requires a list representation"),
+        .dict, .task, .reserved_mask => @compileError("a list representation is required"),
     };
+}
+
+/// Two representations are reuse-compatible when their elements occupy the same
+/// bytes: `leaf_i64`/`leaf_f64` and `leaf_char4`/`leaf_symbol` are the only
+/// such pairs, and that is exactly when a unique input buffer can carry a
+/// result of the other kind by retag rather than by reallocation.
+pub fn leafElementSize(kind_value: HeapKind) usize {
+    return switch (kind_value) {
+        .generic_spine => @sizeOf(Value),
+        .leaf_i64 => @sizeOf(i64),
+        .leaf_f64 => @sizeOf(f64),
+        .leaf_char1 => @sizeOf(u8),
+        .leaf_char2 => @sizeOf(u16),
+        .leaf_char4, .leaf_symbol => @sizeOf(u32),
+        .dict, .task, .reserved_mask => 0,
+    };
+}
+
+fn requireLeafRepresentation(comptime kind_value: HeapKind, comptime capability: []const u8) void {
+    if (kind_value == .generic_spine) @compileError(
+        capability ++ " is a typed leaf capability; a generic spine holds boxed cells and " ++
+            "must go through ListBuilder, which owns the retain discipline those cells need",
+    );
+}
+
+pub fn ListBuilder(comptime kind_value: HeapKind) type {
+    const Element = LeafElement(kind_value);
     return struct {
         const Self = @This();
         pub const Item = Element;

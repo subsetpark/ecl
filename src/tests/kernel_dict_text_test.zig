@@ -106,13 +106,20 @@ test "dict-text: dict-of converts one flat list without evaluation" {
 
 test "dict-text: split handles codepoints substrings and empty separators" {
     try helper.expectStack(
-        "\"a—b—\" \"—\" split \"ab\" \"\" split",
-        "(\"a\" \"b\" \"\") (\"\" \"a\" \"b\" \"\")",
+        "\"a—b—\" \"—\" split \"ab\" \"\" split " ++
+            "\"\" \"\" split \"a🙂λ\" \"\" split " ++
+            "\"abc\" \"🙂\" split \"a🙂b\" \"-\" split \"🙂a🙂\" \"🙂\" split",
+        "(\"a\" \"b\" \"\") (\"a\" \"b\") () (\"a\" \"🙂\" \"λ\") " ++
+            "(\"abc\") (\"a🙂b\") (\"\" \"a\" \"\")",
     );
 }
 
 test "dict-text: join requires strings and chooses narrow char width" {
-    try helper.expectStack("[\"a\" \"b\"] \"—\" join", "\"a—b\"");
+    try helper.expectStack(
+        "[\"a\" \"b\"] \"—\" join [\"a\" \"λ\" \"🙂\"] \"\" join " ++
+            "[\"a\"] \"🙂\" join [] \"🙂\" join",
+        "\"a—b\" \"aλ🙂\" \"a\" \"\"",
+    );
     try helper.expectError(.{
         .name = "join reports the non-string member",
         .source = "[\"a\" 2] \"-\" join",

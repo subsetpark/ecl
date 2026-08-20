@@ -128,7 +128,7 @@ through timing.
 - **symbol** — an interned name, written quoted: `'mean`, `'stats.mean`.
 - **word** — a name in executable position. A bare word in code and a
   quoted symbol are distinct atoms: `(dup) first` yields the word `dup`,
-  `'dup` yields the symbol, and they do not `match`. Words print bare,
+  `'dup` yields the symbol, and they do not `match?`. Words print bare,
   symbols print quoted.
 - **list** — the one aggregate: a finite ordered sequence of values. A
   quotation, a vector, and a row of a matrix are all lists. A homogeneous
@@ -141,11 +141,11 @@ through timing.
   observable only through printing.
 - **dict** — an insertion-ordered map. Any value is a legal key
   (immutability makes every value hashable); symbols are the idiom. Key
-  identity is whole-value `match` identity. Insertion order is preserved
+  identity is whole-value `match?` identity. Insertion order is preserved
   by storage, iteration, and printing, but ignored by equality: two dicts
   with the same key–value pairs in different orders are equal.
 - **task** — a handle to a concurrent unit of work (see Concurrency).
-  Tasks are runtime capabilities bound to their session: `match` and
+  Tasks are runtime capabilities bound to their session: `match?` and
   hashing use handle identity, and a task prints as `<task:N>`, which the
   reader rejects. A task value cannot be forged from text.
 
@@ -153,10 +153,10 @@ through timing.
 
 - `=` is pervasive equality: it descends structure to atoms and produces
   0/1 masks (see Pervasion).
-- `match` is whole-value structural equality: `[1 2] [1 2] =` is `[1 1]`;
-  `[1 2] [1 2] match` is `1`.
+- `match?` is whole-value structural equality: `[1 2] [1 2] =` is `[1 1]`;
+  `[1 2] [1 2] match?` is `1`.
 - Numbers compare numerically everywhere, across int and float: `2` and
-  `2.0` are equal under `=`, `match`, and `cmp`, are the same dict key,
+  `2.0` are equal under `=`, `match?`, and `cmp`, are the same dict key,
   and `0.0` equals `-0.0`. Mixed int/float comparison is exact; no
   rounding occurs through 2^53.
 - `cmp` is a three-way total ordering (−1/0/1) on numbers, chars (by
@@ -457,7 +457,7 @@ tasks, or module loads.
 
 A string is a rank-1 char vector; there is no separate string type. `len`,
 `at`, `reverse`, `each`, and every other list word operate on codepoints.
-UTF-8 exists only at IO boundaries: source files and `prin`/`pp` encode
+UTF-8 exists only at IO boundaries: source files and `io.prin`/`io.pp` encode
 and decode UTF-8, and invalid UTF-8 on input is an error. Char semantics
 are codepoint semantics, stated honestly: grapheme segmentation,
 normalization, non-ASCII case mapping, and locale collation are not
@@ -650,10 +650,12 @@ maps symbols to modules; files are transport.
   explicit `@module` registration remain the way to override one. Every
   module is addressable by qualified name with no ceremony; `use` remains
   the word that splices unqualified exports into scope and reports shadows.
-  Loading is triggered by *executing* a reference: reflection — `body`,
-  `doc`, `see`, `which` — resolves without loading, so name a module or
-  call one of its words first. A misspelled dotted word costs one bounded
-  search before raising `'undefined-word`. Two units racing the first
+  Every qualified-name operation triggers the same load when needed:
+  execution, `body`, `doc`, `see`, `which`, and qualified completion do not
+  depend on whether an earlier operation happened to register the module.
+  Completion loads only the module; it neither executes an export nor imports
+  one into session scope. A misspelled dotted word costs one bounded search
+  before raising `'undefined-word`. Two units racing the first
   reference to one module converge on a single published module; only a
   unit re-entering its own in-progress load is a `'domain` cycle. A loaded
   `.ecl` file registers a module as an ordinary side effect of running;
@@ -679,19 +681,19 @@ a trusted-code boundary.
 
 ## The standard library
 
-Seven modules ship inside the binary. They are ordinary modules — registered,
+Eight modules ship inside the binary. They are ordinary modules — registered,
 enumerable, shadowable — and they load lazily on the first mention of their
 name, whether that is `'str use` or a bare `str.upper`. Resolution consults
 the embedded manifest before `ECL_PATH`, so a stray `csv.ecl` on the search
 path cannot silently replace a stdlib name; in-session shadowing and explicit
-`@module` registration remain the documented overrides. All seven resolve with no
+`@module` registration remain the documented overrides. All eight resolve with no
 `ECL_PATH` set and no filesystem access at all.
 
 Three transports back them, chosen per module rather than uniformly:
 embedded ECL source (`result`, `str`, `table`, `rng`), a linked first-party
 native descriptor published through the same contract as an external
-extension (`csv`), and host primitives published under a module name
-(`json`, `http`).
+extension (`csv`), and builtin word tables published under a module name
+(`io`, `json`, `http`).
 The last is reserved for authority the native SDK deliberately withholds — an
 allocator, TLS, sockets — which is why `json` and `http` are not SDK modules
 and `csv` is.
@@ -737,10 +739,17 @@ because an error dict in flight is not a result: it becomes one only when
 ### str
 
 ASCII-only case mapping per the character model: a non-ASCII scalar passes
-through untouched, and codepoint count is preserved. `str.upper`,
+through untouched, and codepoint count is preserved. Its exports are `str.upper`,
 `str.lower`, `str.trim`, `str.trim-left`, `str.trim-right`, `str.starts?`,
 `str.ends?`, `str.contains?`, `str.index-of` (`'domain` when absent),
 `str.replace`, `str.repeat`, `str.pad-left`, `str.pad-right`.
+
+### io
+
+Observable text I/O lives here: `io.pp`, `io.prin`, `io.print`, `io.inspect`,
+`io.stdin`, `io.slurp`, `io.spit`, and `io.lines`. A qualified reference or
+`'io use` makes the boundary explicit. `str`, which canonically renders any
+value *as a string value* without performing I/O, remains in the prelude.
 
 ### csv
 
@@ -769,7 +778,7 @@ A table is a validated ordinary column dictionary, never a new runtime kind:
 a nonempty insertion-ordered dict whose keys are unique nonempty strings and
 whose values are lists sharing one length. Zero rows are legal; zero columns
 never. Core reflection stays honest — `type` reports `'dict`, and
-`keys`/`at`/`put`/`match` behave as they do for any dict — so a core
+`keys`/`at`/`put`/`match?` behave as they do for any dict — so a core
 operation can produce an invalid candidate, which the next `table.*` boundary
 rejects rather than repairing.
 
@@ -938,13 +947,14 @@ as `[1 2 3]`, and the ragged result of `[[1 2] [3]] 10 *` prints as
   round-trip guarantee: reading `str` output yields the same value, with
   one exception — a task prints as its stable per-session `<task:N>`
   marker, which the reader deliberately rejects.
-- `pp` and the REPL stack display are best-effort human layout: the same
+- `io.pp` and the REPL stack display are best-effort human layout: the same
   delimiters and atom spellings, with the rows of rectangular matrices
   (and one enclosing group axis) separated by newline-plus-indentation.
-  Their output carries no round-trip guarantee. A flat numeric or symbol
-  leaf longer than 256 elements displays as `[<N-values-elided>]`; a
-  character leaf longer than 256 elements displays as
-  `"<N-characters-elided>"`. This whole-leaf marker keeps ordinary terminal
+  Their output carries no round-trip guarantee. A specialized numeric or
+  symbol list longer than 256 elements displays as `[<N-values-elided>]`; a
+  generic list does so as `(<N-values-elided>)`; and a character list longer
+  than 256 elements displays as `"<N-characters-elided>"`. Elision happens
+  before matrix-shape scanning or child rendering, keeping ordinary terminal
   probes bounded. Only `str` is canonical and never elides.
 - The stack display keeps stack order left to right whatever a value's
   height. Each value occupies the rectangle its own layout needs, and the
@@ -956,7 +966,7 @@ as `[1 2 3]`, and the ragged result of `[[1 2] [3]] 10 *` prints as
 - Dicts print as `{key value ...}` in insertion order.
 
 Printing at unit end: script files and `load` print only explicitly
-(`pp`/`prin`); `-e`, stdin, and calculator invocations print the final
+(`io.pp`/`io.prin`); `-e`, stdin, and calculator invocations print the final
 stack; the REPL prints the stack after every unit.
 
 ## The ecl command
@@ -1019,9 +1029,11 @@ on a form's first word. Specifics:
 
 # Word reference
 
-Every binding below ships in the core image, one entry per word, ordered
-by codepoint — the language's own string ordering (`cmp`) — so
-symbol-spelled words precede letter-spelled ones. An entry gives the
+Every public binding below ships in the core image or embedded standard
+library, one entry per word. Prelude and core come first; standard-library
+modules then appear by module name, with each section's words ordered by
+codepoint — the language's own string ordering (`cmp`) — so symbol-spelled
+words precede letter-spelled ones. An entry gives the
 word's stack effect as declared in the implementation — `doc` and `see`
 return the same effect and documentation — followed by its semantics.
 Conventions:
@@ -1041,6 +1053,53 @@ Conventions:
   the length on a miss.
 - Booleans are the ints 0 and 1; a word requiring a boolean rejects every
   other value.
+- Predicate words end in `?`. Symbolic comparisons (`=`, `<>`, `<`, `<=`,
+  `>`, `>=`) and the boolean combinators `and`, `or`, and `not` keep their
+  conventional spellings.
+
+## Prelude and core
+
+### *
+`( x y -- z )` — **Pervasive.** Multiply. Integer overflow is
+`'overflow`.
+
+### +
+`( x y -- z )` — **Pervasive.** Add. Acts ordinally on chars:
+`char int +` (either order) is a char; `char char +` is `'type`. Integer
+overflow is `'overflow`.
+
+### -
+`( x y -- z )` — **Pervasive.** Subtract. Acts ordinally on chars:
+`char char -` is an int, `char int -` is a char, `int char -` is `'type`.
+Integer overflow is `'overflow`.
+
+### /
+`( x y -- z )` — **Pervasive.** Float division. Division by zero is
+`'domain`.
+
+### <
+`( x y -- bool )` — **Pervasive.** Ascending comparison, producing 0/1
+masks.
+
+### <=
+`( x y -- bool )` — **Pervasive.** Less-than-or-equal. Equivalent to
+`> not`.
+
+### <>
+`( x y -- bool )` — **Pervasive.** Inequality. Equivalent to `= not`. (On
+0/1 masks this is xor; there is no separate word.)
+
+### =
+`( x y -- bool )` — **Pervasive.** Equality; numbers compare numerically
+across int and float. Whole-value equality is `match?`.
+
+### >
+`( x y -- bool )` — **Pervasive.** Descending comparison, producing 0/1
+masks.
+
+### >=
+`( x y -- bool )` — **Pervasive.** Greater-than-or-equal. Equivalent to
+`< not`.
 
 ### @attempt
 `( quotation -- result )` — *Unit constructor.* Run a self-contained
@@ -1080,48 +1139,6 @@ all. See Modules.
 self-contained quotation concurrently in a child task. Seed it with
 `values (q) with @spawn`. See Concurrency.
 
-### *
-`( x y -- z )` — **Pervasive.** Multiply. Integer overflow is
-`'overflow`.
-
-### +
-`( x y -- z )` — **Pervasive.** Add. Acts ordinally on chars:
-`char int +` (either order) is a char; `char char +` is `'type`. Integer
-overflow is `'overflow`.
-
-### -
-`( x y -- z )` — **Pervasive.** Subtract. Acts ordinally on chars:
-`char char -` is an int, `char int -` is a char, `int char -` is `'type`.
-Integer overflow is `'overflow`.
-
-### /
-`( x y -- z )` — **Pervasive.** Float division. Division by zero is
-`'domain`.
-
-### <
-`( x y -- bool )` — **Pervasive.** Ascending comparison, producing 0/1
-masks.
-
-### <=
-`( x y -- bool )` — **Pervasive.** Less-than-or-equal. Equivalent to
-`> not`.
-
-### <>
-`( x y -- bool )` — **Pervasive.** Inequality. Equivalent to `= not`. (On
-0/1 masks this is xor; there is no separate word.)
-
-### =
-`( x y -- bool )` — **Pervasive.** Equality; numbers compare numerically
-across int and float. Whole-value equality is `match`.
-
-### >
-`( x y -- bool )` — **Pervasive.** Descending comparison, producing 0/1
-masks.
-
-### >=
-`( x y -- bool )` — **Pervasive.** Greater-than-or-equal. Equivalent to
-`< not`.
-
 ### abs
 `( x -- y )` — **Pervasive.** Absolute value. Defined in ecl (see
 `'abs body`).
@@ -1154,6 +1171,10 @@ Equivalent to `wrap cat`.
 ### args
 `( -- arguments )` — The process arguments following the script or
 source, as a list of strings.
+
+### assert
+`( bool error -- )` — Raise an error dict unless the condition is the boolean
+1, discarding the dict when it holds. Defined in ecl.
 
 ### at
 `( collection key -- value )` — Index a list or look up a dict key.
@@ -1247,10 +1268,10 @@ list pushes its elements.
 ### case
 `( x clauses -- ... )` — *Inline.* The clause list is flat, nonempty, and
 odd: `[key action … else]`. Keys are inert data — any value, never
-executed, duplicates legal with the first `match` winning; every action
-and the else must be a quotation, validated before any comparison. The
-first key that `match`es the subject selects its action. Defined in ecl
-(see `'case body`).
+executed, duplicates legal with the first `match?` result of 1 winning;
+every action and the else must be a quotation, validated before any
+comparison. The first key for which `match?` returns 1 selects its action.
+Defined in ecl (see `'case body`).
 
 ### cat
 `( left right -- list )` — Concatenate two lists.
@@ -1265,7 +1286,7 @@ Constrain to the inclusive interval. Equivalent to `(max) dip min`.
 
 ### cmp
 `( left right -- ordering )` — Three-way whole-value ordering, −1/0/1;
-**not** pervasive — `cmp` is to `<` what `match` is to `=`. Domain:
+**not** pervasive — `cmp` is to `<` what `match?` is to `=`. Domain:
 numbers (exact across int/float), chars by codepoint, strings
 codepoint-lexicographic; anything else, including cross-kind pairs, is
 `'type`. `cmp` exists because the subtraction idiom is unsafe for
@@ -1344,13 +1365,6 @@ follows dynamic stack behavior: filtering is the mask idiom (or
 `filter`), and flat-map is `each raze`. Derived verbs come free from
 homoiconicity: `((1 +) each) 'inc-all def`.
 
-### execute
-`( word -- ... )` — Resolve and apply a word value late through the ordinary
-word-dispatch path, exactly as if that word appeared in executable position.
-Non-words are `'type`; missing words are `'undefined-word`. Module homes,
-private resolution, annotations, tracing, builtins, native calls,
-cancellation, and `within` authority are preserved.
-
 ### empty?
 `( sequence -- bool )` — 1 when the sequence has no elements. Equivalent
 to `len 0 =`.
@@ -1359,6 +1373,13 @@ to `len 0 =`.
 `( -- result )` — Read one int of entropy from the host. The only
 nondeterministic word in the language; see Randomness. Requires the host
 IO capability, and is `'io` without it.
+
+### execute
+`( word -- ... )` — Resolve and apply a word value late through the ordinary
+word-dispatch path, exactly as if that word appeared in executable position.
+Non-words are `'type`; missing words are `'undefined-word`. Module homes,
+private resolution, annotations, tracing, builtins, native calls,
+cancellation, and `within` authority are preserved.
 
 ### exit
 `( status -- )` — Root-only outside `@attempt` (`'domain` otherwise):
@@ -1379,7 +1400,8 @@ ordinary filtering. Equivalent to `over swap each where at`.
 
 ### find
 `( sequence needle -- index )` — Index of the first element that
-`match`es the needle, or the sequence length on a miss. Defined in ecl.
+returns 1 from `match?` against the needle, or the sequence length on a
+miss. Defined in ecl.
 
 ### first
 `( list -- value )` — First element of a nonempty list.
@@ -1429,25 +1451,21 @@ converted to 0.
 `( bool then else -- ... )` — *Inline.* Run `then` when the condition is 1,
 `else` when it is 0; any other condition value is `'type`.
 
-### in
+### in?
 `( value list -- bool )` — Membership. Pervades over the sought value —
 the left operand, never the list — down to its atoms; each atom is then
-tested by whole-value `match` against the list's top-level elements, so
-the result takes the sought value's shape: `[2 5] [1 2 3] in` is
+tested by whole-value `match?` against the list's top-level elements, so
+the result takes the sought value's shape: `[2 5] [1 2 3] in?` is
 `[1 0]`. The list is only ever read one level deep, and a list operand
-is decomposed before any comparison, so `in` cannot ask whether a
-sublist is an element: `[1 1] [[0 0] [1 1]] in` is `[0 0]`, two atom
-searches, not a `0` answer about `[1 1]`. Use `([1 1] match) any?` for
+is decomposed before any comparison, so `in?` cannot ask whether a
+sublist is an element: `[1 1] [[0 0] [1 1]] in?` is `[0 0]`, two atom
+searches, not a `0` answer about `[1 1]`. Use `([1 1] match?) any?` for
 that.
 
 ### infra
 `( list quotation -- list )` — *Isolated*, contract unconstrained. Run
 the quotation with the list's elements as the entire substack; the
 substack that remains is the result list.
-
-### inspect
-`( value -- value )` — `pp` while leaving the value on the stack — the
-pipeline probe. Equivalent to `dup pp`.
 
 ### join
 `( strings separator -- string )` — Join a list of strings with a
@@ -1469,10 +1487,6 @@ Equivalent to `dup len 1 - at`.
 `( list -- count )` — Top-level element count; works on any list,
 including ragged data.
 
-### lines
-`( path -- list )` — A file's newline-separated lines. Defined in the
-prelude as `slurp "\n" split`.
-
 ### literal
 `( value -- quotation )` — Return the plain quotation `((x) first)`:
 calling it pushes the exact captured value as inert data, without
@@ -1487,9 +1501,9 @@ in the calling session.
 Edges follow the Numbers rules: `0 log` is `'overflow` (non-finite from
 finite), `-1 log` is `'domain` (NaN).
 
-### match
+### match?
 `( left right -- bool )` — Whole-value structural equality; **not**
-pervasive. `[1 2] [1 2] =` is `[1 1]`; `[1 2] [1 2] match` is `1`.
+pervasive. `[1 2] [1 2] =` is `[1 1]`; `[1 2] [1 2] match?` is `1`.
 
 ### max
 `( x y -- z )` — **Pervasive.** The greater of two comparable atoms.
@@ -1572,25 +1586,6 @@ returning 0. Defined in ecl.
 ### pow
 `( x y -- z )` — **Pervasive.** Exponentiation; returns float.
 
-### pp
-`( value -- )` — Pretty-print any value plus newline, in the display
-layout of Printing. Best-effort: no round-trip guarantee — huge leaves
-may be elided. `str` is the canonical form.
-
-### qualify
-`( 'module-name 'binding-name -- qualified-word )` — Validate a canonical
-module path and one unqualified, non-reserved binding segment, then construct
-their qualified executable word directly from the interned components. It
-does not parse source or grant module-state/lifecycle authority; use `execute`
-to invoke the result dynamically.
-
-### prin
-`( string -- )` — Write a string's chars raw (UTF-8, no newline).
-Non-string is `'type`.
-
-### print
-`( text -- )` — String plus newline. Equivalent to `prin "\n" prin`.
-
 ### prod
 `( sequence -- product )` — Product of a numeric sequence; 1 when empty.
 Equivalent to `1 (*) fold`.
@@ -1598,6 +1593,13 @@ Equivalent to `1 (*) fold`.
 ### put
 `( collection key value -- collection )` — Functional update of a list
 index or dict key, producing a new value.
+
+### qualify
+`( 'module-name 'binding-name -- qualified-word )` — Validate a canonical
+module path and one unqualified, non-reserved binding segment, then construct
+their qualified executable word directly from the interned components. It
+does not parse source or grant module-state/lifecycle authority; use `execute`
+to invoke the result dynamically.
 
 ### raise
 `( error -- )` — Raise a language error from an error dict.
@@ -1684,33 +1686,19 @@ int, by sign. Equivalent to `dup 0 > swap 0 < -`.
 ### sin
 `( x -- y )` — **Pervasive.** Sine; float transcendental.
 
-### slurp
-`( path -- string )` — Read one whole UTF-8 file. A missing or unreadable
-file raises `'io` carrying the offending `'path`; so does a file that is
-not valid UTF-8. Absent host IO is `'io`.
-
 ### sort
 `( sequence -- sorted )` — Stable ascending sort by `cmp`. Equivalent to
 `dup grade at`.
 
-### spit
-`( string path -- )` — Write one file, truncating and replacing it. There
-is no temporary file and no rename, so a failure part-way through can
-leave a partial file; that is the documented v1 contract, surfaced to the
-program as `'io` with the offending `'path`.
-
 ### split
 `( string separator -- parts )` — Split a string at every occurrence of a
-separator string; the parts are strings.
+separator string; the parts are strings. An empty separator splits the input
+into one single-codepoint string per Unicode scalar, with no empty boundary
+parts; splitting an empty string this way returns an empty list.
 
 ### sqrt
 `( x -- y )` — **Pervasive.** Square root. `'domain` on negative inputs
 (the result would be NaN).
-
-### stdin
-`( -- string )` — Read the whole standard input stream, once. Legal where
-stdin carries data — `-e` and script-file modes — and `'io` in the modes
-where stdin is itself the program source. A second read is `'io`.
 
 ### str
 `( value -- string )` — The canonical printed representation; carries the
@@ -1749,14 +1737,6 @@ in order. Equivalent to `((keep) dip keep) dip call`.
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
 `'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, or `'task`.
 
-### unmodule
-`( 'module-name -- )` — Close, quiesce, and retire the module currently
-registered under a canonical name or unqualified alias, resolved exactly as
-`use` resolves it. An unregistered name is `'undefined-word`. Removal strips
-every alias targeting the slot in the same publish and is `'domain` when
-initiated from inside any state application, since a unit holds at most one
-slot's turn. See Modules.
-
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial
 elements and last element. Equivalent to `reverse uncons reverse swap`.
@@ -1768,6 +1748,14 @@ remainder. Equivalent to `dup first swap rest`.
 ### unless
 `( bool else -- ... )` — *Inline.* Run the quotation when the condition
 is 0. Equivalent to `() swap if`.
+
+### unmodule
+`( 'module-name -- )` — Close, quiesce, and retire the module currently
+registered under a canonical name or unqualified alias, resolved exactly as
+`use` resolves it. An unregistered name is `'undefined-word`. Removal strips
+every alias targeting the slot in the same publish and is `'domain` when
+initiated from inside any state application, since a unit holds at most one
+slot's turn. See Modules.
 
 ### use
 `( 'module-name -- )` — Splice a module's exports into the current scope,
@@ -1795,6 +1783,16 @@ its kind (`def`, `primitive`, or `native`), visibility, and declared
 effect when one was supplied. Constants report `def` with no effect, like
 every other unannotated ecl definition.
 
+### while
+`( cond body -- ... )` — *Inline.* Repeatedly run `cond`, which must leave
+one boolean; while it leaves 1, run `body`. Tail-call optimized.
+
+### with
+`( values quotation -- quotation )` — Capture every element of a list as
+an inert input to a quotation, preserving order. Calling the result starts
+with the list's elements as separate stack values. Defined in ecl as
+`((literal) each) dip append raze`.
+
 ### within
 `( quotation -- ... )` — Run the quotation against a
 private draft of the home module's durable stack, then publish the
@@ -1808,16 +1806,6 @@ it is `'domain`. Parking, nesting, and a second module's slot are
 `( -- )` — Move the draft's top value onto the pending outputs of the
 active `within` application. `'domain` outside one, `'underflow` on an
 empty draft. Outputs reach the caller only if the application publishes.
-
-### while
-`( cond body -- ... )` — *Inline.* Repeatedly run `cond`, which must leave
-one boolean; while it leaves 1, run `body`. Tail-call optimized.
-
-### with
-`( values quotation -- quotation )` — Capture every element of a list as
-an inert input to a quotation, preserving order. Calling the result starts
-with the list's elements as separate stack values. Defined in ecl as
-`((literal) each) dip append raze`.
 
 ### words
 `( -- )` — Print the visible dictionary in sorted order.
@@ -1834,3 +1822,302 @@ sequences. Equivalent to `(pair) zip-with`.
 Zip two lists with broadcast conformability (an atom on either side
 extends). Each-left/each-right are `partial` compositions, not separate
 words.
+
+## csv
+
+### emit
+`( rows -- text )` — Render rows of string fields as canonical,
+CRLF-terminated RFC 4180 text, quoting exactly the fields that require it.
+Non-list rows and non-string cells are `'type`; a zero-field row is `'shape`.
+
+### parse
+`( text -- rows )` — Parse RFC 4180 comma-separated text into rows whose
+fields are all strings. Accept CRLF or LF records, quoted commas and newlines,
+and doubled-quote escapes; preserve empty fields and record widths. Malformed
+quoting is `'parse`.
+
+## http
+
+### get
+`( url headers -- response )` — Fetch a URL with caller-supplied headers;
+use `{}` for none. Return `{'status int, 'headers dict, 'body string}`. A
+transport or protocol failure is `'io` carrying the URL in `'path`; a non-2xx
+status is an ordinary response.
+
+### post
+`( url headers body -- response )` — Post a body with caller-supplied headers
+and return the same response shape and errors as `get`.
+
+## io
+
+### inspect
+`( value -- value )` — Pretty-print a value while leaving it on the stack;
+the pipeline probe. Semantically `dup io.pp`.
+
+### lines
+`( path -- lines )` — Read one UTF-8 file and split it at newline characters.
+Semantically `io.slurp "\n" split`.
+
+### pp
+`( value -- )` — Pretty-print any value plus newline in the display layout of
+Printing. Best-effort: huge leaves may be elided, so there is no round-trip
+guarantee. Use prelude `str` for canonical rendering.
+
+### prin
+`( string -- )` — Write a string's characters as UTF-8 without adding a
+newline. Non-string is `'type`.
+
+### print
+`( string -- )` — Write a string followed by a newline. Semantically
+`io.prin "\n" io.prin`.
+
+### slurp
+`( path -- string )` — Read one whole UTF-8 file. A missing or unreadable file,
+invalid UTF-8, or absent host I/O raises `'io` carrying the offending `'path`.
+
+### spit
+`( string path -- )` — Write one file, truncating and replacing it. There is
+no temporary file and no rename, so a failure part-way through can leave a
+partial file; it raises `'io` carrying the offending `'path`.
+
+### stdin
+`( -- string )` — Read the whole standard input stream once. Legal where stdin
+carries data (`-e` and script-file modes); `'io` where stdin is the program
+source or when it has already been read.
+
+## json
+
+### emit
+`( value -- text )` — Render an ECL value as RFC 8259 JSON. Dict keys must be
+strings or symbols; the only emitted symbol values are `'null`, `'true`, and
+`'false`.
+
+### parse
+`( text -- value )` — Parse RFC 8259 JSON. Objects become string-keyed dicts,
+arrays become lists, in-range integral numbers become ints, and other numbers
+become floats. JSON null and booleans become the ordinary symbols `'null`,
+`'true`, and `'false`.
+
+## result
+
+Every entry validates its result envelope before invoking a caller quotation.
+A success payload is always a list representing a stack.
+
+### all
+`( results -- result )` — Return the leftmost failure unchanged, or one
+success whose value is the list of success stacks in input order.
+
+### and-then
+`( result quotation -- result )` — Seed a success payload onto an isolated
+stack and run the quotation through `with @attempt`; return an existing
+failure unchanged.
+
+### either
+`( result on-ok on-err -- ... )` — Eliminate a result exhaustively: call the
+first quotation with the success list or the second with the error dict.
+Neither branch is isolated.
+
+### err
+`( error -- result )` — Tag an error dict as a failed result.
+
+### err?
+`( result -- bool )` — Return 1 when a well-formed result is a failure.
+
+### map-err
+`( result quotation -- result )` — Replace a failure's error dict with the one
+its `( error -- error )` quotation returns; leave a success unchanged.
+
+### ok
+`( values -- result )` — Tag a list of success values, representing the stack
+a successful computation left.
+
+### ok?
+`( result -- bool )` — Return 1 when a well-formed result is a success.
+
+### or-else
+`( result fallback -- value )` — Return a success payload, or the fallback
+value for a failure.
+
+### or-raise
+`( result -- values )` — Return a success payload, or re-raise the captured
+error dict unchanged.
+
+### partition
+`( results -- successes errors )` — Split results into success lists and error
+dicts, both in input order, without re-raising.
+
+### recover
+`( result quotation -- result )` — Seed a failure's error dict onto an
+isolated stack and run the recovery quotation; leave a success unchanged.
+
+### recover-kinds
+`( result kinds quotation -- result )` — Recover only when a failure's kind is
+one of the listed symbols; leave every other result unchanged.
+
+## rng
+
+These words transact against the module's durable `[key counter]` state. A
+fresh process begins with a fixed key; use `entropy rng.seed` to opt into
+nondeterminism.
+
+### deal
+`( count pool -- results )` — Draw distinct values below `pool` without
+replacement. The sample is unbiased; `count > pool` is `'domain`.
+
+### float
+`( -- result )` — Draw one uniform float in `[0, 1)`.
+
+### int
+`( bound -- result )` — Draw one uniform integer below a positive bound.
+
+### ints
+`( count bound -- results )` — Draw a vector of uniform integers below a
+positive bound.
+
+### roll
+`( count bound -- results )` — Dice-roll spelling of `ints`.
+
+### seed
+`( key -- )` — Rekey the generator and reset its counter.
+
+### shuffle
+`( values -- values )` — Return a uniformly random permutation of a list.
+
+## str
+
+All case and whitespace operations use the ASCII character classes; every
+non-ASCII scalar passes through unchanged.
+
+### contains?
+`( string needle -- bool )` — Return 1 when a needle occurs anywhere in a
+string. The empty needle is present at index zero.
+
+### ends?
+`( string suffix -- bool )` — Return 1 when a string ends with a suffix.
+
+### index-of
+`( string needle -- index )` — Return the zero-based index of a needle's first
+occurrence; return 0 for the empty needle and raise `'domain` when a nonempty
+needle is absent.
+
+### lower
+`( string -- string )` — Lowercase ASCII letters, leaving every other scalar
+unchanged.
+
+### pad-left
+`( string width -- string )` — Pad with leading spaces up to a width; return a
+longer string unchanged.
+
+### pad-right
+`( string width -- string )` — Pad with trailing spaces up to a width; return a
+longer string unchanged.
+
+### repeat
+`( string count -- string )` — Concatenate a nonnegative number of copies of a
+string.
+
+### replace
+`( string needle replacement -- string )` — Replace every occurrence of a
+needle. An empty needle inserts the replacement between adjacent scalars only,
+with no boundary insertion.
+
+### starts?
+`( string prefix -- bool )` — Return 1 when a string begins with a prefix.
+
+### trim
+`( string -- string )` — Remove ASCII whitespace from both ends.
+
+### trim-left
+`( string -- string )` — Remove leading ASCII whitespace.
+
+### trim-right
+`( string -- string )` — Remove trailing ASCII whitespace.
+
+### upper
+`( string -- string )` — Uppercase ASCII letters, leaving every other scalar
+unchanged.
+
+## table
+
+Every operation except `valid?` first validates the ordinary column dict as a
+table. See The standard library for the table convention and frozen error
+kinds.
+
+### aggregate
+`( table names specs -- table )` — Group by `names` and aggregate each group
+with `[output input quotation]` triples. Validate the complete specification
+before running a quotation; key columns precede aggregate columns.
+
+### cast
+`( table spec -- table )` — Coerce named columns with isolated
+`( cell -- value )` quotations. Validate the complete specification before
+running any quotation and replace the table only after all casts succeed.
+
+### column
+`( table name -- column )` — Return one existing named column.
+
+### from-columns
+`( columns -- table )` — Return a column dict as a table, raising when it does
+not satisfy the convention.
+
+### from-header-rows
+`( rows -- table )` — Build a table from rows whose first row contains column
+names.
+
+### from-records
+`( records -- table )` — Build a table from a nonempty list of dicts sharing
+one key set; the first record fixes schema order.
+
+### from-rows
+`( names rows -- table )` — Build a table from explicit names and exact-width
+rows. An empty row list preserves the named zero-row schema.
+
+### group-by
+`( table names -- groups )` — Group row indices by named columns. Keys use
+first-occurrence order and indices stay ascending; zero names yields one global
+group keyed by the empty list.
+
+### header-rows
+`( table -- rows )` — Return data rows prefixed by the column-name row, the
+schema-preserving row form.
+
+### height
+`( table -- count )` — Return the row count.
+
+### inner-join
+`( left right pairs -- table )` — Stable inner equijoin on
+`[left-name right-name]` pairs. Duplicate keys expand to the full
+many-to-many product in left-row then right-row order.
+
+### left-join-with
+`( left right pairs fill -- table )` — Stable left equijoin. `fill` must name
+exactly every appended right column used for unmatched rows.
+
+### names
+`( table -- names )` — Return column names in schema order.
+
+### records
+`( table -- records )` — Return rows as dicts in schema order. An empty result
+necessarily loses its schema.
+
+### rename
+`( table mapping -- table )` — Rename columns through an ordered old-to-new
+mapping while preserving column order; collisions are `'domain`.
+
+### rows
+`( table -- rows )` — Return data rows in order.
+
+### select
+`( table names -- table )` — Keep named columns in the order given.
+
+### valid?
+`( candidate -- bool )` — Return 1 when a candidate satisfies the convention
+and 0 for a convention mismatch. Cancellation and allocation failure still
+propagate.
+
+### where
+`( table mask -- table )` — Keep rows selected by an exact-length 0/1 mask.
+
+### with-column
+`( table name column -- table )` — Replace an existing column or append a new
+one, keeping the row count exact.

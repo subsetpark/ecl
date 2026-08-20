@@ -27,21 +27,16 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "swap", .primitive = swap },
         .{ .name = "pop", .primitive = pop },
         .{ .name = "cons", .primitive = cons },
-        .{ .name = "match", .primitive = match },
+        .{ .name = "match?", .primitive = match },
         .{ .name = "type", .primitive = typeWord },
         .{ .name = "execute", .primitive = execute },
         .{ .name = "parse", .primitive = parse },
         .{ .name = "dict-of", .primitive = dictOf },
         .{ .name = "@attempt", .primitive = attempt },
         .{ .name = "raise", .primitive = raise },
-        .{ .name = "pp", .primitive = pp },
-        .{ .name = "prin", .primitive = prin },
         .{ .name = "args", .primitive = args },
         .{ .name = "exit", .primitive = exit },
-        .{ .name = "slurp", .primitive = slurp },
-        .{ .name = "spit", .primitive = spit },
         .{ .name = "getenv", .primitive = getenv },
-        .{ .name = "stdin", .primitive = standardInput },
     };
     try core.installBuiltins(definitions);
     try combinators.install(core);
@@ -346,7 +341,7 @@ const RaiseDriver = struct {
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
-fn pp(evaluator: *Machine) MachineError!void {
+pub fn ioPp(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     defer item.deinit();
     if (evaluator.unit.inherited.console == null and evaluator.unit.output == null)
@@ -387,7 +382,7 @@ const PpDriver = struct {
     }
 };
 
-fn prin(evaluator: *Machine) MachineError!void {
+pub fn ioPrin(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popString();
     defer item.deinit();
     if (evaluator.unit.inherited.console == null and evaluator.unit.output == null)
@@ -433,7 +428,7 @@ const PrinDriver = struct {
 };
 /// Reads one whole UTF-8 file. The path decodes through the ordinary
 /// resumable encoder before the read driver owns the byte slice.
-fn slurp(evaluator: *Machine) MachineError!void {
+pub fn ioSlurp(evaluator: *Machine) MachineError!void {
     var path_value = try evaluator.popValue();
     defer path_value.deinit();
     if (!path_value.borrow().isString()) return evaluator.typeError("a string path");
@@ -472,7 +467,7 @@ const SlurpDriver = struct {
 /// Writes one whole file by truncate-and-replace. Both the contents and the
 /// path encode to bytes before the write driver takes ownership, so a
 /// non-encodable argument fails before the target file is touched.
-fn spit(evaluator: *Machine) MachineError!void {
+pub fn ioSpit(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     var path_value = try evaluator.popValue();
     errdefer path_value.deinit();
@@ -597,7 +592,7 @@ const GetenvDriver = struct {
 
 /// Reads the whole standard input stream once. The gate lives in the machine
 /// so the CLI mode that owns stdin as program source cannot be raced.
-fn standardInput(evaluator: *Machine) MachineError!void {
+pub fn ioStdin(evaluator: *Machine) MachineError!void {
     return evaluator.readStandardInputOwned();
 }
 

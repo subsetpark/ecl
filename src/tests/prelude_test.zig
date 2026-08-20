@@ -73,7 +73,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .name = "seeded attempts tasks and modules",
             .source = "[] (42) with @attempt [2 3] (+) with @attempt " ++
                 "[2 3] (+) with @spawn await [2 0] (/) with @attempt result.ok? " ++
-                "[2 3] (+) with @attempt [2 3] (+) with @spawn await match " ++
+                "[2 3] (+) with @attempt [2 3] (+) with @spawn await match? " ++
                 "[4 5] (+ 'sum set) with 'seeded @module seeded.sum",
             .expected = "{'ok [42]} {'ok [5]} {'ok [5]} 0 1 9",
         },
@@ -116,17 +116,16 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose bodies and nonempty documentation" {
     const names = [_][]const u8{
-        "compose", "first",  "wrap",   "literal",   "dip",    "over",
-        "partial", "with",   "str",    "mod",       "neg",    "abs",
-        "<>",      "<=",     ">=",     "and",       "or",     "nip",
-        "keep",    "bi",     "tri",    "bi2",       "both",   "when",
-        "unless",  "case",   "signum", "clamp",     "last",   "pair",
-        "pack",    "append", "rest",   "reverse",   "uncons", "unappend",
-        "empty?",  "zip",    "min-of", "max-of",    "sort",   "distinct",
-        "at-path", "vals",   "at-or",  "pairs",     "filter", "partition",
-        "any?",    "all?",   "sum",    "prod",      "mean",   "print",
-        "inspect", "fail",   "find",   "await-all", "set",    "setp",
-        "lines",   "assert", "rotate",
+        "compose", "first",     "wrap",   "literal", "dip",    "over",
+        "partial", "with",      "str",    "mod",     "neg",    "abs",
+        "<>",      "<=",        ">=",     "and",     "or",     "nip",
+        "keep",    "bi",        "tri",    "bi2",     "both",   "when",
+        "unless",  "case",      "signum", "clamp",   "last",   "pair",
+        "pack",    "append",    "rest",   "reverse", "uncons", "unappend",
+        "empty?",  "zip",       "min-of", "max-of",  "sort",   "distinct",
+        "at-path", "vals",      "at-or",  "pairs",   "filter", "partition",
+        "any?",    "all?",      "sum",    "prod",    "mean",   "fail",
+        "find",    "await-all", "set",    "setp",    "assert", "rotate",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -184,23 +183,19 @@ test "embedded definitions retain provenance and deferred words stay absent" {
             .word = "raise",
             .data = &.{.{ .name = "source", .expected = .{ .string = "prelude.ecl" } }},
         },
-        .{ .name = "lines needs a path", .source = "lines", .kind = "underflow", .word = "slurp" },
-        .{ .name = "slurp needs a path", .source = "slurp", .kind = "underflow", .word = "slurp" },
-        .{ .name = "spit needs arguments", .source = "spit", .kind = "underflow", .word = "spit" },
+        .{ .name = "pp moved to io", .source = "1 pp", .kind = "undefined-word", .word = "pp" },
+        .{ .name = "print moved to io", .source = "\"x\" print", .kind = "undefined-word", .word = "print" },
+        .{ .name = "inspect moved to io", .source = "1 inspect", .kind = "undefined-word", .word = "inspect" },
+        .{ .name = "lines moved to io", .source = "\"x\" lines", .kind = "undefined-word", .word = "lines" },
+        .{ .name = "prin moved to io", .source = "\"x\" prin", .kind = "undefined-word", .word = "prin" },
+        .{ .name = "slurp moved to io", .source = "slurp", .kind = "undefined-word", .word = "slurp" },
+        .{ .name = "spit moved to io", .source = "spit", .kind = "undefined-word", .word = "spit" },
         .{ .name = "getenv needs a name", .source = "getenv", .kind = "underflow", .word = "getenv" },
         .{
-            .name = "host filesystem access is gated",
-            .source = "\"any\" slurp",
-            .kind = "io",
-            .word = "slurp",
-            .message = "filesystem access is unavailable",
-        },
-        .{
-            .name = "standard input is gated",
+            .name = "stdin moved to io",
             .source = "stdin",
-            .kind = "io",
+            .kind = "undefined-word",
             .word = "stdin",
-            .message = "standard input is unavailable",
         },
         .{ .name = "result.or-raise identity", .source = "(missing) @attempt result.or-raise", .kind = "undefined-word", .word = "missing" },
         .{

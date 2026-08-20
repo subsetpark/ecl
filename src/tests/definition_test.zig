@@ -56,33 +56,32 @@ test "definition annotations support all top-level forms and dynamic data" {
 
 test "every primitive exposes meaningful reflective documentation" {
     const names = [_][]const u8{
-        "dup",       "swap",       "pop",     "over",  "cons",      "compose",
-        "match",     "type",       "str",     "parse", "dict-of",   "@attempt",
-        "raise",     "pp",         "prin",    "args",  "exit",      "dip",
-        "call",      "if",         "while",   "times", "cond",      "each",
-        "zip-with",  "for",        "fold",    "scan",  "infra",     "def",
-        "set",       "defp",       "setp",    "body",  "doc",       "which",
-        "see",       "@module",    "use",     "alias", "words",     "load",
-        "@spawn",    "await",      "cancel",  "tasks", "await-any", "await-for",
-        "@each",     "+",          "-",       "*",     "/",         "div",
-        "mod",       "pow",        "atan2",   "min",   "max",       "=",
-        "<>",        "<",          ">",       "<=",    ">=",        "and",
-        "or",        "neg",        "abs",     "sqrt",  "floor",     "ceil",
-        "round",     "exp",        "log",     "sin",   "cos",       "not",
-        "at",        "where",      "in",      "raze",  "cat",       "take",
-        "drop",      "reverse",    "first",   "rest",  "range",     "shape",
-        "len",       "flip",       "reshape", "cmp",   "grade",     "distinct",
-        "group",     "keys",       "vals",    "put",   "to-dict",   "del",
-        "merge",     "has?",       "split",   "join",  "format",    "band",
-        "bor",       "bxor",       "bsl",     "bsr",   "bnot",      "rand-int",
-        "rand-ints", "rand-float", "entropy",
+        "dup",    "swap",      "pop",       "over",      "cons",       "compose",
+        "match?", "type",      "parse",     "dict-of",   "@attempt",   "raise",
+        "args",   "exit",      "dip",       "call",      "if",         "while",
+        "times",  "cond",      "each",      "zip-with",  "for",        "fold",
+        "scan",   "infra",     "def",       "set",       "defp",       "setp",
+        "body",   "doc",       "which",     "see",       "@module",    "use",
+        "alias",  "words",     "load",      "@spawn",    "await",      "cancel",
+        "tasks",  "await-any", "await-for", "@each",     "+",          "-",
+        "*",      "/",         "div",       "mod",       "pow",        "atan2",
+        "min",    "max",       "=",         "<>",        "<",          ">",
+        "<=",     ">=",        "and",       "or",        "neg",        "abs",
+        "sqrt",   "floor",     "ceil",      "round",     "exp",        "log",
+        "sin",    "cos",       "not",       "at",        "where",      "in?",
+        "raze",   "cat",       "take",      "drop",      "reverse",    "first",
+        "rest",   "range",     "shape",     "len",       "flip",       "reshape",
+        "cmp",    "grade",     "distinct",  "group",     "keys",       "vals",
+        "put",    "to-dict",   "del",       "merge",     "has?",       "split",
+        "join",   "format",    "band",      "bor",       "bxor",       "bsl",
+        "bsr",    "bnot",      "rand-int",  "rand-ints", "rand-float", "entropy",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
     var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer expected.deinit();
     try source.writer.writeAll(
-        "'over doc \"Copy the value beneath the top of the stack onto the top.\" match ",
+        "'over doc \"Copy the value beneath the top of the stack onto the top.\" match? ",
     );
     try expected.writer.writeByte('1');
     for (names) |name| {
@@ -123,11 +122,11 @@ test "module annotations retain contracts documentation qualification and shadow
         "(2) (-- n : \"Private module word.\") 'private defp " ++
         "('private doc) (-- text : \"Expose private documentation.\") 'private-doc def" ++
         ") 'm @module " ++
-        "'m use 'public doc \"Public module word.\" match " ++
-        "m.private-doc \"Private module word.\" match " ++
+        "'m use 'public doc \"Public module word.\" match? " ++
+        "m.private-doc \"Private module word.\" match? " ++
         "(9) (-- n : \"Session shadow.\") 'public def " ++
-        "'public doc \"Session shadow.\" match " ++
-        "'m.public doc \"Public module word.\" match");
+        "'public doc \"Session shadow.\" match? " ++
+        "'m.public doc \"Public module word.\" match?");
     var display = try runtime.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings("1 1 1 1", display.bytes());
@@ -135,7 +134,7 @@ test "module annotations retain contracts documentation qualification and shadow
     // A documentation-only module word is one of the four legal forms, and
     // its documentation is what reflection reports.
     try expectOk(&runtime, "((1) (: \"Documentation only.\") 'f def) 'docs @module " ++
-        "'docs.f doc \"Documentation only.\" match pop");
+        "'docs.f doc \"Documentation only.\" match? pop");
     try expectErrorContains(&runtime, "((dup +) (a -- b c : \"An intentionally false contract.\") 'f def) 'lies @module 1 lies.f", "'kind 'contract");
 }
 
@@ -147,7 +146,7 @@ test "multiline documentation is normalized and see is canonical and re-readable
     try expectOk(&runtime, "(dup *) (x -- y : \"Square a numeric value.\") 'square def " ++
         "(42) (: \"Only docs.\") 'answer def " ++
         "(1) (: \"  First line wraps\n    softly.\n\n  - One\n    continues\n  - Two.\") 'multiline def " ++
-        "'multiline doc \"First line wraps softly.\n\n- One continues\n- Two.\" match " ++
+        "'multiline doc \"First line wraps softly.\n\n- One continues\n- Two.\" match? " ++
         "'square see 'answer see");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqualStrings(
@@ -159,8 +158,8 @@ test "multiline documentation is normalized and see is canonical and re-readable
     var reread = try session.Session.init(std.testing.allocator, &.{});
     defer reread.deinit();
     try expectOk(&reread, output.written());
-    try expectOk(&reread, "4 square 'square doc \"Square a numeric value.\" match " ++
-        "answer 'answer doc \"Only docs.\" match");
+    try expectOk(&reread, "4 square 'square doc \"Square a numeric value.\" match? " ++
+        "answer 'answer doc \"Only docs.\" match?");
     var display = try reread.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings("16 1 42 1", display.bytes());
@@ -171,11 +170,11 @@ test "redefinition and set replace behavior and clear metadata" {
     defer runtime.deinit();
     try expectOk(&runtime, "(1) (-- n : \"Old metadata.\") 'lease-target def");
     try expectOk(&runtime, "(2) 'lease-target def");
-    try expectOk(&runtime, "lease-target 2 match");
+    try expectOk(&runtime, "lease-target 2 match?");
     try expectErrorContains(&runtime, "'lease-target doc", "'kind 'domain");
 
     try expectOk(&runtime, "(3) (-- n : \"Temporary.\") 'set-target def 9 'set-target set");
-    try expectOk(&runtime, "set-target 9 match");
+    try expectOk(&runtime, "set-target 9 match?");
     try expectErrorContains(&runtime, "'set-target doc", "'kind 'domain");
 }
 

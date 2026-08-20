@@ -325,7 +325,7 @@ test "over compose and at have exact stack effects" {
     try std.testing.expectEqual(@as(i64, 20), runtime.stackItems()[0].int);
 }
 
-test "pp and prin write through and writer failures become io errors" {
+test "io.pp and io.prin write through and writer failures become io errors" {
     const allocator = std.testing.allocator;
     var captured: std.Io.Writer.Allocating = .init(allocator);
     defer captured.deinit();
@@ -333,7 +333,7 @@ test "pp and prin write through and writer failures become io errors" {
     defer test_heap.retire(&runtime_heap);
     var runtime = try session.Session.initWithOutput(runtime_heap.allocator(), &.{}, &captured.writer);
     defer runtime.deinit();
-    try std.testing.expect((try execute(&runtime, "\"hi\" prin 'visible pp")) == null);
+    try std.testing.expect((try execute(&runtime, "\"hi\" io.prin 'visible io.pp")) == null);
     try std.testing.expectEqualStrings("hi'visible\n", captured.written());
 
     var failing: std.Io.Writer = .failing;
@@ -341,7 +341,7 @@ test "pp and prin write through and writer failures become io errors" {
     defer test_heap.retire(&broken_heap);
     var broken = try session.Session.initWithOutput(broken_heap.allocator(), &.{}, &failing);
     defer broken.deinit();
-    const failure = (try execute(&broken, "'broken pp")).?;
+    const failure = (try execute(&broken, "'broken io.pp")).?;
     defer broken.release(failure);
     try std.testing.expectEqualStrings("io", try errorKind(allocator, failure));
 }

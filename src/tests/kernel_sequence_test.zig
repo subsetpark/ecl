@@ -67,9 +67,9 @@ test "sequence: at gathers list string and dict indices" {
     );
 }
 
-test "sequence: where in and find validate and search" {
+test "sequence: where, in?, and find validate and search" {
     try helper.expectStack(
-        "[1 0 1 0] where [2 4] [1 2 3] in [2 3 2] 2 find [2 3] 9 find",
+        "[1 0 1 0] where [2 4] [1 2 3] in? [2 3 2] 2 find [2 3] 9 find",
         "[0 2] [1 0] 0 2",
     );
     try helper.expectErrors(&.{

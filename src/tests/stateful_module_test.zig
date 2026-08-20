@@ -110,7 +110,7 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     // spellings reflect as the same unannotated public def.
     try expectStack(
         &runtime,
-        "42 'answer set 42 literal 'spelled def 'answer body 'spelled body match",
+        "42 'answer set 42 literal 'spelled def 'answer body 'spelled body match?",
         "1",
     );
     try expectOk(&runtime, "'answer see 'spelled see 'answer which");
@@ -383,18 +383,18 @@ test "concurrency: hot reload retains the durable stack and quiesces old generat
             "[1] 30 take (pop ((c.tick) @attempt result.ok?) @spawn) each " ++
                 "[0] (((1 +) within) 'tick def ((dup without) within) 'peek def " ++
                 "((dup 2 * without) within) 'doubled def) with 'c @module " ++
-                "await-all ('ok at first) each sum 30 + c.peek match",
+                "await-all ('ok at first) each sum 30 + c.peek match?",
             "1",
         );
         // The replacement initializer is discarded and the new code is live.
-        try expectStack(&runtime, "c.peek 2 * c.doubled match", "1");
+        try expectStack(&runtime, "c.peek 2 * c.doubled match?", "1");
         // Failed registration changes neither behaviour nor state.
         try expectErrorContains(
             &runtime,
             "((1) (bad -- shape -- here) 'x def) 'c @module",
             &.{"'kind 'domain"},
         );
-        try expectStack(&runtime, "c.tick c.peek c.doubled swap 2 * match", "1");
+        try expectStack(&runtime, "c.tick c.peek c.doubled swap 2 * match?", "1");
         // A generation that re-registers its own module keeps running, but
         // the representation it belongs to is no longer current, so it may
         // not publish state — the invariant the arbiter barrier exists to
@@ -546,7 +546,7 @@ test "concurrency: a cancelled unmodule leaves nothing stranded" {
             " ((('doomed.alive execute) @attempt result.ok?) () while) @spawn 'close-watcher set" ++
             " ('doomed unmodule (1) () while) @spawn 'removal-task set" ++
             " close-watcher await pop removal-task cancel" ++
-            " removal-task await 'err at 'kind at 'cancelled match pop" ++
+            " removal-task await 'err at 'kind at 'cancelled match? pop" ++
             // A successful public mutation drives reuse settlement while the
             // Session remains live; shutdown is not the cleanup mechanism.
             " [1] (((dup without) within) 'peek def) with 'settler @module" ++

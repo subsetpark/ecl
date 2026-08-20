@@ -175,6 +175,23 @@ test "inline times cond and case prevalidate and select" {
     });
 }
 
+test "nested in-place applications finish in one unwind" {
+    // Each finished application continuation records one accounted native
+    // step, and the machine loop consumes one per pass: an inner application
+    // completing inside an outer one has to end the pass rather than resume
+    // the next continuation. `dip` recognition made the shape ordinary, since
+    // `bi` and `tri` apply a quotation beneath one.
+    try support.expectStacks(&.{
+        .{ .name = "nested times", .source = "1 2 (1 (10 *) times) times", .expected = "100" },
+        .{ .name = "nested dip", .source = "1 (2 (3 (4 5 +) dip) dip) dip", .expected = "9 3 2 1" },
+        .{ .name = "bi", .source = "3 4 (+) (*) bi", .expected = "28" },
+        .{ .name = "bi2", .source = "3 4 (+) (*) bi2", .expected = "7 12" },
+        .{ .name = "tri", .source = "3 (1 +) (2 *) (3 -) tri", .expected = "4 6 0" },
+        .{ .name = "dip inside times", .source = "5 2 (9 (1 +) dip pop) times", .expected = "7" },
+        .{ .name = "binder body under dip", .source = "10 20 (|lo hi| hi lo - lo +) call", .expected = "20" },
+    });
+}
+
 test "empty inline iterations remain cancellable and bounded-frame" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);

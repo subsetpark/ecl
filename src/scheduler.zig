@@ -1129,8 +1129,18 @@ pub const WorkerScheduler = enum(usize) {
         unit: *machine.Unit,
         code: *ListHandle,
     ) machine.MachineError!void {
-        const state_ = self.privateState();
         try machine.initialize(unit, code, .empty);
+        return self.runInitializedRoot(unit);
+    }
+
+    /// Drive a root whose caller installed its initial machine work. Session
+    /// observation uses this to auto-load a module without manufacturing a
+    /// public word call or importing that module into the session scope.
+    pub fn runInitializedRoot(
+        self: *const WorkerScheduler,
+        unit: *machine.Unit,
+    ) machine.MachineError!void {
+        const state_ = self.privateState();
         while (true) {
             const status = machine.runSlice(unit) catch |err| {
                 if (err == error.OutOfMemory) self.drainAbandonedRootWork(unit);
@@ -1686,6 +1696,13 @@ pub const Scheduler = enum(usize) {
         code: *ListHandle,
     ) machine.MachineError!void {
         return self.worker().runRoot(unit, code);
+    }
+
+    pub fn runInitializedRoot(
+        self: *Scheduler,
+        unit: *machine.Unit,
+    ) machine.MachineError!void {
+        return self.worker().runInitializedRoot(unit);
     }
 
     /// A blocking mutation turn is a settlement barrier, not merely a wakeup.

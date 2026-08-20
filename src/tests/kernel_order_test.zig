@@ -20,6 +20,14 @@ test "order: cmp and grade share exact whole-value ordering" {
     });
 }
 
+test "order: cmp compares strings across char storage widths" {
+    try helper.expectStack(
+        "\"a\" \"λ\" cmp \"λ\" \"a\" cmp \"λ\" \"🙂\" cmp \"🙂\" \"λ\" cmp " ++
+            "\"aλ\" \"aλ\" cmp",
+        "-1 1 -1 1 0",
+    );
+}
+
 test "order: grade is stable" {
     try helper.expectStack("[2 1 2 1] grade", "[1 3 0 2]");
 }
