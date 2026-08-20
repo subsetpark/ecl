@@ -1367,9 +1367,9 @@ pause before the scheduled post-terminal migration.
 
 **Unlocks**: Post-terminal Step 14 is the first scheduled performance
 completion and migrates flat leaves onto the typed monomorphic kernel seam.
-Other post-v1 work (the static effect checker bundle, d.9; later performance
-evolution toward the K ceiling; exactness revisit) starts from that proven v1
-baseline, with SIMD/fusion/multicore depending on Step 14. The native
+Other post-v1 work (scheduled Step 16's static effect checker bundle, d.9;
+later performance evolution toward the K ceiling; exactness revisit) starts
+from that proven v1 baseline, with SIMD/fusion/multicore depending on Step 14. The native
 capabilities deferred out of M9 — SDK
 exposure of M11's module-state authority, `Offload`, resource values, external
 wake, package assets, and quotation evaluation — also start here. None blocks
@@ -1898,6 +1898,217 @@ loader return-value convention.
 
 **Operator Actions Before Next Milestone**: None.
 
+---
+
+### Post-terminal Step 16: static-effect-schemes
+
+**Status**: design paused 2026-08-20 after settling the language shape,
+verification boundary, and no-runtime-permission rule. No gameplan exists yet;
+the questions below must be closed before implementation planning. This step
+promotes deferred item 1's d.9 bundle into scheduled work. Execution views,
+threaded/opcode arrays, contract-elision guards, and module call-site caches do
+not move into this step; they remain later, separately measured optimization
+work.
+
+Step 16 turns source annotations into optional static stack and observable-
+effect schemes. It verifies every claim an immutable module image makes when
+that image is sealed, after the construction body has completed and the full
+local environment is known. A module may still contain dynamic code: success
+means every static claim is sound, not that every binding has a proof. The
+checker never becomes a runtime permission system and adds no check to the
+Machine, Unit, frame, primitive dispatch, task dispatch, or ordinary word-call
+hot path.
+
+**Settled language contract**:
+
+1. **One annotation quotation has three positional sections.** The grammar is
+   `stack-effect : documentation : observable-effects`, with trailing sections
+   optional. Existing `(x -- y)`, `(: "doc")`, and
+   `(x -- y : "doc")` forms retain their meanings. New examples are
+   `(: : io)`, `(x -- y : : io)`, `(: "doc" : io)`, and
+   `(x -- y : "doc" : io state)`. More than two top-level colons is malformed;
+   markers nested inside quotation parameters do not delimit the outer
+   annotation.
+
+2. **Empty sections are admitted where their meaning is unambiguous.**
+   `(x -- y :)` is accepted and means the same as `(x -- y)`; `(:)` is a no-op
+   annotation. Canonical reflection drops those meaningless empty-document
+   forms. `(: :)` is retained because a present empty observable-effect
+   section explicitly claims purity. A nonempty documentation section is
+   still exactly one string. Nested quotation schemes admit observable effects
+   but not documentation.
+
+3. **Stack diagrams have shape and relational modes.** Plain slots only state
+   shape: `(x -- x)` means one value before and one after with no identity
+   relationship. Apostrophe-prefixed slots state symbolic provenance:
+   `('x -- 'x)` returns the same input provenance, `('x -- 'y)` produces a new
+   provenance, `('x 'y -- 'y 'x)` swaps, and `('x -- 'x 'x)` duplicates.
+   Relational input names are unique; an output name first appearing there is
+   fresh, and a repeated output name means the same produced value. This is
+   symbolic provenance, not a promise of `match?` inequality. Plain and
+   apostrophe-prefixed slots may not mix within one diagram, so `('x -- x)` and
+   `(x -- 'x)` are malformed. Nested quotation diagrams choose their own mode.
+
+4. **Named stack rows relate otherwise implicit lower stack prefixes.**
+   `..a` denotes zero or more slots and may occur only at the left edge of a
+   stack side. Ordinary first-order effects already preserve an unnamed lower
+   prefix, so `(x y -- y)` and `(..a x y -- ..a y)` are equivalent. The named
+   form matters when the same row crosses a quotation boundary, as in
+   `(..a q:(..a -- ..b) -- ..b)` and
+   `(..a 'x q:(..a -- ..b) -- ..b 'x)`. Row names scope over the complete
+   annotation, including nested schemes, but stack rows and observable-effect
+   rows occupy separate namespaces. A row escaping through an output must be
+   determined by an input position; `(x -- ..a x)` is malformed, while
+   `(..a --)` is valid.
+
+5. **The existing `...` row remains deliberately dynamic.** It is valid only
+   as the complete output side and means fixed inputs with an unknown output
+   stack. It supplies no static stack evidence, but an observable-effect
+   section on the same declaration can still be checked independently.
+   `call-as` accepts exact shape effects only and therefore rejects `...`.
+
+6. **Quotation parameters are written inline.** `q:(x -- y)` describes a
+   shape-mode quotation input and `'q:('x -- 'y)` a relational one; a nested
+   observable-effect scheme is written `q:(x -- y : : ..e)`. Quotation
+   parameters are input-only in this step. Literal quotation syntax and
+   quotation values received through such parameters can participate in
+   checking. Quotations returned by words, stored and retrieved, or built via
+   general `cons`/`compose` metaprogramming remain dynamic; output-quotation
+   schemes and a general quotation type system stay deferred.
+
+7. **Observable effects form a closed, set-like static vocabulary.** The
+   initial concrete names are `io` (observable host I/O), `state` (hidden
+   module/registry/environment state), `entropy` (nondeterministic entropy),
+   and `task` (exposed task creation, waiting, cancellation, or scheduling
+   dependence). Order is irrelevant, duplicates and unknown names are
+   malformed, and reflection uses one canonical order. No second colon means
+   observable effects are unspecified; a present set is a declared upper
+   bound; a present empty set proves purity. Allocation and GC are invisible,
+   explicit RNG state is pure, successful-path failure typing needs no `fail`
+   effect, and an implementation's internal use of workers does not by itself
+   add `task`. `@attempt` and `@each` propagate their supplied quotation's
+   effects without adding `task`; `@spawn` adds `task`, and `within` adds
+   `state`. Consequently an explicitly pure quotation gives `@each` the same
+   observable-effect result as `each` despite their different execution
+   strategies.
+
+8. **Named observable-effect rows propagate higher-order effects.** At most
+   one `..name` appears in an effect section. A row must be introduced by an
+   input quotation before it can escape through the enclosing word's effect.
+   For example,
+   `(sequence q:(element -- result : : ..e) -- results : : ..e)` propagates
+   the quotation's effects, while an enclosing word may add concrete effects
+   with `: : ..e state`. Repeated use of one effect row unifies by set union,
+   not exact equality.
+
+9. **`call-as` is the explicit local bridge for dynamic stack shape.** Its
+   form is `quotation (x -- y) call-as`. It runs an otherwise dynamic
+   quotation, records the stack window, and raises `'contract` if the exact
+   successful input/output counts disagree. It rejects documentation,
+   observable-effect sections, relational contracts, and `...`; it cannot
+   manufacture observable-effect evidence. Its runtime cost is local and
+   explicitly requested. Ordinary dynamic `call` remains legal but exits the
+   stack-verified subset.
+
+10. **Inference is strongest-common-successful-path inference.** A static
+    branch must join to one compatible stack shape; effects union. Provenance
+    survives only when every successful branch returns the same provenance,
+    otherwise that slot degrades to an unconstrained shape slot. A path that
+    necessarily raises contributes no output to the join. Loops require a
+    stable stack invariant for another iteration; relational facts survive
+    only when a complete iteration preserves them. An application whose shape
+    cannot stabilize stays legal dynamically.
+
+11. **Inference and declaration are distinct.** Every statically analyzable
+    source word in an immutable image is inferred, and those inferred facts may
+    justify other definitions in that image. An explicit annotation is checked
+    as a public contract. Undeclared inferred facts are neither reflected nor
+    exported as a stable cross-module interface. Mutable session/top-level
+    definitions have no sealing boundary and remain dynamic. Literal-count
+    operations such as `pack` may be inferred when their controlling value is
+    statically known; a data-dependent count is unknown rather than rejected
+    outside a verified application. Stack and observable-effect evidence are
+    independent dimensions: `(x -- y)` checks only stack behavior,
+    `(: : io)` checks only observable effects, and `(x -- y : :)` checks both.
+
+12. **Forward references are checked over the completed image.** `def` and
+    `defp` validate and retain annotation structure while building. After the
+    body finishes, the environment freezes, the checker builds the final call
+    graph, infers acyclic definitions, and analyzes strongly connected
+    components. Recursive inference is not attempted: every member of a
+    recursive SCC must declare each dimension that a checked caller relies on;
+    the checker assumes those declarations while verifying the bodies. A
+    wholly unannotated recursive SCC remains legal and dynamic. Termination is
+    never claimed.
+
+13. **Sealing is a bounded typestate transition.** The ownership sequence is
+    `BuildingImage -> FrozenCandidate -> VerifiedImage`. A checker cursor owns
+    the frozen candidate and advances through the module-construction driver
+    in bounded `WorkContext` chunks. Only success creates the capability that
+    can become a module value; verification failure, cancellation, or
+    allocation failure publishes nothing and retires the candidate through the
+    existing bounded machinery. `register` publishes an already verified
+    image and performs no second check.
+
+14. **Resolution remains the one ordinary module-resolution mechanism.** The
+    checker resolves local, used, and fully qualified words with the same
+    namespace and ECL_PATH rules as execution, including cold qualified
+    auto-load; it does not grow a signature-only loader. Local proof facts are
+    image-owned. Any proof using another registration records that external
+    registration's generation/signature and is conditional on those
+    dependencies remaining current. Reload stays unrestricted. Step 16 stores
+    this evidence but neither consults it on an ordinary call nor elides the
+    existing dynamic stack contract; a later execution-view optimization must
+    guard currency and fall back before consuming it.
+
+15. **Static semantics are nominal metadata, never spelling recognition.** A
+    binding has one exhaustive analysis form: analyzable source body, opaque
+    declared scheme for a builtin/native binding, or one of a very small closed
+    set of literal-dependent intrinsics. The checker never asks whether an
+    ordinary word has a particular spelling. Primitive analysis metadata is
+    centrally complete at comptime, and all switches over the analysis form
+    are exhaustive. Proofs and normalized schemes are image-owned side data,
+    not value payloads, `BindingLease` hot-path fields, or runtime permission
+    masks.
+
+16. **The embedded prelude is a build invariant, not a Session failure mode.**
+    A dedicated build tool over the shared production interpreter library
+    evaluates the exact embedded prelude through the production parser,
+    primitive set, definition machinery, and bootstrap environment, then
+    drives the same checker over the final graph. Success emits a typed
+    certificate tied by digest to the exact embedded source; the normal
+    executable build depends on that artifact and embeds it. Session bootstrap
+    evaluates the prelude normally and attaches those prebuilt proof facts; it
+    performs no static analysis and cannot fail because an internal static
+    claim is wrong. The verifier is not an invocation of the finished binary,
+    avoiding a certificate/build cycle. Every embedded stdlib source is also
+    verified by the normal build and still passes through ordinary module
+    sealing when loaded; only the prelude needs this special certificate
+    because it has no module-sealing boundary.
+
+17. **Native declarations remain an explicit trust boundary.** The native
+    SDK keeps exact input/output arity and gains a validated observable-effect
+    declaration. It does not admit `...` or higher-order quotation schemes
+    until the ABI can actually evaluate quotations. A relational native
+    declaration is a trusted native contract rather than a body-derived proof.
+    Registered-native invocation gains no new callback check or permission
+    mask.
+
+**Why this is a safe pause point**: design work is paused before code or a
+gameplan exists. The settled section fixes the language's surface and the
+ownership, phase, build, and hot-path boundaries; the remaining questions are
+called out explicitly below rather than being guessed during implementation.
+
+**Unlocks**: once the open questions close and the step executes, modules can
+reject false static claims before becoming values, higher-order code can
+propagate stack and observable-effect schemes, and later execution views may
+use conditional proofs behind generation guards. None of those later
+optimizations is licensed merely by module residence or annotation presence.
+
+**Operator Actions Before Next Milestone**: Resume the Step 16 design
+conversation and close every Step 16 item in Open Questions before invoking
+`write-gameplan`.
+
 ## Dependency Graph
 
 - Milestone 1 (value-core) -> []
@@ -1915,21 +2126,78 @@ loader return-value convention.
 - Milestone 13 (v1-acceptance) -> [7, 8, 9, 10, 11, 12]
 - Post-terminal Step 14 (monomorphic-flat-leaf-kernel-migration) -> [13]
 - Post-terminal Step 15 (anonymous-module-values) -> [14]
+- Post-terminal Step 16 (static-effect-schemes) -> [15]
 
 ## Open Questions
 
-None. The stdin-as-data and http-backend questions were closed at M12
-planning and the randomness question was closed the same day (all
-2026-08-18). Step 14's representation, ownership, scheduling, semantic, and
-proof boundaries are fixed above. Step 15's state placement, anonymous image,
-registration-home, `@defm`, and register-upsert rulings were closed on
-2026-08-20; implementation detail belongs in its gameplan rather than in an
-open workstream decision. See Decisions Made.
+All pre-Step-16 questions remain closed. Step 16 is deliberately paused with
+these unresolved design questions:
+
+1. **Static prelude combinators versus the dynamic quotation boundary.** The
+   current `dip` body is `(swap literal compose call)`, which loses static
+   quotation identity under the settled rule that `compose`-produced
+   quotations are dynamic; `keep`, `bi`, and related definitions inherit the
+   loss. Decide whether to rewrite the statically useful combinators into
+   direct binder forms such as `(|x q| q call x)`, or to admit a narrowly
+   typed quotation-construction algebra. The latter must not accidentally
+   introduce the general output-quotation type system already deferred.
+
+2. **The closed scheme and intrinsic catalog.** Enumerate the exact static
+   schemes for core primitives and prelude combinators, and the minimal
+   intrinsic variants required for binders, literal-dependent `pack`,
+   `call-as`, and any control operator not expressible by ordinary scheme
+   unification. This list must be centrally comptime-complete and must not
+   recognize public bindings by name.
+
+3. **Stale external proof behavior.** External generations make certificates
+   conditional, but the checker behavior when it encounters a stale proof is
+   not settled: conservatively treat the application as dynamic, recursively
+   reanalyze the immutable dependency against current registrations, or admit
+   a compatible public-signature fast path. The answer must also specify
+   cross-module proof cycles and reload order without restricting ordinary hot
+   reload or adding a call-time check in Step 16.
+
+4. **Auto-load transaction semantics during checking.** Ordinary qualified
+   resolution may load an ECL_PATH dependency while sealing a candidate.
+   Decide whether a dependency loaded for a candidate that later fails remains
+   registered like any other cold resolution, or whether checking needs an
+   owner-scoped publication transaction. A second signature-only loader is
+   already rejected.
+
+5. **Concrete effect classification.** Classify every primitive, prelude word,
+   embedded stdlib word, and native capability under `io`, `state`, `entropy`,
+   and `task`. In particular settle loader/registry/reflection operations,
+   stable `args`/environment snapshots, deadlines and cancellation, `within`,
+   `@spawn`, `@each`, and host-backed words whose implementation and observable
+   semantics differ.
+
+6. **Diagnostics and reflection details.** Fix the error kinds and source-path
+   presentation for malformed schemes, declaration mismatches, unknown static
+   dependencies, recursive-contract failures, and `call-as` mismatches. Define
+   the canonical `see` rendering for every new grammar form and whether a
+   separate observation surface exposes current/conditional proof status;
+   undeclared inferred schemes themselves remain non-public.
+
+7. **Certificate and proof representation.** Choose the concrete generated
+   artifact, source/interface digest, normalized scheme ownership, dependency
+   fingerprint, and bounded retirement representation. Decide whether the
+   existing unused `BindingSpec.compiled` slot is removed, repurposed, or left
+   for the later execution view; the result may not enlarge hot leases merely
+   to store cold proof state.
+
+8. **Milestone proof and size.** Turn the settled semantics into an externally
+   observable acceptance ledger, including negative grammar cases, forward and
+   recursive references, conditional external proofs, build-time prelude and
+   stdlib rejection, OOM/cancellation, worker scheduling, and the absence of
+   runtime permission checks. Then decide whether the parser/scheme model,
+   bounded checker and certificates, and vocabulary migration fit one atomic
+   gameplan or require additional safe post-terminal steps.
 
 ## Post-v1 follow-ups (deferred features)
 
-Potential follow-ups, not milestones: none blocks the `0.1.0` tag, none has
-an owner, and picking one up starts a design conversation and its own
+Except for item 1's forwarding placeholder to scheduled Step 16, these are
+potential follow-ups rather than milestones: none blocks the `0.1.0` tag, none
+has an owner, and picking one up starts a design conversation and its own
 workstream or gameplan. Each was deferred with constraints pre-written at
 deferral time. The 2026-08-17 documentation consolidation removed them
 from SPEC.md and INTERPRETER.md (those describe present state only), so
@@ -1937,39 +2205,10 @@ this section is the sole active record of those constraints; when a
 follow-up lands, its present-state description moves into SPEC.md and
 INTERPRETER.md and its entry here is retired.
 
-1. **Static effect checker bundle** (ledger d.9's deferred layer). Verify
-   module bodies against their declared effects at registration,
-   Factor-style, with inline quotation literals inferred; dynamic `call`
-   inside checked code requires a declared-effect variant. Checker scope —
-   row polymorphism and purity marks — stays deferred as one bundle.
-   Pre-accepted consequences and constraints:
-   - Arrival is a *principled break*, accepted on the record: a module
-     whose declaration is wrong-but-unexecuted starts failing at
-     registration. The checker rejects only code already violating its own
-     stated contract (success-typing discipline).
-   - Statically *verified* applications may skip the dynamic contract
-     check — verification licenses the skip, never module residence alone.
-   - Purity checking upgrades `@each` to full observational equivalence
-     with `each` (no cross-task IO interleaving possible); purity stays
-     per-word and scoped to where it pays.
-   - Literal-count `pack` is checker-inferable; a nonliteral count has
-     unknown effect and is unavailable inside a statically verified body
-     (it remains legal on the dynamic top level).
-   - Static coverage never extends to metaprogramming: cons/compose-built
-     quotations applied mid-body resolve dynamically forever, and every
-     module keeps a dynamic path. Top-level words permanently forgo
-     hardening.
-   - The substrate is already in place and nothing more was pre-built: the
-     binding cell's slots (doc; effect — populated by module declarations;
-     compiled-form cache — present, unused) and observable binding writes
-     as generation counters (per-env shape generation, per-module registry
-     generation).
-   - The cached compiled form is the deferred execution view:
-     pre-resolved threaded arrays, guard-free for intra-module references
-     (module envs are write-once under the binding license),
-     generation-guarded at `use`/core edges — threaded or opcode arrays at
-     most, never native code. It is built with this bundle, later, or
-     never.
+1. **Static effect checker bundle — promoted.** Ledger d.9's deferred layer is
+   now scheduled as Post-terminal Step 16 above. Its settled constraints and
+   remaining questions live there; this numbered placeholder preserves
+   references from later deferred items without maintaining a second design.
 
 2. **Exactness** (ledger d.4). Bignums, rationals, or decimals — deferred,
    not rejected; a positioning decision to revisit. Constraints: the
@@ -2097,7 +2336,8 @@ INTERPRETER.md and its entry here is retired.
       `Unit` (nominal occupied/empty state, comptime alignment and size
       validation), per-unit size-class pools, or typed slabs; pools keep
       precise ownership and allocator-failure behavior and never turn
-      teardown into unbounded traversal;
+      teardown into unbounded traversal; deferred item 18 is the dispatch-side
+      instance of this same preference and is measured separately;
    2. batching non-kernel transitions inside a bounded slice—generic-spine or
       dict descent, heterogeneous materializer passes, reader/formatter/editor
       cursors—with conservative accounting: a bounded chunk may count as one
@@ -2176,13 +2416,45 @@ INTERPRETER.md and its entry here is retired.
       idiom machinery, is the cheaper option and the one to measure first;
       it needs no registry mechanism, no `source_word` relaxation, and no
       new `Operation` variant.
-    - Measure before building. The cost is one frame plus one transient
-      one-element list per constant reference; whether that is worth any
-      dispatch complexity is unknown until it is measured with Step 14's
-      `bench-kernels` tool. (Earlier text said "M13's benchmarks" — a
-      defect: the benchmark harness was ruled out of v1, so M13 shipped
-      none; Step 14 owns the tool and the checked-in deterministic
-      baseline, corrected 2026-08-19.)
+    - Measured 2026-08-20 with Step 14's `bench-kernels` tool, so the gate
+      is discharged: this item is no longer unmeasured. (Earlier text said
+      "M13's benchmarks" — a defect: the benchmark harness was ruled out of
+      v1, so M13 shipped none; Step 14 owns the tool and the checked-in
+      deterministic baseline, corrected 2026-08-19.) Temporary probe cases,
+      ReleaseFast, 1,000,000 references driven through the generic `each`
+      spine over the tool's `DebugAllocator` backing:
+
+      | probe | allocations per reference | ms |
+      |---|---|---|
+      | inline literal `(pop 42) each` | 2.00 | 2971 |
+      | `def` word with body `(42)` | 3.00 | 6243 |
+      | `def` word with body `((42) first)` | 6.00 | 15123 |
+      | `set` constant reference `(pop k) each` | 6.00 | 13993 |
+      | inline `(42) first`, no user frame | 5.00 | 11282 |
+
+      A constant reference costs four allocations more than the literal it
+      stands for. One of those four is the word frame; the other three are
+      the application of `first`. Milliseconds are DebugAllocator-inflated
+      machine context and are not evidence, per the Step 14 report's own
+      rule; the counts are the durable number.
+    - The cost stated above replaces this item's original claim, which was
+      wrong in both parts. There is no transient one-element list per
+      reference: `literal` builds `((v) first)` once at `set` time
+      (`src/prelude.ecl`), a reference pushes that stored list by refcount,
+      and `firstPrimitive` (`src/kernel_sequence.zig`) is a popList and a
+      `pushBorrowed` with no allocation at all. And the count is four, not
+      one.
+    - Three of the four allocations are not a constant-reference cost and
+      are not this item's to fix. They are the core-word application path
+      of deferred item 18, which every program pays on every core word it
+      calls. This item therefore stays deferred behind item 18: land that,
+      re-run the probe, then decide. If item 18 removes the per-application
+      allocation, a constant reference costs one frame more than a literal
+      and the expected disposition here is to close as not worth any
+      dispatch complexity — the outcome the measure-before-building gate
+      was written to allow. Do not build the `executeResolved` special case
+      first: specialising this one shape would hide a general dispatch tax
+      behind it rather than remove it.
 
 15. **`within` draft/publication copy elision** (deferred 2026-08-18,
     M11 review conversation). Every state application copies the slot's
@@ -2311,6 +2583,62 @@ INTERPRETER.md and its entry here is retired.
       reclamation; allocator-failure coverage reaches cache creation/healing;
       and the Linux/x86_64 TSan gate is blocking because cache hits change when
       generation and directory leases are acquired and released.
+
+18. **Word dispatch allocates a driver per word execution** (measured
+    2026-08-20 while discharging item 14's gate). This item originally named
+    the core-word fallback allocation; an allocation-size histogram shows that
+    is the smallest of the three allocations involved and not the one worth
+    fixing.
+
+    Counts are per iteration, ReleaseFast, 100,000 iterations through the
+    generic `each` spine, bucketed by allocation size:
+
+    | workload | 1144 B | 1288 B | 16 B |
+    |---|---|---|---|
+    | `(pop 42) each` — inline literal | 1 | — | — |
+    | `(pop w) each`, `w` defined as `(42)` | 2 | — | — |
+    | `(pop k) each`, `k` bound by `set` | 3 | 1 | 1 |
+
+    The 1144-byte allocation is `DispatchDriver`, which embeds a
+    `ResolutionCursor` by value (`src/machine.zig`). `executeWord` starts one
+    for **every word execution**: the count tracks how many words a body
+    executes, not what kind they are — one for `pop`, two once `w` is called,
+    three once `k`'s body calls `first`. The 1288-byte allocation is
+    `IdiomDriver`, which embeds a second `ResolutionCursor` (`src/idioms.zig`),
+    started once per core-origin word application. The 16-byte allocation is
+    `DirectWordFallback`. The tax is therefore about 1.1 KB of allocation per
+    word executed, paid by every program on every word, and the fallback is
+    noise beside it. One earlier claim is withdrawn: the fallback allocation is
+    not "pure waste when no `phrase_recognizer` is installed", because
+    `Session` always installs `idioms.tryApply` (`src/session.zig`), so that
+    case does not arise in a real session.
+
+    - The size comes from shape, not from work. `ResolutionCursor` is a flat
+      struct holding about ten mutually exclusive phase cursors as separate
+      optional fields, so every word pays the width of the longest resolution
+      path — dotted-name splitting, registry acquisition, use-order walking,
+      qualified export lookup — to resolve a name that is almost always found
+      immediately in scope or core.
+    - Fix order follows item 9's preference 1 rather than inventing one:
+      first shrink the cursor to a `union(Phase)` payload so the driver is
+      small, then give `Unit` an inline continuation area so the common driver
+      needs no allocation at all. `Unit.native` holds at most one work driver
+      at a time — `installDriver` accepts only `idle` or `yielded`
+      (`src/machine.zig`) — so one inline slot covers essentially every
+      dispatch, with anything larger than the slot falling back to the
+      allocator. Bounded-first-slice promotion stays where item 9 put it:
+      attempted only if allocation remains material after that.
+    - Constraints. This changes when and where memory is acquired, never what
+      executes. Recognition stays observationally invisible, and the
+      differential idiom harness, behavioral suite, and allocator-failure
+      sweeps all remain blocking — allocation-failure coverage especially,
+      because removing an allocation moves where `error.OutOfMemory` can be
+      observed. An inline slot also makes driver storage part of `Unit`'s
+      footprint, so per-task memory is a reported number, not an afterthought.
+    - This item gates deferred item 14, whose four extra allocations per
+      constant reference are two `DispatchDriver`s, one `IdiomDriver`, and one
+      `DirectWordFallback`. Item 14 cannot be decided on its own numbers until
+      those are gone.
 
 ## Decisions Made
 

@@ -5020,6 +5020,37 @@ pub const ResolutionCursor = struct {
         core,
         complete,
     };
+    /// The phases are sequential and all but two of their cursors are
+    /// mutually exclusive, so they share one payload instead of each holding a
+    /// permanently reserved field. Resolving a plain word used to cost the
+    /// width of every resolution path at once — dotted-name splitting,
+    /// registry acquisition, use-order walking, and qualified export lookup —
+    /// though it touches two of them. `use_shape` and `generation` stay
+    /// outside the payload because they deliberately outlive the cursor that
+    /// produced them: a shape lease spans the whole `uses` scan, and a
+    /// generation lease is handed to the completed resolution.
+    const Work = union(enum) {
+        none,
+        dot: intern.LastDotCursor,
+        atom: intern.InternLookupCursor,
+        module_validation: intern.ModuleNameCursor,
+        binding_validation: intern.NamespaceCursor,
+        acquisition: modules.Registry.AcquireCursor,
+        direct: env.DirectLookupCursor,
+        export_lookup: modules.ModuleResolveCursor,
+
+        /// Only the three leased cursors own anything; the interning and
+        /// name-validation cursors are pure position.
+        fn deinit(self: *Work) void {
+            switch (self.*) {
+                .acquisition => |*cursor| cursor.deinit(),
+                .direct => |*cursor| cursor.deinit(),
+                .export_lookup => |*cursor| cursor.deinit(),
+                .none, .dot, .atom, .module_validation, .binding_validation => {},
+            }
+            self.* = .none;
+        }
+    };
     allocator: std.mem.Allocator,
     registry: ?*modules.Registry,
     module_access: *const modules.ExecutionAccess,
@@ -5028,21 +5059,15 @@ pub const ResolutionCursor = struct {
     word: u32,
     spelling: []const u8,
     phase: Phase = .dot,
-    dot: intern.LastDotCursor,
+    work: Work,
     dot_index: usize = 0,
-    atom_lookup: ?intern.InternLookupCursor = null,
     qualified_name: ?intern.QualifiedName = null,
     prefix: ?intern.ModuleName = null,
     export_name: ?intern.BindingName = null,
-    module_validation: ?intern.ModuleNameCursor = null,
-    binding_validation: ?intern.NamespaceCursor = null,
     scope: ?*env.Scope,
-    direct: ?env.DirectLookupCursor = null,
     use_shape: ?env.ShapeLease = null,
     use_ordinal: usize = 0,
-    acquisition: ?modules.Registry.AcquireCursor = null,
     generation: ?modules.GenerationLease = null,
-    export_lookup: ?modules.ModuleResolveCursor = null,
 
     pub fn init(evaluator: *Machine, word: u32) ResolutionCursor {
         const spelling = intern.get(word);
@@ -5054,16 +5079,14 @@ pub const ResolutionCursor = struct {
             .current_home = evaluator.unit.current.?.home,
             .word = word,
             .spelling = spelling,
-            .dot = intern.lastDotCursor(spelling),
+            .work = .{ .dot = intern.lastDotCursor(spelling) },
             .scope = evaluator.unit.current.?.resolution_scope,
         };
     }
 
     pub fn deinit(self: *ResolutionCursor) void {
-        if (self.direct) |*cursor| cursor.deinit();
+        self.work.deinit();
         if (self.use_shape) |*shape| shape.deinit();
-        if (self.acquisition) |*cursor| cursor.deinit();
-        if (self.export_lookup) |*cursor| cursor.deinit();
         if (self.generation) |*lease| lease.deinit();
         self.* = undefined;
     }
@@ -5110,31 +5133,36 @@ pub const ResolutionCursor = struct {
 
     pub fn advance(self: *ResolutionCursor) ResolutionProgress {
         return switch (self.phase) {
-            .dot => switch (self.dot.advance()) {
+            .dot => switch (self.work.dot.advance()) {
                 .pending => .pending,
                 .complete => |maybe_dot| result: {
                     if (maybe_dot) |dot_index| {
                         if (dot_index == 0 or dot_index + 1 == self.spelling.len or self.registry == null) {
+                            self.work = .none;
                             self.phase = .complete;
                             break :result .{ .complete = .unresolved };
                         }
                         self.dot_index = dot_index;
-                        self.atom_lookup = intern.lookupCursor(self.spelling[0..dot_index]);
+                        self.work = .{ .atom = intern.lookupCursor(self.spelling[0..dot_index]) };
                         self.phase = .prefix;
-                    } else self.phase = .scope;
+                    } else {
+                        self.work = .none;
+                        self.phase = .scope;
+                    }
                     break :result .pending;
                 },
             },
-            .prefix => switch (self.atom_lookup.?.advance()) {
+            .prefix => switch (self.work.atom.advance()) {
                 .pending => .pending,
                 .complete => |maybe_prefix| result: {
                     const prefix = maybe_prefix orelse {
+                        self.work = .none;
                         self.phase = .complete;
                         break :result .{ .complete = .{
                             .unknown_module_prefix = self.spelling[0..self.dot_index],
                         } };
                     };
-                    self.module_validation = .init(prefix);
+                    self.work = .{ .module_validation = .init(prefix) };
                     self.phase = .prefix_validate;
                     break :result .pending;
                 },
@@ -5143,70 +5171,69 @@ pub const ResolutionCursor = struct {
             // up. Only that ordering makes a qualified miss report an
             // unregistered *module*: an export atom that no source has
             // interned yet is exactly the state a first reference is in.
-            .prefix_validate => switch (self.module_validation.?.advance()) {
+            .prefix_validate => switch (self.work.module_validation.advance()) {
                 .pending => .pending,
                 .complete => |maybe_module| result: {
                     self.prefix = maybe_module orelse {
+                        self.work = .none;
                         self.phase = .complete;
                         break :result .{ .complete = .unresolved };
                     };
-                    self.module_validation = null;
-                    self.acquisition = self.registry.?.acquireCursor(self.prefix.?);
+                    self.work = .{ .acquisition = self.registry.?.acquireCursor(self.prefix.?) };
                     self.phase = .qualified_acquire;
                     break :result .pending;
                 },
             },
-            .qualified_acquire => switch (self.acquisition.?.advance()) {
+            .qualified_acquire => switch (self.work.acquisition.advance()) {
                 .pending => .pending,
                 .complete => |maybe_generation| result: {
-                    self.acquisition.?.deinit();
-                    self.acquisition = null;
+                    self.work.deinit();
                     self.generation = maybe_generation;
                     if (self.generation == null) {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .unregistered_module = self.prefix.? } };
                     }
-                    self.atom_lookup = intern.lookupCursor(self.spelling[self.dot_index + 1 ..]);
+                    self.work = .{ .atom = intern.lookupCursor(self.spelling[self.dot_index + 1 ..]) };
                     self.phase = .export_name;
                     break :result .pending;
                 },
             },
-            .export_name => switch (self.atom_lookup.?.advance()) {
+            .export_name => switch (self.work.atom.advance()) {
                 .pending => .pending,
                 .complete => |maybe_export| result: {
                     const export_name = maybe_export orelse {
+                        self.work = .none;
                         self.releaseGeneration();
                         self.phase = .complete;
                         break :result .{ .complete = .unresolved };
                     };
-                    self.binding_validation = .init(export_name);
+                    self.work = .{ .binding_validation = .init(export_name) };
                     self.phase = .export_validate;
                     break :result .pending;
                 },
             },
-            .export_validate => switch (self.binding_validation.?.advance()) {
+            .export_validate => switch (self.work.binding_validation.advance()) {
                 .pending => .pending,
                 .complete => |maybe_binding| result: {
                     self.export_name = maybe_binding orelse {
+                        self.work = .none;
                         self.releaseGeneration();
                         self.phase = .complete;
                         break :result .{ .complete = .unresolved };
                     };
-                    self.binding_validation = null;
                     self.qualified_name = intern.qualifiedName(self.prefix.?, self.export_name.?);
-                    self.export_lookup = self.generation.?.resolveCursor(
+                    self.work = .{ .export_lookup = self.generation.?.resolveCursor(
                         intern.bindingId(intern.qualifiedBinding(self.qualified_name.?)),
                         true,
-                    );
+                    ) };
                     self.phase = .qualified_export;
                     break :result .pending;
                 },
             },
-            .qualified_export => switch (self.export_lookup.?.advance()) {
+            .qualified_export => switch (self.work.export_lookup.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
-                    self.export_lookup.?.deinit();
-                    self.export_lookup = null;
+                    self.work.deinit();
                     const lease = maybe_lease orelse {
                         self.releaseGeneration();
                         self.phase = .complete;
@@ -5218,23 +5245,22 @@ pub const ResolutionCursor = struct {
             },
             .scope => result: {
                 const current = self.scope orelse {
-                    self.direct = self.core.directLookupCursor(self.word);
+                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
                     self.phase = .core;
                     break :result .pending;
                 };
                 self.scope = current.parent;
                 if (current.environmentOrNull()) |environment| {
-                    self.direct = environment.directLookupCursor(self.word);
+                    self.work = .{ .direct = environment.directLookupCursor(self.word) };
                     self.phase = .direct;
                 }
                 break :result .pending;
             },
-            .direct => switch (self.direct.?.advance()) {
+            .direct => switch (self.work.direct.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
-                    const environment = self.direct.?.shape.environment;
-                    self.direct.?.deinit();
-                    self.direct = null;
+                    const environment = self.work.direct.shape.environment;
+                    self.work.deinit();
                     if (maybe_lease) |lease| {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .resolved = self.directResult(lease) } };
@@ -5256,28 +5282,26 @@ pub const ResolutionCursor = struct {
                     break :result .pending;
                 };
                 self.use_ordinal += 1;
-                self.acquisition = self.registry.?.acquireCursor(uses[index]);
+                self.work = .{ .acquisition = self.registry.?.acquireCursor(uses[index]) };
                 self.phase = .used_acquire;
                 break :result .pending;
             },
-            .used_acquire => switch (self.acquisition.?.advance()) {
+            .used_acquire => switch (self.work.acquisition.advance()) {
                 .pending => .pending,
                 .complete => |maybe_generation| result: {
-                    self.acquisition.?.deinit();
-                    self.acquisition = null;
+                    self.work.deinit();
                     self.generation = maybe_generation;
                     if (self.generation) |generation| {
-                        self.export_lookup = generation.resolveCursor(self.word, true);
+                        self.work = .{ .export_lookup = generation.resolveCursor(self.word, true) };
                         self.phase = .used_export;
                     } else self.phase = .uses;
                     break :result .pending;
                 },
             },
-            .used_export => switch (self.export_lookup.?.advance()) {
+            .used_export => switch (self.work.export_lookup.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
-                    self.export_lookup.?.deinit();
-                    self.export_lookup = null;
+                    self.work.deinit();
                     if (maybe_lease) |lease| {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .resolved = self.generationResult(lease, .used) } };
@@ -5288,11 +5312,10 @@ pub const ResolutionCursor = struct {
                     break :result .pending;
                 },
             },
-            .core => switch (self.direct.?.advance()) {
+            .core => switch (self.work.direct.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
-                    self.direct.?.deinit();
-                    self.direct = null;
+                    self.work.deinit();
                     self.phase = .complete;
                     var lease = maybe_lease orelse break :result .{ .complete = .unresolved };
                     if (lease.visibility == .private) {
