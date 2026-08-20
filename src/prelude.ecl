@@ -41,7 +41,7 @@
   another quotation.
 
   This is how a unit constructor is seeded: an @ word gives its quotation a fresh stack, so values
-  (q) with @attempt, values (q) with @spawn, and values (body) with 'name @module hand that unit
+  (q) with @attempt, values (q) with @spawn, and values (body) with 'name @defm hand that unit
   exactly the values the caller chose to pass.")
 'with def
 

@@ -172,4 +172,4 @@
 
  )
 'result
-@module
+@defm

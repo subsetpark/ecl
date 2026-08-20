@@ -87,7 +87,7 @@ const WhileState = struct {
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
     running_body: bool = false,
-    word: u32,
+    word: intern.TraceWord,
 
     fn application(self: *WhileState, quotation: *Header) Application {
         return machine.typedApplication(self, quotation, self.parent, self.home, 0);
@@ -124,7 +124,7 @@ const TimesState = struct {
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
     remaining: usize,
-    word: u32,
+    word: intern.TraceWord,
 
     fn application(self: *TimesState) Application {
         return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, 0);
@@ -193,7 +193,7 @@ const DipState = struct {
     protected: heap.Owned(Value),
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
-    word: u32,
+    word: intern.TraceWord,
 
     fn application(self: *DipState) Application {
         return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, 0);
@@ -219,7 +219,7 @@ const CondState = struct {
     home: ?*modules.ModuleHome,
     pair_index: usize = 0,
     running_action: bool = false,
-    word: u32,
+    word: intern.TraceWord,
 
     fn application(self: *CondState, quotation: *Header) Application {
         return machine.typedApplication(self, quotation, self.parent, self.home, 0);
@@ -279,7 +279,7 @@ const CondDriver = struct {
     clauses: heap.Owned(Value),
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
-    word: u32,
+    word: intern.TraceWord,
     index: usize = 0,
 
     pub fn advance(evaluator: *Machine, self: *CondDriver) MachineError!machine.WorkProgress {
@@ -326,7 +326,7 @@ const IterationState = struct {
     home: ?*modules.ModuleHome,
     index: usize = 0,
     count: usize,
-    word: u32,
+    word: intern.TraceWord,
 
     fn application(self: *IterationState, seeded: u32) Application {
         return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, seeded);
@@ -740,6 +740,6 @@ fn boolValue(evaluator: *Machine, item: *const heap.OwnedValue) MachineError!boo
             1 => true,
             else => evaluator.typeError("a 0/1 bool"),
         },
-        .float, .char, .symbol, .word, .list, .dict, .task => evaluator.typeError("a 0/1 bool"),
+        .float, .char, .symbol, .word, .list, .dict, .task, .module => evaluator.typeError("a 0/1 bool"),
     };
 }

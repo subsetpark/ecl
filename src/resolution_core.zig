@@ -4,10 +4,12 @@
 //! the first candidate as the winner, every later candidate as a shadow, and
 //! defines the single reverse-use traversal used by all resolution surfaces.
 
+const intern = @import("intern.zig");
+
 pub const Origin = enum { direct, used, module, core };
 
 pub const Candidate = struct {
-    trace_word: u32,
+    trace_word: intern.TraceWord,
     origin: Origin,
 };
 

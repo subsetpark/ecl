@@ -382,18 +382,18 @@ test "e2e: hot reload all access paths acceptance" {
 test "e2e: module effect declaration acceptance" {
     // An omitted effect is legal and adds no inferred check: the word runs
     // across the home boundary exactly as written.
-    var missing = try run(&.{ build_options.ecl_exe, "-e", "((dup +) 'fine def) 'm @module 2 m.fine" });
+    var missing = try run(&.{ build_options.ecl_exe, "-e", "((dup +) 'fine def) 'm @defm 2 m.fine" });
     defer missing.deinit();
     try missing.expect(.{ .exit_code = 0, .stdout = "4\n", .stderr = "" });
 
-    var lying = try run(&.{ build_options.ecl_exe, "-e", "((dup +) ( a -- b c ) 'lies def) 'm @module 1 m.lies" });
+    var lying = try run(&.{ build_options.ecl_exe, "-e", "((dup +) ( a -- b c ) 'lies def) 'm @defm 1 m.lies" });
     defer lying.deinit();
     try lying.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{ "'kind 'contract", "'word 'm.lies" },
     });
 
-    var visible = try run(&.{ build_options.ecl_exe, "-e", "((dup +) ( a -- b ) 'dbl def) 'm @module 'm.dbl see" });
+    var visible = try run(&.{ build_options.ecl_exe, "-e", "((dup +) ( a -- b ) 'dbl def) 'm @defm 'm.dbl see" });
     defer visible.deinit();
     try visible.expect(.{
         .exit_code = 0,
@@ -406,7 +406,7 @@ test "e2e: use shadow notice acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "1 'mean set 2 'count set (3 'mean set 4 'count set) 'stats @module 'stats use mean count",
+        "1 'mean set 2 'count set (3 'mean set 4 'count set) 'stats @defm 'stats use mean count",
     });
     defer result.deinit();
     try result.expect(.{
@@ -421,7 +421,7 @@ test "e2e: reflection acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module 'm use 'm.f see 'f which words",
+        "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @defm 'm use 'm.f see 'f which words",
     });
     defer result.deinit();
     try result.expect(.{
@@ -462,7 +462,7 @@ test "e2e: stateful module reload acceptance" {
 }
 
 test "e2e: module removal acceptance" {
-    const module = "[7] (((dup without) within) 'peek def) with 'core.c @module ";
+    const module = "[7] (((dup without) within) 'peek def) with 'core.c @defm ";
     var by_name = try run(&.{
         build_options.ecl_exe,
         "-e",
@@ -584,7 +584,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     var constant = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(40 literal (-- value) 'k def) 'm @module m.k 'm.k body 'm.k which",
+        "(40 literal (-- value) 'k def) 'm @defm m.k 'm.k body 'm.k which",
     });
     defer constant.deinit();
     try constant.expect(.{
@@ -593,7 +593,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
         .stderr = "",
     });
 
-    const partial_module = "((pop pop 7 8) (a b -- ...) 'row def) 'm @module ";
+    const partial_module = "((pop pop 7 8) (a b -- ...) 'row def) 'm @defm ";
     var partial = try run(&.{ build_options.ecl_exe, "-e", partial_module ++ "1 2 m.row" });
     defer partial.deinit();
     try partial.expect(.{ .exit_code = 0, .stdout = "7 8\n", .stderr = "" });
@@ -993,7 +993,7 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
         "@attempt-with",
         "@spawn-with",
         "@each-with",
-        "@module-with",
+        "@defm-with",
     }) |old| {
         var result = try run(&.{ build_options.ecl_exe, "-e", old });
         defer result.deinit();
@@ -1026,10 +1026,34 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer seeded_each.deinit();
     try seeded_each.expect(.{ .exit_code = 0, .stdout = "[11 12]\n", .stderr = "" });
 
-    var name_first = try run(&.{ build_options.ecl_exe, "-e", "'wrong ((1) 'x def) @module" });
+    var name_first = try run(&.{ build_options.ecl_exe, "-e", "'wrong ((1) 'x def) @defm" });
     defer name_first.deinit();
     try name_first.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'kind 'type", "@module expected a symbol name" },
+        .stderr_contains = &.{ "'kind 'type", "@defm expected a symbol name" },
     });
+
+    // Anonymous construction names nothing, so its isolation advice names the
+    // unseeded spelling rather than a registration.
+    var anonymous_isolation = try run(&.{ build_options.ecl_exe, "-e", "3 (1 +) @module" });
+    defer anonymous_isolation.deinit();
+    try anonymous_isolation.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{ "'isolation @module", "with @module" },
+    });
+
+    // The value the external binary shows for a module image, and the two
+    // words that name one.
+    var anonymous_value = try run(&.{ build_options.ecl_exe, "-e", "(1 'x set) @module" });
+    defer anonymous_value.deinit();
+    try anonymous_value.expect(.{ .exit_code = 0, .stdout = "<module>\n", .stderr = "" });
+
+    var registered_twice = try run(&.{
+        build_options.ecl_exe,
+        "-e",
+        "(0 ((1 + dup without) within) 'bump def) @module dup 'l register 'r register " ++
+            "l.bump l.bump r.bump",
+    });
+    defer registered_twice.deinit();
+    try registered_twice.expect(.{ .exit_code = 0, .stdout = "1 2 1\n", .stderr = "" });
 }

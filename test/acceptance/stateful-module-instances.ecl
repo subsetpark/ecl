@@ -12,8 +12,8 @@
 'counter-body
 set
 
-[10] counter-body with 'left @module
-[100] counter-body with 'right @module
+[10] counter-body with 'left @defm
+[100] counter-body with 'right @defm
 
 ### Independent slots: separately constructed names own independent stacks.
 left.peek io.pp
@@ -30,14 +30,14 @@ right.peek io.pp
  ### def utils
  (0) 'utils def)
 'core
-@module
+@defm
 
 ### module core.utils
 (
  ### def f
  (1) 'f def)
 'core.utils
-@module
+@defm
 core.utils io.pp
 'core.utils 'f qualify dup type io.pp execute io.pp
 
@@ -58,7 +58,7 @@ core.utils io.pp
  )
 with
 'pool
-@module
+@defm
 pool.size io.pp
 pool.checkout io.pp
 pool.size io.pp

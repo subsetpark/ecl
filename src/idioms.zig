@@ -530,7 +530,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
 }
 
 fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) MachineError!void {
-    if (capture.active_word) |word| evaluator.setActiveWord(word);
+    if (capture.active_word) |word| evaluator.setActiveWord(.plain(word));
     try switch (entry.operation) {
         .unary => |operation| switch (entry.context) {
             .direct => unaryPrimitive(operation)(evaluator),

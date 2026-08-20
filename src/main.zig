@@ -335,7 +335,7 @@ fn emitSyntheticError(
         init.gpa,
         releases,
         &language_error,
-        &.{},
+        .{},
         location,
     );
     defer releases.releaseValue(error_value);

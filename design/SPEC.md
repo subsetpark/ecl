@@ -215,7 +215,8 @@ Two kinds of quotation application exist:
 - **Isolated**: the quotation runs on a fresh substack per application,
   seeded with its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
-  `fold`, `scan`, `infra`, `@attempt`, `@spawn`, `@each`, and `@module`.
+  `fold`, `scan`, `infra`, `@attempt`, `@spawn`, `@each`, `@module`, and
+  `@defm`.
 
 Every isolated combinator states the stack effect it requires of its
 quotation argument (given per word in the reference). The contract is
@@ -225,14 +226,15 @@ checked dynamically at each application; a violation is an immediate
 #### The `@` spelling convention
 
 A leading `@` marks exactly the words that apply their quotation **in a
-fresh unit** — one unit per application for `@each`. There are four:
-`@attempt`, `@spawn`, `@each`, and `@module`. Unit construction is the
-whole of the class invariant; the marked word may or may not seed the
-unit it makes. `@attempt`, `@spawn`, and `@module` seed nothing, so their
-quotations must be self-contained: their effect is `( -- ... )` and
+fresh unit** — one unit per application for `@each`. There are five:
+`@attempt`, `@spawn`, `@each`, `@module`, and `@defm`. Unit construction is
+the whole of the class invariant; the marked word may or may not seed the
+unit it makes. `@attempt`, `@spawn`, `@module`, and `@defm` seed nothing, so
+their quotations must be self-contained: their effect is `( -- ... )` and
 inputs arrive via `literal`/`partial`/`compose`/`with` or environment
 names, never the ambient stack. `@each` seeds each child with exactly its
-element.
+element. `register` is not marked: it publishes an already-constructed
+module value and takes no quotation.
 
 Words that are isolated but *not* marked, with their reasons:
 
@@ -240,8 +242,8 @@ Words that are isolated but *not* marked, with their reasons:
   unit, on a substack, and are implicitly fed their elements.
 - `infra` and `within` — they apply on an explicitly named *other* stack;
   the substitution is the word's meaning, not a new unit.
-- `use`, `load`, `unmodule` — they construct or retire units but take no
-  quotation.
+- `use`, `load`, `unmodule`, `register` — they construct, publish, or retire
+  without taking a quotation.
 - `await`, `await-all`, `await-any`, `await-for`, `cancel`, `tasks` —
   they consume tasks rather than making them.
 - `with` — pure composition; it constructs nothing.
@@ -260,7 +262,8 @@ order:
     values (q) with @attempt
     values (q) with @spawn
     list values (q) with @each          ( element deepest in each child )
-    values (body) with 'name @module
+    values (body) with @module
+    values (body) with 'name @defm
 
 One composition scales to every unit constructor, including ones users
 write, with no companion-word obligation. Any future phrase-level fast
@@ -466,18 +469,41 @@ Symbols are interned at parse; strings are plain uninterned vectors.
 
 ## Modules
 
-A module is a named, registered value — not a file. A per-session registry
-maps symbols to modules; files are transport.
+A module is a value; a *registration* is a name that owns one. A per-session
+registry maps symbols to registrations; files are transport.
 
-- `'name (body) module` runs the body on a fresh environment and registers
-  the result under the name. The body runs stack-isolated: it never sees or
-  disturbs the caller's stack, and registration produces no stack values.
-  Modules are first-class: enumerable, diffable, constructible by building
-  the body quotation programmatically.
-- `values (body) with 'name @module` captures every value inertly and in order
-  before running the same isolated module-registration operation. The values
-  form the body unit's initial stack; the body may consume, reorder, or
-  extend them.
+Construction and publication are separate operations, so a module can exist
+anonymously, be passed as data, and be registered more than once.
+
+- `@module` is `( body -- module )`. It runs the body on a fresh, isolated
+  environment and returns an **anonymous immutable module image**: its frozen
+  environment, its definitions, and the body's final operand stack as an
+  *initial-state template*. It claims no registry name. The body runs
+  stack-isolated: it never sees or disturbs the caller's stack.
+- `register` is `( module 'module-name -- )`. It validates the canonical name
+  and publishes the image under it. Registration is an upsert: a missing name
+  creates its registration, and an existing name installs the new image while
+  keeping the durable state that registration already owns.
+- `@defm` is `( body 'module-name -- )` and is exactly `@module` followed by
+  `register`, including the ordering: the body is evaluated before the name is
+  validated. It is the source spelling for a module definition.
+- `values (body) with @module` and `values (body) with 'name @defm` capture
+  every value inertly and in order before running the same isolated
+  construction. The values form the body unit's initial stack; the body may
+  consume, reorder, or extend them.
+- **A module value is an opaque capability.** Its `type` is `'module`; it
+  prints as the unreadable marker `<module>`; `match?` compares **image
+  identity**, so one construction duplicated matches itself and two
+  constructions of the same body never match. It cannot be read from source,
+  emitted as JSON, or passed through a native word's value or view inputs.
+  It exposes no name, address, environment, registration, or state.
+- **One image may back several registrations.** They share immutable code and
+  definitions and nothing else: each registration owns its own durable state,
+  generation currency, aliases, and removal lifetime. Reloading or removing
+  one cannot change or retire another.
+- Modules are first-class: enumerable, diffable, constructible by building
+  the body quotation programmatically, and nameable at a distance — build
+  once, choose the name later, or register the same image twice.
 - **Module names are validated paths.** A canonical module name is one or
   more nonempty binding-name segments joined by dots: `stats`, `core.utils`,
   and `company.data.csv` are valid; leading, trailing, and doubled dots are
@@ -489,20 +515,26 @@ maps symbols to modules; files are transport.
   unreadable spellings do not become validated names. Reserved syntax markers
   are interned as syntax only and cannot be minted as binding names through a
   privileged validation mode.
-- **The registry slot is the singleton identity.** The first successful
-  registration of a canonical module name creates its slot; later registrations
-  replace only its code generation. Separately constructed names own
-  independent slots even when their bodies come from the same quotation.
+- **The registry slot is the singleton identity of a *name*.** The first
+  successful registration of a canonical module name creates its slot; later
+  registrations replace only its code generation. Distinct names own
+  independent slots even when they were registered from the *same* image.
   A slot owns one immutable snapshot of a durable operand stack per
   session, distinct from its replaceable code generation.
-- **Construction produces the initial state stack.** The isolated body's
-  final operand stack becomes the durable initial stack of a newly created
-  slot — it is not required to be empty. On re-registration the candidate's
-  initial stack is discarded and the existing slot's durable stack is
-  retained: initialization happens once per slot identity, not once per
-  code generation.
-- Registration commits only after the body succeeds. A failed
-  re-registration leaves the previous registration in place.
+- **The image carries the initial-state template; the slot owns live state.**
+  The isolated body's final operand stack becomes the image's initial-state
+  template — it is not required to be empty. A first registration of a name
+  *copies* that template into the new slot's durable stack, so the same image
+  can seed another registration later. A re-registration does not consult the
+  template at all and retains the slot's existing durable stack:
+  initialization happens once per slot identity, not once per code generation
+  and not once per image.
+- Construction commits nothing to the registry: a failing body publishes
+  neither a value nor a name. Registration commits atomically after the image
+  exists; a failed registration — invalid name, alias collision, allocation
+  failure, cancellation, or a conflicting state turn — leaves the previous
+  directory entry, current generation, and durable state exactly as they were,
+  and consumes the module reference it was handed.
 - The registry is flat. A module body may register another module, but that
   registration creates an independent module with its own canonical name
   and lifetime; it does not establish lexical nesting or parent ownership.
@@ -517,9 +549,14 @@ maps symbols to modules; files are transport.
   absent from the module's public face, not access-checked. Definitions
   made inside the module body's isolated child units (e.g. inside an
   `@attempt`) are dynamic and are never exported.
-- **Resolution context is a property of the binding**: an exported word
-  carries its home module's name, and its body resolves against that
-  module's chain — internal environment, then the module's own `use`s,
+- **Resolution context comes from the registration a call was resolved
+  through**, never from anything recorded at definition time. A definition
+  records only its own module-local name; qualified lookup supplies the
+  registration, and the activation carries it for its whole lifetime. So an
+  image registered as both `left` and `right` executes against whichever name
+  the call named — private lookup, same-home dispatch, `within`'s slot,
+  diagnostic spelling, and `which` all follow the invoking registration. An
+  exported word's body resolves against its module's chain — internal environment, then the module's own `use`s,
   then core — never the caller's environment. Publics therefore reach
   privates, and callers cannot perturb a module's behavior by shadowing.
   A module word's body is still a plain list: `'stats.stdev body` is data,
@@ -543,7 +580,8 @@ maps symbols to modules; files are transport.
   against a private draft of the home module's durable stack rather than
   the ambient caller stack. It is legal only while executing a published
   word whose definition-site home is a live module: session top level, a
-  registration root (which operates on its construction stack directly),
+  construction root (an image being built has no registration, and its body
+  operates on its construction stack directly),
   and a body extracted and redefined elsewhere are all `'domain`. There is
   no module-handle-targeted form. Inputs cross the boundary only because
   the word body captures them explicitly with `partial` or `with`.
@@ -647,7 +685,7 @@ maps symbols to modules; files are transport.
   the first existing candidate is authoritative, including its errors.
   Embedded names therefore always win: a `csv.ecl` on the search path
   cannot silently replace the stdlib `csv`, and in-session shadowing or
-  explicit `@module` registration remain the way to override one. Every
+  explicit `@defm` registration remain the way to override one. Every
   module is addressable by qualified name with no ceremony; `use` remains
   the word that splices unqualified exports into scope and reports shadows.
   Every qualified-name operation triggers the same load when needed:
@@ -659,7 +697,10 @@ maps symbols to modules; files are transport.
   reference to one module converge on a single published module; only a
   unit re-entering its own in-progress load is a `'domain` cycle. A loaded
   `.ecl` file registers a module as an ordinary side effect of running;
-  `load` replays any file as one unit in the calling session.
+  `load` replays any file as one unit in the calling session. Loading succeeds
+  only when the requested canonical name is actually registered, whichever
+  spelling the file used: a file that constructs an anonymous image and never
+  registers it fails with the ordinary loader error.
 
 ### Native modules
 
@@ -686,7 +727,7 @@ enumerable, shadowable — and they load lazily on the first mention of their
 name, whether that is `'str use` or a bare `str.upper`. Resolution consults
 the embedded manifest before `ECL_PATH`, so a stray `csv.ecl` on the search
 path cannot silently replace a stdlib name; in-session shadowing and explicit
-`@module` registration remain the documented overrides. All eight resolve with no
+`@defm` registration remain the documented overrides. All eight resolve with no
 `ECL_PATH` set and no filesystem access at all.
 
 Three transports back them, chosen per module rather than uniformly:
@@ -1114,6 +1155,18 @@ That identity is what makes the isolation non-arbitrary rather than an
 implementation accident. Seed it with `values (q) with @attempt`. See
 Errors.
 
+### @defm
+`( body 'module-name -- )` — *Unit constructor.* Exactly `@module` followed
+by `register`: run the body on a fresh environment, then validate the
+canonical module path and register the resulting image under it. The body is
+evaluated before the name is validated, so the two spellings agree on every
+observable outcome.
+
+The name is last, matching `def` and `set`: the bound name sits nearest
+the binder. Seeded registration is therefore `values (body) with 'name
+@defm`, with the name riding above the composition and no shuffle at
+all. See Modules.
+
 ### @each
 `( sequence quotation -- results )` — *Unit constructor*, one fresh unit
 per element, contract `( a -- b )` enforced per element. Concurrent
@@ -1123,15 +1176,11 @@ element; `list values (q) with @each` adds shared values beneath it. See
 Concurrency.
 
 ### @module
-`( body 'module-name -- )` — *Unit constructor.* Validate a canonical
-module path, run the body on a fresh environment, and register the result.
-The body's final operand stack becomes a new slot's durable initial stack
-and is discarded on re-registration.
-
-The name is last, matching `def` and `set`: the bound name sits nearest
-the binder. Seeded registration is therefore `values (body) with 'name
-@module`, with the name riding above the composition and no shuffle at
-all. See Modules.
+`( body -- module )` — *Unit constructor.* Run the body on a fresh
+environment and return the resulting anonymous immutable module image. No
+registry name is claimed and no name is validated. The body's final operand
+stack becomes the image's initial-state template. Seed it with `values (body)
+with @module`. See Modules.
 
 ### @spawn
 `( quotation -- task )` — *Unit constructor*, contract `( -- ... )`
@@ -1626,6 +1675,14 @@ nonnegative int.
 
 ### raze
 `( list -- list )` — Flatten one level. Flat-map is `each raze`.
+
+### register
+`( module 'module-name -- )` — Validate a canonical module path and publish a
+module value under it. A missing name creates its registration and copies the
+image's initial-state template into the new durable stack; an existing name
+installs the new image and retains that registration's durable stack. One
+image may be registered under any number of names, each with independent
+state and lifetime. See Modules.
 
 ### reshape
 `( list shape -- list )` — Cycle the data into the exact nested-list

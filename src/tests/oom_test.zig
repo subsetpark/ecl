@@ -183,7 +183,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "({'kind 'custom 'data {'detail 7}} raise) @attempt pop " ++
             "[3 4] (+) with call pop [5 6] (+) with @attempt pop " ++
             "[7 8] (+) with @spawn await pop " ++
-            "[9 10] (+ 'x set) with 'oom-seeded @module oom-seeded.x pop",
+            "[9 10] (+ 'x set) with 'oom-seeded @defm oom-seeded.x pop",
     );
     try runOk(
         &runtime,
@@ -220,7 +220,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-reflection.ecl",
-        "((1) ( -- n ) 'f def) 'reflection-module @module " ++
+        "((1) ( -- n ) 'f def) 'reflection-module @defm " ++
             "'reflection-module use 'reflection-module.f body pop words " ++
             "'f which 'reflection-module.f see",
     );
@@ -238,34 +238,43 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-module.ecl",
-        "(1 'x setp (x) ( -- n ) 'get def) 'allocation-module @module " ++
+        "(1 'x setp (x) ( -- n ) 'get def) 'allocation-module @defm " ++
             "'allocation-module use get pop 'short 'allocation-module alias short.get pop " ++
-            "(2 'x setp (x) ( -- n ) 'get def) 'allocation-module @module get pop " ++
-            "(((dup) 'f def) 'bad @module) @attempt pop " ++
+            "(2 'x setp (x) ( -- n ) 'get def) 'allocation-module @defm get pop " ++
+            "(((dup) 'f def) 'bad @defm) @attempt pop " ++
             // A non-empty construction stack is captured as durable slot
             // state, so capture, commit, and re-registration discard each
             // have an allocation-failure path of their own.
-            "[11 12 13] (1 +) with 'oom-stateful @module " ++
-            "[21 22] (2 +) with 'oom-stateful @module " ++
+            "[11 12 13] (1 +) with 'oom-stateful @defm " ++
+            "[21 22] (2 +) with 'oom-stateful @defm " ++
             // Transactional updates allocate on the draft, the replacement
             // snapshot, and the caller window; the failing half must leave
             // the durable stack and the caller stack untouched.
             "[0] (((1 + dup without) within) 'bump def " ++
             "((dup without missing) within) 'boom def " ++
-            "((dup without) within) 'peek def) with 'oom-within @module " ++
+            "((dup without) within) 'peek def) with 'oom-within @defm " ++
             "oom-within.bump pop (oom-within.boom) @attempt pop " ++
             // The failing half must publish nothing, so the durable stack
             // still holds exactly what the successful half left.
             "oom-within.peek 1 match? pop " ++
             // Namespaced registration plus branded qualification and ordinary
             // late-bound execution each have Session-only allocation paths.
-            "((33) 'dynamic def) 'oom.namespaced @module " ++
+            "((33) 'dynamic def) 'oom.namespaced @defm " ++
             "'oom.namespaced 'dynamic qualify execute pop " ++
             "3 (dup) first execute pop pop " ++
             // Removal closes, quiesces, and retires through the same bounded
             // work, so its allocation-failure paths belong in the sweep too.
-            "[1 2] (((dup without) within) 'peek def) with 'oom-removed @module " ++
+            "[1 2] (((dup without) within) 'peek def) with 'oom-removed @defm " ++
             "oom-removed.peek pop 'oom-removed unmodule",
+    );
+    try runOk(
+        &runtime,
+        "oom-module-value.ecl",
+        // The value wrapper, the registration record, the copied state
+        // template, and the barrier publication each have their own ordinals.
+        // One construction registered twice and one reload reach all four.
+        "(1) @module dup 'oom-left register 'oom-right register " ++
+            "(2) @module 'oom-left register (3) @module pop",
     );
     var completion = try runtime.completionCandidates("allocation-");
     defer completion.deinit();

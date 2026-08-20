@@ -653,4 +653,4 @@
 
  )
 'table
-@module
+@defm

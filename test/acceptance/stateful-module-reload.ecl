@@ -11,7 +11,7 @@
  )
 with
 'counter
-@module
+@defm
 counter.tick
 counter.peek io.pp
 
@@ -33,7 +33,7 @@ counter.peek io.pp
  )
 with
 'counter
-@module
+@defm
 counter.peek io.pp
 counter.tick
 counter.peek io.pp
@@ -53,7 +53,7 @@ counter.doubled io.pp
  )
 with
 'counter
-@module
+@defm
 counter.migrate
 counter.peek io.pp
 
@@ -62,7 +62,7 @@ counter.peek io.pp
   ### def x
   (1 2) (bad -- shape -- here) 'x def)
  'counter
- @module)
+ @defm)
 @attempt
 'err
 at

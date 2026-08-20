@@ -83,6 +83,7 @@ test {
     _ = @import("tests/native_test.zig");
     _ = @import("tests/fuzz_test.zig");
     _ = @import("tests/stateful_module_test.zig");
+    _ = @import("tests/module_value_test.zig");
     _ = @import("tests/stdlib_test.zig");
     _ = @import("tests/hostio_test.zig");
     _ = @import("tests/result_test.zig");

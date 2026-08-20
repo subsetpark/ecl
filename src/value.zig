@@ -11,6 +11,7 @@ pub const Tag = enum(u8) {
     list,
     dict,
     task,
+    module,
 };
 
 /// The representation tag is a construction-time fact. Extending this enum is
@@ -25,6 +26,7 @@ pub const HeapKind = enum(u8) {
     leaf_symbol,
     dict,
     task,
+    module,
     reserved_mask,
 };
 
@@ -62,6 +64,11 @@ pub const DictHandle = opaque {
 
 pub const TaskHandle = opaque {};
 
+/// An immutable module image. The handle carries identity only: its content,
+/// lifetime, and registration semantics belong to modules.zig, and the heap
+/// knows nothing about them beyond a release callback.
+pub const ModuleHandle = opaque {};
+
 /// Kept beside Header so equality can inspect dicts without importing the
 /// operations layer and creating a module cycle.
 pub const DictPayload = struct {
@@ -79,6 +86,7 @@ pub const Value = union(Tag) {
     list: *ListHandle,
     dict: *DictHandle,
     task: *TaskHandle,
+    module: *ModuleHandle,
 
     pub fn tag(self: Value) Tag {
         return std.meta.activeTag(self);
@@ -90,6 +98,7 @@ pub const Value = union(Tag) {
             .list => |header| @import("heap.zig").headerFromList(header),
             .dict => |header| @import("heap.zig").headerFromDict(header),
             .task => |header| @import("heap.zig").headerFromTask(header),
+            .module => |header| @import("heap.zig").headerFromModule(header),
         };
     }
 
@@ -102,7 +111,7 @@ pub const Value = union(Tag) {
         if (self != .list) return false;
         return switch (self.list.kind()) {
             .leaf_char1, .leaf_char2, .leaf_char4 => true,
-            .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .reserved_mask => false,
+            .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .module, .reserved_mask => false,
         };
     }
 };
@@ -116,6 +125,6 @@ pub fn unicodeScalar(codepoint: u64) ?u21 {
 
 comptime {
     if (@sizeOf(Value) != 16) @compileError("Value must remain exactly 16 bytes");
-    if (@typeInfo(HeapKind).@"enum".fields.len != 10)
+    if (@typeInfo(HeapKind).@"enum".fields.len != 11)
         @compileError("HeapKind dispatch count changed; update every exhaustive representation switch");
 }

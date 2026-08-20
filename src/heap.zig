@@ -9,6 +9,7 @@ pub const Header = value.Header;
 pub const ListHandle = value.ListHandle;
 pub const DictHandle = value.DictHandle;
 pub const TaskHandle = value.TaskHandle;
+pub const ModuleHandle = value.ModuleHandle;
 pub const HeapKind = value.HeapKind;
 /// A read capability over one list's unboxed payload.
 ///
@@ -319,6 +320,43 @@ test "leaf capabilities exhaust allocation failures" {
     );
 }
 
+/// A stand-in for the semantic module image. The heap only ever calls
+/// `releaseImage`, so the probe can prove the ownership contract without
+/// importing the module layer and creating a cycle.
+const ProbeImage = struct {
+    releases: usize = 0,
+
+    fn releaseImage(self: *ProbeImage) void {
+        self.releases += 1;
+    }
+};
+
+/// Ownership on both exits: a failed `createModule` publishes nothing and the
+/// caller still owns its image reference, while a published value releases the
+/// image exactly once when its last reference drops.
+fn moduleCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
+    var cleanup = testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    var image: ProbeImage = .{};
+    const item = try createModule(ProbeImage, allocator, &image);
+    try std.testing.expectEqual(HeapKind.module, kind(item.heapHeader().?));
+    retainValue(item);
+    cleanup.releaseValue(item);
+    cleanup.capability().drain();
+    try std.testing.expectEqual(@as(usize, 0), image.releases);
+    cleanup.releaseValue(item);
+    cleanup.capability().drain();
+    try std.testing.expectEqual(@as(usize, 1), image.releases);
+}
+
+test "module capability exhausts allocation failures" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        moduleCapabilityFailureProbe,
+        .{},
+    );
+}
+
 pub const DictPayload = value.DictPayload;
 
 /// Capabilities are nominal opaque pointers with the same address as Header.
@@ -326,6 +364,7 @@ pub const DictPayload = value.DictPayload;
 const InitializingList = opaque {};
 const InitializingDict = opaque {};
 const InitializingTask = opaque {};
+const InitializingModule = opaque {};
 const UniqueHeader = opaque {};
 pub const UniqueList = opaque {};
 pub const UniqueDict = opaque {};
@@ -399,6 +438,15 @@ pub const TaskStorage = struct {
     destroy: *const fn (std.mem.Allocator, *anyopaque) ?Value,
 };
 
+/// A module value owns exactly one release of an opaque semantic payload.
+/// The heap never learns what a module image is: it stores the payload and
+/// the callback its factory derived, and the callback is what enters bounded
+/// retirement in the layer that owns the image's graph.
+pub const ModuleStorage = struct {
+    payload: *anyopaque,
+    release: *const fn (*anyopaque) void,
+};
+
 const Object = struct {
     header: HeaderImpl,
     capacity: usize,
@@ -451,6 +499,10 @@ pub fn headerFromTask(handle: *TaskHandle) *Header {
     return @ptrCast(@alignCast(handle));
 }
 
+pub fn headerFromModule(handle: *ModuleHandle) *Header {
+    return @ptrCast(@alignCast(handle));
+}
+
 fn mutableHeader(handle: anytype) *Header {
     return @ptrCast(@alignCast(@constCast(handle)));
 }
@@ -459,7 +511,7 @@ pub fn listKind(handle: *ListHandle) HeapKind {
     const result = kind(headerFromList(handle));
     std.debug.assert(switch (result) {
         .generic_spine, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .dict, .task, .reserved_mask => false,
+        .dict, .task, .module, .reserved_mask => false,
     });
     return result;
 }
@@ -489,6 +541,10 @@ fn publishDict(header: *InitializingDict) *DictHandle {
 }
 
 fn publishTask(header: *InitializingTask) *TaskHandle {
+    return @ptrCast(@alignCast(header));
+}
+
+fn publishModule(header: *InitializingModule) *ModuleHandle {
     return @ptrCast(@alignCast(header));
 }
 
@@ -551,7 +607,7 @@ fn allocObject(
         .leaf_char4 => try allocPayload(u32, allocator, capacity_value),
         .leaf_symbol => try allocPayload(u32, allocator, capacity_value),
         .dict => @ptrCast(try allocator.create(DictStorage)),
-        .task => unreachable,
+        .task, .module => unreachable,
         .reserved_mask => null,
     };
     return @ptrCast(@alignCast(&obj.header));
@@ -565,7 +621,7 @@ fn allocListHeader(
 ) error{OutOfMemory}!*InitializingList {
     std.debug.assert(switch (kind_value) {
         .generic_spine, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .dict, .task, .reserved_mask => false,
+        .dict, .task, .module, .reserved_mask => false,
     });
     return @ptrCast(@alignCast(try allocObject(allocator, kind_value, len_value, capacity_value)));
 }
@@ -582,7 +638,7 @@ pub fn LeafElement(comptime kind_value: HeapKind) type {
         .leaf_char1 => u8,
         .leaf_char2 => u16,
         .leaf_char4, .leaf_symbol => u32,
-        .dict, .task, .reserved_mask => @compileError("a list representation is required"),
+        .dict, .task, .module, .reserved_mask => @compileError("a list representation is required"),
     };
 }
 
@@ -598,7 +654,7 @@ pub fn leafElementSize(kind_value: HeapKind) usize {
         .leaf_char1 => @sizeOf(u8),
         .leaf_char2 => @sizeOf(u16),
         .leaf_char4, .leaf_symbol => @sizeOf(u32),
-        .dict, .task, .reserved_mask => 0,
+        .dict, .task, .module, .reserved_mask => 0,
     };
 }
 
@@ -689,7 +745,7 @@ pub const AnyListBuilder = union(enum) {
             .leaf_char2 => .{ .char2 = try .init(allocator, len_value, capacity_value) },
             .leaf_char4 => .{ .char4 = try .init(allocator, len_value, capacity_value) },
             .leaf_symbol => .{ .symbol = try .init(allocator, len_value, capacity_value) },
-            .dict, .task, .reserved_mask => unreachable,
+            .dict, .task, .module, .reserved_mask => unreachable,
         };
     }
 
@@ -818,6 +874,55 @@ pub fn taskStorage(header: *const TaskHandle) *const TaskStorage {
     return @ptrCast(@alignCast(objectConst(headerFromTask(@constCast(header))).payload.?));
 }
 
+fn allocModuleHeader(
+    allocator: std.mem.Allocator,
+    payload: *anyopaque,
+    release: *const fn (*anyopaque) void,
+) error{OutOfMemory}!*InitializingModule {
+    const obj = try allocator.create(Object);
+    errdefer allocator.destroy(obj);
+    const storage = try allocator.create(ModuleStorage);
+    storage.* = .{ .payload = payload, .release = release };
+    obj.* = .{
+        .header = HeaderImpl.init(.module, 0),
+        .capacity = 0,
+        .payload = @ptrCast(storage),
+        .next_destroy = null,
+        .destroy_index = 0,
+    };
+    return @ptrCast(@alignCast(&obj.header));
+}
+
+fn ModuleReleaseAdapter(comptime Payload: type) type {
+    return struct {
+        fn release(raw: *anyopaque) void {
+            const payload: *Payload = @ptrCast(@alignCast(raw));
+            Payload.releaseImage(payload);
+        }
+    };
+}
+
+/// Wraps one already-owned module image in a value. On success the value owns
+/// the reference the caller handed over; on failure the caller still owns it,
+/// because nothing was published. Final release calls `releaseImage`, which is
+/// where the semantic layer enters its own bounded retirement.
+pub fn createModule(
+    comptime Payload: type,
+    allocator: std.mem.Allocator,
+    payload: *Payload,
+) error{OutOfMemory}!Value {
+    const initializing = try allocModuleHeader(
+        allocator,
+        @ptrCast(payload),
+        ModuleReleaseAdapter(Payload).release,
+    );
+    return .{ .module = publishModule(initializing) };
+}
+
+pub fn moduleStorage(header: *const ModuleHandle) *const ModuleStorage {
+    return @ptrCast(@alignCast(objectConst(headerFromModule(@constCast(header))).payload.?));
+}
+
 fn allocPayload(
     comptime T: type,
     allocator: std.mem.Allocator,
@@ -882,7 +987,7 @@ pub fn writeUniqueList(list_header: *UniqueList, index: usize, item: Value) void
         .leaf_char2 => payloadItems(u16, raw)[index] = @intCast(item.char),
         .leaf_char4 => payloadItems(u32, raw)[index] = item.char,
         .leaf_symbol => payloadItems(u32, raw)[index] = item.symbol,
-        .dict, .task, .reserved_mask => unreachable,
+        .dict, .task, .module, .reserved_mask => unreachable,
     }
 }
 
@@ -911,6 +1016,7 @@ pub fn retainValue(item: Value) void {
         .list => |header| incRef(header),
         .dict => |header| incRef(header),
         .task => |header| incRef(header),
+        .module => |header| incRef(header),
     }
 }
 
@@ -1275,6 +1381,16 @@ pub const ReleaseDomain = struct {
                 obj.destroy_index = 1;
                 const storage: *TaskStorage = @constCast(taskStorage(@ptrCast(@alignCast(header))));
                 if (storage.destroy(self.allocator, storage.payload)) |child| self.releaseValue(child);
+                return true;
+            },
+            // The image's own graph is user-sized, so the callback only drops
+            // one reference; whatever that makes unreachable retires through
+            // this same domain in later bounded steps.
+            .module => {
+                if (obj.destroy_index != 0) return false;
+                obj.destroy_index = 1;
+                const storage: *ModuleStorage = @constCast(moduleStorage(@ptrCast(@alignCast(header))));
+                storage.release(storage.payload);
                 return true;
             },
             .leaf_i64,
@@ -1786,6 +1902,10 @@ fn freePayload(allocator: std.mem.Allocator, header: *Header) void {
             const storage: *TaskStorage = @constCast(taskStorage(@ptrCast(@alignCast(header))));
             allocator.destroy(storage);
         },
+        .module => {
+            const storage: *ModuleStorage = @constCast(moduleStorage(@ptrCast(@alignCast(header))));
+            allocator.destroy(storage);
+        },
         .reserved_mask => {},
     }
     obj.payload = null;
@@ -1836,7 +1956,7 @@ pub fn replaceBuffer(
         .leaf_char1 => resizePayload(u8, allocator, raw, new_capacity),
         .leaf_char2 => resizePayload(u16, allocator, raw, new_capacity),
         .leaf_char4, .leaf_symbol => resizePayload(u32, allocator, raw, new_capacity),
-        .dict, .task, .reserved_mask => unreachable,
+        .dict, .task, .module, .reserved_mask => unreachable,
     };
 }
 

@@ -66,7 +66,7 @@ test "definitions: module def and defp accept all four annotation forms" {
         "(4 div) ( n -- n : \"Divide by four.\" ) 'complete def " ++
         "(dup +) 'hidden defp " ++
         "(hidden 1 +) 'via-private def" ++
-        ") 'forms @module");
+        ") 'forms @defm");
     try expectStack(
         &runtime,
         "10 forms.bare 10 forms.effected 10 forms.documented 12 forms.complete 10 forms.via-private",
@@ -89,14 +89,14 @@ test "definitions: module def and defp accept all four annotation forms" {
     // no inferred check, so a word leaving two values crosses unimpeded.
     try expectErrorContains(
         &runtime,
-        "((1 2) ( -- n ) 'two def) 'liar @module liar.two",
+        "((1 2) ( -- n ) 'two def) 'liar @defm liar.two",
         &.{ "'kind 'contract", "'word 'liar.two", "declared (0 -- 1)" },
     );
-    try expectStack(&runtime, "((1 2) 'two def) 'quiet @module quiet.two", "1 2");
+    try expectStack(&runtime, "((1 2) 'two def) 'quiet @defm quiet.two", "1 2");
     // Malformed recognized annotations remain 'domain in a module root.
     try expectErrorContains(
         &runtime,
-        "((3) ( : ) 'bad def) 'broken @module",
+        "((3) ( : ) 'bad def) 'broken @defm",
         &.{ "'kind 'domain", "malformed definition annotation" },
     );
 }
@@ -123,7 +123,7 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     try expectErrorContains(&runtime, "'answer doc", &.{ "'kind 'domain", "documentation" });
     // `setp` carries the same simplification into a module root, where the
     // published constant needs no effect declaration to register.
-    try expectOk(&runtime, "(7 'x set 8 'h setp (h) 'peek def) 'm @module");
+    try expectOk(&runtime, "(7 'x set 8 'h setp (h) 'peek def) 'm @defm");
     try expectStack(&runtime, "m.x m.peek", "7 8");
     output.clearRetainingCapacity();
     try expectOk(&runtime, "'m.x see");
@@ -138,20 +138,20 @@ test "modules: a nonempty construction stack becomes the durable initial stack o
         defer runtime.deinit();
         // The residual construction window is captured rather than rejected,
         // and it leaves the caller's stack: the values moved into the slot.
-        try expectStack(&runtime, "(0 (1 +) 'bump def) 'counter @module", "");
+        try expectStack(&runtime, "(0 (1 +) 'bump def) 'counter @defm", "");
         // Re-registration builds a fresh proposal and discards it: only the
         // code generation advances, which reflection reports.
-        try expectStack(&runtime, "(100 (2 +) 'bump def) 'counter @module", "");
+        try expectStack(&runtime, "(100 (2 +) 'bump def) 'counter @defm", "");
         // Independently registered names own independent slots even when
         // their bodies come from the same quotation.
-        try expectStack(&runtime, "(7) 'left @module (7) 'right @module", "");
+        try expectStack(&runtime, "(7) 'left @defm (7) 'right @defm", "");
         // A body may still leave nothing behind; neither shape is an error.
-        try expectStack(&runtime, "((1) 'one def) 'stateless @module stateless.one", "1");
+        try expectStack(&runtime, "((1) 'one def) 'stateless @defm stateless.one", "1");
     }
     try std.testing.expect(counting.deinit() == .ok);
 }
 
-test "modules: with-seeded @module seeds the construction stack in order" {
+test "modules: with-seeded @defm seeds the construction stack in order" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     // `with` seeds the isolated body in list order, so the body observes the
@@ -159,23 +159,23 @@ test "modules: with-seeded @module seeds the construction stack in order" {
     // needing to read the durable stack back.
     try expectStack(
         &runtime,
-        "[10 3] (div 'quotient set) with 'divide @module divide.quotient",
+        "[10 3] (div 'quotient set) with 'divide @defm divide.quotient",
         "3",
     );
     // The body may consume some, reorder, and extend: whatever remains is
     // the slot's durable stack and never reaches the caller.
-    try expectStack(&runtime, "[1 2 3] (+ swap 9) with 'residue @module", "");
+    try expectStack(&runtime, "[1 2 3] (+ swap 9) with 'residue @defm", "");
     // Seeds that the body leaves untouched are legal too.
-    try expectStack(&runtime, "[4 5] () with 'untouched @module", "");
+    try expectStack(&runtime, "[4 5] () with 'untouched @defm", "");
     // The seeded values are gone from the caller's stack in every case.
-    try expectStack(&runtime, "[6 7] (+ 'sum set) with 'consumed @module consumed.sum", "13");
+    try expectStack(&runtime, "[6 7] (+ 'sum set) with 'consumed @defm consumed.sum", "13");
 }
 
 test "modules: dotted names qualify dynamically and split executable words at the final dot" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "((1) 'utils def) 'core @module");
-    try expectOk(&runtime, "((41) 'f def (42) 'g def) 'core.utils @module");
+    try expectOk(&runtime, "((1) 'utils def) 'core @defm");
+    try expectOk(&runtime, "((41) 'f def (42) 'g def) 'core.utils @defm");
     try expectStack(&runtime, "core.utils core.utils.f", "1 41");
     try expectStack(&runtime, "'core.utils 'f qualify dup type swap execute", "'word 41");
     try expectStack(&runtime, "'core.utils 1 ('f) ('g) if qualify execute", "41");
@@ -183,22 +183,22 @@ test "modules: dotted names qualify dynamically and split executable words at th
     try expectStack(&runtime, "utils.g", "42");
     try expectOk(&runtime, "'core.utils use");
     try expectStack(&runtime, "g", "42");
-    try expectOk(&runtime, "((43) 'f def) 'core.utils @module");
+    try expectOk(&runtime, "((43) 'f def) 'core.utils @defm");
     try expectStack(&runtime, "core.utils.f 'core.utils 'f qualify execute", "43 43");
     try expectOk(&runtime, "'utils unmodule");
     try expectErrorContains(&runtime, "core.utils.f", &.{ "'kind 'undefined-word", "core.utils.f" });
     try expectErrorContains(&runtime, "utils.f", &.{ "'kind 'undefined-word", "utils.f" });
-    try expectOk(&runtime, "((44) 'f def) 'core.utils @module");
+    try expectOk(&runtime, "((44) 'f def) 'core.utils @defm");
     try expectStack(&runtime, "core.utils.f", "44");
 }
 
 test "modules: execute preserves ordinary dispatch home contracts and errors" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "((3) 'secret defp (secret 4 +) 'f def) 'private.home @module");
+    try expectOk(&runtime, "((3) 'secret defp (secret 4 +) 'f def) 'private.home @defm");
     try expectStack(&runtime, "'private.home 'f qualify execute", "7");
     try expectOk(&runtime, "[5] (" ++
-        "((1 +) within) 'tick def ((dup without) within) 'peek def) with 'state.home @module");
+        "((1 +) within) 'tick def ((dup without) within) 'peek def) with 'state.home @defm");
     try expectStack(
         &runtime,
         "'state.home 'tick qualify execute 'state.home 'peek qualify execute",
@@ -216,12 +216,12 @@ test "modules: execute preserves ordinary dispatch home contracts and errors" {
 test "modules: removed identity builtin has no reservation and names validate by category" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    for ([_][]const u8{ "() '.bad @module", "() 'bad. @module", "() 'bad..path @module" }) |source|
+    for ([_][]const u8{ "() '.bad @defm", "() 'bad. @defm", "() 'bad..path @defm" }) |source|
         try expectErrorContains(&runtime, source, &.{"'kind 'parse"});
-    try expectErrorContains(&runtime, "() 1 @module", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "() 1 @defm", &.{"'kind 'type"});
     try expectErrorContains(&runtime, "1 use", &.{"'kind 'type"});
     try expectErrorContains(&runtime, "1 unmodule", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "((1) 'bad.name def) 'core.utils @module", &.{"'kind 'domain"});
+    try expectErrorContains(&runtime, "((1) 'bad.name def) 'core.utils @defm", &.{"'kind 'domain"});
     try expectErrorContains(&runtime, "1 'f qualify", &.{"'kind 'type"});
     try expectErrorContains(&runtime, "'core.utils 1 qualify", &.{"'kind 'type"});
     try expectErrorContains(&runtime, "'core..utils 'f qualify", &.{"'kind 'parse"});
@@ -234,7 +234,7 @@ const counter_module = "[0] (" ++
     "((1 +) within) 'tick def " ++
     "((dup without) within) 'peek def " ++
     "((swap + dup without) partial within) 'add def" ++
-    ") with 'c @module";
+    ") with 'c @defm";
 
 test "concurrency: within applications serialize and publish exactly the successful updates" {
     for ([_]usize{ 1, 8 }) |workers| {
@@ -256,7 +256,7 @@ test "concurrency: within applications serialize and publish exactly the success
             &runtime,
             "[['a 'b 'c]] (((uncons swap without) within) 'checkout def " ++
                 "((append) partial within) 'checkin def " ++
-                "((dup len without) within) 'size def) with 'pool @module pool.size",
+                "((dup len without) within) 'size def) with 'pool @defm pool.size",
             "3",
         );
         try expectStack(&runtime, "pool.checkout pool.size", "'a 2");
@@ -266,7 +266,7 @@ test "concurrency: within applications serialize and publish exactly the success
         try expectStack(
             &runtime,
             "[10 20 30] (((without without) within) 'top-two def " ++
-                "((dup without) within) 'peek def) with 'ordered @module ordered.top-two",
+                "((dup without) within) 'peek def) with 'ordered @defm ordered.top-two",
             "30 20",
         );
         try expectStack(&runtime, "ordered.peek", "10");
@@ -274,12 +274,53 @@ test "concurrency: within applications serialize and publish exactly the success
         // update, which is the multi-input counterpart of `partial`.
         try expectStack(
             &runtime,
-            "[100] (([2 3] (+ + dup without) with within) 'add-both def) with 'summed @module " ++
+            "[100] (([2 3] (+ + dup without) with within) 'add-both def) with 'summed @defm " ++
                 "summed.add-both",
             "105",
         );
         // A stateless module keeps its ordinary caller-stack behaviour.
-        try expectStack(&runtime, "((dup +) 'double def) 'plain @module 21 plain.double", "42");
+        try expectStack(&runtime, "((dup +) 'double def) 'plain @defm 21 plain.double", "42");
+    }
+}
+
+test "concurrency: one image registered twice arbitrates two independent slots" {
+    for ([_]usize{ 1, 8 }) |workers| {
+        var runtime = try session.Session.initWithConfig(
+            std.testing.allocator,
+            &.{},
+            .{ .worker_pool = workers },
+        );
+        defer runtime.deinit();
+        // One immutable image, two registrations. Each slot owns its own
+        // arbiter and durable stack, so concurrent applications through the
+        // two names never serialize against each other and never share a
+        // count.
+        try expectStack(
+            &runtime,
+            "[0] (((1 + dup without) within) 'tick def " ++
+                "((dup without) within) 'peek def) with @module " ++
+                "dup 'shared-left register 'shared-right register",
+            "",
+        );
+        try expectStack(
+            &runtime,
+            "[1] 40 take (pop (shared-left.tick) @spawn (shared-right.tick) @spawn pair) " ++
+                "each raze await-all pop shared-left.peek shared-right.peek",
+            "40 40",
+        );
+        // Reloading one registration keeps the other's state and code
+        // reachable while old generations quiesce.
+        try expectStack(
+            &runtime,
+            "[0] (((10 + dup without) within) 'tick def " ++
+                "((dup without) within) 'peek def) with @module 'shared-left register",
+            "",
+        );
+        try expectStack(&runtime, "shared-left.tick shared-right.tick", "50 41");
+        // Removing one leaves the other completely intact.
+        try expectOk(&runtime, "'shared-left unmodule");
+        try expectStack(&runtime, "shared-right.peek", "41");
+        try expectErrorContains(&runtime, "shared-left.peek", &.{"'kind 'undefined-word"});
     }
 }
 
@@ -291,7 +332,7 @@ test "concurrency: failed within applications publish neither draft nor pending 
     // A quotation error publishes nothing and leaves the caller stack clean.
     try expectOk(&runtime, "[0] (((1 + missing) within) 'boom def " ++
         "((dup without missing) within) 'leaks def " ++
-        "((dup without) within) 'peek def) with 'c @module");
+        "((dup without) within) 'peek def) with 'c @defm");
     try expectErrorContains(&runtime, "c.boom", &.{ "'kind 'undefined-word", "'word 'missing" });
     try expectStack(&runtime, "c.peek", "1");
     // Values already moved outward by `without` are discarded with the draft.
@@ -299,7 +340,7 @@ test "concurrency: failed within applications publish neither draft nor pending 
     try expectStack(&runtime, "c.peek", "1");
     // `without` on an empty draft is 'underflow and publishes nothing.
     try expectOk(&runtime, "[0] (((without without) within) 'greedy def " ++
-        "((1 +) within) 'tick def ((dup without) within) 'peek def) with 'c @module");
+        "((1 +) within) 'tick def ((dup without) within) 'peek def) with 'c @defm");
     try expectErrorContains(&runtime, "c.greedy", &.{"'kind 'underflow"});
     try expectStack(&runtime, "c.peek", "1");
     // Cancellation races the application, so the tick either published in
@@ -326,15 +367,15 @@ test "concurrency: within rejects parking nesting and cross-module drafts as dom
         "(((1) @spawn 5 await-for pop) within) 'deadlined def " ++
         "([(1) (2)] (@spawn) each await-all pop) 'joined def " ++
         "(([(1)] (@spawn) each await-all pop) within) 'joined-within def " ++
-        "((dup without) within) 'peek def) with 'p @module");
+        "((dup without) within) 'peek def) with 'p @defm");
     // Reloading or removing *any* module from inside a state application
     // acquires a second slot's turn, which is the same deadlock shape a
     // nested `within` is: two units each holding one slot and waiting for
     // the other's would never make progress.
     try expectOk(&runtime, "[0] ((('c unmodule) within) 'kill-other def " ++
-        "((((1) 'x def) 'c @module) within) 'reload-other def " ++
+        "((((1) 'x def) 'c @defm) within) 'reload-other def " ++
         "(('q unmodule) within) 'kill-self def " ++
-        "((dup without) within) 'peek def) with 'q @module");
+        "((dup without) within) 'peek def) with 'q @defm");
     for ([_][]const u8{
         "p.nested",        "p.cross",      "p.parked",       "p.deadlined",
         "p.joined-within", "q.kill-other", "q.reload-other", "q.kill-self",
@@ -353,14 +394,14 @@ test "concurrency: within rejects parking nesting and cross-module drafts as dom
     try expectErrorContains(&runtime, "without", &.{ "'kind 'domain", "within application" });
     try expectErrorContains(
         &runtime,
-        "((1) within) 'root @module",
+        "((1) within) 'root @defm",
         &.{ "'kind 'domain", "published module word" },
     );
 }
 
 const reload_counter = "[0] (" ++
     "((1 +) within) 'tick def " ++
-    "((dup without) within) 'peek def) with 'c @module";
+    "((dup without) within) 'peek def) with 'c @defm";
 
 test "concurrency: hot reload retains the durable stack and quiesces old generations" {
     for ([_]usize{ 1, 8 }) |workers| {
@@ -382,7 +423,7 @@ test "concurrency: hot reload retains the durable stack and quiesces old generat
             &runtime,
             "[1] 30 take (pop ((c.tick) @attempt result.ok?) @spawn) each " ++
                 "[0] (((1 +) within) 'tick def ((dup without) within) 'peek def " ++
-                "((dup 2 * without) within) 'doubled def) with 'c @module " ++
+                "((dup 2 * without) within) 'doubled def) with 'c @defm " ++
                 "await-all ('ok at first) each sum 30 + c.peek match?",
             "1",
         );
@@ -391,7 +432,7 @@ test "concurrency: hot reload retains the durable stack and quiesces old generat
         // Failed registration changes neither behaviour nor state.
         try expectErrorContains(
             &runtime,
-            "((1) (bad -- shape -- here) 'x def) 'c @module",
+            "((1) (bad -- shape -- here) 'x def) 'c @defm",
             &.{"'kind 'domain"},
         );
         try expectStack(&runtime, "c.tick c.peek c.doubled swap 2 * match?", "1");
@@ -400,9 +441,9 @@ test "concurrency: hot reload retains the durable stack and quiesces old generat
         // not publish state — the invariant the arbiter barrier exists to
         // hold. The replacement generation is unaffected.
         try expectOk(&runtime, "[5] (" ++
-            "((((1 +) within) 'tick def ((dup without) within) 'peek def) 'stale @module " ++
+            "((((1 +) within) 'tick def ((dup without) within) 'peek def) 'stale @defm " ++
             "(99 +) within) 'publish-late def " ++
-            "((dup without) within) 'peek def) with 'stale @module");
+            "((dup without) within) 'peek def) with 'stale @defm");
         try expectErrorContains(
             &runtime,
             "stale.publish-late",
@@ -414,8 +455,8 @@ test "concurrency: hot reload retains the durable stack and quiesces old generat
         // ordinary; from inside one it is the shape whose barrier could
         // never complete, so it is refused before any wait.
         try expectOk(&runtime, "[0] (" ++
-            "((((1) 'x def) 'self @module) within) 'suicide def " ++
-            "((dup without) within) 'peek def) with 'self @module");
+            "((((1) 'x def) 'self @defm) within) 'suicide def " ++
+            "((dup without) within) 'peek def) with 'self @defm");
         try expectErrorContains(&runtime, "self.suicide", &.{ "'kind 'domain", "state application" });
         try expectStack(&runtime, "self.peek", "0");
     }
@@ -432,8 +473,8 @@ test "concurrency: superseded code may finish but cannot acquire new state autho
         // `reload-me` continues in the superseded generation after replacing
         // its own code, while the replacement owns the unchanged durable state.
         try expectOk(&runtime, "[5] (" ++
-            "((((dup without) within) 'peek def) 'identity @module 7) 'reload-me def " ++
-            "((dup without) within) 'peek def) with 'identity @module");
+            "((((dup without) within) 'peek def) 'identity @defm 7) 'reload-me def " ++
+            "((dup without) within) 'peek def) with 'identity @defm");
         try expectStack(&runtime, "identity.reload-me identity.peek", "7 5");
     }
 }
@@ -452,14 +493,14 @@ test "concurrency: delayed old code cannot reach a recycled replacement slot" {
         // same allocation churn. No old `within` operation may reach it.
         try expectOk(&runtime, "[0] (" ++
             "(((1 +) within) @attempt pop) 'probe def" ++
-            ") with 'old @module");
+            ") with 'old @defm");
         try expectStack(
             &runtime,
             "[1] 200 take (pop (old.probe) @spawn) each " ++
                 "('old unmodule [700] (" ++
                 "((1 +) within) 'tick def " ++
                 "((dup without) within) 'peek def " ++
-                "(99) 'marker def) with 'replacement @module) @spawn append " ++
+                "(99) 'marker def) with 'replacement @defm) @spawn append " ++
                 "await-all pop replacement.marker replacement.tick replacement.peek",
             "99 701",
         );
@@ -468,7 +509,7 @@ test "concurrency: delayed old code cannot reach a recycled replacement slot" {
 
 const removable_module = "[0] (" ++
     "((1 +) within) 'tick def " ++
-    "((dup without) within) 'peek def) with 'c @module";
+    "((dup without) within) 'peek def) with 'c @defm";
 
 test "concurrency: unmodule closes quiesces and retires slots names and aliases" {
     for ([_]usize{ 1, 8 }) |workers| {
@@ -517,14 +558,14 @@ test "concurrency: unmodule closes quiesces and retires slots names and aliases"
         // Removing a module from inside its own state application is the one
         // shape whose barrier could never complete, so it is refused.
         try expectOk(&runtime, "[0] ((('self unmodule) within) 'suicide def " ++
-            "((dup without) within) 'peek def) with 'self @module");
+            "((dup without) within) 'peek def) with 'self @defm");
         try expectErrorContains(&runtime, "self.suicide", &.{ "'kind 'domain", "state application" });
         try expectStack(&runtime, "self.peek", "0");
     }
 }
 
 const churn_cycle = "[\"a durable string\" [1 2 3] {'k 'v}] (" ++
-    "((dup without) within) 'peek def) with 'churn @module churn.peek pop 'churn unmodule";
+    "((dup without) within) 'peek def) with 'churn @defm churn.peek pop 'churn unmodule";
 
 test "concurrency: a cancelled unmodule leaves nothing stranded" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
@@ -542,14 +583,14 @@ test "concurrency: a cancelled unmodule leaves nothing stranded" {
         // than pre-armed. Each batch is one Unit and the source differs only
         // in its count, excluding per-Unit archive/task costs from the bound.
         const cancellation_cycle = "(8192 (0) times " ++
-            "((dup without) within) 'peek def (1) 'alive def) 'doomed @module" ++
+            "((dup without) within) 'peek def (1) 'alive def) 'doomed @defm" ++
             " ((('doomed.alive execute) @attempt result.ok?) () while) @spawn 'close-watcher set" ++
             " ('doomed unmodule (1) () while) @spawn 'removal-task set" ++
             " close-watcher await pop removal-task cancel" ++
             " removal-task await 'err at 'kind at 'cancelled match? pop" ++
             // A successful public mutation drives reuse settlement while the
             // Session remains live; shutdown is not the cleanup mechanism.
-            " [1] (((dup without) within) 'peek def) with 'settler @module" ++
+            " [1] (((dup without) within) 'peek def) with 'settler @defm" ++
             " settler.peek pop 'settler unmodule";
         const small = "[1] 2 take (pop " ++ cancellation_cycle ++ ") for";
         const large = "[1] 8 take (pop " ++ cancellation_cycle ++ ") for";

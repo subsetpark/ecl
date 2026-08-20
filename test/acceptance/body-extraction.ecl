@@ -4,5 +4,5 @@
  ### def f
  (s 2 +) (-- n) 'f def)
 'm
-@module
+@defm
 'm.f body call

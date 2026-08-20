@@ -29,7 +29,7 @@ pub const EffectQuotation = opaque {};
 pub fn quotation(header: *value.ListHandle) ?*Quotation {
     return switch (header.kind()) {
         .generic_spine, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => @ptrCast(@alignCast(header)),
-        .dict, .task, .reserved_mask => null,
+        .dict, .task, .module, .reserved_mask => null,
     };
 }
 
@@ -40,7 +40,7 @@ pub fn quotationHeader(body: *const Quotation) *value.ListHandle {
 pub fn documentation(header: *value.ListHandle) ?*DocumentationString {
     return switch (header.kind()) {
         .leaf_char1, .leaf_char2, .leaf_char4 => @ptrCast(@alignCast(header)),
-        .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .reserved_mask => null,
+        .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .module, .reserved_mask => null,
     };
 }
 
@@ -68,24 +68,20 @@ pub const Binding = union(enum) {
     }
 };
 pub const Visibility = enum { public, private };
+/// Where a definition was published. A module definition records only its own
+/// module-local name: the image it belongs to has no canonical name, and the
+/// registration through which a call reached it is what supplies the qualified
+/// spelling and the live state. Baking a name here would make one image
+/// unregisterable twice; baking a slot here would put a cycle in the value
+/// heap.
 pub const BindingOrigin = union(enum) {
     top,
-    module: struct {
-        home: intern.ModuleName,
-        trace_word: u32,
-    },
+    module_local: struct { trace_word: intern.BindingName },
 
-    pub fn home(self: BindingOrigin) ?intern.ModuleName {
+    pub fn traceWord(self: BindingOrigin) ?intern.BindingName {
         return switch (self) {
             .top => null,
-            .module => |module| module.home,
-        };
-    }
-
-    pub fn traceWord(self: BindingOrigin) ?u32 {
-        return switch (self) {
-            .top => null,
-            .module => |module| module.trace_word,
+            .module_local => |local| local.trace_word,
         };
     }
 };
@@ -221,29 +217,29 @@ const BindingSpec = struct {
         };
     }
     fn fromModule(
-        home: intern.ModuleName,
-        trace_word: u32,
+        name: intern.NamespaceName,
         publication: ModulePublication,
     ) BindingSpec {
+        const origin: BindingOrigin = .{ .module_local = .{ .trace_word = name } };
         return switch (publication) {
             .word => |word| .{
                 .binding = .{ .word = word.body },
                 .visibility = word.visibility,
-                .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
+                .origin = origin,
                 .effect = word.effect,
                 .doc = word.doc,
             },
             .native => |native| .{
                 .binding = .{ .native = native.callable },
                 .visibility = native.visibility,
-                .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
+                .origin = origin,
                 .effect = native.effect,
                 .doc = native.doc,
             },
             .builtin => |primitive| .{
                 .binding = .{ .builtin = primitive.primitive },
                 .visibility = primitive.visibility,
-                .origin = .{ .module = .{ .home = home, .trace_word = trace_word } },
+                .origin = origin,
                 .effect = primitive.effect,
                 .doc = primitive.doc,
             },
@@ -339,11 +335,9 @@ pub const BindingLease = struct {
         self.* = undefined;
     }
 
-    pub fn home(self: BindingLease) ?intern.ModuleName {
-        return self.origin.home();
-    }
-
-    pub fn traceWord(self: BindingLease) ?u32 {
+    /// The definition's module-local name, or null for a top-level binding.
+    /// Present exactly when the binding is module-local.
+    pub fn traceWord(self: BindingLease) ?intern.BindingName {
         return self.origin.traceWord();
     }
 };
@@ -1083,7 +1077,7 @@ const ScopeAllocation = enum { embedded, heap };
 const ScopeStorage = union(enum) {
     session: *Environment,
     core_build: *Environment,
-    module_root: struct { target: *Environment, home: intern.ModuleName },
+    module_root: *Environment,
     isolated,
 };
 pub const Scope = struct {
@@ -1202,12 +1196,10 @@ pub const Scope = struct {
     ) Scope {
         return .{ .allocator = allocator, .parent = parent, .storage = storage };
     }
-    pub fn moduleRoot(
-        allocator: std.mem.Allocator,
-        target: *Environment,
-        home: intern.ModuleName,
-    ) Scope {
-        return direct(allocator, .{ .module_root = .{ .target = target, .home = home } }, null);
+    /// A module image's root. It carries no canonical name: the same frozen
+    /// environment may execute under any number of registrations.
+    pub fn moduleRoot(allocator: std.mem.Allocator, target: *Environment) Scope {
+        return direct(allocator, .{ .module_root = target }, null);
     }
     pub fn lazy(allocator: std.mem.Allocator, parent: *Scope) Scope {
         parent.retain();
@@ -1235,7 +1227,7 @@ pub const Scope = struct {
         return switch (self.storage) {
             .session => |target| .init(target),
             .core_build => |target| .init(target),
-            .module_root => |module| .init(module.target),
+            .module_root => |target| .init(target),
             .isolated => if (self.isolated_environment.load(.acquire)) |target| .init(target) else null,
         };
     }
@@ -1243,7 +1235,7 @@ pub const Scope = struct {
         return switch (self.storage) {
             .session => |target| target.releases,
             .core_build => |target| target.releases,
-            .module_root => |module| module.target.releases,
+            .module_root => |target| target.releases,
             .isolated => self.parent.?.releaseDomain(),
         };
     }
@@ -1279,7 +1271,7 @@ pub const Scope = struct {
         return switch (self.storage) {
             .session => |target| target,
             .core_build => |target| target,
-            .module_root => |module| module.target,
+            .module_root => |target| target,
             .isolated => blk: {
                 if (self.isolated_environment.load(.acquire)) |target| break :blk target;
                 std.Io.Threaded.mutexLock(&self.publication_lock);
@@ -1321,31 +1313,19 @@ pub const Scope = struct {
         publication: ModulePublication,
     ) BindError!*BindingCell {
         return switch (self.storage) {
-            .module_root => |module| {
-                var qualified = try intern.QualifiedCursor.init(
-                    self.allocator,
-                    intern.qualifiedName(module.home, name),
-                );
-                defer qualified.deinit();
-                const trace_word = try poll.driveFallible(u32, &qualified, .{});
-                return module.target.bind(
-                    name,
-                    BindingSpec.fromModule(module.home, trace_word, publication),
-                );
-            },
+            .module_root => |target| target.bind(name, BindingSpec.fromModule(name, publication)),
             else => unreachable,
         };
     }
     pub fn publishModuleCursor(
         self: *Scope,
         name: intern.NamespaceName,
-        trace_word: u32,
         publication: ModulePublication,
     ) error{OutOfMemory}!Environment.BindCursor {
         return switch (self.storage) {
-            .module_root => |module| module.target.bindCursor(
+            .module_root => |target| target.bindCursor(
                 name,
-                BindingSpec.fromModule(module.home, trace_word, publication),
+                BindingSpec.fromModule(name, publication),
             ),
             else => unreachable,
         };
@@ -1358,7 +1338,7 @@ pub const Scope = struct {
     }
     pub fn freezeModule(self: *Scope) void {
         switch (self.storage) {
-            .module_root => |module| module.target.freeze(),
+            .module_root => |target| target.freeze(),
             else => unreachable,
         }
     }

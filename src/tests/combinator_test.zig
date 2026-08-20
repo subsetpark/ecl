@@ -320,7 +320,7 @@ test "idioms: late binding defeats recognition" {
     defer used_sort.deinit();
     try expectStack(
         &used_sort,
-        "((pop [0]) (a -- b) 'grade def) 'm @module 'm use [3 1 2] sort",
+        "((pop [0]) (a -- b) 'grade def) 'm @defm 'm use [3 1 2] sort",
         "[3]",
     );
     try std.testing.expectEqual(@as(u64, 0), used_sort.lastIdiomHits());
@@ -331,7 +331,7 @@ test "idioms: late binding defeats recognition" {
     defer between_applications.deinit();
     try expectStack(
         &between_applications,
-        "[1 2] (dup 1 = (((pop 42) (a -- b) 'f def) 'm @module) () if m.f) each",
+        "[1 2] (dup 1 = (((pop 42) (a -- b) 'f def) 'm @defm) () if m.f) each",
         "[42 42]",
     );
     try std.testing.expectEqual(@as(u64, 0), between_applications.lastIdiomHits());

@@ -11,86 +11,106 @@ const list = @import("list.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const poll_api = @import("poll.zig");
 
-pub const ModuleGeneration = struct {
+/// The execution identity of module code: which image is running, and — when
+/// the code was reached through the registry — which registration owns its
+/// name, durable state, and lifetime. A construction root has no registration,
+/// which is what makes `within` structurally impossible while a body is still
+/// building its image.
+const ExecutionHome = struct {
+    image: *ModuleImage,
+    registration: ?*Registration,
+
+    fn retain(self: *const ExecutionHome) void {
+        if (self.registration) |registration| registration.retain() else self.image.retain();
+    }
+    fn release(self: *const ExecutionHome) void {
+        if (self.registration) |registration| registration.release() else self.image.release();
+    }
+};
+
+/// The immutable content of a module: the frozen environment its definitions
+/// live in, the module-root scope they were published through, and the
+/// construction body's final operand stack as an initial-state template.
+///
+/// An image owns no canonical name, registry slot, arbiter, generation
+/// currency, or `SlotLease`. That absence is the whole point: it lets one
+/// image back several independent registrations, and it keeps the value heap a
+/// DAG, because a registration retains an image and never the reverse.
+const ModuleImage = struct {
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(u32) = .init(1),
-    name: intern.ModuleName,
-    generation: u64 = 0,
     environment: env.Environment,
     scope: env.Scope,
-    /// A candidate has no slot capability, which makes `within`
-    /// structurally impossible at registration root. Publication installs
-    /// an owned lifetime witness that remains with this generation through
-    /// supersession and delayed retirement; slot storage therefore cannot
-    /// be recycled while old code can still name it.
-    slot_lifetime: union(enum) {
-        provisional,
-        published: SlotLease,
-    } = .provisional,
-    /// The construction body's final operand stack, bottom first. It becomes
-    /// a new slot's durable initial stack and is discarded on
-    /// re-registration; entries are scalars until the capture fills them, so
-    /// every element is releasable at any point.
-    proposed_state: []value.Value = &.{},
+    /// The construction body's final operand stack, bottom first. A first
+    /// registration copies it into that slot's durable stack and a
+    /// re-registration discards it for that slot; entries are scalars until
+    /// the capture fills them, so every element is releasable at any point.
+    initial_state: []value.Value = &.{},
+    /// The construction-root home. Its registration is null, so no state
+    /// application can open against a module that is still being built.
+    construction_home: ExecutionHome = undefined,
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: union(enum) {
         live,
-        proposal: usize,
+        template: usize,
         scope: env.Scope.EmbeddedTeardownCursor,
         environment: env.Environment.TeardownCursor,
     } = .live,
 
-    pub fn create(
+    fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        name: intern.ModuleName,
-    ) error{OutOfMemory}!*ModuleGeneration {
-        const result = try allocator.create(ModuleGeneration);
+    ) error{OutOfMemory}!*ModuleImage {
+        const result = try allocator.create(ModuleImage);
         result.allocator = allocator;
         result.refs = .init(1);
-        result.name = name;
-        result.generation = 0;
         result.environment = env.Environment.init(allocator, releases);
-        result.scope = env.Scope.moduleRoot(allocator, &result.environment, name);
-        result.slot_lifetime = .provisional;
-        result.proposed_state = &.{};
+        result.scope = env.Scope.moduleRoot(allocator, &result.environment);
+        result.initial_state = &.{};
+        result.construction_home = .{ .image = result, .registration = null };
         result.retirement = .{};
         result.retirement_state = .live;
         return result;
     }
 
-    pub fn retain(self: *ModuleGeneration) void {
+    fn retain(self: *ModuleImage) void {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
     }
 
-    pub fn release(self: *ModuleGeneration) void {
+    fn release(self: *ModuleImage) void {
         const old = self.refs.fetchSub(1, .release);
         std.debug.assert(old != 0);
         if (old != 1) return;
         _ = self.refs.load(.acquire);
-        self.retirement_state = if (self.proposed_state.len == 0)
+        self.retirement_state = if (self.initial_state.len == 0)
             .{ .scope = .init(&self.scope) }
         else
-            .{ .proposal = self.proposed_state.len };
+            .{ .template = self.initial_state.len };
         self.environment.releases.retire(self, &self.retirement);
+    }
+
+    /// The heap's module value calls this on final release; whatever the drop
+    /// makes unreachable retires through the same domain in later steps.
+    pub fn releaseImage(self: *ModuleImage) void {
+        self.release();
     }
 
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
-        self: *ModuleGeneration,
+        self: *ModuleImage,
     ) bool {
         return switch (self.retirement_state) {
             .live => unreachable,
-            .proposal => |remaining| {
-                releases.releaseValue(self.proposed_state[remaining - 1]);
+            .template => |remaining| {
+                releases.releaseValue(self.initial_state[remaining - 1]);
                 if (remaining != 1) {
-                    self.retirement_state = .{ .proposal = remaining - 1 };
+                    self.retirement_state = .{ .template = remaining - 1 };
                     return false;
                 }
-                allocator.free(self.proposed_state);
-                self.proposed_state = &.{};
+                allocator.free(self.initial_state);
+                self.initial_state = &.{};
                 self.retirement_state = .{ .scope = .init(&self.scope) };
                 return false;
             },
@@ -101,18 +121,82 @@ pub const ModuleGeneration = struct {
             },
             .environment => |*environment| {
                 if (!environment.advance()) return false;
-                switch (self.slot_lifetime) {
-                    .provisional => {},
-                    .published => |*lease| lease.deinit(),
-                }
                 allocator.destroy(self);
                 return true;
             },
         };
     }
+};
+
+/// One published code generation of one canonical name. It retains the image
+/// it publishes and owns everything the image deliberately does not: the name,
+/// the generation number, and the slot lifetime witness that keeps the durable
+/// state and arbiter reachable while old code can still name them.
+const Registration = struct {
+    allocator: std.mem.Allocator,
+    refs: std.atomic.Value(u32) = .init(1),
+    /// One retained image reference held for this generation's whole lifetime.
+    image: *ModuleImage,
+    name: intern.ModuleName,
+    generation: u64 = 0,
+    /// A provisional registration exists only inside a publication cursor and
+    /// is never reachable as a home, which makes `within` at registration
+    /// time structurally impossible. Publication installs an owned lifetime
+    /// witness that stays with this generation through supersession and
+    /// delayed retirement, so slot storage cannot be recycled while old code
+    /// can still name it.
+    slot_lifetime: union(enum) {
+        provisional,
+        published: SlotLease,
+    } = .provisional,
+    home: ExecutionHome = undefined,
+    retirement: heap.ReleaseDomain.Retirement = .{},
+
+    /// Retains `image` on success; on failure the caller still owns its own
+    /// reference and nothing was retained.
+    fn create(
+        allocator: std.mem.Allocator,
+        image: *ModuleImage,
+        name: intern.ModuleName,
+    ) error{OutOfMemory}!*Registration {
+        const result = try allocator.create(Registration);
+        image.retain();
+        result.* = .{ .allocator = allocator, .image = image, .name = name };
+        result.home = .{ .image = image, .registration = result };
+        return result;
+    }
+
+    fn retain(self: *Registration) void {
+        const old = self.refs.fetchAdd(1, .monotonic);
+        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
+    }
+
+    fn release(self: *Registration) void {
+        const old = self.refs.fetchSub(1, .release);
+        std.debug.assert(old != 0);
+        if (old != 1) return;
+        _ = self.refs.load(.acquire);
+        self.image.environment.releases.retire(self, &self.retirement);
+    }
+
+    /// Constant time: the lease and the image reference each drop by one, and
+    /// the image's own user-sized graph retires as separate bounded work.
+    pub fn advanceRetirement(
+        _: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *Registration,
+    ) bool {
+        switch (self.slot_lifetime) {
+            .provisional => {},
+            .published => |*lease| lease.deinit(),
+        }
+        self.image.release();
+        allocator.destroy(self);
+        return true;
+    }
 
     pub fn resolve(
-        self: *const ModuleGeneration,
+        self: *const Registration,
         id: u32,
         public_only: bool,
     ) ?env.BindingLease {
@@ -148,25 +232,25 @@ pub const ModuleGeneration = struct {
         }
     };
     pub fn resolveCursor(
-        self: *const ModuleGeneration,
+        self: *const Registration,
         id: u32,
         public_only: bool,
     ) ResolveCursor {
-        const home = ModuleHome.init(@constCast(self));
+        const home = ModuleHome.init(&@constCast(self).home);
         return .{
             .allocator = self.allocator,
             .public_only = public_only,
-            .lookup = self.environment.directLookupCursor(id),
+            .lookup = self.image.environment.directLookupCursor(id),
             .pin = home.pinInternal(),
         };
     }
 
     pub fn publicNamesOwned(
-        self: *const ModuleGeneration,
+        self: *const Registration,
         allocator: std.mem.Allocator,
     ) error{OutOfMemory}![]u32 {
         var visible = poll.ChunkList(u32).init(allocator);
-        defer visible.retire(self.environment.releases);
+        defer visible.retire(self.image.environment.releases);
         var cursor = self.publicNameCursor();
         defer cursor.deinit();
         while (true) switch (cursor.advance()) {
@@ -207,11 +291,11 @@ pub const ModuleGeneration = struct {
             };
         }
     };
-    pub fn publicNameCursor(self: *const ModuleGeneration) PublicNameCursor {
-        const home = ModuleHome.init(@constCast(self));
+    pub fn publicNameCursor(self: *const Registration) PublicNameCursor {
+        const home = ModuleHome.init(&@constCast(self).home);
         return .{
             .allocator = self.allocator,
-            .inner = self.environment.nameCursor(),
+            .inner = self.image.environment.nameCursor(),
             .pin = home.pinInternal(),
         };
     }
@@ -254,18 +338,26 @@ fn closeArbiter(owning: *ModuleSlot) void {
     owning.phase.store(.closing, .release);
 }
 
-fn generationSlot(generation: *const ModuleGeneration) ?*ModuleSlot {
-    return switch (generation.slot_lifetime) {
+fn registrationSlot(registration: *const Registration) ?*ModuleSlot {
+    return switch (registration.slot_lifetime) {
         .provisional => null,
         .published => |lease| lease.slot(),
     };
+}
+
+/// The slot behind an executing home, or null when the home is a construction
+/// root: an anonymous image has no registration, so it has no durable state to
+/// open a transaction against.
+fn homeSlot(home: *const ModuleHome) ?*ModuleSlot {
+    return registrationSlot(home.state().registration orelse return null);
 }
 
 /// Retains the published generation's slot witness. The returned capability
 /// crosses the gap between inspecting a home and joining the slot arbiter;
 /// callers never carry an unprotected slot pointer through that gap.
 pub fn retainHomeSlot(home: *const ModuleHome, _: *const ExecutionAccess) ?SlotLease {
-    return switch (home.generation().slot_lifetime) {
+    const registration = home.state().registration orelse return null;
+    return switch (registration.slot_lifetime) {
         .provisional => null,
         .published => |lease| lease.clone(),
     };
@@ -275,9 +367,9 @@ pub fn retainHomeSlot(home: *const ModuleHome, _: *const ExecutionAccess) ?SlotL
 /// Old code keeps running under its pin exactly as it always has, but it may
 /// not publish state once a replacement representation is current.
 pub fn homeIsCurrent(home: *const ModuleHome, _: *const ExecutionAccess) bool {
-    const generation = home.generation();
-    const owning = generationSlot(generation) orelse return false;
-    return owning.publisher.isCurrent(generation);
+    const registration = home.state().registration orelse return false;
+    const owning = registrationSlot(registration) orelse return false;
+    return owning.publisher.isCurrent(registration);
 }
 
 /// One place in a slot's fair FIFO, and the only capability that authorizes
@@ -325,7 +417,7 @@ pub const StateTurn = struct {
     }
 
     pub fn sameSlot(self: *const StateTurn, home: *const ModuleHome, _: *const ExecutionAccess) bool {
-        return generationSlot(home.generation()) == self.lease.slot();
+        return homeSlot(home) == self.lease.slot();
     }
 
     /// Spends the unit's authority and joins the queue. Admission and the
@@ -431,7 +523,7 @@ pub const StateTurn = struct {
     }
 };
 
-const GenerationPublisher = snapshot_api.Publisher(ModuleGeneration);
+const GenerationPublisher = snapshot_api.Publisher(Registration);
 
 /// Nominal ownership of one permanent registry-inventory node. A slot keeps
 /// this capability for its allocation lifetime, including while retired and
@@ -618,43 +710,52 @@ const DirectoryLease = struct {
 /// callbacks never receive it.
 pub const ExecutionAccess = opaque {};
 
-/// Narrow identity used by executing frames. Observation leases never expose
-/// this pointer; only code holding the Session's execution authority can
-/// obtain its scope or create another lifetime pin.
+/// Narrow identity used by executing frames: the image that is running plus
+/// the registration, if any, whose name and durable state it is running
+/// against. Observation leases never expose this pointer; only code holding
+/// the Session's execution authority can obtain its scope or another pin.
+///
+/// Because one image may be registered more than once, this — not anything in
+/// the image or in a definition's metadata — is what selects private lookup,
+/// same-home dispatch, diagnostic spelling, and `within`'s slot.
 pub const ModuleHome = opaque {
-    fn init(module_generation: *ModuleGeneration) *ModuleHome {
-        return @ptrCast(module_generation);
+    fn init(home_state: *ExecutionHome) *ModuleHome {
+        return @ptrCast(home_state);
     }
-    fn generation(self: *const ModuleHome) *ModuleGeneration {
+    fn state(self: *const ModuleHome) *ExecutionHome {
         return @ptrCast(@alignCast(@constCast(self)));
     }
     pub fn scope(self: *const ModuleHome, _: *const ExecutionAccess) *env.Scope {
-        return &self.generation().scope;
+        return &self.state().image.scope;
     }
-    pub fn name(self: *const ModuleHome) intern.ModuleName {
-        return self.generation().name;
+    /// The canonical name this activation was reached through, or null while a
+    /// construction body is still building an anonymous image.
+    pub fn name(self: *const ModuleHome) ?intern.ModuleName {
+        const registration = self.state().registration orelse return null;
+        return registration.name;
     }
     pub fn generationNumber(self: *const ModuleHome) u64 {
-        return self.generation().generation;
+        const registration = self.state().registration orelse return 0;
+        return registration.generation;
     }
     fn pinInternal(self: *const ModuleHome) GenerationPin {
-        const retained = self.generation();
-        retained.retain();
-        return .initRetained(retained);
+        self.state().retain();
+        return .initRetained(self.state());
     }
     pub fn pin(self: *const ModuleHome, _: *const ExecutionAccess) GenerationPin {
         return self.pinInternal();
     }
 };
 
-/// An owned generation reference. The raw generation is never exposed, so a
-/// pin can only be consumed by `deinit` and cannot invoke retirement directly.
+/// An owned reference to whichever owner backs one home. The raw image or
+/// registration is never exposed, so a pin can only be consumed by `deinit`
+/// and cannot invoke retirement directly.
 pub const GenerationPin = enum(usize) {
     consumed = 0,
     _,
 
-    fn initRetained(generation: *ModuleGeneration) GenerationPin {
-        return @enumFromInt(@intFromPtr(generation));
+    fn initRetained(retained: *ExecutionHome) GenerationPin {
+        return @enumFromInt(@intFromPtr(retained));
     }
     fn home(self: GenerationPin) *ModuleHome {
         std.debug.assert(self != .consumed);
@@ -662,7 +763,7 @@ pub const GenerationPin = enum(usize) {
     }
     pub fn deinit(self: *GenerationPin) void {
         if (self.* == .consumed) return;
-        self.home().generation().release();
+        self.home().state().release();
         self.* = .consumed;
     }
     pub fn matches(
@@ -674,56 +775,58 @@ pub const GenerationPin = enum(usize) {
     }
 };
 
-/// Opaque observation capability owning one generation reference.
+/// Opaque observation capability owning one registration reference.
 pub const GenerationLease = enum(usize) {
     consumed = 0,
     _,
 
-    fn initRetained(retained_generation: *ModuleGeneration) GenerationLease {
-        return @enumFromInt(@intFromPtr(retained_generation));
+    fn initRetained(retained: *Registration) GenerationLease {
+        return @enumFromInt(@intFromPtr(retained));
     }
-    fn generation(self: GenerationLease) *ModuleGeneration {
+    fn registration(self: GenerationLease) *Registration {
         std.debug.assert(self != .consumed);
         return @ptrFromInt(@intFromEnum(self));
     }
     pub fn generationNumber(self: GenerationLease) u64 {
-        return self.generation().generation;
+        return self.registration().generation;
     }
     pub fn name(self: GenerationLease) intern.ModuleName {
-        return self.generation().name;
+        return self.registration().name;
     }
-    pub fn resolveCursor(self: GenerationLease, id: u32, public_only: bool) ModuleGeneration.ResolveCursor {
-        return self.generation().resolveCursor(id, public_only);
+    pub fn resolveCursor(self: GenerationLease, id: u32, public_only: bool) ModuleResolveCursor {
+        return self.registration().resolveCursor(id, public_only);
     }
-    pub fn publicNameCursor(self: GenerationLease) ModuleGeneration.PublicNameCursor {
-        return self.generation().publicNameCursor();
+    pub fn publicNameCursor(self: GenerationLease) ModulePublicNameCursor {
+        return self.registration().publicNameCursor();
     }
     pub fn enterExecution(
         self: *GenerationLease,
         _: *const ExecutionAccess,
     ) ExecutionGeneration {
-        const generation_ptr = self.generation();
+        const retained = self.registration();
         self.* = .consumed;
-        return .initRetained(generation_ptr);
+        return .initRetained(retained);
     }
     pub fn deinit(self: *GenerationLease) void {
         if (self.* == .consumed) return;
-        self.generation().release();
+        self.registration().release();
         self.* = .consumed;
     }
 };
 
 /// Session-gated execution capability. Observation can be transferred into
-/// execution only by code holding the Session-private authority, and
-/// the raw generation remains hidden on both sides of the transition.
+/// execution only by code holding the Session-private authority, and the raw
+/// registration remains hidden on both sides of the transition. This is the
+/// only producer of a registration home, which is why an activation's state
+/// and name can only come from the registry lease it was resolved through.
 pub const ExecutionGeneration = enum(usize) {
     consumed = 0,
     _,
 
-    fn initRetained(generation_ptr: *ModuleGeneration) ExecutionGeneration {
-        return @enumFromInt(@intFromPtr(generation_ptr));
+    fn initRetained(retained: *Registration) ExecutionGeneration {
+        return @enumFromInt(@intFromPtr(retained));
     }
-    fn generation(self: ExecutionGeneration) *ModuleGeneration {
+    fn registration(self: ExecutionGeneration) *Registration {
         std.debug.assert(self != .consumed);
         return @ptrFromInt(@intFromEnum(self));
     }
@@ -731,85 +834,187 @@ pub const ExecutionGeneration = enum(usize) {
         self: ExecutionGeneration,
         _: *const ExecutionAccess,
     ) *ModuleHome {
-        return .init(self.generation());
+        return .init(&self.registration().home);
     }
     pub fn deinit(self: *ExecutionGeneration) void {
         if (self.* == .consumed) return;
-        self.generation().release();
+        self.registration().release();
         self.* = .consumed;
     }
 };
 
-/// Unique ownership of an unpublished module generation. Publication consumes
-/// the capability; every other exit calls `deinit` without ownership flags.
-pub const OwnedCandidate = enum(usize) {
+/// The cursor types an observation lease hands out. Naming them here keeps the
+/// registration record itself private to this file.
+pub const ModuleResolveCursor = Registration.ResolveCursor;
+pub const ModulePublicNameCursor = Registration.PublicNameCursor;
+
+/// A borrowed reference to one immutable image, valid for the call it is passed
+/// to and no longer. Only a `SealedImage` or a live module value can produce
+/// one, so the borrow always starts from something that owns a reference; a
+/// consumer that outlives the call — a publication cursor — upgrades it to a
+/// `RetainedImage` immediately rather than trusting its caller's lifetime.
+pub const ImageRef = enum(usize) {
+    _,
+
+    fn init(target: *ModuleImage) ImageRef {
+        return @enumFromInt(@intFromPtr(target));
+    }
+    fn image(self: ImageRef) *ModuleImage {
+        return @ptrFromInt(@intFromEnum(self));
+    }
+};
+
+/// One retained image reference, owned for as long as its holder lives. A
+/// publication cursor is resumable across many scheduler turns, so it owns what
+/// it dereferences instead of trusting a caller to outlive it: an `ImageRef` is
+/// a borrow valid at the call that produced it, and nothing stops the caller
+/// from releasing its sealed image before the cursor next advances.
+const RetainedImage = enum(usize) {
     consumed = 0,
     _,
 
-    fn init(generation: *ModuleGeneration) OwnedCandidate {
-        return @enumFromInt(@intFromPtr(generation));
+    fn retain(borrowed: ImageRef) RetainedImage {
+        const target = borrowed.image();
+        target.retain();
+        return @enumFromInt(@intFromPtr(target));
     }
-    fn borrow(self: *const OwnedCandidate) *ModuleGeneration {
+    fn image(self: RetainedImage) *ModuleImage {
+        std.debug.assert(self != .consumed);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    fn deinit(self: *RetainedImage) void {
+        if (self.* == .consumed) return;
+        self.image().release();
+        self.* = .consumed;
+    }
+};
+
+/// Unique ownership of an image that no value and no registration holds yet.
+/// Every exit either transfers the reference into a module value or releases
+/// it; publication never consumes it, because a registration retains its own.
+pub const OwnedImage = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn init(target: *ModuleImage) OwnedImage {
+        return @enumFromInt(@intFromPtr(target));
+    }
+    fn borrow(self: *const OwnedImage) *ModuleImage {
         std.debug.assert(self.* != .consumed);
         return @ptrFromInt(@intFromEnum(self.*));
     }
     pub fn executionHome(
-        self: *const OwnedCandidate,
+        self: *const OwnedImage,
         _: *const ExecutionAccess,
     ) *ModuleHome {
-        return .init(self.borrow());
+        return .init(&self.borrow().construction_home);
     }
     pub fn executionScope(
-        self: *const OwnedCandidate,
+        self: *const OwnedImage,
         _: *const ExecutionAccess,
     ) *env.Scope {
         return &self.borrow().scope;
     }
     pub fn publishDefinition(
-        self: *const OwnedCandidate,
+        self: *const OwnedImage,
         name: intern.BindingName,
         publication: env.ModulePublication,
     ) env.BindError!*env.BindingCell {
         return self.borrow().scope.publishModule(name, publication);
     }
     /// Reserves the construction stack the body left behind. Entries start as
-    /// scalars so a partly filled proposal is always releasable, and the
+    /// scalars so a partly filled template is always releasable, and the
     /// capture fills them from the top down.
-    pub fn reserveProposal(self: *const OwnedCandidate, count: usize) error{OutOfMemory}!void {
-        const generation = self.borrow();
-        std.debug.assert(generation.proposed_state.len == 0);
+    pub fn reserveTemplate(self: *const OwnedImage, count: usize) error{OutOfMemory}!void {
+        const image = self.borrow();
+        std.debug.assert(image.initial_state.len == 0);
         if (count == 0) return;
-        const buffer = try generation.allocator.alloc(value.Value, count);
+        const buffer = try image.allocator.alloc(value.Value, count);
         @memset(buffer, .{ .int = 0 });
-        generation.proposed_state = buffer;
+        image.initial_state = buffer;
     }
-    /// Moves one construction-stack value into the proposal. Ownership
-    /// transfers to the candidate, which retires it on every exit that does
-    /// not install it as a new slot's durable stack.
-    pub fn placeProposal(self: *const OwnedCandidate, index: usize, item: value.Value) void {
-        self.borrow().proposed_state[index] = item;
+    /// Moves one construction-stack value into the template. Ownership
+    /// transfers to the image, which retires it when the image does; a
+    /// registration copies rather than consumes it, so the same template can
+    /// seed a second registration.
+    pub fn placeTemplate(self: *const OwnedImage, index: usize, item: value.Value) void {
+        self.borrow().initial_state[index] = item;
     }
-    pub fn move(self: *OwnedCandidate) OwnedCandidate {
+    /// Ends construction. Freezing the environment and consuming this
+    /// capability are one transition, so nothing that mutates an image — a
+    /// definition, a template slot — remains reachable once the image can be
+    /// registered or handed to a program. The environment's frozen flag stops
+    /// late definitions; only the typestate stops a late template write, which
+    /// has no frozen check because a sealed image has no writer.
+    pub fn seal(self: *OwnedImage) SealedImage {
+        const image = self.borrow();
+        image.scope.freezeModule();
+        self.* = .consumed;
+        return .init(image);
+    }
+    pub fn move(self: *OwnedImage) OwnedImage {
         const result = self.*;
         std.debug.assert(result != .consumed);
         self.* = .consumed;
         return result;
     }
-    pub fn deinit(self: *OwnedCandidate) void {
+    pub fn deinit(self: *OwnedImage) void {
         if (self.* == .consumed) return;
-        // The provisional owner is one lifetime guard, not a uniqueness
-        // assertion. Tasks spawned before commit hold independent generation
-        // pins, so rollback drops only this capability and the generation
-        // remains alive until those tasks and their child scopes quiesce.
+        // The construction owner is one lifetime guard, not a uniqueness
+        // assertion. Tasks spawned during construction hold independent pins,
+        // so rollback drops only this capability and the image remains alive
+        // until those tasks and their child scopes quiesce.
         self.borrow().release();
         self.* = .consumed;
     }
-    fn publish(self: *OwnedCandidate) *ModuleGeneration {
-        const generation = self.borrow();
+};
+
+/// Unique ownership of a finished image. It has no mutation surface at all:
+/// the only things left to do with an image are register it, hand it to a
+/// program as a value, and release it.
+pub const SealedImage = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn init(target: *ModuleImage) SealedImage {
+        return @enumFromInt(@intFromPtr(target));
+    }
+    fn borrow(self: *const SealedImage) *ModuleImage {
+        std.debug.assert(self.* != .consumed);
+        return @ptrFromInt(@intFromEnum(self.*));
+    }
+    /// A borrow for publication. Registration retains its own reference, so
+    /// this capability's holder keeps owning the one it was sealed with.
+    pub fn ref(self: *const SealedImage) ImageRef {
+        return .init(self.borrow());
+    }
+    pub fn move(self: *SealedImage) SealedImage {
+        const result = self.*;
+        std.debug.assert(result != .consumed);
         self.* = .consumed;
-        return generation;
+        return result;
+    }
+    pub fn deinit(self: *SealedImage) void {
+        if (self.* == .consumed) return;
+        self.borrow().release();
+        self.* = .consumed;
+    }
+    /// Wraps the image in a value, transferring this capability's reference to
+    /// it. On failure nothing is published and the capability is untouched.
+    pub fn intoValue(self: *SealedImage, allocator: std.mem.Allocator) error{OutOfMemory}!value.Value {
+        const item = try heap.createModule(ModuleImage, allocator, self.borrow());
+        self.* = .consumed;
+        return item;
     }
 };
+
+/// The single conversion between a module value and its image, so no raw cast
+/// can be paired at a call site. The reference stays borrowed from the value.
+pub fn imageRef(item: value.Value) ?ImageRef {
+    if (item != .module) return null;
+    const storage = heap.moduleStorage(item.module);
+    return .init(@ptrCast(@alignCast(storage.payload)));
+}
 
 pub const CommitError = error{
     OutOfMemory,
@@ -902,7 +1107,7 @@ const SlotEntry = struct {
 };
 
 const RetiredGeneration = struct {
-    generation: *ModuleGeneration,
+    generation: *Registration,
     next: ?*RetiredGeneration = null,
 };
 
@@ -1098,7 +1303,7 @@ pub const Registry = enum(usize) {
                         break :result .pending;
                     };
                     const generation = entry.generation;
-                    const reusable = generationSlot(generation).?.publisher.quiescent();
+                    const reusable = registrationSlot(generation).?.publisher.quiescent();
                     if (!reusable) self.registry.enqueueRetiredGenerationLocked(entry);
                     self.registry.unlock();
                     if (reusable) {
@@ -1220,21 +1425,20 @@ pub const Registry = enum(usize) {
         self.privateState().inventory = entry;
     }
 
-    pub fn createCandidate(
-        self: *Registry,
-        name: intern.ModuleName,
-    ) error{OutOfMemory}!OwnedCandidate {
-        return .init(try ModuleGeneration.create(self.allocator(), self.releaseDomain(), name));
+    /// A fresh anonymous image. Naming it is a separate, later decision, so
+    /// nothing here validates or reserves a registry name.
+    pub fn createImage(self: *Registry) error{OutOfMemory}!OwnedImage {
+        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain()));
     }
 
-    pub const NativeCandidateProgress = poll.Progress(OwnedCandidate);
+    pub const NativeCandidateProgress = poll.Progress(OwnedImage);
 
     /// The single bounded native-definition publication path used by dynamic
     /// loading and static transport verification. Each turn installs at most
     /// one validated definition into the unpublished generation.
     pub const NativeCandidateCursor = struct {
         instance: *native_module.ModuleInstance,
-        candidate: ?OwnedCandidate,
+        candidate: ?OwnedImage,
         definition_index: usize = 0,
 
         pub fn init(
@@ -1243,7 +1447,7 @@ pub const Registry = enum(usize) {
         ) error{OutOfMemory}!NativeCandidateCursor {
             return .{
                 .instance = instance,
-                .candidate = try registry.createCandidate(instance.name()),
+                .candidate = try registry.createImage(),
             };
         }
 
@@ -1277,7 +1481,7 @@ pub const Registry = enum(usize) {
         }
     };
 
-    pub const BuiltinCandidateProgress = poll.Progress(OwnedCandidate);
+    pub const BuiltinCandidateProgress = poll.Progress(OwnedImage);
 
     /// Publication path for builtin-backed modules. One turn installs one
     /// word, so a module with many words is as bounded as a native one; the
@@ -1287,19 +1491,18 @@ pub const Registry = enum(usize) {
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
         words: []const env.BuiltinWord,
-        candidate: ?OwnedCandidate,
+        candidate: ?OwnedImage,
         word_index: usize = 0,
 
         pub fn init(
             registry: *Registry,
-            name: intern.ModuleName,
             words: []const env.BuiltinWord,
         ) error{OutOfMemory}!BuiltinCandidateCursor {
             return .{
                 .allocator = registry.allocator(),
                 .releases = registry.releaseDomain(),
                 .words = words,
-                .candidate = try registry.createCandidate(name),
+                .candidate = try registry.createImage(),
             };
         }
 
@@ -1377,7 +1580,17 @@ pub const Registry = enum(usize) {
     };
 
     pub const CommitProgress = poll.Progress(u64);
-    pub const CommitCursor = struct {
+    /// Publishes one image under one canonical name. Registration is an
+    /// upsert: a missing name creates a slot and seeds its durable stack from
+    /// a *copy* of the image's template, while an existing name installs the
+    /// new image and keeps the state that slot already owns.
+    ///
+    /// The cursor retains the image for its whole lifetime and releases it on
+    /// every exit; the registration it publishes retains an independent
+    /// reference. Every abandoned path leaves the caller's reference, the prior
+    /// directory, the prior generation, and the slot's durable stack exactly as
+    /// they were.
+    pub const RegistrationCursor = struct {
         const ModuleBuilder = union(enum) {
             initialize: Directory.ModuleMap.InitCursor,
             clone: Directory.ModuleMap.CloneCursor,
@@ -1416,6 +1629,11 @@ pub const Registry = enum(usize) {
                     };
                 }
             },
+            /// The new slot's durable stack, copied from the image template.
+            /// Entries are scalars until the copy fills them, so an abandoned
+            /// build is always releasable.
+            state: []value.Value = &.{},
+            copied: usize = 0,
         };
         const State = union(enum) {
             maintenance: MaintenanceCursor,
@@ -1446,9 +1664,7 @@ pub const Registry = enum(usize) {
                 build: *NewBuild,
                 cursor: Directory.ModuleMap.PutCursor,
             },
-            discard_proposal: struct {
-                remaining: usize,
-            },
+            seed_state: *NewBuild,
             barrier: struct {
                 lease: SlotLease,
                 requested: bool = false,
@@ -1459,9 +1675,17 @@ pub const Registry = enum(usize) {
         };
 
         registry: *Registry,
-        owned: *OwnedCandidate,
+        /// Retained for the cursor's whole lifetime and released by `deinit`,
+        /// so the template stays readable across every resumption regardless of
+        /// what the caller does with its own reference.
+        image: RetainedImage,
+        name: intern.ModuleName,
         authority: *TurnAuthority,
         state: State,
+        /// The generation record for this publication. It retains the image on
+        /// creation, so an abandoned cursor releases it rather than leaking a
+        /// reference the caller never granted.
+        registration: ?*Registration = null,
         /// The barrier turn, held outside the state union so publication can
         /// release it after the state has advanced to `.complete`. Its
         /// address is what the arbiter links, and the cursor never moves
@@ -1473,19 +1697,23 @@ pub const Registry = enum(usize) {
 
         pub fn init(
             registry: *Registry,
-            owned: *OwnedCandidate,
+            image: ImageRef,
+            name: intern.ModuleName,
             authority: *TurnAuthority,
-        ) CommitCursor {
+        ) RegistrationCursor {
             return .{
                 .registry = registry,
-                .owned = owned,
+                .image = .retain(image),
+                .name = name,
                 .authority = authority,
                 .state = .{ .maintenance = registry.maintenanceCursor() },
             };
         }
-        pub fn deinit(self: *CommitCursor) void {
+        pub fn deinit(self: *RegistrationCursor) void {
+            self.image.deinit();
             if (self.barrier_turn) |*turn| turn.release();
             if (self.retired_reservation) |record| self.registry.allocator().destroy(record);
+            if (self.registration) |registration| registration.release();
             switch (self.state) {
                 .alias => |*state| state.snapshot.directory.deinit(),
                 .module => |*state| state.snapshot.directory.deinit(),
@@ -1504,15 +1732,18 @@ pub const Registry = enum(usize) {
                     state.snapshot.directory.deinit();
                 },
                 .insert => |state| self.destroyBuild(state.build),
+                .seed_state => |build| self.destroyBuild(build),
                 .commit_new => |build| self.destroyBuild(build),
                 .barrier => |*state| if (!state.requested) state.lease.deinit(),
-                .maintenance, .snapshot, .discard_proposal, .commit_existing, .complete => {},
+                .maintenance, .snapshot, .commit_existing, .complete => {},
             }
             self.* = undefined;
         }
-        fn destroyBuild(self: *CommitCursor, build: *NewBuild) void {
+        fn destroyBuild(self: *RegistrationCursor, build: *NewBuild) void {
             build.modules.deinit();
             build.aliases.deinit();
+            for (build.state) |item| self.registry.releaseDomain().releaseValue(item);
+            if (build.state.len != 0) self.registry.allocator().free(build.state);
             switch (build.slot) {
                 .fresh => |slot| {
                     self.registry.allocator().destroy(slot.inventory.node());
@@ -1523,9 +1754,23 @@ pub const Registry = enum(usize) {
             build.snapshot.directory.deinit();
             self.registry.allocator().destroy(build);
         }
-        pub fn advance(self: *CommitCursor) CommitError!CommitProgress {
-            const candidate = self.owned.borrow();
-            const name = candidate.name;
+        /// The one place a generation record is created, so both publication
+        /// paths retain the image identically and neither can forget to.
+        fn prepareRegistration(self: *RegistrationCursor) error{OutOfMemory}!void {
+            if (self.registration != null) return;
+            self.registration = try Registration.create(
+                self.registry.allocator(),
+                self.image.image(),
+                self.name,
+            );
+        }
+        fn takeRegistration(self: *RegistrationCursor) *Registration {
+            const registration = self.registration.?;
+            self.registration = null;
+            return registration;
+        }
+        pub fn advance(self: *RegistrationCursor) CommitError!CommitProgress {
+            const name = self.name;
             return switch (self.state) {
                 .maintenance => |*maintenance| switch (maintenance.advance()) {
                     .pending => .pending,
@@ -1664,30 +1909,31 @@ pub const Registry = enum(usize) {
                 .insert => |*state| switch (state.cursor.advance()) {
                     .pending => .pending,
                     .complete => result: {
-                        self.state = .{ .commit_new = state.build };
+                        const template = self.image.image().initial_state;
+                        if (template.len != 0)
+                            state.build.state = try self.registry.allocator().alloc(
+                                value.Value,
+                                template.len,
+                            );
+                        @memset(state.build.state, .{ .int = 0 });
+                        self.state = .{ .seed_state = state.build };
                         break :result .pending;
                     },
                 },
-                .discard_proposal => |*state| result: {
-                    // Initialization happens once per slot identity: the
-                    // candidate's proposal is retired outside the writer lock
-                    // and the slot keeps the stack it already owns.
-                    if (state.remaining != 0) {
-                        const next = state.remaining - 1;
-                        const discarded = candidate.proposed_state[next];
-                        // Overwrite before releasing so an abandoned cursor
-                        // cannot hand the same value to the candidate's own
-                        // retirement.
-                        candidate.proposed_state[next] = .{ .int = 0 };
-                        self.registry.releaseDomain().releaseValue(discarded);
-                        state.remaining = next;
+                // A first registration *copies* the template rather than
+                // consuming it: the same image may seed another slot later, so
+                // the template stays the image's own immutable property.
+                .seed_state => |build| result: {
+                    const template = self.image.image().initial_state;
+                    if (build.copied != template.len) {
+                        const item = template[build.copied];
+                        heap.retainValue(item);
+                        build.state[build.copied] = item;
+                        build.copied += 1;
                         break :result .pending;
                     }
-                    if (candidate.proposed_state.len != 0) {
-                        self.registry.allocator().free(candidate.proposed_state);
-                        candidate.proposed_state = &.{};
-                    }
-                    self.state = .commit_existing;
+                    try self.prepareRegistration();
+                    self.state = .{ .commit_new = build };
                     break :result .pending;
                 },
                 // Re-registration takes an ordinary place in the slot's fair
@@ -1725,8 +1971,8 @@ pub const Registry = enum(usize) {
                         self.retired_reservation = try self.registry.allocator().create(RetiredGeneration);
                     // Removal may have won the turn ahead of this cursor, so
                     // the slot is re-validated after the grant rather than
-                    // only at lookup. Nothing has been discarded yet, so the
-                    // retry still owns its complete proposal.
+                    // only at lookup. Nothing has been published yet, so the
+                    // retry still owns everything it arrived with.
                     const slot = self.barrier_turn.?.lease.slot();
                     if (slot.phase.load(.acquire) != .live) {
                         self.registry.allocator().destroy(self.retired_reservation.?);
@@ -1736,22 +1982,24 @@ pub const Registry = enum(usize) {
                         self.state = .snapshot;
                         break :result .pending;
                     }
-                    self.state = .{ .discard_proposal = .{
-                        .remaining = candidate.proposed_state.len,
-                    } };
+                    try self.prepareRegistration();
+                    self.state = .commit_existing;
                     break :result .pending;
                 },
+                // Replacement installs new code over live state: the slot
+                // keeps the durable stack it already owns and this image's
+                // template is simply not consulted for that slot.
                 .commit_existing => result: {
                     const slot = self.barrier_turn.?.lease.slot();
                     const retired = self.retired_reservation.?;
+                    const registration = self.registration.?;
                     self.registry.lockBlocking();
                     const prior = slot.publisher.currentOwned().?;
                     std.debug.assert(slot.phase.load(.acquire) == .live);
                     retired.* = .{ .generation = prior };
-                    candidate.generation = prior.generation + 1;
-                    candidate.slot_lifetime = .{ .published = SlotLease.retain(slot) };
-                    candidate.scope.freezeModule();
-                    slot.publisher.publish(self.owned.publish());
+                    registration.generation = prior.generation + 1;
+                    registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
+                    slot.publisher.publish(self.takeRegistration());
                     const release_prior = slot.publisher.quiescent();
                     if (!release_prior) self.registry.enqueueRetiredGenerationLocked(retired);
                     self.registry.unlock();
@@ -1762,7 +2010,7 @@ pub const Registry = enum(usize) {
                     }
                     if (self.barrier_turn) |*turn| turn.release();
                     self.state = .complete;
-                    break :result .{ .complete = candidate.generation };
+                    break :result .{ .complete = registration.generation };
                 },
                 .commit_new => |build| result: {
                     const next = try self.registry.allocator().create(Directory);
@@ -1784,12 +2032,12 @@ pub const Registry = enum(usize) {
                         .aliases = build.aliases,
                         .previous = @constCast(build.snapshot.old),
                     };
-                    candidate.generation = 1;
-                    candidate.slot_lifetime = .{ .published = SlotLease.retain(slot) };
-                    slot.state = candidate.proposed_state;
-                    candidate.proposed_state = &.{};
-                    candidate.scope.freezeModule();
-                    slot.publisher.publish(self.owned.publish());
+                    const registration = self.registration.?;
+                    registration.generation = 1;
+                    registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
+                    slot.state = build.state;
+                    build.state = &.{};
+                    slot.publisher.publish(self.takeRegistration());
                     self.registry.privateState().directories.publish(next);
                     self.registry.unlock();
                     build.snapshot.directory.deinit();
@@ -1801,12 +2049,14 @@ pub const Registry = enum(usize) {
             };
         }
     };
-    pub fn commitCursor(
+
+    pub fn registrationCursor(
         self: *Registry,
-        owned: *OwnedCandidate,
+        image: ImageRef,
+        name: intern.ModuleName,
         authority: *TurnAuthority,
-    ) CommitCursor {
-        return .init(self, owned, authority);
+    ) RegistrationCursor {
+        return .init(self, image, name, authority);
     }
 
     /// Cancellation-independent owner of all work after the directory close
@@ -2414,13 +2664,16 @@ pub const Registry = enum(usize) {
         };
     }
 
-    /// Consumes a fully built, typed candidate only after successful publication.
-    pub fn commit(
+    /// Publishes one borrowed image under `name`. The borrow need only be valid
+    /// for this call: the cursor retains its own reference, and a successful
+    /// registration holds a third, independent one.
+    pub fn register(
         self: *Registry,
-        owned: *OwnedCandidate,
+        image: ImageRef,
+        name: intern.ModuleName,
     ) CommitError!u64 {
         var authority: TurnAuthority = .available;
-        var cursor = self.commitCursor(owned, &authority);
+        var cursor = self.registrationCursor(image, name, &authority);
         defer cursor.deinit();
         return poll.driveFallible(u64, &cursor, .{});
     }

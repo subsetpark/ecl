@@ -156,6 +156,7 @@ fn typeWord(evaluator: *Machine) MachineError!void {
         .list => "list",
         .dict => "dict",
         .task => "task",
+        .module => "module",
     };
     try evaluator.pushOwned(.{ .symbol = try intern.intern(spelling) });
 }

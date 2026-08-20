@@ -78,6 +78,24 @@ test "native runtime: inadmissible values and duplicate keys are language errors
         .stderr_contains = &.{ "'kind 'type", "native words cannot observe task capabilities" },
     });
 
+    // A module image is a runtime capability on the same terms as a task: the
+    // ABI has no representation for it, in scalar or in view position.
+    var module_input = try run("'sample use (1) @module sample.forward", "1", false);
+    defer module_input.deinit();
+    try module_input.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{ "'kind 'type", "native words cannot observe module capabilities" },
+    });
+
+    var module_element = try run("'sample use ((1) @module) sample.sum-list", "1", false);
+    defer module_element.deinit();
+    try module_element.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{"'kind "},
+    });
+
     var duplicate = try run("'sample use sample.duplicate-dict", "1", false);
     defer duplicate.deinit();
     try duplicate.expect(.{
@@ -130,7 +148,7 @@ test "native runtime: source precedence and path-root order are observable" {
     defer same_root.cleanup();
     try same_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "(100 'increment set) 'sample @module",
+        .data = "(100 'increment set) 'sample @defm",
     });
     try std.Io.Dir.copyFile(
         std.Io.Dir.cwd(),
@@ -164,7 +182,7 @@ test "native runtime: source precedence and path-root order are observable" {
     defer source_root.cleanup();
     try source_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "(100 'increment set) 'sample @module",
+        .data = "(100 'increment set) 'sample @defm",
     });
     const native_root_path = try native_root.dir.realPathFileAlloc(
         std.testing.io,

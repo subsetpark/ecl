@@ -56,25 +56,26 @@ test "definition annotations support all top-level forms and dynamic data" {
 
 test "every primitive exposes meaningful reflective documentation" {
     const names = [_][]const u8{
-        "dup",    "swap",      "pop",       "over",      "cons",       "compose",
-        "match?", "type",      "parse",     "dict-of",   "@attempt",   "raise",
-        "args",   "exit",      "dip",       "call",      "if",         "while",
-        "times",  "cond",      "each",      "zip-with",  "for",        "fold",
-        "scan",   "infra",     "def",       "set",       "defp",       "setp",
-        "body",   "doc",       "which",     "see",       "@module",    "use",
-        "alias",  "words",     "load",      "@spawn",    "await",      "cancel",
-        "tasks",  "await-any", "await-for", "@each",     "+",          "-",
-        "*",      "/",         "div",       "mod",       "pow",        "atan2",
-        "min",    "max",       "=",         "<>",        "<",          ">",
-        "<=",     ">=",        "and",       "or",        "neg",        "abs",
-        "sqrt",   "floor",     "ceil",      "round",     "exp",        "log",
-        "sin",    "cos",       "not",       "at",        "where",      "in?",
-        "raze",   "cat",       "take",      "drop",      "reverse",    "first",
-        "rest",   "range",     "shape",     "len",       "flip",       "reshape",
-        "cmp",    "grade",     "distinct",  "group",     "keys",       "vals",
-        "put",    "to-dict",   "del",       "merge",     "has?",       "split",
-        "join",   "format",    "band",      "bor",       "bxor",       "bsl",
-        "bsr",    "bnot",      "rand-int",  "rand-ints", "rand-float", "entropy",
+        "dup",        "swap",    "pop",   "over",      "cons",      "compose",
+        "match?",     "type",    "parse", "dict-of",   "@attempt",  "raise",
+        "args",       "exit",    "dip",   "call",      "if",        "while",
+        "times",      "cond",    "each",  "zip-with",  "for",       "fold",
+        "scan",       "infra",   "def",   "set",       "defp",      "setp",
+        "body",       "doc",     "which", "see",       "@module",   "@defm",
+        "register",   "use",     "alias", "words",     "load",      "@spawn",
+        "await",      "cancel",  "tasks", "await-any", "await-for", "@each",
+        "+",          "-",       "*",     "/",         "div",       "mod",
+        "pow",        "atan2",   "min",   "max",       "=",         "<>",
+        "<",          ">",       "<=",    ">=",        "and",       "or",
+        "neg",        "abs",     "sqrt",  "floor",     "ceil",      "round",
+        "exp",        "log",     "sin",   "cos",       "not",       "at",
+        "where",      "in?",     "raze",  "cat",       "take",      "drop",
+        "reverse",    "first",   "rest",  "range",     "shape",     "len",
+        "flip",       "reshape", "cmp",   "grade",     "distinct",  "group",
+        "keys",       "vals",    "put",   "to-dict",   "del",       "merge",
+        "has?",       "split",   "join",  "format",    "band",      "bor",
+        "bxor",       "bsl",     "bsr",   "bnot",      "rand-int",  "rand-ints",
+        "rand-float", "entropy",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
@@ -121,7 +122,7 @@ test "module annotations retain contracts documentation qualification and shadow
         "(1) (-- n : \"Public module word.\") 'public def " ++
         "(2) (-- n : \"Private module word.\") 'private defp " ++
         "('private doc) (-- text : \"Expose private documentation.\") 'private-doc def" ++
-        ") 'm @module " ++
+        ") 'm @defm " ++
         "'m use 'public doc \"Public module word.\" match? " ++
         "m.private-doc \"Private module word.\" match? " ++
         "(9) (-- n : \"Session shadow.\") 'public def " ++
@@ -133,9 +134,9 @@ test "module annotations retain contracts documentation qualification and shadow
     try expectErrorContains(&runtime, "'m.private doc", "'kind 'undefined-word");
     // A documentation-only module word is one of the four legal forms, and
     // its documentation is what reflection reports.
-    try expectOk(&runtime, "((1) (: \"Documentation only.\") 'f def) 'docs @module " ++
+    try expectOk(&runtime, "((1) (: \"Documentation only.\") 'f def) 'docs @defm " ++
         "'docs.f doc \"Documentation only.\" match? pop");
-    try expectErrorContains(&runtime, "((dup +) (a -- b c : \"An intentionally false contract.\") 'f def) 'lies @module 1 lies.f", "'kind 'contract");
+    try expectErrorContains(&runtime, "((dup +) (a -- b c : \"An intentionally false contract.\") 'f def) 'lies @defm 1 lies.f", "'kind 'contract");
 }
 
 test "multiline documentation is normalized and see is canonical and re-readable" {
@@ -201,7 +202,7 @@ test "nested and quoted markers remain body data and set never recognizes annota
         "((-- :) '-- ':) 'inert def inert " ++
             "(-- :) 'markers set markers " ++
             "((-- :) 'private-markers setp " ++
-            "(private-markers) (-- value : \"Return private marker data.\") 'get def) 'm @module m.get",
+            "(private-markers) (-- value : \"Return private marker data.\") 'get def) 'm @defm m.get",
         "(-- :) '-- ': (-- :) (-- :)",
     );
 }
@@ -214,10 +215,10 @@ test "reserved namespace names reject every binding surface but remain readable"
         .{ .name = "value", .source = "1 ': set", .kind = "domain", .word = "def" },
         .{ .name = "local separator", .source = "1 (|--| --)", .kind = "parse" },
         .{ .name = "local colon", .source = "1 (|:| :)", .kind = "parse" },
-        .{ .name = "@module", .source = "() '-- @module", .kind = "domain", .word = "@module" },
-        .{ .name = "alias", .source = "() 'm @module '-- 'm alias", .kind = "domain", .word = "alias" },
-        .{ .name = "public export", .source = "((1) (-- x) '-- def) 'm @module", .kind = "domain", .word = "def" },
-        .{ .name = "private value", .source = "(1 ': setp) 'm @module", .kind = "domain", .word = "defp" },
+        .{ .name = "@defm", .source = "() '-- @defm", .kind = "domain", .word = "@defm" },
+        .{ .name = "alias", .source = "() 'm @defm '-- 'm alias", .kind = "domain", .word = "alias" },
+        .{ .name = "public export", .source = "((1) (-- x) '-- def) 'm @defm", .kind = "domain", .word = "def" },
+        .{ .name = "private value", .source = "(1 ': setp) 'm @defm", .kind = "domain", .word = "defp" },
         .{ .name = "bare reserved word is readable", .source = "--", .kind = "undefined-word", .word = "--" },
     });
     try support.expectStack("'-- ': (-- :) 'x:y", "'-- ': (-- :) 'x:y");
@@ -405,7 +406,7 @@ test "definitions: top-level setp fails through defp's module-root check" {
             // inside a module body — the check is against the unit's current
             // scope, not the enclosing registration.
             .name = "setp inside an isolated child",
-            .source = "([1] (pop 1 'x setp) each) 'm @module",
+            .source = "([1] (pop 1 'x setp) each) 'm @defm",
             .kind = "domain",
             .word = "defp",
         },
@@ -429,9 +430,9 @@ test "definitions: def inside a word body writes the caller's scope" {
     // how the core words set and setp publish module constants, including
     // the privacy distinction. Module bodies resolve against the module's
     // own chain, so only core words (not session helpers) can be used here.
-    try support.expectStack("(7 'x set 8 'h setp (h) (-- n) 'peek def) 'm @module m.x m.peek", "7 8");
+    try support.expectStack("(7 'x set 8 'h setp (h) (-- n) 'peek def) 'm @defm m.x m.peek", "7 8");
     try support.expectErrors(&.{
-        .{ .name = "private stays private", .source = "(8 'h setp) 'm @module m.h", .kind = "undefined-word", .word = "m.h" },
+        .{ .name = "private stays private", .source = "(8 'h setp) 'm @defm m.h", .kind = "undefined-word", .word = "m.h" },
     });
 
     // Inside an isolated child unit it stays in that disposable scope.

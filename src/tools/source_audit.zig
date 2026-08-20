@@ -160,7 +160,7 @@ const test_files = [_][]const u8{
     "tests/str_test.zig",             "tests/csv_test.zig",
     "tests/json_test.zig",            "tests/table_test.zig",
     "tests/http_test.zig",            "tests/random_test.zig",
-    "tests/kernel_typed_test.zig",
+    "tests/kernel_typed_test.zig",    "tests/module_value_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
@@ -675,9 +675,12 @@ fn auditUnsafeCasts() bool {
         &.{ "ApplicationAdapters", "IdiomFallbackAdapters", "WorkDriverAdapters" },
     ) or failed;
     failed = auditErasedCasts(
-        "task destructor erasure",
+        "capability payload erasure",
         @embedFile("../heap.zig"),
-        &.{ "TaskDestroyAdapter", "RetirementAdapters", "RetirementWakeAdapters" },
+        &.{
+            "TaskDestroyAdapter", "ModuleReleaseAdapter",
+            "RetirementAdapters", "RetirementWakeAdapters",
+        },
     ) or failed;
     return failed;
 }
@@ -860,7 +863,7 @@ fn hasForbiddenTokens(
 /// unit. Nothing in the compiler can express that, so the manifest is written
 /// down here and the audit enforces both directions — every listed word is
 /// marked, and nothing else in first-party vocabulary is.
-const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@each", "@module" };
+const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@each", "@module", "@defm" };
 
 fn auditUnitConstructorSpelling() bool {
     var failed = false;

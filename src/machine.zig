@@ -23,7 +23,10 @@ const resolution_core = @import("resolution_core.zig");
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
 pub const MachineError = error{ OutOfMemory, Ecl };
-const no_word = std.math.maxInt(u32);
+/// The absence of a named activation. A trace word is either a plain atom or
+/// a module-local name qualified by the registration it was reached through,
+/// so `none` is the one value that spells neither.
+const no_word: intern.TraceWord = .none;
 const max_frame_count = std.math.maxInt(u32);
 const FrameIndex = enum(u32) { _ };
 const fuel_quantum: u32 = 1024;
@@ -82,8 +85,8 @@ pub const EclErr = struct {
     kind: ErrorKind,
     message: [512]u8 = [_]u8{0} ** 512,
     message_len: usize = 0,
-    word: ?u32 = null,
-    trace_parent: ?u32 = null,
+    word: ?intern.TraceWord = null,
+    trace_parent: ?intern.TraceWord = null,
     site: ?ErrorSite = null,
     data: [5]ErrorData = .{empty_error_data} ** 5,
     data_len: usize = 0,
@@ -149,7 +152,7 @@ const ErrorValueProgress = poll_api.Progress(Value);
 const OrdinaryErrorCursor = struct {
     allocator: std.mem.Allocator,
     failure: *EclErr,
-    trace_ids: []const u32,
+    resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
     names: [9]u32 = .{0} ** 9,
     name_index: usize = 0,
@@ -174,13 +177,13 @@ const OrdinaryErrorCursor = struct {
     fn init(
         allocator: std.mem.Allocator,
         failure: *EclErr,
-        trace_ids: []const u32,
+        resolved: ResolvedTrace,
         location: ?spans.LocatedSpan,
     ) OrdinaryErrorCursor {
         return .{
             .allocator = allocator,
             .failure = failure,
-            .trace_ids = trace_ids,
+            .resolved = resolved,
             .location = if (failure.source_len > 0) .{
                 .source_name = failure.source[0..failure.source_len],
                 .span = .{ .line = failure.source_line, .col = failure.source_col },
@@ -260,7 +263,7 @@ const OrdinaryErrorCursor = struct {
         count += 1;
         self.outer_pairs[count] = .{ .{ .symbol = self.names[2] }, self.message_value.? };
         count += 1;
-        if (self.failure.word) |word| {
+        if (self.resolved.word) |word| {
             self.outer_pairs[count] = .{ .{ .symbol = self.names[3] }, .{ .symbol = word } };
             count += 1;
         }
@@ -285,13 +288,13 @@ const OrdinaryErrorCursor = struct {
                 },
             },
             .trace_allocate => result: {
-                self.trace_items = try self.allocator.alloc(Value, self.trace_ids.len);
+                self.trace_items = try self.allocator.alloc(Value, self.resolved.trace.len);
                 self.phase = .trace_copy;
                 break :result .pending;
             },
             .trace_copy => result: {
-                if (self.trace_index != self.trace_ids.len) {
-                    self.trace_items.?[self.trace_index] = .{ .symbol = self.trace_ids[self.trace_index] };
+                if (self.trace_index != self.resolved.trace.len) {
+                    self.trace_items.?[self.trace_index] = .{ .symbol = self.resolved.trace[self.trace_index] };
                     self.trace_index += 1;
                 } else {
                     self.trace_builder = .init(self.allocator, self.trace_items.?);
@@ -357,7 +360,7 @@ const OrdinaryErrorCursor = struct {
 const RaisedErrorCursor = struct {
     allocator: std.mem.Allocator,
     failure: *EclErr,
-    trace_ids: []const u32,
+    resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
     names: [8]u32 = .{0} ** 8,
     name_index: usize = 0,
@@ -409,13 +412,13 @@ const RaisedErrorCursor = struct {
     fn init(
         allocator: std.mem.Allocator,
         failure: *EclErr,
-        trace_ids: []const u32,
+        resolved: ResolvedTrace,
         location: ?spans.LocatedSpan,
     ) RaisedErrorCursor {
         return .{
             .allocator = allocator,
             .failure = failure,
-            .trace_ids = trace_ids,
+            .resolved = resolved,
             .location = if (failure.source_len > 0) .{
                 .source_name = failure.source[0..failure.source_len],
                 .span = .{ .line = failure.source_line, .col = failure.source_col },
@@ -501,7 +504,7 @@ const RaisedErrorCursor = struct {
         const raised = self.failure.raised.?;
         const old_count: usize = @intCast(raised.dict.length());
         const extra = @as(usize, @intFromBool(self.fields[1] == null)) +
-            @as(usize, @intFromBool(self.fields[2] == null and self.failure.word != null)) +
+            @as(usize, @intFromBool(self.fields[2] == null and self.resolved.word != null)) +
             @as(usize, @intFromBool(self.fields[3] == null)) +
             @as(usize, @intFromBool(self.fields[4] == null));
         self.outer_pairs = try self.allocator.alloc(dict.Pair, old_count + extra);
@@ -513,7 +516,7 @@ const RaisedErrorCursor = struct {
             self.outer_pairs.?[index] = .{ .{ .symbol = self.names[1] }, self.message_value.? };
             index += 1;
         }
-        if (self.fields[2] == null) if (self.failure.word) |word| {
+        if (self.fields[2] == null) if (self.resolved.word) |word| {
             self.outer_pairs.?[index] = .{ .{ .symbol = self.names[2] }, .{ .symbol = word } };
             index += 1;
         };
@@ -578,13 +581,13 @@ const RaisedErrorCursor = struct {
                 },
             },
             .trace_allocate => result: {
-                self.trace_items = try self.allocator.alloc(Value, self.trace_ids.len);
+                self.trace_items = try self.allocator.alloc(Value, self.resolved.trace.len);
                 self.phase = .trace_copy;
                 break :result .pending;
             },
             .trace_copy => result: {
-                if (self.trace_index != self.trace_ids.len) {
-                    self.trace_items.?[self.trace_index] = .{ .symbol = self.trace_ids[self.trace_index] };
+                if (self.trace_index != self.resolved.trace.len) {
+                    self.trace_items.?[self.trace_index] = .{ .symbol = self.resolved.trace[self.trace_index] };
                     self.trace_index += 1;
                 } else {
                     self.trace_builder = .init(self.allocator, self.trace_items.?);
@@ -702,13 +705,13 @@ const ErrorValueCursor = union(enum) {
     fn init(
         allocator: std.mem.Allocator,
         failure: *EclErr,
-        trace_ids: []const u32,
+        resolved: ResolvedTrace,
         location: ?spans.LocatedSpan,
     ) ErrorValueCursor {
         return if (failure.raised == null)
-            .{ .ordinary = .init(allocator, failure, trace_ids, location) }
+            .{ .ordinary = .init(allocator, failure, resolved, location) }
         else
-            .{ .raised = .init(allocator, failure, trace_ids, location) };
+            .{ .raised = .init(allocator, failure, resolved, location) };
     }
     fn retire(self: *ErrorValueCursor, releases: *heap.ReleaseDomain) void {
         switch (self.*) {
@@ -721,14 +724,21 @@ const ErrorValueCursor = union(enum) {
         };
     }
 };
+/// The spellings a failure value needs, already interned. Qualifying a
+/// module-local trace word allocates, so it happens in the resumable failure
+/// driver rather than inside the value builder.
+pub const ResolvedTrace = struct {
+    word: ?u32 = null,
+    trace: []const u32 = &.{},
+};
 pub fn errorValue(
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
     failure: *EclErr,
-    trace_ids: []const u32,
+    resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
 ) error{OutOfMemory}!Value {
-    var cursor = ErrorValueCursor.init(allocator, failure, trace_ids, location);
+    var cursor = ErrorValueCursor.init(allocator, failure, resolved, location);
     defer cursor.retire(releases);
     return poll_api.driveFallible(Value, &cursor, .{});
 }
@@ -754,7 +764,7 @@ const Eval = struct {
     /// reaching inside the prelude words it calls.
     resolution_scope: *env.Scope,
     home: ?*modules.ModuleHome,
-    traced_word: u32,
+    traced_word: intern.TraceWord,
 };
 /// One tagged owner of everything a `within` transaction needs: the private
 /// draft of the home slot's durable stack (the unit window above
@@ -814,9 +824,26 @@ const OwnedApplication = enum(usize) {
     }
 };
 
+/// A module construction boundary. The body always produces an image; a
+/// `@defm` boundary additionally carries the symbol that image is registered
+/// under the instant construction succeeds, which is what makes the combined
+/// word a driver composition rather than a second publication protocol.
+///
+/// The symbol is unvalidated on purpose. `@defm` must behave as `@module`
+/// followed by `register`, and that composition evaluates the body before any
+/// name is checked, so validating early would skip a body the composition runs.
+const ModuleBoundary = struct {
+    image: modules.OwnedImage,
+    registration: ?u32,
+
+    fn deinit(self: ModuleBoundary) void {
+        var owned = self.image;
+        owned.deinit();
+    }
+};
 const BoundaryMode = union(enum) {
     attempt: *env.Scope,
-    module: modules.OwnedCandidate,
+    module: ModuleBoundary,
     state: OwnedApplication,
 };
 const Boundary = struct {
@@ -824,17 +851,14 @@ const Boundary = struct {
     stack_base: u32,
     previous_base: u32,
     previous_boundary: ?FrameIndex,
-    word: u32,
+    word: intern.TraceWord,
     fn deinit(
         self: Boundary,
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
     ) void {
         switch (self.mode) {
-            .module => |candidate_value| {
-                var candidate = candidate_value;
-                candidate.deinit();
-            },
+            .module => |boundary| boundary.deinit(),
             .attempt => |scope| {
                 scope.retire();
             },
@@ -850,7 +874,7 @@ pub const EffectCheck = struct {
     entry_depth: u32,
     inputs: u32,
     outputs: u32,
-    word: u32,
+    word: intern.TraceWord,
     /// An anonymous after row is an input-only contract: entry consumption is
     /// still verified, the post-condition compare is skipped.
     row: bool = false,
@@ -946,7 +970,7 @@ const ApplicationFrame = struct {
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
     mode: ApplicationMode,
-    traced_word: u32,
+    traced_word: intern.TraceWord,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         switch (self.mode) {
             .in_place => {},
@@ -1407,7 +1431,7 @@ pub const WorkDriver = struct {
     resume_fn: *const fn (*Machine, *anyopaque) MachineError!WorkProgress,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     site: ?ErrorSite,
-    trace_parent: ?u32 = null,
+    trace_parent: ?intern.TraceWord = null,
 
     pub fn advance(self: WorkDriver, evaluator: *Machine) MachineError!WorkProgress {
         return self.resume_fn(evaluator, self.context);
@@ -1587,7 +1611,11 @@ pub const Unit = struct {
     turn_authority: modules.TurnAuthority = .available,
     current: ?Eval = null,
     active_index: u32 = 0,
-    active_word: u32 = no_word,
+    active_word: intern.TraceWord = no_word,
+    /// Scratch for spelling one qualified trace word in a diagnostic message.
+    /// A module-local word's spelling depends on the invoking registration, so
+    /// there is no interned string to point at.
+    word_scratch: [intern.trace_word_bytes]u8 = undefined,
     pub fn init(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
@@ -2061,8 +2089,8 @@ pub const Machine = struct {
     /// an export. The caller supplies an initialized root and drives it through
     /// `runInitializedRoot`; reflection and completion use this same path.
     pub fn loadModuleOnly(self: *Machine, name: intern.ModuleName) MachineError!void {
-        self.unit.active_word = intern.moduleId(name);
-        try self.autoLoadModule(name, .{ .qualified = self.unit.active_word });
+        self.unit.active_word = .plain(intern.moduleId(name));
+        try self.autoLoadModule(name, .{ .qualified = intern.moduleId(name) });
     }
 
     /// A reflection primitive already consumed its symbol before discovering
@@ -2469,7 +2497,6 @@ pub const Machine = struct {
             // strand the lease and path this driver had already taken.
             const publication = try modules.Registry.BuiltinCandidateCursor.init(
                 evaluator.unit.inherited.registry.?,
-                self.name,
                 words,
             );
             // No errdefer: from here nothing fails until `startDriver`, which
@@ -2554,8 +2581,8 @@ pub const Machine = struct {
         loading: heap.Owned(modules.LoadingLease),
         path: heap.Owned(Value),
         publication: heap.Owned(modules.Registry.BuiltinCandidateCursor),
-        candidate: ?heap.Owned(modules.OwnedCandidate) = null,
-        commit: ?heap.Owned(modules.Registry.CommitCursor) = null,
+        candidate: ?heap.Owned(modules.SealedImage) = null,
+        commit: ?heap.Owned(modules.Registry.RegistrationCursor) = null,
 
         pub fn advance(evaluator: *Machine, self: *BuiltinLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
@@ -2570,13 +2597,15 @@ pub const Machine = struct {
                     }) {
                         .pending => return .yielded,
                         .complete => |candidate| {
-                            self.candidate = .init(candidate);
+                            var built = candidate;
+                            self.candidate = .init(built.seal());
                             return .yielded;
                         },
                     }
                 }
-                self.commit = .init(evaluator.unit.inherited.registry.?.commitCursor(
-                    self.candidate.?.borrowMut(),
+                self.commit = .init(evaluator.unit.inherited.registry.?.registrationCursor(
+                    self.candidate.?.borrow().ref(),
+                    self.name,
                     &evaluator.unit.turn_authority,
                 ));
                 return .yielded;
@@ -2621,8 +2650,8 @@ pub const Machine = struct {
         path: heap.Owned(Value),
         instance: ?heap.Owned(*native_module.ModuleInstance) = null,
         publication: ?heap.Owned(modules.Registry.NativeCandidateCursor) = null,
-        candidate: ?heap.Owned(modules.OwnedCandidate) = null,
-        commit: ?heap.Owned(modules.Registry.CommitCursor) = null,
+        candidate: ?heap.Owned(modules.SealedImage) = null,
+        commit: ?heap.Owned(modules.Registry.RegistrationCursor) = null,
         phase: enum { validate, definitions, commit } = .validate,
 
         fn failLoad(self: *NativeLoadDriver, evaluator: *Machine, message: []const u8) MachineError {
@@ -2652,9 +2681,11 @@ pub const Machine = struct {
                     .complete => |candidate| {
                         self.publication.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.publication = null;
-                        self.candidate = .init(candidate);
-                        self.commit = .init(evaluator.unit.inherited.registry.?.commitCursor(
-                            self.candidate.?.borrowMut(),
+                        var built = candidate;
+                        self.candidate = .init(built.seal());
+                        self.commit = .init(evaluator.unit.inherited.registry.?.registrationCursor(
+                            self.candidate.?.borrow().ref(),
+                            self.name,
                             &evaluator.unit.turn_authority,
                         ));
                         self.phase = .commit;
@@ -2718,7 +2749,7 @@ pub const Machine = struct {
         canonical_name: ?intern.ModuleName = null,
         acquisition: ?heap.Owned(modules.Registry.AcquireCursor) = null,
         generation: ?heap.Owned(modules.GenerationLease) = null,
-        exports: ?heap.Owned(modules.ModuleGeneration.PublicNameCursor) = null,
+        exports: ?heap.Owned(modules.ModulePublicNameCursor) = null,
         found: heap.Owned(poll_api.ChunkList(u32)),
         names: ?heap.Owned([]u32) = null,
         found_iterator: ?poll_api.ChunkList(u32).Iterator = null,
@@ -3565,10 +3596,10 @@ pub const Machine = struct {
         return failure;
     }
     pub fn undefinedActiveWord(self: *Machine) MachineError {
-        return self.undefinedWord(self.unit.active_word);
+        return self.undefinedWord(self.unit.active_word.atom());
     }
     pub fn undefinedName(self: *Machine, name: u32) MachineError {
-        self.unit.active_word = name;
+        self.unit.active_word = .plain(name);
         const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(name)});
         self.unit.pending.?.addData(.name, .{ .symbol = name });
         return failure;
@@ -3629,10 +3660,14 @@ pub const Machine = struct {
                     .advice = "the substack is isolated from the caller's stack — " ++
                         "seed it with `values (q) with @attempt` or capture with `partial`",
                 },
-                .module => .{
+                .module => |construction| if (construction.registration == null) .{
                     .constructor = "@module",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "seed it with `values (body) with 'name @module` or capture with `partial`",
+                        "seed it with `values (body) with @module` or capture with `partial`",
+                } else .{
+                    .constructor = "@defm",
+                    .advice = "the substack is isolated from the caller's stack — " ++
+                        "seed it with `values (body) with 'name @defm` or capture with `partial`",
                 },
                 .state => null,
             };
@@ -3740,10 +3775,10 @@ pub const Machine = struct {
         heap.retainValue(item);
         return self.pushOwned(item);
     }
-    pub fn activeWordId(self: *const Machine) u32 {
+    pub fn activeWordId(self: *const Machine) intern.TraceWord {
         return self.unit.active_word;
     }
-    pub fn setActiveWord(self: *Machine, word: u32) void {
+    pub fn setActiveWord(self: *Machine, word: intern.TraceWord) void {
         self.unit.active_word = word;
     }
     pub fn setFailureSite(self: *Machine, code: *Header, index: u32) void {
@@ -3752,7 +3787,7 @@ pub const Machine = struct {
     pub fn setWorkDriverSite(self: *Machine, code: *Header, index: u32) void {
         if (self.unit.workDriver()) |driver| driver.site = .{ .code = code, .index = index };
     }
-    pub fn setWorkDriverTraceParent(self: *Machine, word: u32) void {
+    pub fn setWorkDriverTraceParent(self: *Machine, word: intern.TraceWord) void {
         if (self.unit.workDriver()) |driver| driver.trace_parent = word;
     }
 
@@ -3762,7 +3797,7 @@ pub const Machine = struct {
     /// failures inside that quotation still trace through the word the caller
     /// wrote. Only the installing callback may claim an application this way:
     /// an unrelated enclosing application owns its own attribution.
-    pub fn setApplicationTraceParent(self: *Machine, word: u32) void {
+    pub fn setApplicationTraceParent(self: *Machine, word: intern.TraceWord) void {
         const frame = &self.unit.frames.items[self.unit.frames.items.len - 1];
         std.debug.assert(frame.* == .application);
         frame.application.traced_word = word;
@@ -3825,12 +3860,12 @@ pub const Machine = struct {
         std.debug.assert(self.unit.native == .idle);
         self.unit.installTaskJoinCleanup(.init(.inputOnly(tasks), disposition));
     }
-    pub fn commitDirectIdiomTrace(self: *Machine) u32 {
+    pub fn commitDirectIdiomTrace(self: *Machine) intern.TraceWord {
         const parent = self.unit.active_word;
         if (self.unit.current.?.ip >= self.unit.current.?.code.length()) self.unit.current.?.traced_word = no_word;
         return parent;
     }
-    pub fn setFailureTraceParent(self: *Machine, word: u32) void {
+    pub fn setFailureTraceParent(self: *Machine, word: intern.TraceWord) void {
         if (self.unit.pending) |*pending| pending.trace_parent = word;
     }
     pub fn takePrimitiveFailure(self: *Machine) ?EclErr {
@@ -3851,8 +3886,12 @@ pub const Machine = struct {
         defer fallback.deinit(self.releaseDomain(), self.unit.allocator);
         return fallback.run(self);
     }
-    pub fn activeWordName(self: *const Machine) []const u8 {
-        return if (self.unit.active_word == no_word) "evaluation" else intern.get(self.unit.active_word);
+    /// The active word as a diagnostic spells it. A module-local word has no
+    /// single interned spelling, so the rendering borrows the unit's scratch;
+    /// the returned slice is valid until the next call.
+    pub fn activeWordName(self: *Machine) []const u8 {
+        if (self.unit.active_word == no_word) return "evaluation";
+        return self.unit.active_word.render(&self.unit.word_scratch);
     }
     pub fn fail(self: *Machine, kind: ErrorKind, message: []const u8) MachineError {
         std.debug.assert(self.unit.pending == null);
@@ -4004,7 +4043,7 @@ pub const Machine = struct {
         self: *Machine,
         application: IsolatedApplication,
         launch: ApplicationLaunch,
-        inherited: ?u32,
+        inherited: ?intern.TraceWord,
     ) MachineError!void {
         self.require(application.seeded) catch |err| {
             application.deinit_fn(self.releaseDomain(), self.unit.allocator, application.context);
@@ -4060,9 +4099,38 @@ pub const Machine = struct {
     pub fn attemptOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
         return self.beginAttemptOwned(quotation);
     }
+    /// Publishes an already-constructed image under a validated name. The
+    /// module value is consumed: the driver retains it for its whole lifetime,
+    /// which is what keeps the borrowed image alive across every resumption,
+    /// and releases it on every exit.
+    pub fn registerModuleOwned(
+        self: *Machine,
+        module: Value,
+        name: intern.ModuleName,
+    ) MachineError!void {
+        const registry = self.unit.inherited.registry orelse {
+            self.releaseDomain().releaseValue(module);
+            return self.fail(.domain, "module registry is unavailable");
+        };
+        const image = modules.imageRef(module) orelse {
+            self.releaseDomain().releaseValue(module);
+            return self.typeError("a module");
+        };
+        return self.startDriver(ModuleRegisterDriver{
+            .module = .init(module),
+            .cursor = .init(registry.registrationCursor(
+                image,
+                name,
+                &self.unit.turn_authority,
+            )),
+        });
+    }
+    /// Opens a construction boundary. The body evaluates against a fresh
+    /// anonymous image; `registration`, when present, is the name that image
+    /// is published under the instant the body succeeds.
     pub fn moduleOwned(
         self: *Machine,
-        name: intern.ModuleName,
+        registration: ?u32,
         quotation: *Header,
     ) MachineError!void {
         const registry = self.unit.inherited.registry orelse {
@@ -4070,7 +4138,7 @@ pub const Machine = struct {
             return self.fail(.domain, "module registry is unavailable");
         };
         const word = self.unit.active_word;
-        var candidate = registry.createCandidate(name) catch {
+        var candidate = registry.createImage() catch {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
         };
@@ -4087,7 +4155,10 @@ pub const Machine = struct {
         }
         const index: FrameIndex = @enumFromInt(@as(u32, @intCast(self.unit.frames.items.len)));
         var continuation = OwnedFrame.init(.{ .boundary = .{
-            .mode = .{ .module = candidate.move() },
+            .mode = .{ .module = .{
+                .image = candidate.move(),
+                .registration = registration,
+            } },
             .stack_base = @intCast(self.unit.stack.items.len),
             .previous_base = @intCast(self.unit.stack_base),
             .previous_boundary = self.unit.boundary_index,
@@ -4110,7 +4181,7 @@ pub const Machine = struct {
         };
     }
     pub fn executeWord(self: *Machine, word: u32) MachineError!void {
-        self.unit.active_word = word;
+        self.unit.active_word = .plain(word);
         try self.startDriver(DispatchDriver{ .resolution = .init(.init(self, word)) });
     }
     /// Opens one state application against the invoking word's home slot.
@@ -4308,7 +4379,7 @@ pub const Machine = struct {
     /// Suspends a non-tail continuation. An exhausted anonymous quotation
     /// inherits its named trace owner so inline control does not erase the
     /// activation that selected it.
-    fn suspendCurrent(self: *Machine) error{OutOfMemory}!u32 {
+    fn suspendCurrent(self: *Machine) error{OutOfMemory}!intern.TraceWord {
         const current = self.unit.current.?;
         const inherited_trace = if (current.ip >= current.code.length())
             current.traced_word
@@ -4536,7 +4607,7 @@ fn resumePark(self: *Machine) MachineError!void {
                 self.unit.allocator,
                 self.releaseDomain(),
                 &timeout,
-                &.{},
+                .{},
                 null,
             );
             try self.pushOwned(try outcomeDict(
@@ -4726,7 +4797,7 @@ fn poll(self: *Machine) MachineError!void {
 fn dispatch(self: *Machine, form: Value) MachineError!void {
     const word = switch (form) {
         .word => |id| id,
-        .int, .float, .char, .symbol, .list, .dict, .task => return self.pushBorrowed(form),
+        .int, .float, .char, .symbol, .list, .dict, .task, .module => return self.pushBorrowed(form),
     };
     try self.executeWord(word);
 }
@@ -4777,7 +4848,7 @@ const DispatchDriver = struct {
 fn retryAfterLoad(self: *Machine, name: intern.ModuleName) MachineError!WorkProgress {
     if (self.unit.current == null or self.unit.inherited.registry == null)
         return self.undefinedActiveWord();
-    const word = self.unit.active_word;
+    const word = self.unit.active_word.atom();
     self.unit.current.?.ip = self.unit.active_index;
     try self.autoLoadModule(name, .{ .qualified = word });
     return .detached;
@@ -4841,7 +4912,9 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 heap.incRef(body_header);
                 fallback.* = .{ .body = .init(body_header), .word = resolved.trace_word };
                 return self.continueWithIdiom(
-                    .{ .direct = .{ .body = body_header, .word = resolved.trace_word } },
+                    // Only a core-origin word reaches recognition, and a core
+                    // word's trace spelling is its own atom.
+                    .{ .direct = .{ .body = body_header, .word = resolved.trace_word.atom() } },
                     typedIdiomFallback(fallback),
                 );
             }
@@ -4875,7 +4948,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
 
 const DirectWordFallback = struct {
     body: heap.Owned(*Header),
-    word: u32,
+    word: intern.TraceWord,
     pub fn run(evaluator: *Machine, self: *DirectWordFallback) MachineError!void {
         return scheduleWord(evaluator, self.body.borrow(), self.word, null, null);
     }
@@ -4883,11 +4956,19 @@ const DirectWordFallback = struct {
 };
 
 pub const ResolutionOrigin = resolution_core.Origin;
+
+/// How a module-local definition is spelled when reached through `home`. An
+/// anonymous construction root has no name to qualify with, so code running
+/// inside a body under construction traces by its local name alone.
+fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) intern.TraceWord {
+    const name = home.name() orelse return .plain(intern.bindingId(local));
+    return .moduleLocal(name, local);
+}
 pub const Resolution = struct {
     lease: env.BindingLease,
     execution_generation: ?modules.ExecutionGeneration,
     home: ?*modules.ModuleHome,
-    trace_word: u32,
+    trace_word: intern.TraceWord,
     origin: ResolutionOrigin,
     pub fn deinit(self: *Resolution, _: std.mem.Allocator) void {
         self.lease.deinit();
@@ -4959,7 +5040,7 @@ pub const ResolutionCursor = struct {
     use_ordinal: usize = 0,
     acquisition: ?modules.Registry.AcquireCursor = null,
     generation: ?modules.GenerationLease = null,
-    export_lookup: ?modules.ModuleGeneration.ResolveCursor = null,
+    export_lookup: ?modules.ModuleResolveCursor = null,
 
     pub fn init(evaluator: *Machine, word: u32) ResolutionCursor {
         const spelling = intern.get(word);
@@ -4990,17 +5071,19 @@ pub const ResolutionCursor = struct {
         self.generation = null;
     }
 
+    /// A module-local binding found by direct lookup came out of the image the
+    /// activation is already running, because a module body's resolution scope
+    /// is rooted at that image and nothing else. Its home is therefore the
+    /// invoking home — the registration this activation entered through — and
+    /// never a name recorded at definition time.
     fn directResult(self: *ResolutionCursor, lease: env.BindingLease) Resolution {
-        const home = if (lease.home() != null and self.current_home != null and
-            intern.moduleId(lease.home().?) == intern.moduleId(self.current_home.?.name()))
-            self.current_home
-        else
-            null;
+        const local = lease.traceWord();
+        const home = if (local == null) null else self.current_home;
         return .{
             .lease = lease,
             .execution_generation = null,
             .home = home,
-            .trace_word = if (home != null) lease.traceWord().? else self.word,
+            .trace_word = if (home) |resolved| homeTraceWord(resolved, local.?) else .plain(self.word),
             .origin = if (home != null) .module else .direct,
         };
     }
@@ -5013,11 +5096,12 @@ pub const ResolutionCursor = struct {
         var generation_lease = self.generation.?;
         self.generation = null;
         const execution_generation = generation_lease.enterExecution(self.module_access);
+        const home = execution_generation.home(self.module_access);
         return .{
             .lease = lease,
             .execution_generation = execution_generation,
-            .home = execution_generation.home(self.module_access),
-            .trace_word = lease.traceWord().?,
+            .home = home,
+            .trace_word = homeTraceWord(home, lease.traceWord().?),
             .origin = origin,
         };
     }
@@ -5217,7 +5301,7 @@ pub const ResolutionCursor = struct {
                         .lease = lease,
                         .execution_generation = null,
                         .home = null,
-                        .trace_word = self.word,
+                        .trace_word = .plain(self.word),
                         .origin = .core,
                     } } };
                 },
@@ -5227,7 +5311,7 @@ pub const ResolutionCursor = struct {
     }
 };
 
-pub const ShadowProgress = poll_api.Progress([]u32);
+pub const ShadowProgress = poll_api.Progress([]intern.TraceWord);
 pub const ShadowCursor = struct {
     const Phase = enum { dot, scope, direct, uses, acquire, export_name, core, materialize, complete };
     allocator: std.mem.Allocator,
@@ -5243,11 +5327,12 @@ pub const ShadowCursor = struct {
     use_ordinal: usize = 0,
     acquisition: ?modules.Registry.AcquireCursor = null,
     generation: ?modules.GenerationLease = null,
-    export_lookup: ?modules.ModuleGeneration.ResolveCursor = null,
+    export_lookup: ?modules.ModuleResolveCursor = null,
+    current_home: ?*modules.ModuleHome,
     search: resolution_core.Search = .searching,
-    found: poll_api.ChunkList(u32),
-    output: ?[]u32 = null,
-    iterator: ?poll_api.ChunkList(u32).Iterator = null,
+    found: poll_api.ChunkList(intern.TraceWord),
+    output: ?[]intern.TraceWord = null,
+    iterator: ?poll_api.ChunkList(intern.TraceWord).Iterator = null,
     output_index: usize = 0,
 
     pub fn init(evaluator: *Machine, word: u32) ShadowCursor {
@@ -5256,6 +5341,7 @@ pub const ShadowCursor = struct {
             .releases = evaluator.releaseDomain(),
             .registry = evaluator.unit.inherited.registry,
             .core = evaluator.unit.environment.coreView(),
+            .current_home = evaluator.unit.current.?.home,
             .word = word,
             .dot = intern.dotCursor(intern.get(word)),
             .scope = evaluator.unit.current.?.resolution_scope,
@@ -5272,7 +5358,11 @@ pub const ShadowCursor = struct {
         self.found.retire(self.releases);
         self.* = undefined;
     }
-    fn record(self: *ShadowCursor, trace_word: u32, origin: ResolutionOrigin) error{OutOfMemory}!void {
+    fn record(
+        self: *ShadowCursor,
+        trace_word: intern.TraceWord,
+        origin: ResolutionOrigin,
+    ) error{OutOfMemory}!void {
         const decision = resolution_core.consider(self.search, .{ .trace_word = trace_word, .origin = origin });
         self.search = decision.next;
         switch (decision.command) {
@@ -5286,7 +5376,7 @@ pub const ShadowCursor = struct {
                 .pending => .pending,
                 .complete => |maybe_dot| result: {
                     if (maybe_dot != null) {
-                        self.output = try self.allocator.alloc(u32, 0);
+                        self.output = try self.allocator.alloc(intern.TraceWord, 0);
                         self.phase = .complete;
                         break :result .{ .complete = self.takeOutput() };
                     }
@@ -5316,10 +5406,17 @@ pub const ShadowCursor = struct {
                     if (maybe_lease) |loaded| {
                         var lease = loaded;
                         defer lease.deinit();
-                        try self.record(
-                            lease.traceWord() orelse self.word,
-                            if (lease.home() != null) .module else .direct,
-                        );
+                        // Same reasoning as `directResult`: a module-local
+                        // binding reached lexically belongs to the image this
+                        // activation is running, so the invoking home spells it.
+                        const home = if (lease.traceWord() == null) null else self.current_home;
+                        if (home) |resolved|
+                            try self.record(
+                                homeTraceWord(resolved, lease.traceWord().?),
+                                .module,
+                            )
+                        else
+                            try self.record(.plain(self.word), .direct);
                     }
                     if (self.registry != null) {
                         self.use_shape = environment.acquireShape();
@@ -5363,7 +5460,10 @@ pub const ShadowCursor = struct {
                     if (maybe_lease) |loaded| {
                         var lease = loaded;
                         defer lease.deinit();
-                        try self.record(lease.traceWord().?, .used);
+                        try self.record(
+                            .moduleLocal(self.generation.?.name(), lease.traceWord().?),
+                            .used,
+                        );
                     }
                     self.generation.?.deinit();
                     self.generation = null;
@@ -5379,9 +5479,9 @@ pub const ShadowCursor = struct {
                     if (maybe_lease) |loaded| {
                         var lease = loaded;
                         defer lease.deinit();
-                        if (lease.visibility == .public) try self.record(self.word, .core);
+                        if (lease.visibility == .public) try self.record(.plain(self.word), .core);
                     }
-                    self.output = try self.allocator.alloc(u32, self.found.count);
+                    self.output = try self.allocator.alloc(intern.TraceWord, self.found.count);
                     self.iterator = self.found.iterator();
                     self.phase = .materialize;
                     break :result .pending;
@@ -5398,7 +5498,7 @@ pub const ShadowCursor = struct {
             .complete => unreachable,
         };
     }
-    fn takeOutput(self: *ShadowCursor) []u32 {
+    fn takeOutput(self: *ShadowCursor) []intern.TraceWord {
         const result = self.output.?;
         self.output = null;
         return result;
@@ -5408,7 +5508,7 @@ pub const ShadowCursor = struct {
 fn scheduleWord(
     self: *Machine,
     body: *Header,
-    word: u32,
+    word: intern.TraceWord,
     resolved_home: ?*modules.ModuleHome,
     effect: ?env.Effect,
 ) MachineError!void {
@@ -5443,7 +5543,7 @@ fn scheduleWord(
 fn prepareEffectCheck(
     self: *Machine,
     effect: ?env.Effect,
-    word: u32,
+    word: intern.TraceWord,
 ) MachineError!EffectCheck {
     const declared = effect orelse {
         self.unit.active_word = word;
@@ -5527,7 +5627,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             defer loading.deinit();
             var path = heap.OwnedValue.init(self.releaseDomain(), continuation.path);
             defer path.deinit();
-            self.unit.active_word = try intern.intern("use");
+            self.unit.active_word = .plain(try intern.intern("use"));
             var driver = Machine.UseDriver.init(self, continuation.scope, continuation.name, false);
             driver.after_load = .init(.{ .loading = loading.move(), .path = path.take() });
             try self.startDriver(driver);
@@ -5650,13 +5750,15 @@ const AttemptResultDriver = struct {
 /// initial state, so a non-empty residual window is captured rather than
 /// rejected. Ownership moves value by value into the candidate's proposal.
 fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
-    var candidate = boundary.mode.module;
-    defer candidate.deinit();
+    const owned = boundary.mode.module;
+    var image = owned.image;
+    defer image.deinit();
     const observed = self.unit.stack.items.len - boundary.stack_base;
-    try candidate.reserveProposal(observed);
-    const driver = try self.unit.allocator.create(ModuleCommitDriver);
+    try image.reserveTemplate(observed);
+    const driver = try self.unit.allocator.create(ModuleCompletionDriver);
     driver.* = .{
-        .candidate = .init(candidate.move()),
+        .image = .init(image.move()),
+        .validation = if (owned.registration) |symbol| .init(symbol) else null,
         .cursor = null,
         .captured = observed,
     };
@@ -5829,45 +5931,94 @@ fn finishStateApplication(self: *Machine, boundary: Boundary) MachineError!void 
     });
 }
 
-const ModuleCommitDriver = struct {
+/// The registry-mutation half of module publication, reached either by
+/// `register` on a value or by a `@defm` boundary that has just finished
+/// constructing one. Both spellings therefore share one publication protocol.
+fn advanceRegistration(
+    evaluator: *Machine,
+    cursor: *modules.Registry.RegistrationCursor,
+) MachineError!WorkProgress {
+    var budget: usize = kernel_poll_quantum;
+    while (budget != 0) : (budget -= 1) {
+        switch (cursor.advance() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NameConflict => return evaluator.fail(.domain, "module name collides with an alias"),
+            error.StateApplicationActive => return evaluator.fail(
+                .domain,
+                "a module cannot be registered from inside a state application",
+            ),
+        }) {
+            .pending => {},
+            .complete => return .completed,
+        }
+    }
+    return .yielded;
+}
+
+const ModuleRegisterDriver = struct {
     pub const address_stable_driver = {};
-    candidate: heap.Owned(modules.OwnedCandidate),
-    cursor: ?heap.Owned(modules.Registry.CommitCursor),
-    /// Construction-stack values still to move into the candidate proposal,
+    module: heap.Owned(Value),
+    cursor: heap.Owned(modules.Registry.RegistrationCursor),
+    pub fn advance(evaluator: *Machine, self: *ModuleRegisterDriver) MachineError!WorkProgress {
+        try evaluator.pollKernel();
+        return advanceRegistration(evaluator, self.cursor.borrowMut());
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+/// Finishes one construction boundary: capture the residual stack as the
+/// image's template, freeze the image, then either register it under the name
+/// the boundary carried or hand it to the program as a value.
+const ModuleCompletionDriver = struct {
+    pub const address_stable_driver = {};
+    image: heap.Owned(modules.OwnedImage),
+    /// The same image once construction is over. Sealing consumes `image`, so
+    /// no template write or definition can reach it after this point.
+    sealed: ?heap.Owned(modules.SealedImage) = null,
+    /// Absent for `@module`, which hands the image to the program instead.
+    validation: ?intern.ModuleNameCursor,
+    cursor: ?heap.Owned(modules.Registry.RegistrationCursor),
+    /// Construction-stack values still to move into the image template,
     /// counted from the top of the residual window down.
     captured: usize,
-    pub fn advance(evaluator: *Machine, self: *ModuleCommitDriver) MachineError!WorkProgress {
+    phase: enum { capture, validate, publish } = .capture,
+    pub fn advance(evaluator: *Machine, self: *ModuleCompletionDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
-        if (self.cursor == null) {
-            var budget: usize = kernel_poll_quantum;
-            while (budget != 0 and self.captured != 0) : (budget -= 1) {
-                self.captured -= 1;
-                self.candidate.borrow().placeProposal(
-                    self.captured,
-                    evaluator.unit.takeStackOwned().?,
-                );
-            }
-            if (self.captured != 0) return .yielded;
-            self.cursor = .init(evaluator.unit.inherited.registry.?.commitCursor(
-                self.candidate.borrowMut(),
-                &evaluator.unit.turn_authority,
-            ));
-            return .yielded;
-        }
         var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) {
-            switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.NameConflict => return evaluator.fail(.domain, "module name collides with an alias"),
-                error.StateApplicationActive => return evaluator.fail(
-                    .domain,
-                    "a module cannot be registered from inside a state application",
-                ),
-            }) {
+        while (budget != 0) : (budget -= 1) switch (self.phase) {
+            .capture => {
+                if (self.captured != 0) {
+                    self.captured -= 1;
+                    self.image.borrow().placeTemplate(
+                        self.captured,
+                        evaluator.unit.takeStackOwned().?,
+                    );
+                    continue;
+                }
+                self.sealed = .init(self.image.borrowMut().seal());
+                if (self.validation == null) {
+                    const item = try self.sealed.?.borrowMut().intoValue(evaluator.unit.allocator);
+                    return .{ .output = item };
+                }
+                self.phase = .validate;
+            },
+            .validate => switch (self.validation.?.advance()) {
                 .pending => {},
-                .complete => return .completed,
-            }
-        }
+                .complete => |maybe_name| {
+                    const name = maybe_name orelse return evaluator.fail(
+                        .domain,
+                        "@defm requires a valid module name",
+                    );
+                    self.cursor = .init(evaluator.unit.inherited.registry.?.registrationCursor(
+                        self.sealed.?.borrow().ref(),
+                        name,
+                        &evaluator.unit.turn_authority,
+                    ));
+                    self.phase = .publish;
+                },
+            },
+            .publish => return advanceRegistration(evaluator, self.cursor.?.borrowMut()),
+        };
         return .yielded;
     }
     pub const ownership: heap.DriverOwnership = .fields;
@@ -5886,13 +6037,16 @@ fn startFailure(self: *Machine) error{OutOfMemory}!void {
     std.debug.assert(!self.unit.hasWorkDriver() and self.unit.pending != null);
     const capacity = std.math.add(usize, self.unit.frames.items.len, 3) catch
         return error.OutOfMemory;
-    const trace = try self.unit.allocator.alloc(u32, capacity);
+    const trace = try self.unit.allocator.alloc(intern.TraceWord, capacity);
     errdefer self.unit.allocator.free(trace);
+    const resolved = try self.unit.allocator.alloc(u32, capacity);
+    errdefer self.unit.allocator.free(resolved);
     const driver = try self.unit.allocator.create(FailureDriver);
     driver.* = .{
         .allocator = self.unit.allocator,
         .failure = self.unit.pending.?,
         .trace = trace,
+        .resolved = resolved,
         .frame_index = self.unit.frames.items.len,
         .boundary_index = self.unit.boundary_index,
     };
@@ -5906,8 +6060,14 @@ const FailureDriver = struct {
     pub const ownership: heap.DriverOwnership = .self_owned;
     allocator: std.mem.Allocator,
     failure: EclErr,
-    trace: []u32,
+    /// The activation chain, innermost first. Entries are trace words rather
+    /// than atoms because a module-local word's spelling depends on the
+    /// registration it ran under; `resolved` holds the interned spellings.
+    trace: []intern.TraceWord,
+    resolved: []u32,
     trace_count: usize = 0,
+    resolve_index: usize = 0,
+    resolver: ?intern.TraceWordCursor = null,
     frame_index: usize,
     location_cursor: ?spans.SpanArchive.LocateCursor = null,
     location: ?spans.LocatedSpan = null,
@@ -5921,7 +6081,7 @@ const FailureDriver = struct {
     outcome_inserter: ?intern.InternInsertionCursor = null,
     outcome_pair: [1]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }},
     outcome_builder: ?kernel_storage.DictMaterializer = null,
-    phase: enum { trace, locate, value, nearest, current, frames, boundary, stack, outcome_name, outcome, finish } = .trace,
+    phase: enum { trace, spell, locate, value, nearest, current, frames, boundary, stack, outcome_name, outcome, finish } = .trace,
 
     fn appendInitial(self: *FailureDriver, evaluator: *Machine) void {
         if (self.failure.word) |word| self.appendTrace(word);
@@ -5929,7 +6089,7 @@ const FailureDriver = struct {
         if (evaluator.unit.current) |current|
             if (current.traced_word != no_word) self.appendTrace(current.traced_word);
     }
-    fn appendTrace(self: *FailureDriver, word: u32) void {
+    fn appendTrace(self: *FailureDriver, word: intern.TraceWord) void {
         self.trace[self.trace_count] = word;
         self.trace_count += 1;
     }
@@ -5941,8 +6101,10 @@ const FailureDriver = struct {
         if (self.value_cursor) |*cursor| cursor.retire(releases);
         if (self.outcome_builder) |*builder| builder.retire(releases);
         if (self.error_value) |item| releases.releaseValue(item);
+        if (self.resolver) |*cursor| cursor.deinit();
         self.failure.retire(releases);
         storage_allocator.free(self.trace);
+        storage_allocator.free(self.resolved);
     }
     fn beginLocation(self: *FailureDriver, evaluator: *Machine) void {
         if (self.failure.site) |site| {
@@ -5954,7 +6116,12 @@ const FailureDriver = struct {
         self.value_cursor = .init(
             self.allocator,
             &self.failure,
-            self.trace[0..self.trace_count],
+            // `appendInitial` puts the failing word first when there is one,
+            // so its spelling is the first resolved entry.
+            .{
+                .word = if (self.failure.word != null) self.resolved[0] else null,
+                .trace = self.resolved[0..self.trace_count],
+            },
             self.location,
         );
         self.phase = .value;
@@ -5972,13 +6139,32 @@ const FailureDriver = struct {
         while (budget != 0) : (budget -= 1) switch (self.phase) {
             .trace => {
                 if (self.frame_index == 0) {
-                    self.beginLocation(evaluator);
+                    self.phase = .spell;
                     continue;
                 }
                 self.frame_index -= 1;
                 switch (evaluator.unit.frames.items[self.frame_index]) {
                     .eval => |frame| if (frame.traced_word != no_word) self.appendTrace(frame.traced_word),
                     .effect_check, .application, .use_after_load, .qualified_after_load, .boundary => {},
+                }
+            },
+            // Qualifying a module-local word interns its spelling. Failures
+            // are rare, so this is the one place that cost is paid.
+            .spell => {
+                if (self.resolve_index == self.trace_count) {
+                    self.beginLocation(evaluator);
+                    continue;
+                }
+                if (self.resolver == null)
+                    self.resolver = try .init(self.allocator, self.trace[self.resolve_index]);
+                switch (try self.resolver.?.advance()) {
+                    .pending => {},
+                    .complete => |id| {
+                        self.resolver.?.deinit();
+                        self.resolver = null;
+                        self.resolved[self.resolve_index] = id;
+                        self.resolve_index += 1;
+                    },
                 }
             },
             .locate => switch (self.location_cursor.?.advance()) {

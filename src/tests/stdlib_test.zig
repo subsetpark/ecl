@@ -92,15 +92,15 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     // A path module that would shadow a stdlib name, and one that would not.
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "result.ecl",
-        .data = "((999) 'ok def) 'result @module",
+        .data = "((999) 'ok def) 'result @defm",
     });
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "site-local.ecl",
-        .data = "((7) 'answer def) 'site-local @module",
+        .data = "((7) 'answer def) 'site-local @defm",
     });
     try directory.dir.writeFile(std.testing.io, .{
         .sub_path = "cold-local.ecl",
-        .data = "((8) 'answer def (9) 'also def) 'cold-local @module",
+        .data = "((8) 'answer def (9) 'also def) 'cold-local @defm",
     });
     const search = try directory.dir.realPathFileAlloc(std.testing.io, ".", allocator);
     defer allocator.free(search);

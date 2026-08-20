@@ -86,9 +86,11 @@ const TestEffect = struct {
 };
 
 fn commitEmptyModule(registry: *modules.Registry, name: intern.ModuleName) !void {
-    var candidate = try registry.createCandidate(name);
+    var candidate = try registry.createImage();
     defer candidate.deinit();
-    _ = try registry.commit(&candidate);
+    var sealed = candidate.seal();
+    defer sealed.deinit();
+    _ = try registry.register(sealed.ref(), name);
 }
 
 test "module names: branded factories enforce the reader symbol grammar" {
@@ -129,8 +131,7 @@ test "env: new names and use edits bump shape and deep lookup is ordered" {
     defer host.cleanup().drain();
     var environment = env.Environment.init(std.testing.allocator, releases);
     defer env.testing.deinitEnvironment(&environment);
-    const home = try intern.internModuleName("environment-test-home");
-    var scope = env.Scope.moduleRoot(std.testing.allocator, &environment, home);
+    var scope = env.Scope.moduleRoot(std.testing.allocator, &environment);
     defer env.testing.deinitScope(&scope, releases);
     const first = try intern.internNamespace("first-env-name");
     const second = try intern.internNamespace("second-env-name");
@@ -183,36 +184,36 @@ test "scope: isolated @attempt and child use do not leak" {
     defer runtime.deinit();
     try expectErrorContains(&runtime, "(1 'k set) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
     try expectErrorContains(&runtime, "((1 'k set missing) @attempt pop) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
-    try expectOk(&runtime, "(7 'x set) 'm @module");
+    try expectOk(&runtime, "(7 'x set) 'm @defm");
     try expectErrorContains(&runtime, "('m use x) @attempt pop x", &.{ "'kind 'undefined-word", "'word 'x" });
 }
 
 test "module: privacy module-body contract top-level private and qualified trace" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module m.f");
+    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @defm m.f");
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
     try expectErrorContains(&runtime, "m.s", &.{ "'kind 'undefined-word", "'word 'm.s" });
-    try expectOk(&runtime, "((41) ( -- n ) 'g defp (g 1 +) ( -- n ) 'f def) 'private-word @module private-word.f");
+    try expectOk(&runtime, "((41) ( -- n ) 'g defp (g 1 +) ( -- n ) 'f def) 'private-word @defm private-word.f");
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
     try expectErrorContains(&runtime, "private-word.g", &.{ "'kind 'undefined-word", "'word 'private-word.g" });
     try expectErrorContains(&runtime, "1 'x setp", &.{ "'kind 'domain", "defp/setp" });
     // A body that leaves values behind registers: they become the slot's
     // durable stack, not bindings, so no name appears for them.
-    try expectOk(&runtime, "(1) 'bad @module");
+    try expectOk(&runtime, "(1) 'bad @defm");
     try expectErrorContains(&runtime, "bad.x", &.{"'kind 'undefined-word"});
-    try expectOk(&runtime, "((1 'hidden set) @attempt pop) 'temporary @module");
+    try expectOk(&runtime, "((1 'hidden set) @attempt pop) 'temporary @defm");
     try expectErrorContains(&runtime, "temporary.hidden", &.{"'kind 'undefined-word"});
-    try expectOk(&runtime, "((missing) ( -- n ) 'boom def) 'trace-module @module");
+    try expectOk(&runtime, "((missing) ( -- n ) 'boom def) 'trace-module @defm");
     try expectErrorContains(&runtime, "trace-module.boom", &.{ "'word 'missing", "'trace ['missing 'trace-module.boom]" });
-    try expectOk(&runtime, "((dup 0 > (1 - f 1 +) (pop missing) if) ( n -- n ) 'f def) 'recursive @module");
+    try expectOk(&runtime, "((dup 0 > (1 - f 1 +) (pop missing) if) ( n -- n ) 'f def) 'recursive @defm");
     try expectErrorContains(&runtime, "2 recursive.f", &.{"'trace ['missing 'recursive.f 'recursive.f 'recursive.f]"});
 }
 
 test "modules: removal strips aliases and leaves no half-removed entry" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "((1) 'x def) 'a @module ((2) 'x def) 'b @module " ++
+    try expectOk(&runtime, "((1) 'x def) 'a @defm ((2) 'x def) 'b @defm " ++
         "'short 'a alias 'a use short.x a.x x");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try expectOk(&runtime, "'a unmodule");
@@ -230,7 +231,7 @@ test "modules: removal strips aliases and leaves no half-removed entry" {
 test "module: qualified use alias ordering idempotence and collisions" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "(1 'x set) 'a @module (2 'x set) 'b @module " ++
+    try expectOk(&runtime, "(1 'x set) 'a @defm (2 'x set) 'b @defm " ++
         "'a use 'b use x 'a use x 'short 'a alias short.x");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
@@ -238,7 +239,7 @@ test "module: qualified use alias ordering idempotence and collisions" {
     try expectErrorContains(&runtime, "'a 'b alias", &.{"'kind 'domain"});
     try expectOk(&runtime, "'short 'b alias short.x");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[3].int);
-    try expectErrorContains(&runtime, "'future 'a alias (3 'x set) 'future @module", &.{"'kind 'domain"});
+    try expectErrorContains(&runtime, "'future 'a alias (3 'x set) 'future @defm", &.{"'kind 'domain"});
     try expectErrorContains(&runtime, "'dotted.name 'a alias", &.{"'kind 'domain"});
 }
 
@@ -249,21 +250,21 @@ test "module: provisional tasks keep rollback generations alive until quiescence
         .{ .worker_pool = 1 },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "((((1) () while) @spawn pop missing) 'bad @module) @attempt pop");
+    try expectOk(&runtime, "((((1) () while) @spawn pop missing) 'bad @defm) @attempt pop");
 }
 
 test "module: hot reload commit failure and whole-body pinning" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     try expectOk(&runtime, "(1 'x setp " ++
-        "((2 'x setp (x) ( -- n ) 'get def) 'm @module x) ( -- n ) 'probe def " ++
-        "(x) ( -- n ) 'get def) 'm @module m.probe m.get");
+        "((2 'x setp (x) ( -- n ) 'get def) 'm @defm x) ( -- n ) 'probe def " ++
+        "(x) ( -- n ) 'get def) 'm @defm m.probe m.get");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
-    try expectErrorContains(&runtime, "(3 'x setp missing) 'm @module", &.{"'kind 'undefined-word"});
+    try expectErrorContains(&runtime, "(3 'x setp missing) 'm @defm", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "m.get");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[2].int);
-    try expectErrorContains(&runtime, "((9) ( -- n ) 'get def) 'kept @module missing", &.{"'kind 'undefined-word"});
+    try expectErrorContains(&runtime, "((9) ( -- n ) 'get def) 'kept @defm missing", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "kept.get");
     try std.testing.expectEqual(@as(i64, 9), runtime.stackItems()[3].int);
 }
@@ -273,17 +274,17 @@ test "module: effect shape cross-home contract and same-home TCO" {
     defer runtime.deinit();
     // A module word may omit its annotation entirely; only a malformed
     // recognized annotation is 'domain.
-    try expectOk(&runtime, "((dup) 'f def) 'fine @module");
-    try expectErrorContains(&runtime, "((dup) (a -- b -- c) 'f def) 'bad @module", &.{"'kind 'domain"});
-    try expectErrorContains(&runtime, "((dup) (a 1 -- b) 'f def) 'bad @module", &.{"'kind 'domain"});
-    try expectOk(&runtime, "((dup 0 > (1 - countdown) (pop) if) ( n -- ) 'countdown def) 'm @module");
+    try expectOk(&runtime, "((dup) 'f def) 'fine @defm");
+    try expectErrorContains(&runtime, "((dup) (a -- b -- c) 'f def) 'bad @defm", &.{"'kind 'domain"});
+    try expectErrorContains(&runtime, "((dup) (a 1 -- b) 'f def) 'bad @defm", &.{"'kind 'domain"});
+    try expectOk(&runtime, "((dup 0 > (1 - countdown) (pop) if) ( n -- ) 'countdown def) 'm @defm");
     try expectOk(&runtime, "20 m.countdown");
     const shallow_frames = runtime.lastMaxFrames();
     try expectOk(&runtime, "20000 m.countdown");
     try std.testing.expectEqual(shallow_frames, runtime.lastMaxFrames());
-    try expectErrorContains(&runtime, "((dup +) ( a -- b c ) 'f def) 'lies @module 1 lies.f", &.{ "'kind 'contract", "'word 'lies.f" });
-    try expectErrorContains(&runtime, "((dup) ( a -- a a ) 'f def) 'needs @module needs.f", &.{ "'kind 'contract", "seeded 0" });
-    try expectErrorContains(&runtime, "((missing) ( -- n ) 'f def) 'throws @module throws.f", &.{ "'kind 'undefined-word", "'word 'missing" });
+    try expectErrorContains(&runtime, "((dup +) ( a -- b c ) 'f def) 'lies @defm 1 lies.f", &.{ "'kind 'contract", "'word 'lies.f" });
+    try expectErrorContains(&runtime, "((dup) ( a -- a a ) 'f def) 'needs @defm needs.f", &.{ "'kind 'contract", "seeded 0" });
+    try expectErrorContains(&runtime, "((missing) ( -- n ) 'f def) 'throws @defm throws.f", &.{ "'kind 'undefined-word", "'word 'missing" });
     try expectOk(&runtime, "(dup +) 'session-double def 4 session-double");
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[runtime.stackItems().len - 1].int);
 }
@@ -304,7 +305,7 @@ test "module: use shadow notices are exact and non-blocking" {
         },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "1 'mean set 2 'count set (3 'mean set 4 'count set 5 'other set) 'stats @module 'stats use mean count");
+    try expectOk(&runtime, "1 'mean set 2 'count set (3 'mean set 4 'count set 5 'other set) 'stats @defm 'stats use mean count");
     try std.testing.expectEqualStrings(
         "session `count` shadows `stats.count`\n" ++
             "session `mean` shadows `stats.mean`\n",
@@ -313,7 +314,7 @@ test "module: use shadow notices are exact and non-blocking" {
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
     const notice_len = diagnostics.written().len;
-    try expectOk(&runtime, "('stats use other pop) @attempt pop ('stats use (other) ( -- n ) 'get def) 'consumer @module consumer.get pop");
+    try expectOk(&runtime, "('stats use other pop) @attempt pop ('stats use (other) ( -- n ) 'get def) 'consumer @defm consumer.get pop");
     try std.testing.expectEqual(notice_len, diagnostics.written().len);
 
     var output_buffer: [64]u8 = undefined;
@@ -331,7 +332,7 @@ test "module: use shadow notices are exact and non-blocking" {
         },
     );
     defer broken.deinit();
-    try expectErrorContains(&broken, "1 'x set (2 'x set 3 'y set) 'm @module 'm use", &.{"'kind 'io"});
+    try expectErrorContains(&broken, "1 'x set (2 'x set 3 'y set) 'm @defm 'm use", &.{"'kind 'io"});
     try expectErrorContains(&broken, "y", &.{"'kind 'undefined-word"});
 }
 
@@ -359,7 +360,7 @@ test "module: use shadow notices stay within the cancellation bound" {
     const binding = try TestBinding.init(allocator);
     defer runtime.release(binding.body);
     try runtime.define(long_name, binding.top());
-    const module_source = try std.fmt.allocPrint(allocator, "(2 '{s} set) 'wide @module", .{name_bytes});
+    const module_source = try std.fmt.allocPrint(allocator, "(2 '{s} set) 'wide @defm", .{name_bytes});
     defer allocator.free(module_source);
     try expectOk(&runtime, module_source);
     runtime.requestCancellation();
@@ -376,7 +377,7 @@ test "module: use shadow notices stay within the cancellation bound" {
     try name_runtime.pushOwned(.{ .symbol = intern.namespaceId(long_name) });
     try name_runtime.pushOwned(try list.fromValuesGeneric(allocator, &.{}));
     name_runtime.requestCancellation();
-    try expectErrorContains(&name_runtime, "@module", &.{"unit cancelled"});
+    try expectErrorContains(&name_runtime, "@defm", &.{"unit cancelled"});
     try std.testing.expect(name_runtime.lastPolls() >= 1);
 }
 
@@ -396,7 +397,7 @@ test "reflection: which and see expose home shadow and effect" {
         },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module 'm use " ++
+    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @defm 'm use " ++
         "'m.f see 9 'f set 'f which 'f see words");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(s 2 +) (-- n) 'm.f def") != null);
     // One binding kind: a session constant reports as a public def with no
@@ -412,7 +413,7 @@ test "reflection: which and see expose home shadow and effect" {
 test "reflection: body extraction loses home context" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module");
+    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @defm");
     try expectErrorContains(&runtime, "'m.f body call", &.{ "'kind 'undefined-word", "'word 's" });
 }
 
@@ -432,7 +433,7 @@ test "reflection: words is sorted unique and private-safe" {
         },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "(1 'hidden setp 2 'zebra set 3 'alpha set) 'm @module 'm use 4 'zebra set words");
+    try expectOk(&runtime, "(1 'hidden setp 2 'zebra set 3 'alpha set) 'm @defm 'm use 4 'zebra set words");
     const rendered = output.written();
     try std.testing.expect(std.mem.indexOf(u8, rendered, "alpha") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "hidden") == null);
@@ -478,7 +479,7 @@ test "session completion: live and registered names are sorted unique" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     try expectOk(
         &runtime,
-        "(1 'hidden setp 2 'public set) 'completion-module @module " ++
+        "(1 'hidden setp 2 'public set) 'completion-module @defm " ++
             "'completion-module use 'cm 'completion-module alias " ++
             "3 'repl-live set",
     );
@@ -508,9 +509,9 @@ test "session completion: dotted aliases expose only public exports" {
     defer runtime.deinit();
     try expectOk(
         &runtime,
-        "(1 'old-public set 2 'private-name setp) 'completion-module @module " ++
+        "(1 'old-public set 2 'private-name setp) 'completion-module @defm " ++
             "'cm 'completion-module alias " ++
-            "(3 'new-public set 4 'new-private setp) 'completion-module @module",
+            "(3 'new-public set 4 'new-private setp) 'completion-module @defm",
     );
     var canonical = try runtime.completionCandidates("completion-module.");
     defer canonical.deinit();
@@ -582,7 +583,7 @@ test "reflection remains cancellable across sorting and identifier output" {
     defer qualified_runtime.deinit();
     const module_source = try std.fmt.allocPrint(
         allocator,
-        "(1 '{s} set) 'poll-module @module",
+        "(1 '{s} set) 'poll-module @defm",
         .{first_bytes},
     );
     defer allocator.free(module_source);
@@ -1034,9 +1035,11 @@ const RegistryThreadContext = struct {
 };
 
 fn commitCandidate(context: RegistryThreadContext, name: intern.ModuleName) bool {
-    var candidate = context.registry.createCandidate(name) catch return false;
+    var candidate = context.registry.createImage() catch return false;
     defer candidate.deinit();
-    _ = context.registry.commit(&candidate) catch return false;
+    var sealed = candidate.seal();
+    defer sealed.deinit();
+    _ = context.registry.register(sealed.ref(), name) catch return false;
     return true;
 }
 
@@ -1100,7 +1103,7 @@ test "registry: old generation leases survive reload and reclaim after release" 
     defer releases.releaseValue(body);
     const module_name = try intern.internModuleName("leased-generation");
     const value_name = try intern.internNamespace("leased-value");
-    var first = try registry.createCandidate(module_name);
+    var first = try registry.createImage();
     defer first.deinit();
     const effect = try TestEffect.init(std.testing.allocator);
     defer effect.release(releases);
@@ -1109,14 +1112,22 @@ test "registry: old generation leases survive reload and reclaim after release" 
         .visibility = .public,
         .effect = effect.effect,
     } });
-    _ = try registry.commit(&first);
+    var first_sealed = first.seal();
+    defer first_sealed.deinit();
+    _ = try registry.register(first_sealed.ref(), module_name);
     var old = registry.acquire(module_name).?;
-    var second = try registry.createCandidate(module_name);
+    var second = try registry.createImage();
     defer second.deinit();
-    _ = try registry.commit(&second);
+    var second_sealed = second.seal();
+    defer second_sealed.deinit();
+    _ = try registry.register(second_sealed.ref(), module_name);
     try std.testing.expectEqual(@as(u64, 1), old.generationNumber());
     try std.testing.expectEqual(@as(u32, 2), heap.refCount(body.list));
     old.deinit();
+    // Construction and registration are independent owners now, so the test's
+    // own sealed-image reference is the other retainer of the definition body;
+    // the superseded generation reclaims only once both are gone.
+    first_sealed.deinit();
     host.cleanup().drain();
     try std.testing.expectEqual(@as(u32, 1), heap.refCount(body.list));
 }
@@ -1129,22 +1140,26 @@ test "registry: generation cursors independently pin their snapshot" {
     defer registry.deinit();
     const module_name = try intern.internModuleName("cursor-pinned-generation");
     const value_name = try intern.internNamespace("cursor-pinned-value");
-    var first = try registry.createCandidate(module_name);
+    var first = try registry.createImage();
     defer first.deinit();
     const binding = try TestBinding.init(std.testing.allocator);
     defer binding.release(releases);
     const effect = try TestEffect.init(std.testing.allocator);
     defer effect.release(releases);
     _ = try first.publishDefinition(value_name, binding.module(effect.effect, .public));
-    _ = try registry.commit(&first);
+    var first_sealed = first.seal();
+    defer first_sealed.deinit();
+    _ = try registry.register(first_sealed.ref(), module_name);
 
     var lease = registry.acquire(module_name).?;
     var lookup = lease.resolveCursor(intern.namespaceId(value_name), true);
     var names = lease.publicNameCursor();
     lease.deinit();
-    var second = try registry.createCandidate(module_name);
+    var second = try registry.createImage();
     defer second.deinit();
-    _ = try registry.commit(&second);
+    var second_sealed = second.seal();
+    defer second_sealed.deinit();
+    _ = try registry.register(second_sealed.ref(), module_name);
     for (0..64) |_| _ = releases.advance(1);
 
     const old = while (true) switch (lookup.advance()) {
@@ -1165,42 +1180,33 @@ test "registry: generation cursors independently pin their snapshot" {
     host.cleanup().drain();
 }
 
-test "module generation retirement waits for descendant scope propagation" {
+test "module image retirement waits for descendant scope propagation" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
-        var host = heap.HostOwner.init(allocator);
-        const releases = host.domain();
-        defer host.cleanup().drain();
-        const generation = try modules.ModuleGeneration.create(
-            allocator,
-            releases,
-            try intern.internModuleName("descendant-retirement"),
-        );
-        const child = try env.Scope.createLazy(allocator, &generation.scope);
-        const binding = try TestBinding.init(allocator);
-        defer binding.release(releases);
-        _ = try child.publishTop(
-            try intern.internNamespace("descendant-local"),
-            binding.top(),
-        );
-        // The generation owner may retire first, but its embedded scope must
-        // keep both its storage and environment until the child finishes its
-        // own multi-turn environment teardown and propagates the parent drop.
-        generation.release();
-        for (0..16) |_| _ = releases.advance(1);
-        try std.testing.expect(releases.hasPending());
-        const grandchild = try env.Scope.createLazy(allocator, child);
-        const grandchild_name = try intern.internNamespace("grandchild-after-retirement");
-        _ = try grandchild.publishTop(grandchild_name, binding.top());
-        var grandchild_value = grandchild.environmentOrNull().?.resolveDirect(
-            intern.namespaceId(grandchild_name),
-        ).?;
-        try std.testing.expectEqual(env.quotation(binding.body.list).?, grandchild_value.binding.word);
-        grandchild_value.deinit();
-        grandchild.retire();
-        child.retire();
-        host.cleanup().drain();
+        var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
+        defer runtime.deinit();
+        // The body spawns a task whose `@attempt` opens a lazy child scope of
+        // the image's module root, and leaves that task on the construction
+        // stack, where it becomes part of the image's initial-state template.
+        // Dropping the image therefore releases an owner whose descendant
+        // scope is still propagating its own multi-turn teardown. If the
+        // embedded scope or its environment were destroyed before that
+        // propagation finished, this aborts inside the allocator rather than
+        // failing an assertion — which is why the shape is driven through the
+        // ordinary words instead of a handcrafted seam.
+        const cycle = "(1 'x setp ((x) @attempt) @spawn) @module pop";
+        const small = "[1] 20 take (pop " ++ cycle ++ ") for";
+        const large = "[1] 200 take (pop " ++ cycle ++ ") for";
+        try expectOk(&runtime, small);
+        const before_small = counting.total_requested_bytes;
+        try expectOk(&runtime, small);
+        const after_small = counting.total_requested_bytes;
+        try expectOk(&runtime, large);
+        const after_large = counting.total_requested_bytes;
+        const small_growth = after_small -| before_small;
+        const large_growth = after_large -| after_small;
+        try std.testing.expect(large_growth <= small_growth * 2 + 4096);
     }
     try std.testing.expectEqual(.ok, counting.deinit());
 }
@@ -1366,7 +1372,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     const alias_name = try intern.internNamespace("allocation-alias");
     const second_name = try intern.internModuleName("allocation-second-module");
     const word_name = try intern.internNamespace("answer");
-    var first = try registry.createCandidate(first_name);
+    var first = try registry.createImage();
     defer first.deinit();
     _ = try first.publishDefinition(word_name, .{ .word = .{
         .body = env.quotation(effect_value.list).?,
@@ -1374,11 +1380,13 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .effect = effect,
         .doc = document,
     } });
-    _ = try registry.commit(&first);
+    var first_sealed = first.seal();
+    defer first_sealed.deinit();
+    _ = try registry.register(first_sealed.ref(), first_name);
     try registry.alias(alias_name, first_name);
     var lease = registry.acquire(try intern.internModuleName("allocation-alias")).?;
     defer lease.deinit();
-    var second = try registry.createCandidate(first_name);
+    var second = try registry.createImage();
     defer second.deinit();
     _ = try second.publishDefinition(word_name, .{ .word = .{
         .body = env.quotation(effect_value.list).?,
@@ -1386,13 +1394,17 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         .effect = effect,
         .doc = document,
     } });
-    _ = try registry.commit(&second);
-    var third = try registry.createCandidate(second_name);
+    var second_sealed = second.seal();
+    defer second_sealed.deinit();
+    _ = try registry.register(second_sealed.ref(), first_name);
+    var third = try registry.createImage();
     defer third.deinit();
     const constant = try TestBinding.init(allocator);
     defer releases.releaseValue(constant.body);
     _ = try third.publishDefinition(word_name, constant.module(effect, .public));
-    _ = try registry.commit(&third);
+    var third_sealed = third.seal();
+    defer third_sealed.deinit();
+    _ = try registry.register(third_sealed.ref(), second_name);
 }
 
 test "environment and registry APIs propagate every allocation failure" {
@@ -1410,7 +1422,7 @@ test "modules: module set and setp publish unannotated constants" {
     // Registration succeeding is itself the proof that a module definition
     // may carry no effect at all: `set` publishes the bare literal capture,
     // so constants need no value exception and no synthesized metadata.
-    try expectOk(&runtime, "(7 'x set 8 'h setp (h) (-- n) 'peek def) 'm @module");
+    try expectOk(&runtime, "(7 'x set 8 'h setp (h) (-- n) 'peek def) 'm @defm");
     try expectOk(&runtime, "m.x m.peek");
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[1].int);
@@ -1429,7 +1441,7 @@ test "modules: cross-home constant references cross unchecked while declared eff
     // A constant reached across a home boundary declares no effect, so no
     // check frame is installed at all: qualified access, spliced access, and
     // module-internal access agree without one.
-    try expectOk(&runtime, "(7 'x set 8 'h setp (h) (-- n) 'peek def) 'm @module");
+    try expectOk(&runtime, "(7 'x set 8 'h setp (h) (-- n) 'peek def) 'm @defm");
     try expectOk(&runtime, "m.x 'm use x m.peek");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
@@ -1439,7 +1451,7 @@ test "modules: cross-home constant references cross unchecked while declared eff
     // word declaring it and leaving two values is a contract violation.
     try expectErrorContains(
         &runtime,
-        "((1 2) (-- value) 'two def) 'liar @module liar.two",
+        "((1 2) (-- value) 'two def) 'liar @defm liar.two",
         // Seeded/observed are absolute stack depths, so assert the parts that
         // do not depend on what this session left on the stack.
         &.{ "'kind 'contract", "'word 'liar.two", "declared (0 -- 1)" },

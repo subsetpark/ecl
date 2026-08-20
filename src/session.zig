@@ -496,7 +496,7 @@ pub const Session = enum(usize) {
                     core.allocator(),
                     core.releaseDomain(),
                     &parse_error,
-                    &.{},
+                    .{},
                     location,
                 ) };
             },

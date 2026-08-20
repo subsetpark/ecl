@@ -79,7 +79,7 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
 }
 
 const DefineDriver = struct {
-    const Phase = enum { scan_annotation, validate_annotation, validate_name, normalize_doc, copy_effect, materialize_effect, qualify_name, publish };
+    const Phase = enum { scan_annotation, validate_annotation, validate_name, normalize_doc, copy_effect, materialize_effect, publish };
     mode: Mode,
     scope: *env.Scope,
     name: u32,
@@ -99,8 +99,6 @@ const DefineDriver = struct {
     normalizer: ?heap.Owned(doc_text.NormalizeCursor) = null,
     effect_items: ?heap.Owned([]Value) = null,
     effect_materializer: ?heap.Owned(kernel_storage.ValueMaterializer) = null,
-    qualified: ?heap.Owned(intern.QualifiedCursor) = null,
-    trace_word: ?u32 = null,
     publisher: ?heap.Owned(env.Environment.BindCursor) = null,
 
     fn malformed(evaluator: *Machine) MachineError {
@@ -233,23 +231,10 @@ const DefineDriver = struct {
                         "def/set requires an unqualified, non-reserved name",
                     ),
                 }
-                if (self.scope.kind() == .module_root) {
-                    self.qualified = .init(try .init(
-                        evaluator.allocator(),
-                        intern.qualifiedName(
-                            evaluator.currentHome().?.name(),
-                            self.binding_name.?,
-                        ),
-                    ));
-                    self.phase = .qualify_name;
-                } else self.phase = .publish;
-            },
-            .qualify_name => switch (try self.qualified.?.borrowMut().advance()) {
-                .pending => budget -= 1,
-                .complete => |trace_word| {
-                    self.trace_word = trace_word;
-                    self.phase = .publish;
-                },
+                // A module definition records only its own name. The
+                // qualified spelling belongs to whichever registration a call
+                // reaches it through, so there is nothing to intern here.
+                self.phase = .publish;
             },
             .publish => {
                 const private = self.mode == .defp;
@@ -259,7 +244,7 @@ const DefineDriver = struct {
                 const name = self.binding_name.?;
                 const visibility: env.Visibility = if (private) .private else .public;
                 if (self.publisher == null) self.publisher = .init(if (module_root)
-                    try self.scope.publishModuleCursor(name, self.trace_word.?, .{ .word = .{
+                    try self.scope.publishModuleCursor(name, .{ .word = .{
                         .body = env.quotation(self.item.?.borrow().list) orelse
                             return evaluator.fail(.domain, "definition body has an invalid heap representation"),
                         .visibility = visibility,
@@ -385,7 +370,7 @@ const WhichDriver = struct {
     resolution: ?heap.Owned(machine.ResolutionCursor),
     shadow_cursor: ?heap.Owned(machine.ShadowCursor) = null,
     resolved: ?heap.Owned(machine.Resolution) = null,
-    shadows: ?heap.Owned([]u32) = null,
+    shadows: ?heap.Owned([]intern.TraceWord) = null,
     actions: heap.Owned(reflection.ActionPlan),
     initialized: bool = false,
     shadow_index: usize = 0,
@@ -404,7 +389,7 @@ const WhichDriver = struct {
     fn initialize(self: *WhichDriver) error{OutOfMemory}!void {
         try self.add(.{ .name = self.requested });
         try self.add(.{ .bytes = " -> " });
-        try self.add(.{ .name = self.resolved.?.borrow().trace_word });
+        try self.add(.{ .trace_word = self.resolved.?.borrow().trace_word });
         try self.add(.{ .bytes = " " });
         try self.add(.{ .bytes = switch (self.resolved.?.borrow().lease.binding) {
             .word => "def",
@@ -474,7 +459,7 @@ const WhichDriver = struct {
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0 and self.shadow_index != self.shadows.?.borrow().len) : (budget -= 1) {
             try self.add(.{ .bytes = "; shadows " });
-            try self.add(.{ .name = self.shadows.?.borrow()[self.shadow_index] });
+            try self.add(.{ .trace_word = self.shadows.?.borrow()[self.shadow_index] });
             self.shadow_index += 1;
         }
         if (self.shadow_index != self.shadows.?.borrow().len) return .yielded;
@@ -532,7 +517,7 @@ const SeeDriver = struct {
             .builtin => try self.add(.{ .bytes = "<primitive>" }),
             .native => {
                 try self.add(.{ .bytes = "<native:" });
-                try self.add(.{ .name = self.resolved.?.borrow().trace_word });
+                try self.add(.{ .trace_word = self.resolved.?.borrow().trace_word });
                 try self.add(.{ .bytes = ">" });
             },
         }
@@ -554,7 +539,7 @@ const SeeDriver = struct {
             else => {},
         }
         try self.add(.{ .bytes = " '" });
-        try self.add(.{ .name = self.resolved.?.borrow().trace_word });
+        try self.add(.{ .trace_word = self.resolved.?.borrow().trace_word });
         try self.add(.{ .bytes = switch (self.resolved.?.borrow().lease.binding) {
             .word => if (self.resolved.?.borrow().lease.visibility == .private) " defp\n" else " def\n",
             .builtin => " def\n",

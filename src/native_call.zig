@@ -424,6 +424,7 @@ pub fn begin(
         @intCast(index),
     )) {
         .task => return evaluator.fail(.type, "native words cannot observe task capabilities"),
+        .module => return evaluator.fail(.type, "native words cannot observe module capabilities"),
         else => {},
     };
     const call = Transaction.create(evaluator, callable, definition, effect_check) catch |err| switch (err) {
@@ -475,7 +476,7 @@ fn writeView(item: Value, output: *abi.ValueView) abi.HostStatus {
         },
         .list => |header| .{ .kind = .list, .aggregate_len = header.length() },
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
-        .task => return .invalid,
+        .task, .module => return .invalid,
     };
     return .ok;
 }
@@ -558,7 +559,7 @@ fn hostReadPath(
             else
                 dict.valueAt(header, @intCast(entry));
         },
-        .int, .float, .char, .symbol, .word, .task => return .invalid,
+        .int, .float, .char, .symbol, .word, .task, .module => return .invalid,
     };
     return writeView(current, output);
 }

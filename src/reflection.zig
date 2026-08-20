@@ -12,6 +12,10 @@ const value = @import("value.zig");
 pub const Action = union(enum) {
     bytes: []const u8,
     name: u32,
+    /// A word whose spelling may be qualified by the registration it was
+    /// reached through. Rendering writes the two atoms with a separator rather
+    /// than interning a third, because this sink is already a byte stream.
+    trace_word: intern.TraceWord,
     value: value.Value,
 };
 
@@ -46,7 +50,7 @@ pub const VisibleNameCursor = struct {
         ordinal: usize,
         after: AfterEnvironment,
         generation: modules.GenerationLease,
-        cursor: modules.ModuleGeneration.PublicNameCursor,
+        cursor: modules.ModulePublicNameCursor,
     };
     const Phase = union(enum) {
         scopes: struct { current: ?*env.Scope },
@@ -238,6 +242,9 @@ pub const PlanCursor = struct {
     actions: []const Action,
     action_index: usize = 0,
     byte_index: usize = 0,
+    /// Which segment of a qualified spelling is being written: prefix, the
+    /// separator, then the local name.
+    word_part: enum { prefix, separator, local } = .prefix,
     renderer: ?printer.RenderCursor = null,
 
     pub fn init(allocator: std.mem.Allocator, actions: []const Action) PlanCursor {
@@ -268,6 +275,7 @@ pub const PlanCursor = struct {
                 .value => |item| self.renderer = try .init(self.allocator, item),
                 .bytes => |bytes| try self.writeBytes(writer, bytes),
                 .name => |name| try self.writeBytes(writer, intern.get(name)),
+                .trace_word => |word| try self.writeTraceWord(writer, word),
             }
         }
         return if (self.action_index == self.actions.len and self.renderer == null)
@@ -275,13 +283,44 @@ pub const PlanCursor = struct {
         else
             .pending;
     }
-    fn writeBytes(self: *PlanCursor, writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
+    fn writeSegment(
+        self: *PlanCursor,
+        writer: *std.Io.Writer,
+        bytes: []const u8,
+    ) std.Io.Writer.Error!bool {
         const end = @min(self.byte_index + 256, bytes.len);
         try writer.writeAll(bytes[self.byte_index..end]);
         self.byte_index = end;
-        if (end == bytes.len) {
-            self.byte_index = 0;
-            self.action_index += 1;
+        if (end != bytes.len) return false;
+        self.byte_index = 0;
+        return true;
+    }
+    fn writeBytes(self: *PlanCursor, writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void {
+        if (try self.writeSegment(writer, bytes)) self.action_index += 1;
+    }
+    /// A qualified spelling is three segments, not one interned string: the
+    /// registration's name, the separator, and the definition's own name.
+    fn writeTraceWord(
+        self: *PlanCursor,
+        writer: *std.Io.Writer,
+        word: intern.TraceWord,
+    ) std.Io.Writer.Error!void {
+        const local = intern.get(word.atom());
+        const prefix = word.modulePrefix() orelse {
+            if (try self.writeSegment(writer, local)) self.action_index += 1;
+            return;
+        };
+        switch (self.word_part) {
+            .prefix => if (try self.writeSegment(writer, prefix)) {
+                self.word_part = .separator;
+            },
+            .separator => if (try self.writeSegment(writer, ".")) {
+                self.word_part = .local;
+            },
+            .local => if (try self.writeSegment(writer, local)) {
+                self.word_part = .prefix;
+                self.action_index += 1;
+            },
         }
     }
 };

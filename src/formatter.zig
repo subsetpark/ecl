@@ -837,9 +837,11 @@ fn definitionName(sequence: Sequence, start: usize) ?[]const u8 {
     const quoted = sequence.parts[nextFormPart(sequence, anchor).?].form.kind.atom;
     return quoted[1..];
 }
-/// `(body) 'name @module`, or its seeded spelling `values (body) with 'name
-/// @module`: the registration shape that earns a navigation header, mirroring
+/// `(body) 'name @defm`, or its seeded spelling `values (body) with 'name
+/// @defm`: the registration shape that earns a navigation header, mirroring
 /// `### def`. A computed name gets no header, exactly as a definition does.
+/// A bare `@module` is an ordinary value-producing expression: it names
+/// nothing, so there is no header to write.
 fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
     if (!sequence.definitions) return null;
     const head = sequence.parts[start].form;
@@ -859,7 +861,7 @@ fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
                     continue;
                 },
             };
-            if (named) |name| return if (std.mem.eql(u8, bytes, "@module")) name else null;
+            if (named) |name| return if (std.mem.eql(u8, bytes, "@defm")) name else null;
             if (std.mem.eql(u8, bytes, "with")) {
                 // `head with` means `head` is the body of a phrase whose seed
                 // list, if any, already owns the header.

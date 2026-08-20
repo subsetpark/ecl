@@ -136,7 +136,7 @@ name. The filename is transport, not identity. For example, save this as
  (x -- y : "Double a number.")
  'twice def)
 'stats
-@module
+@defm
 ```
 
 Place the containing directory on `ECL_PATH`. On the first unresolved
@@ -153,11 +153,21 @@ word. Public bodies can resolve their definition-site privates; callers cannot
 name them. Re-registering the same canonical name atomically publishes a new
 code generation, healing qualified, used, and aliased access paths.
 
-A module body may leave construction values behind. Those values initialize
-the module slot's durable stack exactly once. Module-homed code accesses that
+`@defm` is the source spelling for a module definition, and it is exactly
+`@module` followed by `register`. `@module` alone is `( body -- module )`: it
+returns an anonymous immutable module value that reports type `'module`, prints
+as `<module>`, and compares by identity. `register` is
+`( module 'module-name -- )` and publishes that value under a canonical name,
+so one image can be registered under several names — each with its own durable
+state and lifetime.
+
+A module body may leave construction values behind. Those values are the
+image's initial-state template, and the first registration of a name copies
+them into that registration's durable stack. Module-homed code accesses that
 stack transactionally with `within` and transfers explicit outputs with
-`without`; re-registration preserves the durable stack. `unmodule` closes new
-admission and retires the slot after active operations quiesce.
+`without`; re-registration preserves the durable stack and ignores the new
+image's template. `unmodule` closes new admission and retires the slot after
+active operations quiesce.
 
 `ECL_PATH` is an ordered platform path list. For each root, ecl tries
 `<name>.ecl` before `<name>.eclmod`; the first existing candidate is

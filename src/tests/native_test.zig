@@ -313,7 +313,7 @@ test "native: source candidates win inside a root and path-root order wins acros
     defer same_root.cleanup();
     try same_root.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "(100 'increment set) 'sample @module",
+        .data = "(100 'increment set) 'sample @defm",
     });
     try std.Io.Dir.copyFile(
         std.Io.Dir.cwd(),
@@ -352,7 +352,7 @@ test "native: source candidates win inside a root and path-root order wins acros
     defer later_source.cleanup();
     try later_source.dir.writeFile(std.testing.io, .{
         .sub_path = "sample.ecl",
-        .data = "(100 'increment set) 'sample @module",
+        .data = "(100 'increment set) 'sample @defm",
     });
     const native_root_path = try native_root.dir.realPathFileAlloc(
         std.testing.io,
@@ -519,7 +519,9 @@ test "native: the static transport publishes a linked descriptor through the sam
         .complete => |candidate| break candidate,
     };
     defer candidate.deinit();
-    _ = try registry.commit(&candidate);
+    var candidate_sealed = candidate.seal();
+    defer candidate_sealed.deinit();
+    _ = try registry.register(candidate_sealed.ref(), requested);
     var generation = registry.acquire(requested).?;
     defer generation.deinit();
     const increment = try intern.internNamespace("increment");

@@ -22,6 +22,8 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try definition_prims.install(core);
     const definitions = comptime [_]Definition{
         .{ .name = "@module", .primitive = moduleWord },
+        .{ .name = "register", .primitive = registerWord },
+        .{ .name = "@defm", .primitive = defmWord },
         .{ .name = "unmodule", .primitive = unmoduleWord },
         .{ .name = "within", .primitive = withinWord },
         .{ .name = "without", .primitive = withoutWord },
@@ -33,17 +35,40 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     };
     try core.installBuiltins(definitions);
 }
+/// Construction alone: the body builds an anonymous immutable image and the
+/// program decides later whether, and under what name, to register it.
 fn moduleWord(evaluator: *Machine) MachineError!void {
+    var body = try evaluator.popQuotation();
+    defer body.deinit();
+    return evaluator.moduleOwned(null, body.take().list);
+}
+/// Publication alone: name an already-constructed image. A missing name
+/// creates its registration; an existing one installs this image over the
+/// state that registration already owns.
+fn registerWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    // Name-last, matching `def` and `set`: the bound name sits nearest the
-    // binder, so a seeded registration needs no shuffle above `with`.
+    const name = try evaluator.popSymbol();
+    var item = try evaluator.popValue();
+    errdefer item.deinit();
+    if (item.borrow() != .module) return evaluator.typeError("a module");
+    try evaluator.startDriver(RegisterDriver{
+        .module = .init(item.take()),
+        .validation = .init(name),
+    });
+}
+/// The source-module spelling: construction followed immediately by
+/// registration, with the same all-or-nothing outcome as writing the two
+/// words. Name-last, matching `def` and `set`, so a `with`-seeded definition
+/// needs no shuffle above the binder.
+fn defmWord(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
     const name = try evaluator.popSymbol();
     var body = try evaluator.popQuotation();
     defer body.deinit();
-    try evaluator.startDriver(ModuleStartDriver{
-        .body = .init(body.take().list),
-        .validation = .init(name),
-    });
+    // The name is carried unvalidated into the construction boundary. The
+    // composition this word stands for evaluates the body first, so checking
+    // the name here would skip a body `@module` plus `register` would run.
+    return evaluator.moduleOwned(name, body.take().list);
 }
 /// Removal completes the lifecycle. A canonical or alias name is resolved
 /// exactly as `use` resolves it and drives the owner-issued close protocol.
@@ -125,11 +150,13 @@ fn aliasModule(evaluator: *Machine) MachineError!void {
     });
 }
 
-const ModuleStartDriver = struct {
+/// Validates the requested canonical name before any registry mutation, then
+/// hands the retained module value to the publication driver.
+const RegisterDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    body: ?heap.Owned(*value.ListHandle),
+    module: ?heap.Owned(Value),
     validation: intern.ModuleNameCursor,
-    pub fn advance(evaluator: *Machine, self: *ModuleStartDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Machine, self: *RegisterDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) switch (self.validation.advance()) {
@@ -137,12 +164,14 @@ const ModuleStartDriver = struct {
             .complete => |maybe_name| {
                 const name = maybe_name orelse return evaluator.fail(
                     .domain,
-                    "module requires a valid module name",
+                    "register requires a valid module name",
                 );
-                const body = self.body.?.take();
-                self.body = null;
-                try evaluator.moduleOwned(name, body);
-                return .completed;
+                const item = self.module.?.take();
+                self.module = null;
+                evaluator.detachWorkDriver(self);
+                heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+                try evaluator.registerModuleOwned(item, name);
+                return .detached;
             },
         };
         return .yielded;

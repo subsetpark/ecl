@@ -8,5 +8,5 @@ range
   ### def value
   (1) 'value def)
  'hot-module
- @module)
+ @defm)
 for

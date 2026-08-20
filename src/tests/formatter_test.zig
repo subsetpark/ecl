@@ -152,7 +152,7 @@ test "formatter owns canonical definition section comments" {
         "(1)\n(-- n)\n'visible def\n" ++
         "# note\n# def stale\n# hidden details\n" ++
         "(2)\n(-- n)\n'hidden defp\n" ++
-        ") 'm @module\n";
+        ") 'm @defm\n";
     try expectFormat(
         nested,
         "### module m\n" ++
@@ -162,7 +162,7 @@ test "formatter owns canonical definition section comments" {
             " ### def hidden\n" ++
             " # hidden details\n" ++
             " (2)\n (-- n)\n 'hidden defp\n )\n" ++
-            "'m\n@module\n",
+            "'m\n@defm\n",
     );
     try expectParseEquivalent(nested);
 
@@ -170,7 +170,7 @@ test "formatter owns canonical definition section comments" {
         "(\n" ++
         "# attached inside the module\n" ++
         "(3)\n(-- n)\n'generated def\n" ++
-        ") 'm @module\n";
+        ") 'm @defm\n";
     try expectFormat(
         nested_synthesized,
         "### module m\n" ++
@@ -179,7 +179,7 @@ test "formatter owns canonical definition section comments" {
             " # attached inside the module\n" ++
             " (3)\n (-- n)\n 'generated def\n" ++
             " )\n" ++
-            "'m\n@module\n",
+            "'m\n@defm\n",
     );
     try expectParseEquivalent(nested_synthesized);
 
@@ -310,24 +310,43 @@ test "formatter handles the reader's maximum nesting without host recursion" {
 test "formatter synthesizes and normalizes module navigation headers" {
     // A registration earns a header on the same terms a definition does, and
     // the body keeps the definition headers it already earns inside.
-    const registration = "((1) 'x def) 'stats @module\n";
-    const headed = "### module stats\n(\n ### def x\n (1) 'x def)\n'stats\n@module\n";
+    const registration = "((1) 'x def) 'stats @defm\n";
+    const headed = "### module stats\n(\n ### def x\n (1) 'x def)\n'stats\n@defm\n";
     try expectFormat(registration, headed);
     // A stale header is rewritten from the registration itself, never trusted.
     try expectFormat("### module wrong\n" ++ registration, headed);
     // The seeded phrase is one form, so its values list carries the header and
     // an attached comment stays below it exactly as it does for a definition.
-    const seeded = "# a seeded counter\n[[0]] ((1 +) 'tick def) with 'counter @module\n";
+    const seeded = "# a seeded counter\n[[0]] ((1 +) 'tick def) with 'counter @defm\n";
     try expectFormat(
         seeded,
         "### module counter\n# a seeded counter\n[[0]]\n(\n ### def tick\n (1 +) 'tick def)\n" ++
-            "with\n'counter\n@module\n",
+            "with\n'counter\n@defm\n",
     );
     // A computed name gets no header, matching def's rule.
     try expectFormat(
-        "((1) 'x def) chosen-name @module\n",
-        "(\n ### def x\n (1) 'x def)\nchosen-name\n@module\n",
+        "((1) 'x def) chosen-name @defm\n",
+        "(\n ### def x\n (1) 'x def)\nchosen-name\n@defm\n",
+    );
+    // Anonymous construction names nothing, so it is an ordinary expression
+    // and earns no header — with or without a symbol beside it.
+    try expectFormat(
+        "((1) 'x def) @module\n",
+        "(\n ### def x\n (1) 'x def)\n@module\n",
+    );
+    try expectFormat(
+        "((1) 'x def) @module 'stats register\n",
+        "(\n ### def x\n (1) 'x def)\n@module\n'stats\nregister\n",
+    );
+    // A header is synthesized and rewritten only where a registration is
+    // recognized, so above an anonymous construction the text stays an
+    // ordinary comment rather than becoming a navigation header the file has
+    // no definition for.
+    try expectFormat(
+        "### module stats\n((1) 'x def) @module\n",
+        "### module stats\n(\n ### def x\n (1) 'x def)\n@module\n",
     );
     try expectParseEquivalent(registration);
     try expectParseEquivalent(seeded);
+    try expectParseEquivalent("((1) 'x def) @module 'stats register\n");
 }

@@ -187,4 +187,4 @@
 
  )
 'str
-@module
+@defm

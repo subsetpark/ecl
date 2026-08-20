@@ -159,8 +159,8 @@ primitives, operationalized as two rules:
   is still performed at call time, which is why redefining `cons` at the
   session level still changes `wrap`. What went away is dynamic scope.
 - **A quotation resolves where its invoker runs.** Quotations are plain lists
-  that capture nothing, so `call`, `each`, `@attempt`, `@module`, and `within`
-  all set the new frame's `resolution_scope` from the invoking frame's
+  that capture nothing, so `call`, `each`, `@attempt`, `@module`, `@defm`, and
+  `within` all set the new frame's `resolution_scope` from the invoking frame's
   `scope`. That is what keeps a module word's `(private-helper)` resolving
   when it is handed to a combinator defined in core. It also means a
   session-level `use` that shadows a core name still reaches prelude bodies —
@@ -881,7 +881,7 @@ honest source with no public dual representation.
   single heap-owned structure holding the module-stack draft (the unit
   window above its boundary base), the pending output sequence, the home
   authority, and the publication transition; it appears in the frame stack
-  as a third boundary mode beside `@attempt` and `@module`. Only the
+  as a third boundary mode beside `@attempt` and module construction. Only the
   definition-site home can create one — the authority comes from the
   executing home's slot, never from a value — and it is consumed exactly
   once, by publication on success or by retirement on every failure. The
@@ -897,16 +897,53 @@ honest source with no public dual representation.
   applications without a second protocol. Each turn consumes an owned
   `SlotLease` before it joins the queue and releases it only after unlinking;
   queued and granted work therefore cannot observe recycled storage.
-- An unpublished module generation is held by an opaque, consumable
-  `OwnedCandidate`. Registry publication consumes that capability;
-  rollback releases only the provisional guard. Tasks spawned before
-  commit carry independent generation pins, so rollback cannot destroy the
-  embedded module scope until those tasks and their child scopes quiesce.
-  Unit and generation lifetime use the same nominal embedded-scope
-  teardown cursor, which retains its owner until dependent child scopes
-  have propagated their releases. Attempt and module boundaries are
-  distinct tagged-union states, so candidate ownership never depends on
-  nullable pointers or side-band booleans.
+- **An immutable image and a stateful registration are separate owners.** A
+  `ModuleImage` owns the frozen environment, the module-root scope its
+  definitions were published through, and the construction body's residual
+  stack as an initial-state template. It owns no canonical name, registry
+  slot, arbiter, generation number, or `SlotLease`. A `Registration` retains
+  exactly one image and owns everything the image deliberately does not: the
+  name, the generation number, and the slot lifetime witness. The reference
+  goes one way only — a registration retains an image, never the reverse —
+  which is what keeps the value heap a DAG with no cycle collector, because
+  a module *value* is a freely duplicable retainer of an image. A first
+  registration copies the template into its new slot's durable stack rather
+  than consuming it, so the same image can seed a second registration; a
+  re-registration does not consult it at all.
+- **Invocation context is supplied by a registration lease, not stored in
+  binding metadata.** `BindingOrigin.module_local` records a definition's own
+  module-local name and nothing else. A qualified resolution acquires a
+  registration generation and mints the opaque `ModuleHome` the activation
+  carries for its whole lifetime; same-home resolution, private lookup,
+  reflection, effect contracts, and `within` all read the slot, name, and
+  state through that capability. Only `ExecutionGeneration` — reachable only
+  from a registry lease plus the Session's execution authority — can produce
+  one. That is why one image registered under two names executes correctly
+  under both, and why baking either a name or a slot pointer into the image
+  would be a defect rather than an optimization.
+- **A diagnostic word is a `(registration, local name)` pair, qualified at the
+  render boundary.** An image has no name, so no qualified spelling can be
+  interned at definition time. `intern.TraceWord` carries both halves through
+  `active_word`, frame trace slots, effect checks, and the failure record;
+  byte sinks render the two atoms directly and only the failure-value builder
+  interns a qualified spelling. Failures are rare, which is where that cost
+  belongs.
+- An image under construction is held by an opaque, consumable `OwnedImage`,
+  and `seal` is a *consuming* transition to `SealedImage`, the only producer of
+  the `ImageRef` registration accepts. Freezing the environment and ending the
+  construction capability are therefore one step: the frozen flag refuses a late
+  definition, and the typestate refuses a late initial-state template write,
+  which has no frozen check of its own because a sealed image has no writer.
+  Publication safety is a property of the types rather than of call ordering.
+  Publication retains its own image reference rather than consuming the
+  caller's, so the module value on the operand stack and the registration are
+  independent owners. Tasks spawned during construction carry independent
+  generation pins, so rollback cannot destroy the embedded module scope until
+  those tasks and their child scopes quiesce. Unit, image, and registration
+  lifetime use the same nominal embedded-scope teardown cursor, which retains
+  its owner until dependent child scopes have propagated their releases.
+  Attempt and module boundaries are distinct tagged-union states, so image
+  ownership never depends on nullable pointers or side-band booleans.
 - Auto-loading owns a consumable `LoadingLease`. Removal consumes it only
   after success; unwinding retains the capability until the cursor-owned
   cleanup phase. Environment and module resolution expose explicit
@@ -933,11 +970,14 @@ honest source with no public dual representation.
   `LocalName`, environment maps use `BindingName`, registry maps use
   `ModuleName`, and qualified lookup carries `QualifiedName`; a raw
   integer-keyed publication map is rejected at `comptime`.
-- Heap values carry nominal `ListHandle`, `DictHandle`, and `TaskHandle`
-  pointers. Allocation returns kind-specific initializing capabilities and
-  publication consumes the matching capability, so a list cannot be passed
-  to task storage or a constructing dictionary observed through a ready
-  handle.
+- Heap values carry nominal `ListHandle`, `DictHandle`, `TaskHandle`, and
+  `ModuleHandle` pointers. Allocation returns kind-specific initializing
+  capabilities and publication consumes the matching capability, so a list
+  cannot be passed to task storage or a constructing dictionary observed
+  through a ready handle. Module storage holds one opaque payload plus the
+  release callback its typed factory derived; `heap.zig` never learns what an
+  image is, and final release drops one image reference into the same bounded
+  retirement domain rather than walking a user-sized graph.
 - Native continuation ownership retained across a yield is represented by
   an optional or tagged owner (`Accumulator` distinguishes borrowed,
   owned, and transferred). Driver teardown does not consult a side-band

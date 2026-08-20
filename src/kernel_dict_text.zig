@@ -140,7 +140,7 @@ fn putPrimitive(evaluator: *Machine) MachineError!void {
                 .values = .init(values),
             });
         },
-        .int, .float, .char, .symbol, .word, .task => return evaluator.typeError("a list or dict"),
+        .int, .float, .char, .symbol, .word, .task, .module => return evaluator.typeError("a list or dict"),
     }
 }
 
@@ -179,7 +179,7 @@ fn typedReplacement(comptime kind: value.HeapKind, item: Value) ?heap.LeafElemen
             .symbol => |symbol| symbol,
             else => null,
         },
-        .generic_spine, .dict, .task, .reserved_mask => unreachable,
+        .generic_spine, .dict, .task, .module, .reserved_mask => unreachable,
     };
 }
 

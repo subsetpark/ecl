@@ -250,7 +250,7 @@ pub const LowerCursor = struct {
                         dict.valueAt(header, entry) });
                     break :result .pending;
                 },
-                .int, .float, .char, .symbol, .task => result: {
+                .int, .float, .char, .symbol, .task, .module => result: {
                     _ = self.walk.pop().?;
                     break :result .pending;
                 },
@@ -284,7 +284,7 @@ pub const LowerCursor = struct {
                 self.nested_active = true;
                 break :result .pending;
             },
-            .int, .float, .char, .symbol, .task => result: {
+            .int, .float, .char, .symbol, .task, .module => result: {
                 self.local_indices[self.body_index] = null;
                 self.body_index += 1;
                 break :result .pending;

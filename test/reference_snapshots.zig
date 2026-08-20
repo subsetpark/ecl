@@ -99,7 +99,7 @@ const cases = [_]Case{
     .{ .name = "see", .source = "3 'x set 'x see" },
     .{ .name = "see set", .source = "'set see" },
     .{ .name = "setp", .source = "1 'x setp" },
-    .{ .name = "qualify execute", .source = "((41) 'f def) 'core.utils @module 'core.utils 'f qualify execute" },
+    .{ .name = "qualify execute", .source = "((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute" },
     .{ .name = "execute type", .source = "1 execute" },
     .{ .name = "doc qualify", .source = "'qualify doc" },
     .{ .name = "within top level", .source = "(1) within" },
@@ -107,7 +107,7 @@ const cases = [_]Case{
     .{ .name = "see within", .source = "'within see" },
     .{ .name = "doc without", .source = "'without doc" },
     .{ .name = "unmodule unknown", .source = "'nowhere unmodule" },
-    .{ .name = "unmodule then resolve", .source = "((1) 'x def) 'gone @module 'gone unmodule gone.x" },
+    .{ .name = "unmodule then resolve", .source = "((1) 'x def) 'gone @defm 'gone unmodule gone.x" },
     .{ .name = "doc unmodule", .source = "'unmodule doc" },
     // M12 stdlib and host scripting. Deterministic output only: no network,
     // and no environment dependence beyond an unset-variable error.
@@ -153,7 +153,16 @@ const cases = [_]Case{
     .{ .name = "isolated substack", .source = "3 (1 +) @attempt" },
     .{ .name = "isolated child", .source = "3 [1 2] (+ +) @each" },
     .{ .name = "seeded attempt", .source = "[3] (1 +) with @attempt" },
-    .{ .name = "seeded module", .source = "[7] ('base set) with 'm @module m.base" },
+    .{ .name = "seeded module", .source = "[7] ('base set) with 'm @defm m.base" },
+    // Anonymous construction, opaque identity, and one image under two names.
+    .{ .name = "anonymous module", .source = "(1 'x set) @module type" },
+    .{ .name = "module identity", .source = "(1) @module dup match? (1) @module (1) @module match?" },
+    .{
+        .name = "one image two registrations",
+        .source = "(0 ((1 + dup without) within) 'bump def) @module " ++
+            "dup 'l register 'r register l.bump l.bump r.bump",
+    },
+    .{ .name = "module marker is unreadable", .source = "\"<module>\" parse" },
     .{ .name = "old spelling", .source = "(1) attempt" },
     .{ .name = "row annotation", .source = "(dup) (a -- ...) 'f def 'f see" },
     .{ .name = "row after mixing", .source = "(dup) (a -- ... b) 'f def" },
@@ -788,7 +797,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 334 'col 20}}
         \\=== qualify execute ===
-        \\source: ((41) 'f def) 'core.utils @module 'core.utils 'f qualify execute
+        \\source: ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute
         \\exit: 0
         \\stdout:
         \\41
@@ -844,12 +853,12 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'undefined-word 'msg "undefined word `nowhere`" 'word 'nowhere 'trace ['nowhere] 'data {'name 'nowhere 'source "<command>" 'line 1 'col 10}}
         \\=== unmodule then resolve ===
-        \\source: ((1) 'x def) 'gone @module 'gone unmodule gone.x
+        \\source: ((1) 'x def) 'gone @defm 'gone unmodule gone.x
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'source "<command>" 'line 1 'col 43}}
+        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'source "<command>" 'line 1 'col 41}}
         \\=== doc unmodule ===
         \\source: 'unmodule doc
         \\exit: 0
@@ -1097,12 +1106,40 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\<empty>
         \\=== seeded module ===
-        \\source: [7] ('base set) with 'm @module m.base
+        \\source: [7] ('base set) with 'm @defm m.base
         \\exit: 0
         \\stdout:
         \\7
         \\stderr:
         \\<empty>
+        \\=== anonymous module ===
+        \\source: (1 'x set) @module type
+        \\exit: 0
+        \\stdout:
+        \\'module
+        \\stderr:
+        \\<empty>
+        \\=== module identity ===
+        \\source: (1) @module dup match? (1) @module (1) @module match?
+        \\exit: 0
+        \\stdout:
+        \\1 0
+        \\stderr:
+        \\<empty>
+        \\=== one image two registrations ===
+        \\source: (0 ((1 + dup without) within) 'bump def) @module dup 'l register 'r register l.bump l.bump r.bump
+        \\exit: 0
+        \\stdout:
+        \\1 2 1
+        \\stderr:
+        \\<empty>
+        \\=== module marker is unreadable ===
+        \\source: "<module>" parse
+        \\exit: 1
+        \\stdout:
+        \\<empty>
+        \\stderr:
+        \\{'kind 'parse 'msg "module display markers are runtime-only and cannot be parsed" 'word 'parse 'trace ['parse] 'data {'source "<parse>" 'line 1 'col 1}}
         \\=== old spelling ===
         \\source: (1) attempt
         \\exit: 1

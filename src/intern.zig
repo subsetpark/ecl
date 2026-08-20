@@ -60,6 +60,117 @@ pub fn qualifiedBinding(name: QualifiedName) BindingName {
     return @enumFromInt(@as(u32, @truncate(@intFromEnum(name))));
 }
 
+/// A word as a diagnostic names it.
+///
+/// A plain atom is its own spelling. A module-local binding has no spelling of
+/// its own: an image carries no canonical name, and one image may be
+/// registered under several, so the qualified spelling depends on the
+/// registration the binding was reached through. Deferring qualification to
+/// whoever renders it keeps definition metadata reusable and keeps the
+/// interning cost off every module-word invocation.
+pub const TraceWord = enum(u64) {
+    none = (@as(u64, no_trace_module) << 32) | no_trace_atom,
+    _,
+
+    /// Neither value is a reachable id: module brands stay below bit 31 plus
+    /// the dotted mask, and the entry space cannot reach this many atoms.
+    const no_trace_module: u32 = 0xffff_ffff;
+    const no_trace_atom: u32 = 0xffff_ffff;
+
+    pub fn plain(id: u32) TraceWord {
+        return @enumFromInt((@as(u64, no_trace_module) << 32) | id);
+    }
+
+    pub fn moduleLocal(module: ModuleName, local: BindingName) TraceWord {
+        std.debug.assert(@intFromEnum(module) != no_trace_module);
+        return @enumFromInt((@as(u64, @intFromEnum(module)) << 32) | bindingId(local));
+    }
+
+    /// The unqualified atom. For a module-local word this is the definition's
+    /// own name, which is what recognition and idiom matching compare.
+    pub fn atom(self: TraceWord) u32 {
+        return @truncate(@intFromEnum(self));
+    }
+
+    pub fn qualified(self: TraceWord) ?QualifiedName {
+        const module: u32 = @truncate(@intFromEnum(self) >> 32);
+        if (module == no_trace_module) return null;
+        return @enumFromInt(@intFromEnum(self));
+    }
+
+    /// The module part of a qualified spelling, or null when the word is a
+    /// plain atom.
+    pub fn modulePrefix(self: TraceWord) ?[]const u8 {
+        const name = self.qualified() orelse return null;
+        return get(moduleId(qualifiedModule(name)));
+    }
+
+    /// Bytes marking an elided rendering. A bracket is a reader delimiter, so
+    /// no single word can contain this and an elided spelling can never be
+    /// read as a shorter name that exists.
+    const elision = "[...]";
+
+    /// Writes the spelling a program would have to type.
+    ///
+    /// A name too long for the caller's scratch is elided from the left rather
+    /// than replaced by its unqualified atom: substituting the atom would make
+    /// a diagnostic message name a *different* word than the same failure's
+    /// `word` field reports, which for an image registered under several names
+    /// is not merely terse but ambiguous.
+    pub fn render(self: TraceWord, buffer: []u8) []const u8 {
+        std.debug.assert(self != .none);
+        const local = get(self.atom());
+        const prefix = self.modulePrefix() orelse return local;
+        if (prefix.len + 1 + local.len <= buffer.len) {
+            @memcpy(buffer[0..prefix.len], prefix);
+            buffer[prefix.len] = '.';
+            @memcpy(buffer[prefix.len + 1 ..][0..local.len], local);
+            return buffer[0 .. prefix.len + 1 + local.len];
+        }
+        // Keep the definition's own name and as much of the registration's as
+        // fits, so the rendering still points at one binding.
+        if (elision.len + 1 + local.len > buffer.len) return elision;
+        const room = buffer.len - elision.len - 1 - local.len;
+        @memcpy(buffer[0..elision.len], elision);
+        @memcpy(buffer[elision.len..][0..room], prefix[prefix.len - room ..]);
+        buffer[elision.len + room] = '.';
+        @memcpy(buffer[elision.len + room + 1 ..][0..local.len], local);
+        return buffer[0 .. elision.len + room + 1 + local.len];
+    }
+};
+
+/// The scratch a diagnostic borrows to spell one qualified word. It matches the
+/// diagnostic message budget in `machine.EclErr`, so every name a message can
+/// carry at all renders in full; beyond that the message itself collapses to
+/// its own too-long fallback.
+pub const trace_word_bytes = 512;
+
+pub const TraceWordProgress = poll.Progress(u32);
+/// Interns the spelling of a trace word. Only surfaces that must produce a
+/// symbol *value* pay this; byte sinks render through `TraceWord.render`.
+pub const TraceWordCursor = struct {
+    plain_atom: ?u32,
+    qualifier: ?QualifiedCursor = null,
+
+    pub fn init(allocator: std.mem.Allocator, word: TraceWord) error{OutOfMemory}!TraceWordCursor {
+        const name = word.qualified() orelse return .{ .plain_atom = word.atom() };
+        return .{ .plain_atom = null, .qualifier = try QualifiedCursor.init(allocator, name) };
+    }
+
+    pub fn deinit(self: *TraceWordCursor) void {
+        if (self.qualifier) |*cursor| cursor.deinit();
+        self.* = undefined;
+    }
+
+    pub fn advance(self: *TraceWordCursor) error{OutOfMemory}!TraceWordProgress {
+        if (self.plain_atom) |id| return .{ .complete = id };
+        return switch (try self.qualifier.?.advance()) {
+            .pending => .pending,
+            .complete => |id| .{ .complete = id },
+        };
+    }
+};
+
 pub const NameError = error{InvalidName};
 
 pub fn namespaceName(id: u32) NameError!NamespaceName {

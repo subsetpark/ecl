@@ -61,8 +61,8 @@ Verified in the checkout (2026-08-17):
   stateful modules, and M12 stdlib were future milestones when this
   section was written; M9, M10 (one-binder merge), M11, M12, and M13 have
   since landed — their Status records are the as-built truth. The
-  workstream is terminal: `0.1.0` is tagged (2026-08-19) and only
-  post-terminal Step 14 remains scheduled.
+  workstream is terminal: `0.1.0` is tagged (2026-08-19) and post-terminal
+  Steps 14 and 15 have executed.
 - All derived core words now live in `src/prelude.ecl`; the loader embeds and
   evaluates that ordinary source with retained provenance before freezing the
   core. Every definition is a documented `### def <name>` block. A standard
@@ -1767,6 +1767,137 @@ is part of this step, and neither may introduce a second semantic loop.
 only through a new gameplan against the checked-in benchmark report; no runtime
 flag, soak window, or conditional cutover is part of this migration.
 
+---
+
+### Post-terminal Step 15: anonymous-module-values
+
+**Status**: executed 2026-08-20 — gameplan
+`gameplans/anonymous-module-values.json` (local, ignored per convention).
+This step separates module construction from registry publication without
+moving mutable state or lifecycle authority into a freely duplicable value.
+`@module` becomes `(body -- module)`, `register` is
+`(module 'module-name --)`, and `@defm` preserves the concise combined form
+`(body 'module-name --)`. `register` is an upsert: the first registration of a
+canonical name creates its slot; a later registration atomically replaces that
+slot's code image while preserving its durable live state.
+
+The representation has two nominal layers. An immutable anonymous
+`ModuleImage` owns the frozen module environment, module-local definition
+metadata, and the construction body's final stack as an initial-state
+template. It owns no canonical name, registry slot, arbiter, generation
+currency, or `SlotLease`. A registration retains one image and owns the name,
+live stack, serialization arbiter, generation lifecycle, aliases, and removal.
+The same image may therefore be registered under multiple names while every
+registration keeps independent state and lifetime. This preserves the
+value-heap DAG and no-cycle-collector invariant: an image never points back to
+a slot that may retain it.
+
+Definition metadata becomes module-local rather than name-bearing. Qualified
+registry resolution acquires the registered generation and supplies an opaque
+`RegistrationHome` to the activation; same-home resolution, private lookup,
+effect traces, reflection, and `within` carry that capability for the complete
+call. Consequently an image registered as both `left` and `right` executes
+against the registration through which it was reached, never a construction-
+time or last-registered name.
+
+**Definition of Done**:
+
+1. **An explicit opaque module value exists.** `Value` and `HeapKind` gain one
+   module case without changing the 16-byte `Value` layout or native ABI-v1.
+   The value reports type `'module`, renders as `<module>`, and `match?`
+   compares image identity. Source reading, JSON emission, and native
+   scalar/view conversion reject the capability without exposing an address,
+   environment, slot, or state.
+
+2. **Construction is anonymous and side-effect free with respect to the
+   registry.** `@module` validates only its body contract, evaluates the body
+   in an isolated module-root environment, captures its residual stack as the
+   image's initial-state template, freezes the image, and pushes it. Body
+   failure publishes neither a value nor a registry mutation.
+
+3. **Registration is one atomic upsert protocol.** `register` validates the
+   canonical name and consumes a module-value reference into the existing
+   bounded registry publication path. A missing name creates a slot from the
+   image template. An existing name installs the new image, preserves the
+   slot's live state, and discards that image's template for that slot. Alias
+   collision, allocation failure, cancellation, or a conflicting state turn
+   leaves the prior directory entry, generation, and state unchanged.
+
+4. **`@defm` is exactly the composition.** For ordinary and `with`-seeded
+   bodies, successful and failing construction, invalid names, allocation
+   failure, and cancellation, `(body 'name @defm)` has the same stack,
+   registry, error, and ownership outcome as `(body @module 'name register)`
+   in the equivalent isolated context. It is a trusted primitive driver
+   composition, not a second publication protocol.
+
+5. **Images are reusable; registrations remain independent.** Retaining one
+   image and registering it under two names shares immutable definitions only.
+   Each registration has its own durable state, generation currency, aliases,
+   and removal lifetime. Reloading or removing one cannot change or retire the
+   other. Old-generation calls remain valid through their production leases
+   until bounded retirement drains.
+
+6. **Invocation authority comes only from registration.** `ModuleImage`,
+   binding origin, and module-root scope contain no canonical module name or
+   slot authority. Only a registry lease can mint `RegistrationHome`, and an
+   activation retains it across internal resolution, reflection, contracts,
+   and `within`. No public or registered-native surface exposes the image,
+   home, environment, slot, registry, or reclamation root behind an opaque
+   capability.
+
+7. **Loading and observation remain registration-driven.** Fully-qualified
+   dispatch, `use`, `doc`, completion, builtin modules, native modules, and
+   ECL_PATH auto-loading continue through the single registry path. Loading a
+   source succeeds only if it registers the requested canonical name; a file
+   that merely constructs an anonymous image produces the existing total
+   loader error. Prior explicit `use` or load state is never required for a
+   fully qualified observation or invocation.
+
+8. **The language and documentation cut over together.** Every checked-in ECL
+   source that intends combined construction/registration uses `@defm`;
+   deliberate `@module` uses construct values. Formatter navigation recognizes
+   `@defm` definition blocks and treats `@module` as an ordinary expression.
+   Primitive docs, README, snapshots, `SPEC.md`'s module section and complete
+   module/word-sorted listing, and `INTERPRETER.md` describe the as-built split.
+
+9. **Ownership and concurrency are proven through production paths.** No
+   test-only representation accessor is added. Component allocation-failure
+   probes cover image and registration-generation construction; the initialized
+   Session OOM sweep uses the smallest snippets reaching `@module`, `register`,
+   `@defm`, image reuse, and reload. A delayed-call counting-allocator property
+   repeatedly registers, reloads, and removes shared images and proves settled
+   memory is bounded by peak simultaneously live images/registrations rather
+   than history. Debug/ReleaseSafe, REPL, source-audit, snapshots, one/eight-
+   worker, and Linux/x86_64 TSan gates are blocking; the last is mandatory
+   because module loading/publication timing and generation lifetimes change.
+   Repository RC-only gates remain RC-only.
+
+**Implementation sequence**: five strictly sequential patches. First add the
+skipped public proof ledger. Second add the dormant module value and bounded
+heap adapter, closing every exhaustive consumer. Third split anonymous images
+from registered generations while retaining today's public behavior through a
+combined internal adapter. Fourth atomically cut over `@module`, add `register`
+and `@defm`, migrate source inputs, and implement the runtime/OOM/concurrency
+proofs. Fifth update formatter navigation, snapshots, SPEC, INTERPRETER, README,
+and the architecture audit. No flag, soak period, operator action, or decision
+between patches is permitted.
+
+**Why this is a safe pause point**: construction, value identity, publication,
+live state, and execution authority each have one owner. There is no anonymous
+value with a registry back-reference, no registration whose state lives in a
+copyable value, no binding with a baked-in canonical name, and no second reload
+protocol. Checked-in sources and the runtime agree on the new word effects.
+
+**Unlocks**: programs and future transports can construct, retain, choose a
+name for, and register module images as ordinary values. A later frozen-module-
+environment representation can optimize the immutable image without touching
+registration state, and Deferred Item 17 may cache warm module call sites
+without putting a canonical name back into the image. This step does not add
+package identity, persistence, module serialization, native ABI exposure, or a
+loader return-value convention.
+
+**Operator Actions Before Next Milestone**: None.
+
 ## Dependency Graph
 
 - Milestone 1 (value-core) -> []
@@ -1783,14 +1914,17 @@ flag, soak window, or conditional cutover is part of this migration.
 - Milestone 12 (stdlib-result-str-csv-json-table-http) -> [6, 9, 10, 11]
 - Milestone 13 (v1-acceptance) -> [7, 8, 9, 10, 11, 12]
 - Post-terminal Step 14 (monomorphic-flat-leaf-kernel-migration) -> [13]
+- Post-terminal Step 15 (anonymous-module-values) -> [14]
 
 ## Open Questions
 
 None. The stdin-as-data and http-backend questions were closed at M12
 planning and the randomness question was closed the same day (all
 2026-08-18). Step 14's representation, ownership, scheduling, semantic, and
-proof boundaries are fixed above; implementation detail belongs in its
-gameplan rather than in an open workstream decision. See Decisions Made.
+proof boundaries are fixed above. Step 15's state placement, anonymous image,
+registration-home, `@defm`, and register-upsert rulings were closed on
+2026-08-20; implementation detail belongs in its gameplan rather than in an
+open workstream decision. See Decisions Made.
 
 ## Post-v1 follow-ups (deferred features)
 
@@ -1880,6 +2014,40 @@ INTERPRETER.md and its entry here is retired.
    migration. Step 14 supplies the only typed range ABI; these upgrades add
    algorithms or machine variants behind it and may not recreate dispatch,
    fault, ownership, or generic-fallback semantics:
+   - Counted float generation closes the deliberate vocabulary asymmetry left
+     by the first randomness pass. Add the pure
+     `rand-floats ( state count -- state results )` kernel and the stateful
+     `rng.floats ( count -- results )` wrapper beside `rand-ints`/`rng.ints`.
+     The pure kernel advances the visible counter exactly as repeated
+     `rand-float` calls would and fills one exact-width `leaf_f64` result
+     through the Step 14 typed writer; the module wrapper performs one
+     `within` transaction rather than one transaction per element. Acceptance
+     compares values, final state (including the next draw), zero and invalid
+     counts, cancellation, and allocation failure against the scalar reference
+     path. The pure kernel remains bit-identical under one and eight workers;
+     concurrent calls through the shared `rng` module remain arbiter-serialized
+     but honestly worker-count-nondeterministic, as the existing module contract
+     requires. The same pass adds the ECL-defined
+     `rng.choose ( values -- value )`, compositionally equivalent to
+     `dup len rng.int at`: it uniformly selects one element, accepts the same
+     list representations as `at`, and needs no separate pure kernel or
+     placeholder allocation. A singleton returns its element; an empty input
+     is `'domain` before generator state advances. Acceptance resets a fixed
+     seed and compares `choose` with the explicit composition, including the
+     following draw, so both the selected value and state transition are pinned.
+   - Fuse the exact identity-guarded phrase `range (quotation) each` into one
+     bounded tabulation driver. The driver synthesizes each i64 index instead
+     of materializing the range leaf, preserves `each`'s isolated `( a -- b )`
+     contract, left-to-right application order, error attribution,
+     cancellation bound, and known result length, and uses the existing
+     generic result materializer when the quotation's output kind is not known.
+     Shadowed bindings and unrecognized/dynamic phrases retain the ordinary
+     `range` then `each` path. No public `tabulate` word is added merely as a
+     performance escape hatch; a named combinator remains a later vocabulary
+     decision only if it proves useful independently of fusion. Differential
+     coverage runs automatic and generic-only modes through values, errors,
+     effects, shadowing, quantum boundaries, and OOM, while allocator counters
+     prove that the recognized path allocates no range leaf.
    - Grounding case study: codereport's
      [`WHY_BQN_WINS.md`](https://github.com/codereport/max-odd-binary/blob/main/WHY_BQN_WINS.md)
      dissects a small CBQN workload into six compounding advantages. Five
@@ -1958,9 +2126,11 @@ INTERPRETER.md and its entry here is retired.
     profiling demands otherwise); Tokio-style local run queues with
     steal-half; quickening/inline caches under the iron law — hold the
     binding cell, re-read its interior every execution, never cache a
-    resolution. The execution view is item 1's compiled form. The
-    dispatch-loop freeze stands: none of these touches the inner loop's
-    design.
+    completed `Resolution`. Deferred Item 17 gives the module-call
+    specialization of that rule: its cache owns an opaque generation
+    capability, guards currency, and reacquires the binding lease used by each
+    execution. The execution view is item 1's compiled form. The dispatch-loop
+    freeze stands: none of these touches the inner loop's design.
 
 11. **Native extension capabilities.** Already recorded in M9's deferral
     ruling, M13's Unlocks, and Decisions Made; listed here only for
@@ -2090,7 +2260,71 @@ INTERPRETER.md and its entry here is retired.
       and generation depth; M12's stdlib modules are the realistic
       corpus. Nothing about it is on the `0.1.0` path.
 
+17. **Generation-guarded module call-site caches** (deferred 2026-08-20,
+    anonymous-module-values review). The anonymous-image/registration split
+    adds only one steady-state pointer traversal, but a hot qualified call still
+    repeats dotted-name splitting, registry acquisition, and image-environment
+    lookup on every execution. An unqualified call through `use` repeats the
+    scope/use walk, while a same-image local call still enters the generic
+    direct-lookup machinery. For small module words those existing resolution
+    costs can dominate the body. Measure them after the representation has
+    settled, then allow one call-site cache behind the execution view:
+
+    - A cache entry is not a completed `Resolution`, raw `ModuleHome`, slot
+      pointer, environment pointer, or binding payload. It owns an opaque
+      registration-generation capability and the binding cell it located;
+      every hit verifies that the canonical slot still publishes that
+      generation and reacquires the binding lease used by the call. The cache
+      cannot mint execution or mutation authority, bypass Unit generation
+      pinning, or outlive the Session reclamation domain that issued it.
+    - Qualified canonical and alias calls guard the registration generation.
+      A `use`-resolved call additionally guards the scope/use-order generation
+      that selected the registration. A same-image local reference may omit
+      the registry guard only when its execution view owns the immutable image
+      generation for its whole lifetime. Unrelated registry writes may cause a
+      conservative miss; they may never make a stale hit legal.
+    - A warm hit performs no dotted-spelling scan, directory or alias-map walk,
+      use-order traversal, qualified-name interning, or fresh registration
+      search. It still performs the language-mandated cross-home effect check,
+      body retain, frame scheduling, and Unit pin check. Ordinary calls never
+      acquire the state arbiter; `within` remains the only state-turn path.
+    - Reload, `register`, alias changes, and `unmodule` are observable binding
+      events. The very next call after any relevant publication must miss or
+      heal before execution; an old frame that already owns its generation may
+      finish, but no cache may dispatch a new call through superseded code.
+      Invalidation releases cached capabilities through bounded retirement and
+      settled memory is bounded by live execution views/call sites, not reload
+      history.
+    - Measure only ReleaseSafe and the intended release mode, never Debug. The
+      corpus compares cold and warm calls for a top-level trivial word,
+      `module.word`, an unqualified word reached through `use`, and a local call
+      within the same module; then repeats after unrelated publication, reload
+      of the target name, alias removal/recreation, and `unmodule`. Record
+      ns/call, allocations and bytes, cache hit/miss/heal counts, registry and
+      environment cursor steps, generation-pin scans, and resident bytes per
+      call site. Include one and eight workers and a Unit that has visited many
+      distinct registrations.
+    - Acceptance is behavioral and production-connected: cached and uncached
+      modes produce identical stacks, errors, traces, reflection, private-name
+      behavior, and state; differential reload/alias/removal races exercise the
+      real registry publisher and leases; delayed readers prove bounded
+      reclamation; allocator-failure coverage reaches cache creation/healing;
+      and the Linux/x86_64 TSan gate is blocking because cache hits change when
+      generation and directory leases are acquired and released.
+
 ## Decisions Made
+
+- **Counted random floats and index-map fusion are separate optimizations
+  (2026-08-20, user ruling).** The random vocabulary gains
+  `rand-floats`/`rng.floats`, because a vector draw can fill one typed result
+  and advance module state in one transaction; it also gains the derived
+  `rng.choose ( values -- value )`, spelled by the existing `rng.int` and `at`
+  semantics rather than a new kernel. Merely removing an index list cannot
+  recover the vector draw's two properties. Independently, the natural array
+  phrase `range (quotation) each` is identity-guarded and fused so its indices
+  are generated directly into `each`'s applications. No public `tabulate` word
+  is added solely to expose that optimization. Post-v1 follow-up item 8 records
+  the implementation and acceptance boundaries for both changes.
 
 - **Stateful-module lifecycle sub-rulings (2026-08-17, M11 gameplan
   dialogue).** Four questions surfaced by grounding the M11 plan
@@ -2165,7 +2399,8 @@ INTERPRETER.md and its entry here is retired.
   annotations optional in modules, removes the no-longer-needed synthesized
   effect from the prelude `set`/`setp` bodies. Durable state is a separate
   module-owned operand stack, not a mutable name-resolution layer.
-- **M11 addendum removes public slot identity (2026-08-18, user ruling).**
+- **M11 addendum removes public slot identity (2026-08-18, user ruling;
+  public-value portion superseded by the Step 15 ruling below).**
   `__MODULE__`, the `'module` value kind, handle-targeted removal, handle
   rendering, and all handle-control machinery are deleted. Canonical module
   names may be dotted; qualified execution splits at the final dot. Nominal
@@ -2179,8 +2414,23 @@ INTERPRETER.md and its entry here is retired.
   qualified word and `execute` invokes it through ordinary dispatch. Internal
   homes and slot leases preserve definition-site and lifetime authority without
   exposing either as an ECL value.
+- **Anonymous module images restore a public value without exposing slot
+  identity (2026-08-20, user ruling; supersedes only the public-value portion
+  of the M11 addendum).** `@module` returns an immutable anonymous module
+  image; `register` names and upserts that image in the registry; `@defm`
+  combines the operations for source definitions. Live durable state,
+  arbitration, generation currency, aliases, removal, and lifetime authority
+  remain registration-slot owned. An image has no name or slot back-reference,
+  and definition metadata is module-local; qualified resolution supplies the
+  opaque registration home used by private lookup, reflection, and `within`.
+  The same image may be registered more than once with independent state.
+  `register` preserves the existing slot's state on replacement rather than
+  introducing a separate reload word or publication protocol. The value is
+  type `'module`, identity-matched, printed `<module>`, and unavailable to
+  source deserialization, JSON, and native ABI-v1 conversion.
 - **Modules are ECL's durable state objects (2026-08-17, user ruling; public
-  identity portion superseded by the M11 addendum).** A
+  identity portion superseded first by the M11 addendum and then by Step 15's
+  image/registration split).** A
   dynamically constructed canonical module registry slot owns one durable
   operand stack per Session, initialized by the module construction body's
   final stack and preserved across code generations. Ordinary module words
@@ -2191,8 +2441,9 @@ INTERPRETER.md and its entry here is retired.
   the caller. No
   state-specific annotation, implicit argument/result movement, or mutable
   binding overlay exists. The slot, not a replaceable code generation, is the
-  internal state owner for the duration of a registration; no public value
-  exposes that identity or lifecycle authority. There is no resident actor,
+  internal state owner for the duration of a registration; Step 15's public
+  image value still exposes none of that identity or lifecycle authority.
+  There is no resident actor,
   mailbox, or supervision tree. M11 also adds an explicit quiescing removal
   path; native resource values and SDK access to its internal stack authority
   remain later extensions.

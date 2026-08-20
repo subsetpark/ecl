@@ -444,7 +444,7 @@ fn scalarMatchesElement(
             .symbol => |symbol| symbol == candidate,
             else => false,
         },
-        .generic_spine, .dict, .task, .reserved_mask => unreachable,
+        .generic_spine, .dict, .task, .module, .reserved_mask => unreachable,
     };
 }
 
@@ -453,7 +453,7 @@ fn scalarCanMatchKind(needle: Value, haystack_kind: value.HeapKind) bool {
         .int, .float => haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64,
         .char => haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4,
         .symbol => haystack_kind == .leaf_symbol,
-        .word, .list, .dict, .task => false,
+        .word, .list, .dict, .task, .module => false,
     };
 }
 

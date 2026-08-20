@@ -30,7 +30,7 @@
  (hidden hidden-effect hidden-doc hidden-both) 'via-private def
  )
 'forms
-@module
+@defm
 
 ### Reflection reports exactly the portions that were supplied.
 'forms.bare see
@@ -61,7 +61,7 @@
  ### def two
  (1 2) (-- n) 'two def)
 'liar
-@module
+@defm
 (liar.two) @attempt 'err at 'kind at io.pp
 
 ### A malformed recognized annotation is still 'domain.
@@ -69,7 +69,7 @@
   ### def bad
   (3) (:) 'bad def)
  'broken
- @module)
+ @defm)
 @attempt
 'err
 at
@@ -92,6 +92,6 @@ io.pp
  ### def f
  (a b) 'f def)
 'positional
-@module
+@defm
 'positional.f body io.pp
 positional.peek io.pp
