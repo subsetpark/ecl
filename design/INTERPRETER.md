@@ -1359,8 +1359,8 @@ preceding material by one empty line.
 **Three tiers, one of them local.** Verification is deliberately tiered by
 cost, because a gate nobody runs proves nothing. `zig build precommit` is the
 local tier: Zig and ECL formatting, the source-architecture audit, the binary,
-whole-tree semantic analysis, and the fast core of the suite, in about eighty
-seconds after a source change. Per-push CI owns the complete matrix, and the
+whole-tree semantic analysis, and the fast core of the suite, in about a
+hundred seconds after a source change. Per-push CI owns the complete matrix, and the
 release-candidate matrix owns the exhaustive initialized-Session OOM sweep and
 the complete ReleaseFast suite.
 

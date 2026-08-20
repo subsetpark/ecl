@@ -277,7 +277,7 @@ Verification has three tiers. Only the first is meant to be run by hand.
 zig build precommit < /dev/null
 ```
 
-About eighty seconds after a source change. It checks Zig and ECL source
+About a hundred seconds after a source change. It checks Zig and ECL source
 formatting, runs the source-architecture audit, builds the binary,
 semantically analyzes every test root with codegen suppressed, and executes the
 fast core of the test suite. Its halves are also available alone: `zig build

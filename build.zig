@@ -634,6 +634,11 @@ pub fn build(b: *std.Build) void {
             "tests.value_test.",
             "tests.reader_test.",
             "tests.machine_test.",
+            // Whole file, including the 17s cross-home effect/TCO walk that is
+            // most of this tier's module cost. A CI-only miss in the registry
+            // and module-lifetime area is what this list is for; selecting
+            // families here left the file's unprefixed tests invisible.
+            "tests.module_test.",
             "tests.kernel_numeric_test.",
             "tests.kernel_sequence_test.",
             "tests.kernel_order_test.",

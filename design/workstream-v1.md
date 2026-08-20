@@ -2319,7 +2319,7 @@ INTERPRETER.md and its entry here is retired.
   matrix: `zig build test` alone measures 5m06s after a one-line change (about
   120s of compilation and 184s of execution), which is too big to be an inner
   loop, so it was skipped exactly when refactors needed it. There are now three
-  tiers. `zig build precommit` is the local gate at about 80 seconds: Zig and
+  tiers. `zig build precommit` is the local gate at about 100 seconds: Zig and
   ECL formatting, the source-architecture audit, the installed binary,
   `zig build check`, and `zig build test-precommit`. Per-push CI
   (`.builds/ci.yml`) keeps the complete matrix, and the release-candidate matrix
@@ -2334,8 +2334,8 @@ INTERPRETER.md and its entry here is retired.
   or family joins the tier with no second manifest, while the families excluded
   on measured cost or ambient resource (`concurrency:`, `typed differential:`,
   `dict-text:`, `module:`, `native:`, `fuzz:`, `acceptance:`, PTY, sockets) are
-  listed in `build.zig` beside the measurement that justifies them. 205 of the
-  suite's 304 tests run in the local tier.
+  listed in `build.zig` beside the measurement that justifies them. 218 of the
+  suite's 305 tests run in the local tier.
 
 - **Counted random floats and index-map fusion are separate optimizations
   (2026-08-20, user ruling).** The random vocabulary gains

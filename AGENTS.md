@@ -26,7 +26,7 @@
   a timeout that fires later than its supervisor reports nothing about why the
   run died.
 - **There are exactly three test tiers, and only the first one is yours.**
-  - **Local: `zig build precommit`.** Roughly 80 seconds after a source change.
+  - **Local: `zig build precommit`.** Roughly 100 seconds after a source change.
     It checks Zig formatting and the checked-in ECL source conventions
     (`check-ecl`: canonical formatting, and a standard module's terminal form is
     `@defm`), runs the architecture audit, builds the binary, semantically

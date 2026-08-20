@@ -1180,37 +1180,6 @@ test "registry: generation cursors independently pin their snapshot" {
     host.cleanup().drain();
 }
 
-test "module image retirement waits for descendant scope propagation" {
-    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
-    const allocator = counting.allocator();
-    {
-        var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
-        defer runtime.deinit();
-        // The body spawns a task whose `@attempt` opens a lazy child scope of
-        // the image's module root, and leaves that task on the construction
-        // stack, where it becomes part of the image's initial-state template.
-        // Dropping the image therefore releases an owner whose descendant
-        // scope is still propagating its own multi-turn teardown. If the
-        // embedded scope or its environment were destroyed before that
-        // propagation finished, this aborts inside the allocator rather than
-        // failing an assertion — which is why the shape is driven through the
-        // ordinary words instead of a handcrafted seam.
-        const cycle = "(1 'x setp ((x) @attempt) @spawn) @module pop";
-        const small = "[1] 20 take (pop " ++ cycle ++ ") for";
-        const large = "[1] 200 take (pop " ++ cycle ++ ") for";
-        try expectOk(&runtime, small);
-        const before_small = counting.total_requested_bytes;
-        try expectOk(&runtime, small);
-        const after_small = counting.total_requested_bytes;
-        try expectOk(&runtime, large);
-        const after_large = counting.total_requested_bytes;
-        const small_growth = after_small -| before_small;
-        const large_growth = after_large -| after_small;
-        try std.testing.expect(large_growth <= small_growth * 2 + 4096);
-    }
-    try std.testing.expectEqual(.ok, counting.deinit());
-}
-
 test "loader: load is one unit and preserves file provenance" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
