@@ -1614,8 +1614,10 @@ pub const Unit = struct {
     active_word: intern.TraceWord = no_word,
     /// Scratch for spelling one qualified trace word in a diagnostic message.
     /// A module-local word's spelling depends on the invoking registration, so
-    /// there is no interned string to point at.
-    word_scratch: [intern.trace_word_bytes]u8 = undefined,
+    /// there is no interned string to point at. Written before it is read on
+    /// every path; zeroed rather than left `undefined` so no default here can
+    /// become a read of uninitialized bytes.
+    word_scratch: [intern.trace_word_bytes]u8 = @splat(0),
     pub fn init(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,

@@ -634,11 +634,12 @@ pub fn build(b: *std.Build) void {
             "tests.value_test.",
             "tests.reader_test.",
             "tests.machine_test.",
-            // Whole file, including the 17s cross-home effect/TCO walk that is
-            // most of this tier's module cost. A CI-only miss in the registry
-            // and module-lifetime area is what this list is for; selecting
-            // families here left the file's unprefixed tests invisible.
+            // Both module suites whole, not by family: selecting families is
+            // what left this file's unprefixed tests invisible until CI found
+            // one, and the registry and module-lifetime area is where a
+            // CI-only miss costs the most.
             "tests.module_test.",
+            "tests.module_source_test.",
             "tests.kernel_numeric_test.",
             "tests.kernel_sequence_test.",
             "tests.kernel_order_test.",
@@ -701,10 +702,31 @@ pub fn build(b: *std.Build) void {
     );
     ecl_source_step.dependOn(&run_ecl_source.step);
 
+    // zlint is a downloaded binary rather than a Zig dependency, so it is
+    // optional here and blocking in CI. It is wired in when it is on PATH
+    // because a lint failure is otherwise only discoverable after a push, which
+    // is the same round trip this tier exists to remove. Untracked sources are
+    // included: a new file is exactly the one most likely to trip a rule.
+    const lint_step = b.step("lint", "Run zlint over first-party Zig sources (needs zlint on PATH)");
+    const zlint_available = if (b.findProgram(&.{"zlint"}, &.{})) |_| true else |_| false;
+    const run_lint = b.addSystemCommand(&.{
+        "sh", "-c",
+        "{ git ls-files '*.zig'; git ls-files --others --exclude-standard '*.zig'; } | " ++
+            "zlint -S --deny-warnings",
+    });
+    if (zlint_available) {
+        lint_step.dependOn(&run_lint.step);
+    } else {
+        lint_step.dependOn(&b.addFail(
+            "zlint is not on PATH; install it from github.com/DonIsaac/zlint to run this gate",
+        ).step);
+    }
+
     const precommit_step = b.step(
         "precommit",
         "The local gate: formatting, architecture audit, whole-tree analysis, and the fast test tier",
     );
+    if (zlint_available) precommit_step.dependOn(&run_lint.step);
     precommit_step.dependOn(&check_zig_fmt.step);
     precommit_step.dependOn(&run_audit.step);
     precommit_step.dependOn(&run_ecl_source.step);

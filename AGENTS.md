@@ -26,12 +26,13 @@
   a timeout that fires later than its supervisor reports nothing about why the
   run died.
 - **There are exactly three test tiers, and only the first one is yours.**
-  - **Local: `zig build precommit`.** Roughly 100 seconds after a source change.
-    It checks Zig formatting and the checked-in ECL source conventions
-    (`check-ecl`: canonical formatting, and a standard module's terminal form is
-    `@defm`), runs the architecture audit, builds the binary, semantically
-    analyzes *every* test root with codegen suppressed, and then executes the
-    fast core of the suite (`zig build test-precommit` alone).
+  - **Local: `zig build precommit`.** Roughly 80 seconds after a source change.
+    It lints (when `zlint` is on PATH), checks Zig formatting and the
+    checked-in ECL source conventions (`check-ecl`: canonical formatting, and a
+    standard module's terminal form is `@defm`), runs the architecture audit,
+    builds the binary, semantically analyzes *every* test root with codegen
+    suppressed, and then executes the fast core of the suite
+    (`zig build test-precommit` alone).
     Run it before every commit and after every patch in a stack. Iterate faster
     still with `zig build` plus real behavior against `./zig-out/bin/ecl`, and
     `zig build check` when all you need is "does the tree still compile".

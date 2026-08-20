@@ -163,6 +163,7 @@ const test_files = [_][]const u8{
     "tests/json_test.zig",            "tests/table_test.zig",
     "tests/http_test.zig",            "tests/random_test.zig",
     "tests/kernel_typed_test.zig",    "tests/module_value_test.zig",
+    "tests/module_source_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",

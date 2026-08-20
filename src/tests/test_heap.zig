@@ -62,11 +62,19 @@
 //! `heap.freePayload`, far from the line at fault.
 //!
 //! So this heap suits suites that only run source strings through a session
-//! (`kernel_test_support`, `combinator_test`, `machine_test`). Suites that
-//! mix host-built values into a session (`definition_test`, `module_test`)
-//! stay on `std.testing.allocator`, where the value and the session already
-//! agree. If you move a test here and it aborts on a free, that is this
-//! rule, not a bug in the code under test.
+//! (`kernel_test_support`, `combinator_test`, `machine_test`,
+//! `module_source_test`). Suites that mix host-built values into a session
+//! (`definition_test`, `module_test`) stay on `std.testing.allocator`, where
+//! the value and the session already agree. If you move a test here and it
+//! aborts on a free, that is this rule, not a bug in the code under test.
+//!
+//! The rule cuts *files*, not tests, so a file that needs both is two files.
+//! `module_test.zig` was one file until the same-home TCO walk was measured:
+//! twenty thousand activations under a tracing allocator cost 15.4s against
+//! 4.2s untraced, and none of that file's source-only tests read a stack
+//! trace. Splitting `module_source_test.zig` out took the local gate from
+//! 103s to 81s. When a slow test's allocator is not load-bearing, move the
+//! test rather than shrinking the proof.
 const std = @import("std");
 
 /// Raise to restore allocation-site attribution in every suite that uses

@@ -277,12 +277,14 @@ Verification has three tiers. Only the first is meant to be run by hand.
 zig build precommit < /dev/null
 ```
 
-About a hundred seconds after a source change. It checks Zig and ECL source
-formatting, runs the source-architecture audit, builds the binary,
+About eighty seconds after a source change. It lints, checks Zig and ECL
+source formatting, runs the source-architecture audit, builds the binary,
 semantically analyzes every test root with codegen suppressed, and executes the
-fast core of the test suite. Its halves are also available alone: `zig build
+fast core of the test suite. Its parts are also available alone: `zig build
 check` for whole-tree analysis, `zig build test-precommit` for the fast core,
-and `zig build check-ecl` for the checked-in ECL source conventions.
+`zig build check-ecl` for the checked-in ECL source conventions, and `zig build
+lint` for [zlint](https://github.com/DonIsaac/zlint), which is included only
+when it is on PATH.
 
 **Per-push CI** (`.builds/ci.yml`) owns the complete matrix: the whole suite in
 Debug and in the distributed ReleaseSafe mode, plus PTY, native, snapshot,

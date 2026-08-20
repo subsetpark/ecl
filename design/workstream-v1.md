@@ -2319,7 +2319,7 @@ INTERPRETER.md and its entry here is retired.
   matrix: `zig build test` alone measures 5m06s after a one-line change (about
   120s of compilation and 184s of execution), which is too big to be an inner
   loop, so it was skipped exactly when refactors needed it. There are now three
-  tiers. `zig build precommit` is the local gate at about 100 seconds: Zig and
+  tiers. `zig build precommit` is the local gate at about 80 seconds: Zig and
   ECL formatting, the source-architecture audit, the installed binary,
   `zig build check`, and `zig build test-precommit`. Per-push CI
   (`.builds/ci.yml`) keeps the complete matrix, and the release-candidate matrix

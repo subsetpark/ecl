@@ -47,8 +47,10 @@ const ModuleImage = struct {
     /// the capture fills them, so every element is releasable at any point.
     initial_state: []value.Value = &.{},
     /// The construction-root home. Its registration is null, so no state
-    /// application can open against a module that is still being built.
-    construction_home: ExecutionHome = undefined,
+    /// application can open against a module that is still being built. It
+    /// embeds a pointer to its own owner, so `create` fills it in after the
+    /// allocation rather than defaulting it.
+    construction_home: ExecutionHome,
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: union(enum) {
         live,
@@ -149,7 +151,10 @@ const Registration = struct {
         provisional,
         published: SlotLease,
     } = .provisional,
-    home: ExecutionHome = undefined,
+    /// The execution home callers reach this registration through. Like the
+    /// image's, it embeds a pointer to its own owner and is therefore filled in
+    /// after the allocation.
+    home: ExecutionHome,
     retirement: heap.ReleaseDomain.Retirement = .{},
 
     /// Retains `image` on success; on failure the caller still owns its own
@@ -161,8 +166,14 @@ const Registration = struct {
     ) error{OutOfMemory}!*Registration {
         const result = try allocator.create(Registration);
         image.retain();
-        result.* = .{ .allocator = allocator, .image = image, .name = name };
+        result.allocator = allocator;
+        result.refs = .init(1);
+        result.image = image;
+        result.name = name;
+        result.generation = 0;
+        result.slot_lifetime = .provisional;
         result.home = .{ .image = image, .registration = result };
+        result.retirement = .{};
         return result;
     }
 
