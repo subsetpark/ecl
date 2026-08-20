@@ -1309,7 +1309,7 @@ fn fixedCharStep(
 
         fn step(state: *FixedCharState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
-            var block: Loops.Staging = .{};
+            var block = Loops.Staging.init();
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
@@ -1447,7 +1447,7 @@ fn dynamicCharStep(
 
         fn step(state: *DynamicCharState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
-            var block: Loops.Staging = .{};
+            var block = Loops.Staging.init();
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
@@ -1630,7 +1630,7 @@ fn binaryStep(
 
         fn step(state: *TypedState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
-            var block: Loops.Staging = .{};
+            var block = Loops.Staging.init();
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
@@ -1691,7 +1691,7 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
 
         fn step(state: *TypedState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
-            var block: Loops.Staging = .{};
+            var block = Loops.Staging.init();
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
@@ -2434,7 +2434,7 @@ fn reduceStep(
         fn step(state: *TypedReduceState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
             const elements = state.input.slice(element_class);
-            var block: Staging = .{};
+            var block = Staging.init();
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);

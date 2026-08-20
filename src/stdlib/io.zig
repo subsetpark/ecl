@@ -4,7 +4,6 @@
 //! derived words schedule fixed quotations in their definition-site module,
 //! so `print` remains `prin "\n" prin` and `lines` remains
 //! `slurp "\n" split` without exposing the host primitives globally.
-const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const intern = @import("../intern.zig");
@@ -12,7 +11,6 @@ const env = @import("../env.zig");
 const machine = @import("../machine.zig");
 const prims = @import("../prims.zig");
 
-const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 

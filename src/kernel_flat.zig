@@ -152,9 +152,15 @@ pub fn Block(comptime Element: type) type {
     return struct {
         const Self = @This();
 
-        items: [block_size]Element = undefined,
+        items: [block_size]Element,
         len: usize = 0,
         faulted: bool = false,
+
+        pub fn init() Self {
+            // SAFETY: `len` starts at zero, and every producer initializes the
+            // complete visible prefix before increasing it.
+            return .{ .items = undefined };
+        }
 
         pub fn reset(self: *Self) void {
             self.len = 0;
@@ -192,7 +198,7 @@ pub fn Family(comptime Left: type, comptime Right: type, comptime Out: type) typ
             var faulted = false;
             for (range.start..range.end) |index| {
                 const result = body(left[index], right[index]);
-                block.items[index - range.start] = result orelse undefined;
+                block.items[index - range.start] = result orelse std.mem.zeroes(Out);
                 faulted = faulted or result == null;
             }
             block.len = range.len();
@@ -214,7 +220,7 @@ pub fn Family(comptime Left: type, comptime Right: type, comptime Out: type) typ
             var faulted = false;
             for (range.start..range.end) |index| {
                 const result = body(left[index], right);
-                block.items[index - range.start] = result orelse undefined;
+                block.items[index - range.start] = result orelse std.mem.zeroes(Out);
                 faulted = faulted or result == null;
             }
             block.len = range.len();
@@ -236,7 +242,7 @@ pub fn Family(comptime Left: type, comptime Right: type, comptime Out: type) typ
             var faulted = false;
             for (range.start..range.end) |index| {
                 const result = body(left, right[index]);
-                block.items[index - range.start] = result orelse undefined;
+                block.items[index - range.start] = result orelse std.mem.zeroes(Out);
                 faulted = faulted or result == null;
             }
             block.len = range.len();
@@ -255,7 +261,7 @@ pub fn Family(comptime Left: type, comptime Right: type, comptime Out: type) typ
             var faulted = false;
             for (range.start..range.end) |index| {
                 const result = body(operand[index]);
-                block.items[index - range.start] = result orelse undefined;
+                block.items[index - range.start] = result orelse std.mem.zeroes(Out);
                 faulted = faulted or result == null;
             }
             block.len = range.len();
@@ -302,7 +308,7 @@ test "blocks stage results and a fault anywhere blocks the whole block" {
             return std.math.add(i64, left, right) catch null;
         }
     }.body;
-    var block: Ints.Staging = .{};
+    var block = Ints.Staging.init();
     const left = [_]i64{ 1, 2, 3, 4 };
     const right = [_]i64{ 10, 20, 30, 40 };
     Ints.binary(add, &left, &right, .{ .start = 1, .end = 4 }, &block);
@@ -329,7 +335,7 @@ test "blocks stage results and a fault anywhere blocks the whole block" {
             return std.math.sub(i64, 0, operand) catch null;
         }
     }.body;
-    var unary_block: Negate.Staging = .{};
+    var unary_block = Negate.Staging.init();
     Negate.unary(negate, &[_]i64{ 1, -2, 3 }, .{ .start = 0, .end = 3 }, &unary_block);
     try std.testing.expectEqualSlices(i64, &.{ -1, 2, -3 }, unary_block.written());
     Negate.unary(negate, &[_]i64{std.math.minInt(i64)}, .{ .start = 0, .end = 1 }, &unary_block);
@@ -356,7 +362,7 @@ fn typedWriteFailureProbe(allocator: std.mem.Allocator) !void {
     var writer = try heap.LeafWriter(.leaf_i64).init(allocator, block_size + 1);
     errdefer writer.retirePartial(cleanup.domain());
     const Ints = Family(i64, i64, i64);
-    var block: Ints.Staging = .{};
+    var block = Ints.Staging.init();
     var source: [block_size + 1]i64 = undefined;
     for (&source, 0..) |*item, index| item.* = @intCast(index);
     const range = Chunk{ .start = 0, .end = source.len };
