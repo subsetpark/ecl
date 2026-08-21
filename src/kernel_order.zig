@@ -48,6 +48,18 @@ fn cmpPrimitive(evaluator: *Machine) MachineError!void {
     const left_item = left.borrow();
     const right_item = right.borrow();
     if (try startTypedStringCompare(evaluator, left_item, right_item)) return;
+    // Only two strings have anything to walk. Every other pair is one call to
+    // `compareScalars` -- the cursor's own answer for them -- which a driver and
+    // a scheduler turn were being allocated to reach.
+    if (!left_item.isString() and !right_item.isString()) {
+        const ordering = equal.compareScalars(left_item, right_item) catch
+            return evaluator.typeError("two comparable numbers, chars, or strings");
+        return evaluator.pushOwned(.{ .int = switch (ordering) {
+            .lt => -1,
+            .eq => 0,
+            .gt => 1,
+        } });
+    }
     try evaluator.startDriver(CompareDriver{
         .left = .init(left.take()),
         .right = .init(right.take()),

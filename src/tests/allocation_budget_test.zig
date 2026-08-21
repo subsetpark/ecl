@@ -255,6 +255,12 @@ const dispatch_free = [_]Case{
         .workload = "(pop 5 type) each len",
         .per_element = 0,
     },
+    .{
+        .name = "scalar compare",
+        .setup = "{d} range",
+        .workload = "(pop 1 2 cmp) each len",
+        .per_element = 0,
+    },
     // Swept across the primitive surface 2026-08-21 rather than sampled. Every
     // one of these already measured zero; they are here so that stays true.
     .{
@@ -601,12 +607,6 @@ test "allocation: construction stays at its recorded floor" {
 /// while the question stays open; lowering one to zero is the point of looking
 /// at them.
 const scalar_result_suspects = [_]Case{
-    .{
-        .name = "scalar compare",
-        .setup = "{d} range",
-        .workload = "(pop 1 2 cmp) each len",
-        .per_element = 1,
-    },
     .{
         .name = "membership",
         .setup = "{d} range",
