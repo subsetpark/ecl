@@ -57,6 +57,27 @@ pub fn matchWithAllocator(
     return poll.driveFallible(bool, &cursor, .{1024});
 }
 
+/// The comparison a match needs no worklist for: any pair that is not a list
+/// against a list or a dict against a dict. `null` means the pair has
+/// structure to walk. `MatchCursor` answers its own leaf case from here, so a
+/// caller that takes this answer directly cannot disagree with the cursor.
+pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
+    if (numericPair(a, b)) return numberEqual(a, b);
+    if (a.tag() != b.tag()) return false;
+    return switch (a) {
+        .int, .float => unreachable,
+        .char => |codepoint| codepoint == b.char,
+        .symbol => |id| id == b.symbol,
+        .word => |id| id == b.word,
+        .task => |header| header == b.task,
+        // Image identity, never structural traversal: two references to one
+        // image match and two constructions never do, and no comparison
+        // enters the frozen environment or initial-state template.
+        .module => |header| header == b.module,
+        .list, .dict => null,
+    };
+}
+
 pub const MatchProgress = poll.Progress(bool);
 
 /// Owned structural-comparison state. `advance` performs at most `budget`
@@ -140,25 +161,12 @@ pub const MatchCursor = struct {
         const action = self.actions.pop() orelse return self.last;
         switch (action) {
             .compare => |pair| {
-                if (numericPair(pair.a, pair.b)) {
-                    self.last = numberEqual(pair.a, pair.b);
-                    return null;
-                }
-                if (pair.a.tag() != pair.b.tag()) {
-                    self.last = false;
+                if (matchWithoutStructure(pair.a, pair.b)) |answer| {
+                    self.last = answer;
                     return null;
                 }
                 switch (pair.a) {
-                    .int, .float => unreachable,
-                    .char => |codepoint| self.last = codepoint == pair.b.char,
-                    .symbol => |id| self.last = id == pair.b.symbol,
-                    .word => |id| self.last = id == pair.b.word,
-                    .task => |header| self.last = header == pair.b.task,
-                    // Image identity, never structural traversal: two
-                    // references to one image match and two constructions
-                    // never do, and no comparison enters the frozen
-                    // environment or initial-state template.
-                    .module => |header| self.last = header == pair.b.module,
+                    .int, .float, .char, .symbol, .word, .task, .module => unreachable,
                     .list => |a_header| {
                         const b_header = pair.b.list;
                         if (a_header == b_header) {

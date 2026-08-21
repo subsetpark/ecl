@@ -167,6 +167,12 @@ fn match(evaluator: *Machine) MachineError!void {
     defer right.deinit();
     var left = try evaluator.popValue();
     defer left.deinit();
+    // Only a list against a list or a dict against a dict has structure to
+    // walk; every other pair is one comparison, which the cursor would reach
+    // after allocating a worklist and a driver to hold it.
+    if (equal.matchWithoutStructure(left.borrow(), right.borrow())) |matches| {
+        return evaluator.pushOwned(.{ .int = @intFromBool(matches) });
+    }
     const cursor = try equal.MatchCursor.init(evaluator.allocator(), left.borrow(), right.borrow());
     try evaluator.startDriver(MatchDriver{
         .left = .init(left.take()),
