@@ -1655,6 +1655,12 @@ pub const Unit = struct {
     /// being free — only the allocation does.
     driver_slot: [driver_slot_len]u8 align(driver_slot_align),
     driver_slot_busy: bool = false,
+    /// One parked isolated application scope. A combinator retires the scope
+    /// for element N and immediately builds one for element N+1 over the same
+    /// parent; when the retired one never bound anything it is indistinguishable
+    /// from the new one, so it is kept here instead of being freed and
+    /// reallocated per element.
+    spare_scope: ?*env.Scope = null,
     pub fn init(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
@@ -2015,6 +2021,7 @@ pub const Unit = struct {
             .park_resume => |result| result.deinit(self.releases),
             .task_join, .task_join_request, .task_join_resume, .task_join_cleanup, .work_join_cleanup => @panic("task join must be retired resumably before unit teardown"),
         }
+        if (self.spare_scope) |spare| spare.retire();
         self.lifetime.deinit(self.releases, self.allocator);
         self.* = undefined;
     }
@@ -4155,6 +4162,35 @@ pub const Machine = struct {
         return self.beginApplication(application, .in_place, null);
     }
     const ApplicationLaunch = enum { in_place, isolated };
+    /// Hands back an isolated application scope. One that never bound and is
+    /// unshared is parked for the next application over the same parent rather
+    /// than retired; anything else takes the ordinary path.
+    fn releaseApplicationScope(self: *Machine, scope: *env.Scope) void {
+        if (self.unit.spare_scope == null and scope.parent != null and
+            scope.reusableAsChildOf(scope.parent.?))
+        {
+            self.unit.spare_scope = scope;
+            return;
+        }
+        scope.retire();
+    }
+
+    /// The parked scope if it belongs under `parent`, otherwise a fresh one.
+    /// A parked scope that belongs elsewhere is retired rather than kept: it
+    /// pins its own parent alive, and the next application is the evidence
+    /// that nothing is iterating over it any more.
+    fn acquireApplicationScope(self: *Machine, parent: *env.Scope) error{OutOfMemory}!*env.Scope {
+        if (self.unit.spare_scope) |spare| {
+            if (spare.reusableAsChildOf(parent)) {
+                self.unit.spare_scope = null;
+                return spare;
+            }
+            self.unit.spare_scope = null;
+            spare.retire();
+        }
+        return env.Scope.createLazy(self.unit.allocator, parent);
+    }
+
     fn beginApplication(
         self: *Machine,
         application: IsolatedApplication,
@@ -4168,7 +4204,7 @@ pub const Machine = struct {
         const base = StackWindow.init(self.unit.stack.items.len, application.seeded) orelse unreachable;
         var child: ?*env.Scope = null;
         if (launch == .isolated) {
-            child = env.Scope.createLazy(self.unit.allocator, application.parent_scope) catch {
+            child = self.acquireApplicationScope(application.parent_scope) catch {
                 application.deinit_fn(self.releaseDomain(), self.unit.allocator, application.context);
                 return error.OutOfMemory;
             };
@@ -5738,7 +5774,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                 .in_place => |window| .{ .in_place, window },
                 .isolated => |isolated| blk: {
                     const window: StackWindow = @enumFromInt(@as(u32, @intCast(self.unit.stack_base)));
-                    isolated.child.retire();
+                    self.releaseApplicationScope(isolated.child);
                     self.unit.stack_base = isolated.previous_base.base();
                     break :blk .{ .isolated, window };
                 },

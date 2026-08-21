@@ -2337,7 +2337,20 @@ INTERPRETER.md and its entry here is retired.
       validation), per-unit size-class pools, or typed slabs; pools keep
       precise ownership and allocator-failure behavior and never turn
       teardown into unbounded traversal; deferred item 18 is the dispatch-side
-      instance of this same preference and is measured separately;
+      instance of this same preference and is measured separately. Measured
+      2026-08-21: the largest per-element cost this preference was written for
+      was not a driver at all. Applying a quotation allocated a 144-byte
+      `env.Scope` per element — one per element of every generic combinator,
+      including a body that binds nothing and does nothing — and retired it
+      through bounded retirement, so each element also cost release-domain
+      traffic. `beginApplication` now parks an unmaterialized, unshared scope
+      for the next application over the same parent instead of retiring it,
+      taking a 100,000-element unrecognized `each` from 100,033 allocations to
+      34. Two larger per-element costs are now exposed and unowned: a `|x|`
+      body costs about ten allocations per element in the reader-time lowering
+      of head binders, and a body that binds with `set` costs about twenty-one.
+      Both dwarf what the scope cost, and neither is a driver either — take the
+      measurement before assuming this preference names the right structure;
    2. batching non-kernel transitions inside a bounded slice—generic-spine or
       dict descent, heterogeneous materializer passes, reader/formatter/editor
       cursors—with conservative accounting: a bounded chunk may count as one

@@ -1211,6 +1211,17 @@ pub const Scope = struct {
         result.allocation = .heap;
         return result;
     }
+    /// True when nothing has bound in this scope and nobody but its own frame
+    /// refers to it. Such a scope carries no state at all: it is pure identity
+    /// over its parent, so one is interchangeable with another over the same
+    /// parent. Isolation still holds, because a scope that has bound anything
+    /// has materialized its environment and fails this test.
+    pub fn reusableAsChildOf(self: *const Scope, parent: *const Scope) bool {
+        if (self.storage != .isolated) return false;
+        if (self.parent != parent) return false;
+        if (self.isolated_environment.load(.acquire) != null) return false;
+        return self.refs.load(.acquire) == 1;
+    }
     pub fn retain(self: *Scope) void {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
