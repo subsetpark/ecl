@@ -640,6 +640,10 @@ pub fn build(b: *std.Build) void {
             // CI-only miss costs the most.
             "tests.module_test.",
             "tests.module_source_test.",
+            // Allocation budgets are cheap and guard behaviour no other test
+            // can see: a fast path that stops firing still returns the right
+            // answer.
+            "tests.allocation_budget_test.",
             "tests.kernel_numeric_test.",
             "tests.kernel_sequence_test.",
             "tests.kernel_order_test.",
