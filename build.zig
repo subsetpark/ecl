@@ -640,9 +640,14 @@ pub fn build(b: *std.Build) void {
             // CI-only miss costs the most.
             "tests.module_test.",
             "tests.module_source_test.",
-            // Allocation budgets are cheap and guard behaviour no other test
-            // can see: a fast path that stops firing still returns the right
-            // answer.
+            // Allocation budgets cost this tier about twenty seconds, taking
+            // it from roughly eighty to roughly a hundred. That is the largest
+            // single entry here and it is deliberate: a fast path that stops
+            // firing still returns the right answer, so nothing else in the
+            // suite notices, and finding out from a benchmark weeks later is
+            // how the last two of these were found. The cost is already one
+            // session per case rather than one per measurement; shrinking it
+            // further means measuring fewer operations.
             "tests.allocation_budget_test.",
             "tests.kernel_numeric_test.",
             "tests.kernel_sequence_test.",

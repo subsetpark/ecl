@@ -84,15 +84,21 @@ const Case = struct {
     per_element: usize,
 };
 
-const small = 1_000;
-const large = 3_000;
+// Small enough that the whole sweep stays inside the fast tier's budget, and
+// far enough apart that a per-element cost is unambiguous in the difference.
+const small = 400;
+const large = 1_200;
 
-/// Runs `setup` at `count` elements, then measures `workload` alone.
-fn measure(allocator: std.mem.Allocator, case: Case, count: usize) !usize {
-    var counting = CountingAllocator{ .backing = allocator };
-    var runtime = try session.Session.init(counting.allocator(), &.{});
-    defer runtime.deinit();
-
+/// Runs `setup` at `count` elements in `runtime`, then measures `workload`
+/// alone. Both sizes share one session: initializing one costs more than either
+/// measurement, and the subtraction removes anything they share anyway.
+fn measure(
+    runtime: *session.Session,
+    counting: *CountingAllocator,
+    allocator: std.mem.Allocator,
+    case: Case,
+    count: usize,
+) !usize {
     var count_text: [24]u8 = undefined;
     const digits = try std.fmt.bufPrint(&count_text, "{d}", .{count});
     const setup = try allocator.alloc(u8, std.mem.replacementSize(u8, case.setup, "{d}", digits));
@@ -123,8 +129,11 @@ fn measure(allocator: std.mem.Allocator, case: Case, count: usize) !usize {
 
 fn expectBudget(case: Case) !void {
     const allocator = std.testing.allocator;
-    const at_small = try measure(allocator, case, small);
-    const at_large = try measure(allocator, case, large);
+    var counting = CountingAllocator{ .backing = allocator };
+    var runtime = try session.Session.init(counting.allocator(), &.{});
+    defer runtime.deinit();
+    const at_small = try measure(&runtime, &counting, allocator, case, small);
+    const at_large = try measure(&runtime, &counting, allocator, case, large);
     // Subtracting removes every fixed cost the two runs share, so what is left
     // is the per-element spend and nothing else. A fast path that stopped
     // firing shows up here and nowhere else.
@@ -246,6 +255,200 @@ const dispatch_free = [_]Case{
         .workload = "(pop 5 type) each len",
         .per_element = 0,
     },
+    // Swept across the primitive surface 2026-08-21 rather than sampled. Every
+    // one of these already measured zero; they are here so that stays true.
+    .{
+        .name = "stack dup",
+        .setup = "{d} range",
+        .workload = "(pop 5 dup pop) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "stack swap",
+        .setup = "{d} range",
+        .workload = "(pop 1 2 swap pop) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "logical not",
+        .setup = "{d} range",
+        .workload = "(pop 1 not) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "equality",
+        .setup = "{d} range",
+        .workload = "(pop 1 2 =) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "less than",
+        .setup = "{d} range",
+        .workload = "(pop 1 2 <) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "greater than",
+        .setup = "{d} range",
+        .workload = "(pop 1 2 >) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "min",
+        .setup = "{d} range",
+        .workload = "(pop 1 2 min) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "max",
+        .setup = "{d} range",
+        .workload = "(pop 1 2 max) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "subtraction",
+        .setup = "{d} range",
+        .workload = "(pop 3 2 -) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "multiplication",
+        .setup = "{d} range",
+        .workload = "(pop 3 2 *) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "division",
+        .setup = "{d} range",
+        .workload = "(pop 6 2 /) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "integer division",
+        .setup = "{d} range",
+        .workload = "(pop 7 2 div) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "power",
+        .setup = "{d} range",
+        .workload = "(pop 2 3 pow) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "atan2",
+        .setup = "{d} range",
+        .workload = "(pop 1.0 2.0 atan2) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "square root",
+        .setup = "{d} range",
+        .workload = "(pop 4 sqrt) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "floor",
+        .setup = "{d} range",
+        .workload = "(pop 1.5 floor) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "ceiling",
+        .setup = "{d} range",
+        .workload = "(pop 1.5 ceil) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "round",
+        .setup = "{d} range",
+        .workload = "(pop 1.5 round) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "exp",
+        .setup = "{d} range",
+        .workload = "(pop 1.0 exp) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "log",
+        .setup = "{d} range",
+        .workload = "(pop 1.0 log) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "sine",
+        .setup = "{d} range",
+        .workload = "(pop 1.0 sin) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "cosine",
+        .setup = "{d} range",
+        .workload = "(pop 1.0 cos) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "bitwise and",
+        .setup = "{d} range",
+        .workload = "(pop 3 5 band) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "bitwise or",
+        .setup = "{d} range",
+        .workload = "(pop 3 5 bor) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "bitwise xor",
+        .setup = "{d} range",
+        .workload = "(pop 3 5 bxor) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "bitwise not",
+        .setup = "{d} range",
+        .workload = "(pop 3 bnot) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "shift left",
+        .setup = "{d} range",
+        .workload = "(pop 3 2 bsl) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "shift right",
+        .setup = "{d} range",
+        .workload = "(pop 12 2 bsr) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "quotation call",
+        .setup = "{d} range",
+        .workload = "(pop 5 (dup) call pop) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "conditional",
+        .setup = "{d} range",
+        .workload = "(pop 1 (2) (3) if) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "dict keys",
+        .setup = "{d} range",
+        .workload = "(pop {'a 1} keys len) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "dict values",
+        .setup = "{d} range",
+        .workload = "(pop {'a 1} vals len) each len",
+        .per_element = 0,
+    },
 };
 
 test "allocation: dispatch spends nothing per element" {
@@ -253,9 +456,10 @@ test "allocation: dispatch spends nothing per element" {
 }
 
 /// Operations that build something. These allocate because there is a value to
-/// construct, not because reaching the construction cost anything, and the
-/// budgets record where that floor currently sits. They are here so that a
-/// change which raises one has to say so.
+/// construct, not because reaching the construction cost anything. The numbers
+/// are what the sweep measured, not what anyone argued for: several look higher
+/// than the structure they produce, and whether that is the floor or slack
+/// nobody has looked at yet is exactly what a recorded baseline is for.
 const construction = [_]Case{
     .{
         .name = "cons onto an empty list",
@@ -281,8 +485,148 @@ const construction = [_]Case{
         .workload = "(pop [1 2 3] reverse len) each len",
         .per_element = 4,
     },
+    .{
+        .name = "range",
+        .setup = "{d} range",
+        .workload = "(pop 3 range len) each len",
+        .per_element = 3,
+    },
+    .{
+        .name = "join",
+        .setup = "{d} range",
+        .workload = "(pop [\"a\" \"b\"] \",\" join len) each len",
+        .per_element = 3,
+    },
+    .{
+        .name = "where",
+        .setup = "{d} range",
+        .workload = "(pop [1 0 1] where len) each len",
+        .per_element = 3,
+    },
+    .{
+        .name = "drop",
+        .setup = "{d} range",
+        .workload = "(pop [1 2 3] 1 drop len) each len",
+        .per_element = 3,
+    },
+    .{
+        .name = "take",
+        .setup = "{d} range",
+        .workload = "(pop [1 2 3] 2 take len) each len",
+        .per_element = 3,
+    },
+    .{
+        .name = "each over two elements",
+        .setup = "{d} range",
+        .workload = "(pop [1 2] (1 +) each len) each len",
+        .per_element = 3,
+    },
+    .{
+        .name = "concatenate",
+        .setup = "{d} range",
+        .workload = "(pop [1 2] [3] cat len) each len",
+        .per_element = 3,
+    },
+    .{
+        .name = "raze",
+        .setup = "{d} range",
+        .workload = "(pop [[1] [2]] raze len) each len",
+        .per_element = 4,
+    },
+    .{
+        .name = "shape",
+        .setup = "{d} range",
+        .workload = "(pop [1 2 3] shape len) each len",
+        .per_element = 5,
+    },
+    .{
+        .name = "grade",
+        .setup = "{d} range",
+        .workload = "(pop [3 1 2] grade len) each len",
+        .per_element = 5,
+    },
+    .{
+        .name = "split",
+        .setup = "{d} range",
+        .workload = "(pop \"a,b\" \",\" split len) each len",
+        .per_element = 9,
+    },
+    .{
+        .name = "dict delete",
+        .setup = "{d} range",
+        .workload = "(pop {'a 1} 'a del keys len) each len",
+        .per_element = 9,
+    },
+    .{
+        .name = "flip",
+        .setup = "{d} range",
+        .workload = "(pop [[1 2] [3 4]] flip len) each len",
+        .per_element = 12,
+    },
+    .{
+        .name = "dict put",
+        .setup = "{d} range",
+        .workload = "(pop {'a 1} 'b 2 put keys len) each len",
+        .per_element = 15,
+    },
+    .{
+        .name = "dict merge",
+        .setup = "{d} range",
+        .workload = "(pop {'a 1} {'b 2} merge keys len) each len",
+        .per_element = 15,
+    },
+    .{
+        .name = "reshape",
+        .setup = "{d} range",
+        .workload = "(pop [1 2 3 4] [2 2] reshape len) each len",
+        .per_element = 18,
+    },
+    .{
+        .name = "group",
+        .setup = "{d} range",
+        .workload = "(pop [1 1 2] group keys len) each len",
+        .per_element = 27,
+    },
 };
 
 test "allocation: construction stays at its recorded floor" {
     for (construction) |case| try expectBudget(case);
+}
+
+/// Operations whose result is a scalar and whose budget is nevertheless not
+/// zero. Each allocates once per call to produce a number or a boolean, which
+/// is the same shape as the cursor-and-driver costs already removed from
+/// arithmetic, indexing, matching, and dict lookup. They are recorded at what
+/// they cost rather than at what they should cost, so the budget holds the line
+/// while the question stays open; lowering one to zero is the point of looking
+/// at them.
+const scalar_result_suspects = [_]Case{
+    .{
+        .name = "scalar compare",
+        .setup = "{d} range",
+        .workload = "(pop 1 2 cmp) each len",
+        .per_element = 1,
+    },
+    .{
+        .name = "membership",
+        .setup = "{d} range",
+        .workload = "(pop 2 [1 2 3] in?) each len",
+        .per_element = 1,
+    },
+    .{
+        .name = "dict membership",
+        .setup = "{d} range",
+        .workload = "(pop {'a 1} 'a has?) each len",
+        .per_element = 1,
+    },
+    .{
+        .name = "fold to a scalar",
+        .setup = "{d} range",
+        .workload = "(pop [1 2] 0 (+) fold) each len",
+        .per_element = 1,
+    },
+};
+
+test "allocation: scalar results hold their recorded cost" {
+    for (scalar_result_suspects) |case| try expectBudget(case);
 }
