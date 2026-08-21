@@ -2474,13 +2474,22 @@ INTERPRETER.md and its entry here is retired.
       path, frame and both resolutions included; one that merely sidesteps
       the idiom machinery would land between these two numbers, not below
       them.
-    - Still deferred, and the open question is no longer what a constant
-      reference costs but whether programs make enough of them to care.
-      Every number here comes from a synthetic probe that does nothing but
-      dereference a constant. Before building anything, measure constant
-      reference frequency in real ECL — the standard library and the
-      acceptance corpus are the available bodies of code — because a 4 µs
-      cost on a rare operation buys nothing back.
+    - Frequency measured 2026-08-20, which answers what the cost numbers
+      could not. The checked-in corpus holds 24 `set`/`setp` sites, every one
+      of them under `test/acceptance`; `src/prelude.ecl` and the stdlib
+      modules bind with `def` and are unaffected. Every site is a top-level
+      pipeline binding — `"…csv" io.slurp csv.parse from-header-rows 'raw
+      set`, then a few top-level references to `raw` — and not one reference
+      sits inside a quotation body that a combinator drives per element. A
+      constant reference therefore executes a few dozen times per script run,
+      on the order of a hundred microseconds in total.
+    - Deferred on frequency, not on cost, and deliberately not closed. The
+      tenfold gap is a real property of the dispatch path, and it bites the
+      first time someone writes a constant reference inside an `each` body —
+      an ordinary thing to write that no checked-in code happens to do yet.
+      Reopen on that evidence: a reference inside a combinator body, or a
+      profile of real work showing one in a loop. Do not reopen on the cost
+      numbers above, which were already known when this was deferred.
 
 15. **`within` draft/publication copy elision** (deferred 2026-08-18,
     M11 review conversation). Every state application copies the slot's
