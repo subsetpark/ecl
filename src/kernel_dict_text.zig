@@ -268,6 +268,8 @@ fn startTypedListPut(
 }
 
 const ListPutDriver = struct {
+    /// One list rebuilt around a replaced element, then it publishes.
+    pub const inline_driver = true;
     pub const ownership: heap.DriverOwnership = .fields;
     collection: heap.Owned(Value),
     key: heap.Owned(Value),
@@ -417,6 +419,8 @@ fn toDictPrimitive(evaluator: *Machine) MachineError!void {
 }
 
 const ToDictDriver = struct {
+    /// One dict built from two lists, then it publishes.
+    pub const inline_driver = true;
     pub const ownership: heap.DriverOwnership = .fields;
     keys: heap.Owned(Value),
     values: heap.Owned(Value),
@@ -856,6 +860,8 @@ fn joinPrimitive(evaluator: *Machine) MachineError!void {
 }
 
 const JoinDriver = struct {
+    /// One string built from a list, then it publishes.
+    pub const inline_driver = true;
     pub const ownership: heap.DriverOwnership = .fields;
     parts: heap.Owned(Value),
     separator: heap.Owned(Value),
@@ -1002,6 +1008,8 @@ fn formatPrimitive(evaluator: *Machine) MachineError!void {
 const RenderedReplacement = struct { text: Value };
 
 const FormatDriver = struct {
+    /// One rendering, then it publishes.
+    pub const inline_driver = true;
     values: heap.Owned(Value),
     template: heap.Owned(Value),
     replacements: heap.Owned([]RenderedReplacement),
