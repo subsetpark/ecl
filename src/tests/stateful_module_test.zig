@@ -600,9 +600,23 @@ test "concurrency: a cancelled unmodule leaves nothing stranded" {
         const after_small = counting.total_requested_bytes;
         try expectStack(&runtime, large, "");
         const after_large = counting.total_requested_bytes;
-        const small_growth = after_small - before_small;
-        const large_growth = after_large - after_small;
-        try std.testing.expect(large_growth <= small_growth * 2 + 4096);
+        // Both batches are sampled live, so retirement landing between two
+        // reads can leave the second below the first. A smaller footprint is
+        // not a regression, but unsigned subtraction turned it into an
+        // integer-overflow panic rather than a verdict, which is how this
+        // read as a failure on one CI run and passed on the next with the
+        // same code. Saturate, and report what was seen when the bound is
+        // actually exceeded so a recurrence arrives with its numbers.
+        const small_growth = after_small -| before_small;
+        const large_growth = after_large -| after_small;
+        std.testing.expect(large_growth <= small_growth * 2 + 4096) catch |err| {
+            std.debug.print(
+                "settled memory: before={d} after_small={d} after_large={d} " ++
+                    "small_growth={d} large_growth={d}\n",
+                .{ before_small, after_small, after_large, small_growth, large_growth },
+            );
+            return err;
+        };
     }
     try std.testing.expect(counting.deinit() == .ok);
 }
@@ -625,9 +639,23 @@ test "concurrency: repeated construct remove cycles keep settled memory bounded"
         const after_small = counting.total_requested_bytes;
         try expectStack(&runtime, large, "");
         const after_large = counting.total_requested_bytes;
-        const small_growth = after_small - before_small;
-        const large_growth = after_large - after_small;
-        try std.testing.expect(large_growth <= small_growth * 2 + 4096);
+        // Both batches are sampled live, so retirement landing between two
+        // reads can leave the second below the first. A smaller footprint is
+        // not a regression, but unsigned subtraction turned it into an
+        // integer-overflow panic rather than a verdict, which is how this
+        // read as a failure on one CI run and passed on the next with the
+        // same code. Saturate, and report what was seen when the bound is
+        // actually exceeded so a recurrence arrives with its numbers.
+        const small_growth = after_small -| before_small;
+        const large_growth = after_large -| after_small;
+        std.testing.expect(large_growth <= small_growth * 2 + 4096) catch |err| {
+            std.debug.print(
+                "settled memory: before={d} after_small={d} after_large={d} " ++
+                    "small_growth={d} large_growth={d}\n",
+                .{ before_small, after_small, after_large, small_growth, large_growth },
+            );
+            return err;
+        };
     }
     try std.testing.expect(counting.deinit() == .ok);
 }
