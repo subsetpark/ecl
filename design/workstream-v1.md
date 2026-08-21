@@ -687,8 +687,9 @@ failure instead of returning a descriptor publish nothing and produce a precise
 module load error. Opening a dynamic library is documented as arbitrary trusted-code
 execution—platform constructors may run before descriptor validation—so a
 native-bearing `ECL_PATH` is a trusted dependency path. Future first-party
-package management resolves versions and targets by constructing that ordered
-path; the runtime gains no dependency solver or separate native path.
+package management resolves versions and targets into a lock table consulted
+ahead of `ECL_PATH` (follow-up 12); the runtime gains no dependency solver or
+separate native path.
 
 **Loading and lifetime are one consuming typestate.** A Session-owned instance
 moves through `opened -> described -> validated -> initialized -> published`,
@@ -2396,10 +2397,29 @@ INTERPRETER.md and its entry here is retired.
     requires an explicit wire-contract revision; none is a new callback
     class.
 
-12. **Package manager.** Owns dependency solving and target selection, and
-    publishes its result by ordering package roots in `ECL_PATH`; the
-    runtime does neither job. `.eclmod` stays portable naming, never a
-    portable binary.
+12. **Package manager.** Owns dependency solving and target selection; the
+    runtime does neither job and gains no solver. **Resolution is minimal
+    version selection.** Each manifest declares minimum versions, the
+    resolver takes the maximum of the declared minimums, and a build holds
+    exactly one image per canonical module name. Upgrades happen only when a
+    manifest is edited; an unsatisfiable graph is reported to the author and
+    never resolved by installing two versions of one name. **The resolver
+    publishes a lock table, not a search-path ordering** — a manifest arm
+    keyed by canonical module name with a content hash per entry, the shape
+    `AutoLoadDriver` already consults for the embedded stdlib, so importing
+    stays by name and never by path. Auto-load precedence becomes embedded
+    manifest, then lock, then `ECL_PATH`, and `ECL_PATH` is demoted from the
+    resolution mechanism to the dev override and escape hatch. **The lock
+    format is per-package from its first version even though every map is
+    currently identical**: one image per name keeps the auto-load key a bare
+    name, so no mangling or keyed dispatch is built, and carrying the
+    structure now is the retrofit door for a later decision to admit two
+    versions of a name without a breaking change to resolution. `.eclmod`
+    stays portable naming, never a portable binary. Planned in full in
+    `design/workstream-pkg.md` (2026-08-21), which additionally settles an
+    ECL-hosted resolver shipped as an embedded module, prefix-owning
+    packages, tarball-only transport, and source-only packages for its first
+    version — target selection stays deferred.
 
 13. **Reserved doors.** `;` is a reserved token (parse error; currently
     means nothing). Word aliases for `fold` and friends can come later —
@@ -3055,10 +3075,19 @@ INTERPRETER.md and its entry here is retired.
   post-v1, against the invariants v1 preserved.
 - **Stdlib ships embedded in the binary**, not via ECL_PATH files —
   single-binary distribution is part of the positioning (d.21).
+- **Dependency resolution is minimal version selection, and its output is a
+  lock table rather than an `ECL_PATH` ordering** (user ruling, 2026-08-21).
+  Importing by name and never by filepath is the property being preserved,
+  and the manifest-before-search-path precedence `AutoLoadDriver` already
+  implements is the mechanism that preserves it: the lock is a third entry
+  arm, not a new resolution path. One image per canonical name keeps the
+  auto-load key a bare name; the lock *format* is per-package anyway, as the
+  retrofit door. See follow-up 12 and `design/workstream-pkg.md`.
 - **Native interop is extension-outward, not an embedding API.** Stock `ecl`
   loads trusted target-specific `.eclmod` dependencies from the same ordered
   `ECL_PATH` used for source modules; future package management makes resolved
-  dependencies available by constructing that path. V1 supports Zig authors
+  dependencies available through its lock table instead, consulted ahead of
+  that path (follow-up 12). V1 supports Zig authors
   on the pinned toolchain, one artifact = one canonical atomically published
   module, and Linux/macOS loading. It does not expose a public API for hosting
   ECL inside a Zig application, a C author SDK, native hot reload, or early
