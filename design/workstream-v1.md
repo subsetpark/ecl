@@ -2786,6 +2786,40 @@ INTERPRETER.md and its entry here is retired.
       what this would improve, so the change can be measured against them
       rather than argued about.
 
+22. **An empty dict is four heap objects** (measured 2026-08-21 while closing
+    the allocation sweep). Constructing one costs eight allocations whatever
+    produces it — `{'a 1} 'a del` and `[] [] to-dict` spend the same eight, in
+    the same sizes — and attributing them shows why:
+
+        ALLOCOBJECT kind=dict          len=0
+        ALLOCOBJECT kind=generic_spine len=0   keys
+        ALLOCOBJECT kind=generic_spine len=0   vals
+        ALLOCOBJECT kind=leaf_i64      len=0   hashes
+
+    A dict is not one thing. It is a dict object plus three component lists
+    held as ordinary heap values, and each object costs its own allocation plus
+    a payload. When the dict is empty all three components are empty lists, and
+    an empty list of a given kind has exactly one inhabitant.
+
+    - The lever is canonical empty components: a shared, refcounted empty
+      `generic_spine` and empty `leaf_i64` handed out instead of freshly
+      allocated. That takes an empty dict from eight allocations to about two,
+      and it helps every empty list, not only the ones inside dicts. Sharing is
+      safe because these values are immutable — `put`, `del`, and `merge`
+      rebuild rather than mutate, which the work on this branch confirmed while
+      unifying their phases.
+    - The narrower alternative, a dict that holds no components at all when
+      empty, pushes an optional into every accessor and helps nothing else.
+    - Two things to establish before building either. How often an empty dict
+      or list is actually produced, because if the answer is "rarely" this buys
+      nothing measurable; and that a shared inhabitant cannot be reached by
+      anything that frees or mutates in place, which is a property of the heap
+      rather than of the dict operations.
+    - This does not apply to a non-empty dict. Its three components are real
+      there, so the same eight is structure rather than waste. The allocation
+      budgets record both, and the empty case is the only one this item is
+      about.
+
 ## Decisions Made
 
 - **Verification is tiered, and the local tier is not a copy of CI

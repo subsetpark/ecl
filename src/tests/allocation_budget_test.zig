@@ -517,7 +517,9 @@ test "allocation: generic membership holds its recorded cost" {
 /// same sizes -- because a dict is several heap objects even when it holds
 /// nothing. Making that cheaper is a question about the representation, a
 /// shared empty dict or arrays allocated on first use, and not about any
-/// operation recorded here.
+/// operation recorded here. Deferred item 22 carries the attribution: an empty
+/// dict is four heap objects, the dict plus empty keys, vals, and hashes
+/// lists, each costing an object and a payload.
 const construction = [_]Case{
     .{
         .name = "cons onto an empty list",
