@@ -2025,6 +2025,18 @@ pub const Unit = struct {
         return @intFromPtr(driver) == @intFromPtr(&self.driver_slot);
     }
 
+    /// Drops any parked application scope. A parked scope holds a reference on
+    /// its parent, so keeping one across a scheduler turn would pin whatever
+    /// that parent belongs to -- a module generation another task is waiting to
+    /// see reclaimed, for instance. The parking is an optimization within one
+    /// slice and must not outlive it.
+    pub fn dropSpareScope(self: *Unit) void {
+        if (self.spare_scope) |spare| {
+            self.spare_scope = null;
+            spare.retire();
+        }
+    }
+
     fn releaseInlineDriver(self: *Unit) void {
         std.debug.assert(self.driver_slot_busy);
         self.driver_slot_busy = false;
@@ -4645,6 +4657,7 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
 
 pub fn runSlice(unit: *Unit) MachineError!RunStatus {
     var evaluator = Machine{ .unit = unit };
+    defer unit.dropSpareScope();
     return loop(&evaluator) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => return error.OutOfMemory,
