@@ -25,6 +25,23 @@
   first. Closing stdin turns an accidental blocking read into immediate EOF, and
   a timeout that fires later than its supervisor reports nothing about why the
   run died.
+- **Read the exit code of the run you care about, not the one the shell happened
+  to finish with.** Give that run its own invocation and capture its status
+  immediately: `timeout 500 zig build test < /dev/null > run.log 2>&1; code=$?`.
+  Appending a `tail`, `head`, or `grep` — or piping into one — replaces the
+  status with the helper's. `grep` is the worst of them, because it exits 1 when
+  it matches nothing: a clean run then reads as a failure, and a filtered summary
+  of a *timed-out* run reads as success. Both have happened here. A `zig build
+  test` that gave up at 900 seconds was recorded as passing because the
+  invocation ended in `tail`, and the real `test_exit=124` sat unread; the wrong
+  reading nearly retired a correct diagnosis of a hang.
+- **A silent run is not a passing run.** The captured test runner prints nothing
+  when everything passes, so an empty log is evidence about output and none at
+  all about what executed. The fast-core tier selects by name prefix, so a new
+  test file that nobody added to the filter list passes by never running, and the
+  source audit will not notice either until the file is in its manifest. Prove a
+  new test can fail before trusting it to pass: break its assertion on purpose,
+  watch the tier report the failure, then put it back.
 - **There are exactly three test tiers, and only the first one is yours.**
   - **Local: `zig build precommit`.** Roughly 80 seconds after a source change.
     It lints (when `zlint` is on PATH), checks Zig formatting and the
