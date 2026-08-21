@@ -119,7 +119,7 @@ fn putPrimitive(evaluator: *Machine) MachineError!void {
                 .dictionary = .init(collection.take()),
                 .key = .init(key.take()),
                 .new_value = .init(new_value.take()),
-                .finder = .init(finder),
+                .work = .init(.{ .finding = finder }),
             });
         },
         .list => {
@@ -305,26 +305,54 @@ const ListPutDriver = struct {
     }
 };
 
+/// The two phases a dict rebuild passes through. They never overlap: the
+/// finder locates the key and is retired before anything is materialized, and
+/// the materializer is built only after it is gone. Holding a field for each
+/// reserved both at once in every driver that rebuilds a dict -- 248 bytes for
+/// the finder and 288 for the materializer, in drivers that measured 656 to
+/// 688 -- for state that is live in one phase or the other and never both.
+const RebuildPhase = union(enum) {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    finding: storage.DictFindCursor,
+    materializing: storage.DictMaterializer,
+    between,
+
+    pub fn retire(self: *RebuildPhase, releases: *heap.ReleaseDomain) void {
+        switch (self.*) {
+            .finding => |*cursor| cursor.deinit(),
+            .materializing => |*materializer| materializer.retire(releases),
+            .between => {},
+        }
+        self.* = .between;
+    }
+
+    fn finish(self: *RebuildPhase, releases: *heap.ReleaseDomain) void {
+        self.retire(releases);
+    }
+};
+
 const DictPutDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
+    /// One dict rebuild, then it publishes: short-lived, so it takes the slot
+    /// without holding it across anything else.
+    pub const inline_driver = true;
     dictionary: heap.Owned(Value),
     key: heap.Owned(Value),
     new_value: heap.Owned(Value),
-    finder: ?heap.Owned(storage.DictFindCursor),
+    work: heap.Owned(RebuildPhase),
     found_index: ?usize = null,
     pairs: ?heap.Owned([]dict.Pair) = null,
     index: usize = 0,
-    materializer: ?heap.Owned(storage.DictMaterializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *DictPutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        if (self.finder) |*finder| switch (try finder.borrowMut().advance(budget)) {
+        if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(budget)) {
             .pending => return .yielded,
             .complete => {
-                self.found_index = finder.borrow().foundIndex();
-                finder.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.finder = null;
+                self.found_index = self.work.borrowMut().finding.foundIndex();
+                self.work.borrowMut().finish(evaluator.releaseDomain());
                 const old_count: usize = @intCast(self.dictionary.borrow().dict.length());
                 self.pairs = .init(try evaluator.allocator().alloc(
                     dict.Pair,
@@ -333,7 +361,7 @@ const DictPutDriver = struct {
                 return .yielded;
             },
         };
-        if (self.materializer == null) {
+        if (self.work.borrowMut().* != .materializing) {
             const old_count: usize = @intCast(self.dictionary.borrow().dict.length());
             const pairs = self.pairs.?.borrow();
             const end = @min(self.index + budget, pairs.len);
@@ -353,15 +381,16 @@ const DictPutDriver = struct {
             }
             budget -= copied;
             if (self.index != pairs.len) return .yielded;
-            self.materializer = .init(try .init(evaluator.allocator(), pairs, false));
+            self.work.borrowMut().* = .{
+                .materializing = try .init(evaluator.allocator(), pairs, false),
+            };
         }
         if (budget == 0) return .yielded;
-        return switch (try self.materializer.?.borrowMut().advance(budget)) {
+        return switch (try self.work.borrowMut().materializing.advance(budget)) {
             .pending => .yielded,
             .duplicate_key => unreachable,
             .complete => |result| completed: {
-                self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.materializer = null;
+                self.work.borrowMut().finish(evaluator.releaseDomain());
                 break :completed .{ .output = result };
             },
         };
@@ -436,30 +465,31 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(DelDriver{
         .dictionary = .init(dictionary.take()),
         .key = .init(key.take()),
-        .finder = .init(finder),
+        .work = .init(.{ .finding = finder }),
     });
 }
 
 const DelDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
+    /// One dict rebuild, then it publishes: short-lived, so it takes the slot
+    /// without holding it across anything else.
+    pub const inline_driver = true;
     dictionary: heap.Owned(Value),
     key: heap.Owned(Value),
-    finder: ?heap.Owned(storage.DictFindCursor),
+    work: heap.Owned(RebuildPhase),
     removed_index: ?usize = null,
     pairs: ?heap.Owned([]dict.Pair) = null,
     source_index: usize = 0,
     destination_index: usize = 0,
-    materializer: ?heap.Owned(storage.DictMaterializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *DelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        if (self.finder) |*finder| switch (try finder.borrowMut().advance(budget)) {
+        if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(budget)) {
             .pending => return .yielded,
             .complete => {
-                self.removed_index = finder.borrow().foundIndex();
-                finder.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.finder = null;
+                self.removed_index = self.work.borrowMut().finding.foundIndex();
+                self.work.borrowMut().finish(evaluator.releaseDomain());
                 if (self.removed_index == null) {
                     heap.retainValue(self.dictionary.borrow());
                     return .{ .output = self.dictionary.borrow() };
@@ -469,7 +499,7 @@ const DelDriver = struct {
                 return .yielded;
             },
         };
-        if (self.materializer == null) {
+        if (self.work.borrowMut().* != .materializing) {
             const count: usize = @intCast(self.dictionary.borrow().dict.length());
             while (budget != 0 and self.source_index != count) : (self.source_index += 1) {
                 if (self.source_index != self.removed_index.?) {
@@ -482,18 +512,17 @@ const DelDriver = struct {
                 budget -= 1;
             }
             if (self.source_index != count or budget == 0) return .yielded;
-            self.materializer = .init(try .init(
+            self.work.borrowMut().* = .{ .materializing = try .init(
                 evaluator.allocator(),
                 self.pairs.?.borrow(),
                 false,
-            ));
+            ) };
         }
-        return switch (try self.materializer.?.borrowMut().advance(budget)) {
+        return switch (try self.work.borrowMut().materializing.advance(budget)) {
             .pending => .yielded,
             .duplicate_key => unreachable,
             .complete => |result| completed: {
-                self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.materializer = null;
+                self.work.borrowMut().finish(evaluator.releaseDomain());
                 break :completed .{ .output = result };
             },
         };
@@ -520,14 +549,16 @@ fn mergePrimitive(evaluator: *Machine) MachineError!void {
 
 const MergeDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
+    /// One dict rebuild, then it publishes: short-lived, so it takes the slot
+    /// without holding it across anything else.
+    pub const inline_driver = true;
     left: heap.Owned(Value),
     right: heap.Owned(Value),
     pairs: heap.Owned([]dict.Pair),
     pair_count: usize,
     phase: enum { copy_left, merge_right, materialize } = .copy_left,
     index: usize = 0,
-    finder: ?heap.Owned(storage.DictFindCursor) = null,
-    materializer: ?heap.Owned(storage.DictMaterializer) = null,
+    work: heap.Owned(RebuildPhase) = .init(.between),
 
     pub fn advance(evaluator: *Machine, self: *MergeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -550,26 +581,27 @@ const MergeDriver = struct {
             .merge_right => {
                 const count: usize = @intCast(self.right.borrow().dict.length());
                 if (self.index == count) {
-                    self.materializer = .init(try storage.DictMaterializer.init(
+                    self.work.borrowMut().* = .{ .materializing = try storage.DictMaterializer.init(
                         evaluator.allocator(),
                         self.pairs.borrow()[0..self.pair_count],
                         false,
-                    ));
+                    ) };
                     self.phase = .materialize;
                     continue;
                 }
                 const key = dict.keyAt(self.right.borrow().dict, self.index);
-                if (self.finder == null) self.finder = .init(storage.DictFindCursor.initHeader(
-                    evaluator.allocator(),
-                    self.left.borrow().dict,
-                    key,
-                ));
-                switch (try self.finder.?.borrowMut().advance(1)) {
+                if (self.work.borrowMut().* != .finding) self.work.borrowMut().* = .{
+                    .finding = storage.DictFindCursor.initHeader(
+                        evaluator.allocator(),
+                        self.left.borrow().dict,
+                        key,
+                    ),
+                };
+                switch (try self.work.borrowMut().finding.advance(1)) {
                     .pending => budget -= 1,
                     .complete => {
-                        const found = self.finder.?.borrow().foundIndex();
-                        self.finder.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.finder = null;
+                        const found = self.work.borrowMut().finding.foundIndex();
+                        self.work.borrowMut().finish(evaluator.releaseDomain());
                         const pair = dict.Pair{ key, dict.valueAt(self.right.borrow().dict, self.index) };
                         if (found) |destination| {
                             self.pairs.borrow()[destination][1] = pair[1];
@@ -582,12 +614,11 @@ const MergeDriver = struct {
                     },
                 }
             },
-            .materialize => return switch (try self.materializer.?.borrowMut().advance(budget)) {
+            .materialize => return switch (try self.work.borrowMut().materializing.advance(budget)) {
                 .pending => .yielded,
                 .duplicate_key => unreachable,
                 .complete => |result| completed: {
-                    self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.materializer = null;
+                    self.work.borrowMut().finish(evaluator.releaseDomain());
                     break :completed .{ .output = result };
                 },
             },

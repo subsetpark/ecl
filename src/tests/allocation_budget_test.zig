@@ -613,7 +613,7 @@ const construction = [_]Case{
         .name = "dict delete",
         .setup = "{d} range",
         .workload = "(pop {'a 1} 'a del keys len) each len",
-        .per_element = 9,
+        .per_element = 8,
     },
     .{
         .name = "flip",
@@ -625,13 +625,13 @@ const construction = [_]Case{
         .name = "dict put",
         .setup = "{d} range",
         .workload = "(pop {'a 1} 'b 2 put keys len) each len",
-        .per_element = 15,
+        .per_element = 14,
     },
     .{
         .name = "dict merge",
         .setup = "{d} range",
         .workload = "(pop {'a 1} {'b 2} merge keys len) each len",
-        .per_element = 15,
+        .per_element = 14,
     },
     .{
         .name = "reshape",
