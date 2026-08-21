@@ -2706,8 +2706,8 @@ INTERPRETER.md and its entry here is retired.
       `DirectWordFallback`. Three are now gone. Item 14 stays open on its
       remaining non-allocation cost, recorded there.
 
-19. **Scalar `at` allocates a cursor and a driver** (measured 2026-08-21 while
-    costing the locals reader). `atPrimitive` (`src/kernel_sequence.zig`) has a
+19. **Scalar `at` allocates a cursor and a driver — complete 2026-08-21.**
+    Measured while costing the locals reader. `atPrimitive` (`src/kernel_sequence.zig`) has a
     typed fast path only for an i64 index *vector*. A scalar index falls
     through to `IndexCursor.init` plus `startDriver(IndexDriver)` — two
     allocations and a driver round trip to fetch one element — where
@@ -2723,29 +2723,38 @@ INTERPRETER.md and its entry here is retired.
       out of bounds"`, a non-integer non-list index is a type error, and a
       dict collection keeps taking the `DictFindCursor` path. Anything less
       exact changes observable errors rather than costs.
-    - Independent of the locals work. Deferred item 20 removes `at` from the
-      locals path entirely, but `at` with a constant index is ordinary ECL
-      that any program writes, so this stands on its own.
+    - Independent of the locals work, which removed `at` from the locals path
+      entirely; `at` with a constant index is ordinary ECL that any program
+      writes, so it stood on its own. `atPrimitive` now answers a `.list`
+      collection with an `.int` index directly, reproducing the cursor's
+      checks in the same order with the same kinds and messages. Verified
+      against the cursor path on a 48-case corpus covering negative and
+      out-of-range indices, non-integer indices, dict keys, index vectors,
+      strings, and a non-list collection: identical on every one.
 
-20. **Scalar binary arithmetic allocates twice per operation** (measured
-    2026-08-21 while costing the locals reader). In a quotation the idiom
+20. **Scalar binary arithmetic allocates twice per operation — complete
+    2026-08-21.** Measured while costing the locals reader. In a quotation the idiom
     recognizer does not match, each scalar `+` costs two allocations per
     element: `(pop 42) each` over 100,000 elements is 34 allocations total,
     and `(pop 1 2 +) each` is 200,034. A second `+` adds another two per
     element. Recognized shapes never pay it, because they run a typed kernel
     instead of applying the quotation at all.
 
-    - This is the same shape of defect as item 19 and probably the same root
-      cause: a kernel entered with two scalar operands starts a driver rather
-      than computing in place. Measure that before fixing either, because one
-      change may close both.
+    - It was the same defect as item 19 and the same root cause: a kernel
+      entered with scalar operands started a driver rather than computing in
+      place. `binaryPrimitive` and `unaryPrimitive` now answer directly when no
+      operand is a list or dict — the pervade cursor's own leaf case — and one
+      change closed both items. `(pop 1 2 +) each` over 100,000 elements went
+      from 200,034 allocations to 34.
     - It is now the dominant per-element cost of an unrecognized body. After
       the scope reuse above and the locals rewrite, an arithmetic-free body
       allocates nothing per element — `(|x| x x pop) each` is 42 allocations
       for 100,000 elements — so what is left in `(|x| x x +) each` is entirely
       the `+`.
-    - Bodies that bind with `set` cost about twenty-one allocations per
-      element and are not covered by this item. That path materializes a scope
+    - What remains per element in a generic combinator body is real work
+      rather than dispatch: `cons` allocates four to build a one-element list,
+      and a body that binds with `set` costs about twenty-one. Neither is
+      covered by this item. That path materializes a scope
       environment per element by design; whether it can be made cheaper
       without changing the isolation that makes it correct is unmeasured.
 

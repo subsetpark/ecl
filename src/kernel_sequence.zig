@@ -73,6 +73,19 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
             @intCast(index.borrow().list.length()),
         )) return;
     }
+    // A scalar index into a list is the cursor's own leaf case, reached in one
+    // step with no state to carry. `IndexCursor` allocates a frame stack and a
+    // driver to run exactly the four lines below, so its checks are reproduced
+    // here in full rather than approximated: same order, same error kinds,
+    // same messages.
+    if (collection.borrow() == .list and index.borrow() == .int) {
+        if (index.borrow().int < 0) return evaluator.fail(.domain, "at index is negative");
+        const position = std.math.cast(usize, index.borrow().int) orelse
+            return evaluator.fail(.domain, "at index is out of bounds");
+        if (position >= collection.borrow().list.length())
+            return evaluator.fail(.domain, "at index is out of bounds");
+        return evaluator.pushBorrowed(list.atUnchecked(collection.borrow(), position));
+    }
     const cursor = try IndexCursor.init(
         evaluator.releaseDomain(),
         evaluator.allocator(),

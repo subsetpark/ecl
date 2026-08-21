@@ -59,6 +59,12 @@ pub fn unaryPrimitiveFor(comptime operation: UnaryOp) env.PrimitiveImpl {
     return bindUnary(operation);
 }
 
+/// The operand shape the pervade cursor treats as a leaf: everything it does
+/// not descend into. Lists and dicts are the two it does.
+fn isPervadeScalar(item: Value) bool {
+    return item != .list and item != .dict;
+}
+
 fn binaryPrimitive(evaluator: *Machine, comptime operation: BinaryOp) MachineError!void {
     try evaluator.require(2);
     var right = try evaluator.popValue();
@@ -66,6 +72,15 @@ fn binaryPrimitive(evaluator: *Machine, comptime operation: BinaryOp) MachineErr
     var left = try evaluator.popValue();
     defer left.deinit();
     if (try startTypedBinary(evaluator, operation, &left, &right, .{})) return;
+    // Two scalars are the whole operation. `PervadeCursor.startBinary` reaches
+    // this same call for its leaf case, so routing there costs one cursor and
+    // one driver allocation to arrive at a value already in hand. A scalar at
+    // top level carries no logical index, exactly as the cursor reports it.
+    if (isPervadeScalar(left.borrow()) and isPervadeScalar(right.borrow())) {
+        const result = scalarBinary(operation, left.borrow(), right.borrow()) catch |fault|
+            return scalarFailure(evaluator, fault, null);
+        return evaluator.pushOwned(result);
+    }
 
     const cursor = try PervadeCursor.initBinary(
         evaluator.releaseDomain(),
@@ -85,6 +100,11 @@ fn unaryPrimitive(evaluator: *Machine, comptime operation: UnaryOp) MachineError
     var operand = try evaluator.popValue();
     defer operand.deinit();
     if (try startTypedUnary(evaluator, operation, &operand, .{})) return;
+    if (isPervadeScalar(operand.borrow())) {
+        const result = scalarUnary(operation, operand.borrow()) catch |fault|
+            return scalarFailure(evaluator, fault, null);
+        return evaluator.pushOwned(result);
+    }
     const cursor = try PervadeCursor.initUnary(
         evaluator.releaseDomain(),
         evaluator.allocator(),
