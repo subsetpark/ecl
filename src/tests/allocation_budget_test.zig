@@ -544,6 +544,12 @@ const construction = [_]Case{
         .per_element = 3,
     },
     .{
+        .name = "gather by index vector",
+        .setup = "{d} range",
+        .workload = "(pop [1 2 3] [0 2] at len) each len",
+        .per_element = 3,
+    },
+    .{
         .name = "join",
         .setup = "{d} range",
         .workload = "(pop [\"a\" \"b\"] \",\" join len) each len",

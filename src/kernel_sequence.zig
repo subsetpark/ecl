@@ -166,7 +166,7 @@ const IndexCursor = struct {
         materializer: ?storage.ValueMaterializer = null,
         result: ?Value = null,
     };
-    const Frame = union(enum) { node: Node, build: Build, find: storage.DictFindCursor };
+    const Frame = union(enum) { node: Node, build: Build };
     releases: *heap.ReleaseDomain,
     allocator: std.mem.Allocator,
     frames: @import("poll.zig").ChunkStack(Frame),
@@ -192,10 +192,6 @@ const IndexCursor = struct {
     fn deinitFrame(self: *IndexCursor, frame_value: Frame) void {
         switch (frame_value) {
             .node => {},
-            .find => |cursor_value| {
-                var cursor = cursor_value;
-                cursor.deinit();
-            },
             .build => |build_value| {
                 var build = build_value;
                 if (build.materializer) |*materializer| materializer.retire(self.releases);
@@ -217,14 +213,11 @@ const IndexCursor = struct {
                 .node => |node| {
                     if (node.depth >= support.max_depth and node.index == .list)
                         return evaluator.fail(.domain, "index nesting exceeds 256 levels");
-                    if (node.collection == .dict) {
-                        try self.frames.push(.{ .find = storage.DictFindCursor.init(
-                            self.allocator,
-                            node.collection,
-                            node.index,
-                        ) catch @panic("dictionary lookup cursor rejected a dictionary") });
-                    } else {
-                        if (node.collection != .list) return evaluator.typeError("a list or dict");
+                    // A dict never arrives here: `at` answers a dict itself,
+                    // and a nested node inherits its parent's collection, so
+                    // the only collection this cursor ever descends is a list.
+                    if (node.collection != .list) return evaluator.typeError("a list or dict");
+                    {
                         if (node.index == .list) {
                             var values = try heap.OwnedValueBuffer.init(
                                 self.releases,
@@ -250,19 +243,6 @@ const IndexCursor = struct {
                             self.last = result;
                         }
                     }
-                },
-                .find => |*find| switch (try find.advance(remaining)) {
-                    .pending => {
-                        try self.frames.push(.{ .find = find.* });
-                        return .pending;
-                    },
-                    .complete => |maybe_result| {
-                        const result = maybe_result orelse
-                            return evaluator.fail(.domain, "at could not find the dict key");
-                        find.deinit();
-                        heap.retainValue(result);
-                        self.last = result;
-                    },
                 },
                 .build => |*build| {
                     if (build.result) |result| {
