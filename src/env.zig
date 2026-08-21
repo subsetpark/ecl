@@ -663,7 +663,13 @@ pub const Environment = struct {
         const shape = self.acquireShape();
         return .{
             .lookup = null,
-            .validation = .init(id),
+            // A lookup may find a reserved name; only publication may not use
+            // one. The runtime installs the words it reserves — the head-binder
+            // backend — and a gate that refused to resolve them would reserve
+            // them from their only legitimate caller. Nothing else can reach
+            // this map under a reserved name, because every publishing path
+            // still validates strictly.
+            .validation = .initReserved(id),
             .shape = shape,
         };
     }
@@ -1494,7 +1500,7 @@ pub const BuildingEnv = struct {
             core.releases.releaseValue(effect.value);
         };
         try self.target.installCoreSpec(
-            intern.internNamespace(name) catch |err| switch (err) {
+            intern.internReservedNamespace(name) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidName => unreachable,
             },

@@ -849,6 +849,9 @@ const BoundaryMode = union(enum) {
 const Boundary = struct {
     mode: BoundaryMode,
     stack_base: u32,
+    /// The locals depth on entry. `_dl` balances the normal path; a
+    /// body that fails never reaches it, so unwinding restores this instead.
+    locals_base: u32,
     previous_base: u32,
     previous_boundary: ?FrameIndex,
     word: intern.TraceWord,
@@ -1661,6 +1664,13 @@ pub const Unit = struct {
     /// from the new one, so it is kept here instead of being freed and
     /// reallocated per element.
     spare_scope: ?*env.Scope = null,
+    /// Head-binder locals. A binder's names live here for the length of the
+    /// quotation body that introduced them, never on the operand stack, so a
+    /// body's declared stack effect describes its operands alone and an
+    /// ordinary form between two local reads needs no shuffling to see past
+    /// them. Reads are top-relative: the last name a binder introduced is
+    /// index 0.
+    locals: std.ArrayList(Value) = .empty,
     pub fn init(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
@@ -2021,6 +2031,8 @@ pub const Unit = struct {
             .park_resume => |result| result.deinit(self.releases),
             .task_join, .task_join_request, .task_join_resume, .task_join_cleanup, .work_join_cleanup => @panic("task join must be retired resumably before unit teardown"),
         }
+        for (self.locals.items) |item| self.releases.releaseValue(item);
+        self.locals.deinit(self.allocator);
         if (self.spare_scope) |spare| spare.retire();
         self.lifetime.deinit(self.releases, self.allocator);
         self.* = undefined;
@@ -2196,6 +2208,36 @@ pub const Machine = struct {
         }
         heap.destroyDriver(self.unit.releases, self.unit.allocator, driver);
     }
+    /// Moves the top `count` operands into the unit's head-binder locals, the
+    /// binder's first name ending on top. The operand stack is machine-owned,
+    /// so the move lives here and the primitive keeps only its validation.
+    pub fn bindLocals(self: *Machine, count: usize) error{OutOfMemory}!void {
+        try self.unit.locals.ensureUnusedCapacity(self.unit.allocator, count);
+        const base = self.unit.stack.items.len - count;
+        var remaining = count;
+        while (remaining != 0) {
+            remaining -= 1;
+            self.unit.locals.appendAssumeCapacity(self.unit.stack.items[base + remaining]);
+        }
+        self.unit.stack.shrinkRetainingCapacity(base);
+    }
+
+    pub fn localDepth(self: *const Machine) usize {
+        return self.unit.locals.items.len;
+    }
+
+    pub fn readLocal(self: *Machine, index: usize) error{OutOfMemory}!void {
+        const depth = self.unit.locals.items.len;
+        try self.pushBorrowed(self.unit.locals.items[depth - 1 - index]);
+    }
+
+    pub fn unbindLocals(self: *Machine, count: usize) void {
+        for (0..count) |_| {
+            const item = self.unit.locals.pop().?;
+            self.releaseDomain().releaseValue(item);
+        }
+    }
+
     /// Detach the installed continuation and destroy it. A driver that has
     /// finished its own work ends exactly this way, and routing every one of
     /// them through a single place is what keeps inline-slot storage from ever
@@ -4510,6 +4552,7 @@ pub const Machine = struct {
         var continuation = OwnedFrame.init(.{ .boundary = .{
             .mode = mode,
             .stack_base = stack_base,
+            .locals_base = @intCast(self.unit.locals.items.len),
             .previous_base = @intCast(self.unit.stack_base),
             .previous_boundary = self.unit.boundary_index,
             .word = word,
@@ -6268,12 +6311,16 @@ const FailureDriver = struct {
     boundary_index: ?FrameIndex,
     attempt_index: ?FrameIndex = null,
     attempt_stack_base: usize = 0,
+    /// Where the locals stack returns to. A body that fails between
+    /// `_ll` and `_dl` leaves its names behind; unwinding is
+    /// the only thing that will release them.
+    attempt_locals_base: usize = 0,
     previous_base: usize = 0,
     previous_boundary: ?FrameIndex = null,
     outcome_inserter: ?intern.InternInsertionCursor = null,
     outcome_pair: [1]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }},
     outcome_builder: ?kernel_storage.DictMaterializer = null,
-    phase: enum { trace, spell, locate, value, nearest, current, frames, boundary, stack, outcome_name, outcome, finish } = .trace,
+    phase: enum { trace, spell, locate, value, nearest, current, frames, boundary, locals, stack, outcome_name, outcome, finish } = .trace,
 
     fn appendInitial(self: *FailureDriver, evaluator: *Machine) void {
         if (self.failure.word) |word| self.appendTrace(word);
@@ -6385,6 +6432,7 @@ const FailureDriver = struct {
                 if (boundary.mode == .attempt) {
                     self.attempt_index = self.boundary_index;
                     self.attempt_stack_base = boundary.stack_base;
+                    self.attempt_locals_base = boundary.locals_base;
                     self.previous_base = boundary.previous_base;
                     self.previous_boundary = boundary.previous_boundary;
                     self.beginUnwind(evaluator);
@@ -6408,6 +6456,15 @@ const FailureDriver = struct {
                 if (self.attempt_index != null) {
                     var frame = evaluator.unit.frames.pop().?;
                     frame.deinit(evaluator.releaseDomain(), self.allocator);
+                }
+                self.phase = .locals;
+            },
+            .locals => {
+                const target = @min(self.attempt_locals_base, evaluator.unit.locals.items.len);
+                if (evaluator.unit.locals.items.len != target) {
+                    const item = evaluator.unit.locals.pop().?;
+                    evaluator.releaseDomain().releaseValue(item);
+                    continue;
                 }
                 self.phase = .stack;
             },

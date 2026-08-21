@@ -37,6 +37,9 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "args", .primitive = args },
         .{ .name = "exit", .primitive = exit },
         .{ .name = "getenv", .primitive = getenv },
+        .{ .name = "_ll", .primitive = bindLocals },
+        .{ .name = "_gl", .primitive = readLocal },
+        .{ .name = "_dl", .primitive = unbindLocals },
     };
     try core.installBuiltins(definitions);
     try combinators.install(core);
@@ -44,6 +47,48 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try module_prims.install(core);
     try task_prims.install(core);
 }
+/// Head-binder backend: `_ll` loads locals, `_gl` gets one, `_dl` drops them.
+/// The reader lowers `|a b|` into these three, and they are reserved binding
+/// names so a session definition cannot change what a local read means. The
+/// underscore marks them as the reader's, not a vocabulary anyone writes by
+/// hand, and keeps three ordinary words out of the reservation. They move values between the operand stack and the unit's
+/// locals, which is storage the reader alone addresses: every index the three
+/// ever see was computed by the binder from names it had already resolved.
+fn bindLocals(evaluator: *Machine) MachineError!void {
+    var count_value = try evaluator.popValue();
+    defer count_value.deinit();
+    if (count_value.borrow() != .int) return evaluator.typeError("an integer local count");
+    if (count_value.borrow().int < 0) return evaluator.fail(.domain, "_ll count is negative");
+    const count = std.math.cast(usize, count_value.borrow().int) orelse
+        return evaluator.fail(.domain, "_ll count is out of range");
+    try evaluator.require(count);
+    return evaluator.bindLocals(count);
+}
+
+fn readLocal(evaluator: *Machine) MachineError!void {
+    var index_value = try evaluator.popValue();
+    defer index_value.deinit();
+    if (index_value.borrow() != .int) return evaluator.typeError("an integer _gl index");
+    if (index_value.borrow().int < 0) return evaluator.fail(.domain, "_gl index is negative");
+    const index = std.math.cast(usize, index_value.borrow().int) orelse
+        return evaluator.fail(.domain, "_gl index is out of bounds");
+    if (index >= evaluator.localDepth())
+        return evaluator.fail(.domain, "_gl index is out of bounds");
+    return evaluator.readLocal(index);
+}
+
+fn unbindLocals(evaluator: *Machine) MachineError!void {
+    var count_value = try evaluator.popValue();
+    defer count_value.deinit();
+    if (count_value.borrow() != .int) return evaluator.typeError("an integer local count");
+    if (count_value.borrow().int < 0) return evaluator.fail(.domain, "un_ll count is negative");
+    const count = std.math.cast(usize, count_value.borrow().int) orelse
+        return evaluator.fail(.domain, "un_ll count is out of range");
+    if (count > evaluator.localDepth())
+        return evaluator.fail(.domain, "un_ll count exceeds the live locals");
+    evaluator.unbindLocals(count);
+}
+
 fn dup(evaluator: *Machine) MachineError!void {
     try evaluator.require(1);
     try evaluator.pushBorrowed(evaluator.unit.stack.items[evaluator.unit.stack.items.len - 1]);

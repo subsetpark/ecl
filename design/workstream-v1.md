@@ -2346,11 +2346,13 @@ INTERPRETER.md and its entry here is retired.
       traffic. `beginApplication` now parks an unmaterialized, unshared scope
       for the next application over the same parent instead of retiring it,
       taking a 100,000-element unrecognized `each` from 100,033 allocations to
-      34. Two larger per-element costs are now exposed and unowned: a `|x|`
-      body costs about ten allocations per element in the reader-time lowering
-      of head binders, and a body that binds with `set` costs about twenty-one.
-      Both dwarf what the scope cost, and neither is a driver either — take the
-      measurement before assuming this preference names the right structure;
+      34. Two larger per-element costs were exposed by that measurement, and
+      neither was a driver either. The first is gone: a `|x|` body cost about
+      ten allocations per element in the reader-time lowering of head binders,
+      which now compiles to frame slots and allocates nothing. What remains is
+      a body that binds with `set`, at about twenty-one, and scalar arithmetic
+      at two per operation — deferred items 20 and 19. Take the measurement
+      before assuming this preference names the right structure;
    2. batching non-kernel transitions inside a bounded slice—generic-spine or
       dict descent, heterogeneous materializer passes, reader/formatter/editor
       cursors—with conservative accounting: a bounded chunk may count as one
@@ -2703,6 +2705,49 @@ INTERPRETER.md and its entry here is retired.
       constant reference were two `DispatchDriver`s, one `IdiomDriver`, and one
       `DirectWordFallback`. Three are now gone. Item 14 stays open on its
       remaining non-allocation cost, recorded there.
+
+19. **Scalar `at` allocates a cursor and a driver** (measured 2026-08-21 while
+    costing the locals reader). `atPrimitive` (`src/kernel_sequence.zig`) has a
+    typed fast path only for an i64 index *vector*. A scalar index falls
+    through to `IndexCursor.init` plus `startDriver(IndexDriver)` — two
+    allocations and a driver round trip to fetch one element — where
+    `firstPrimitive`, three lines away, does the same fetch with
+    `list.atUnchecked` and no allocation at all.
+
+    - Measured at two allocations per `at`, over 100,000 elements: a hand
+      lowered `([] cons dup 0 at swap pop) each` costs 6 allocations per
+      element against 4 for the same shape without the `at`.
+    - The fast path is `.list` collection with an `.int` index, and it has to
+      reproduce `IndexCursor`'s scalar branch exactly — negative index is
+      `'domain "at index is negative"`, out of range is `'domain "at index is
+      out of bounds"`, a non-integer non-list index is a type error, and a
+      dict collection keeps taking the `DictFindCursor` path. Anything less
+      exact changes observable errors rather than costs.
+    - Independent of the locals work. Deferred item 20 removes `at` from the
+      locals path entirely, but `at` with a constant index is ordinary ECL
+      that any program writes, so this stands on its own.
+
+20. **Scalar binary arithmetic allocates twice per operation** (measured
+    2026-08-21 while costing the locals reader). In a quotation the idiom
+    recognizer does not match, each scalar `+` costs two allocations per
+    element: `(pop 42) each` over 100,000 elements is 34 allocations total,
+    and `(pop 1 2 +) each` is 200,034. A second `+` adds another two per
+    element. Recognized shapes never pay it, because they run a typed kernel
+    instead of applying the quotation at all.
+
+    - This is the same shape of defect as item 19 and probably the same root
+      cause: a kernel entered with two scalar operands starts a driver rather
+      than computing in place. Measure that before fixing either, because one
+      change may close both.
+    - It is now the dominant per-element cost of an unrecognized body. After
+      the scope reuse above and the locals rewrite, an arithmetic-free body
+      allocates nothing per element — `(|x| x x pop) each` is 42 allocations
+      for 100,000 elements — so what is left in `(|x| x x +) each` is entirely
+      the `+`.
+    - Bodies that bind with `set` cost about twenty-one allocations per
+      element and are not covered by this item. That path materializes a scope
+      environment per element by design; whether it can be made cheaper
+      without changing the isolation that makes it correct is unmeasured.
 
 ## Decisions Made
 

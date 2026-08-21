@@ -50,7 +50,7 @@ pub const LowerCursor = struct {
     locals: ?LocalMap = null,
     local_indices: []?usize,
     walk: poll.ChunkStack(WalkFrame),
-    phase: enum { locals_init, names, body, live, words, size, empty, output, complete } = .locals_init,
+    phase: enum { locals_init, names, body, live, words, size, output, complete } = .locals_init,
     name_index: usize = 0,
     body_index: usize = 0,
     byte_index: usize = 0,
@@ -61,23 +61,15 @@ pub const LowerCursor = struct {
     lookup: ?LocalMap.RawLookupCursor = null,
     lookup_kind: enum { top, nested } = .top,
     nested_active: bool = false,
-    words: [6]u32 = .{0} ** 6,
+    words: [3]u32 = .{0} ** 3,
     word_index: usize = 0,
-    output_count: usize = 2,
+    output_count: usize = 4,
     output: ?[]SpannedValue = null,
     output_values: ?heap.OwnedValueBuffer = null,
     output_index: usize = 0,
     emit_body_index: usize = 0,
     emit_step: usize = 0,
-    /// The last body position that reads a local, which is where the
-    /// environment list stops being live.
-    last_local: ?usize = null,
-    pop_emitted: bool = false,
-    empty_materializer: ?storage.I64Materializer = null,
-    wrapper_source: [1]Value = .{.{ .int = 0 }},
-    wrapper_materializer: ?storage.ValueMaterializer = null,
-
-    const storage = @import("kernel_storage.zig");
+    epilogue_step: usize = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -103,8 +95,6 @@ pub const LowerCursor = struct {
     pub fn deinit(self: *LowerCursor) void {
         self.locals_init.deinit();
         if (self.locals) |*locals| locals.deinit();
-        if (self.empty_materializer) |*materializer| materializer.retire(self.releases);
-        if (self.wrapper_materializer) |*materializer| materializer.retire(self.releases);
         if (self.output_values) |*values| values.deinit();
         if (self.output) |output| self.allocator.free(output);
         self.allocator.free(self.local_indices);
@@ -302,24 +292,24 @@ pub const LowerCursor = struct {
         self.append(.{ .value = item, .span = self.binder_span });
     }
 
-    /// The first body position that runs after the environment list is gone:
-    /// one past the last local reference, or the very start when the body
-    /// reads no local at all.
-    fn popIndex(self: *const LowerCursor) usize {
-        return if (self.last_local) |index| index + 1 else 0;
-    }
-
     fn advanceOutput(self: *LowerCursor) (error{OutOfMemory})!LowerProgress {
-        // The environment list dies with the last local read. Retiring it
-        // exactly there is what lets every later form run directly on the
-        // stack: a form emitted after the `pop` needs no `dip` to see past an
-        // environment that no longer exists.
-        if (!self.pop_emitted and self.emit_body_index == self.popIndex()) {
-            self.atom(.{ .word = self.words[5] });
-            self.pop_emitted = true;
-            return .pending;
-        }
         if (self.emit_body_index == self.body.len) {
+            // `drop-locals` is the body's last act rather than something
+            // threaded through it: the names never sat on the operand stack,
+            // so nothing between here and the binder had to see past them.
+            switch (self.epilogue_step) {
+                0 => {
+                    self.atom(.{ .int = @intCast(self.names.len) });
+                    self.epilogue_step = 1;
+                    return .pending;
+                },
+                1 => {
+                    self.atom(.{ .word = self.words[2] });
+                    self.epilogue_step = 2;
+                    return .pending;
+                },
+                else => {},
+            }
             const output = self.output.?;
             self.output = null;
             const values = self.output_values.?.take();
@@ -328,45 +318,20 @@ pub const LowerCursor = struct {
             return .{ .complete = .{ .forms = output, .values = values } };
         }
         if (self.local_indices[self.emit_body_index]) |index| {
-            switch (self.emit_step) {
-                0 => self.atom(.{ .word = self.words[1] }),
-                1 => self.atom(.{ .int = @intCast(index) }),
-                2 => self.atom(.{ .word = self.words[2] }),
-                3 => self.atom(.{ .word = self.words[3] }),
-                else => unreachable,
+            if (self.emit_step == 0) {
+                self.atom(.{ .int = @intCast(index) });
+                self.emit_step = 1;
+                return .pending;
             }
-            self.emit_step += 1;
-            if (self.emit_step == 4) {
-                self.emit_step = 0;
-                self.emit_body_index += 1;
-            }
-            return .pending;
-        }
-        if (self.pop_emitted) {
-            const form = self.body[self.emit_body_index];
-            heap.retainValue(form.value);
-            self.append(form);
+            self.atom(.{ .word = self.words[1] });
+            self.emit_step = 0;
             self.emit_body_index += 1;
             return .pending;
         }
-        if (self.emit_step == 0) {
-            self.wrapper_source[0] = self.body[self.emit_body_index].value;
-            self.wrapper_materializer = .init(self.allocator, &self.wrapper_source);
-            self.emit_step = 1;
-            return .pending;
-        }
-        if (self.emit_step == 1) return switch (try self.wrapper_materializer.?.advance(1)) {
-            .pending => .pending,
-            .complete => |wrapper| result: {
-                self.wrapper_materializer.?.deinit();
-                self.wrapper_materializer = null;
-                self.append(.{ .value = wrapper, .span = self.binder_span });
-                self.emit_step = 2;
-                break :result .pending;
-            },
-        };
-        self.atom(.{ .word = self.words[4] });
-        self.emit_step = 0;
+        // Every form that is not a local read is emitted exactly as written.
+        const form = self.body[self.emit_body_index];
+        heap.retainValue(form.value);
+        self.append(form);
         self.emit_body_index += 1;
         return .pending;
     }
@@ -388,17 +353,12 @@ pub const LowerCursor = struct {
             .names => try self.advanceName(),
             .body => try self.advanceBody(),
             .live => result: {
-                if (self.body_index != self.body.len) {
-                    if (self.local_indices[self.body_index] != null) self.last_local = self.body_index;
-                    self.body_index += 1;
-                    break :result .pending;
-                }
                 self.body_index = 0;
                 self.phase = .words;
                 break :result .pending;
             },
             .words => result: {
-                const names = [_][]const u8{ "cons", "dup", "at", "swap", "dip", "pop" };
+                const names = [_][]const u8{ "_ll", "_gl", "_dl" };
                 if (self.inserter == null) self.inserter = intern.insertionCursor(names[self.word_index]);
                 switch (try self.inserter.?.advance()) {
                     .pending => {},
@@ -413,42 +373,31 @@ pub const LowerCursor = struct {
             },
             .size => result: {
                 if (self.body_index != self.body.len) {
-                    const additional: usize = if (self.local_indices[self.body_index] != null)
-                        4
-                    else if (self.body_index < self.popIndex())
-                        2
-                    else
-                        1;
+                    const additional: usize = if (self.local_indices[self.body_index] != null) 2 else 1;
                     self.output_count = std.math.add(usize, self.output_count, additional) catch
                         return error.OutOfMemory;
                     self.body_index += 1;
                     break :result .pending;
                 }
-                self.output_count = std.math.add(usize, self.output_count, self.names.len) catch
-                    return error.OutOfMemory;
                 self.output = try self.allocator.alloc(SpannedValue, self.output_count);
                 self.output_values = try .init(self.releases, self.output_count);
-                self.empty_materializer = .init(self.allocator, &.{});
-                self.phase = .empty;
+                self.name_index = 0;
+                self.phase = .output;
                 break :result .pending;
             },
-            .empty => switch (try self.empty_materializer.?.advance(1)) {
-                .pending => .pending,
-                .complete => |empty| result: {
-                    self.empty_materializer.?.deinit();
-                    self.empty_materializer = null;
-                    self.append(.{ .value = empty, .span = self.binder_span });
-                    if (self.name_index != self.names.len) unreachable;
-                    self.name_index = 0;
-                    self.phase = .output;
-                    break :result .pending;
-                },
-            },
             .output => result: {
-                if (self.name_index != self.names.len) {
-                    self.atom(.{ .word = self.words[0] });
-                    self.name_index += 1;
-                    break :result .pending;
+                switch (self.name_index) {
+                    0 => {
+                        self.atom(.{ .int = @intCast(self.names.len) });
+                        self.name_index = 1;
+                        break :result .pending;
+                    },
+                    1 => {
+                        self.atom(.{ .word = self.words[0] });
+                        self.name_index = 2;
+                        break :result .pending;
+                    },
+                    else => {},
                 }
                 break :result try self.advanceOutput();
             },

@@ -130,18 +130,21 @@ test "reader fixtures remain byte-for-byte anchors" {
         },
         .{
             .source = "(|x| x x *)",
-            .expected = &.{"([] cons dup 0 at swap dup 0 at swap pop *)"},
+            .expected = &.{"(1 _ll 0 _gl 0 _gl * 1 _dl)"},
         },
-        // The environment retires at the last local read, so a body form that
-        // still precedes one runs under `dip` while everything after it is
-        // ordinary code.
+        // Locals never reach the operand stack, so a body form between two
+        // local reads is emitted exactly as written. The same fixture under
+        // the environment-list lowering read
+        // `([] cons dup 0 at swap [1] dip (+) dip dup 0 at swap pop *)`:
+        // every form before the last local read had to be quoted and `dip`ped
+        // past an environment that was sitting on the stack.
         .{
             .source = "(|x| x 1 + x *)",
-            .expected = &.{"([] cons dup 0 at swap [1] dip (+) dip dup 0 at swap pop *)"},
+            .expected = &.{"(1 _ll 0 _gl 1 + 0 _gl * 1 _dl)"},
         },
         .{
             .source = "(|x y| 1 2)",
-            .expected = &.{"([] cons cons pop 1 2)"},
+            .expected = &.{"(2 _ll 1 2 2 _dl)"},
         },
     };
     for (fixtures) |fixture| {

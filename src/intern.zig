@@ -184,6 +184,14 @@ pub fn internNamespace(bytes: []const u8) error{ OutOfMemory, InvalidName }!Name
     return namespaceName(id);
 }
 
+/// Core installation only. See `NamespaceCursor.reserved_ok`.
+pub fn internReservedNamespace(bytes: []const u8) error{ OutOfMemory, InvalidName }!NamespaceName {
+    const id = try intern(bytes);
+    _ = process_table.getBytes(id) orelse return error.InvalidName;
+    var cursor = NamespaceCursor.initReserved(id);
+    return poll.drive(?NamespaceName, &cursor, .{}) orelse error.InvalidName;
+}
+
 pub fn moduleName(id: u32) NameError!ModuleName {
     _ = process_table.getBytes(id) orelse return error.InvalidName;
     var cursor = ModuleNameCursor.init(id);
@@ -544,12 +552,21 @@ pub const NamespaceCursor = struct {
     id: u32,
     bytes: []const u8,
     lexical: lexer.SymbolCursor,
+    /// The runtime installs the words it reserves; the reservation exists to
+    /// keep every other publisher off them, so core installation is the one
+    /// caller that passes this.
+    reserved_ok: bool = false,
     pub fn init(id: u32) NamespaceCursor {
         const bytes = get(id);
         return .{ .id = id, .bytes = bytes, .lexical = .initSegment(bytes) };
     }
+    pub fn initReserved(id: u32) NamespaceCursor {
+        var cursor = init(id);
+        cursor.reserved_ok = true;
+        return cursor;
+    }
     pub fn advance(self: *NamespaceCursor) NamespaceProgress {
-        if (self.bytes.len == 0 or isReservedWordBytes(self.bytes))
+        if (self.bytes.len == 0 or (!self.reserved_ok and isReservedWordBytes(self.bytes)))
             return .{ .complete = null };
         return switch (self.lexical.advance()) {
             .pending => .pending,
@@ -611,7 +628,13 @@ pub fn isReservedBytes(name: []const u8) bool {
         std.mem.eql(u8, name, lexer.row_token);
 }
 
-/// Every binding name the language reserves for itself.
+/// Every binding name the language reserves for itself. The head-binder
+/// backend is reserved because the reader emits those three words into every
+/// lowered binder body: a session definition of `_gl` would otherwise
+/// silently change what `|x|` means everywhere.
 pub fn isReservedWordBytes(name: []const u8) bool {
-    return isReservedBytes(name);
+    return isReservedBytes(name) or
+        std.mem.eql(u8, name, "_ll") or
+        std.mem.eql(u8, name, "_gl") or
+        std.mem.eql(u8, name, "_dl");
 }

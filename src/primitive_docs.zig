@@ -11,6 +11,24 @@ const entries = [_]Metadata{
     .{ .name = "dup", .effect = "x -- x x", .text = "Duplicate the top stack value." },
     .{ .name = "swap", .effect = "x y -- y x", .text = "Exchange the top two stack values." },
     .{ .name = "pop", .effect = "x --", .text = "Discard the top stack value." },
+    .{
+        .name = "_ll",
+        .effect = "... n --",
+        .text = "Move the top n values into the head-binder locals, last name first. " ++
+            "The reader emits this; write `|a b|` instead.",
+    },
+    .{
+        .name = "_gl",
+        .effect = "n -- x",
+        .text = "Copy head-binder local n, counting from the most recently bound name. " ++
+            "The reader emits this; write the local's name instead.",
+    },
+    .{
+        .name = "_dl",
+        .effect = "n --",
+        .text = "Discard the top n head-binder locals. The reader emits this at the end " ++
+            "of a binder body.",
+    },
     .{ .name = "cons", .effect = "value list -- list", .text = "Prepend a value or executable form to a list." },
     .{ .name = "match?", .effect = "left right -- bool", .text = "Return whether two complete values are structurally equal." },
     .{ .name = "type", .effect = "value -- type", .text = "Return the value kind as a symbol." },
