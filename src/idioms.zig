@@ -277,8 +277,9 @@ pub fn tryApply(
     fallback: machine.IdiomFallback,
 ) MachineError!void {
     if (evaluator.unit.inherited.idiom_mode == .generic_only or requestCandidate(evaluator, request) == null) {
-        defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
-        return fallback.run(evaluator);
+        var owned = fallback;
+        defer owned.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        return owned.run(evaluator);
     }
     try evaluator.startDriver(IdiomDriver{
         .candidate = requestCandidate(evaluator, request).?,
@@ -353,7 +354,7 @@ const IdiomDriver = struct {
         evaluator: *Machine,
         entry: ?RegistryEntry,
     ) MachineError!machine.WorkProgress {
-        const fallback = self.fallback.take();
+        var fallback = self.fallback.take();
         const candidate = self.candidate;
         const capture = self.capture;
         if (self.resolution) |*cursor| cursor.deinit(

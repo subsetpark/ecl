@@ -2462,9 +2462,11 @@ INTERPRETER.md and its entry here is retired.
     - Three of the four allocations were not a constant-reference cost and
       were not this item's to fix; they were the per-word and per-core-word
       drivers of item 18, which every program paid on every word it called.
-      Item 18 shipped 2026-08-20 and removed them. Allocation is no longer
-      the interesting axis here: a constant reference now costs one 16-byte
-      `DirectWordFallback` more than the inline literal it stands for.
+      Item 18 shipped 2026-08-20 and removed them. Allocation is no longer an
+      axis here at all: the last one, a 16-byte `DirectWordFallback` per
+      core-origin word application, became inline fallback storage on
+      2026-08-21. A constant reference now allocates exactly as much as the
+      inline literal it stands for, which is nothing.
     - The work did not go away with the allocations. Re-measured 2026-08-20
       after item 18, marginal cost of one added constant reference, 100,000
       iterations through the generic `each` spine:

@@ -1057,14 +1057,21 @@ pub const IdiomRequest = union(enum) {
     scan,
 };
 pub const IdiomFallback = struct {
-    context: ?*anyopaque = null,
+    /// What to do if recognition declines, carried by value. Recognition holds
+    /// at most one fallback at a time and the only one with any state is a core
+    /// word's body and trace word, so describing the decline costs no
+    /// allocation. Storing it inline also removes the question a pointer
+    /// raised: with every payload here, teardown always retires fields and
+    /// never frees storage.
+    pub const storage_len = 32;
+    storage: [storage_len]u8 align(@alignOf(usize)) = @splat(0),
     run_fn: *const fn (*Machine, ?*anyopaque) MachineError!void,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, ?*anyopaque) void,
-    pub fn run(self: IdiomFallback, evaluator: *Machine) MachineError!void {
-        return self.run_fn(evaluator, self.context);
+    pub fn run(self: *IdiomFallback, evaluator: *Machine) MachineError!void {
+        return self.run_fn(evaluator, &self.storage);
     }
-    pub fn deinit(self: IdiomFallback, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
-        self.deinit_fn(releases, allocator, self.context);
+    pub fn deinit(self: *IdiomFallback, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        self.deinit_fn(releases, allocator, &self.storage);
     }
 };
 
@@ -1139,11 +1146,11 @@ pub const StandardInput = struct {
     }
 };
 
-fn IdiomFallbackAdapters(comptime Driver: type) type {
+fn IdiomFallbackAdapters(comptime Payload: type) type {
     return struct {
         fn run(evaluator: *Machine, raw: ?*anyopaque) MachineError!void {
-            const driver: *Driver = @ptrCast(@alignCast(raw.?));
-            return Driver.run(evaluator, driver);
+            const payload: *Payload = @ptrCast(@alignCast(raw.?));
+            return Payload.run(evaluator, payload);
         }
 
         fn deinit(
@@ -1151,26 +1158,32 @@ fn IdiomFallbackAdapters(comptime Driver: type) type {
             allocator: std.mem.Allocator,
             raw: ?*anyopaque,
         ) void {
-            const driver: *Driver = @ptrCast(@alignCast(raw.?));
-            heap.destroyDriver(releases, allocator, driver);
+            const payload: *Payload = @ptrCast(@alignCast(raw.?));
+            heap.deinitDriverFields(releases, allocator, payload);
         }
     };
 }
 
-pub fn typedIdiomFallback(driver: anytype) IdiomFallback {
-    const Context = @TypeOf(driver);
-    const pointer = switch (@typeInfo(Context)) {
-        .pointer => |info| info,
-        else => @compileError("idiom fallback driver must be a pointer"),
-    };
-    if (pointer.size != .one) @compileError("idiom fallback driver must be a single-item pointer");
-    const Driver = pointer.child;
-    const adapters = IdiomFallbackAdapters(Driver);
-    return .{
-        .context = @ptrCast(driver),
+/// Copies a fallback payload into the fallback itself. The payload must own its
+/// fields and hold no pointer into itself, because the value moves with the
+/// fallback rather than staying at one address.
+pub fn typedIdiomFallback(payload: anytype) IdiomFallback {
+    const Payload = @TypeOf(payload);
+    if (@typeInfo(Payload) != .@"struct")
+        @compileError("idiom fallback payload must be a struct value");
+    if (@sizeOf(Payload) > IdiomFallback.storage_len)
+        @compileError(@typeName(Payload) ++ " exceeds the inline idiom fallback storage");
+    if (@alignOf(Payload) > @alignOf(usize))
+        @compileError(@typeName(Payload) ++ " exceeds the inline idiom fallback alignment");
+    _ = comptime heap.validateDriverOwnership(Payload);
+    const adapters = IdiomFallbackAdapters(Payload);
+    var result: IdiomFallback = .{
         .run_fn = adapters.run,
         .deinit_fn = adapters.deinit,
     };
+    const target: *Payload = @ptrCast(@alignCast(&result.storage));
+    target.* = payload;
+    return result;
 }
 pub const PhraseRecognizer = *const fn (*Machine, IdiomRequest, IdiomFallback) MachineError!void;
 
@@ -4048,8 +4061,9 @@ pub const Machine = struct {
     }
     pub fn continueWithIdiom(self: *Machine, request: IdiomRequest, fallback: IdiomFallback) MachineError!void {
         if (self.unit.inherited.phrase_recognizer) |recognize| return recognize(self, request, fallback);
-        defer fallback.deinit(self.releaseDomain(), self.unit.allocator);
-        return fallback.run(self);
+        var owned = fallback;
+        defer owned.deinit(self.releaseDomain(), self.unit.allocator);
+        return owned.run(self);
     }
     /// The active word as a diagnostic spells it. A module-local word has no
     /// single interned spelling, so the rendering borrows the unit's scratch;
@@ -5105,9 +5119,11 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
         .word => |body| {
             const body_header = env.quotationHeader(body);
             if (resolved.origin == .core) {
-                const fallback = try self.unit.allocator.create(DirectWordFallback);
                 heap.incRef(body_header);
-                fallback.* = .{ .body = .init(body_header), .word = resolved.trace_word };
+                const fallback: DirectWordFallback = .{
+                    .body = .init(body_header),
+                    .word = resolved.trace_word,
+                };
                 return self.continueWithIdiom(
                     // Only a core-origin word reaches recognition, and a core
                     // word's trace spelling is its own atom.
