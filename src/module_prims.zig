@@ -416,25 +416,4 @@ fn load(evaluator: *Machine) MachineError!void {
         .encoder = .init(encoder),
     });
 }
-const LoadPathDriver = struct {
-    path_value: heap.Owned(Value),
-    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
-    path: ?heap.Owned([]u8) = null,
-    pub fn advance(evaluator: *Machine, self: *LoadPathDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.path == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return evaluator.fail(.domain, "path contains an invalid Unicode scalar"),
-        }) {
-            .pending => return .yielded,
-            .complete => |path| self.path = .init(path),
-        };
-        const path = self.path.?.take();
-        const path_value = self.path_value.take();
-        self.path = null;
-        evaluator.retireDriver(self);
-        try evaluator.loadFileOwned(path, path_value);
-        return .detached;
-    }
-    pub const ownership: heap.DriverOwnership = .fields;
-};
+const LoadPathDriver = machine.PathActionDriver(Machine.loadFileOwned);

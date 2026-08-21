@@ -2019,6 +2019,40 @@ pub const Unit = struct {
         self.* = undefined;
     }
 };
+/// One driver for a primitive that must encode a path argument to bytes before
+/// it can act. Encoding and its failure are the same work whatever follows, so
+/// the action is the only thing that varies; the ownership order — take the
+/// path, take the value, retire, then act — is stated once here rather than
+/// copied per primitive.
+pub fn PathActionDriver(
+    comptime action: fn (*Machine, []u8, Value) MachineError!void,
+) type {
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+        path_value: heap.Owned(Value),
+        encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
+        path: ?heap.Owned([]u8) = null,
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!WorkProgress {
+            try evaluator.pollKernel();
+            if (self.path == null) switch (self.encoder.borrowMut().advance(kernel_poll_quantum) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidCodepoint => return evaluator.fail(.domain, "path contains an invalid Unicode scalar"),
+            }) {
+                .pending => return .yielded,
+                .complete => |path| self.path = .init(path),
+            };
+            const path = self.path.?.take();
+            const path_value = self.path_value.take();
+            self.path = null;
+            evaluator.retireDriver(self);
+            try action(evaluator, path, path_value);
+            return .detached;
+        }
+    };
+}
+
 pub const Machine = struct {
     unit: *Unit,
     pub fn allocator(self: *const Machine) std.mem.Allocator {
@@ -4235,24 +4269,12 @@ pub const Machine = struct {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
         }
-        const index: FrameIndex = @enumFromInt(@as(u32, @intCast(self.unit.frames.items.len)));
-        var continuation = OwnedFrame.init(.{ .boundary = .{
-            .mode = .{ .module = .{
-                .image = candidate.move(),
-                .registration = registration,
-            } },
-            .stack_base = @intCast(self.unit.stack.items.len),
-            .previous_base = @intCast(self.unit.stack_base),
-            .previous_boundary = self.unit.boundary_index,
-            .word = word,
-        } });
-        defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
-        self.appendFrame(&continuation) catch {
-            self.releaseDomain().releaseHeader(quotation);
-            return error.OutOfMemory;
-        };
-        self.unit.boundary_index = index;
-        self.unit.stack_base = self.unit.stack.items.len;
+        try self.openBoundary(
+            .{ .module = .{ .image = candidate.move(), .registration = registration } },
+            @intCast(self.unit.stack.items.len),
+            word,
+            quotation,
+        );
         self.unit.current = .{
             .code = quotation,
             .ip = 0,
@@ -4375,21 +4397,12 @@ pub const Machine = struct {
             owned.retire(self.releaseDomain(), self.unit.allocator);
             return error.OutOfMemory;
         }
-        const index: FrameIndex = @enumFromInt(@as(u32, @intCast(self.unit.frames.items.len)));
-        var continuation = OwnedFrame.init(.{ .boundary = .{
-            .mode = .{ .state = owned.move() },
-            .stack_base = application.draft_base,
-            .previous_base = @intCast(self.unit.stack_base),
-            .previous_boundary = self.unit.boundary_index,
-            .word = word,
-        } });
-        defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
-        self.appendFrame(&continuation) catch {
-            self.releaseDomain().releaseHeader(quotation);
-            return error.OutOfMemory;
-        };
-        self.unit.boundary_index = index;
-        self.unit.stack_base = application.draft_base;
+        try self.openBoundary(
+            .{ .state = owned.move() },
+            application.draft_base,
+            word,
+            quotation,
+        );
         self.unit.state_application = application;
         self.unit.current = .{
             .code = quotation,
@@ -4429,10 +4442,38 @@ pub const Machine = struct {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
         }
+        try self.openBoundary(
+            .{ .attempt = child },
+            @intCast(self.unit.stack.items.len),
+            word,
+            quotation,
+        );
+        self.unit.current = .{
+            .code = quotation,
+            .ip = 0,
+            .scope = child,
+            .resolution_scope = child,
+            .home = home,
+            .traced_word = no_word,
+        };
+    }
+    /// Opens one stack boundary: the frame recording where to return to, and
+    /// the base its operands start from. The three boundary modes — a module
+    /// body, a state application, and `@attempt` — differ in what they record
+    /// and what runs inside them, never in how the boundary is opened. The
+    /// caller keeps the frame-count check, because what it has to release on
+    /// refusal differs; past that point failure releases the quotation here.
+    fn openBoundary(
+        self: *Machine,
+        mode: BoundaryMode,
+        stack_base: u32,
+        word: intern.TraceWord,
+        quotation: *Header,
+    ) error{OutOfMemory}!void {
         const index: FrameIndex = @enumFromInt(@as(u32, @intCast(self.unit.frames.items.len)));
         var continuation = OwnedFrame.init(.{ .boundary = .{
-            .mode = .{ .attempt = child },
-            .stack_base = @intCast(self.unit.stack.items.len),
+            .mode = mode,
+            .stack_base = stack_base,
             .previous_base = @intCast(self.unit.stack_base),
             .previous_boundary = self.unit.boundary_index,
             .word = word,
@@ -4443,15 +4484,7 @@ pub const Machine = struct {
             return error.OutOfMemory;
         };
         self.unit.boundary_index = index;
-        self.unit.stack_base = self.unit.stack.items.len;
-        self.unit.current = .{
-            .code = quotation,
-            .ip = 0,
-            .scope = child,
-            .resolution_scope = child,
-            .home = home,
-            .traced_word = no_word,
-        };
+        self.unit.stack_base = stack_base;
     }
     fn appendFrame(self: *Machine, owned: *OwnedFrame) error{OutOfMemory}!void {
         try self.unit.frames.append(self.unit.allocator, owned.frame.?);
@@ -5422,20 +5455,40 @@ pub const ResolutionCursor = struct {
 pub const ShadowProgress = poll_api.Progress([]intern.TraceWord);
 pub const ShadowCursor = struct {
     const Phase = enum { dot, scope, direct, uses, acquire, export_name, core, materialize, complete };
+    /// The same reservation `ResolutionCursor.Work` removes, for the same
+    /// reason: these phase cursors are mutually exclusive, and `use_shape` and
+    /// `generation` are the two that deliberately outlive the phase that
+    /// opened them. The walk itself is not shared with that cursor — this one
+    /// records every hit and keeps going, where resolution stops at the first
+    /// and takes ownership of it.
+    const Work = union(enum) {
+        none,
+        dot: intern.DotCursor,
+        direct: env.DirectLookupCursor,
+        acquisition: modules.Registry.AcquireCursor,
+        export_lookup: modules.ModuleResolveCursor,
+
+        fn deinit(self: *Work) void {
+            switch (self.*) {
+                .acquisition => |*cursor| cursor.deinit(),
+                .direct => |*cursor| cursor.deinit(),
+                .export_lookup => |*cursor| cursor.deinit(),
+                .none, .dot => {},
+            }
+            self.* = .none;
+        }
+    };
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
     registry: ?*modules.Registry,
     core: env.EnvironmentView,
     word: u32,
     phase: Phase = .dot,
-    dot: intern.DotCursor,
+    work: Work,
     scope: ?*env.Scope,
-    direct: ?env.DirectLookupCursor = null,
     use_shape: ?env.ShapeLease = null,
     use_ordinal: usize = 0,
-    acquisition: ?modules.Registry.AcquireCursor = null,
     generation: ?modules.GenerationLease = null,
-    export_lookup: ?modules.ModuleResolveCursor = null,
     current_home: ?*modules.ModuleHome,
     search: resolution_core.Search = .searching,
     found: poll_api.ChunkList(intern.TraceWord),
@@ -5451,16 +5504,14 @@ pub const ShadowCursor = struct {
             .core = evaluator.unit.environment.coreView(),
             .current_home = evaluator.unit.current.?.home,
             .word = word,
-            .dot = intern.dotCursor(intern.get(word)),
+            .work = .{ .dot = intern.dotCursor(intern.get(word)) },
             .scope = evaluator.unit.current.?.resolution_scope,
             .found = .init(evaluator.unit.allocator),
         };
     }
     pub fn deinit(self: *ShadowCursor) void {
-        if (self.direct) |*cursor| cursor.deinit();
+        self.work.deinit();
         if (self.use_shape) |*shape| shape.deinit();
-        if (self.acquisition) |*cursor| cursor.deinit();
-        if (self.export_lookup) |*cursor| cursor.deinit();
         if (self.generation) |*lease| lease.deinit();
         if (self.output) |output| self.allocator.free(output);
         self.found.retire(self.releases);
@@ -5480,9 +5531,10 @@ pub const ShadowCursor = struct {
     }
     pub fn advance(self: *ShadowCursor) error{OutOfMemory}!ShadowProgress {
         return switch (self.phase) {
-            .dot => switch (self.dot.advance()) {
+            .dot => switch (self.work.dot.advance()) {
                 .pending => .pending,
                 .complete => |maybe_dot| result: {
+                    self.work.deinit();
                     if (maybe_dot != null) {
                         self.output = try self.allocator.alloc(intern.TraceWord, 0);
                         self.phase = .complete;
@@ -5494,23 +5546,22 @@ pub const ShadowCursor = struct {
             },
             .scope => result: {
                 const current = self.scope orelse {
-                    self.direct = self.core.directLookupCursor(self.word);
+                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
                     self.phase = .core;
                     break :result .pending;
                 };
                 self.scope = current.parent;
                 if (current.environmentOrNull()) |environment| {
-                    self.direct = environment.directLookupCursor(self.word);
+                    self.work = .{ .direct = environment.directLookupCursor(self.word) };
                     self.phase = .direct;
                 }
                 break :result .pending;
             },
-            .direct => switch (self.direct.?.advance()) {
+            .direct => switch (self.work.direct.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
-                    const environment = self.direct.?.shape.environment;
-                    self.direct.?.deinit();
-                    self.direct = null;
+                    const environment = self.work.direct.shape.environment;
+                    self.work.deinit();
                     if (maybe_lease) |loaded| {
                         var lease = loaded;
                         defer lease.deinit();
@@ -5543,28 +5594,26 @@ pub const ShadowCursor = struct {
                     break :result .pending;
                 };
                 self.use_ordinal += 1;
-                self.acquisition = self.registry.?.acquireCursor(uses[index]);
+                self.work = .{ .acquisition = self.registry.?.acquireCursor(uses[index]) };
                 self.phase = .acquire;
                 break :result .pending;
             },
-            .acquire => switch (self.acquisition.?.advance()) {
+            .acquire => switch (self.work.acquisition.advance()) {
                 .pending => .pending,
                 .complete => |maybe_generation| result: {
-                    self.acquisition.?.deinit();
-                    self.acquisition = null;
+                    self.work.deinit();
                     self.generation = maybe_generation;
                     if (self.generation) |generation| {
-                        self.export_lookup = generation.resolveCursor(self.word, true);
+                        self.work = .{ .export_lookup = generation.resolveCursor(self.word, true) };
                         self.phase = .export_name;
                     } else self.phase = .uses;
                     break :result .pending;
                 },
             },
-            .export_name => switch (self.export_lookup.?.advance()) {
+            .export_name => switch (self.work.export_lookup.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
-                    self.export_lookup.?.deinit();
-                    self.export_lookup = null;
+                    self.work.deinit();
                     if (maybe_lease) |loaded| {
                         var lease = loaded;
                         defer lease.deinit();
@@ -5579,11 +5628,10 @@ pub const ShadowCursor = struct {
                     break :result .pending;
                 },
             },
-            .core => switch (self.direct.?.advance()) {
+            .core => switch (self.work.direct.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
-                    self.direct.?.deinit();
-                    self.direct = null;
+                    self.work.deinit();
                     if (maybe_lease) |loaded| {
                         var lease = loaded;
                         defer lease.deinit();

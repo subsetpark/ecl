@@ -439,29 +439,7 @@ pub fn ioSlurp(evaluator: *Machine) MachineError!void {
     });
 }
 
-const SlurpDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    path_value: heap.Owned(Value),
-    encoder: heap.Owned(kernel_storage.ToUtf8Cursor),
-    path: ?heap.Owned([]u8) = null,
-
-    pub fn advance(evaluator: *Machine, self: *SlurpDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.path == null) switch (self.encoder.borrowMut().advance(machine.kernel_poll_quantum) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return evaluator.fail(.domain, "path contains an invalid Unicode scalar"),
-        }) {
-            .pending => return .yielded,
-            .complete => |path| self.path = .init(path),
-        };
-        const path = self.path.?.take();
-        const path_value = self.path_value.take();
-        self.path = null;
-        evaluator.retireDriver(self);
-        try evaluator.slurpFileOwned(path, path_value);
-        return .detached;
-    }
-};
+const SlurpDriver = machine.PathActionDriver(Machine.slurpFileOwned);
 
 /// Writes one whole file by truncate-and-replace. Both the contents and the
 /// path encode to bytes before the write driver takes ownership, so a
