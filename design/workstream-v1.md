@@ -2447,20 +2447,40 @@ INTERPRETER.md and its entry here is retired.
     - Three of the four allocations were not a constant-reference cost and
       were not this item's to fix; they were the per-word and per-core-word
       drivers of item 18, which every program paid on every word it called.
-      Item 18 shipped 2026-08-20 and removed them. Re-measured on the same
-      probe, a `set` constant reference now costs **one** allocation more
-      than the inline literal it stands for — the 16-byte
-      `DirectWordFallback` — against three allocations for the whole
-      reference before. The frame is no longer an allocation at all.
-    - On those numbers the expected disposition is to close this item rather
-      than build it: one 16-byte transient, against a recognition special
-      case in `executeResolved` that every future reader of the dispatch
-      path has to understand. If it is ever picked up, the cheaper target is
-      the fallback record itself — giving `DirectWordFallback` the same
-      inline treatment item 18 gave the drivers would remove the last
-      allocation for every core-word application, not just for constants,
-      and needs no recognition change at all. Do not build the special case
-      first.
+      Item 18 shipped 2026-08-20 and removed them. Allocation is no longer
+      the interesting axis here: a constant reference now costs one 16-byte
+      `DirectWordFallback` more than the inline literal it stands for.
+    - The work did not go away with the allocations. Re-measured 2026-08-20
+      after item 18, marginal cost of one added constant reference, 100,000
+      iterations through the generic `each` spine:
+
+      | idiom mode | allocations | polls | µs |
+      |---|---|---|---|
+      | automatic | 1 | 4.0 | 4.07 |
+      | generic_only | 3 | 8.0 | 7.49 |
+
+      For scale, in the same harness a whole literal-push iteration costs
+      0.42 µs and 2 polls, and adding a plain non-core word call with a
+      trivial body costs 0.12 µs marginal. A constant reference is therefore
+      roughly ten times a literal push and thirty times a plain word call.
+      What it buys with that: one frame, a word resolution for the bound
+      name, a second word resolution for `first`, a recognition match, and
+      the primitive.
+    - Recognition is not the cost, and no future version of this item may be
+      justified as avoiding it. Turning recognition off doubles the price of
+      a constant reference — 7.49 µs against 4.07 — because matching
+      collapses `first`'s five-form body into one primitive. A special case
+      in `executeResolved` is worth building only if it skips the whole
+      path, frame and both resolutions included; one that merely sidesteps
+      the idiom machinery would land between these two numbers, not below
+      them.
+    - Still deferred, and the open question is no longer what a constant
+      reference costs but whether programs make enough of them to care.
+      Every number here comes from a synthetic probe that does nothing but
+      dereference a constant. Before building anything, measure constant
+      reference frequency in real ECL — the standard library and the
+      acceptance corpus are the available bodies of code — because a 4 µs
+      cost on a rare operation buys nothing back.
 
 15. **`within` draft/publication copy elision** (deferred 2026-08-18,
     M11 review conversation). Every state application copies the slot's
@@ -2659,8 +2679,8 @@ INTERPRETER.md and its entry here is retired.
       footprint, so per-task memory is a reported number, not an afterthought.
     - This item gated deferred item 14, whose four extra allocations per
       constant reference were two `DispatchDriver`s, one `IdiomDriver`, and one
-      `DirectWordFallback`. Three are now gone; item 14's remaining cost is
-      recorded there.
+      `DirectWordFallback`. Three are now gone. Item 14 stays open on its
+      remaining non-allocation cost, recorded there.
 
 ## Decisions Made
 
