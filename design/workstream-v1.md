@@ -2444,17 +2444,23 @@ INTERPRETER.md and its entry here is retired.
       and `firstPrimitive` (`src/kernel_sequence.zig`) is a popList and a
       `pushBorrowed` with no allocation at all. And the count is four, not
       one.
-    - Three of the four allocations are not a constant-reference cost and
-      are not this item's to fix. They are the core-word application path
-      of deferred item 18, which every program pays on every core word it
-      calls. This item therefore stays deferred behind item 18: land that,
-      re-run the probe, then decide. If item 18 removes the per-application
-      allocation, a constant reference costs one frame more than a literal
-      and the expected disposition here is to close as not worth any
-      dispatch complexity — the outcome the measure-before-building gate
-      was written to allow. Do not build the `executeResolved` special case
-      first: specialising this one shape would hide a general dispatch tax
-      behind it rather than remove it.
+    - Three of the four allocations were not a constant-reference cost and
+      were not this item's to fix; they were the per-word and per-core-word
+      drivers of item 18, which every program paid on every word it called.
+      Item 18 shipped 2026-08-20 and removed them. Re-measured on the same
+      probe, a `set` constant reference now costs **one** allocation more
+      than the inline literal it stands for — the 16-byte
+      `DirectWordFallback` — against three allocations for the whole
+      reference before. The frame is no longer an allocation at all.
+    - On those numbers the expected disposition is to close this item rather
+      than build it: one 16-byte transient, against a recognition special
+      case in `executeResolved` that every future reader of the dispatch
+      path has to understand. If it is ever picked up, the cheaper target is
+      the fallback record itself — giving `DirectWordFallback` the same
+      inline treatment item 18 gave the drivers would remove the last
+      allocation for every core-word application, not just for constants,
+      and needs no recognition change at all. Do not build the special case
+      first.
 
 15. **`within` draft/publication copy elision** (deferred 2026-08-18,
     M11 review conversation). Every state application copies the slot's
@@ -2584,11 +2590,11 @@ INTERPRETER.md and its entry here is retired.
       and the Linux/x86_64 TSan gate is blocking because cache hits change when
       generation and directory leases are acquired and released.
 
-18. **Word dispatch allocates a driver per word execution** (measured
-    2026-08-20 while discharging item 14's gate). This item originally named
-    the core-word fallback allocation; an allocation-size histogram shows that
-    is the smallest of the three allocations involved and not the one worth
-    fixing.
+18. **Word dispatch allocates a driver per word execution — complete
+    2026-08-20.** Measured while discharging item 14's gate. This item
+    originally named the core-word fallback allocation; an allocation-size
+    histogram showed that is the smallest of the three allocations involved and
+    not the one worth fixing.
 
     Counts are per iteration, ReleaseFast, 100,000 iterations through the
     generic `each` spine, bucketed by allocation size:
@@ -2619,15 +2625,31 @@ INTERPRETER.md and its entry here is retired.
       path — dotted-name splitting, registry acquisition, use-order walking,
       qualified export lookup — to resolve a name that is almost always found
       immediately in scope or core.
-    - Fix order follows item 9's preference 1 rather than inventing one:
-      first shrink the cursor to a `union(Phase)` payload so the driver is
-      small, then give `Unit` an inline continuation area so the common driver
-      needs no allocation at all. `Unit.native` holds at most one work driver
-      at a time — `installDriver` accepts only `idle` or `yielded`
-      (`src/machine.zig`) — so one inline slot covers essentially every
-      dispatch, with anything larger than the slot falling back to the
-      allocator. Bounded-first-slice promotion stays where item 9 put it:
-      attempted only if allocation remains material after that.
+    - Fixed in item 9's preference-1 order rather than an invented one. First
+      `ResolutionCursor`'s ten optional phase cursors became one `union(Phase)`
+      payload, taking `DispatchDriver` from 1144 to 440 bytes and `IdiomDriver`
+      from 1288 to 584. Then `Unit` gained a 640-byte inline continuation slot,
+      which those two drivers opt into by declaring `inline_driver`; both now
+      construct in the slot instead of the allocator. `Unit.native` holds at
+      most one work driver at a time — `installDriver` accepts only `idle` or
+      `yielded` — so the slot is free at essentially every dispatch, and
+      correctness never depends on that: a driver that starts while the slot is
+      held simply allocates, and teardown routes by pointer identity.
+      Bounded-first-slice promotion stays where item 9 put it, and is now very
+      unlikely to be worth attempting.
+    - Result, same probes, allocations per iteration: an inline literal push
+      went from 2 to 1, a user word call from 3 to 1 — a word call is now
+      allocation-free — and a `set` constant reference from 6 to 2. Under the
+      probe's `DebugAllocator` backing the 100,000-iteration wall times fell
+      from 313/614/1343 ms to 41/53/392 ms; that backing weights allocation
+      count heavily, so treat the counts as the result and the times as its
+      direction, not its magnitude.
+    - Cost paid: every `Unit` carries the 640-byte slot whether or not it runs
+      a word, so per-task footprint grows by that much. Raising the slot to
+      cover a wider driver raises it for every task; measure before doing so.
+      The slot is opt-in for exactly this reason, and `inlineDriverCapable`
+      fails the build if an opting driver outgrows it or stops owning its
+      fields, so the arrangement cannot silently revert to allocating.
     - Constraints. This changes when and where memory is acquired, never what
       executes. Recognition stays observationally invisible, and the
       differential idiom harness, behavioral suite, and allocator-failure
@@ -2635,10 +2657,10 @@ INTERPRETER.md and its entry here is retired.
       because removing an allocation moves where `error.OutOfMemory` can be
       observed. An inline slot also makes driver storage part of `Unit`'s
       footprint, so per-task memory is a reported number, not an afterthought.
-    - This item gates deferred item 14, whose four extra allocations per
-      constant reference are two `DispatchDriver`s, one `IdiomDriver`, and one
-      `DirectWordFallback`. Item 14 cannot be decided on its own numbers until
-      those are gone.
+    - This item gated deferred item 14, whose four extra allocations per
+      constant reference were two `DispatchDriver`s, one `IdiomDriver`, and one
+      `DirectWordFallback`. Three are now gone; item 14's remaining cost is
+      recorded there.
 
 ## Decisions Made
 

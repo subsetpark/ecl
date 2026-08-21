@@ -328,6 +328,10 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
 }
 
 const IdiomDriver = struct {
+    /// Started once per core-origin word application, which is every prelude
+    /// word a program calls.
+    pub const inline_driver = true;
+
     candidate: Candidate,
     fallback: heap.Owned(machine.IdiomFallback),
     entry_index: usize = 0,
@@ -358,7 +362,7 @@ const IdiomDriver = struct {
         );
         self.resolution = null;
         evaluator.detachWorkDriver(self);
-        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+        evaluator.finishDriver(self);
         if (entry) |selected| {
             defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
             const direct_parent = if (selected.context == .direct)

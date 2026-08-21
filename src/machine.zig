@@ -1473,7 +1473,37 @@ fn WorkDriverAdapters(comptime Driver: type) type {
             const driver: *Driver = @ptrCast(@alignCast(raw));
             heap.destroyDriver(releases, allocator, driver);
         }
+
+        /// Teardown for a driver living in the unit's inline slot: the same
+        /// field ownership, without the destroy that storage never had. The
+        /// slot is not marked free because the only caller is unit teardown,
+        /// which invalidates the unit immediately afterward.
+        fn deinitInline(
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+            raw: *anyopaque,
+        ) void {
+            if (comptime !inlineDriverCapable(Driver)) unreachable;
+            const driver: *Driver = @ptrCast(@alignCast(raw));
+            heap.deinitUninstalledDriver(releases, allocator, driver);
+        }
     };
+}
+
+/// Opt-in inline driver storage. A driver declares `inline_driver` to be
+/// constructed in the unit's slot instead of the allocator; the declaration is
+/// checked here rather than assumed, so a driver that outgrows the slot or
+/// stops owning its fields fails the build instead of silently reverting to an
+/// allocation.
+fn inlineDriverCapable(comptime Driver: type) bool {
+    if (!@hasDecl(Driver, "inline_driver")) return false;
+    if (heap.validateDriverOwnership(Driver) != .fields)
+        @compileError(@typeName(Driver) ++ " inline driver storage requires field ownership");
+    if (@sizeOf(Driver) > Unit.driver_slot_len)
+        @compileError(@typeName(Driver) ++ " exceeds the unit inline driver slot");
+    if (@alignOf(Driver) > Unit.driver_slot_align)
+        @compileError(@typeName(Driver) ++ " exceeds the unit inline driver alignment");
+    return true;
 }
 
 comptime {
@@ -1618,6 +1648,14 @@ pub const Unit = struct {
     /// every path; zeroed rather than left `undefined` so no default here can
     /// become a read of uninitialized bytes.
     word_scratch: [intern.trace_word_bytes]u8 = @splat(0),
+    /// Storage for the one work driver a unit runs at a time. `installDriver`
+    /// accepts a driver only from `idle` or `yielded`, so a second live driver
+    /// is not representable; a driver that has detached but not yet destroyed
+    /// itself can still be holding the slot when the next one starts, and that
+    /// one falls back to the allocator. Correctness never depends on the slot
+    /// being free — only the allocation does.
+    driver_slot: [driver_slot_len]u8 align(driver_slot_align),
+    driver_slot_busy: bool = false,
     pub fn init(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
@@ -1642,6 +1680,11 @@ pub const Unit = struct {
             .cancelled = cancelled,
             .entry_base = stack.items.len,
             .stack_base = 0,
+            // SAFETY: storage, not state. `driver_slot_busy` is the only
+            // thing that says a driver lives here, and every read of the slot
+            // goes through `acquireInlineDriver`, which writes the whole
+            // driver before the pointer escapes.
+            .driver_slot = undefined,
         };
     }
 
@@ -1937,6 +1980,27 @@ pub const Unit = struct {
     pub fn pinGeneration(self: *Unit, generation: *modules.ModuleHome) error{OutOfMemory}!void {
         try self.lifetime.pin(self.allocator, generation, self.module_access);
     }
+    /// Sized to the drivers that opt in, checked by `inlineDriverCapable`.
+    /// Raising it trades unit footprint, which every task pays, for covering a
+    /// wider driver; measure before doing so.
+    pub const driver_slot_len = 640;
+    pub const driver_slot_align = 16;
+
+    fn acquireInlineDriver(self: *Unit, comptime Driver: type) ?*Driver {
+        if (self.driver_slot_busy) return null;
+        self.driver_slot_busy = true;
+        return @ptrCast(@alignCast(&self.driver_slot));
+    }
+
+    fn ownsInlineDriver(self: *const Unit, driver: *const anyopaque) bool {
+        return @intFromPtr(driver) == @intFromPtr(&self.driver_slot);
+    }
+
+    fn releaseInlineDriver(self: *Unit) void {
+        std.debug.assert(self.driver_slot_busy);
+        self.driver_slot_busy = false;
+    }
+
     pub fn deinit(self: *Unit) void {
         if (self.current) |current| self.releases.releaseHeader(current.code);
         for (self.frames.items) |frame| frame.deinit(self.releases, self.allocator);
@@ -2026,7 +2090,10 @@ pub const Machine = struct {
         const installed = WorkDriver{
             .context = @ptrCast(context),
             .resume_fn = adapters.advance,
-            .deinit_fn = adapters.deinit,
+            .deinit_fn = if (comptime inlineDriverCapable(Driver))
+                (if (self.unit.ownsInlineDriver(context)) adapters.deinitInline else adapters.deinit)
+            else
+                adapters.deinit,
             .site = if (self.unit.current) |current| .{
                 .code = current.code,
                 .index = self.unit.active_index,
@@ -2062,12 +2129,32 @@ pub const Machine = struct {
             .self_owned => @compileError("self-owned drivers require address-stable construction"),
         }
         var pending = initial;
+        if (comptime inlineDriverCapable(Driver)) {
+            if (self.unit.acquireInlineDriver(Driver)) |slot| {
+                slot.* = pending;
+                self.installDriver(slot);
+                return;
+            }
+        }
         const driver = self.unit.allocator.create(Driver) catch |err| {
             heap.deinitUninstalledDriver(self.unit.releases, self.unit.allocator, &pending);
             return err;
         };
         driver.* = pending;
         self.installDriver(driver);
+    }
+
+    /// Destroy a driver that may be living in the unit's inline slot. A driver
+    /// that opts into inline storage must retire itself through this rather
+    /// than `heap.destroyDriver`, which would hand slot memory to the
+    /// allocator.
+    pub fn finishDriver(self: *Machine, driver: anytype) void {
+        if (self.unit.ownsInlineDriver(driver)) {
+            heap.deinitUninstalledDriver(self.unit.releases, self.unit.allocator, driver);
+            self.unit.releaseInlineDriver();
+            return;
+        }
+        heap.destroyDriver(self.unit.releases, self.unit.allocator, driver);
     }
     /// Consumes the currently installed erased continuation without invoking
     /// its destructor. Self-replacing drivers use this before destroying their
@@ -4806,6 +4893,10 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
 const DispatchDriver = struct {
     resolution: heap.Owned(ResolutionCursor),
 
+    /// Started once per word executed, so this is the driver the inline slot
+    /// exists for.
+    pub const inline_driver = true;
+
     pub fn advance(self_machine: *Machine, self: *DispatchDriver) MachineError!WorkProgress {
         try self_machine.pollKernel();
         var budget: usize = kernel_poll_quantum;
@@ -4815,7 +4906,7 @@ const DispatchDriver = struct {
                 self.resolution.deinit(self_machine.releaseDomain(), self_machine.allocator());
                 const allocator = self_machine.unit.allocator;
                 self_machine.detachWorkDriver(self);
-                heap.destroyDriver(self_machine.releaseDomain(), allocator, self);
+                self_machine.finishDriver(self);
                 switch (outcome) {
                     .resolved => |resolution| {
                         var resolved = resolution;
