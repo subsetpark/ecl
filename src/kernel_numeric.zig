@@ -643,20 +643,50 @@ fn selectUnary(operation: UnaryOp) ScalarUnary {
     };
 }
 
+/// The element count a binary shape conforms to, or the conformance failure
+/// that shape reports. `leaf_only` is a unary shape and never reaches here.
+fn conformingLength(
+    evaluator: *Machine,
+    shape: Shape,
+    left_item: Value,
+    right_item: Value,
+) MachineError!usize {
+    return switch (shape) {
+        .leaf_leaf => blk: {
+            const left_count: usize = @intCast(left_item.list.length());
+            const right_count: usize = @intCast(right_item.list.length());
+            if (left_count != right_count) return evaluator.conformError(left_count, right_count);
+            break :blk left_count;
+        },
+        .leaf_scalar => @intCast(left_item.list.length()),
+        .scalar_leaf => @intCast(right_item.list.length()),
+        .leaf_only => unreachable,
+    };
+}
+
+const ScalarDiagnostic = struct {
+    kind: machine.ErrorKind,
+    message: []const u8,
+};
+
+/// One mapping from a scalar kernel fault to the diagnostic that reports it.
+/// The three reporting surfaces — the evaluator, an indexed kernel context, and
+/// a sequential fold — differ in where they send the diagnostic, never in what
+/// it says.
+fn scalarDiagnostic(fault: ScalarError) ScalarDiagnostic {
+    return switch (fault) {
+        error.Type => .{ .kind = .type, .message = "kernel received incompatible scalar operands" },
+        error.Overflow => .{ .kind = .overflow, .message = "kernel arithmetic overflow" },
+        error.Domain => .{ .kind = .domain, .message = "kernel arithmetic is outside its domain" },
+        error.ShiftCount => .{ .kind = .domain, .message = "a shift count must be from 0 to 63" },
+    };
+}
+
 fn scalarFailure(evaluator: *Machine, fault: ScalarError, index: ?usize) MachineError {
-    const kind: @import("machine.zig").ErrorKind = switch (fault) {
-        error.Type => .type,
-        error.Overflow => .overflow,
-        error.Domain, error.ShiftCount => .domain,
-    };
-    const message = switch (fault) {
-        error.Type => "kernel received incompatible scalar operands",
-        error.Overflow => "kernel arithmetic overflow",
-        error.Domain => "kernel arithmetic is outside its domain",
-        error.ShiftCount => "a shift count must be from 0 to 63",
-    };
-    if (index) |logical_index| return evaluator.failAtIndex(kind, message, logical_index);
-    return evaluator.fail(kind, message);
+    const diagnostic = scalarDiagnostic(fault);
+    if (index) |logical_index|
+        return evaluator.failAtIndex(diagnostic.kind, diagnostic.message, logical_index);
+    return evaluator.fail(diagnostic.kind, diagnostic.message);
 }
 
 fn scalarBinary(comptime operation: BinaryOp, left: Value, right: Value) ScalarError!Value {
@@ -1208,19 +1238,9 @@ fn failTypedScalar(
     fault: ScalarError,
     index: usize,
 ) MachineError {
-    const kind: machine.ErrorKind = switch (fault) {
-        error.Type => .type,
-        error.Overflow => .overflow,
-        error.Domain, error.ShiftCount => .domain,
-    };
-    const message = switch (fault) {
-        error.Type => "kernel received incompatible scalar operands",
-        error.Overflow => "kernel arithmetic overflow",
-        error.Domain => "kernel arithmetic is outside its domain",
-        error.ShiftCount => "a shift count must be from 0 to 63",
-    };
-    if (report.index) return context.failAt(kind, message, index);
-    return context.fail(kind, message);
+    const diagnostic = scalarDiagnostic(fault);
+    if (report.index) return context.failAt(diagnostic.kind, diagnostic.message, index);
+    return context.fail(diagnostic.kind, diagnostic.message);
 }
 
 const FixedCharState = struct {
@@ -1794,17 +1814,7 @@ fn buildNestedTypedCharBinaryFor(
     const left_class = left_leaf orelse left_scalar.?;
     const right_class = right_leaf orelse right_scalar.?;
     if (!left_class.isCharacter() and !right_class.isCharacter()) return null;
-    const length: usize = switch (shape) {
-        .leaf_leaf => blk: {
-            const left_count: usize = @intCast(left_item.list.length());
-            const right_count: usize = @intCast(right_item.list.length());
-            if (left_count != right_count) return evaluator.conformError(left_count, right_count);
-            break :blk left_count;
-        },
-        .leaf_scalar => @intCast(left_item.list.length()),
-        .scalar_leaf => @intCast(right_item.list.length()),
-        .leaf_only => unreachable,
-    };
+    const length = try conformingLength(evaluator, shape, left_item, right_item);
     if (length == 0) return null;
     const fixed_result = left_class.isCharacter() and right_class.isCharacter() and
         (operation == .sub or switch (operation) {
@@ -2000,17 +2010,7 @@ fn buildNestedTypedNumericBinaryFor(
         .scalar_leaf
     else
         return null;
-    const length: usize = switch (shape) {
-        .leaf_leaf => blk: {
-            const left_count: usize = @intCast(left_item.list.length());
-            const right_count: usize = @intCast(right_item.list.length());
-            if (left_count != right_count) return evaluator.conformError(left_count, right_count);
-            break :blk left_count;
-        },
-        .leaf_scalar => @intCast(left_item.list.length()),
-        .scalar_leaf => @intCast(right_item.list.length()),
-        .leaf_only => unreachable,
-    };
+    const length = try conformingLength(evaluator, shape, left_item, right_item);
     if (length == 0) return null;
     const left_class = left_leaf orelse left_scalar.?;
     const right_class = right_leaf orelse right_scalar.?;
@@ -2142,17 +2142,7 @@ fn startTypedBinary(
     else
         return rejectUnsupportedFlatBinary(evaluator, operation, left_item, right_item, report);
 
-    const length: usize = switch (shape) {
-        .leaf_leaf => blk: {
-            const left_count: usize = @intCast(left_item.list.length());
-            const right_count: usize = @intCast(right_item.list.length());
-            if (left_count != right_count) return evaluator.conformError(left_count, right_count);
-            break :blk left_count;
-        },
-        .leaf_scalar => @intCast(left_item.list.length()),
-        .scalar_leaf => @intCast(right_item.list.length()),
-        .leaf_only => unreachable,
-    };
+    const length = try conformingLength(evaluator, shape, left_item, right_item);
     // An empty result's representation is the generic route's to choose; there
     // is no typed work to do and no reason to fork that decision.
     if (length == 0) return false;
@@ -2450,18 +2440,8 @@ fn reduceStep(
                         // failure is reported where it happened. A recognized
                         // combinator's fault carries no list index, exactly as
                         // the per-element route reported it.
-                        const kind: machine.ErrorKind = switch (fault) {
-                            error.Type => .type,
-                            error.Overflow => .overflow,
-                            error.Domain, error.ShiftCount => .domain,
-                        };
-                        const message = switch (fault) {
-                            error.Type => "kernel received incompatible scalar operands",
-                            error.Overflow => "kernel arithmetic overflow",
-                            error.Domain => "kernel arithmetic is outside its domain",
-                            error.ShiftCount => "a shift count must be from 0 to 63",
-                        };
-                        return context.fail(kind, message);
+                        const diagnostic = scalarDiagnostic(fault);
+                        return context.fail(diagnostic.kind, diagnostic.message);
                     };
                     store(state, accumulator_class.unboxed(next));
                     if (scan) {

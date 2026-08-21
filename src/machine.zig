@@ -1483,9 +1483,8 @@ fn WorkDriverAdapters(comptime Driver: type) type {
             allocator: std.mem.Allocator,
             raw: *anyopaque,
         ) void {
-            if (comptime !inlineDriverCapable(Driver)) unreachable;
             const driver: *Driver = @ptrCast(@alignCast(raw));
-            heap.deinitUninstalledDriver(releases, allocator, driver);
+            heap.deinitDriverFields(releases, allocator, driver);
         }
     };
 }
@@ -2137,7 +2136,7 @@ pub const Machine = struct {
             }
         }
         const driver = self.unit.allocator.create(Driver) catch |err| {
-            heap.deinitUninstalledDriver(self.unit.releases, self.unit.allocator, &pending);
+            heap.deinitDriverFields(self.unit.releases, self.unit.allocator, &pending);
             return err;
         };
         driver.* = pending;
@@ -2150,11 +2149,19 @@ pub const Machine = struct {
     /// allocator.
     pub fn finishDriver(self: *Machine, driver: anytype) void {
         if (self.unit.ownsInlineDriver(driver)) {
-            heap.deinitUninstalledDriver(self.unit.releases, self.unit.allocator, driver);
+            heap.deinitDriverFields(self.unit.releases, self.unit.allocator, driver);
             self.unit.releaseInlineDriver();
             return;
         }
         heap.destroyDriver(self.unit.releases, self.unit.allocator, driver);
+    }
+    /// Detach the installed continuation and destroy it. A driver that has
+    /// finished its own work ends exactly this way, and routing every one of
+    /// them through a single place is what keeps inline-slot storage from ever
+    /// reaching the allocator.
+    pub fn retireDriver(self: *Machine, driver: anytype) void {
+        self.detachWorkDriver(driver);
+        self.finishDriver(driver);
     }
     /// Consumes the currently installed erased continuation without invoking
     /// its destructor. Self-replacing drivers use this before destroying their
@@ -2348,8 +2355,7 @@ pub const Machine = struct {
                         ),
                     });
                     self.loading = null;
-                    evaluator.detachWorkDriver(self);
-                    heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+                    evaluator.retireDriver(self);
                     try evaluator.startDriver(next);
                     return .detached;
                 },
@@ -2543,8 +2549,7 @@ pub const Machine = struct {
                     self.candidate = null;
                     self.loading = null;
                     self.path_value = null;
-                    evaluator.detachWorkDriver(self);
-                    heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+                    evaluator.retireDriver(self);
                     try evaluator.fileSourceOwned(candidate, null, completion);
                     return .detached;
                 },
@@ -2571,8 +2576,7 @@ pub const Machine = struct {
             self.candidate = null;
             self.loading = null;
             self.path_value = null;
-            evaluator.detachWorkDriver(self);
-            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            evaluator.retireDriver(self);
             try evaluator.sourceOwned(source_name, text, completion);
             return .detached;
         }
@@ -2599,8 +2603,7 @@ pub const Machine = struct {
             };
             self.loading = null;
             self.path_value = null;
-            evaluator.detachWorkDriver(self);
-            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            evaluator.retireDriver(self);
             try evaluator.startDriver(next);
             return .detached;
         }
@@ -2628,8 +2631,7 @@ pub const Machine = struct {
             };
             self.loading = null;
             self.path_value = null;
-            evaluator.detachWorkDriver(self);
-            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            evaluator.retireDriver(self);
             try evaluator.startDriver(next);
             return .detached;
         }
@@ -2655,8 +2657,7 @@ pub const Machine = struct {
                 .loading = .init(self.loading.?.take()),
                 .path = .init(self.path_value.?.take()),
             };
-            evaluator.detachWorkDriver(self);
-            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            evaluator.retireDriver(self);
             try evaluator.startDriver(next);
             return .detached;
         }
@@ -2724,8 +2725,7 @@ pub const Machine = struct {
                 .loading = self.loading.take(),
                 .path = self.path.take(),
             });
-            evaluator.detachWorkDriver(self);
-            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            evaluator.retireDriver(self);
             try evaluator.startDriver(next);
             return .detached;
         }
@@ -2807,8 +2807,7 @@ pub const Machine = struct {
                             .loading = self.loading.take(),
                             .path = self.path.take(),
                         });
-                        evaluator.detachWorkDriver(self);
-                        heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+                        evaluator.retireDriver(self);
                         try evaluator.startDriver(next);
                         return .detached;
                     },
@@ -2901,8 +2900,7 @@ pub const Machine = struct {
                 break :retained after.path;
             } else null;
             defer if (path) |item| evaluator.releaseDomain().releaseValue(item);
-            evaluator.detachWorkDriver(self);
-            heap.destroyDriver(evaluator.releaseDomain(), evaluator.unit.allocator, self);
+            evaluator.retireDriver(self);
             if (allow_load) {
                 try evaluator.autoLoadModule(name, .use);
             } else {
@@ -3472,12 +3470,7 @@ pub const Machine = struct {
                         evaluator.allocator(),
                     );
                     self.path_value = null;
-                    evaluator.detachWorkDriver(self);
-                    heap.destroyDriver(
-                        evaluator.releaseDomain(),
-                        evaluator.allocator(),
-                        self,
-                    );
+                    evaluator.retireDriver(self);
                     try evaluator.sourceOwned(path, source, completion);
                     return .detached;
                 },
@@ -4905,8 +4898,7 @@ const DispatchDriver = struct {
             .complete => |outcome| {
                 self.resolution.deinit(self_machine.releaseDomain(), self_machine.allocator());
                 const allocator = self_machine.unit.allocator;
-                self_machine.detachWorkDriver(self);
-                self_machine.finishDriver(self);
+                self_machine.retireDriver(self);
                 switch (outcome) {
                     .resolved => |resolution| {
                         var resolved = resolution;
@@ -5229,7 +5221,7 @@ pub const ResolutionCursor = struct {
                 .complete => |maybe_dot| result: {
                     if (maybe_dot) |dot_index| {
                         if (dot_index == 0 or dot_index + 1 == self.spelling.len or self.registry == null) {
-                            self.work = .none;
+                            self.work.deinit();
                             self.phase = .complete;
                             break :result .{ .complete = .unresolved };
                         }
@@ -5237,7 +5229,7 @@ pub const ResolutionCursor = struct {
                         self.work = .{ .atom = intern.lookupCursor(self.spelling[0..dot_index]) };
                         self.phase = .prefix;
                     } else {
-                        self.work = .none;
+                        self.work.deinit();
                         self.phase = .scope;
                     }
                     break :result .pending;
@@ -5247,7 +5239,7 @@ pub const ResolutionCursor = struct {
                 .pending => .pending,
                 .complete => |maybe_prefix| result: {
                     const prefix = maybe_prefix orelse {
-                        self.work = .none;
+                        self.work.deinit();
                         self.phase = .complete;
                         break :result .{ .complete = .{
                             .unknown_module_prefix = self.spelling[0..self.dot_index],
@@ -5266,7 +5258,7 @@ pub const ResolutionCursor = struct {
                 .pending => .pending,
                 .complete => |maybe_module| result: {
                     self.prefix = maybe_module orelse {
-                        self.work = .none;
+                        self.work.deinit();
                         self.phase = .complete;
                         break :result .{ .complete = .unresolved };
                     };
@@ -5293,7 +5285,7 @@ pub const ResolutionCursor = struct {
                 .pending => .pending,
                 .complete => |maybe_export| result: {
                     const export_name = maybe_export orelse {
-                        self.work = .none;
+                        self.work.deinit();
                         self.releaseGeneration();
                         self.phase = .complete;
                         break :result .{ .complete = .unresolved };
@@ -5307,7 +5299,7 @@ pub const ResolutionCursor = struct {
                 .pending => .pending,
                 .complete => |maybe_binding| result: {
                     self.export_name = maybe_binding orelse {
-                        self.work = .none;
+                        self.work.deinit();
                         self.releaseGeneration();
                         self.phase = .complete;
                         break :result .{ .complete = .unresolved };

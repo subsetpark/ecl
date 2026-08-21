@@ -1702,10 +1702,12 @@ pub fn validateDriverOwnership(comptime Driver: type) DriverOwnership {
     return ownership;
 }
 
-/// Retire a fully initialized driver value whose heap allocation failed.
+/// Retire a fully initialized driver's owned fields without freeing the
+/// storage holding them — either because the allocation that would have held
+/// it failed, or because it never had one and lives in the unit's inline slot.
 /// Self-owned drivers are deliberately excluded because their representation
 /// is only valid after address-stable construction.
-pub fn deinitUninstalledDriver(
+pub fn deinitDriverFields(
     releases: *ReleaseDomain,
     allocator: std.mem.Allocator,
     driver: anytype,

@@ -361,8 +361,7 @@ const IdiomDriver = struct {
             evaluator.allocator(),
         );
         self.resolution = null;
-        evaluator.detachWorkDriver(self);
-        evaluator.finishDriver(self);
+        evaluator.retireDriver(self);
         if (entry) |selected| {
             defer fallback.deinit(evaluator.releaseDomain(), evaluator.allocator());
             const direct_parent = if (selected.context == .direct)

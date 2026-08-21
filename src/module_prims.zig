@@ -168,8 +168,7 @@ const RegisterDriver = struct {
                 );
                 const item = self.module.?.take();
                 self.module = null;
-                evaluator.detachWorkDriver(self);
-                heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+                evaluator.retireDriver(self);
                 try evaluator.registerModuleOwned(item, name);
                 return .detached;
             },
@@ -188,8 +187,7 @@ const UseNameDriver = struct {
             .pending => {},
             .complete => |maybe_name| {
                 const name = maybe_name orelse return evaluator.fail(.domain, "use requires a valid module name");
-                evaluator.detachWorkDriver(self);
-                heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+                evaluator.retireDriver(self);
                 try evaluator.useOrLoad(name);
                 return .detached;
             },
@@ -434,8 +432,7 @@ const LoadPathDriver = struct {
         const path = self.path.?.take();
         const path_value = self.path_value.take();
         self.path = null;
-        evaluator.detachWorkDriver(self);
-        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+        evaluator.retireDriver(self);
         try evaluator.loadFileOwned(path, path_value);
         return .detached;
     }

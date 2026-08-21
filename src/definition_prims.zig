@@ -305,8 +305,7 @@ fn resolveForReflection(
         .resolved => |resolved| .{ .resolved = resolved },
         .unresolved => evaluator.undefinedName(requested),
         .unknown_module_prefix, .unregistered_module => {
-            evaluator.detachWorkDriver(driver);
-            heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), driver);
+            evaluator.retireDriver(driver);
             return .{ .retry = try evaluator.retryQualifiedOperandAfterLoad(requested, outcome) };
         },
     };

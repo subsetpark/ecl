@@ -194,8 +194,7 @@ const ParseDriver = struct {
         };
         const source = self.source.?.take();
         self.source = null;
-        evaluator.detachWorkDriver(self);
-        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+        evaluator.retireDriver(self);
         try evaluator.parseSourceOwned(source);
         return .detached;
     }
@@ -458,8 +457,7 @@ const SlurpDriver = struct {
         const path = self.path.?.take();
         const path_value = self.path_value.take();
         self.path = null;
-        evaluator.detachWorkDriver(self);
-        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+        evaluator.retireDriver(self);
         try evaluator.slurpFileOwned(path, path_value);
         return .detached;
     }
@@ -522,8 +520,7 @@ const SpitDriver = struct {
         const path_value = self.path_value.take();
         self.path = null;
         self.contents = null;
-        evaluator.detachWorkDriver(self);
-        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+        evaluator.retireDriver(self);
         try evaluator.writeFileOwned(path, path_value, contents);
         return .detached;
     }

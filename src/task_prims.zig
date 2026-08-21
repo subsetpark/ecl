@@ -149,8 +149,7 @@ const ParEachDriver = struct {
         }
         if (self.index != count) return .yielded;
         const task_values = self.tasks.borrowMut().takeList();
-        evaluator.detachWorkDriver(self);
-        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+        evaluator.retireDriver(self);
         try evaluator.beginTaskJoinOwned(task_values);
         return .detached;
     }
@@ -181,8 +180,7 @@ const AwaitAnyDriver = struct {
         if (self.index != count) return .yielded;
         _ = self.tasks.?.take();
         self.tasks = null;
-        evaluator.detachWorkDriver(self);
-        heap.destroyDriver(evaluator.releaseDomain(), evaluator.allocator(), self);
+        evaluator.retireDriver(self);
         try evaluator.park(.{ .any = task_values });
         return .detached;
     }
