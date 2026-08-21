@@ -731,6 +731,12 @@ pub const DictFindCursor = struct {
     pub fn advance(self: *DictFindCursor, budget: usize) error{OutOfMemory}!DictFindProgress {
         std.debug.assert(budget != 0);
         if (self.key_hash == null) {
+            // A key with no structure hashes in one call. Only a list or dict
+            // key needs the worklist the cursor allocates.
+            if (equal.scalarHash(self.key)) |computed| {
+                self.key_hash = computed;
+                return .pending;
+            }
             if (self.hash_cursor == null) self.hash_cursor = try .init(self.allocator, self.key);
             switch (try self.hash_cursor.?.advance(budget)) {
                 .pending => return .pending,
@@ -747,6 +753,15 @@ pub const DictFindCursor = struct {
         while (remaining != 0 and self.candidate != count) {
             const stored = dict.hashAt(self.header, self.candidate);
             if (stored != self.key_hash.?) {
+                self.candidate += 1;
+                remaining -= 1;
+                continue;
+            }
+            // Same for comparing a candidate key against it: a pair with no
+            // structure is one comparison, and a stored key whose hash already
+            // matched is overwhelmingly that pair.
+            if (equal.matchWithoutStructure(dict.keyAt(self.header, self.candidate), self.key)) |matches| {
+                if (matches) return .{ .complete = dict.valueAt(self.header, self.candidate) };
                 self.candidate += 1;
                 remaining -= 1;
                 continue;

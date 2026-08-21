@@ -549,7 +549,10 @@ fn numericHash(number: f64) u64 {
     return mix(0x4e55_4d42, @bitCast(normalized));
 }
 
-fn scalarHash(item: Value) ?u64 {
+/// The hash `HashCursor` reaches without a worklist: a value with no structure
+/// to walk. `null` means it has some. The cursor's own leaf case is this call,
+/// so a caller that takes the answer directly cannot disagree with it.
+pub fn scalarHash(item: Value) ?u64 {
     return switch (item) {
         .int => |number| numericHash(@floatFromInt(number)),
         .float => |number| numericHash(number),

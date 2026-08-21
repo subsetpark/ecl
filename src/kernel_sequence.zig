@@ -86,6 +86,23 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
             return evaluator.fail(.domain, "at index is out of bounds");
         return evaluator.pushBorrowed(list.atUnchecked(collection.borrow(), position));
     }
+    // A dict has one key to find and nothing to descend into, so it needs the
+    // find cursor and not the index cursor's frame stack -- which is sized by
+    // its widest frame and costs a chunk allocation per lookup to hold one
+    // entry. `DictFindCursor` allocates nothing for a key without structure,
+    // and falls back to its own worklists for one that has some.
+    if (collection.borrow() == .dict) {
+        const find = storage.DictFindCursor.initHeader(
+            evaluator.allocator(),
+            collection.borrow().dict,
+            index.borrow(),
+        );
+        return evaluator.startDriver(DictAtDriver{
+            .collection = .init(collection.take()),
+            .key = .init(index.take()),
+            .cursor = .init(find),
+        });
+    }
     const cursor = try IndexCursor.init(
         evaluator.releaseDomain(),
         evaluator.allocator(),
@@ -109,6 +126,29 @@ const IndexDriver = struct {
         return switch (try self.cursor.borrowMut().advance(evaluator, machine.kernel_poll_quantum)) {
             .pending => .yielded,
             .complete => |result| .{ .output = result },
+        };
+    }
+};
+
+/// Finding one key in one dict: no descent, so no frame stack. The miss is the
+/// same failure `IndexCursor` reports, because it is the only other caller of
+/// this cursor for the same job.
+const DictAtDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    pub const inline_driver = true;
+    collection: heap.Owned(Value),
+    key: heap.Owned(Value),
+    cursor: heap.Owned(storage.DictFindCursor),
+    pub fn advance(evaluator: *Machine, self: *DictAtDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        return switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .complete => |maybe_result| result: {
+                const found = maybe_result orelse
+                    return evaluator.fail(.domain, "at could not find the dict key");
+                heap.retainValue(found);
+                break :result .{ .output = found };
+            },
         };
     }
 };

@@ -1491,9 +1491,10 @@ fn WorkDriverAdapters(comptime Driver: type) type {
         }
 
         /// Teardown for a driver living in the unit's inline slot: the same
-        /// field ownership, without the destroy that storage never had. The
-        /// slot is not marked free because the only caller is unit teardown,
-        /// which invalidates the unit immediately afterward.
+        /// field ownership, without the destroy that storage never had.
+        /// Releasing the slot belongs to the caller, which knows the unit:
+        /// `clearWorkDriver` frees it, and unit teardown does not bother
+        /// because it invalidates the unit immediately afterward.
         fn deinitInline(
             releases: *heap.ReleaseDomain,
             allocator: std.mem.Allocator,
@@ -2027,6 +2028,13 @@ pub const Unit = struct {
     fn releaseInlineDriver(self: *Unit) void {
         std.debug.assert(self.driver_slot_busy);
         self.driver_slot_busy = false;
+    }
+
+    /// True while the inline slot holds a live driver. Tests assert on this:
+    /// a slot that is never released is not a failure any behaviour can see,
+    /// only a silent return to allocating.
+    pub fn inlineDriverBusy(self: *const Unit) bool {
+        return self.driver_slot_busy;
     }
 
     pub fn deinit(self: *Unit) void {
@@ -4789,7 +4797,13 @@ fn loop(self: *Machine) MachineError!RunStatus {
 
 fn clearWorkDriver(unit: *Unit) void {
     const driver = unit.takeWorkDriver() orelse return;
+    const inline_storage = unit.ownsInlineDriver(driver.context);
     driver.deinit(unit.releases, unit.allocator);
+    // A driver that finishes by handing back a result is torn down here rather
+    // than retiring itself, so this is the other place the slot comes free.
+    // Without it an inline driver that completed this way would hold the slot
+    // for the rest of the unit's life and every later driver would allocate.
+    if (inline_storage) unit.releaseInlineDriver();
 }
 
 fn resumePark(self: *Machine) MachineError!void {
