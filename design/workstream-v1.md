@@ -2760,6 +2760,32 @@ INTERPRETER.md and its entry here is retired.
       environment per element by design; whether it can be made cheaper
       without changing the isolation that makes it correct is unmeasured.
 
+21. **`ChunkStack` allocates a chunk to hold one entry** (measured 2026-08-21
+    while closing the allocation sweep). Every poll-driven cursor in the
+    interpreter builds its worklist on `poll.ChunkStack`, and every one of them
+    allocates its first chunk on construction — `IndexCursor`,
+    `MembershipCursor`, `MatchCursor`, `HashCursor`, and `PervadeCursor` all
+    push exactly one entry and, overwhelmingly, never push a second.
+
+    - Measured: after the leaf answers were taken everywhere else, membership
+      over a generic spine with a scalar needle costs exactly one allocation
+      per call, and it is this chunk. Dict `at` avoided it only by routing
+      around `IndexCursor` to a driver that holds a `DictFindCursor` directly;
+      that was a fix for one caller, not for the shape.
+    - The contained version is an inline first entry: hold one frame in the
+      cursor and allocate a chunk only on the second push. Most cursors would
+      then allocate nothing, and the ones that genuinely descend would pay what
+      they always did.
+    - The hazard is that inline storage moves with the value. Cursors live
+      inside drivers, drivers are now sometimes constructed in a unit's inline
+      slot, and `slot.* = pending` copies the driver — so an inline frame must
+      hold no pointer into itself, and that has to be checked rather than
+      assumed. `ChunkStack` is shared by every kernel, so a mistake here is not
+      contained to one primitive.
+    - Not attempted on the branch that found it. The allocation budgets record
+      what this would improve, so the change can be measured against them
+      rather than argued about.
+
 ## Decisions Made
 
 - **Verification is tiered, and the local tier is not a copy of CI

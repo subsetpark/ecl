@@ -777,10 +777,23 @@ const MembershipCursor = struct {
                         self.last = .{ .int = 0 };
                         continue;
                     }
+                    // A candidate with no structure against a needle with none
+                    // is one comparison. Only a pair that has some needs the
+                    // worklist, which was being allocated for every candidate.
+                    const candidate_value = list.atUnchecked(self.collection, search.candidate);
+                    if (equal.matchWithoutStructure(search.needle, candidate_value)) |matches| {
+                        if (matches) {
+                            self.last = .{ .int = 1 };
+                            continue;
+                        }
+                        search.candidate += 1;
+                        try self.frames.push(.{ .search = search.* });
+                        continue;
+                    }
                     if (search.match == null) search.match = try .init(
                         self.allocator,
                         search.needle,
-                        list.atUnchecked(self.collection, search.candidate),
+                        candidate_value,
                     );
                     switch (try search.match.?.advance(remaining)) {
                         .pending => {
