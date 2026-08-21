@@ -514,6 +514,10 @@ fn ScalarMembershipDriver(comptime haystack_kind: value.HeapKind) type {
     return struct {
         const Self = @This();
         pub const ownership: heap.DriverOwnership = .fields;
+        /// Scanning a leaf haystack is bounded work whatever its length, so
+        /// this driver earns its existence; it did not earn an allocation to
+        /// come into being, and for a short haystack that was the whole cost.
+        pub const inline_driver = true;
 
         haystack: heap.Owned(heap.LeafReader(haystack_kind)),
         needle: Value,
@@ -666,6 +670,11 @@ fn startTypedMembership(evaluator: *Machine, needle: Value, haystack: Value) Mac
 
 const MembershipDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
+    /// Same reasoning as the typed scan: the walk is bounded work, its
+    /// creation need not allocate. This path also carries a cursor that
+    /// allocates its own frame stack, so membership over a generic spine
+    /// still costs one; the budget records that rather than claiming it away.
+    pub const inline_driver = true;
     needle: heap.Owned(Value),
     collection: heap.Owned(Value),
     cursor: heap.Owned(MembershipCursor),

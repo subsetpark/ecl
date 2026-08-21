@@ -261,6 +261,12 @@ const dispatch_free = [_]Case{
         .workload = "(pop 1 2 cmp) each len",
         .per_element = 0,
     },
+    .{
+        .name = "membership",
+        .setup = "{d} range",
+        .workload = "(pop 2 [1 2 3] in?) each len",
+        .per_element = 0,
+    },
     // Swept across the primitive surface 2026-08-21 rather than sampled. Every
     // one of these already measured zero; they are here so that stays true.
     .{
@@ -461,6 +467,25 @@ test "allocation: dispatch spends nothing per element" {
     for (dispatch_free) |case| try expectBudget(case);
 }
 
+/// Membership over a generic spine, which the typed scan declines. Nine
+/// allocations per call for a two-element haystack: the walk carries a cursor
+/// whose frame stack allocates whether or not there is anything to descend
+/// into, and comparing structured candidates allocates a match worklist each.
+/// Recorded rather than fixed -- it is the same frame-stack-for-one-entry shape
+/// removed from dict lookup, and the same fix would suit it.
+const generic_membership = [_]Case{
+    .{
+        .name = "membership over a generic spine",
+        .setup = "{d} range",
+        .workload = "(pop [1 2] [[1 2] [3]] in?) each len",
+        .per_element = 9,
+    },
+};
+
+test "allocation: generic membership holds its recorded cost" {
+    for (generic_membership) |case| try expectBudget(case);
+}
+
 /// Operations that build something. These allocate because there is a value to
 /// construct, not because reaching the construction cost anything. The numbers
 /// are what the sweep measured, not what anyone argued for: several look higher
@@ -607,12 +632,6 @@ test "allocation: construction stays at its recorded floor" {
 /// while the question stays open; lowering one to zero is the point of looking
 /// at them.
 const scalar_result_suspects = [_]Case{
-    .{
-        .name = "membership",
-        .setup = "{d} range",
-        .workload = "(pop 2 [1 2 3] in?) each len",
-        .per_element = 1,
-    },
     .{
         .name = "dict membership",
         .setup = "{d} range",
