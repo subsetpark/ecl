@@ -273,6 +273,12 @@ const dispatch_free = [_]Case{
         .workload = "(pop {'a 1} 'a has?) each len",
         .per_element = 0,
     },
+    .{
+        .name = "fold to a scalar",
+        .setup = "{d} range",
+        .workload = "(pop [1 2] 0 (+) fold) each len",
+        .per_element = 0,
+    },
     // Swept across the primitive surface 2026-08-21 rather than sampled. Every
     // one of these already measured zero; they are here so that stays true.
     .{
@@ -628,24 +634,4 @@ const construction = [_]Case{
 
 test "allocation: construction stays at its recorded floor" {
     for (construction) |case| try expectBudget(case);
-}
-
-/// Operations whose result is a scalar and whose budget is nevertheless not
-/// zero. Each allocates once per call to produce a number or a boolean, which
-/// is the same shape as the cursor-and-driver costs already removed from
-/// arithmetic, indexing, matching, and dict lookup. They are recorded at what
-/// they cost rather than at what they should cost, so the budget holds the line
-/// while the question stays open; lowering one to zero is the point of looking
-/// at them.
-const scalar_result_suspects = [_]Case{
-    .{
-        .name = "fold to a scalar",
-        .setup = "{d} range",
-        .workload = "(pop [1 2] 0 (+) fold) each len",
-        .per_element = 1,
-    },
-};
-
-test "allocation: scalar results hold their recorded cost" {
-    for (scalar_result_suspects) |case| try expectBudget(case);
 }

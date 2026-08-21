@@ -2391,6 +2391,13 @@ const TypedReduceStep = *const fn (*TypedReduceState, support.Context) MachineEr
 
 const TypedReduceDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
+    /// A sequential reduce over a leaf of any length has to be able to yield,
+    /// so the driver is earned; its creation is not, and for a short fold that
+    /// was the whole cost. It qualifies for the slot on lifetime as well as
+    /// size: it lives for one reduction and releases the slot when it
+    /// publishes, rather than spanning an iteration the way a combinator's own
+    /// driver does.
+    pub const inline_driver = true;
 
     state: heap.Owned(TypedReduceState),
     step: TypedReduceStep,

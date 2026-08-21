@@ -1511,6 +1511,17 @@ fn WorkDriverAdapters(comptime Driver: type) type {
 /// checked here rather than assumed, so a driver that outgrows the slot or
 /// stops owning its fields fails the build instead of silently reverting to an
 /// allocation.
+///
+/// What the compiler cannot check is the one rule that decides whether the
+/// annotation helps: **declare it on short-lived drivers, never on long-lived
+/// ones.** There is a single slot per unit and its holder keeps it until the
+/// driver is retired, so a driver that spans an iteration would hold the slot
+/// for the iteration's whole length and push every driver started inside it
+/// back to the allocator. That is worse than not declaring it at all, and it
+/// is invisible: the annotation still compiles, the slot is still used, and the
+/// allocations simply move rather than disappear. A combinator's own iteration
+/// driver is the shape to leave alone; the leaf drivers it starts per element
+/// are the shape this is for.
 fn inlineDriverCapable(comptime Driver: type) bool {
     if (!@hasDecl(Driver, "inline_driver")) return false;
     if (heap.validateDriverOwnership(Driver) != .fields)
