@@ -267,6 +267,12 @@ const dispatch_free = [_]Case{
         .workload = "(pop 2 [1 2 3] in?) each len",
         .per_element = 0,
     },
+    .{
+        .name = "dict membership",
+        .setup = "{d} range",
+        .workload = "(pop {'a 1} 'a has?) each len",
+        .per_element = 0,
+    },
     // Swept across the primitive surface 2026-08-21 rather than sampled. Every
     // one of these already measured zero; they are here so that stays true.
     .{
@@ -632,12 +638,6 @@ test "allocation: construction stays at its recorded floor" {
 /// while the question stays open; lowering one to zero is the point of looking
 /// at them.
 const scalar_result_suspects = [_]Case{
-    .{
-        .name = "dict membership",
-        .setup = "{d} range",
-        .workload = "(pop {'a 1} 'a has?) each len",
-        .per_element = 1,
-    },
     .{
         .name = "fold to a scalar",
         .setup = "{d} range",

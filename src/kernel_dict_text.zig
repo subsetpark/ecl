@@ -82,6 +82,11 @@ fn hasPrimitive(evaluator: *Machine) MachineError!void {
 
 const HasDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
+    /// Searching a dict is bounded work over however many entries it has, so
+    /// the driver is earned; its creation is not. `DictFindCursor` already
+    /// allocates nothing for a key without structure, which left this as the
+    /// only cost of asking whether a dict holds a symbol.
+    pub const inline_driver = true;
     dictionary: heap.Owned(Value),
     key: heap.Owned(Value),
     cursor: heap.Owned(storage.DictFindCursor),
