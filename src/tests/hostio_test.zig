@@ -283,5 +283,5 @@ test "hostio: io exports are documented and importable" {
         defer allocator.free(source);
         try expectStack(.{ .source = source }, "1");
     }
-    try expectStack(.{ .source = "'io use 7 inspect" }, "7");
+    try expectStack(.{ .source = "7 io.inspect" }, "7");
 }

@@ -218,7 +218,7 @@ test "http: every exported word carries documentation" {
     for ([_][]const u8{ "get", "post" }) |name| {
         const source = try std.fmt.allocPrint(
             allocator,
-            "'http use 'http.{s} doc len 0 >",
+            "'http.{s} doc len 0 >",
             .{name},
         );
         defer allocator.free(source);

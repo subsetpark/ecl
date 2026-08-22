@@ -122,7 +122,7 @@ test "json: every exported word carries documentation" {
     for ([_][]const u8{ "parse", "emit" }) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'json use 'json.{s} doc len 0 >",
+            "'json.{s} doc len 0 >",
             .{name},
         );
         defer std.testing.allocator.free(source);

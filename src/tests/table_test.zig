@@ -443,7 +443,7 @@ test "table: every exported core word has nonempty documentation" {
     for (names) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'table use 'table.{s} body type 'table.{s} doc len 0 >",
+            "'table.{s} body type 'table.{s} doc len 0 >",
             .{ name, name },
         );
         defer std.testing.allocator.free(source);

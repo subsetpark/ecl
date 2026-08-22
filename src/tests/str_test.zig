@@ -241,7 +241,7 @@ test "str: every exported word has nonempty documentation" {
     for (names) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'str use 'str.{s} body type 'str.{s} doc len 0 >",
+            "'str.{s} body type 'str.{s} doc len 0 >",
             .{ name, name },
         );
         defer std.testing.allocator.free(source);

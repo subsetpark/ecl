@@ -131,14 +131,14 @@ test "pkg: version ordering is a strict total order over a generated corpus" {
         order_laws ++ "[\"1.0.0\" \"1.0.0-alpha\"] ascending-flags (1 =) all?",
         "0",
     );
-    // Ordering survives a session that has imported `table`. That module
-    // exports `where`, and `use` splices it over the core kernel that prelude
-    // `find`, `filter`, and `partition` resolve through — so a `pkg` word
-    // reaching any of those three answered "a table must be a dict of columns"
-    // instead of ordering two versions. Expected to break loudly when `use`
-    // becomes a single-name import, at which point the hazard is gone.
+    // Ordering survives a session that has deliberately shadowed `where`,
+    // which prelude `find`, `filter`, and `partition` resolve through. When
+    // this could happen wholesale and silently — `'table use` spliced every
+    // export at once — a `pkg` word reaching any of those three answered "a
+    // table must be a dict of columns" instead of ordering two versions. It
+    // now takes naming `where`, and it still must not reach this module.
     try support.expectStack(
-        "'table use \"1.2.0\" \"1.10.0\" pkg.version< " ++
+        "'where 'table.where import \"1.2.0\" \"1.10.0\" pkg.version< " ++
             "[\"1.0.0-a\" \"1.0.0\"] pkg.version-max",
         "1 \"1.0.0\"",
     );

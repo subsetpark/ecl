@@ -300,7 +300,7 @@ test "result: every exported word carries documentation" {
     for (names) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'result use 'result.{s} body type 'result.{s} doc len 0 >",
+            "'result.{s} body type 'result.{s} doc len 0 >",
             .{ name, name },
         );
         defer std.testing.allocator.free(source);

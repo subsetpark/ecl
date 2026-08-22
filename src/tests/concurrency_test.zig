@@ -61,7 +61,7 @@ test "concurrency: native shutdown releases delayed continuations and image pins
             },
             .{ .worker_pool = 1 },
         );
-        try runOk(&runtime, "'sample use (9 sample.yield-forever) @spawn pop");
+        try runOk(&runtime, "(9 sample.yield-forever) @spawn pop");
         runtime.deinit();
     }
     try std.testing.expectEqual(.ok, counting.deinit());
