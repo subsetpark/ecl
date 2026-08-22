@@ -62,7 +62,7 @@ const entries = [_]Metadata{
     .{ .name = "body", .effect = "name -- quotation", .text = "Return the stored quotation body of a resolved word." },
     .{ .name = "doc", .effect = "name -- string", .text = "Return the canonical documentation string of a resolved binding." },
     .{ .name = "which", .effect = "name --", .text = "Print where a word resolves and any bindings it shadows." },
-    .{ .name = "see", .effect = "name --", .text = "Print a canonical, re-readable representation of a binding." },
+    .{ .name = "see", .effect = "name --", .text = "Print a standard-formatted, re-readable representation of a binding." },
 
     .{ .name = "unmodule", .effect = "module-name --", .text = "Close, quiesce, and retire a registered module named by a symbol." },
     .{ .name = "within", .effect = "quotation -- ...", .text = "Run a quotation against a private draft of the home module's durable stack and publish the result." },

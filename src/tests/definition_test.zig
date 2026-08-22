@@ -100,7 +100,10 @@ test "every primitive exposes meaningful reflective documentation" {
     try std.testing.expectEqualStrings(expected.written(), display.bytes());
     try expectOk(&runtime, "'over see 'call see");
     try std.testing.expectEqualStrings(
-        "(swap dup (swap) dip) (x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") 'over def\n" ++
+        "### def over\n" ++
+            "(swap dup (swap) dip) (x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\")\n" ++
+            "'over\n" ++
+            "def\n" ++
             "<primitive> (quotation -- ... : \"Run a quotation on the current stack.\") 'call def\n",
         output.written(),
     );
@@ -151,8 +154,10 @@ test "multiline documentation is normalized and see is canonical and re-readable
         "'square see 'answer see");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqualStrings(
-        "(dup *) (x -- y : \"Square a numeric value.\") 'square def\n" ++
-            "[42] (: \"Only docs.\") 'answer def\n",
+        "### def square\n" ++
+            "(dup *) (x -- y : \"Square a numeric value.\") 'square def\n" ++
+            "### def answer\n" ++
+            "(42) (: \"Only docs.\") 'answer def\n",
         output.written(),
     );
 
@@ -164,6 +169,32 @@ test "multiline documentation is normalized and see is canonical and re-readable
     var display = try reread.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings("16 1 42 1", display.bytes());
+}
+
+test "see retains source binders while execution uses their lowered body" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    defer runtime.deinit();
+
+    // Define and reflect in separate units: the binding, rather than the
+    // already-retired input turn, owns the shared source slice.
+    try expectOk(&runtime, "(|x| x 1 +) (n -- n : \"Increment.\") 'inc def");
+    try expectOk(&runtime, "'inc see");
+    try std.testing.expectEqualStrings(
+        "### def inc\n(|x| x 1 +) (n -- n : \"Increment.\") 'inc def\n",
+        output.written(),
+    );
+
+    // The reflected definition is ordinary source: rereading it lowers the
+    // binder again, and both copies execute identically.
+    var reread = try session.Session.init(std.testing.allocator, &.{});
+    defer reread.deinit();
+    try expectOk(&reread, output.written());
+    try expectOk(&reread, "41 inc");
+    var display = try reread.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("42", display.bytes());
 }
 
 test "redefinition and set replace behavior and clear metadata" {
@@ -363,6 +394,7 @@ test "definitions: which and see render set bindings as public defs" {
     try expectOk(&runtime, "3 'x set 'x which 'x see");
     try std.testing.expectEqualStrings(
         "x -> x def public\n" ++
+            "### def x\n" ++
             "([3] first) 'x def\n",
         output.written(),
     );

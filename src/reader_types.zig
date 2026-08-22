@@ -16,13 +16,62 @@ pub const Incomplete = struct {
     span: Span,
 };
 
+const SourceBacking = struct {
+    allocator: std.mem.Allocator,
+    refs: std.atomic.Value(u32) = .init(1),
+    bytes: []u8,
+};
+
+/// A source buffer shared by provenance and every binding that retains a
+/// reflective slice of it. Slices add only a refcount and two offsets; source
+/// bodies are never copied per definition.
+pub const SourceSlice = struct {
+    backing: *SourceBacking,
+    start: usize,
+    end: usize,
+
+    pub fn initOwned(allocator: std.mem.Allocator, owned_bytes: []u8) error{OutOfMemory}!SourceSlice {
+        const backing = allocator.create(SourceBacking) catch |err| {
+            allocator.free(owned_bytes);
+            return err;
+        };
+        backing.* = .{ .allocator = allocator, .bytes = owned_bytes };
+        return .{ .backing = backing, .start = 0, .end = owned_bytes.len };
+    }
+    pub fn slice(self: SourceSlice, start: usize, end: usize) SourceSlice {
+        std.debug.assert(start <= end and end <= self.end - self.start);
+        return .{ .backing = self.backing, .start = self.start + start, .end = self.start + end };
+    }
+    pub fn bytes(self: SourceSlice) []const u8 {
+        return self.backing.bytes[self.start..self.end];
+    }
+    pub fn retain(self: SourceSlice) void {
+        const old = self.backing.refs.fetchAdd(1, .monotonic);
+        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
+    }
+    pub fn deinit(self: *SourceSlice) void {
+        const backing = self.backing;
+        const old = backing.refs.fetchSub(1, .release);
+        std.debug.assert(old != 0);
+        if (old == 1) {
+            _ = backing.refs.load(.acquire);
+            const allocator = backing.allocator;
+            allocator.free(backing.bytes);
+            allocator.destroy(backing);
+        }
+        self.* = undefined;
+    }
+};
+
 /// Provenance is keyed by the identity of reader-built code lists. Runtime-
 /// built or CoW-copied lists are naturally absent.
 pub const SpanTable = struct {
+    pub const SourceRange = struct { start: usize, end: usize };
     const bucket_count = 4096;
     pub const Entry = struct {
         header: *Header,
         spans: []Span,
+        source_range: ?SourceRange = null,
         next_bucket: ?*Entry = null,
     };
     pub const EntryList = poll.ChunkList(Entry);
@@ -86,6 +135,23 @@ pub const SpanTable = struct {
         return .{ .header = header, .entry = self.buckets[bucket(header)] };
     }
 
+    pub const SourceLookupProgress = poll.Progress(?SourceRange);
+    pub const SourceLookupCursor = struct {
+        header: *Header,
+        entry: ?*Entry,
+        pub fn advance(self: *SourceLookupCursor) SourceLookupProgress {
+            const current = self.entry orelse return .{ .complete = null };
+            self.entry = current.next_bucket;
+            if (current.header == self.header and current.source_range != null)
+                return .{ .complete = current.source_range };
+            return .pending;
+        }
+    };
+    pub fn sourceLookupCursor(self: *const SpanTable, header: *Header) ?SourceLookupCursor {
+        if (self.buckets.len == 0) return null;
+        return .{ .header = header, .entry = self.buckets[bucket(header)] };
+    }
+
     pub const PutProgress = poll.Progress(void);
     pub const PutCursor = struct {
         table: *SpanTable,
@@ -93,6 +159,7 @@ pub const SpanTable = struct {
         header: *Header,
         source: []const Span,
         uniform: ?Span,
+        source_range: ?SourceRange = null,
         owned: ?[]Span = null,
         index: usize = 0,
         initializing_buckets: bool = false,
@@ -118,6 +185,23 @@ pub const SpanTable = struct {
                 .header = header,
                 .source = &.{},
                 .uniform = span,
+            };
+        }
+        pub fn initSource(
+            table: *SpanTable,
+            allocator: std.mem.Allocator,
+            header: *Header,
+            source: []const Span,
+            start: usize,
+            end: usize,
+        ) PutCursor {
+            return .{
+                .table = table,
+                .allocator = allocator,
+                .header = header,
+                .source = source,
+                .uniform = null,
+                .source_range = .{ .start = start, .end = end },
             };
         }
         pub fn deinit(self: *PutCursor) void {
@@ -163,6 +247,7 @@ pub const SpanTable = struct {
                     const entry = try self.table.entries.appendPtr(.{
                         .header = self.header,
                         .spans = self.owned.?,
+                        .source_range = self.source_range,
                         .next_bucket = self.table.buckets[bucket_index],
                     });
                     self.table.buckets[bucket_index] = entry;
@@ -182,6 +267,7 @@ pub const Parsed = struct {
     releases: *heap.ReleaseDomain,
     spans: SpanTable,
     source_name: []u8,
+    source: ?SourceSlice,
 
     pub fn values(self: *const Parsed) []const Value {
         return self.forms.values();
@@ -213,6 +299,8 @@ pub const Parsed = struct {
                 .source_name => result: {
                     self.parsed.allocator.free(self.parsed.source_name);
                     self.parsed.source_name = &.{};
+                    if (self.parsed.source) |*source| source.deinit();
+                    self.parsed.source = null;
                     self.phase = .complete;
                     break :result false;
                 },

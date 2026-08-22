@@ -13,6 +13,7 @@ const Entry = struct {
     root: value.Value,
     spans: reader.SpanTable,
     source_name: []u8,
+    source: reader.SourceSlice,
     fn deinit(
         self: *Entry,
         allocator: std.mem.Allocator,
@@ -22,6 +23,7 @@ const Entry = struct {
         while (spans_cursor.advance(releases) == .pending) {}
         releases.releaseValue(self.root);
         allocator.free(self.source_name);
+        self.source.deinit();
         self.* = undefined;
     }
 };
@@ -125,9 +127,11 @@ pub const SpanArchive = enum(usize) {
                         .root = self.root,
                         .spans = self.parsed.spans,
                         .source_name = self.parsed.source_name,
+                        .source = self.parsed.source.?,
                     });
                     self.parsed.spans = .init(self.archive.allocator());
                     self.parsed.source_name = &.{};
+                    self.parsed.source = null;
                     self.phase = .complete;
                     break :result .complete;
                 },
@@ -190,6 +194,41 @@ pub const SpanArchive = enum(usize) {
         std.Io.Threaded.mutexLock(&backing.mutex);
         defer std.Io.Threaded.mutexUnlock(&backing.mutex);
         return .{ .entries = backing.entries.reverseIterator(), .header = header, .index = index };
+    }
+
+    pub const SourceProgress = poll.Progress(?reader.SourceSlice);
+    pub const SourceCursor = struct {
+        entries: poll.ChunkList(Entry).ReverseIterator,
+        header: *value.ListHandle,
+        active: ?struct {
+            entry: *const Entry,
+            lookup: reader.SpanTable.SourceLookupCursor,
+        } = null,
+
+        pub fn advance(self: *SourceCursor) SourceProgress {
+            if (self.active) |*active| return switch (active.lookup.advance()) {
+                .pending => .pending,
+                .complete => |maybe_range| result: {
+                    if (maybe_range) |range| {
+                        const source = active.entry.source.slice(range.start, range.end);
+                        source.retain();
+                        return .{ .complete = source };
+                    }
+                    self.active = null;
+                    break :result .pending;
+                },
+            };
+            const entry = self.entries.next() orelse return .{ .complete = null };
+            if (entry.spans.sourceLookupCursor(@constCast(self.header))) |lookup|
+                self.active = .{ .entry = entry, .lookup = lookup };
+            return .pending;
+        }
+    };
+    pub fn sourceCursor(self: *const SpanArchive, header: *value.ListHandle) SourceCursor {
+        const backing = self.privateState();
+        std.Io.Threaded.mutexLock(&backing.mutex);
+        defer std.Io.Threaded.mutexUnlock(&backing.mutex);
+        return .{ .entries = backing.entries.reverseIterator(), .header = header };
     }
 };
 comptime {

@@ -307,9 +307,15 @@ primitives, operationalized as two rules:
   after every check and allocation succeeds. Top-level effect metadata
   does not schedule contract frames; module home transitions trigger the
   effect frame, while same-home tail calls remain frame-neutral. `doc`,
-  `which`, and `see` resolve through ordinary leased bindings; canonical
-  `see` rendering is poll-aware and combines effect and documentation back
-  into one quotation. `doc.zig` normalizes documentation with an
+  `which`, and `see` resolve through ordinary leased bindings; `see` combines
+  effect and documentation back into one quotation, materializes that source
+  through the poll-aware reflection plan, and sends it through the same
+  canonical layout as `ecl fmt`. Every parsed unit owns one ref-counted source
+  buffer; provenance records the byte range of each reader-built quotation,
+  and a published binding retains only that slice handle. `see` can therefore
+  render authored binder names while dispatch continues to use the lowered
+  executable quotation, with no duplicated source body per binding.
+  `doc.zig` normalizes documentation with an
   exact-size two-pass traversal and the machine's structural poller before
   publication, so formatter-introduced physical wrapping never leaks into
   reflection.

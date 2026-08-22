@@ -467,8 +467,12 @@ polling. Top-level definitions may carry either portion independently; module
 `def`/`defp` still require an effect and may add documentation. `set`/`setp`
 remain data-only. The immutable binding snapshot owns body, effect, and doc so
 replacement clears omitted metadata while old leases remain valid. `doc`
-uses normal qualified/shadowing resolution, and `see` emits one canonical
-re-readable combined annotation. The exact names `--` and `:` are reserved on
+uses normal qualified/shadowing resolution, and `see` emits one re-readable
+combined annotation through the standard source formatter. A parsed unit owns
+one shared source buffer; quotation provenance records byte ranges, and each
+published binding retains a slice handle rather than copying its body, so
+reflection preserves binder names while execution keeps the lowered form. The
+exact names `--` and `:` are reserved on
 every namespace-introduction path (including locals and native registration)
 without preventing their use as ordinary word values.
 

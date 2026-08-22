@@ -9,6 +9,7 @@ pub const Diag = types.Diag;
 pub const Error = types.Error;
 pub const Incomplete = types.Incomplete;
 pub const SpanTable = types.SpanTable;
+pub const SourceSlice = types.SourceSlice;
 pub const Parsed = types.Parsed;
 pub const HostParsed = types.HostParsed;
 pub const ReadResult = types.HostReadResult;

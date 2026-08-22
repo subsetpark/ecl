@@ -5,7 +5,6 @@
 'table.column 'column import
 'table.cast 'cast import
 'table.with-column 'with-column import
-'table.where 'where import
 'table.group-by 'group-by import
 'table.aggregate 'aggregate import
 
@@ -25,7 +24,7 @@ derived io.pp
 
 # Filtering takes an exact 0/1 mask, which is an ordinary pervasive comparison.
 derived "revenue" column 100 > io.pp
-derived dup "revenue" column 100 > where 'large set
+derived dup "revenue" column 100 > table.where 'large set
 large io.pp
 
 # Grouping keys appear in first-occurrence order with stable ascending indices.

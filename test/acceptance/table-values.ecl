@@ -15,7 +15,6 @@
 'table.select 'select import
 'table.rename 'rename import
 'table.with-column 'with-column import
-'table.where 'where import
 
 {"id" [1 2 3] "city" ["Oslo" "Lima" "Oslo"]} 'sales set
 
@@ -58,7 +57,7 @@ sales ["city" "id"] select io.pp
 sales {"city" "town"} rename io.pp
 sales "id" [9 9 9] with-column io.pp
 sales "flag" [1 0 1] with-column io.pp
-sales [1 0 1] where io.pp
+sales [1 0 1] table.where io.pp
 
 # csv is text-only, so a numeric column is cast explicitly before emission;
 # the schema then survives the round trip.

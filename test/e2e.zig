@@ -116,8 +116,8 @@ test "e2e: native extension discovery ABI and reflection acceptance" {
         .exit_code = 0,
         .stdout = "sample.increment -> sample.increment native public generation 1 " ++
             "(n -- result) requires call, build-values, reschedule\n" ++
-            "<native:sample.increment> (n -- result : \"Increment an integer.\") " ++
-            "requires call, build-values, reschedule 'sample.increment def\n42\n",
+            "<native:sample.increment> (n -- result : \"Increment an integer.\") requires call build-values\n" ++
+            "reschedule\n'sample.increment\ndef\n42\n",
         .stderr = "",
     });
 }
@@ -491,15 +491,15 @@ test "e2e: optional module annotation acceptance" {
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
-        .stdout = "(1 +) 'forms.bare def\n" ++
-            "(2 *) (n -- n) 'forms.effected def\n" ++
-            "(3 -) (: \"Subtract three.\") 'forms.documented def\n" ++
-            "(4 div) (n -- n : \"Divide by four.\") 'forms.complete def\n" ++
+        .stdout = "### def forms.bare\n(1 +) 'forms.bare def\n" ++
+            "### def forms.effected\n(2 *) (n -- n) 'forms.effected def\n" ++
+            "### def forms.documented\n(3 -) (: \"Subtract three.\") 'forms.documented def\n" ++
+            "### def forms.complete\n(4 div) (n -- n : \"Divide by four.\") 'forms.complete def\n" ++
             "\"Subtract three.\"\n" ++
             "11\n20\n7\n3\n59\n" ++
             "1\n" ++
-            "([42] first) 'answer def\n" ++
-            "([42] first) 'spelled def\n" ++
+            "### def answer\n([42] first) 'answer def\n" ++
+            "### def spelled\n([42] first) 'spelled def\n" ++
             "'contract\n'domain\n'domain\n" ++
             "(a b)\n(dup)\n",
         .stderr = "",
@@ -617,7 +617,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     defer reflected.deinit();
     try reflected.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{ "(result on-ok on-err -- ...", "'result.either def" },
+        .stdout_contains = &.{ "(result on-ok on-err -- ...", "'result.either\ndef" },
         .stderr = "",
     });
 }

@@ -1965,11 +1965,17 @@ Return a nonempty list's first element followed by the intermediate
 accumulators from reducing its remainder. Defined in ecl over `scan`.
 
 ### see
-`( 'name -- )` — Print a canonical, re-readable definition with one
-combined annotation, omitting each portion that was not supplied. What
-prints is what is stored: a name bound by `set` prints its capture body
-ending in `'name def`, with no annotation, not the `set` spelling that
-produced it. Native and module origins are displayed.
+`( 'name -- )` — Print a re-readable definition through the standard source
+formatter, including its width-aware layout and `### def` navigation header
+when the reflected form is an ordinary source definition. The definition has
+one combined annotation, omitting each portion that was not supplied. What
+prints is what is stored: a name bound by `set` prints its capture body ending
+in `'name def`, with no annotation, not the `set` spelling that produced it.
+Reader-built bodies retain a shared slice of their source unit, so head binders
+print with their authored local names even though execution uses the lowered
+`_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source
+provenance fall back to their canonical value form. Native and module origins
+are displayed.
 
 ### set
 `( value 'name -- )` — Bind a value as a constant word in the current

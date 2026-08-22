@@ -2178,6 +2178,9 @@ pub const Machine = struct {
     pub fn currentScope(self: *const Machine) *env.Scope {
         return self.unit.current.?.scope;
     }
+    pub fn sourceCursor(self: *const Machine, header: *Header) spans.SpanArchive.SourceCursor {
+        return self.unit.archive.sourceCursor(header);
+    }
     pub fn currentHome(self: *const Machine) ?*modules.ModuleHome {
         return self.unit.current.?.home;
     }

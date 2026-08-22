@@ -9,7 +9,6 @@
 'table.select 'select import
 'table.rename 'rename import
 'table.with-column 'with-column import
-'table.where 'where import
 'table.aggregate 'aggregate import
 'table.inner-join 'inner-join import
 'table.left-join-with 'left-join-with import
@@ -41,8 +40,8 @@
 ({"a" [1 2] "b" [3 4]} {"a" "b"} rename) @attempt 'err at 'kind at io.pp
 ({"a" [1 2]} {"z" "x"} rename) @attempt 'err at 'kind at io.pp
 ({"a" [1 2]} "c" [7] with-column) @attempt 'err at 'kind at io.pp
-({"a" [1 2 3]} [1 0] where) @attempt 'err at 'kind at io.pp
-({"a" [1 2 3]} [1 0 2] where) @attempt 'err at 'kind at io.pp
+({"a" [1 2 3]} [1 0] table.where) @attempt 'err at 'kind at io.pp
+({"a" [1 2 3]} [1 0 2] table.where) @attempt 'err at 'kind at io.pp
 ({"a" [1 2]} {"z" (str)} cast) @attempt 'err at 'kind at io.pp
 ({"a" [1 2]} {"a" 5} cast) @attempt 'err at 'kind at io.pp
 ({"a" [1]} [] [] aggregate) @attempt 'err at 'kind at io.pp

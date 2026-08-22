@@ -95,6 +95,17 @@ test "long top-level runs pack locally to the configured width" {
     try std.testing.expect(saw_packed_continuation);
 }
 
+test "broken nested runs refill each continuation line" {
+    const a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const c = "cccccccccccccccccccc";
+    const d = "dddddddddddddddddddd";
+    try expectFormat(
+        "(" ++ a ++ " " ++ b ++ " " ++ c ++ " " ++ d ++ ")",
+        "(" ++ a ++ " " ++ b ++ "\n " ++ c ++ " " ++ d ++ ")\n",
+    );
+}
+
 test "comments break only their local structural run" {
     const source = "(dup type 'list match? (# nested comment\n dup len dup 0 > swap 2 mod 1 = and) if)";
     try expectFormat(

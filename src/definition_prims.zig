@@ -10,7 +10,9 @@ const machine = @import("machine.zig");
 const native_module = @import("native_module.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const reflection = @import("reflection.zig");
+const formatter = @import("formatter.zig");
 const doc_text = @import("doc.zig");
+const reader_types = @import("reader_types.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
@@ -79,7 +81,7 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
 }
 
 const DefineDriver = struct {
-    const Phase = enum { scan_annotation, validate_annotation, validate_name, normalize_doc, copy_effect, materialize_effect, publish };
+    const Phase = enum { scan_annotation, validate_annotation, validate_name, normalize_doc, copy_effect, materialize_effect, source, publish };
     mode: Mode,
     scope: *env.Scope,
     name: u32,
@@ -100,6 +102,8 @@ const DefineDriver = struct {
     effect_items: ?heap.Owned([]Value) = null,
     effect_materializer: ?heap.Owned(kernel_storage.ValueMaterializer) = null,
     publisher: ?heap.Owned(env.Environment.BindCursor) = null,
+    source_cursor: ?@import("spans.zig").SpanArchive.SourceCursor = null,
+    source: ?heap.Owned(reader_types.SourceSlice) = null,
 
     fn malformed(evaluator: *Machine) MachineError {
         return evaluator.fail(.domain, "malformed definition annotation");
@@ -231,22 +235,32 @@ const DefineDriver = struct {
                         "def/set requires an unqualified, non-reserved name",
                     ),
                 }
-                // A module definition records only its own name. The
-                // qualified spelling belongs to whichever registration a call
-                // reaches it through, so there is nothing to intern here.
-                self.phase = .publish;
+                if (self.item.?.borrow() != .list)
+                    return evaluator.fail(.type, "def expected a list body; use set for values");
+                self.source_cursor = evaluator.sourceCursor(self.item.?.borrow().list);
+                self.phase = .source;
+            },
+            .source => switch (self.source_cursor.?.advance()) {
+                .pending => budget -= 1,
+                .complete => |source| {
+                    if (source) |owned_source| self.source = .init(owned_source);
+                    self.source_cursor = null;
+                    // A module definition records only its own name. The
+                    // qualified spelling belongs to whichever registration a call
+                    // reaches it through, so there is nothing to intern here.
+                    self.phase = .publish;
+                },
             },
             .publish => {
                 const private = self.mode == .defp;
                 const module_root = self.scope.kind() == .module_root;
-                if (self.item.?.borrow() != .list)
-                    return evaluator.fail(.type, "def expected a list body; use set for values");
                 const name = self.binding_name.?;
                 const visibility: env.Visibility = if (private) .private else .public;
                 if (self.publisher == null) self.publisher = .init(if (module_root)
                     try self.scope.publishModuleCursor(name, .{ .word = .{
                         .body = env.quotation(self.item.?.borrow().list) orelse
                             return evaluator.fail(.domain, "definition body has an invalid heap representation"),
+                        .source = if (self.source) |*source| source.borrow() else null,
                         .visibility = visibility,
                         .effect = self.annotation.borrow().effect,
                         .doc = self.annotation.borrow().doc_value,
@@ -255,6 +269,7 @@ const DefineDriver = struct {
                     try self.scope.publishTopCursor(name, .{ .word = .{
                         .body = env.quotation(self.item.?.borrow().list) orelse
                             return evaluator.fail(.domain, "definition body has an invalid heap representation"),
+                        .source = if (self.source) |*source| source.borrow() else null,
                         .effect = self.annotation.borrow().effect,
                         .doc = self.annotation.borrow().doc_value,
                     } }));
@@ -512,7 +527,10 @@ const SeeDriver = struct {
 
     fn buildPlan(self: *SeeDriver) error{OutOfMemory}!void {
         switch (self.resolved.?.borrow().lease.binding) {
-            .word => |source| try self.add(.{ .value = .{ .list = env.quotationHeader(source) } }),
+            .word => |word_body| if (self.resolved.?.borrow().lease.source) |source|
+                try self.add(.{ .bytes = source.bytes() })
+            else
+                try self.add(.{ .value = .{ .list = env.quotationHeader(word_body) } }),
             .builtin => try self.add(.{ .bytes = "<primitive>" }),
             .native => {
                 try self.add(.{ .bytes = "<native:" });
@@ -614,7 +632,17 @@ const SeeDriver = struct {
         if (!self.plan_ready) try self.buildPlan();
         if (self.rendered == null) switch (try self.actions.borrowMut().advance(machine.kernel_poll_quantum)) {
             .pending => return .yielded,
-            .complete => |bytes| self.rendered = .init(bytes),
+            .complete => |source| {
+                defer evaluator.allocator().free(source);
+                self.rendered = .init(formatter.format(evaluator.allocator(), source) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // The reflection plan emits only reader-valid canonical
+                    // values and fixed definition syntax. Failure here is an
+                    // internal disagreement between those two production
+                    // boundaries, not a user program error.
+                    error.InvalidUtf8, error.InvalidSource => unreachable,
+                });
+            },
         };
         if (evaluator.unit.inherited.console) |console| {
             console.writeOutput(self.rendered.?.borrow(), false) catch return writeFailure(evaluator);

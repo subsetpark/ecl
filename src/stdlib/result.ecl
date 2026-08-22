@@ -1,16 +1,12 @@
 ### module result
-# The result module: composition over the core {'ok values} / {'err error}
-# representation that `@attempt` already produces.
+# Results have the same {'ok values} or {'err error} form produced by `@attempt`
+# and `await`.
 #
-# A success payload is always a list standing for a stack, never one
-# privileged scalar, so `and-then` can seed it straight back through
-# `with @attempt`. Every word validates its result argument before running any
-# quotation the caller supplied.
+# The success payload is a list containing the values left on the successful
+# stack. Operations that accept results validate their inputs before invoking a
+# caller quotation.
 #
-# The boundary: every word that *interprets* an envelope lives here. The words
-# that *produce* an error — raise, fail, assert — stay core, because an error
-# dict in flight is not a result. It becomes one only when @attempt or await
-# reifies it.
+# `raise`, `fail`, and `assert` operate on errors directly and remain core words.
 (
  ### def checked
  (dup type 'dict match?
@@ -25,25 +21,21 @@
    dup 'err at type 'dict match?
    {'kind 'type 'msg "an err result must carry an error dict"} assert)
   if)
- (result -- result :
-  "Return a tagged result unchanged, raising before any caller quotation runs when it is
-   malformed.")
+ (result -- result : "Validate and return a result.")
  'checked defp
 
  ### def checked-all
  (dup type 'list match?
   {'kind 'type 'msg "expected a list of results"} assert
   dup (checked pop) for)
- (results -- results :
-  "Return a list of results unchanged, raising when the list or any member is malformed.")
+ (results -- results : "Validate and return a list of results.")
  'checked-all defp
 
  ### def ok
  (dup type 'list match?
   {'kind 'type 'msg "result.ok expects a list of success values"} assert
   'ok swap pair dict-of)
- (values -- result :
-  "Tag a list of success values, which stands for the stack a successful computation left.")
+ (values -- result : "Build an ok result from a list of successful stack values.")
  'ok def
 
  ### def err
@@ -55,23 +47,22 @@
 
  ### def ok?
  (checked 'ok has?)
- (result -- bool : "Return 1 when a well-formed result is a success.")
+ (result -- bool : "Return 1 for an ok result.")
  'ok? def
 
  ### def err?
  (checked 'err has?)
- (result -- bool : "Return 1 when a well-formed result is a failure.")
+ (result -- bool : "Return 1 for an err result.")
  'err? def
 
  ### def or-raise
  (checked dup 'ok has? ('ok at) ('err at raise) if)
- (result -- values : "Return a success payload, or re-raise the captured error dict unchanged.")
+ (result -- values : "Return the success list or raise the stored error.")
  'or-raise def
 
  ### def or-else
  (swap checked swap over 'ok has? (pop 'ok at) (nip) if)
- (result fallback -- value :
-  "Return a success payload, or the fallback value when the result is a failure.")
+ (result fallback -- value : "Return the success list or a fallback value for an err result.")
  'or-else def
 
  ### def and-then
@@ -80,13 +71,8 @@
   (pop)
   if)
  (result quotation -- result :
-  "Seed a success payload back onto an isolated stack and run the quotation, returning an existing
-   failure unchanged.
-
-   There is no separate map: @attempt's automatic {'ok [...]} wrapping collapses the functor map and
-   the monadic bind into this one word on the success side. The distinction survives only on the
-   failure side, which is why that side carries both map-err, which rewraps and never leaves the
-   failure arm, and recover, which can replace the outcome.")
+  "For an ok result, run the quotation under @attempt on an isolated stack seeded with the success
+   values. Return an err result unchanged.")
  'and-then def
 
  ### def map-err
@@ -102,8 +88,7 @@
   (pop)
   if)
  (result quotation -- result :
-  "Replace a failure's error dict with the one its ( error -- error ) quotation returns, leaving a
-   success unchanged.")
+  "Apply an isolated ( error -- error ) quotation to an err result. Return an ok result unchanged.")
  'map-err def
 
  ### def recover
@@ -112,42 +97,40 @@
   (pop)
   if)
  (result quotation -- result :
-  "Seed a failure's error dict onto an isolated stack and run the recovery quotation, leaving a
-   success unchanged.")
+  "For an err result, run the quotation under @attempt with the stored error. Return an ok result
+   unchanged.")
  'recover def
 
  ### def recover-kinds
- ((|result kinds handler|
-   result checked pop
-   kinds type 'list match?
-   {'kind 'type 'msg "result.recover-kinds expects a list of kind symbols"} assert
-   kinds
-   (type 'symbol match?
-    {'kind 'type 'msg "result.recover-kinds expects a list of kind symbols"} assert)
-   for
-   result 'err {} at-or 'kind 'no-kind-present at-or kinds in?
-   result 'err has? and
-   result handler pair (recover) with
-   result literal
-   if)
-  call)
+ (|result kinds handler|
+  result checked pop
+  kinds type 'list match?
+  {'kind 'type 'msg "result.recover-kinds expects a list of kind symbols"} assert
+  kinds
+  (type 'symbol match?
+   {'kind 'type 'msg "result.recover-kinds expects a list of kind symbols"} assert)
+  for
+  result 'err {} at-or 'kind 'no-kind-present at-or kinds in?
+  result 'err has? and
+  result handler pair (recover) with
+  result literal
+  if)
+
  (result kinds quotation -- result :
-  "Recover only when a failure's kind is one of the listed symbols, leaving every other result
-   unchanged.")
+  "Recover an err result when its kind is listed. Return all other results unchanged.")
  'recover-kinds def
 
  ### def either
- ((|result on-ok on-err|
-   result checked pop
-   result 'ok has?
-   result ('ok at) partial on-ok compose
-   result ('err at) partial on-err compose
-   if)
-  call)
+ (|result on-ok on-err|
+  result checked pop
+  result 'ok has?
+  result ('ok at) partial on-ok compose
+  result ('err at) partial on-err compose
+  if)
+
  (result on-ok on-err -- ... :
-  "Eliminate a result exhaustively: push its success list and call the first quotation, or push its
-   error dict and call the second. Neither branch is isolated, so a branch may leave any number of
-   values and its failures propagate.")
+  "Call on-ok with the success list or on-err with the error dictionary. Branches run inline and may
+   leave any number of values.")
  'either def
 
  ### def all
@@ -158,8 +141,7 @@
   (pop ('ok at) each ok)
   if)
  (results -- result :
-  "Return the leftmost failure unchanged, or one success holding every result's success list in
-   input order.")
+  "Return the first err result, or an ok result containing all success lists in input order.")
  'all def
 
  ### def partition
@@ -167,7 +149,7 @@
   dup ('ok has?) filter ('ok at) each
   swap ('err has?) filter ('err at) each)
  (results -- successes errors :
-  "Split results into success lists and error dicts, both in input order, without re-raising.")
+  "Return the success lists and error dictionaries as separate lists in input order.")
  'partition def
 
  )

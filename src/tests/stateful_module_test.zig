@@ -77,9 +77,13 @@ test "definitions: module def and defp accept all four annotation forms" {
     try expectOk(&runtime, "'forms.bare see 'forms.effected see " ++
         "'forms.documented see 'forms.complete see");
     try std.testing.expectEqualStrings(
-        "(1 +) 'forms.bare def\n" ++
+        "### def forms.bare\n" ++
+            "(1 +) 'forms.bare def\n" ++
+            "### def forms.effected\n" ++
             "(2 *) (n -- n) 'forms.effected def\n" ++
+            "### def forms.documented\n" ++
             "(3 -) (: \"Subtract three.\") 'forms.documented def\n" ++
+            "### def forms.complete\n" ++
             "(4 div) (n -- n : \"Divide by four.\") 'forms.complete def\n",
         output.written(),
     );
@@ -115,7 +119,9 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     );
     try expectOk(&runtime, "'answer see 'spelled see 'answer which");
     try std.testing.expectEqualStrings(
-        "([42] first) 'answer def\n" ++
+        "### def answer\n" ++
+            "([42] first) 'answer def\n" ++
+            "### def spelled\n" ++
             "([42] first) 'spelled def\n" ++
             "answer -> answer def public\n",
         output.written(),
@@ -127,7 +133,7 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     try expectStack(&runtime, "m.x m.peek", "7 8");
     output.clearRetainingCapacity();
     try expectOk(&runtime, "'m.x see");
-    try std.testing.expectEqualStrings("([7] first) 'm.x def\n", output.written());
+    try std.testing.expectEqualStrings("### def m.x\n([7] first) 'm.x def\n", output.written());
 }
 
 test "modules: a nonempty construction stack becomes the durable initial stack once per slot" {

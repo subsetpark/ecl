@@ -36,7 +36,13 @@ const TokenKind = enum {
     character,
     string,
 };
-const Token = struct { kind: TokenKind, bytes: []const u8 = &.{}, span: Span };
+const Token = struct {
+    kind: TokenKind,
+    bytes: []const u8 = &.{},
+    span: Span,
+    source_start: usize = 0,
+    source_end: usize = 0,
+};
 
 const SourceProgress = union(enum) { pending, complete, incomplete: reader.Incomplete };
 const TokenizeProgress = SourceProgress;
@@ -50,6 +56,7 @@ const Tokenizer = struct {
     resume_mode: Mode = .main,
     token_kind: TokenKind = .atom,
     token_start: usize = 0,
+    token_source_start: usize = 0,
     token_span: Span = .{},
     string_escaped: bool = false,
     character_first: bool = false,
@@ -57,11 +64,25 @@ const Tokenizer = struct {
     fn init(source: []const u8, tokens: ?*TokenList) Tokenizer {
         return .{ .source = source, .tokens = tokens, .cursor = .init(source) };
     }
-    fn append(self: *Tokenizer, kind: TokenKind, bytes: []const u8, span: Span) error{OutOfMemory}!void {
+    fn append(
+        self: *Tokenizer,
+        kind: TokenKind,
+        bytes: []const u8,
+        span: Span,
+        source_start: usize,
+        source_end: usize,
+    ) error{OutOfMemory}!void {
         const tokens = self.tokens orelse return;
-        try tokens.append(.{ .kind = kind, .bytes = bytes, .span = span });
+        try tokens.append(.{
+            .kind = kind,
+            .bytes = bytes,
+            .span = span,
+            .source_start = source_start,
+            .source_end = source_end,
+        });
     }
     fn startAtom(self: *Tokenizer, kind: TokenKind) void {
+        if (kind == .atom) self.token_source_start = self.cursor.byteIndex();
         self.token_kind = kind;
         self.token_start = self.cursor.byteIndex();
         self.token_span = self.cursor.span();
@@ -76,6 +97,8 @@ const Tokenizer = struct {
             self.token_kind,
             self.source[self.token_start..self.cursor.byteIndex()],
             self.token_span,
+            self.token_source_start,
+            self.cursor.byteIndex(),
         );
         self.mode = .main;
     }
@@ -128,11 +151,13 @@ const Tokenizer = struct {
                     else => null,
                 };
                 if (simple) |kind| {
+                    const source_start = self.cursor.byteIndex();
                     _ = self.bump();
-                    try self.append(kind, &.{}, span);
+                    try self.append(kind, &.{}, span, source_start, self.cursor.byteIndex());
                     return .pending;
                 }
                 if (next == '"') {
+                    self.token_source_start = self.cursor.byteIndex();
                     _ = self.bump();
                     self.token_start = self.cursor.byteIndex();
                     self.token_span = span;
@@ -141,11 +166,13 @@ const Tokenizer = struct {
                     return .pending;
                 }
                 if (next == '\'') {
+                    self.token_source_start = self.cursor.byteIndex();
                     _ = self.bump();
                     self.startAtom(.quoted);
                     return .pending;
                 }
                 if (next == '\\') {
+                    self.token_source_start = self.cursor.byteIndex();
                     _ = self.bump();
                     self.startAtom(.character);
                     return .pending;
@@ -214,7 +241,13 @@ const Tokenizer = struct {
                 if (!self.string_escaped and next == '"') {
                     const bytes = self.source[self.token_start..self.cursor.byteIndex()];
                     _ = self.bump();
-                    try self.append(.string, bytes, self.token_span);
+                    try self.append(
+                        .string,
+                        bytes,
+                        self.token_span,
+                        self.token_source_start,
+                        self.cursor.byteIndex(),
+                    );
                     self.mode = .main;
                 } else {
                     _ = self.bump();
@@ -766,14 +799,17 @@ const Context = struct {
 
     kind: ContainerKind,
     start: Span,
+    source_start: usize,
+    source_end: usize = 0,
     body: FormList,
     names: NameList,
     binder: BinderState,
 
-    fn init(allocator: std.mem.Allocator, kind: ContainerKind, start: Span) Context {
+    fn init(allocator: std.mem.Allocator, kind: ContainerKind, start: Span, source_start: usize) Context {
         return .{
             .kind = kind,
             .start = start,
+            .source_start = source_start,
             .body = .init(allocator),
             .names = .init(allocator),
             .binder = if (kind == .dictionary) .unavailable else .unchecked,
@@ -978,11 +1014,13 @@ const CollectionBuilder = struct {
                     if (self.lowered_values) |*values| values.deinit();
                     self.lowered_values = null;
                     self.result = item;
-                    self.span_writer = .init(
+                    self.span_writer = .initSource(
                         self.spans,
                         self.allocator,
                         item.list,
                         self.element_spans.?,
+                        self.context.source_start,
+                        self.context.source_end,
                     );
                     self.phase = .list_spans;
                     break :result .pending;
@@ -1245,6 +1283,7 @@ const ParserCursor = struct {
             return error.Parse;
         }
         var context = self.contexts.pop().?;
+        context.source_end = token.source_end;
         self.context_depth -= 1;
         self.state = .{ .collection = .init(
             self.allocator,
@@ -1264,7 +1303,7 @@ const ParserCursor = struct {
                 self.diag.set(token.span, "form nesting too deep");
                 return error.Parse;
             }
-            try self.contexts.push(.init(self.allocator, kind, token.span));
+            try self.contexts.push(.init(self.allocator, kind, token.span, token.source_start));
             self.context_depth += 1;
             return;
         }
@@ -1325,10 +1364,11 @@ pub const ReadCursor = struct {
     spans: reader.SpanTable,
     tokenizer: Tokenizer,
     parser: ?ParserCursor = null,
-    phase: enum { tokenize, parse, allocate, copy, source_name, finish, complete } = .tokenize,
+    phase: enum { tokenize, parse, allocate, copy, source_name, source, finish, complete } = .tokenize,
     forms: ?heap.OwnedValueBuffer = null,
     top_spans: ?[]Span = null,
     owned_source_name: ?[]u8 = null,
+    owned_source: ?[]u8 = null,
     form_iterator: ?FormList.Iterator = null,
     copy_index: usize = 0,
     span_retirement: ?reader.SpanTable.RetireCursor = null,
@@ -1362,6 +1402,7 @@ pub const ReadCursor = struct {
         if (self.forms) |*forms| forms.deinit();
         if (self.top_spans) |spans| self.allocator.free(spans);
         if (self.owned_source_name) |name| self.allocator.free(name);
+        if (self.owned_source) |source| self.allocator.free(source);
     }
     pub fn advanceRetirement(self: *ReadCursor) bool {
         return switch (self.retirement_phase) {
@@ -1398,6 +1439,8 @@ pub const ReadCursor = struct {
                 self.top_spans = null;
                 if (self.owned_source_name) |name| self.allocator.free(name);
                 self.owned_source_name = null;
+                if (self.owned_source) |source| self.allocator.free(source);
+                self.owned_source = null;
                 self.retirement_phase = .complete;
                 break :result true;
             },
@@ -1439,6 +1482,7 @@ pub const ReadCursor = struct {
                 self.forms = try .init(self.releases, count);
                 self.top_spans = try self.allocator.alloc(Span, count);
                 self.owned_source_name = try self.allocator.alloc(u8, self.source_name.len);
+                self.owned_source = try self.allocator.alloc(u8, self.source.len);
                 self.form_iterator = self.parser.?.output.?.iterator();
                 self.phase = .copy;
                 break :result .pending;
@@ -1457,6 +1501,16 @@ pub const ReadCursor = struct {
                 if (self.copy_index != self.source_name.len) {
                     self.owned_source_name.?[self.copy_index] = self.source_name[self.copy_index];
                     self.copy_index += 1;
+                } else {
+                    self.copy_index = 0;
+                    self.phase = .source;
+                }
+                break :result .pending;
+            },
+            .source => result: {
+                if (self.copy_index != self.source.len) {
+                    self.owned_source.?[self.copy_index] = self.source[self.copy_index];
+                    self.copy_index += 1;
                 } else self.phase = .finish;
                 break :result .pending;
             },
@@ -1469,12 +1523,16 @@ pub const ReadCursor = struct {
                 self.tokens.retire(self.releases);
                 self.spans.top = self.top_spans.?;
                 self.top_spans = null;
+                const source_bytes = self.owned_source.?;
+                self.owned_source = null;
+                const source_slice = try reader.SourceSlice.initOwned(self.allocator, source_bytes);
                 const parsed: reader.Parsed = .{
                     .allocator = self.allocator,
                     .forms = self.forms.?.take(),
                     .releases = self.releases,
                     .spans = self.spans,
                     .source_name = self.owned_source_name.?,
+                    .source = source_slice,
                 };
                 self.forms = null;
                 self.owned_source_name = null;

@@ -11,6 +11,7 @@ const machine = @import("machine.zig");
 const native_module = @import("native_module.zig");
 const primitive_docs = @import("primitive_docs.zig");
 const snapshot_api = @import("snapshot.zig");
+const reader_types = @import("reader_types.zig");
 /// In-tree primitives use Machine's ergonomic error helpers. This binding
 /// kind is not part of the native-extension ABI.
 pub const PrimitiveImpl = *const fn (*machine.Machine) machine.MachineError!void;
@@ -155,6 +156,7 @@ pub const Effect = ValidatedEffect;
 pub const TopPublication = union(enum) {
     word: struct {
         body: *Quotation,
+        source: ?reader_types.SourceSlice = null,
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
     },
@@ -179,6 +181,7 @@ pub const BuiltinWord = struct {
 pub const ModulePublication = union(enum) {
     word: struct {
         body: *Quotation,
+        source: ?reader_types.SourceSlice = null,
         visibility: Visibility,
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
@@ -207,10 +210,12 @@ const BindingSpec = struct {
     effect: ?ValidatedEffect = null,
     doc: ?*DocumentationString = null,
     compiled: ?*Quotation = null,
+    source: ?reader_types.SourceSlice = null,
     fn fromTop(publication: TopPublication) BindingSpec {
         return switch (publication) {
             .word => |word| .{
                 .binding = .{ .word = word.body },
+                .source = word.source,
                 .effect = word.effect,
                 .doc = word.doc,
             },
@@ -224,6 +229,7 @@ const BindingSpec = struct {
         return switch (publication) {
             .word => |word| .{
                 .binding = .{ .word = word.body },
+                .source = word.source,
                 .visibility = word.visibility,
                 .origin = origin,
                 .effect = word.effect,
@@ -250,12 +256,17 @@ const BindingSpec = struct {
         if (self.effect) |effect| effect.retain();
         if (self.doc) |doc| heap.incRef(documentationHeader(doc));
         if (self.compiled) |compiled| heap.incRef(quotationHeader(compiled));
+        if (self.source) |source| source.retain();
     }
     fn retire(self: BindingSpec, releases: *heap.ReleaseDomain) void {
         self.binding.retire(releases);
         if (self.effect) |effect| effect.retire(releases);
         if (self.doc) |doc| releases.releaseHeader(documentationHeader(doc));
         if (self.compiled) |compiled| releases.releaseHeader(quotationHeader(compiled));
+        if (self.source) |source| {
+            var owned = source;
+            owned.deinit();
+        }
     }
     pub fn deinit(self: *BindingSpec, releases: *heap.ReleaseDomain) void {
         self.retire(releases);
@@ -309,6 +320,7 @@ pub const BindingLease = struct {
     effect: ?ValidatedEffect,
     doc: ?*DocumentationString,
     compiled: ?*Quotation,
+    source: ?reader_types.SourceSlice,
 
     fn fromSpec(spec: BindingSpec, releases: *heap.ReleaseDomain) BindingLease {
         return .{
@@ -319,6 +331,7 @@ pub const BindingLease = struct {
             .effect = spec.effect,
             .doc = spec.doc,
             .compiled = spec.compiled,
+            .source = spec.source,
         };
     }
 
@@ -330,6 +343,7 @@ pub const BindingLease = struct {
             .effect = self.effect,
             .doc = self.doc,
             .compiled = self.compiled,
+            .source = self.source,
         };
         spec.retire(self.releases);
         self.* = undefined;
