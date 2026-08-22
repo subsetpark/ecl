@@ -199,7 +199,6 @@
   package module match?
   module package "." cat str.starts?
   or)
-
  (package-name module-name -- bool :
   "Return 1 when the module name equals the package name or starts with the package name and a
    dot.")
@@ -237,7 +236,6 @@
   'key key pair dict-of
   put
   raise)
-
  (key -- : "Raise an inert-data error for a dict entry.")
  'offending defp
 
@@ -275,7 +273,6 @@
   requirement 'hash at hash?
   {'kind 'domain 'msg "a requirement hash is sha256- and 64 lowercase hex digits"} assert
   requirement)
-
  (requirement -- requirement : "Validate and return a package requirement.")
  'requirement-checked defp
 
@@ -301,7 +298,6 @@
   candidate 'name at wrap candidate 'requires at keys cat collides? not
   {'kind 'domain 'msg "no package may own another's name, its own included"} assert
   candidate)
-
  (candidate -- manifest :
   "Validate and return a manifest. Executable word values are rejected before structural checks.")
  'validate-manifest def
@@ -314,7 +310,6 @@
   dup len 1 =
   {'kind 'shape 'msg "a package file is exactly one form"} assert
   first)
-
  (text -- form : "Parse text containing exactly one form and return it without evaluation.")
  'one-form defp
 
@@ -333,7 +328,6 @@
   {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
   minimums vals (version-checked pop) for
   minimums)
-
  (minimums -- minimums : "Validate and return one package's minimum-version requirements.")
  'minimums-checked defp
 
@@ -378,7 +372,6 @@
   candidate 'packages at (satisfied?) partial all?
   {'kind 'domain 'msg "a selected version is never below a minimum recorded for it"} assert
   candidate)
-
  (candidate -- lock :
   "Validate and return a lock. Each required package must have a selection that meets every recorded
    minimum version.")
@@ -405,7 +398,6 @@
   requirement 'url at
   requirement 'hash at
   3 pack "{{'version {} 'url {} 'hash {}}}" format)
-
  (requirement -- text : "Render one selection in the canonical field order.")
  'render-requirement defp
 
