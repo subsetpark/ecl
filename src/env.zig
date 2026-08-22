@@ -1513,6 +1513,7 @@ pub const BuildingEnv = struct {
     }
     pub fn installBuiltins(self: *BuildingEnv, comptime definitions: anytype) error{OutOfMemory}!void {
         comptime {
+            @setEvalBranchQuota(4000);
             for (definitions, 0..) |definition, index| {
                 assertStaticNamespace(definition.name);
                 for (definitions[0..index]) |prior| {
@@ -1522,7 +1523,6 @@ pub const BuildingEnv = struct {
                 }
             }
         }
-        @setEvalBranchQuota(4000);
         inline for (definitions) |definition| {
             try self.installBuiltin(definition.name, definition.primitive);
         }

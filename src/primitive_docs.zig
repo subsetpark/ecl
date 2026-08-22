@@ -34,6 +34,8 @@ const entries = [_]Metadata{
     .{ .name = "type", .effect = "value -- type", .text = "Return the value kind as a symbol." },
     .{ .name = "execute", .effect = "word -- ...", .text = "Execute a word through ordinary name resolution and dispatch." },
     .{ .name = "parse", .effect = "string -- quotation", .text = "Parse source text into an unevaluated quotation." },
+    .{ .name = "parse-int", .effect = "string -- integer", .text = "Parse one ECL integer literal without evaluating source text." },
+    .{ .name = "parse-float", .effect = "string -- float", .text = "Parse one ECL numeric literal and return its floating-point value." },
     .{ .name = "dict-of", .effect = "entries -- dict", .text = "Build a dictionary from a flat list of adjacent key and value entries." },
     .{ .name = "@attempt", .effect = "quotation -- result", .text = "Run a quotation in a fresh unit and return an ok or error result dictionary; observationally `@spawn await`." },
     .{ .name = "raise", .effect = "error --", .text = "Raise a language error from an error dictionary." },

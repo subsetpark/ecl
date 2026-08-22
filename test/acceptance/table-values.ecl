@@ -53,7 +53,7 @@ sales dup records from-records match? io.pp
 sales names io.pp
 sales height io.pp
 sales "city" column io.pp
-{"n" ["1" "2"]} {"n" (parse first)} cast io.pp
+{"n" ["1" "2"]} {"n" (parse-int)} cast io.pp
 sales ["city" "id"] select io.pp
 sales {"city" "town"} rename io.pp
 sales "id" [9 9 9] with-column io.pp

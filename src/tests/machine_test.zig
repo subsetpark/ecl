@@ -395,6 +395,63 @@ test "public parse maps malformed incomplete and type inputs to language errors"
     });
 }
 
+test "numeric text parsers accept ECL literals without general source parsing" {
+    const support = @import("kernel_test_support.zig");
+    try support.expectStacks(&.{
+        .{
+            .name = "integer literal forms",
+            .source = "\"0\" parse-int \"-9223372036854775808\" parse-int " ++
+                "\"+17\" parse-int \"0x10\" parse-int \"1_000\" parse-int",
+            .expected = "0 -9223372036854775808 17 16 1000",
+        },
+        .{
+            .name = "integer and floating literals become floats",
+            .source = "\"1\" parse-float \"-3.5\" parse-float \"2e3\" parse-float " ++
+                "\"+inf\" parse-float dup type",
+            .expected = "1.0 -3.5 2000.0 inf 'float",
+        },
+        .{
+            .name = "each collects parsed integers into a numeric list",
+            .source = "[\"1\" \"2\" \"3\"] (parse-int) each",
+            .expected = "[1 2 3]",
+        },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "parse-int type", .source = "1 parse-int", .kind = "type", .word = "parse-int" },
+        .{ .name = "parse-float type", .source = "1 parse-float", .kind = "type", .word = "parse-float" },
+        .{
+            .name = "parse-int rejects a float",
+            .source = "\"1.0\" parse-int",
+            .kind = "parse",
+            .word = "parse-int",
+        },
+        .{
+            .name = "parse-int rejects malformed text",
+            .source = "\"12x\" parse-int",
+            .kind = "parse",
+            .word = "parse-int",
+        },
+        .{
+            .name = "parse-int reports range failure",
+            .source = "\"9223372036854775808\" parse-int",
+            .kind = "overflow",
+            .word = "parse-int",
+        },
+        .{
+            .name = "parse-float rejects malformed text",
+            .source = "\"nan\" parse-float",
+            .kind = "parse",
+            .word = "parse-float",
+        },
+        .{
+            .name = "parse-float reports range failure",
+            .source = "\"1e1000000\" parse-float",
+            .kind = "overflow",
+            .word = "parse-float",
+        },
+    });
+}
+
 test "public parse cancellation reaches UTF-8 materialization" {
     const allocator = std.testing.allocator;
     const text_len = 40_000;

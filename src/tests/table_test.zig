@@ -151,7 +151,7 @@ test "table: transformations preserve schema and order per policy" {
         .{
             // Casting is the only scalar coercion, and it is requested by name.
             .name = "cast coerces exactly the named columns",
-            .source = "{\"a\" [\"1\" \"2\"] \"b\" [\"5\" \"6\"]} {\"a\" (parse first)} table.cast",
+            .source = "{\"a\" [\"1\" \"2\"] \"b\" [\"5\" \"6\"]} {\"a\" (parse-int)} table.cast",
             .expected = "{\"a\" [1 2] \"b\" (\"5\" \"6\")}",
         },
         .{

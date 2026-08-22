@@ -6,6 +6,7 @@ const list = @import("list.zig");
 const dict = @import("dict.zig");
 const equal = @import("equal.zig");
 const intern = @import("intern.zig");
+const lexer = @import("lexer.zig");
 const printer = @import("print.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
@@ -31,6 +32,8 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "type", .primitive = typeWord },
         .{ .name = "execute", .primitive = execute },
         .{ .name = "parse", .primitive = parse },
+        .{ .name = "parse-int", .primitive = parseInt },
+        .{ .name = "parse-float", .primitive = parseFloat },
         .{ .name = "dict-of", .primitive = dictOf },
         .{ .name = "@attempt", .primitive = attempt },
         .{ .name = "raise", .primitive = raise },
@@ -248,6 +251,77 @@ const ParseDriver = struct {
         evaluator.retireDriver(self);
         try evaluator.parseSourceOwned(source);
         return .detached;
+    }
+};
+
+const NumericParseTarget = enum { integer, float };
+
+fn parseInt(evaluator: *Machine) MachineError!void {
+    return startNumericParse(evaluator, .integer);
+}
+
+fn parseFloat(evaluator: *Machine) MachineError!void {
+    return startNumericParse(evaluator, .float);
+}
+
+fn startNumericParse(evaluator: *Machine, target: NumericParseTarget) MachineError!void {
+    var source_value = try evaluator.popString();
+    defer source_value.deinit();
+    const source = source_value.borrow();
+    if (source.list.kind() != .leaf_char1) return invalidNumericText(evaluator, target);
+    const length: usize = @intCast(source.list.length());
+    const bytes = heap.chars8(source.list)[0..length];
+    try evaluator.startDriver(NumericParseDriver{
+        .source_value = .init(source_value.take()),
+        .classifier = .init(bytes),
+        .target = target,
+    });
+}
+
+fn invalidNumericText(evaluator: *Machine, target: NumericParseTarget) MachineError {
+    return switch (target) {
+        .integer => evaluator.fail(.parse, "parse-int expects an integer literal"),
+        .float => evaluator.fail(.parse, "parse-float expects a numeric literal"),
+    };
+}
+
+const NumericParseDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+
+    source_value: heap.Owned(Value),
+    classifier: lexer.ClassifyCursor,
+    target: NumericParseTarget,
+
+    pub fn advance(evaluator: *Machine, self: *NumericParseDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (self.classifier.advance()) {
+            .pending => {},
+            .complete => |classification| return self.finish(evaluator, classification),
+        };
+        return .yielded;
+    }
+
+    fn finish(
+        self: *NumericParseDriver,
+        evaluator: *Machine,
+        classification: lexer.Classification,
+    ) MachineError!machine.WorkProgress {
+        return switch (classification) {
+            .int => |number| switch (self.target) {
+                .integer => .{ .output = .{ .int = number } },
+                .float => .{ .output = .{ .float = @floatFromInt(number) } },
+            },
+            .float => |number| switch (self.target) {
+                .integer => invalidNumericText(evaluator, self.target),
+                .float => .{ .output = .{ .float = number } },
+            },
+            .word => invalidNumericText(evaluator, self.target),
+            .out_of_range => switch (self.target) {
+                .integer => evaluator.fail(.overflow, "parse-int result is outside int64"),
+                .float => evaluator.fail(.overflow, "parse-float input is outside the ECL numeric range"),
+            },
+        };
     }
 };
 fn dictOf(evaluator: *Machine) MachineError!void {

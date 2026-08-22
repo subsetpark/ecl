@@ -15,7 +15,7 @@ raw "amount" column io.pp
 
 # Everything arrives as text; casting is the only coercion.
 raw "amount" column first type io.pp
-raw {"amount" (parse first) "quantity" (parse first)} cast 'sales set
+raw {"amount" (parse-int) "quantity" (parse-int)} cast 'sales set
 sales io.pp
 sales "amount" column first type io.pp
 

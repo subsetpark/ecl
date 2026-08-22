@@ -188,7 +188,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-session.ecl",
-        "args pop \"42 missing\" parse pop",
+        "args pop \"42 missing\" parse pop \"1\" parse-int pop \"1\" parse-float pop",
     );
     try runOk(
         &runtime,
