@@ -664,6 +664,7 @@ pub fn build(b: *std.Build) void {
             "tests.json_test.",
             "tests.table_test.",
             "tests.pkg_test.",
+            "tests.archive_test.",
             "tests.random_test.",
             "tests.hostio_test.",
             // Fast families inside sources that also hold heavy tests.
