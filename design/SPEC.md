@@ -722,16 +722,16 @@ a trusted-code boundary.
 
 ## The standard library
 
-Eight modules ship inside the binary. They are ordinary modules — registered,
+Nine modules ship inside the binary. They are ordinary modules — registered,
 enumerable, shadowable — and they load lazily on the first mention of their
 name, whether that is `'str use` or a bare `str.upper`. Resolution consults
 the embedded manifest before `ECL_PATH`, so a stray `csv.ecl` on the search
 path cannot silently replace a stdlib name; in-session shadowing and explicit
-`@defm` registration remain the documented overrides. All eight resolve with no
+`@defm` registration remain the documented overrides. All nine resolve with no
 `ECL_PATH` set and no filesystem access at all.
 
 Three transports back them, chosen per module rather than uniformly:
-embedded ECL source (`result`, `str`, `table`, `rng`), a linked first-party
+embedded ECL source (`result`, `str`, `table`, `rng`, `pkg`), a linked first-party
 native descriptor published through the same contract as an external
 extension (`csv`), and builtin word tables published under a module name
 (`io`, `json`, `http`).
@@ -884,6 +884,185 @@ stores the advanced state back.
 A fresh process starts from a fixed key, so a program using `rng` and
 never calling `rng.seed` is fully reproducible. Seeding from `entropy` is
 the explicit opt out.
+
+### pkg
+
+The package formats as data (see Packages). Pure value vocabulary: every word
+takes and returns text or values, so finding a file, reading it, and writing
+one back are the caller's business — this module reaches no host capability at
+all.
+
+- versions: `pkg.version<` `( left right -- bool )`, `pkg.version-max`
+  `( versions -- version )`
+- manifest: `pkg.read-manifest` `( text -- manifest )`,
+  `pkg.validate-manifest` `( candidate -- manifest )`
+- lock: `pkg.read-lock` `( text -- lock )`, `pkg.write-lock`
+  `( lock -- text )`
+- names: `pkg.owns-prefix?` `( package-name module-name -- bool )`
+
+`validate-manifest` returns its argument unchanged or raises; it is not a
+`valid?`-style predicate. Failures follow the frozen kinds and introduce no
+user kind: unreadable text is `'parse`; text that is not exactly one form, and
+an empty `version-max` list, are `'shape`; a wrong value kind is `'type`; and
+everything inside a legal type but outside the grammar — an undeclared key, an
+unsupported `'format`, a malformed name, version, hash, or URL, a
+self-requirement, an ownership collision, a word value anywhere — is
+`'domain`.
+
+## Packages
+
+A project declares its dependencies in `ecl.pkg`, and resolution derives
+`ecl.lock` from it. Both files are ECL data: read with `parse` and **never
+evaluated**, so resolving a dependency graph cannot run code from a
+dependency. Importing stays by name — `use foo.bar` never mentions a file, a
+URL, or a version — and a checkout plus a lock reproduces the same module
+images on any machine.
+
+The vocabulary that reads, validates, and writes these files is the `pkg`
+module (see The standard library). Nothing in this section reaches the network
+or the filesystem: ordinary evaluation reads a lock and never writes one, and
+fetching is an explicit command.
+
+### Versions
+
+A version is a **string**, always:
+
+```
+version     :=  core ( "-" prerelease )?
+core        :=  num "." num "." num
+num         :=  "0" | [1-9] [0-9]*
+prerelease  :=  ident ( "." ident )*
+ident       :=  [0-9A-Za-z-]+
+```
+
+A numeric `ident` — one whose every character is a digit — may not carry a
+leading zero. **Build metadata is not in the grammar**: a `+` anywhere makes
+the spelling malformed rather than being parsed and discarded.
+
+The string requirement is not a convention. A bare `1.2.3` reads as the
+*word* `1.2.3` — an executable reference — so an unquoted version in a
+manifest is malformed by construction rather than by rule.
+
+Precedence is Semantic Versioning 2.0.0 §11, and it is a strict total order
+over what the grammar admits:
+
+- Compare `major`, then `minor`, then `patch`, numerically.
+- On equal cores, a version carrying a prerelease is below the same core
+  without one.
+- Otherwise compare prereleases identifier by identifier from the left: a
+  numeric identifier is below an alphanumeric one, two numeric identifiers
+  compare numerically, and two alphanumeric identifiers compare in codepoint
+  order — the ordering `cmp` already gives strings.
+- When every shared identifier is equal, the shorter prerelease is below the
+  longer one.
+
+Anything outside the grammar is an error, not an incomparable value, so there
+is no partial order to reason about.
+
+Minimal version selection takes the maximum of *declared* minimums and never
+enumerates available versions, so every selected version is one some manifest
+wrote down. A prerelease is therefore selected only when it was declared; no
+separate rule is needed to prevent it.
+
+### The manifest
+
+`ecl.pkg` holds exactly one dict form. It is found by walking up from the
+process working directory toward the filesystem root: the first one found is
+the project root, and `ecl.lock` is read from beside it and never from a
+different directory. There is no repository-boundary stop and no environment
+override. The walk costs one directory probe per level — bounded by depth,
+paid once per session — and no `ecl.pkg` anywhere up the chain means there is
+no lock at all.
+
+```
+{'format 1
+ 'name "my.proj"
+ 'version "0.1.0"
+ 'requires
+ {"foo" {'version "1.2.0"
+         'url "https://example.com/foo-1.2.0.tar.gz"
+         'hash "sha256-<64 lowercase hex digits>"}}}
+```
+
+- `'format` is the int 1. An unrecognized value is `'domain` rather than a
+  best-effort read: more than one reader consumes these files, so all of them
+  must agree on when to stop reading.
+- `'name` is this package's canonical name, `'version` is its own version, and
+  `'requires` maps a required canonical name to a requirement.
+- A requirement is exactly `'version` — the declared *minimum* — plus `'url`
+  and `'hash`. The URL must begin `https://`: a tarball over HTTPS is the only
+  transport, and a git dependency is a codeload tarball URL.
+- Every key is declared. An undeclared key at any level is `'domain`, so a
+  misspelling is an error rather than an entry that is silently ignored.
+- A requirement may not name the manifest's own `'name`, and no two
+  requirement names may stand in the ownership relation below.
+- `#` comments are permitted, and nothing that rewrites the file preserves
+  them.
+
+**Inertness is a property of the format, not of the reader.** A manifest may
+hold ints, floats, chars, symbols, strings, lists, and dicts; a **word** value
+anywhere in it is `'domain`. A quotation is an ordinary list and is legal as
+data — what is forbidden is the executable reference, which is the thing an
+evaluated manifest would run.
+
+### Canonical names and prefix ownership
+
+A canonical package name is one or more segments joined by `.`, each matching
+`[a-z] [a-z0-9-]*`. Every package name is therefore a legal module name by
+construction.
+
+Package `foo` may publish exactly the modules `foo` and `foo.<rest>` and
+nothing else. Ownership continues only across a `.` boundary: `foo` owns
+`foo.bar` and does not own `foobar`. With no registry to police publication,
+prefix ownership is what polices namespaces instead — and it is what keeps a
+lock small enough for prefix matching to be cheap.
+
+### The lock
+
+`ecl.lock` holds exactly one dict form. It is derived rather than recorded:
+deleting it and resolving again reproduces it.
+
+```
+{'format 1
+ 'root "my.proj"
+ 'packages
+ {"bar" {'version "0.3.0" 'url "https://…" 'hash "sha256-…"}
+  "foo" {'version "1.2.0" 'url "https://…" 'hash "sha256-…"}}
+ 'requires
+ {"foo" {"bar" "0.3.0"}
+  "my.proj" {"foo" "1.2.0"}}}
+```
+
+- `'packages` is the selection: one entry per canonical name, carrying the
+  selected version and the URL and hash it was declared with.
+- `'requires` is keyed by the **requiring** package — the root under its own
+  `'name` — and maps each name that package required to the minimum it
+  declared. Under minimal version selection every one of those maps agrees
+  with `'packages` today. The table is per-package from this first version
+  anyway: it is the retrofit door for admitting two versions of one name later
+  without a format break.
+- The version selected for a name is never below a minimum recorded for that
+  name. A lock that violates this is malformed.
+- Entries in `'packages`, in `'requires`, and in each inner requirement map
+  stand in ascending `cmp` order of their name keys.
+
+The lock is machine-owned, so comments in it are not preserved and its layout
+is canonical rather than free: a newline precedes each top-level key and each
+entry of `'packages` and `'requires`, everything below an entry stays on one
+line, and every scalar is in `str`'s canonical spelling. A reader that ignores
+whitespace paired with a writer that is layout-exact is what makes the round
+trip a fixed point — reading a canonical lock and writing it back reproduces
+its bytes — and it keeps one dependency change a one-line diff.
+
+### Hashes and the store
+
+A hash is the literal `sha256-` followed by exactly 64 lowercase hex digits.
+The store entry for a selection is the directory named
+`<name>-<version>-<hex>`, where `<hex>` is those digits without the prefix —
+the same `name-version-hash` shape a content-addressed package cache
+conventionally uses. A hash mismatch is a hard failure and never a warning: a
+moved tag changes the content hash and fails rather than silently changing
+what a build means.
 
 ## Errors
 
@@ -1954,6 +2133,50 @@ strings or symbols; the only emitted symbol values are `'null`, `'true`, and
 arrays become lists, in-range integral numbers become ints, and other numbers
 become floats. JSON null and booleans become the ordinary symbols `'null`,
 `'true`, and `'false`.
+
+## pkg
+
+Pure vocabulary over the package formats (see Packages). No word here reaches
+the filesystem or the network.
+
+### owns-prefix?
+`( package-name module-name -- bool )` — Return 1 when a package owns a module
+name: the name itself, or a name continuing after a `.` boundary. `foo` owns
+`foo.bar` and does not own `foobar`. A non-string is `'type`; a malformed
+canonical name is `'domain`.
+
+### read-lock
+`( text -- lock )` — Parse and validate a lock. Unreadable text is `'parse`;
+text that is not exactly one form is `'shape`; anything else answers as the
+lock grammar decides, including the rule that no selection is below a minimum
+recorded for it.
+
+### read-manifest
+`( text -- manifest )` — Parse and validate a manifest. Unreadable text is
+`'parse`, text that is not exactly one form is `'shape`, and the single form is
+then handed to `validate-manifest`. The form is never evaluated.
+
+### validate-manifest
+`( candidate -- manifest )` — Return a manifest unchanged, or raise. A non-dict
+is `'type`; an undeclared key, an unsupported `'format`, a malformed name,
+version, hash, or URL, a self-requirement, an ownership collision between two
+requirement names, and a word value anywhere are `'domain`.
+
+### version-max
+`( versions -- version )` — The greatest of a nonempty list of version
+strings. The empty list is `'shape`, a non-list or a non-string element is
+`'type`, and a malformed version is `'domain` whether or not it is the
+maximum.
+
+### version<
+`( left right -- bool )` — Return 1 when the left version precedes the right
+under Semantic Versioning 2.0.0 §11. A non-string is `'type`; a spelling
+outside the version grammar is `'domain` rather than a false answer.
+
+### write-lock
+`( lock -- text )` — Render a lock in its canonical layout. An invalid lock
+raises rather than producing partial text, so its kinds are `read-lock`'s
+minus `'parse`.
 
 ## result
 
