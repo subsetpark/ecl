@@ -912,6 +912,7 @@ all.
   `pkg.validate-manifest` `( candidate -- manifest )`
 - lock: `pkg.read-lock` `( text -- lock )`, `pkg.write-lock`
   `( lock -- text )`
+- resolution: `pkg.resolve` `( root-manifest manifests -- lock )`
 - names: `pkg.owns-prefix?` `( package-name module-name -- bool )`
 
 `validate-manifest` returns its argument unchanged or raises; it is not a
@@ -922,6 +923,12 @@ everything inside a legal type but outside the grammar — an undeclared key, an
 unsupported `'format`, a malformed name, version, hash, or URL, a
 self-requirement, an ownership collision, a word value anywhere — is
 `'domain`.
+
+`resolve` returns a lock value directly. It raises the ordinary structured
+ECL error on failure; it does not return a `result` envelope. A wrong root or
+manifest-catalog container is `'type`. Malformed graph data, a missing
+manifest, a hash conflict, a selected-prefix collision, and a requirement
+cycle are `'domain`.
 
 ## Packages
 
@@ -1030,6 +1037,61 @@ nothing else. Ownership continues only across a `.` boundary: `foo` owns
 `foo.bar` and does not own `foobar`. With no registry to police publication,
 prefix ownership is what polices namespaces instead — and it is what keeps a
 lock small enough for prefix matching to be cheap.
+
+### Resolution
+
+`pkg.resolve` takes a validated root manifest and a catalog of already-read
+dependency manifests. The catalog is nested by exact package version:
+
+```
+{"foo" {"1.2.0" <foo 1.2.0 manifest>
+        "1.5.0" <foo 1.5.0 manifest>}
+ "bar" {"2.0.0" <bar 2.0.0 manifest>}}
+```
+
+Each outer key is a canonical package name. Each inner key is a version, and
+the manifest stored there has that same `'name` and `'version`. The root is
+passed separately and does not appear in the lock's `'packages` map.
+
+Resolution implements minimal version selection over the exact
+package-version requirement graph. Starting from the root's requirements, it
+visits every reachable `(name, version)` node and its requirements. It then
+keeps the greatest reachable version of each package name under
+`pkg.version<`. Catalog entries that no reachable requirement names are not
+candidates, are not validated, and cannot affect either the lock or an error.
+An active-path repeat is a requirement cycle and is rejected; this is a
+deliberate restriction of the otherwise cycle-tolerant MVS graph traversal.
+
+The returned lock uses the format below. `'root` is the root manifest's name.
+`'packages` contains one selected requirement value per dependency name.
+`'requires` contains the root and every selected package as requirers, each
+mapped to the minimum versions in its manifest. Every selected version is at
+least every recorded minimum, and the complete value satisfies the same
+validation as `pkg.read-lock` and `pkg.write-lock`.
+
+Traversal and diagnostics do not depend on dict insertion order. Requirements
+are considered in canonical name/version/requirer order. If equal
+name/version declarations have the same hash but different URLs, the
+lexicographically least URL is recorded; the content hash, not its mirror, is
+the artifact identity. Different hashes for one name/version are a hard
+conflict. Selected prefix-collision pairs and conflicting declarations are
+reported in package-name order. A cycle reports the sorted distinct package
+names in the cycle. When more than one malformed or missing edge exists, the
+least edge in canonical order is reported.
+
+Resolver errors use the frozen kinds and carry the following `'data` fields:
+
+- hash conflict: `'package`, `'version`, `'left-package`, `'left-hash`,
+  `'right-package`, `'right-hash`
+- selected-prefix collision: `'left-package`, `'right-package`
+- requirement cycle: `'packages`
+- malformed version or missing manifest: `'package`, `'required-package`,
+  `'version`
+
+Adding a requirement whose exact node is already reachable and whose minimum
+is already met does not change `'packages`. It does change `'requires`, which
+records the new declaration under its requirer; selection stability is not a
+claim that the whole lock value is byte-identical.
 
 ### The lock
 
@@ -2258,6 +2320,14 @@ recorded for it.
 `( text -- manifest )` — Parse and validate a manifest. Unreadable text is
 `'parse`, text that is not exactly one form is `'shape`, and the single form is
 then handed to `validate-manifest`. The form is never evaluated.
+
+### resolve
+`( root-manifest manifests -- lock )` — Resolve the reachable exact-version
+requirement graph by minimal version selection. `manifests` is a dict from
+canonical package name to a dict from exact version to an already-read
+manifest. Return a lock directly, or raise a structured error for a malformed
+input, hash conflict, selected-prefix collision, requirement cycle, or missing
+manifest. No filesystem, network, or evaluation capability is reached.
 
 ### validate-manifest
 `( candidate -- manifest )` — Return a manifest unchanged, or raise. A non-dict
