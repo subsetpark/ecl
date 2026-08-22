@@ -8,6 +8,8 @@ and standard library.
 Version `0.1.0` is the first prerelease. The language is usable, but source and
 native-extension compatibility are not yet promised across prereleases.
 
+ecl is distributed under the [BSD 3-Clause License](LICENSE).
+
 ## Install
 
 Building requires Zig 0.16.0, the version pinned by `build.zig.zon` and CI.
