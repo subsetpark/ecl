@@ -93,6 +93,7 @@ test {
     _ = @import("tests/csv_test.zig");
     _ = @import("tests/json_test.zig");
     _ = @import("tests/table_test.zig");
+    _ = @import("tests/pkg_test.zig");
     _ = @import("tests/http_test.zig");
     _ = @import("tests/random_test.zig");
     _ = @import("tests/kernel_typed_test.zig");
