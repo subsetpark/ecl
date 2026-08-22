@@ -585,3 +585,51 @@ test "pkg: the lock keys requirements by the requiring package" {
         },
     });
 }
+
+test "pkg: resolve selects the maximum of every reachable declared minimum" {
+    // PENDING: Patch 3
+    // Resolve the DoD-4 graph and assert that c appears once at exactly 1.5.0.
+    return error.SkipZigTest;
+}
+
+test "pkg: every resolved selection meets every recorded minimum" {
+    // PENDING: Patch 3
+    // Compare every per-requirer minimum in the returned lock with its selected version.
+    return error.SkipZigTest;
+}
+
+test "pkg: resolution is deterministic and order-independent over shuffled graph inputs" {
+    // PENDING: Patch 3
+    // Shuffle every dict and add an unreachable newer version, then compare canonical lock text.
+    return error.SkipZigTest;
+}
+
+test "pkg: adding an already satisfied requirement preserves selections" {
+    // PENDING: Patch 3
+    // Add an edge to an already-reached node and compare packages while checking new provenance.
+    return error.SkipZigTest;
+}
+
+test "pkg: resolve reports a hash conflict with both declarations" {
+    // PENDING: Patch 3
+    // Assert the domain error names the package, version, declaring packages, and both hashes.
+    return error.SkipZigTest;
+}
+
+test "pkg: resolve reports a prefix collision with both packages" {
+    // PENDING: Patch 3
+    // Assert overlapping selected prefixes fail with both package names in canonical order.
+    return error.SkipZigTest;
+}
+
+test "pkg: resolve reports a requirement cycle with every responsible package" {
+    // PENDING: Patch 3
+    // Assert an exact-version cycle fails and carries its sorted distinct package names.
+    return error.SkipZigTest;
+}
+
+test "pkg: resolve reports malformed versions and missing manifests with their requirers" {
+    // PENDING: Patch 3
+    // Assert both failures carry the requirer, required package, and offending exact version.
+    return error.SkipZigTest;
+}
