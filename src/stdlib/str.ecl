@@ -16,12 +16,20 @@
  (message -- error : "Build the caller-specific type error used by a public string word.")
  'type-error defp
 
+ ### def str?
+ (dup type 'list match? ((type 'char match?) all?) (pop 0) if)
+ (value -- bool :
+  "Return 1 when a value is a string — a list whose every element is a char — and 0 for anything
+   else, without raising.
+
+   The empty string answers 1, and so does the empty list: a string is a rank-1 char vector rather
+   than a distinct kind, so `\"\"` and `()` are one value. This is the predicate every boundary that
+   accepts text wants; specialization is representation and `type` deliberately does not report
+   it.")
+ 'str? def
+
  ### def checked-error
- ((|candidate failure|
-   candidate type 'list match? failure assert
-   candidate (type 'char match?) all? failure assert
-   candidate)
-  call)
+ ((|candidate failure| candidate str? failure assert candidate) call)
  (candidate failure -- string :
   "Return a rank-1 character vector unchanged, using the supplied error when validation fails.")
  'checked-error defp

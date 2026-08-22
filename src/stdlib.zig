@@ -65,6 +65,10 @@ const modules = [_]Module{
         .name = "<stdlib:rng>",
         .text = @embedFile("stdlib/rng.ecl"),
     } } },
+    .{ .name = "pkg", .entry = .{ .source = .{
+        .name = "<stdlib:pkg>",
+        .text = @embedFile("stdlib/pkg.ecl"),
+    } } },
 };
 
 comptime {

@@ -783,7 +783,14 @@ ASCII-only case mapping per the character model: a non-ASCII scalar passes
 through untouched, and codepoint count is preserved. Its exports are `str.upper`,
 `str.lower`, `str.trim`, `str.trim-left`, `str.trim-right`, `str.starts?`,
 `str.ends?`, `str.contains?`, `str.index-of` (`'domain` when absent),
-`str.replace`, `str.repeat`, `str.pad-left`, `str.pad-right`.
+`str.replace`, `str.repeat`, `str.pad-left`, `str.pad-right`, and `str.str?`.
+
+`str.str?` is the recognizer every boundary that accepts text needs, and it
+lives here rather than in core because it is derived: a string is a rank-1 char
+vector, so the test is a `'list` whose every element is a `'char`. It answers 1
+for the empty string — which is also the empty list, the two being one value —
+and 0 rather than raising for every other kind. `type` reports `'list` for every
+list, specialized or not, so this is the honest form of the question.
 
 ### io
 
@@ -2303,6 +2310,11 @@ with no boundary insertion.
 
 ### starts?
 `( string prefix -- bool )` — Return 1 when a string begins with a prefix.
+
+### str?
+`( value -- bool )` — Return 1 when a value is a string: a list whose every
+element is a char. The empty string answers 1, and so does the empty list —
+they are one value. Never raises.
 
 ### trim
 `( string -- string )` — Remove ASCII whitespace from both ends.

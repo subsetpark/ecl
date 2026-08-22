@@ -928,6 +928,7 @@ fn auditUnitConstructorSpelling() bool {
         @embedFile("../stdlib/str.ecl"),
         @embedFile("../stdlib/table.ecl"),
         @embedFile("../stdlib/rng.ecl"),
+        @embedFile("../stdlib/pkg.ecl"),
     };
     for (definition_sources) |source| {
         var scan: usize = 0;

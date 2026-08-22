@@ -480,4 +480,5 @@ test "module sources: formatter and standard modules use @defm" {
     try expectStack(&runtime, "\"ab\" str.upper", "\"AB\"");
     try expectStack(&runtime, "[\"n\"] [[1] [2]] table.from-rows table.height", "2");
     try expectStack(&runtime, "7 rng.seed 6 rng.int type", "'int");
+    try expectStack(&runtime, "\"1.2.0\" \"1.10.0\" pkg.version<", "1");
 }
