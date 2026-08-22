@@ -261,8 +261,9 @@ The soul test passes end-to-end: `ecl '3 4 +'` prints `7`. Implements
 ARCHITECTURE.md §Frame machine and §Dispatch: unit struct (frame stack,
 data stack, env ref, control block with fuel counter and cancel flag —
 present now, polled even before the scheduler exists), the single
-switch-dispatch loop with ip/code/env in locals, ≤80-byte frames (raised from
-48 for typed application modes and immutable continuation drivers),
+switch-dispatch loop with ip/code/env in locals, ≤104-byte frames (raised from
+48 for typed application modes and immutable continuation drivers, then from
+80 so a qualified-load frame owns its complete replay-or-dispatch request),
 base-index substack isolation, boundary frames with O(1) truncation,
 TCO as frame overwrite, lazy traces built only at unwind, and error
 dicts per d.19. Primitives are core-env bindings with fn-pointer

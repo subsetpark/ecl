@@ -371,9 +371,10 @@ test "module loader: observation and dispatch require the requested registration
     });
     defer runtime.deinit();
 
-    // Fully-qualified dispatch auto-loads with no prior import, and it does not
-    // care which spelling the file used to register the requested name.
-    try expectStack(&runtime, "stats.answer", "42");
+    // Literal and dynamically qualified dispatch both auto-load with no prior
+    // import, and neither cares which spelling the file used to register the
+    // requested name.
+    try expectStack(&runtime, "'stats 'answer qualify execute", "42");
     try expectStack(&runtime, "register-style.answer", "7");
 
     // `import` reaches the same registration through the same path.

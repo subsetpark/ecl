@@ -863,7 +863,6 @@ fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
-    try source.writer.writeAll("'sample.increment 'increment import ");
     var steps: usize = 0;
     while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1) {
         try source.writer.writeAll(programs[smith.index(programs.len)]);

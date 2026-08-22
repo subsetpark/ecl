@@ -77,6 +77,32 @@ test "stdlib: qualified reference auto-loads an unregistered module" {
     });
 }
 
+test "stdlib: dynamic qualified execution auto-loads every embedded transport" {
+    try support.expectStacks(&.{
+        .{
+            .name = "embedded ECL source",
+            .source = "[1] 'result 'ok qualify execute",
+            .expected = "{'ok [1]}",
+        },
+        .{
+            .name = "embedded builtin table",
+            .source = "\"[1]\" 'json 'parse qualify execute",
+            .expected = "[1]",
+        },
+        .{
+            .name = "embedded native descriptor",
+            .source = "\"a,b\" 'csv 'parse qualify execute",
+            .expected = "((\"a\" \"b\"))",
+        },
+    });
+    try support.expectError(.{
+        .name = "cold dynamic miss retains the requested word",
+        .source = "'result 'nope qualify execute",
+        .kind = "undefined-word",
+        .word = "result.nope",
+    });
+}
+
 test "stdlib: qualified reflection auto-loads every module transport" {
     try support.expectStack("'str.upper body type 'io.pp doc len 0 >", "'list 1");
 
@@ -116,6 +142,24 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     defer output.deinit();
     var diagnostics = std.Io.Writer.Allocating.init(allocator);
     defer diagnostics.deinit();
+
+    // Import precedence is proved from a cold registry, not after another
+    // spelling has already selected and published the embedded module.
+    {
+        var imported_output = std.Io.Writer.Allocating.init(allocator);
+        defer imported_output.deinit();
+        var imported_diagnostics = std.Io.Writer.Allocating.init(allocator);
+        defer imported_diagnostics.deinit();
+        var imported = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+            .io = std.testing.io,
+            .output = &imported_output.writer,
+            .diagnostics = &imported_diagnostics.writer,
+            .ecl_path = search,
+        });
+        defer imported.deinit();
+        try expectDisplay(&imported, "'result.ok 'ok import [3] ok", "{'ok [3]}");
+    }
+
     var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
         .io = std.testing.io,
         .output = &output.writer,
@@ -124,9 +168,8 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     });
     defer runtime.deinit();
 
-    // The embedded module wins for both spellings of the miss.
+    // The embedded module also wins for a cold literal qualified reference.
     try expectDisplay(&runtime, "[1 2] result.ok", "{'ok [1 2]}");
-    try expectDisplay(&runtime, "'result.ok 'ok import [3] ok", "{'ok [1 2]} {'ok [3]}");
     // Completion reaches the same ECL_PATH module before any execution or
     // reflection has registered it.
     var completed = try runtime.completionCandidates("cold-local.a");
@@ -136,7 +179,7 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
     try std.testing.expectEqualStrings("cold-local.answer", completed.items()[1]);
     // The same search path still serves a name the stdlib does not claim, so
     // this is precedence rather than ECL_PATH being ignored.
-    try expectDisplay(&runtime, "site-local.answer", "{'ok [1 2]} {'ok [3]} 7");
+    try expectDisplay(&runtime, "site-local.answer", "{'ok [1 2]} 7");
 }
 
 test "stdlib: concurrent first references converge on one published module" {

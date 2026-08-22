@@ -321,10 +321,14 @@ primitives, operationalized as two rules:
   stack, which is what makes units green: suspension is "stop stepping."
   This identity between the frame machine and the scheduler is the
   load-bearing synergy of the design.
-- **Frames are ≤80-byte uniform records** (code ref, ip, env ref, kind
+- **Frames are ≤104-byte uniform records** (code ref, ip, env ref, kind
   tag, typed payload). The ceiling covers the tagged application mode, the
-  immutable continuation driver, and trace ownership. Combinator state is
-  indices. Isolation and failure rollback save only base indices into the
+  immutable continuation driver, trace ownership, and the qualified-load
+  return frame's complete replay-or-dispatch continuation. That last state
+  raised the former 80-byte ceiling: retaining the semantic request across
+  nested source execution is preferable to correlating a consumed operand,
+  instruction pointer, and ambient load state. Combinator state is indices.
+  Isolation and failure rollback save only base indices into the
   unit's one contiguous data stack: isolation is a base-index barrier and
   attempt-catch is truncate-to-base, O(1). `cond` and `while` are the one
   distinct observation protocol: a resumable guard cursor retains the visible
@@ -1025,19 +1029,21 @@ honest source with no public dual representation.
   resolves with no host IO and no `ECL_PATH`, and no path module can shadow
   one. The host-IO/search-path bail moved after the manifest check for exactly
   this reason.
-- **An import original auto-loads exactly as any qualified miss does.** Resolution
+- **Every qualified execution carries its request through auto-load.** Resolution
   acquires the module *before* looking up the export atom, because a first
   reference is precisely the state in which that atom has never been interned;
   checking the export first made the trigger depend on whether some unrelated
-  source happened to intern the name. On a miss the dispatcher rewinds the
-  caller's instruction pointer to the reference and loads; the caller's own
-  frame then retries, so nothing has to reconstruct an execution context the
-  load may have discarded. A `.qualified_after_load` frame verifies the module
-  actually registered, which is what bounds the retry. Reflection restores
-  its already-consumed symbol and rewinds its primitive call through that same
-  protocol. Session completion drives the same loader on an initialized empty
-  root, without executing an export or creating an import; transport and prior
-  registration are therefore unobservable to every qualified-name operation.
+  source happened to intern the name. A dispatch miss transfers its requested
+  word, source site, and trace parent into the load continuation. Source-backed
+  loading preserves the caller evaluation even in tail position; after the
+  `.qualified_after_load` frame verifies the requested registration, dispatch
+  resumes that stored word directly. It never replays a consumed `execute`
+  operand. Reflection and import currently restore their consumed symbols and
+  select the continuation's explicit replay arm. Session completion selects
+  load-only, without executing an export or creating an import. Transport and
+  prior registration are therefore unobservable to every qualified-name
+  operation, and the tagged continuation makes the three resumption modes
+  exhaustive.
 - **Contention and recursion are different states.** A `LoadingNode` stores
   its owner rather than a bare active flag, so a second request from the same
   owner is a cycle and one from another owner is contention. A cycle raises

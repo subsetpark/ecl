@@ -680,7 +680,9 @@ anonymously, be passed as data, and be registered more than once.
   binding-name symbol and constructs the corresponding executable word;
   `execute` applies that word through ordinary late-bound dispatch, preserving
   its module home, private lookup, annotations, tracing, native/builtin path,
-  cancellation, and `within` authority. `alias` registers a short registry
+  cancellation, and `within` authority. If the qualified word is cold, that
+  same dispatch loads its module and resumes the constructed word directly;
+  it never requires a prior import or literal qualified call. `alias` registers a short registry
   name; aliases and module
   names may not collide in either direction. `which` shows any name's
   resolution.

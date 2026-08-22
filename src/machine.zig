@@ -983,6 +983,23 @@ const ApplicationFrame = struct {
         self.deinit_fn(releases, allocator, self.context);
     }
 };
+/// The semantic operation suspended while an unavailable qualified module is
+/// materialized. Direct and dynamically constructed words resume from the
+/// word they requested; operand-consuming primitives that still replay their
+/// source call restore those operands before selecting `.replay`.
+const QualifiedLoadContinuation = union(enum) {
+    replay,
+    dispatch: struct {
+        word: u32,
+        site: ?ErrorSite,
+        trace_parent: ?intern.TraceWord,
+    },
+    load_only,
+};
+const QualifiedLoadRequest = struct {
+    qualified: u32,
+    continuation: QualifiedLoadContinuation,
+};
 pub const Frame = union(enum(u8)) {
     eval: Eval,
     effect_check: EffectCheck,
@@ -991,6 +1008,7 @@ pub const Frame = union(enum(u8)) {
         loading: modules.LoadingLease,
         name: intern.ModuleName,
         path: Value,
+        request: QualifiedLoadRequest,
     },
     boundary: Boundary,
     fn deinit(self: Frame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
@@ -1035,7 +1053,11 @@ const OwnedFrame = struct {
 comptime {
     // The tagged application mode and immutable driver identity are worth the
     // extra words: invalid correlated continuation states are unrepresentable.
-    if (@sizeOf(Frame) > 80) @compileError("machine frames must remain at most 80 bytes");
+    // A load-return frame owns the complete qualified-operation continuation
+    // across nested source execution. Keeping that tagged state in the frame
+    // makes replay-vs-dispatch ownership unrepresentable rather than relying
+    // on correlated Unit fields.
+    if (@sizeOf(Frame) > 104) @compileError("machine frames must remain at most 104 bytes");
 }
 pub const IdiomRequest = union(enum) {
     direct: struct { body: *Header, word: u32 },
@@ -2298,7 +2320,10 @@ pub const Machine = struct {
     /// `runInitializedRoot`; reflection and completion use this same path.
     pub fn loadModuleOnly(self: *Machine, name: intern.ModuleName) MachineError!void {
         self.unit.active_word = .plain(intern.moduleId(name));
-        try self.autoLoadModule(name, .{ .qualified = intern.moduleId(name) });
+        try self.autoLoadModule(name, .{
+            .qualified = intern.moduleId(name),
+            .continuation = .load_only,
+        });
     }
 
     /// A reflection primitive already consumed its symbol before discovering
@@ -2322,7 +2347,10 @@ pub const Machine = struct {
         };
         try self.pushBorrowed(.{ .symbol = requested });
         self.unit.current.?.ip = self.unit.active_index;
-        try self.autoLoadModule(name, .{ .qualified = requested });
+        try self.autoLoadModule(name, .{
+            .qualified = requested,
+            .continuation = .replay,
+        });
         return .detached;
     }
     /// An import consumes two symbols before discovering a cold qualified
@@ -2348,17 +2376,19 @@ pub const Machine = struct {
         try self.pushBorrowed(.{ .symbol = original });
         try self.pushBorrowed(.{ .symbol = binding });
         self.unit.current.?.ip = self.unit.active_index;
-        try self.autoLoadModule(name, .{ .qualified = original });
+        try self.autoLoadModule(name, .{
+            .qualified = original,
+            .continuation = .replay,
+        });
         return .detached;
     }
-    /// A completed auto-load registers the module before the requesting
-    /// qualified word is retried once. The requested spelling also identifies
-    /// a misspelled export in the final undefined-word error.
-    const AutoLoadRequest = struct { qualified: u32 };
+    /// A completed auto-load registers the module before resuming the tagged
+    /// qualified operation. The requested spelling also identifies a
+    /// misspelled export in the final undefined-word error.
     fn autoLoadModule(
         self: *Machine,
         name: intern.ModuleName,
-        request: AutoLoadRequest,
+        request: QualifiedLoadRequest,
     ) MachineError!void {
         const registry = self.unit.inherited.registry orelse return self.undefinedModule(intern.moduleId(name));
         try self.startDriver(AutoLoadDriver{
@@ -2372,7 +2402,7 @@ pub const Machine = struct {
         const FilenameTarget = enum { component_start, candidate };
 
         name: intern.ModuleName,
-        request: AutoLoadRequest,
+        request: QualifiedLoadRequest,
         cursor: modules.Registry.BeginLoadingCursor,
         embedded: ?stdlib.Entry = null,
         loading: ?heap.Owned(modules.LoadingLease) = null,
@@ -2472,9 +2502,8 @@ pub const Machine = struct {
             self: *AutoLoadDriver,
             evaluator: *Machine,
         ) MachineError!WorkProgress {
-            _ = evaluator;
             self.loading.?.borrowMut().finish();
-            return .completed;
+            return continueQualifiedRequest(evaluator, self, self.request);
         }
         fn notFound(self: *AutoLoadDriver, evaluator: *Machine) MachineError {
             return evaluator.undefinedWord(self.request.qualified);
@@ -2484,6 +2513,7 @@ pub const Machine = struct {
                 .loading = self.loading.?.borrowMut().move(),
                 .name = self.name,
                 .path = self.path_value.?.take(),
+                .request = self.request,
             } };
         }
         pub fn advance(evaluator: *Machine, self: *AutoLoadDriver) MachineError!WorkProgress {
@@ -2518,8 +2548,8 @@ pub const Machine = struct {
                         },
                     },
                 },
-                // A load that raced a winner has nothing left to do: the
-                // caller re-resolves against the module the winner published.
+                // A load that raced a winner has nothing left to publish: its
+                // tagged operation resumes against the winner's module.
                 .registered => switch (self.registration.?.borrowMut().advance()) {
                     .pending => {},
                     .complete => |maybe_generation| {
@@ -2697,6 +2727,7 @@ pub const Machine = struct {
             // disposes the whole uninstalled driver's owned fields itself.
             const next = BuiltinLoadDriver{
                 .name = self.name,
+                .request = self.request,
                 .loading = .init(self.loading.?.take()),
                 .path = .init(self.path_value.?.take()),
                 .publication = .init(publication),
@@ -2724,6 +2755,7 @@ pub const Machine = struct {
             };
             const next = NativeLoadDriver{
                 .name = self.name,
+                .request = self.request,
                 .loader = .init(loader),
                 .loading = .init(self.loading.?.take()),
                 .path = .init(self.path_value.?.take()),
@@ -2751,6 +2783,7 @@ pub const Machine = struct {
             };
             const next = NativeLoadDriver{
                 .name = self.name,
+                .request = self.request,
                 .loader = .init(loader),
                 .loading = .init(self.loading.?.take()),
                 .path = .init(self.path_value.?.take()),
@@ -2765,6 +2798,7 @@ pub const Machine = struct {
     /// protocol as a native one; only the definition source differs.
     const BuiltinLoadDriver = struct {
         name: intern.ModuleName,
+        request: QualifiedLoadRequest,
         loading: heap.Owned(modules.LoadingLease),
         path: heap.Owned(Value),
         publication: heap.Owned(modules.Registry.BuiltinCandidateCursor),
@@ -2810,13 +2844,20 @@ pub const Machine = struct {
             }
             self.commit.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
             self.commit = null;
-            self.loading.borrowMut().finish();
-            return .completed;
+            return verifyPublishedModule(
+                evaluator,
+                self,
+                self.name,
+                &self.loading,
+                &self.path,
+                self.request,
+            );
         }
         pub const ownership: heap.DriverOwnership = .fields;
     };
     const NativeLoadDriver = struct {
         name: intern.ModuleName,
+        request: QualifiedLoadRequest,
         loader: heap.Owned(native_module.LoadCursor),
         loading: heap.Owned(modules.LoadingLease),
         path: heap.Owned(Value),
@@ -2876,8 +2917,14 @@ pub const Machine = struct {
                     .complete => {
                         self.commit.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.commit = null;
-                        self.loading.borrowMut().finish();
-                        return .completed;
+                        return verifyPublishedModule(
+                            evaluator,
+                            self,
+                            self.name,
+                            &self.loading,
+                            &self.path,
+                            self.request,
+                        );
                     },
                 },
             }
@@ -2901,12 +2948,13 @@ pub const Machine = struct {
     const SourceCompletion = union(enum) {
         push,
         call,
-        /// Registration only: the source runs, the loading lease is
-        /// released, and one qualified word is retried.
+        /// Registration only: the source runs, then the loading lease and
+        /// tagged qualified operation transfer to the return frame.
         register: struct {
             loading: ?modules.LoadingLease,
             name: intern.ModuleName,
             path: ?Value,
+            request: QualifiedLoadRequest,
         },
 
         pub fn deinit(self: *SourceCompletion, releases: *heap.ReleaseDomain) void {
@@ -3021,7 +3069,14 @@ pub const Machine = struct {
                             const scope = evaluator.unit.current.?.scope;
                             const home = evaluator.unit.current.?.home;
                             heap.incRef(self.root_header.?);
-                            _ = evaluator.suspendCurrent() catch {
+                            const preserves_caller = switch (register.request.continuation) {
+                                .replay, .dispatch => true,
+                                .load_only => false,
+                            };
+                            _ = (if (preserves_caller)
+                                evaluator.suspendCurrentForQualifiedLoad()
+                            else
+                                evaluator.suspendCurrent()) catch {
                                 evaluator.releaseDomain().releaseHeader(self.root_header.?);
                                 return error.OutOfMemory;
                             };
@@ -3029,6 +3084,7 @@ pub const Machine = struct {
                                 .loading = register.loading.?.move(),
                                 .name = register.name,
                                 .path = register.path.?,
+                                .request = register.request,
                             } });
                             defer continuation.deinit(evaluator.releaseDomain(), self.allocator);
                             register.loading = null;
@@ -4093,7 +4149,10 @@ pub const Machine = struct {
     }
     pub fn executeWord(self: *Machine, word: u32) MachineError!void {
         self.unit.active_word = .plain(word);
-        try self.startDriver(DispatchDriver{ .resolution = .init(.init(self, word)) });
+        try self.startDriver(DispatchDriver{
+            .word = word,
+            .resolution = .init(.init(self, word)),
+        });
     }
     /// Opens one state application against the invoking word's home slot.
     /// Authority comes from the definition-site home, never from a value, so
@@ -4316,6 +4375,17 @@ pub const Machine = struct {
         }
         self.unit.current = null;
         return inherited_trace;
+    }
+    /// A source-backed module load nests inside the requesting evaluation.
+    /// Preserve even an exhausted caller: after publication the qualified
+    /// request still needs its resolution scope, home, and continuation, and
+    /// only the eventual dispatched word may consume the tail position.
+    fn suspendCurrentForQualifiedLoad(self: *Machine) error{OutOfMemory}!intern.TraceWord {
+        const current = self.unit.current.?;
+        try self.unit.frames.append(self.unit.allocator, .{ .eval = current });
+        self.unit.max_frames = @max(self.unit.max_frames, self.unit.frames.items.len);
+        self.unit.current = null;
+        return no_word;
     }
 };
 
@@ -4732,6 +4802,7 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
     try self.executeWord(word);
 }
 const DispatchDriver = struct {
+    word: u32,
     resolution: heap.Owned(ResolutionCursor),
 
     /// Started once per word executed, so this is the driver the inline slot
@@ -4744,6 +4815,15 @@ const DispatchDriver = struct {
         while (budget != 0) : (budget -= 1) switch (self.resolution.borrowMut().advance()) {
             .pending => {},
             .complete => |outcome| {
+                const installed = self_machine.unit.workDriver().?;
+                const request = QualifiedLoadRequest{
+                    .qualified = self.word,
+                    .continuation = .{ .dispatch = .{
+                        .word = self.word,
+                        .site = installed.site,
+                        .trace_parent = installed.trace_parent,
+                    } },
+                };
                 self.resolution.deinit(self_machine.releaseDomain(), self_machine.allocator());
                 const allocator = self_machine.unit.allocator;
                 self_machine.retireDriver(self);
@@ -4754,18 +4834,17 @@ const DispatchDriver = struct {
                         try executeResolved(self_machine, &resolved);
                         return .detached;
                     },
-                    // A bare qualified reference loads its module, then lets
-                    // the caller re-execute the reference from the instruction
-                    // it was rewound to.
+                    // A qualified dispatch carries its exact word and
+                    // provenance through loading, including dynamic execute.
                     .unknown_module_prefix => |prefix| {
                         const name = intern.internModuleName(prefix) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.InvalidName => return self_machine.undefinedActiveWord(),
                         };
-                        return retryAfterLoad(self_machine, name);
+                        return continueDispatchAfterLoad(self_machine, name, request);
                     },
-                    .unregistered_module => |name| return retryAfterLoad(self_machine, name),
-                    .unresolved => return self_machine.undefinedActiveWord(),
+                    .unregistered_module => |name| return continueDispatchAfterLoad(self_machine, name, request),
+                    .unresolved => return self_machine.undefinedWord(request.qualified),
                 }
             },
         };
@@ -4775,26 +4854,72 @@ const DispatchDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-/// Rewinds the caller to the qualified reference and loads its module. The
-/// caller's own frame performs the retry, so nothing has to reconstruct an
-/// execution context the load may have discarded.
-fn retryAfterLoad(self: *Machine, name: intern.ModuleName) MachineError!WorkProgress {
-    if (self.unit.current == null or self.unit.inherited.registry == null)
-        return self.undefinedActiveWord();
-    const word = self.unit.active_word.atom();
-    self.unit.current.?.ip = self.unit.active_index;
-    try self.autoLoadModule(name, .{ .qualified = word });
+/// Carries the exact dispatch request through module loading. The caller has
+/// already consumed any dynamic `execute` operand, so replaying its source
+/// instruction would not be equivalent to retrying the requested word.
+fn continueDispatchAfterLoad(
+    self: *Machine,
+    name: intern.ModuleName,
+    request: QualifiedLoadRequest,
+) MachineError!WorkProgress {
+    if (self.unit.inherited.registry == null) return self.undefinedWord(request.qualified);
+    try self.autoLoadModule(name, request);
     return .detached;
 }
 
-/// After a qualified-miss auto-load, the requested module must actually be
-/// registered. Checking that is what bounds the retry: a source that
-/// registered nothing, or a different name, fails once here instead of being
-/// reloaded on every re-execution of the reference.
+/// After an auto-load, the requested module must actually be registered.
+/// Checking that is what bounds the operation: a source that registered
+/// nothing, or a different name, fails once here instead of starting another
+/// load when its tagged continuation resumes.
+fn continueQualifiedRequest(
+    evaluator: *Machine,
+    driver: anytype,
+    request: QualifiedLoadRequest,
+) MachineError!WorkProgress {
+    return switch (request.continuation) {
+        .replay, .load_only => .completed,
+        .dispatch => |dispatch_request| continuation: {
+            evaluator.retireDriver(driver);
+            evaluator.setActiveWord(.plain(dispatch_request.word));
+            try evaluator.startDriver(DispatchDriver{
+                .word = dispatch_request.word,
+                .resolution = .init(.init(evaluator, dispatch_request.word)),
+            });
+            if (dispatch_request.site) |site|
+                evaluator.setWorkDriverSite(site.code, site.index);
+            if (dispatch_request.trace_parent) |parent|
+                evaluator.setWorkDriverTraceParent(parent);
+            break :continuation .detached;
+        },
+    };
+}
+
+fn verifyPublishedModule(
+    evaluator: *Machine,
+    driver: anytype,
+    name: intern.ModuleName,
+    loading: *heap.Owned(modules.LoadingLease),
+    path: *heap.Owned(Value),
+    request: QualifiedLoadRequest,
+) MachineError!WorkProgress {
+    loading.borrowMut().finish();
+    const registry = evaluator.unit.inherited.registry.?;
+    const next = QualifiedRegistrationDriver{
+        .name = name,
+        .path = .init(path.take()),
+        .acquisition = .init(registry.acquireCursor(name)),
+        .request = request,
+    };
+    evaluator.retireDriver(driver);
+    try evaluator.startDriver(next);
+    return .detached;
+}
+
 const QualifiedRegistrationDriver = struct {
     name: intern.ModuleName,
     path: heap.Owned(Value),
     acquisition: heap.Owned(modules.Registry.AcquireCursor),
+    request: QualifiedLoadRequest,
 
     pub fn advance(evaluator: *Machine, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
@@ -4804,7 +4929,7 @@ const QualifiedRegistrationDriver = struct {
                 if (maybe_generation) |generation| {
                     var lease = generation;
                     lease.deinit();
-                    return .completed;
+                    return continueQualifiedRequest(evaluator, self, self.request);
                 }
                 const failure = evaluator.failFmt(
                     .io,
@@ -5601,15 +5726,27 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             var path = heap.OwnedValue.init(self.releaseDomain(), continuation.path);
             defer path.deinit();
             loading.finish();
-            // The caller's own frame retries the word: its instruction
-            // pointer was rewound to the reference before the load began.
-            // What must be checked here is that the load actually registered
-            // the module, since only that makes the retry terminating.
+            // Source loading temporarily replaces the caller's evaluation.
+            // Replay requests resume at their restored primitive operands;
+            // dispatch requests resume the exact stored word without replay.
+            switch (continuation.request.continuation) {
+                .replay, .dispatch => {
+                    const caller = self.unit.frames.pop().?;
+                    self.unit.current = switch (caller) {
+                        .eval => |evaluation| evaluation,
+                        else => unreachable,
+                    };
+                },
+                .load_only => {},
+            }
+            // The registration check bounds the retry and gives every
+            // transport the same post-load handoff.
             const registry = self.unit.inherited.registry.?;
             try self.startDriver(QualifiedRegistrationDriver{
                 .name = continuation.name,
                 .path = .init(path.take()),
                 .acquisition = .init(registry.acquireCursor(continuation.name)),
+                .request = continuation.request,
             });
             return true;
         },

@@ -106,7 +106,7 @@ test "native runtime: inadmissible values and duplicate keys are language errors
 }
 
 test "native runtime: execute uses ordinary native dispatch" {
-    var result = try run("'sample.increment 'increment import 7 'sample 'increment qualify execute", "1", false);
+    var result = try run("7 'sample 'increment qualify execute", "1", false);
     defer result.deinit();
     try result.expect(.{ .exit_code = 0, .stdout = "8\n", .stderr = "" });
 }
