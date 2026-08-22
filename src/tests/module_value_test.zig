@@ -125,7 +125,7 @@ test "module values: type display identity and capability boundaries are opaque"
     });
 
     // Serialization refuses the capability with its ordinary total error.
-    try expectErrorContains(&runtime, "'json use (1) @module json.emit", &.{
+    try expectErrorContains(&runtime, "(1) @module json.emit", &.{
         "'kind 'type",
         "'word 'json.emit",
     });
@@ -371,13 +371,13 @@ test "module loader: observation and dispatch require the requested registration
     });
     defer runtime.deinit();
 
-    // Fully-qualified dispatch auto-loads with no prior `use`, and it does not
+    // Fully-qualified dispatch auto-loads with no prior import, and it does not
     // care which spelling the file used to register the requested name.
     try expectStack(&runtime, "stats.answer", "42");
     try expectStack(&runtime, "register-style.answer", "7");
 
-    // `use` reaches the same registration through the same path.
-    try expectStack(&runtime, "'register-style use answer", "7");
+    // `import` reaches the same registration through the same path.
+    try expectStack(&runtime, "'register-style.answer 'answer import answer", "7");
 
     // A file that constructs an anonymous image but registers nothing still
     // fails with the existing total loader error.
@@ -386,7 +386,11 @@ test "module loader: observation and dispatch require the requested registration
         "registered nothing under that name",
         "'path \"test/acceptance/modules/image-only.ecl\"",
     });
-    try expectErrorContains(&runtime, "'image-only use", &.{ "'kind 'undefined-word", "'name 'image-only" });
+    try expectErrorContains(&runtime, "'image-only.answer 'answer import", &.{
+        "'kind 'io",
+        "registered nothing under that name",
+        "'path \"test/acceptance/modules/image-only.ecl\"",
+    });
 
     // Observation is registration-driven on the same terms as invocation.
     try expectStack(&runtime, "'register-style.answer body", "([7] first)");
@@ -463,12 +467,16 @@ test "module sources: formatter and standard modules use @defm" {
     // Every embedded standard module is registration-driven, enumerated from
     // the manifest rather than by hand so a new module is covered the day it
     // ships. A module whose source ended in a bare `@module` would construct an
-    // image the loader discards, and `use` would report that it registered
+    // image the loader discards, and `import` would report that it registered
     // nothing under the requested name.
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    for (stdlib.names()) |name| {
-        const source = try std.fmt.allocPrint(std.testing.allocator, "'{s} use", .{name});
+    const exports = [_][]const u8{
+        "result.ok",    "str.upper", "io.print",  "csv.parse",    "json.parse",
+        "table.valid?", "http.get",  "rng.float", "pkg.version<",
+    };
+    for (stdlib.names(), exports) |name, qualified| {
+        const source = try std.fmt.allocPrint(std.testing.allocator, "'{s} 'local import", .{qualified});
         defer std.testing.allocator.free(source);
         expectOk(&runtime, source) catch |failed| {
             std.log.err("embedded module {s} did not register its own name", .{name});

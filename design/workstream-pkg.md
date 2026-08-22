@@ -6,7 +6,7 @@
 dependencies in an inert data manifest, a resolver derives a lock from that
 manifest by minimal version selection, and the interpreter resolves module
 names through the lock before it ever touches a search path. Importing stays
-by name — `use foo.bar` never mentions a file, a URL, or a version — and a
+by name — `'foo.bar.word 'word import` never mentions a file, a URL, or a version — and a
 checkout plus a lock reproduces the same module images on any machine. The
 resolver is written in ECL and ships embedded in the binary, so the language's
 first substantial first-party program is written in itself and there is no
@@ -201,7 +201,8 @@ workstream terminal).
 **Why this is a safe pause point**: Nothing outside `src/stdlib.zig` and
 `src/stdlib/pkg.ecl` changes. `pkg` is an ordinary embedded module that
 manipulates data; no resolution path, CLI surface, or IO behavior is touched.
-The binary behaves identically for every program that does not `use pkg`.
+The binary behaves identically for every program that does not reference or
+import a `pkg` word.
 
 **Unlocks**: The resolver (M2) and the lock tier (M5) can both be written
 against a fixed format, in parallel.
@@ -209,11 +210,13 @@ against a fixed format, in parallel.
 **Open Questions**: None. Manifest discovery was settled during planning —
 walk up from the working directory (see Decisions Made).
 
-**Status**: Planned, 2026-08-21. Four patches — SPEC.md, the pending test
-suite and its three registration points, the version vocabulary plus module
-registration, then the manifest and lock vocabulary — in
-`gameplans/pkg-manifest-and-lock-format.json` (treat the link as possibly
-dangling; everything load-bearing is recorded here).
+**Status**: Executed, 2026-08-21. Four patches landed in the planned order:
+`36e662f` pins the format, `9c60195` registers the selected proof surface,
+`42b7b83` adds the embedded module and version ordering, and `176736f` adds
+manifest/lock validation and canonical lock writing. The later checkpointed-
+guard and explicit-import migrations preserve those contracts and keep every
+checked-in pkg predicate and example on the current vocabulary. The complete
+plan and proof ledger are in `gameplans/pkg-manifest-and-lock-format.json`.
 
 ---
 
@@ -533,12 +536,13 @@ fetcher. M6 is the join.
 ## Definition of Done (Acceptance Suite)
 
 - **DoD-1 — Import by name resolves through the lock**
-  - **Assert**: With a synced project, a script that says `use foo.bar` runs
+  - **Assert**: With a synced project, a script that says
+    `'foo.bar.answer 'answer import` runs
     successfully without naming any file, path, URL, or version, and with
     `ECL_PATH` unset.
   - **Verify by** `cmd`: In a fixture project synced against the fixture
     server, run `env -u ECL_PATH ecl script.ecl` where `script.ecl` contains
-    `use foo.bar` and calls an exported word.
+    `'foo.bar.answer 'answer import` and calls `answer`.
   - **Expected**: Exit status 0 and the word's output on stdout.
   - **Traces to**: Milestone 5 — the lock tier in `AutoLoadDriver`
     (`src/machine.zig`).
@@ -557,8 +561,8 @@ fetcher. M6 is the join.
   - **Assert**: A locked package that publishes a module named `json` cannot
     shadow the embedded `json`.
   - **Verify by** `cmd`: Sync a fixture package declaring prefix `json`, then
-    run `ecl -e 'use json'` and inspect which words are present.
-  - **Expected**: The embedded module's words. The tier order embedded →
+    run `ecl -e "'json.parse doc"` and inspect the resolved documentation.
+  - **Expected**: The embedded module's word. The tier order embedded →
     lock → `ECL_PATH` holds.
   - **Traces to**: Milestone 5 — the tier inserted *after* `stdlib.find` at
     `src/machine.zig:2565`.

@@ -2,6 +2,7 @@
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
+const list = @import("list.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
@@ -27,7 +28,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "unmodule", .primitive = unmoduleWord },
         .{ .name = "within", .primitive = withinWord },
         .{ .name = "without", .primitive = withoutWord },
-        .{ .name = "use", .primitive = useModule },
+        .{ .name = "import", .primitive = importWord },
         .{ .name = "alias", .primitive = aliasModule },
         .{ .name = "qualify", .primitive = qualify },
         .{ .name = "words", .primitive = words },
@@ -71,7 +72,7 @@ fn defmWord(evaluator: *Machine) MachineError!void {
     return evaluator.moduleOwned(name, body.take().list);
 }
 /// Removal completes the lifecycle. A canonical or alias name is resolved
-/// exactly as `use` resolves it and drives the owner-issued close protocol.
+/// through the registry and drives the owner-issued close protocol.
 fn unmoduleWord(evaluator: *Machine) MachineError!void {
     const name = try evaluator.popSymbol();
     try evaluator.startDriver(UnmoduleDriver{ .validation = .init(name) });
@@ -136,9 +137,11 @@ fn withoutWord(evaluator: *Machine) MachineError!void {
     return evaluator.moveWithout();
 }
 
-fn useModule(evaluator: *Machine) MachineError!void {
-    const name = try evaluator.popSymbol();
-    try evaluator.startDriver(UseNameDriver{ .validation = .init(name) });
+fn importWord(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    const binding = try evaluator.popSymbol();
+    const original = try evaluator.popSymbol();
+    try evaluator.startDriver(ImportDriver.init(evaluator, original, binding));
 }
 fn aliasModule(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
@@ -177,21 +180,106 @@ const RegisterDriver = struct {
     }
 };
 
-const UseNameDriver = struct {
+const ImportDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    validation: intern.ModuleNameCursor,
-    pub fn advance(evaluator: *Machine, self: *UseNameDriver) MachineError!machine.WorkProgress {
+    original: u32,
+    binding_id: u32,
+    scope: *env.Scope,
+    binding_validation: intern.NamespaceCursor,
+    dot: intern.LastDotCursor,
+    binding: ?intern.BindingName = null,
+    qualified: bool = false,
+    resolution: ?heap.Owned(machine.ResolutionCursor) = null,
+    resolved: ?heap.Owned(machine.Resolution) = null,
+    forwarding_body: ?heap.Owned(Value) = null,
+    publisher: ?heap.Owned(env.Environment.BindCursor) = null,
+
+    fn init(evaluator: *Machine, original: u32, binding: u32) ImportDriver {
+        return .{
+            .original = original,
+            .binding_id = binding,
+            .scope = evaluator.currentScope(),
+            .binding_validation = .init(binding),
+            .dot = intern.lastDotCursor(intern.get(original)),
+        };
+    }
+
+    pub fn advance(evaluator: *Machine, self: *ImportDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.validation.advance()) {
-            .pending => {},
-            .complete => |maybe_name| {
-                const name = maybe_name orelse return evaluator.fail(.domain, "use requires a valid module name");
-                evaluator.retireDriver(self);
-                try evaluator.useOrLoad(name);
-                return .detached;
-            },
-        };
+        while (budget != 0) : (budget -= 1) {
+            if (self.binding == null) switch (self.binding_validation.advance()) {
+                .pending => continue,
+                .complete => |maybe_name| {
+                    self.binding = maybe_name orelse return evaluator.fail(
+                        .domain,
+                        "import binding must be unqualified and non-reserved",
+                    );
+                    continue;
+                },
+            };
+            if (!self.qualified) switch (self.dot.advance()) {
+                .pending => continue,
+                .complete => |maybe_index| {
+                    const index = maybe_index orelse return evaluator.fail(
+                        .domain,
+                        "import original must be a qualified word",
+                    );
+                    const bytes = intern.get(self.original);
+                    if (index == 0 or index + 1 == bytes.len)
+                        return evaluator.fail(.domain, "import original must be a qualified word");
+                    self.qualified = true;
+                    self.resolution = .init(machine.ResolutionCursor.init(evaluator, self.original));
+                    continue;
+                },
+            };
+            if (self.resolved == null and self.publisher == null) switch (self.resolution.?.borrowMut().advance()) {
+                .pending => continue,
+                .complete => |outcome| switch (outcome) {
+                    .resolved => |resolved| {
+                        self.resolved = .init(resolved);
+                        self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.resolution = null;
+                        continue;
+                    },
+                    .unresolved => return evaluator.undefinedName(self.original),
+                    .unknown_module_prefix, .unregistered_module => {
+                        const binding = self.binding_id;
+                        const original = self.original;
+                        evaluator.retireDriver(self);
+                        return evaluator.retryImportAfterLoad(binding, original, outcome);
+                    },
+                },
+            };
+            if (self.forwarding_body == null) {
+                self.forwarding_body = .init(try list.fromValuesGeneric(
+                    evaluator.allocator(),
+                    &.{.{ .word = self.original }},
+                ));
+                continue;
+            }
+            if (self.publisher == null) {
+                const lease = &self.resolved.?.borrow().lease;
+                self.publisher = .init(try self.scope.publishTopCursor(self.binding.?, .{ .word = .{
+                    .body = env.quotation(self.forwarding_body.?.borrow().list) orelse unreachable,
+                    .effect = lease.effect,
+                    .doc = lease.doc,
+                } }));
+                self.resolved.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.resolved = null;
+                continue;
+            }
+            switch (self.publisher.?.borrowMut().advance() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Frozen => return evaluator.fail(
+                    .domain,
+                    "module environments are immutable after registration",
+                ),
+            }) {
+                .pending => {},
+                .complete => return .completed,
+            }
+        }
         return .yielded;
     }
 };

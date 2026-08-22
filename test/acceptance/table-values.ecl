@@ -1,6 +1,21 @@
 # DoD-27: a valid table stays an ordinary dict under every core interface,
 # while the table words preserve the ordered equal-length-column convention.
-'table use
+'table.valid? 'valid? import
+'table.names 'names import
+'table.height 'height import
+'table.from-columns 'from-columns import
+'table.from-rows 'from-rows import
+'table.from-header-rows 'from-header-rows import
+'table.from-records 'from-records import
+'table.rows 'rows import
+'table.header-rows 'header-rows import
+'table.records 'records import
+'table.column 'column import
+'table.cast 'cast import
+'table.select 'select import
+'table.rename 'rename import
+'table.with-column 'with-column import
+'table.where 'where import
 
 {"id" [1 2 3] "city" ["Oslo" "Lima" "Oslo"]} 'sales set
 

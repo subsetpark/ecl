@@ -142,12 +142,52 @@ test "combinators: child scopes are fresh and discarded" {
     });
 }
 
-test "inline times cond and case prevalidate and select" {
+test "inline times checkpointed guards and case prevalidate and select" {
     try support.expectStacks(&.{
         .{ .name = "times", .source = "0 3 (1 +) times", .expected = "3" },
         .{ .name = "cond false", .source = "[(0) (111) (222)] cond", .expected = "222" },
         .{ .name = "cond true", .source = "[(1) (111) (222)] cond", .expected = "111" },
         .{ .name = "cond else no-op", .source = "7 [()] cond", .expected = "7" },
+        .{
+            .name = "cond tests share their entry checkpoint",
+            .source = "10 [(1 + 0) () (dup 11 =) () (999)] cond",
+            .expected = "10 999",
+        },
+        .{
+            .name = "cond permits destructive tests and restores before the action",
+            .source = "10 20 [(pop 10 =) (30) (40)] cond",
+            .expected = "10 20 30",
+        },
+        .{
+            .name = "cond ignores test values below its top boolean",
+            .source = "[(111 0) () (222)] cond",
+            .expected = "222",
+        },
+        .{
+            .name = "cond stack rollback preserves environment effects",
+            .source = "[(1 'guard-effect set 0) () (guard-effect)] cond",
+            .expected = "1",
+        },
+        .{
+            .name = "while restores each test checkpoint",
+            .source = "0 (1 + dup 3 <) (10 +) while",
+            .expected = "10",
+        },
+        .{
+            .name = "while permits destructive tests and advances from body results",
+            .source = "0 3 (pop 3 <) (swap 1 + swap) while",
+            .expected = "3 3",
+        },
+        .{
+            .name = "while false test restores the iteration checkpoint",
+            .source = "10 (1 + 0) (999) while",
+            .expected = "10",
+        },
+        .{
+            .name = "while stack rollback preserves environment effects",
+            .source = "0 (1 'while-guard-effect set 0) () while while-guard-effect",
+            .expected = "0 1",
+        },
         .{ .name = "case", .source = "3 [1 (10) 3 (30) (90)] case", .expected = "30" },
         .{ .name = "case inert key", .source = "(missing) [(missing) (7) (9)] case", .expected = "7" },
         .{ .name = "case inert word subject", .source = "(foo) first [foo (7) (9)] case", .expected = "7" },
@@ -157,8 +197,8 @@ test "inline times cond and case prevalidate and select" {
         .{ .name = "cond shape", .source = "[] cond", .kind = "shape", .word = "cond" },
         .{ .name = "cond even", .source = "[() ()] cond", .kind = "shape", .word = "cond" },
         .{ .name = "cond type", .source = "[() 1 ()] cond", .kind = "type", .word = "cond" },
-        .{ .name = "while consumes ambient stack", .source = "42 (pop) () while", .kind = "contract", .word = "while" },
-        .{ .name = "cond consumes ambient stack", .source = "42 [(pop) () ()] cond", .kind = "contract", .word = "cond" },
+        .{ .name = "while test leaves no boolean", .source = "42 (pop) () while", .kind = "underflow", .word = "while" },
+        .{ .name = "cond test leaves no boolean", .source = "42 [(pop) () ()] cond", .kind = "underflow", .word = "cond" },
         .{ .name = "case prevalidation", .source = "1 [1 (10) 2 20 (30)] case", .kind = "type", .word = "len" },
         .{
             .name = "cond prevalidation precedes effects",
@@ -320,7 +360,7 @@ test "idioms: late binding defeats recognition" {
     defer used_sort.deinit();
     try expectStack(
         &used_sort,
-        "((pop [0]) (a -- b) 'grade def) 'm @defm 'm use [3 1 2] sort",
+        "((pop [0]) (a -- b) 'grade def) 'm @defm 'm.grade 'grade import [3 1 2] sort",
         "[3]",
     );
     try std.testing.expectEqual(@as(u64, 0), used_sort.lastIdiomHits());

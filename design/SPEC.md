@@ -207,11 +207,17 @@ A dying unit also cancels its unawaited tasks (see Concurrency).
 
 ### Application contexts
 
-Two kinds of quotation application exist:
+Three quotation-application behaviors exist:
 
 - **Inline**: the quotation runs on the current stack. The inline words
   are `call`, `dip`, `keep`, `bi`, `tri`, `bi2`, `both`, `if`, `when`,
-  `unless`, `cond`, `case`, `while`, and `times`.
+  `unless`, `case`, and `times`.
+- **Checkpointed inline guards**: `cond` and `while` test quotations run
+  in the current scope against a retained operand-stack checkpoint. A test
+  may consume, rearrange, or add values; its top value must be a 0/1 boolean,
+  and its complete operand result is discarded before control continues from
+  the checkpoint. Environment writes, IO, and other non-stack effects are
+  inline and therefore survive.
 - **Isolated**: the quotation runs on a fresh substack per application,
   seeded with its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
@@ -242,7 +248,7 @@ Words that are isolated but *not* marked, with their reasons:
   unit, on a substack, and are implicitly fed their elements.
 - `infra` and `within` — they apply on an explicitly named *other* stack;
   the substitution is the word's meaning, not a new unit.
-- `use`, `load`, `unmodule`, `register` — they construct, publish, or retire
+- `import`, `load`, `unmodule`, `register` — they construct, publish, or retire
   without taking a quotation.
 - `await`, `await-all`, `await-any`, `await-for`, `cancel`, `tasks` —
   they consume tasks rather than making them.
@@ -556,7 +562,7 @@ anonymously, be passed as data, and be registered more than once.
   image registered as both `left` and `right` executes against whichever name
   the call named — private lookup, same-home dispatch, `within`'s slot,
   diagnostic spelling, and `which` all follow the invoking registration. An
-  exported word's body resolves against its module's chain — internal environment, then the module's own `use`s,
+  exported word's body resolves against its module's internal environment and
   then core — never the caller's environment. Publics therefore reach
   privates, and callers cannot perturb a module's behavior by shadowing.
   A module word's body is still a plain list: `'stats.stdev body` is data,
@@ -643,7 +649,7 @@ anonymously, be passed as data, and be registered more than once.
   retained representation and may migrate it with an ordinary first
   `within`; the runtime neither inspects nor names positions in the stack.
 - **Removal completes the lifecycle.** `unmodule` accepts a module name; an
-  alias canonicalizes exactly as `use` resolves it. An unregistered name is
+  alias canonicalizes through the registry to the same slot. An unregistered name is
   `'undefined-word`, and removal from inside any state application is
   `'domain`, like re-registration. It
   closes new resolution, calls, and `within` applications, waits for
@@ -663,14 +669,13 @@ anonymously, be passed as data, and be registered more than once.
   restart, and the native ABI exposes no module-state capability, so an
   `.eclmod` word can neither observe an internal module home nor reach a durable
   stack.
-- **Surface**: `use` splices a module's exports into scope. Session
-  definitions shadow used exports; a later `use` shadows an earlier one;
-  re-`use`ing a module moves it to the top of the shadow order; `use` is
-  idempotent. Each session binding that shadows an incoming export is
-  reported on stderr ("session `mean` shadows `stats.mean`") —
-  informational only; shadowing is the documented way to locally patch a
-  module word. Dotted words split at their final dot and give qualified access
-  with no import. `qualify` validates a module-name symbol and an unqualified
+- **Surface**: `import` consumes a qualified original and a bare binding name,
+  then publishes exactly that one binding in the current environment. The
+  binding is a late-bound forwarding definition whose effect and documentation
+  are copied from the original. Naming a binding that already exists replaces
+  only that binding; importing never splices an entire module or emits shadow
+  notices. Dotted words split at their final dot and give qualified access with
+  no import. `qualify` validates a module-name symbol and an unqualified
   binding-name symbol and constructs the corresponding executable word;
   `execute` applies that word through ordinary late-bound dispatch, preserving
   its module home, private lookup, annotations, tracing, native/builtin path,
@@ -678,16 +683,16 @@ anonymously, be passed as data, and be registered more than once.
   name; aliases and module
   names may not collide in either direction. `which` shows any name's
   resolution.
-- **Loading**: `'stats use` on an unregistered name — and equally the
-  first qualified reference (`stats.mean`) to an unregistered module —
+- **Loading**: the first qualified reference (`stats.mean`) to an unregistered
+  module — including an original named by `import` —
   consults the embedded standard library first, then searches each
   `ECL_PATH` entry in order, trying `stats.ecl` and then `stats.eclmod`;
   the first existing candidate is authoritative, including its errors.
   Embedded names therefore always win: a `csv.ecl` on the search path
   cannot silently replace the stdlib `csv`, and in-session shadowing or
   explicit `@defm` registration remain the way to override one. Every
-  module is addressable by qualified name with no ceremony; `use` remains
-  the word that splices unqualified exports into scope and reports shadows.
+  module is addressable by qualified name with no ceremony; an explicit
+  `import` supplies a chosen bare spelling for one word.
   Every qualified-name operation triggers the same load when needed:
   execution, `body`, `doc`, `see`, `which`, and qualified completion do not
   depend on whether an earlier operation happened to register the module.
@@ -708,8 +713,8 @@ A `<name>.eclmod` is a precompiled native module: one artifact is one
 module, whose complete word table validates and publishes atomically — an
 artifact cannot partially register. Its canonical name must equal the
 requested name. Native words are ordinary module words: they carry a
-mandatory effect and nonempty documentation, participate in `use`, dotted
-access, `doc`, `which`, and `see` (which display the native origin), and
+  mandatory effect and nonempty documentation, participate in `import`, dotted
+  access, `doc`, `which`, and `see` (which display the native origin), and
 their calls are transactional — a failing native call leaves the stack
 unchanged. A native word can raise only the kinds `'type`, `'shape`,
 `'conform`, `'overflow`, `'domain`, `'parse`, `'io`, or `'user`; the
@@ -723,8 +728,8 @@ a trusted-code boundary.
 ## The standard library
 
 Nine modules ship inside the binary. They are ordinary modules — registered,
-enumerable, shadowable — and they load lazily on the first mention of their
-name, whether that is `'str use` or a bare `str.upper`. Resolution consults
+enumerable, shadowable — and they load lazily on the first qualified mention of
+their name, whether that is a bare `str.upper` or `'str.upper 'upper import`. Resolution consults
 the embedded manifest before `ECL_PATH`, so a stray `csv.ecl` on the search
 path cannot silently replace a stdlib name; in-session shadowing and explicit
 `@defm` registration remain the documented overrides. All nine resolve with no
@@ -796,7 +801,7 @@ list, specialized or not, so this is the honest form of the question.
 
 Observable text I/O lives here: `io.pp`, `io.prin`, `io.print`, `io.inspect`,
 `io.stdin`, `io.slurp`, `io.spit`, and `io.lines`. A qualified reference or
-`'io use` makes the boundary explicit. `str`, which canonically renders any
+an explicit import such as `'io.print 'print import` makes the boundary explicit. `str`, which canonically renders any
 value *as a string value* without performing I/O, remains in the prelude.
 
 ### csv
@@ -878,8 +883,7 @@ stores the advanced state back.
 
 - `rng.seed` `( key -- )` — rekey and reset the counter. Every later draw
   is a function of this key.
-- `rng.int` `( bound -- result )`, `rng.ints` `( count bound -- results )`,
-  and `rng.roll`, the dice-roll spelling of `rng.ints`.
+- `rng.int` `( bound -- result )`, `rng.ints` `( count bound -- results )`.
 - `rng.float` `( -- result )` — one uniform float in `[0, 1)`.
 - `rng.deal` `( count pool -- results )` — `count` distinct values below
   `pool`, drawn without replacement. Selection sampling, so the sample is
@@ -921,8 +925,8 @@ self-requirement, an ownership collision, a word value anywhere — is
 A project declares its dependencies in `ecl.pkg`, and resolution derives
 `ecl.lock` from it. Both files are ECL data: read with `parse` and **never
 evaluated**, so resolving a dependency graph cannot run code from a
-dependency. Importing stays by name — `use foo.bar` never mentions a file, a
-URL, or a version — and a checkout plus a lock reproduces the same module
+dependency. Importing stays by qualified name — `'foo.bar.baz 'baz import`
+never mentions a file, a URL, or a version — and a checkout plus a lock reproduces the same module
 images on any machine.
 
 The vocabulary that reads, validates, and writes these files is the `pkg`
@@ -1536,8 +1540,13 @@ order.
 `( clauses -- ... )` — *Inline.* The clause list is flat, nonempty, and
 odd: `[test action … else]`, all quotations. The whole list is validated
 before the first test runs (empty or even lists are `'shape`; a non-list
-or non-quotation member is `'type`). The first test leaving 1 selects its
-action; otherwise the final else runs.
+or non-quotation member is `'type`). Every test runs against the operand
+stack checkpoint taken after the clause list is consumed. Tests may inspect
+that stack destructively; only their top result is interpreted, and it must
+be a 0/1 boolean. The complete test result is then discarded. The first true
+test selects its action; otherwise the final else runs, in either case from
+the original checkpoint. Stack rollback does not roll back environment or IO
+effects performed by tests.
 
 ### cons
 `( value list -- list )` — Raw structural prepend. On data,
@@ -1699,13 +1708,14 @@ searches, not a `0` answer about `[1 1]`. Use `([1 1] match?) any?` for
 that.
 
 ### import
-`( 'short 'qualified-word -- )` — Bind one module word under an unqualified
-local name: `'upper 'str.upper import` makes `upper` mean `str.upper`. The
+`( 'original 'binding -- )` — Bind one qualified module word under an
+unqualified local name: `'str.upper 'upper import` makes `upper` mean `str.upper`. The
 binding dispatches through the module, so an imported word resolves against its
 own home exactly as the qualified spelling does. Shadowing an existing binding
 is allowed — it is the documented way to patch one — but it takes naming the
-word, so it cannot happen by accident. An unqualified target is `'domain`.
-Defined in ecl.
+word, so it cannot happen by accident. The new binding preserves the
+original's effect and documentation; `body` reflects its one-word forwarding
+quotation. An unqualified original or a qualified binding is `'domain`.
 
 ### infra
 `( list quotation -- list )` — *Isolated*, contract unconstrained. Run
@@ -2005,18 +2015,10 @@ is 0. Equivalent to `() swap if`.
 ### unmodule
 `( 'module-name -- )` — Close, quiesce, and retire the module currently
 registered under a canonical name or unqualified alias, resolved exactly as
-`use` resolves it. An unregistered name is `'undefined-word`. Removal strips
+ordinary registry lookup resolves it. An unregistered name is `'undefined-word`. Removal strips
 every alias targeting the slot in the same publish and is `'domain` when
 initiated from inside any state application, since a unit holds at most one
 slot's turn. See Modules.
-
-### use
-`( 'module-name -- )` — Splice a module's exports into the current scope,
-loading `<name>.ecl`/`<name>.eclmod` from `ECL_PATH` when unregistered
-(qualified reference to an unregistered module triggers the same load;
-`use` adds only the unqualified splice and shadow notices). Reports each
-shadowed export on stderr. Idempotent; re-use moves the module to the top
-of the shadow order. See Modules.
 
 ### vals
 `( dict -- values )` — Values in insertion order. Defined in ecl.
@@ -2037,8 +2039,13 @@ effect when one was supplied. Constants report `def` with no effect, like
 every other unannotated ecl definition.
 
 ### while
-`( cond body -- ... )` — *Inline.* Repeatedly run `cond`, which must leave
-one boolean; while it leaves 1, run `body`. Tail-call optimized.
+`( cond body -- ... )` — *Inline.* At the start of each iteration, retain an
+operand-stack checkpoint and run `cond` against it. The condition may inspect
+the stack destructively; its top result must be a 0/1 boolean, and its complete
+stack result is discarded. On 1, run `body` from the checkpoint and use the
+body's result as the next iteration's checkpoint. On 0, restore the checkpoint
+and exit. Environment and IO effects from the condition survive. Tail-call
+optimized.
 
 ### with
 `( values quotation -- quotation )` — Capture every element of a list as
@@ -2270,9 +2277,6 @@ replacement. The sample is unbiased; `count > pool` is `'domain`.
 ### ints
 `( count bound -- results )` — Draw a vector of uniform integers below a
 positive bound.
-
-### roll
-`( count bound -- results )` — Dice-roll spelling of `ints`.
 
 ### seed
 `( key -- )` — Rekey the generator and reset its counter.

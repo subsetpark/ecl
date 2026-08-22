@@ -221,14 +221,14 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-reflection.ecl",
         "((1) ( -- n ) 'f def) 'reflection-module @defm " ++
-            "'reflection-module use 'reflection-module.f body pop words " ++
+            "'reflection-module.f 'f import 'reflection-module.f body pop words " ++
             "'f which 'reflection-module.f see",
     );
-    try runOk(&runtime, "oom-loader.ecl", "'stats use answer pop");
+    try runOk(&runtime, "oom-loader.ecl", "'stats.answer 'answer import answer pop");
     try runOk(
         &runtime,
         "oom-native.ecl",
-        "'sample use 41 sample.increment pop 7 sample.singleton pop " ++
+        "'sample.increment 'increment import 41 sample.increment pop 7 sample.singleton pop " ++
             "7 'sample 'increment qualify execute pop " ++
             "[1 2] sample.sum-list pop {'a 1 'b 2} sample.sum-dict pop " ++
             "'answer 42 sample.pair-dict pop sample.builder-budget pop " ++
@@ -239,7 +239,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-module.ecl",
         "(1 'x setp (x) ( -- n ) 'get def) 'allocation-module @defm " ++
-            "'allocation-module use get pop 'short 'allocation-module alias short.get pop " ++
+            "'allocation-module.get 'get import get pop 'short 'allocation-module alias short.get pop " ++
             "(2 'x setp (x) ( -- n ) 'get def) 'allocation-module @defm get pop " ++
             "(((dup) 'f def) 'bad @defm) @attempt pop " ++
             // A non-empty construction stack is captured as durable slot
@@ -337,7 +337,8 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-random.ecl",
-        "'rng use 42 seed 2 4 deal shuffle pop 2 6 ints pop float pop " ++
+        "'rng.seed 'seed import 'rng.deal 'deal import 'rng.shuffle 'shuffle import " ++
+            "'rng.ints 'ints import 'rng.float 'float import 42 seed 2 4 deal shuffle pop 2 6 ints pop float pop " ++
             "[7 0] 2 6 rand-ints nip pop",
     );
     // Each stdlib module has its own Session-reachable load path: embedded

@@ -279,7 +279,7 @@ test "native: a discovered artifact publishes its complete table atomically" {
 
     try expectOk(
         &runtime,
-        "'sample use 40 sample.increment 41 increment 's 'sample alias 42 s.increment",
+        "'sample.increment 'increment import 40 sample.increment 41 increment 's 'sample alias 42 s.increment",
     );
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 41), runtime.stackItems()[0].int);
@@ -335,7 +335,7 @@ test "native: source candidates win inside a root and path-root order wins acros
     defer diagnostics.deinit();
     var source_first = try initRuntime(&output.writer, &diagnostics.writer, same_root_path);
     defer source_first.deinit();
-    try expectOk(&source_first, "'sample use sample.increment");
+    try expectOk(&source_first, "sample.increment");
     try std.testing.expectEqual(@as(i64, 100), source_first.stackItems()[0].int);
 
     var native_root = std.testing.tmpDir(.{});
@@ -374,7 +374,7 @@ test "native: source candidates win inside a root and path-root order wins acros
     defer std.testing.allocator.free(search);
     var path_first = try initRuntime(&output.writer, &diagnostics.writer, search);
     defer path_first.deinit();
-    try expectOk(&path_first, "'sample use 41 sample.increment");
+    try expectOk(&path_first, "41 sample.increment");
     try std.testing.expectEqual(@as(i64, 42), path_first.stackItems()[0].int);
 }
 
@@ -407,12 +407,12 @@ test "native: a rejected artifact publishes nothing and never selects a later ca
         defer diagnostics.deinit();
         var runtime = try initRuntime(&output.writer, &diagnostics.writer, search);
         defer runtime.deinit();
-        try expectErrorContains(&runtime, "'sample use", &.{ "'kind 'io", case.message, broken });
+        try expectErrorContains(&runtime, "'sample.increment 'increment import", &.{ "'kind 'io", case.message, broken });
         var completion = try runtime.completionCandidates("sample.");
         defer completion.deinit();
         try std.testing.expectEqual(@as(usize, 0), completion.items().len);
         // Under the qualified-miss auto-load ruling a bare qualified
-        // reference loads its module exactly as `use` does, so it reports the
+        // reference loads its module exactly as `import` does, so it reports the
         // same rejection rather than an undefined word.
         try expectErrorContains(&runtime, "sample.increment", &.{ "'kind 'io", case.message });
     }
@@ -427,7 +427,7 @@ test "native: reflection exposes native origin effects documentation and capabil
     defer runtime.deinit();
     try expectOk(
         &runtime,
-        "'sample use 'sample.increment which 'sample.increment see 'sample.increment doc",
+        "'sample.increment 'increment import 'sample.increment which 'sample.increment see 'sample.increment doc",
     );
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -451,7 +451,7 @@ test "native: only exact completion mutates the operand stack" {
     defer diagnostics.deinit();
     var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
-    try expectOk(&runtime, "'sample use 7");
+    try expectOk(&runtime, "sample.singleton pop 7");
     try expectErrorContains(
         &runtime,
         "sample.fail-user",
@@ -564,7 +564,7 @@ test "native: cooperative slices let another unit progress at one worker" {
     defer runtime.deinit();
     try expectOk(
         &runtime,
-        "'sample use ((sample.cooperative) @spawn 'native-task set " ++
+        "((sample.cooperative) @spawn 'native-task set " ++
             "(7) @spawn 'observer set native-task observer pair await-any) @spawn await",
     );
     var display = try runtime.stackDisplay();
@@ -579,7 +579,7 @@ test "native: aggregate cursors and builders charge the scheduler budget" {
     defer diagnostics.deinit();
     var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
-    try expectOk(&runtime, "'sample use 200000 range");
+    try expectOk(&runtime, "sample.singleton pop 200000 range");
     try expectOk(&runtime, "sample.sum-list");
     try std.testing.expectEqual(@as(i64, 19_999_900_000), runtime.stackItems()[0].int);
     try std.testing.expect(runtime.lastPolls() >= 4);
@@ -612,7 +612,7 @@ test "native: cancellation after a yield preserves the pre-call operand stack" {
         .{ .worker_pool = 1 },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "'sample use 5");
+    try expectOk(&runtime, "sample.singleton pop 5");
     try expectOk(
         &runtime,
         "(9 sample.yield-forever) @spawn dup 1 await-for pop dup cancel await pop",

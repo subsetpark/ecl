@@ -3,7 +3,7 @@
 //! Every first-party module ships inside the binary, so the auto-load driver
 //! consults this table before it ever touches the filesystem. That order is
 //! the ruling, not an optimization: a stray `csv.ecl` on `ECL_PATH` must not
-//! silently replace the stdlib, and `use` of a stdlib name must work with no
+//! silently replace the stdlib, and `import` of a stdlib word must work with no
 //! `ECL_PATH` and no readable working directory at all.
 //!
 //! In-session shadowing and explicit `module` registration remain the

@@ -295,13 +295,13 @@ ARCHITECTURE.md §Environments in full: binding cells (rebind swaps the
 interior), per-env shape generations, the single `env.bind()` funnel,
 lazy child envs shared by every isolated boundary, deep-binding chain
 resolution, core frozen after prelude install. The d.18 module system:
-`@module`/`use`/`alias`, dotted
+`@module`/`import`/`alias`, dotted
 qualified access, `defp`/`setp` (top-level error), registry as
 name → atomically swapped `{env, generation}` with commit-after-success
 and **whole-body generation pinning**, plus the multi-writer registry
 swap protocol. Reflection: `body`, `doc`, `words`, `which`, `see`. **New over
 the skeleton**: `load` (file as one unit) and `ECL_PATH` auto-load on
-unregistered `use`, and the native-builtin-module mechanism (modules
+an unregistered qualified reference, and the native-builtin-module mechanism (modules
 pre-registered at startup whose bindings are primitive-backed — the
 static substrate M12 reuses after M9 replaces the public callback seam).
 **New over the skeleton (d.9, re-ruled
@@ -317,10 +317,10 @@ recursion stay constant-space under the pinned module activation; the
 post-v1 static checker owns internal word-to-word verification. A module
 def without an effect is a registration error. Top-level `def` permits no
 annotation, effect only, documentation only, or both; its effects are
-reflective metadata rather than dynamic call frames. The d.18 shadow notice: `use`
-prints one stderr line per session binding that shadows an incoming
-export (informational; `use` succeeds). The skeleton's d.18 test
-battery is ported and green (its module fixtures gain declarations).
+reflective metadata rather than dynamic call frames. The former bulk `use`
+surface has since been replaced by metadata-preserving, one-word `import`;
+explicit replacement emits no shadow notice. The skeleton's d.18 test battery
+is ported and green (its module fixtures gain declarations).
 
 **Why this is a safe pause point**: The binary is a calculator with a
 complete module system; kernels/combinators still run the provisional
@@ -411,8 +411,14 @@ reification through `parse` [P].
 **Conditional clauses use one flat, exhaustive shape.** `cond` consumes a
 nonempty `2n+1` list of quotations: alternating test/action slots followed
 by a mandatory else quotation. It prevalidates the entire list before
-running a test; each test must leave exactly one 0/1 boolean, the first true
-test selects its adjacent action, and `[()] cond` is the no-op-else case.
+running a test. Each test may destructively inspect the same retained entry
+stack; its top value must be a 0/1 boolean, its complete stack result is
+discarded, and the first true test selects its adjacent action from the entry
+checkpoint. `[()] cond` is the no-op-else case. `while` uses the same guard
+protocol once per iteration: a true body starts from that iteration's
+checkpoint and its result becomes the next one; a false test restores and
+exits. Both remain inline-scope operations, so test environment and IO effects
+survive stack restoration.
 `case` uses the parallel shape `( subject [key action ... else] -- …)`, but
 its left slots are inert Values rather than predicate quotations. It
 prevalidates every action/else quotation, compares keys left-to-right with
@@ -1115,7 +1121,7 @@ stack snapshot. Concretely:
   representation and may migrate it with an ordinary first `within` operation;
   the runtime neither inspects nor names positions in the stack.
 - **Removal completes the lifecycle.** `unmodule` accepts a module name
-  (alias names canonicalize exactly as `use` and qualified resolution do);
+  (alias names canonicalize through the same registry path as qualified resolution);
   an unregistered name is `'undefined-word`, and removal from inside any state application is
   `'domain` like re-registration. It closes new resolution, calls, and `within`
   applications, waits through the same arbiter order for queued and active
@@ -1163,7 +1169,7 @@ protocol.
 per convention; the substance below stands on its own). Ten patches,
 ungated pre-`0.1.0`. Planning rulings folded into the DoD: the http spike
 ran and `std.http.Client` won; qualified reference to an unregistered
-module auto-loads exactly as `use`-miss; embedded stdlib wins over
+module auto-loads from any qualified miss, including an `import` original; embedded stdlib wins over
 `ECL_PATH`; `str` ships sixteen words; `http` ships two fixed-arity words;
 `stdin` closes Open Question 1.
 
@@ -1212,7 +1218,7 @@ declined in favour of recording the limitation.
 Eight stdlib modules ship inside the binary (embedded sources / native
 descriptors registered lazily through M4 plus M9's private static transport,
 so the single-binary story holds; `ECL_PATH` remains for user modules), each
-resolvable by `use` and by bare qualified reference with no `ECL_PATH` and no
+resolvable by explicit one-word `import` and by bare qualified reference with no `ECL_PATH` and no
 filesystem. CSV
 and JSON are first-party consumers of the public typed callback/capability
 protocol without becoming external runtime dependencies. The same milestone
@@ -1847,11 +1853,11 @@ time or last-registered name.
    capability.
 
 7. **Loading and observation remain registration-driven.** Fully-qualified
-   dispatch, `use`, `doc`, completion, builtin modules, native modules, and
+   dispatch, `import`, `doc`, completion, builtin modules, native modules, and
    ECL_PATH auto-loading continue through the single registry path. Loading a
    source succeeds only if it registers the requested canonical name; a file
    that merely constructs an anonymous image produces the existing total
-   loader error. Prior explicit `use` or load state is never required for a
+   loader error. Prior explicit import or load state is never required for a
    fully qualified observation or invocation.
 
 8. **The language and documentation cut over together.** Every checked-in ECL
@@ -2608,8 +2614,8 @@ INTERPRETER.md and its entry here is retired.
     anonymous-module-values review). The anonymous-image/registration split
     adds only one steady-state pointer traversal, but a hot qualified call still
     repeats dotted-name splitting, registry acquisition, and image-environment
-    lookup on every execution. An unqualified call through `use` repeats the
-    scope/use walk, while a same-image local call still enters the generic
+    lookup on every execution. An imported call repeats the direct scope lookup
+    and its forwarding qualified lookup, while a same-image local call still enters the generic
     direct-lookup machinery. For small module words those existing resolution
     costs can dominate the body. Measure them after the representation has
     settled, then allow one call-site cache behind the execution view:
@@ -2622,13 +2628,13 @@ INTERPRETER.md and its entry here is retired.
       cannot mint execution or mutation authority, bypass Unit generation
       pinning, or outlive the Session reclamation domain that issued it.
     - Qualified canonical and alias calls guard the registration generation.
-      A `use`-resolved call additionally guards the scope/use-order generation
-      that selected the registration. A same-image local reference may omit
+      An imported call additionally guards the scope binding generation that
+      selected its forwarding definition. A same-image local reference may omit
       the registry guard only when its execution view owns the immutable image
       generation for its whole lifetime. Unrelated registry writes may cause a
       conservative miss; they may never make a stale hit legal.
     - A warm hit performs no dotted-spelling scan, directory or alias-map walk,
-      use-order traversal, qualified-name interning, or fresh registration
+      scope traversal, qualified-name interning, or fresh registration
       search. It still performs the language-mandated cross-home effect check,
       body retain, frame scheduling, and Unit pin check. Ordinary calls never
       acquire the state arbiter; `within` remains the only state-turn path.
@@ -2641,7 +2647,7 @@ INTERPRETER.md and its entry here is retired.
       history.
     - Measure only ReleaseSafe and the intended release mode, never Debug. The
       corpus compares cold and warm calls for a top-level trivial word,
-      `module.word`, an unqualified word reached through `use`, and a local call
+      `module.word`, an unqualified word reached through `import`, and a local call
       within the same module; then repeats after unrelated publication, reload
       of the target name, alias removal/recreation, and `unmodule`. Record
       ns/call, allocations and bytes, cache hit/miss/heal counts, registry and
@@ -2688,7 +2694,7 @@ INTERPRETER.md and its entry here is retired.
     - The size comes from shape, not from work. `ResolutionCursor` is a flat
       struct holding about ten mutually exclusive phase cursors as separate
       optional fields, so every word pays the width of the longest resolution
-      path — dotted-name splitting, registry acquisition, use-order walking,
+      path — dotted-name splitting, registry acquisition, scope walking,
       qualified export lookup — to resolve a name that is almost always found
       immediately in scope or core.
     - Fixed in item 9's preference-1 order rather than an invented one. First
@@ -2892,8 +2898,8 @@ INTERPRETER.md and its entry here is retired.
   cooperatively for publication (the state-only alternative was
   rejected: it makes reload timing observable inside state applications
   and leaves old and new code running concurrently without bound);
-  (3) `unmodule` canonicalizes alias names exactly as `use` and
-  qualified resolution do — every name that reaches a module can remove
+  (3) `unmodule` canonicalizes alias names through the same registry path as
+  qualified resolution — every registered module name can remove
   it; (4) **superseded by the M11 addendum below:** the original plan exposed
   slot identity through module handles and specified closed-handle display.
   The addendum removes that value kind and makes every public lifecycle
@@ -3252,12 +3258,11 @@ INTERPRETER.md and its entry here is retired.
   itself has no timeout fields.
 - **Qualified reference auto-loads (user ruling, 2026-08-18, M12
   planning).** The first qualified reference (`stats.mean`) to an
-  unregistered module triggers exactly the `use`-miss auto-load —
-  embedded stdlib and `ECL_PATH` modules are addressable Erlang-style
-  with no ceremony. `use` remains solely the unqualified-export splice
-  with shadow notices. A misspelled dotted word costs one bounded,
-  uncached search before `'undefined-word`; the trust boundary is
-  unchanged (`use` already auto-loads — only the trigger moves).
+  unregistered module triggers auto-load, so embedded stdlib and `ECL_PATH`
+  modules are addressable Erlang-style with no ceremony. The later `import`
+  migration uses that same trigger for its qualified original and binds only
+  the explicitly named bare word. A misspelled dotted word costs one bounded,
+  uncached search before `'undefined-word`; the trust boundary is unchanged.
   Recorded in SPEC.md's Modules/Loading section at ruling time, ahead of
   the implementation.
 - **Qualified observation auto-loads too** (user ruling, 2026-08-19):
@@ -3268,8 +3273,8 @@ INTERPRETER.md and its entry here is retired.
   depends on the available module transports, never on whether some earlier
   call happened to load the module.
 - **Embedded stdlib wins auto-load precedence over `ECL_PATH`** (user
-  ruling, 2026-08-18, M12 planning), identically for `use`-miss and
-  qualified-miss: stdlib names stay stable — a stray `csv.ecl` on the
+  ruling, 2026-08-18, M12 planning), for every qualified miss including an
+  `import` original: stdlib names stay stable — a stray `csv.ecl` on the
   path cannot silently replace the stdlib; in-session shadowing and
   explicit `@module` registration remain the documented override; embedded
   resolution pays no filesystem stat.
@@ -3321,7 +3326,7 @@ INTERPRETER.md and its entry here is retired.
   naming consistent and maximally clear): `map-error -> map-err`
   (every failure-arm word spells `err`, matching the `'err` tag and
   Rust's `map_err`) and `case -> either` (the old name shadowed prelude
-  `case` with unrelated semantics under `'result use` — an
+  `case` with unrelated semantics when bulk-imported from `result` — an
   unrelated-homonym trap; `either` is the Haskell-lineage eliminator
   name and collides with nothing; `result.partition` keeps its name
   because adjacent-concept shadowing is the benign, documented kind).
@@ -3331,7 +3336,8 @@ INTERPRETER.md and its entry here is retired.
   (`map-err` rewraps, `recover` replaces the outcome) — now stated in
   `and-then`'s doc. Made cheap by the same-day qualified-miss
   auto-load ruling; the common idiom becomes `@attempt result.or-raise`
-  with `'result use` splicing bare names back. Ships as the fourth
+  with an explicit `'result.or-raise 'or-raise import` when a bare name is
+  preferred. Ships as the fourth
   standalone patch (`gameplans/result-consolidation.json`, local,
   untracked), after unit-word-spelling.
 - **Bitwise words are pattern words** (user ruling, 2026-08-18): `band
@@ -3416,7 +3422,7 @@ INTERPRETER.md and its entry here is retired.
   `### def <name>`; the embedded stdlib sources are reformatted under it.
   Deliberately unmarked: `each`/`fold`-family
   (implicitly fed their elements), `infra`/`within` (apply an explicitly
-  named other stack), `use`/`load`/`unmodule` (no quotation), the task
+  named other stack), `import`/`load`/`unmodule` (no quotation), the task
   observers, and `with`. `@` stays an ordinary word character — the
   source audit enforces the convention for first-party vocabulary via a
   spelling manifest; users are encouraged to follow it. The same patch
@@ -3575,7 +3581,7 @@ script in CI.
   - **Traces to**: Milestone 4 — registry resolution + visibility.
 
 - **DoD-12 — hot reload heals all access paths**
-  - **Assert**: re-registering a module updates qualified, `use`d, and
+  - **Assert**: re-registering a module updates qualified, imported, and
     aliased callers.
   - **Verify by** `cmd`: fixture `hot-reload.ecl`, whose module words carry
     declared effects.
@@ -3583,10 +3589,10 @@ script in CI.
   - **Traces to**: Milestone 4 — registry generation swap.
 
 - **DoD-13 — ECL_PATH auto-load**
-  - **Assert**: `use` of an unregistered module loads `<name>.ecl` from
-    `ECL_PATH` and retries.
+  - **Assert**: importing a word from an unregistered module loads `<name>.ecl`
+    from `ECL_PATH` and retries.
   - **Verify by** `cmd`:
-    `ECL_PATH=test/acceptance/modules ecl -e "'stats use answer"`,
+    `ECL_PATH=test/acceptance/modules ecl -e "'stats.answer 'answer import answer"`,
     where `test/acceptance/modules/stats.ecl` registers a module with
     `42 'answer set`, and no module was registered beforehand.
   - **Expected**: `42`; exit 0.
@@ -3687,7 +3693,7 @@ script in CI.
     `zig-out/native-fixture/sample.eclmod` from `test/native/sample.zig` plus
     one artifact per defect under `zig-out/native-fixture/<defect>/`; then run
     the release binary with only a fixture directory on `ECL_PATH` and execute
-    `'sample use 41 sample.increment 'sample.increment doc
+    `'sample.increment 'increment import 41 increment 'sample.increment doc
     'sample.increment which 'sample.increment see`; repeat with source/native,
     path-order, wrong-name, ABI-version, duplicate-word, missing-doc,
     invalid-effect, unsupported-capability, invalid-continuation,
@@ -3769,7 +3775,7 @@ script in CI.
     and short-circuit paths; recovery of `'io` but not `'type`; a failing
     recovery quotation; error mapping; both `case` branches; all-success,
     mixed, and empty `all`; and stable `partition` output. Run the same fixture
-    after `'result use` and through qualified `result.*` calls.
+    after explicit imports and through qualified `result.*` calls.
   - **Expected**: successes preserve exact stack order and representation;
     short-circuited and unmatched errors are structurally identical to their
     inputs; `all` returns the leftmost error or ordered success-stack lists;
@@ -3889,10 +3895,10 @@ script in CI.
     direct-blocking exception.
 
 - **DoD-32 — str module via embedded stdlib**
-  - **Assert**: `'str use "hello" str.upper` works with no ECL_PATH
-    set, and so does the bare qualified form with no `use` at all
+  - **Assert**: `'str.upper 'upper import "hello" upper` works with no ECL_PATH
+    set, and so does the bare qualified form with no prior import
     (qualified-miss auto-load, ruled 2026-08-18).
-  - **Verify by** `cmd`: `ecl "'str use \"hello\" str.upper io.pp"` and
+  - **Verify by** `cmd`: `ecl "'str.upper 'upper import \"hello\" upper io.pp"` and
     `ecl '"hello" str.upper io.pp'`, both in an empty environment with a
     copied binary in an empty directory.
   - **Expected**: `"HELLO"` from both.
@@ -4122,7 +4128,7 @@ script in CI.
 
 - **DoD-45 — randomness is deterministic values plus one capability**
   - **Assert**: identical generator states produce identical draws;
-    `'rng use` works with no ECL_PATH; a seeded rng sequence is
+    importing an `rng` word works with no ECL_PATH; a seeded rng sequence is
     reproducible across runs; `entropy` raises `'io` without host
     authority and differs across real-binary runs.
   - **Verify by** `cmd`: promoted snapshot case for a seeded
@@ -4173,7 +4179,7 @@ script in CI.
     effect and call it across the module boundary with wrong and right input
     arities; `(1) '... def` proves reservation while `'...` remains inert;
     the native `partial_effect` compile-negative fixture rejects the row; and
-    `'result use 'result.either see` shows the sanctioned reflected form.
+    `'result.either 'either import 'either see` shows the sanctioned reflected form.
   - **Expected**: wrong input arity is a `'contract` error naming the
     declared before-slots; variable outputs pass; malformed placements
     are `'domain`; the native fixture is rejected at validation; `see`

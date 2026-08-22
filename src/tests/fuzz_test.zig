@@ -694,7 +694,7 @@ fn fuzzCompletionMutation(_: void, smith: *std.testing.Smith) !void {
     try runOk(
         &runtime,
         "(1 'alpha set 2 'private setp) 'fuzzmod @defm " ++
-            "'fm 'fuzzmod alias 'fuzzmod use 3 'fuzz-live set",
+            "'fm 'fuzzmod alias 'fuzzmod.x 'x import 3 'fuzz-live set",
     );
     var steps: usize = 0;
     while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1) {
@@ -863,7 +863,7 @@ fn fuzzNativeTransactions(_: void, smith: *std.testing.Smith) !void {
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
-    try source.writer.writeAll("'sample use ");
+    try source.writer.writeAll("'sample.increment 'increment import ");
     var steps: usize = 0;
     while (steps < max_session_steps and !smith.eosWeightedSimple(7, 1)) : (steps += 1) {
         try source.writer.writeAll(programs[smith.index(programs.len)]);

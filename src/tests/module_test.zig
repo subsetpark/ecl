@@ -16,7 +16,6 @@ const env = @import("../env.zig");
 const heap = @import("../heap.zig");
 const intern = @import("../intern.zig");
 const list = @import("../list.zig");
-const machine = @import("../machine.zig");
 const modules = @import("../modules.zig");
 const printer = @import("../print.zig");
 const session = @import("../session.zig");
@@ -181,42 +180,12 @@ test "env: new names and use edits bump shape and deep lookup is ordered" {
     );
 }
 
-test "module: use shadow notices stay within the cancellation bound" {
+test "module: long definition names stay within the cancellation bound" {
     const allocator = std.testing.allocator;
     const name_bytes = try allocator.alloc(u8, 70_000);
     defer allocator.free(name_bytes);
     @memset(name_bytes, 's');
     const long_name = try intern.internNamespace(name_bytes);
-    var output_buffer: [256]u8 = undefined;
-    var output = std.Io.Writer.Discarding.init(&output_buffer);
-    var diagnostics = std.Io.Writer.Allocating.init(allocator);
-    defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(
-        allocator,
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = null,
-        },
-    );
-    defer runtime.deinit();
-    const binding = try TestBinding.init(allocator);
-    defer runtime.release(binding.body);
-    try runtime.define(long_name, binding.top());
-    const module_source = try std.fmt.allocPrint(allocator, "(2 '{s} set) 'wide @defm", .{name_bytes});
-    defer allocator.free(module_source);
-    try expectOk(&runtime, module_source);
-    runtime.requestCancellation();
-    const failure = (try runtime.runUnit("shadow-poll.ecl", "'wide use")).err;
-    defer runtime.release(failure);
-    const rendered = try printer.toOwnedString(allocator, failure);
-    defer allocator.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, "unit cancelled") != null);
-    try std.testing.expect(runtime.lastPolls() >= 1);
-    try std.testing.expect(diagnostics.written().len < machine.kernel_poll_quantum);
-
     var name_runtime = try session.Session.init(allocator, &.{});
     defer name_runtime.deinit();
     try name_runtime.pushOwned(.{ .symbol = intern.namespaceId(long_name) });
@@ -242,7 +211,8 @@ test "reflection: words is sorted unique and private-safe" {
         },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "(1 'hidden setp 2 'zebra set 3 'alpha set) 'm @defm 'm use 4 'zebra set words");
+    try expectOk(&runtime, "(1 'hidden setp 2 'zebra set 3 'alpha set) 'm @defm " ++
+        "'m.alpha 'alpha import 'm.zebra 'zebra import 4 'zebra set words");
     const rendered = output.written();
     try std.testing.expect(std.mem.indexOf(u8, rendered, "alpha") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "hidden") == null);
@@ -939,9 +909,13 @@ test "loader: failures and cycles are total" {
         },
     );
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "'missing-module use", &.{ "'kind 'undefined-word", "'name 'missing-module" });
-    try expectErrorContains(&runtime, "'cycle use", &.{ "'kind 'domain", "recursive auto-load" });
-    try expectErrorContains(&runtime, "'orphan use", &.{ "'kind 'undefined-word", "'path \"test/acceptance/modules/orphan.ecl\"" });
+    try expectErrorContains(&runtime, "'missing-module.x 'x import", &.{ "'kind 'undefined-word", "'name 'missing-module.x" });
+    try expectErrorContains(&runtime, "'cycle.x 'x import", &.{ "'kind 'domain", "recursive auto-load" });
+    try expectErrorContains(&runtime, "'orphan.x 'x import", &.{
+        "'kind 'io",
+        "registered nothing under that name",
+        "'path \"test/acceptance/modules/orphan.ecl\"",
+    });
     try expectErrorContains(&runtime, "\"test/acceptance/load-parse-error.ecl\" load", &.{ "'kind 'parse", "'source \"test/acceptance/load-parse-error.ecl\"" });
     try expectErrorContains(&runtime, "\"test/acceptance/does-not-exist.ecl\" load", &.{ "'kind 'io", "'path \"test/acceptance/does-not-exist.ecl\"" });
 

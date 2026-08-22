@@ -267,10 +267,10 @@
   "Expand a 0/1 mask into the indices it selects.
 
    Written with fold rather than `filter`, `partition`, or `find`, all three of which call the core
-   `where` kernel. This module exports a word named `where`, and `'table use` splices that export
-   into the session scope where prelude bodies resolve their dependencies — the documented way to
-   patch a binding. So those three would reach `table.where` for any program that imported this
-   module, including this module's own `where`.")
+   `where` kernel. This module exports a word named `where`, and an explicit `'where 'table.where
+   import` patches that binding in the session scope where prelude bodies resolve their
+   dependencies. So those three would reach `table.where` only when a program names that import,
+   including this module's own `where`.")
  'selected defp
 
  ### def slice-at

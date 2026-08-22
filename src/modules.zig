@@ -2196,7 +2196,7 @@ pub const Registry = enum(usize) {
                     break :result .pending;
                 },
                 // Every name that can reach a module can also remove it, so a
-                // short alias canonicalizes exactly as `use` resolves it.
+                // A short alias canonicalizes through the registry directory.
                 .alias => switch (self.alias_lookup.?.advance()) {
                     .pending => .pending,
                     .complete => |canonical_name| result: {

@@ -181,7 +181,7 @@ test "modules: dotted names qualify dynamically and split executable words at th
     try expectStack(&runtime, "'core.utils 1 ('f) ('g) if qualify execute", "41");
     try expectOk(&runtime, "'utils 'core.utils alias");
     try expectStack(&runtime, "utils.g", "42");
-    try expectOk(&runtime, "'core.utils use");
+    try expectOk(&runtime, "'core.utils.g 'g import");
     try expectStack(&runtime, "g", "42");
     try expectOk(&runtime, "((43) 'f def) 'core.utils @defm");
     try expectStack(&runtime, "core.utils.f 'core.utils 'f qualify execute", "43 43");
@@ -219,7 +219,7 @@ test "modules: removed identity builtin has no reservation and names validate by
     for ([_][]const u8{ "() '.bad @defm", "() 'bad. @defm", "() 'bad..path @defm" }) |source|
         try expectErrorContains(&runtime, source, &.{"'kind 'parse"});
     try expectErrorContains(&runtime, "() 1 @defm", &.{"'kind 'type"});
-    try expectErrorContains(&runtime, "1 use", &.{"'kind 'type"});
+    try expectErrorContains(&runtime, "'x 1 import", &.{"'kind 'type"});
     try expectErrorContains(&runtime, "1 unmodule", &.{"'kind 'type"});
     try expectErrorContains(&runtime, "((1) 'bad.name def) 'core.utils @defm", &.{"'kind 'domain"});
     try expectErrorContains(&runtime, "1 'f qualify", &.{"'kind 'type"});
@@ -532,7 +532,7 @@ test "concurrency: unmodule closes quiesces and retires slots names and aliases"
         try expectErrorContains(&runtime, "c.peek", &.{"'kind 'undefined-word"});
         // Every alias targeting the slot goes with it in the same publish.
         try expectErrorContains(&runtime, "short.peek", &.{"'kind 'undefined-word"});
-        try expectErrorContains(&runtime, "'short use", &.{"'kind 'undefined-word"});
+        try expectErrorContains(&runtime, "'short.peek 'peek import", &.{"'kind 'undefined-word"});
         // Reusing the public name creates no way to refer to the removed slot.
         try expectOk(&runtime, removable_module);
         try expectStack(&runtime, "'c unmodule " ++ removable_module ++ " c.tick c.peek", "1");

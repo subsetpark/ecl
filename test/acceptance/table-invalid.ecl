@@ -1,6 +1,20 @@
 # DoD-28: invalid candidates are never implicitly repaired or reclassified, and
 # every exported word validates before running a user quotation.
-'table use
+'table.valid? 'valid? import
+'table.from-columns 'from-columns import
+'table.from-rows 'from-rows import
+'table.from-records 'from-records import
+'table.column 'column import
+'table.cast 'cast import
+'table.select 'select import
+'table.rename 'rename import
+'table.with-column 'with-column import
+'table.where 'where import
+'table.aggregate 'aggregate import
+'table.inner-join 'inner-join import
+'table.left-join-with 'left-join-with import
+'table.rows 'rows import
+'table.records 'records import
 
 # valid? answers 0 for every convention mismatch, and only for those.
 5 valid? io.pp

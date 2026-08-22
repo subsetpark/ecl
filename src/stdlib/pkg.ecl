@@ -1,77 +1,60 @@
 ### module pkg
-# The pkg module: the package formats — see SPEC.md, Packages — as data.
+# Pure functions for validating and formatting `ecl.pkg` and `ecl.lock` data.
+# This module accepts values and text. It does not read files, write files, or
+# access the network. Parsed package data is validated but never evaluated.
 #
-# Every word here is pure. `ecl.pkg` and `ecl.lock` are ECL data read with
-# `parse` and never evaluated, so validation is the whole of what makes a
-# candidate a manifest: nothing in this module finds a file, reads one, or
-# writes one, and the host capabilities that would are deliberately out of
-# reach.
-#
-# Error messages are constants rather than interpolations. The version words
-# are called once per comparison inside a resolution, so a message assembled
-# on the happy path would be an allocation per comparison; the raising word
-# and its trace already name where the failure was.
-(# The decimal digits, so digit classification is one membership test.
+# Predicates in `cond` may consume their inputs because each predicate starts
+# from the same stack checkpoint.
+(# Decimal digits.
  "0123456789"
  'digit-chars setp
 
- # The characters a prerelease identifier may hold.
+ # Characters allowed in prerelease identifiers.
  "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
  'identifier-chars setp
 
  ### def digits?
  (dup empty? (pop 0) ((digit-chars in?) all?) if)
- (string -- bool : "Return 1 for a nonempty string of decimal digits.")
+ (string -- bool : "Test whether a string is nonempty and contains only decimal digits.")
  'digits? defp
 
  ### def numeric-field?
- ([(dup digits? not) (pop 0)
-   (dup len 1 =) (pop 1)
+ ([(digits? not) (pop 0)
+   (len 1 =) (pop 1)
    (first \0 <>)]
   cond)
- (string -- bool :
-  "Return 1 for a numeric version field: digits throughout, and a leading zero only when it is the
-   whole field.")
+ (string -- bool : "Test whether a string is a decimal field with no leading zero, except for `0`.")
  'numeric-field? defp
 
  ### def identifier?
  (dup empty? (pop 0) ((identifier-chars in?) all?) if)
- (string -- bool : "Return 1 for a nonempty string of prerelease identifier characters.")
+ (string -- bool : "Test whether a string is a nonempty prerelease identifier.")
  'identifier? defp
 
  ### def prerelease-identifier?
- ([(dup identifier? not) (pop 0)
-   (dup digits?) (numeric-field?)
+ ([(identifier? not) (pop 0)
+   (digits?) (numeric-field?)
    (pop 1)]
   cond)
  (string -- bool :
-  "Return 1 for a legal prerelease identifier: identifier characters throughout, and no leading zero
-   in an all-digit one.")
+  "Test a prerelease identifier, including the no-leading-zero rule for numeric identifiers.")
  'prerelease-identifier? defp
 
  ### def hyphen-parts
  ("-" split)
  (candidate -- parts :
-  "Split a version at every hyphen: the first part is its core and the rest are the prerelease with
-   its own hyphens taken apart.
-
-   Splitting beats locating the first hyphen and slicing around it: the trailing-hyphen case falls
-   out as one empty identifier instead of needing its own branch.")
+  "Split a version at hyphens. The first item is the core; later items make up the prerelease.")
  'hyphen-parts defp
 
  ### def core-fields
  (hyphen-parts first "." split)
- (candidate -- fields : "The dot-separated core fields of a version, before any prerelease.")
+ (candidate -- fields : "Return the dot-separated fields before the first hyphen.")
  'core-fields defp
 
  ### def identifiers
  (hyphen-parts dup len 1 = (pop []) (rest "-" join "." split) if)
  (candidate -- identifiers :
-  "The prerelease identifiers of a version, empty when it carries no hyphen.
-
-   Rejoining the tail with hyphens preserves an identifier that contains one, and a trailing hyphen
-   yields one empty identifier rather than no prerelease — so `\"1.0.0-\"` is rejected instead of
-   read as a release.")
+  "Return the dot-separated prerelease identifiers, or an empty list when none are present.")
  'identifiers defp
 
  ### def version-checked
@@ -90,60 +73,40 @@
    'msg "a prerelease identifier is alphanumeric or hyphen, with no leading zero when numeric"}
   assert
   pair)
- (candidate -- parts :
-  "Return a validated version as its core fields paired with its prerelease identifiers.
-
-   Every rejection is the version grammar's: a non-string is 'type and every spelling outside the
-   grammar is 'domain, so no caller has to treat a malformed version as merely unordered.")
+ (candidate -- parts : "Validate a version and return `[core-fields prerelease-identifiers]`.")
  'version-checked defp
 
  ### def field-cmp
  (over len over len = (cmp) (swap len swap len cmp) if)
- (left right -- order :
-  "Order two validated numeric fields.
-
-   Leading zeros are already excluded, so the longer field is the larger number and equal lengths
-   compare codepoint-wise.")
+ (left right -- order : "Compare two validated decimal fields without converting them to integers.")
  'field-cmp defp
 
  ### def order-then
  (over 0 = (nip) (pop) if)
- (accumulated next -- order :
-  "Keep the accumulated order unless it is 0, in which case take the next one.")
+ (accumulated next -- order : "Keep the first nonzero comparison result.")
  'order-then defp
 
  ### def first-nonzero
  (0 (order-then) fold)
- (orders -- order :
-  "The leftmost nonzero order, or 0 when every one of them is 0.
-
-   A fold rather than a filter: one pass, and no intermediate list to allocate for a result that is
-   one value.")
+ (orders -- order : "Return the first nonzero comparison result, or 0 if all are zero.")
  'first-nonzero defp
 
  ### def core-cmp
  (zip (call field-cmp) each first-nonzero)
- (left right -- order : "Order two validated three-field cores, most significant field first.")
+ (left right -- order : "Compare validated major, minor, and patch fields in order.")
  'core-cmp defp
 
  ### def identifier-cmp
- ([(over digits? over digits? =) (over digits? (field-cmp) (cmp) if)
+ ([(digits? swap digits? =) (over digits? (field-cmp) (cmp) if)
    (over digits? (pop pop -1) (pop pop 1) if)]
   cond)
  (left right -- order :
-  "Order two prerelease identifiers per semver 2.0.0 §11.
-
-   Two of a kind compare within their kind — numerics as numbers, alphanumerics by codepoint — and a
-   numeric identifier is below an alphanumeric one.")
+  "Compare two prerelease identifiers. Numeric identifiers sort before nonnumeric identifiers.")
  'identifier-cmp defp
 
  ### def common-order
  ((|index left right| left index at right index at identifier-cmp) call)
- (index left right -- order :
-  "Order the identifiers two prereleases share at one position.
-
-   The captured prereleases arrive above the index, because `partial` pushes what it captured after
-   `each` has already pushed the element.")
+ (index left right -- order : "Compare two prerelease identifiers at one index.")
  'common-order defp
 
  ### def identifier-walk
@@ -152,42 +115,35 @@
    left len right len min range left right (common-order) partial partial each first-nonzero
    dup 0 = (pop) (nip) if)
   call)
- (left right -- order :
-  "Order two nonempty prereleases: the leftmost differing identifier decides, and when every shared
-   identifier agrees the shorter prerelease is the smaller one.")
+ (left right -- order : "Compare two nonempty prereleases by identifier, then by identifier count.")
  'identifier-walk defp
 
  ### def prerelease-cmp
- ([(over empty? over empty? and) (pop pop 0)
-   (over empty?) (pop pop 1)
-   (dup empty?) (pop pop -1)
+ ([(empty? swap empty? and) (pop pop 0)
+   (pop empty?) (pop pop 1)
+   (nip empty?) (pop pop -1)
    (identifier-walk)]
   cond)
  (left right -- order :
-  "Order two prereleases, where absent beats present: a version carrying a prerelease is below the
-   same core without one.")
+  "Compare prereleases. A release version sorts after a version with the same core and a
+   prerelease.")
  'prerelease-cmp defp
 
  ### def version-cmp
  (over first over first core-cmp
   dup 0 = (pop swap 1 at swap 1 at prerelease-cmp) (nip nip) if)
- (left right -- order :
-  "Order two validated version parts: the core decides unless the cores agree, and then the
-   prerelease does.")
+ (left right -- order : "Compare validated versions by core, then prerelease.")
  'version-cmp defp
 
  ### def version<
  (version-checked swap version-checked swap version-cmp -1 =)
  (left right -- bool :
-  "Return 1 when the left version precedes the right under semver 2.0.0 §11.
-
-   A spelling outside the version grammar raises rather than answering 0: a total order over a
-   subset of its inputs is not a total order.")
+  "Test whether the left version has lower SemVer 2.0.0 precedence. Invalid versions raise.")
  'version< def
 
  ### def keep-larger
  (over over version< (nip) (pop) if)
- (accumulated candidate -- accumulated : "Keep whichever of two versions is the later one.")
+ (accumulated candidate -- accumulated : "Return the version with higher precedence.")
  'keep-larger defp
 
  ### def version-max
@@ -200,60 +156,52 @@
   dup (version-checked) each pop
   dup first (keep-larger) fold)
  (versions -- version :
-  "The greatest of a nonempty list of version strings.
-
-   Every element is validated before any comparison runs, so a malformed version late in the list is
-   an error rather than something an earlier maximum can hide.")
+  "Return the highest version in a nonempty list. Validate every item before comparing.")
  'version-max def
 
  # --- names ---------------------------------------------------------------
 
  ### def lead-chars
- # The characters a canonical name segment may begin with.
+ # Valid first characters for a package-name segment.
  "abcdefghijklmnopqrstuvwxyz"
  'lead-chars setp
 
  ### def segment-chars
- # The characters a canonical name segment may continue with.
+ # Valid later characters for a package-name segment.
  "-0123456789abcdefghijklmnopqrstuvwxyz"
  'segment-chars setp
 
  ### def hex-chars
- # The digits a hash body may hold, lowercase by ruling.
+ # Lowercase hexadecimal digits.
  "0123456789abcdef"
  'hex-chars setp
 
  ### def segment?
  (dup empty? (pop 0) ((first lead-chars in?) ((segment-chars in?) all?) bi and) if)
- (text -- bool : "Return 1 for one legal segment of a canonical package name.")
+ (text -- bool : "Test whether text is a valid package-name segment.")
  'segment? defp
 
  ### def name?
- ([(dup str.str? not) (pop 0)
-   (dup empty?) (pop 0)
+ ([(str.str? not) (pop 0)
+   (empty?) (pop 0)
    ("." split (segment?) all?)]
   cond)
  (value -- bool :
-  "Return 1 for a canonical package name: dot-joined segments, each opening with a lowercase letter
-   and continuing with lowercase letters, digits, or hyphens.
-
-   A leading, trailing, or doubled dot leaves an empty segment behind, so the segment test rejects
-   it without a separate rule.")
+  "Test whether a value is a dot-separated package name. Each segment starts with a lowercase letter
+   and continues with lowercase letters, digits, or hyphens.")
  'name? defp
 
  ### def hash?
- ([(dup str.str? not) (pop 0)
-   (dup "sha256-" str.starts? not) (pop 0)
+ ([(str.str? not) (pop 0)
+   ("sha256-" str.starts? not) (pop 0)
    (7 drop (len 64 =) ((hex-chars in?) all?) bi and)]
   cond)
- (value -- bool : "Return 1 for the literal `sha256-` followed by exactly 64 lowercase hex digits.")
+ (value -- bool : "Test for `sha256-` followed by exactly 64 lowercase hexadecimal digits.")
  'hash? defp
 
  ### def url?
  (dup str.str? (("https://" str.starts?) (len 8 >) bi and) (pop 0) if)
- (value -- bool :
-  "Return 1 for an https url with something after the scheme. Tarball over https is the only
-   transport, so no other scheme is admitted.")
+ (value -- bool : "Test for a nonempty HTTPS URL.")
  'url? defp
 
  ### def owns-prefix?
@@ -271,44 +219,33 @@
    or)
   call)
  (package-name module-name -- bool :
-  "Return 1 when a package owns a module name: its own name, or a name continuing after a dot.
-
-   The dot boundary is the whole point — `foo` owns `foo.bar` and does not own `foobar`.")
+  "Test whether a module name equals a package name or begins with that name followed by a dot.")
  'owns-prefix? def
 
  ### def related?
  ((|left right| left right owns-prefix? right left owns-prefix? or) call)
- (left right -- bool : "Return 1 when either of two package names owns the other.")
+ (left right -- bool : "Test whether either package name owns the other as a prefix.")
  'related? defp
 
  ### def row-related?
  ((|index names| names index 1 + drop names index at (swap related?) partial each (1 =) any?) call)
- (index names -- bool : "Return 1 when one name is related to any name after it.")
+ (index names -- bool : "Test one name against the names after it for prefix overlap.")
  'row-related? defp
 
  ### def collides?
  ((|names| names len range names (row-related?) partial each (1 =) any?) call)
- (names -- bool :
-  "Return 1 when two members of a name list own one another.
-
-   Only later members are compared against each one, so each pair is tested once and a name is never
-   compared with itself.")
+ (names -- bool : "Test whether any two package names have overlapping owned prefixes.")
  'collides? defp
 
  # --- inertness -----------------------------------------------------------
 
  ### def inert?
- ([(dup type 'word match?) (pop 0)
-   (dup type 'dict match?) (vals (inert?) all?)
-   (dup type 'list match?) ((inert?) all?)
+ ([(type 'word match?) (pop 0)
+   (type 'dict match?) (vals (inert?) all?)
+   (type 'list match?) ((inert?) all?)
    (pop 1)]
   cond)
- (value -- bool :
-  "Return 1 when a value holds no executable reference anywhere inside it.
-
-   A word is the whole of what is forbidden: a quotation is an ordinary list and is legal as data,
-   so what this rejects is exactly what an evaluated manifest would have run. Depth is whatever the
-   reader already accepted; no separate limit is imposed here.")
+ (value -- bool : "Test recursively whether a value contains no executable word values.")
  'inert? defp
 
  ### def offending
@@ -319,30 +256,28 @@
    put
    raise)
   call)
- (key -- : "Raise the inertness failure, naming the entry that carried an executable reference.")
+ (key -- : "Raise an inert-data error for a dict entry.")
  'offending defp
 
  ### def inert-entry
  (dup inert? (pop 0) (first offending) if)
- (pair -- flag :
-  "Answer 0 for an inert entry and raise for one that is not, so a walk over `pairs` reports which
-   key was at fault rather than that some key was.")
+ (pair -- flag : "Return 0 for an inert entry, or raise an error that names its key.")
  'inert-entry defp
 
  # --- manifests -----------------------------------------------------------
 
  ### def manifest-keys
- # Every key a manifest has, and no others.
+ # Required manifest keys.
  ['format 'name 'version 'requires]
  'manifest-keys setp
 
  ### def requirement-keys
- # Every key a requirement has, and no others.
+ # Required package-requirement keys.
  ['version 'url 'hash]
  'requirement-keys setp
 
  ### def lock-keys
- # Every key a lock has, and no others.
+ # Required lock keys.
  ['format 'root 'packages 'requires]
  'lock-keys setp
 
@@ -352,11 +287,7 @@
    declared candidate (swap has?) partial all?
    and)
   call)
- (candidate declared -- bool :
-  "Return 1 when a dict's keys are exactly the declared ones.
-
-   Dict keys are unique, so equal counts plus containment is set equality; order is not compared,
-   because a hand-written manifest should not have to guess one.")
+ (candidate declared -- bool : "Test whether a dict has exactly the declared keys, in any order.")
  'keys-exactly? defp
 
  ### def requirement-checked
@@ -372,8 +303,7 @@
    {'kind 'domain 'msg "a requirement hash is sha256- and 64 lowercase hex digits"} assert
    requirement)
   call)
- (requirement -- requirement :
-  "Return a requirement unchanged, raising for any field the format does not admit.")
+ (requirement -- requirement : "Validate and return a package requirement.")
  'requirement-checked defp
 
  ### def validate-manifest
@@ -400,11 +330,7 @@
    candidate)
   call)
  (candidate -- manifest :
-  "Return a manifest unchanged, or raise.
-
-   Inertness is checked before anything else, so a candidate holding an executable reference is
-   reported as that rather than as a bad key — and no part of it is ever evaluated. The name checks
-   run last together, because self-requirement and a prefix collision are the same question.")
+  "Validate and return a manifest. Executable word values are rejected before structural checks.")
  'validate-manifest def
 
  ### def one-form
@@ -416,15 +342,12 @@
    {'kind 'shape 'msg "a package file is exactly one form"} assert
    first)
   call)
- (text -- form :
-  "Read text as exactly one inert form.
-
-   Unreadable text raises 'parse from the reader unchanged; the form is returned, never called.")
+ (text -- form : "Parse text containing exactly one form and return it without evaluation.")
  'one-form defp
 
  ### def read-manifest
  (one-form validate-manifest)
- (text -- manifest : "Read and validate a manifest from text. The manifest is never evaluated.")
+ (text -- manifest : "Parse and validate a manifest without evaluating it.")
  'read-manifest def
 
  # --- locks ---------------------------------------------------------------
@@ -438,19 +361,17 @@
    minimums vals (version-checked) each pop
    minimums)
   call)
- (minimums -- minimums :
-  "Return one package's declared minimums unchanged, raising for a name or version the format does
-   not admit.")
+ (minimums -- minimums : "Validate and return one package's minimum-version requirements.")
  'minimums-checked defp
 
  ### def known?
  ((|pair packages| packages pair first has?) call)
- (pair packages -- bool : "Return 1 when a required name has a selection in the lock.")
+ (pair packages -- bool : "Test whether a required package has a locked selection.")
  'known? defp
 
  ### def satisfied?
  ((|pair packages| packages pair first at 'version at pair 1 at version< not) call)
- (pair packages -- bool : "Return 1 when a name's selected version is not below this minimum.")
+ (pair packages -- bool : "Test whether a locked version meets a minimum version.")
  'satisfied? defp
 
  ### def lock-checked
@@ -486,26 +407,23 @@
    candidate)
   call)
  (candidate -- lock :
-  "Return a lock unchanged, or raise.
-
-   Beyond the grammar this enforces the two rules that make a lock usable without re-resolving:
-   every required name has a selection, and no selection sits below a minimum recorded for it.")
+  "Validate and return a lock. Each required package must have a selection that meets every recorded
+   minimum version.")
  'lock-checked defp
 
  ### def read-lock
  (one-form lock-checked)
- (text -- lock : "Read and validate a lock from text. The lock is never evaluated.")
+ (text -- lock : "Parse and validate a lock without evaluating it.")
  'read-lock def
 
  ### def entry-of
  ((|key holder| key holder key at pair) call)
- (key holder -- pair : "Pair one key with its value.")
+ (key holder -- pair : "Return a key and its value as a pair.")
  'entry-of defp
 
  ### def sorted-entries
  ((|holder| holder keys sort holder (entry-of) partial each) call)
- (holder -- pairs :
-  "A dict's entries in ascending key order, which is the order the lock is written in.")
+ (holder -- pairs : "Return a dict's entries in ascending key order.")
  'sorted-entries defp
 
  ### def render-requirement
@@ -524,29 +442,27 @@
 
  ### def render-selection
  ((|pair| pair first str " " pair 1 at render-requirement 3 pack "" join) call)
- (pair -- text : "Render one `'packages` entry.")
+ (pair -- text : "Render one `packages` entry.")
  'render-selection defp
 
  ### def render-minimum
  ((|pair| pair first str " " pair 1 at str 3 pack "" join) call)
- (pair -- text : "Render one required name and its declared minimum.")
+ (pair -- text : "Render one package name and minimum version.")
  'render-minimum defp
 
  ### def render-minimums
  ((|minimums| "{" minimums sorted-entries (render-minimum) each " " join "}" 3 pack "" join) call)
- (minimums -- text : "Render one package's minimums on a single line.")
+ (minimums -- text : "Render one package's minimum versions on a single line.")
  'render-minimums defp
 
  ### def render-requirer
  ((|pair| pair first str " " pair 1 at render-minimums 3 pack "" join) call)
- (pair -- text : "Render one `'requires` entry: the requiring package and what it declared.")
+ (pair -- text : "Render one `requires` entry.")
  'render-requirer defp
 
  ### def render-block
  ((|holder renderer| "{" holder sorted-entries renderer each "\n  " join "}" 3 pack "" join) call)
- (holder renderer -- text :
-  "Render a dict as a block: the first entry beside the opening brace and every later one on its own
-   indented line, so adding one entry is a one-line diff.")
+ (holder renderer -- text : "Render a dict as an indented block.")
  'render-block defp
 
  ### def write-lock
@@ -562,12 +478,7 @@
    7 pack "" join)
   call)
  (lock -- text :
-  "Render a lock in its canonical layout.
-
-   The lock is validated before anything is rendered, so an invalid one raises rather than producing
-   partial text. Every scalar goes through `str`, which is the spelling that carries the round-trip
-   guarantee, and the layout is fixed so that reading canonical text and writing it back reproduces
-   its bytes — the closing newline included, because a lock is a file.")
+  "Validate a lock and render canonical text. Keys are sorted and the output ends with a newline.")
  'write-lock def
 
  )

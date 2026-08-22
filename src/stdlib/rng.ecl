@@ -31,11 +31,6 @@
  (count bound -- results : "Draw a vector of uniform integers below a positive bound.")
  'ints def
 
- ### def roll
- (ints)
- (count bound -- results : "Draw a vector of uniform integers; the dice-roll spelling of ints.")
- 'roll def
-
  ### def float
  ((rand-float without) within)
  (-- result : "Draw one uniform float in the unit interval.")

@@ -325,25 +325,6 @@
 (tasks -- results : "Wait for every task and return its result in input order.")
 'await-all def
 
-### def import
-((|short target|
-  target str 1 drop "." split
-  dup len 2 >=
-  {'kind 'domain 'msg "import needs a qualified word"} assert
-  unappend
-  swap "." join "'" swap cat parse first
-  swap "'" swap cat parse first
-  qualify wrap short def)
- call)
-(short target -- :
- "Bind one module word under an unqualified local name.
-
-  The binding dispatches through the module, so an imported word resolves against its own home
-  exactly as the qualified spelling does. Shadowing an existing binding is allowed and is the
-  documented way to patch one — but it takes naming the word, so it cannot happen by accident. An
-  unqualified target is 'domain.")
-'import def
-
 ### def set
 (swap literal swap def)
 (value name -- : "Bind a value as a constant word in the current scope.")

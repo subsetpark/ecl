@@ -63,61 +63,22 @@ fn whileWord(evaluator: *Machine) MachineError!void {
     defer condition.deinit();
     if (body.borrow() != .list or condition.borrow() != .list)
         return evaluator.typeError("two quotations/lists");
-    var expected = heap.OwnedValue.init(
-        evaluator.releaseDomain(),
-        try effectValue(evaluator.allocator(), &.{ "--", "bool" }),
-    );
-    defer expected.deinit();
-    const state = try evaluator.allocator().create(WhileState);
-    state.* = .{
-        .condition = .init(condition.take().list),
-        .body = .init(body.take().list),
-        .expected = .init(expected.take()),
-        .parent = evaluator.currentScope(),
-        .home = evaluator.currentHome(),
-        .word = evaluator.activeWordId(),
-    };
-    try evaluator.beginInlineApplication(state.application(state.condition.borrow()));
+    const first_condition = condition.borrow().list;
+    var checkpoint = try GuardCheckpoint.init(evaluator);
+    try evaluator.startDriver(GuardSnapshotDriver{
+        .control = .init(.{
+            .checkpoint = .init(checkpoint.take()),
+            .selector = .{ .while_loop = .{
+                .condition = .init(condition.take().list),
+                .body = .init(body.take().list),
+            } },
+            .parent = evaluator.currentScope(),
+            .home = evaluator.currentHome(),
+            .word = evaluator.activeWordId(),
+        }),
+        .target = .{ .predicate = first_condition },
+    });
 }
-
-const WhileState = struct {
-    condition: heap.Owned(*Header),
-    body: heap.Owned(*Header),
-    expected: heap.Owned(Value),
-    parent: *env.Scope,
-    home: ?*modules.ModuleHome,
-    running_body: bool = false,
-    word: intern.TraceWord,
-
-    fn application(self: *WhileState, quotation: *Header) Application {
-        return machine.typedApplication(self, quotation, self.parent, self.home, 0);
-    }
-    fn step(_: *WhileState, quotation: *Header) ApplicationStep {
-        return .{ .quotation = quotation, .seeded = 0 };
-    }
-
-    pub fn resumeApplication(evaluator: *Machine, self: *WhileState, window: StackWindow) MachineError!?ApplicationStep {
-        evaluator.setActiveWord(self.word);
-        try evaluator.yieldNativeStep();
-        if (self.running_body) {
-            self.running_body = false;
-            return self.step(self.condition.borrow());
-        }
-        const observed = window.observed(evaluator.unit.stack.items.len) orelse {
-            return evaluator.applicationContractError(self.expected.borrow(), 0, 0, null);
-        };
-        if (observed != 1) {
-            return evaluator.applicationContractError(self.expected.borrow(), 0, observed, null);
-        }
-        var predicate = try evaluator.popValue();
-        defer predicate.deinit();
-        if (!try boolValue(evaluator, &predicate)) return null;
-        self.running_body = true;
-        return self.step(self.body.borrow());
-    }
-
-    pub const ownership: heap.DriverOwnership = .fields;
-};
 
 const TimesState = struct {
     quotation: heap.Owned(*Header),
@@ -212,48 +173,245 @@ const DipState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-const CondState = struct {
-    clauses: heap.Owned(Value),
-    expected: heap.Owned(Value),
+const GuardTarget = union(enum) {
+    predicate: *Header,
+    action: *Header,
+    done,
+};
+
+const GuardCheckpoint = struct {
+    values: heap.OwnedValueBuffer,
+    depth: usize,
+    index: usize = 0,
+    phase: enum { capture, ready, discard, reserve, restore } = .capture,
+
+    fn init(evaluator: *Machine) error{OutOfMemory}!heap.Owned(GuardCheckpoint) {
+        const depth = evaluator.available();
+        return .init(.{
+            .values = try .init(evaluator.releaseDomain(), depth),
+            .depth = depth,
+        });
+    }
+    fn take(self: *GuardCheckpoint) GuardCheckpoint {
+        return .{
+            .values = self.values.take(),
+            .depth = self.depth,
+            .index = self.index,
+            .phase = self.phase,
+        };
+    }
+    fn advanceCapture(self: *GuardCheckpoint, evaluator: *Machine, budget: usize) bool {
+        std.debug.assert(self.phase == .capture and evaluator.available() == self.depth);
+        const end = @min(self.index + budget, self.depth);
+        while (self.index != end) : (self.index += 1)
+            self.values.appendBorrowed(evaluator.visibleOperandBorrowed(self.index));
+        if (self.index != self.depth) return false;
+        self.phase = .ready;
+        return true;
+    }
+    fn beginRestore(self: *GuardCheckpoint) void {
+        std.debug.assert(self.phase == .ready);
+        self.phase = .discard;
+        self.index = 0;
+    }
+    fn advanceRestore(
+        self: *GuardCheckpoint,
+        evaluator: *Machine,
+        budget: usize,
+    ) error{OutOfMemory}!bool {
+        var remaining = budget;
+        while (remaining != 0) : (remaining -= 1) switch (self.phase) {
+            .discard => if (evaluator.available() != 0) {
+                evaluator.discard(1);
+            } else {
+                self.phase = .reserve;
+            },
+            .reserve => {
+                _ = try evaluator.reserveStack(self.depth);
+                self.phase = .restore;
+            },
+            .restore => if (self.index != self.depth) {
+                try evaluator.pushBorrowed(self.values.values()[self.index]);
+                self.index += 1;
+            } else {
+                self.phase = .ready;
+                return true;
+            },
+            .capture, .ready => unreachable,
+        };
+        return false;
+    }
+    pub fn retire(self: *GuardCheckpoint, _: *heap.ReleaseDomain) void {
+        self.values.deinit();
+    }
+};
+
+const GuardControl = struct {
+    checkpoint: heap.Owned(GuardCheckpoint),
+    selector: union(enum) {
+        cond: struct {
+            clauses: heap.Owned(Value),
+            pair_index: usize = 0,
+        },
+        while_loop: struct {
+            condition: heap.Owned(*Header),
+            body: heap.Owned(*Header),
+        },
+    },
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
-    pair_index: usize = 0,
-    running_action: bool = false,
     word: intern.TraceWord,
 
-    fn application(self: *CondState, quotation: *Header) Application {
-        return machine.typedApplication(self, quotation, self.parent, self.home, 0);
-    }
-    fn step(_: *CondState, quotation: *Header) ApplicationStep {
-        return .{ .quotation = quotation, .seeded = 0 };
-    }
-
-    pub fn resumeApplication(evaluator: *Machine, self: *CondState, window: StackWindow) MachineError!?ApplicationStep {
-        evaluator.setActiveWord(self.word);
-        try evaluator.yieldNativeStep();
-        if (self.running_action) return null;
-        const observed = window.observed(evaluator.unit.stack.items.len) orelse {
-            return evaluator.applicationContractError(self.expected.borrow(), 0, 0, self.pair_index / 2);
+    fn selectedTarget(self: *GuardControl, selected: bool) GuardTarget {
+        return switch (self.selector) {
+            .cond => |*state| if (selected)
+                .{ .action = list.atUnchecked(state.clauses.borrow(), state.pair_index + 1).list }
+            else next: {
+                state.pair_index += 2;
+                const count: usize = @intCast(state.clauses.borrow().list.length());
+                if (state.pair_index + 1 >= count)
+                    break :next .{ .action = list.atUnchecked(state.clauses.borrow(), count - 1).list };
+                break :next .{ .predicate = list.atUnchecked(state.clauses.borrow(), state.pair_index).list };
+            },
+            .while_loop => |*state| if (selected)
+                .{ .action = state.body.borrow() }
+            else
+                .done,
         };
-        if (observed != 1) {
-            return evaluator.applicationContractError(self.expected.borrow(), 0, observed, self.pair_index / 2);
+    }
+    fn afterAction(self: *GuardControl) ?*Header {
+        return switch (self.selector) {
+            .cond => null,
+            .while_loop => |*state| state.condition.borrow(),
+        };
+    }
+    pub fn retire(
+        self: *GuardControl,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.checkpoint.deinit(releases, allocator);
+        switch (self.selector) {
+            .cond => |*state| state.clauses.deinit(releases, allocator),
+            .while_loop => |*state| {
+                state.body.deinit(releases, allocator);
+                state.condition.deinit(releases, allocator);
+            },
         }
+    }
+};
+
+fn beginGuardTarget(
+    evaluator: *Machine,
+    control: *heap.Owned(GuardControl),
+    target: GuardTarget,
+) MachineError!void {
+    switch (target) {
+        .predicate => |quotation| {
+            const state = try evaluator.allocator().create(GuardPredicateState);
+            state.* = .{ .control = .init(control.take()) };
+            try evaluator.beginInlineApplication(state.application(quotation));
+        },
+        .action => |quotation| {
+            const state = try evaluator.allocator().create(GuardActionState);
+            state.* = .{ .control = .init(control.take()) };
+            try evaluator.beginInlineApplication(state.application(quotation));
+        },
+        .done => unreachable,
+    }
+}
+
+const GuardSnapshotDriver = struct {
+    control: heap.Owned(GuardControl),
+    target: GuardTarget,
+
+    pub fn advance(evaluator: *Machine, self: *GuardSnapshotDriver) MachineError!machine.WorkProgress {
+        evaluator.setActiveWord(self.control.borrow().word);
+        try evaluator.pollKernel();
+        if (!self.control.borrowMut().checkpoint.borrowMut().advanceCapture(
+            evaluator,
+            machine.kernel_poll_quantum,
+        )) return .yielded;
+        var control = heap.Owned(GuardControl).init(self.control.take());
+        defer control.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        const target = self.target;
+        evaluator.retireDriver(self);
+        try beginGuardTarget(evaluator, &control, target);
+        return .detached;
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+const GuardRestoreDriver = struct {
+    control: heap.Owned(GuardControl),
+    target: GuardTarget,
+
+    pub fn advance(evaluator: *Machine, self: *GuardRestoreDriver) MachineError!machine.WorkProgress {
+        evaluator.setActiveWord(self.control.borrow().word);
+        try evaluator.pollKernel();
+        if (!try self.control.borrowMut().checkpoint.borrowMut().advanceRestore(
+            evaluator,
+            machine.kernel_poll_quantum,
+        )) return .yielded;
+        var control = heap.Owned(GuardControl).init(self.control.take());
+        defer control.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        const target = self.target;
+        evaluator.retireDriver(self);
+        if (target != .done) try beginGuardTarget(evaluator, &control, target);
+        return .detached;
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+const GuardPredicateState = struct {
+    control: heap.Owned(GuardControl),
+
+    fn application(self: *GuardPredicateState, quotation: *Header) Application {
+        const control = self.control.borrow();
+        return machine.typedApplication(self, quotation, control.parent, control.home, 0);
+    }
+    pub fn resumeApplication(
+        evaluator: *Machine,
+        self: *GuardPredicateState,
+        _: StackWindow,
+    ) MachineError!?ApplicationStep {
+        evaluator.setActiveWord(self.control.borrow().word);
         var predicate = try evaluator.popValue();
         defer predicate.deinit();
-        const selected = try boolValue(evaluator, &predicate);
-        if (selected) {
-            self.running_action = true;
-            return self.step(list.atUnchecked(self.clauses.borrow(), self.pair_index + 1).list);
-        }
-        self.pair_index += 2;
-        const count: usize = @intCast(self.clauses.borrow().list.length());
-        if (self.pair_index + 1 >= count) {
-            self.running_action = true;
-            return self.step(list.atUnchecked(self.clauses.borrow(), count - 1).list);
-        }
-        return self.step(list.atUnchecked(self.clauses.borrow(), self.pair_index).list);
+        const target = self.control.borrowMut().selectedTarget(try boolValue(evaluator, &predicate));
+        self.control.borrowMut().checkpoint.borrowMut().beginRestore();
+        try evaluator.startDriver(GuardRestoreDriver{
+            .control = .init(self.control.take()),
+            .target = target,
+        });
+        return null;
     }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
 
+const GuardActionState = struct {
+    control: heap.Owned(GuardControl),
+
+    fn application(self: *GuardActionState, quotation: *Header) Application {
+        const control = self.control.borrow();
+        return machine.typedApplication(self, quotation, control.parent, control.home, 0);
+    }
+    pub fn resumeApplication(
+        evaluator: *Machine,
+        self: *GuardActionState,
+        _: StackWindow,
+    ) MachineError!?ApplicationStep {
+        evaluator.setActiveWord(self.control.borrow().word);
+        const condition = self.control.borrowMut().afterAction() orelse return null;
+        var checkpoint = try GuardCheckpoint.init(evaluator);
+        self.control.borrowMut().checkpoint.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        self.control.borrowMut().checkpoint = .init(checkpoint.take());
+        try evaluator.startDriver(GuardSnapshotDriver{
+            .control = .init(self.control.take()),
+            .target = .{ .predicate = condition },
+        });
+        return null;
+    }
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
@@ -292,23 +450,24 @@ const CondDriver = struct {
                 return evaluator.typeError("quotation clauses and else");
         }
         if (self.index != count) return .yielded;
-        var expected_value: ?Value = try effectValue(evaluator.allocator(), &.{ "--", "bool" });
-        errdefer if (expected_value) |expected| evaluator.releaseDomain().releaseValue(expected);
-        const state = try evaluator.allocator().create(CondState);
-        state.* = .{
-            .clauses = .init(self.clauses.take()),
-            .expected = .init(expected_value.?),
+        var checkpoint = try GuardCheckpoint.init(evaluator);
+        const first: GuardTarget = if (count == 1)
+            .{ .action = list.atUnchecked(clauses, 0).list }
+        else
+            .{ .predicate = list.atUnchecked(clauses, 0).list };
+        const control = GuardControl{
+            .checkpoint = .init(checkpoint.take()),
+            .selector = .{ .cond = .{ .clauses = .init(self.clauses.take()) } },
             .parent = self.parent,
             .home = self.home,
             .word = self.word,
         };
-        expected_value = null;
-        const first = if (count == 1) blk: {
-            state.running_action = true;
-            break :blk list.atUnchecked(clauses, 0).list;
-        } else list.atUnchecked(clauses, 0).list;
-        try evaluator.beginInlineApplication(state.application(first));
-        return .completed;
+        evaluator.retireDriver(self);
+        try evaluator.startDriver(GuardSnapshotDriver{
+            .control = .init(control),
+            .target = first,
+        });
+        return .detached;
     }
 
     pub const ownership: heap.DriverOwnership = .fields;

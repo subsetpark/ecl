@@ -109,7 +109,7 @@ test "e2e: native extension discovery ABI and reflection acceptance" {
     var result = try runWithNativePath(&.{
         build_options.ecl_exe,
         "-e",
-        "'sample use 41 sample.increment 'sample.increment which 'sample.increment see",
+        "41 sample.increment 'sample.increment which 'sample.increment see",
     });
     defer result.deinit();
     try result.expect(.{
@@ -402,18 +402,18 @@ test "e2e: module effect declaration acceptance" {
     });
 }
 
-test "e2e: use shadow notice acceptance" {
+test "e2e: explicit import replacement acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "1 'mean set 2 'count set (3 'mean set 4 'count set) 'stats @defm 'stats use mean count",
+        "1 'mean set 2 'count set (3 'mean set 4 'count set) 'stats @defm " ++
+            "'stats.mean 'mean import 'stats.count 'count import mean count",
     });
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
-        .stdout = "1 2\n",
-        .stderr = "session `count` shadows `stats.count`\n" ++
-            "session `mean` shadows `stats.mean`\n",
+        .stdout = "3 4\n",
+        .stderr = "",
     });
 }
 
@@ -421,14 +421,14 @@ test "e2e: reflection acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @defm 'm use 'm.f see 'f which words",
+        "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @defm 'm.f 'f import 'm.f see 'f which words",
     });
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
         .stdout_contains = &.{
             "(s 2 +) (-- n) 'm.f def",
-            "f -> m.f def public generation 1 (-- n)",
+            "f -> f def public (-- n)",
         },
         .stdout_excludes = &.{" s "},
         .stderr = "",
@@ -515,7 +515,7 @@ test "e2e: direct load and ECL_PATH acceptance" {
     defer environment.deinit();
     try environment.put("ECL_PATH", "test/acceptance/modules");
     var result = try cli.runOptions(.{
-        .argv = &.{ build_options.ecl_exe, "-e", "'stats use answer" },
+        .argv = &.{ build_options.ecl_exe, "-e", "'stats.answer 'answer import answer" },
         .environ_map = &environment,
     });
     defer result.deinit();
@@ -528,7 +528,7 @@ test "e2e: direct load and ECL_PATH acceptance" {
     var empty_environment = std.process.Environ.Map.init(allocator);
     defer empty_environment.deinit();
     var no_implicit_cwd = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "'stats use" },
+        .argv = &.{ exe, "-e", "'stats.answer 'answer import" },
         .cwd = .{ .dir = module_directory },
         .environ_map = &empty_environment,
     });
@@ -613,7 +613,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     defer inert.deinit();
     try inert.expect(.{ .exit_code = 0, .stdout = "'...\n", .stderr = "" });
 
-    var reflected = try run(&.{ build_options.ecl_exe, "-e", "'result use 'result.either see" });
+    var reflected = try run(&.{ build_options.ecl_exe, "-e", "'result.either see" });
     defer reflected.deinit();
     try reflected.expect(.{
         .exit_code = 0,
@@ -823,7 +823,7 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
 
     // DoD-32, to the letter.
     var dod32 = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "'str use \"hello\" str.upper io.pp" },
+        .argv = &.{ "./ecl", "'str.upper 'upper import \"hello\" upper io.pp" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });
@@ -832,34 +832,34 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
 
     // Both spellings of the first reference, for every embedded module, from a
     // copied binary in an empty directory with an empty environment.
-    const modules = [_]struct { name: []const u8, use: []const u8, qualified: []const u8 }{
+    const modules = [_]struct { name: []const u8, imported: []const u8, qualified: []const u8 }{
         // The moved envelope words prove the whole point of the consolidation:
-        // `result.or-raise` needs no `use` at all under qualified-miss
+        // `result.or-raise` needs no import at all under qualified-miss
         // auto-load, with no `ECL_PATH` and no readable directory.
         .{
             .name = "result",
-            .use = "'result use (2 3 +) @attempt or-raise io.pp",
+            .imported = "'result.or-raise 'or-raise import (2 3 +) @attempt or-raise io.pp",
             .qualified = "(2 3 +) @attempt result.or-raise io.pp",
         },
-        .{ .name = "str", .use = "'str use \"hi\" upper io.pp", .qualified = "\"hi\" str.upper io.pp" },
-        .{ .name = "io", .use = "'io use \"hi\" print", .qualified = "\"hi\" io.print" },
-        .{ .name = "csv", .use = "'csv use \"a,b\" parse io.pp", .qualified = "\"a,b\" csv.parse io.pp" },
-        .{ .name = "json", .use = "'json use \"[1]\" parse io.pp", .qualified = "\"[1]\" json.parse io.pp" },
+        .{ .name = "str", .imported = "'str.upper 'upper import \"hi\" upper io.pp", .qualified = "\"hi\" str.upper io.pp" },
+        .{ .name = "io", .imported = "'io.print 'print import \"hi\" print", .qualified = "\"hi\" io.print" },
+        .{ .name = "csv", .imported = "'csv.parse 'csv-parse import \"a,b\" csv-parse io.pp", .qualified = "\"a,b\" csv.parse io.pp" },
+        .{ .name = "json", .imported = "'json.parse 'json-parse import \"[1]\" json-parse io.pp", .qualified = "\"[1]\" json.parse io.pp" },
         .{
             .name = "table",
-            .use = "'table use {\"a\" [1]} valid? io.pp",
+            .imported = "'table.valid? 'valid? import {\"a\" [1]} valid? io.pp",
             .qualified = "{\"a\" [1]} table.valid? io.pp",
         },
         .{
             .name = "rng",
             // The default key is fixed, so an unseeded draw from a fresh
             // process is as reproducible as any other embedded module's output.
-            .use = "'rng use 6 int io.pp",
+            .imported = "'rng.int 'int import 6 int io.pp",
             .qualified = "6 rng.int io.pp",
         },
         .{
             .name = "http",
-            .use = "'http use 'http.get doc len 0 > io.pp",
+            .imported = "'http.get 'get import 'get doc len 0 > io.pp",
             .qualified = "'http.get doc len 0 > io.pp",
         },
     };
@@ -873,13 +873,13 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
     };
     for (modules, used_output, qualified_output) |module, want, qualified_want| {
         var used = try cli.runOptions(.{
-            .argv = &.{ "./ecl", module.use },
+            .argv = &.{ "./ecl", module.imported },
             .cwd = .{ .dir = temporary.dir },
             .environ_map = &environment,
         });
         defer used.deinit();
         used.expect(.{ .exit_code = 0, .stdout = want }) catch |err| {
-            std.log.err("`use` of stdlib module `{s}` failed", .{module.name});
+            std.log.err("import from stdlib module `{s}` failed", .{module.name});
             return err;
         };
         var qualified = try cli.runOptions(.{
@@ -973,7 +973,8 @@ test "e2e: entropy is the one draw that differs between processes" {
     var seeded = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "'rng use entropy dup 'k set seed 100 6 ints 'a set k seed 100 6 ints a match? io.pp",
+        "'rng.seed 'seed import 'rng.ints 'ints import " ++
+            "entropy dup 'k set seed 100 6 ints 'a set k seed 100 6 ints a match? io.pp",
     });
     defer seeded.deinit();
     try seeded.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });

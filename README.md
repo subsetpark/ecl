@@ -77,15 +77,16 @@ probe stays bounded.
 ## Standard library and data pipelines
 
 The `result`, `str`, `io`, `csv`, `json`, `table`, `http`, and `rng` modules are
-embedded and load on first use. A qualified name is enough; `use` additionally
-imports a module's public names into the current environment.
+embedded and load on first qualified reference. `import` binds one qualified
+word to one bare name in the current environment while preserving its effect
+and documentation.
 
 ```sh
 ecl '"hello" str.upper'                         # "HELLO"
 ecl "['a 1] str"                                # "('a 1)"
 ecl '"a,b\nc,d" csv.parse'                      # (("a" "b") ("c" "d"))
 ecl '"{\"a\":[1,null]}" json.parse'            # {"a" (1 'null)}
-ecl -e "'result use 3 result.ok result.or-raise call"
+ecl -e "'result.or-raise 'or-raise import 3 result.ok or-raise call"
 ```
 
 Tables are validated ordinary dictionaries whose string keys name equal-length
@@ -142,12 +143,12 @@ name. The filename is transport, not identity. For example, save this as
 ```
 
 Place the containing directory on `ECL_PATH`. On the first unresolved
-qualified reference or `use`, ecl loads `stats.ecl`, requires it to register
-`stats`, and retries resolution.
+qualified reference, including the original named by `import`, ecl loads
+`stats.ecl`, requires it to register `stats`, and retries resolution.
 
 ```sh
 ECL_PATH="$PWD/modules" ecl '21 stats.twice'
-ECL_PATH="$PWD/modules" ecl "'stats use 21 twice"
+ECL_PATH="$PWD/modules" ecl "'stats.twice 'twice import 21 twice"
 ```
 
 Inside a module, `def` publishes a public word and `defp` publishes a private

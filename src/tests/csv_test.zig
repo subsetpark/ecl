@@ -92,12 +92,12 @@ test "csv: emit produces canonical CRLF output quoting exactly as required" {
             // Larger than one 65,536-unit scheduler quantum, so the parse and
             // the emit both cross yields and resume mid-record.
             .name = "input beyond one budget quantum resumes correctly",
-            .source = "'str use \"ab,cd\\u{D}\\n\" 12000 repeat dup csv.parse csv.emit match?",
+            .source = "'str.repeat 'repeat import \"ab,cd\\u{D}\\n\" 12000 repeat dup csv.parse csv.emit match?",
             .expected = "1",
         },
         .{
             .name = "quoted fields beyond one quantum resume correctly",
-            .source = "'str use \"\\\"a\\\"\\\"b\\\",\\\"c,d\\\"\\u{D}\\n\" 8000 repeat " ++
+            .source = "'str.repeat 'repeat import \"\\\"a\\\"\\\"b\\\",\\\"c,d\\\"\\u{D}\\n\" 8000 repeat " ++
                 "dup csv.parse csv.emit match?",
             .expected = "1",
         },
@@ -167,7 +167,7 @@ test "csv: the module resolves and documents itself like every other" {
     try support.expectStacks(&.{
         .{
             .name = "documentation reaches native words",
-            .source = "'csv use 'csv.parse doc len 0 > 'csv.emit doc len 0 >",
+            .source = "'csv.parse doc len 0 > 'csv.emit doc len 0 >",
             .expected = "1 1",
         },
     });

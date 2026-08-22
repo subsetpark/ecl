@@ -1,6 +1,18 @@
-# DoD-25a: the result module's whole contract, reached both by `use` and by
-# bare qualified reference.
-'result use
+# DoD-25a: the result module's whole contract, reached both through explicit
+# metadata-preserving imports and by bare qualified reference.
+'result.ok 'ok import
+'result.err 'err import
+'result.ok? 'ok? import
+'result.err? 'err? import
+'result.or-raise 'or-raise import
+'result.or-else 'or-else import
+'result.and-then 'and-then import
+'result.map-err 'map-err import
+'result.recover 'recover import
+'result.recover-kinds 'recover-kinds import
+'result.either 'either import
+'result.all 'all import
+'result.partition 'partition import
 
 # Construction and observation. A success payload is always a stack.
 [1 2] ok io.pp
@@ -37,8 +49,8 @@
 [7] ok (first) (pop 0) either io.pp
 {'kind 'io} err (first) ('kind at) either io.pp
 
-# The three envelope interpreters that moved out of the prelude: qualified,
-# and spliced in by `use`.
+# The envelope interpreters that moved out of the prelude: qualified and
+# explicitly imported.
 (2 3 +) @attempt or-raise io.pp
 (missing) @attempt 9 or-else io.pp
 (2 3 +) @attempt result.or-raise io.pp

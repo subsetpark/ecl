@@ -86,7 +86,7 @@ test "binding: set installs and replaces values while let is absent" {
     try expectErrorContains(&runtime, "3 'bad def", &.{ "'kind 'type", "use set for values" });
 }
 
-test "scope: isolated @attempt and child use do not leak" {
+test "scope: isolated @attempt and child import do not leak" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -94,7 +94,7 @@ test "scope: isolated @attempt and child use do not leak" {
     try expectErrorContains(&runtime, "(1 'k set) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
     try expectErrorContains(&runtime, "((1 'k set missing) @attempt pop) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
     try expectOk(&runtime, "(7 'x set) 'm @defm");
-    try expectErrorContains(&runtime, "('m use x) @attempt pop x", &.{ "'kind 'undefined-word", "'word 'x" });
+    try expectErrorContains(&runtime, "('m.x 'x import x) @attempt pop x", &.{ "'kind 'undefined-word", "'word 'x" });
 }
 
 test "module: privacy module-body contract top-level private and qualified trace" {
@@ -127,13 +127,13 @@ test "modules: removal strips aliases and leaves no half-removed entry" {
     var runtime = try session.Session.init(backing.allocator(), &.{});
     defer runtime.deinit();
     try expectOk(&runtime, "((1) 'x def) 'a @defm ((2) 'x def) 'b @defm " ++
-        "'short 'a alias 'a use short.x a.x x");
+        "'short 'a alias 'a.x 'x import short.x a.x x");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try expectOk(&runtime, "'a unmodule");
     // The canonical name and every alias targeting it go in one publish.
     try expectErrorContains(&runtime, "a.x", &.{"'kind 'undefined-word"});
     try expectErrorContains(&runtime, "short.x", &.{"'kind 'undefined-word"});
-    try expectErrorContains(&runtime, "'short use", &.{"'kind 'undefined-word"});
+    try expectErrorContains(&runtime, "'short.x 'x import", &.{"'kind 'undefined-word"});
     // Enumeration never shows a half-removed entry, and unrelated modules
     // and their aliases are untouched.
     try expectOk(&runtime, "'other 'b alias other.x b.x");
@@ -141,13 +141,13 @@ test "modules: removal strips aliases and leaves no half-removed entry" {
     try expectErrorContains(&runtime, "'again 'a alias", &.{"'kind 'undefined-word"});
 }
 
-test "module: qualified use alias ordering idempotence and collisions" {
+test "module: qualified import replacement and alias collisions" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
     defer runtime.deinit();
     try expectOk(&runtime, "(1 'x set) 'a @defm (2 'x set) 'b @defm " ++
-        "'a use 'b use x 'a use x 'short 'a alias short.x");
+        "'a.x 'x import 'b.x 'x import x 'a.x 'x import x 'short 'a alias short.x");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
@@ -210,7 +210,7 @@ test "module: effect shape cross-home contract and same-home TCO" {
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[runtime.stackItems().len - 1].int);
 }
 
-test "module: use shadow notices are exact and non-blocking" {
+test "module: import explicitly replaces one binding and preserves metadata" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -228,35 +228,27 @@ test "module: use shadow notices are exact and non-blocking" {
         },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "1 'mean set 2 'count set (3 'mean set 4 'count set 5 'other set) 'stats @defm 'stats use mean count");
-    try std.testing.expectEqualStrings(
-        "session `count` shadows `stats.count`\n" ++
-            "session `mean` shadows `stats.mean`\n",
-        diagnostics.written(),
-    );
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
-    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
-    const notice_len = diagnostics.written().len;
-    try expectOk(&runtime, "('stats use other pop) @attempt pop ('stats use (other) ( -- n ) 'get def) 'consumer @defm consumer.get pop");
-    try std.testing.expectEqual(notice_len, diagnostics.written().len);
-
-    var output_buffer: [64]u8 = undefined;
-    var fixed_output = std.Io.Writer.fixed(&output_buffer);
-    var no_diagnostic_space: [0]u8 = .{};
-    var broken_diagnostics = std.Io.Writer.fixed(&no_diagnostic_space);
-    var broken = try session.Session.initWithHost(
-        backing.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &fixed_output,
-            .diagnostics = &broken_diagnostics,
-            .ecl_path = null,
-        },
-    );
-    defer broken.deinit();
-    try expectErrorContains(&broken, "1 'x set (2 'x set 3 'y set) 'm @defm 'm use", &.{"'kind 'io"});
-    try expectErrorContains(&broken, "y", &.{"'kind 'undefined-word"});
+    try expectOk(&runtime, "(3 'mean set (4) ( -- n : \"Count.\") 'count def 5 'other set) 'stats @defm " ++
+        "1 'mean set 'stats.mean 'mean import mean 'stats.count 'count import count " ++
+        "'count doc \"Count.\" match? 'count body (stats.count) match? 'count see");
+    try std.testing.expectEqualStrings("", diagnostics.written());
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(stats.count) (-- n : \"Count.\") 'count def") != null);
+    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 4), runtime.stackItems()[1].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[3].int);
+    try expectErrorContains(&runtime, "'count 'stats.count import", &.{
+        "'kind 'domain",
+        "import binding must be unqualified",
+    });
+    try expectErrorContains(&runtime, "'stats 'local import", &.{
+        "'kind 'domain",
+        "import original must be a qualified word",
+    });
+    try expectErrorContains(&runtime, "'result use", &.{
+        "'kind 'undefined-word",
+        "'word 'use",
+    });
 }
 
 test "reflection: which and see expose home shadow and effect" {
@@ -277,13 +269,14 @@ test "reflection: which and see expose home shadow and effect" {
         },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @defm 'm use " ++
+    try expectOk(&runtime, "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @defm 'm.f 'f import " ++
         "'m.f see 9 'f set 'f which 'f see words");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(s 2 +) (-- n) 'm.f def") != null);
     // One binding kind: a session constant reports as a public def with no
     // metadata, because the sugar supplies none, and `see` prints the stored
     // literal capture rather than reconstructing the `set` spelling.
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f def public; shadows m.f") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f def public") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "shadows m.f") == null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "([9] first) 'f def") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " f ") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " s ") == null);
@@ -320,7 +313,7 @@ test "session completion: live and registered names are sorted unique" {
     try expectOk(
         &runtime,
         "(1 'hidden setp 2 'public set) 'completion-module @defm " ++
-            "'completion-module use 'cm 'completion-module alias " ++
+            "'completion-module.public 'public import 'cm 'completion-module alias " ++
             "3 'repl-live set",
     );
     var all = try runtime.completionCandidates("");
@@ -406,7 +399,7 @@ test "loader: load is one unit and preserves file provenance" {
     try std.testing.expectEqualStrings("side", output.written());
 }
 
-test "loader: ECL_PATH loads first candidate and retries use" {
+test "loader: ECL_PATH loads first candidate and retries import" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     const search = try std.fmt.allocPrint(
@@ -430,10 +423,10 @@ test "loader: ECL_PATH loads first candidate and retries use" {
         },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "('attempted use answer) @attempt pop attempted.answer");
+    try expectOk(&runtime, "('attempted.answer 'answer import answer) @attempt pop attempted.answer");
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try expectErrorContains(&runtime, "answer", &.{"'kind 'undefined-word"});
-    try expectOk(&runtime, "'stats use answer");
+    try expectOk(&runtime, "'stats.answer 'answer import answer");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
 
     var no_path = try session.Session.initWithHost(
@@ -447,7 +440,7 @@ test "loader: ECL_PATH loads first candidate and retries use" {
         },
     );
     defer no_path.deinit();
-    try expectErrorContains(&no_path, "'stats use", &.{ "'kind 'undefined-word", "'name 'stats" });
+    try expectErrorContains(&no_path, "'stats.answer 'answer import", &.{ "'kind 'undefined-word", "'name 'stats.answer" });
 }
 
 test "modules: module set and setp publish unannotated constants" {
@@ -479,10 +472,10 @@ test "modules: cross-home constant references cross unchecked while declared eff
     var runtime = try session.Session.init(backing.allocator(), &.{});
     defer runtime.deinit();
     // A constant reached across a home boundary declares no effect, so no
-    // check frame is installed at all: qualified access, spliced access, and
+    // check frame is installed at all: qualified access, imported access, and
     // module-internal access agree without one.
     try expectOk(&runtime, "(7 'x set 8 'h setp (h) (-- n) 'peek def) 'm @defm");
-    try expectOk(&runtime, "m.x 'm use x m.peek");
+    try expectOk(&runtime, "m.x 'm.x 'x import x m.peek");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);

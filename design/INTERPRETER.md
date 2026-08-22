@@ -163,9 +163,8 @@ primitives, operationalized as two rules:
   `within` all set the new frame's `resolution_scope` from the invoking frame's
   `scope`. That is what keeps a module word's `(private-helper)` resolving
   when it is handed to a combinator defined in core. It also means a
-  session-level `use` that shadows a core name still reaches prelude bodies —
-  that path is the documented way to patch a binding, and it reports a shadow
-  notice.
+  session-level `import` that replaces a core name still reaches prelude bodies
+  — explicit one-name replacement is the documented way to patch a binding.
 - **Name domains are nominal and validated.** `BindingName` is exactly one
   unqualified non-reserved segment, `ModuleName` is one or more valid
   segments joined by dots, and `QualifiedName` is the validated pair of a
@@ -282,7 +281,7 @@ primitives, operationalized as two rules:
   public-name traversal for both `words` and host completion. Its tagged
   root is either one retained scope path or the pre-first-unit session
   environment; its tagged phase variants own exactly the direct cursor,
-  use Shape lease, registry acquisition cursor, export generation/cursor
+  scope Shape lease, registry acquisition cursor, export generation/cursor
   pair, or core cursor required in that phase. A transition constructs its
   successor payload in one step, so the pre-first-unit environment-to-core
   transition cannot expose a core phase without a core cursor. Registry
@@ -325,11 +324,14 @@ primitives, operationalized as two rules:
 - **Frames are ≤80-byte uniform records** (code ref, ip, env ref, kind
   tag, typed payload). The ceiling covers the tagged application mode, the
   immutable continuation driver, and trace ownership. Combinator state is
-  indices; saved stacks are **base indices into the unit's one contiguous
-  data stack**, never moved-out vectors. Isolation = a base-index barrier
-  (the underflow check is one compare, which also implements the
-  combinator contract checks); rollback and attempt-catch =
-  truncate-to-base, O(1).
+  indices. Isolation and failure rollback save only base indices into the
+  unit's one contiguous data stack: isolation is a base-index barrier and
+  attempt-catch is truncate-to-base, O(1). `cond` and `while` are the one
+  distinct observation protocol: a resumable guard cursor retains the visible
+  operands in an immutable generic-spine checkpoint, permits destructive test
+  execution in the same scope, and restores that checkpoint in bounded chunks
+  before selecting an action or body. No frame owns or copies a user-sized
+  stack snapshot.
 - **Boundary frames** (attempt/module) record saved depths and form an
   intrusive chain with a register to the innermost — unwinding never scans
   or interprets frames (crash-only has no finally); it truncates.
@@ -1008,7 +1010,7 @@ honest source with no public dual representation.
   resolves with no host IO and no `ECL_PATH`, and no path module can shadow
   one. The host-IO/search-path bail moved after the manifest check for exactly
   this reason.
-- **A qualified miss auto-loads exactly as a `use` miss does.** Resolution
+- **An import original auto-loads exactly as any qualified miss does.** Resolution
   acquires the module *before* looking up the export atom, because a first
   reference is precisely the state in which that atom has never been interned;
   checking the export first made the trigger depend on whether some unrelated
@@ -1019,7 +1021,7 @@ honest source with no public dual representation.
   actually registered, which is what bounds the retry. Reflection restores
   its already-consumed symbol and rewinds its primitive call through that same
   protocol. Session completion drives the same loader on an initialized empty
-  root, without executing an export or splicing a `use`; transport and prior
+  root, without executing an export or creating an import; transport and prior
   registration are therefore unobservable to every qualified-name operation.
 - **Contention and recursion are different states.** A `LoadingNode` stores
   its owner rather than a bare active flag, so a second request from the same
@@ -1044,7 +1046,8 @@ honest source with no public dual representation.
   `http` state their stack shape in prose instead.
 - **`io` is the observable-I/O boundary.** Its builtin table publishes
   `pp`, `prin`, `print`, `inspect`, `stdin`, `slurp`, `spit`, and `lines`;
-  qualified names and `'io use` are the only routes to those words. The
+  qualified names and explicit imports such as `'io.print 'print import` are
+  the only routes to those words. The
   primitive callbacks keep host authority private, while `print`, `inspect`,
   and `lines` schedule fixed quotations over sibling exports. The canonical
   any-value renderer `str` remains in the prelude because it produces a value

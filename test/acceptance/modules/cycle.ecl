@@ -1,1 +1,1 @@
-'cycle use
+'cycle.x 'x import

@@ -66,7 +66,7 @@ test "errors: contract depths are relative to the isolated substack" {
     defer test_heap.retire(&runtime_heap);
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
     defer runtime.deinit();
-    const source = "7 8 ((1 2) () while) @attempt";
+    const source = "7 8 ([0] (pop 1 2) each) @attempt";
     try std.testing.expect((try runtime.runUnit("contract.ecl", source)) == .ok);
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     const contract_error = try field(
@@ -77,7 +77,7 @@ test "errors: contract depths are relative to the isolated substack" {
     const kind = try field(allocator, contract_error, "kind");
     try std.testing.expectEqualStrings("contract", intern.get(kind.symbol));
     const data = try field(allocator, contract_error, "data");
-    try std.testing.expectEqual(@as(i64, 0), (try field(allocator, data, "seeded")).int);
+    try std.testing.expectEqual(@as(i64, 1), (try field(allocator, data, "seeded")).int);
     try std.testing.expectEqual(@as(i64, 2), (try field(allocator, data, "observed")).int);
 }
 

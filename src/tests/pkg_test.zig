@@ -133,12 +133,12 @@ test "pkg: version ordering is a strict total order over a generated corpus" {
     );
     // Ordering survives a session that has deliberately shadowed `where`,
     // which prelude `find`, `filter`, and `partition` resolve through. When
-    // this could happen wholesale and silently — `'table use` spliced every
+    // this could once happen wholesale and silently — bulk module splicing added every
     // export at once — a `pkg` word reaching any of those three answered "a
     // table must be a dict of columns" instead of ordering two versions. It
     // now takes naming `where`, and it still must not reach this module.
     try support.expectStack(
-        "'where 'table.where import \"1.2.0\" \"1.10.0\" pkg.version< " ++
+        "'table.where 'where import \"1.2.0\" \"1.10.0\" pkg.version< " ++
             "[\"1.0.0-a\" \"1.0.0\"] pkg.version-max",
         "1 \"1.0.0\"",
     );

@@ -4,7 +4,7 @@
  (1 +) (n -- n) 'inc def)
 'math
 @defm
-'math use
+'math.inc 'inc import
 'm 'math alias
 10 math.inc io.pp 20 inc io.pp 30 m.inc io.pp
 

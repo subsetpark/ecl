@@ -1,4 +1,4 @@
-//! Embedded-stdlib resolution: use-miss and qualified-miss auto-load,
+//! Embedded-stdlib resolution: import-miss and qualified-miss auto-load,
 //! precedence against `ECL_PATH`, and lazy-registration convergence.
 //!
 //! These cases pass only source strings to a Session, so they run on the
@@ -33,23 +33,28 @@ fn expectDisplay(runtime: *session.Session, source: []const u8, expected: []cons
     try std.testing.expectEqualStrings(expected, display.bytes());
 }
 
-test "stdlib: embedded module resolves via use with no ECL_PATH" {
+test "stdlib: embedded module resolves via import with no ECL_PATH" {
     // A bare Session has no host IO and no search path at all, so nothing
     // here could reach a file even if one existed.
-    for (stdlib.names()) |name| {
+    const exports = [_][]const u8{
+        "result.ok",    "str.upper", "io.print",  "csv.parse",    "json.parse",
+        "table.valid?", "http.get",  "rng.float", "pkg.version<",
+    };
+    for (stdlib.names(), exports) |name, qualified| {
         var heap: test_heap.SessionHeap = .init;
         defer test_heap.retire(&heap);
         var runtime = try session.Session.init(heap.allocator(), &.{});
         defer runtime.deinit();
-        const source = try std.fmt.allocPrint(allocator, "'{s} use", .{name});
+        try std.testing.expect(std.mem.startsWith(u8, qualified, name));
+        const source = try std.fmt.allocPrint(allocator, "'{s} 'local import", .{qualified});
         defer allocator.free(source);
         try expectOk(&runtime, source);
     }
-    try support.expectStack("'result use [1 2] ok", "{'ok [1 2]}");
+    try support.expectStack("'result.ok 'ok import [1 2] ok", "{'ok [1 2]}");
 }
 
 test "stdlib: qualified reference auto-loads an unregistered module" {
-    // No `use`, no registration, no path: the first mention of the dotted
+    // No import, no registration, no path: the first mention of the dotted
     // name is what loads the module.
     try support.expectStack("[1 2] result.ok", "{'ok [1 2]}");
     // The reference is retried in place, so a value produced before it and a
@@ -121,7 +126,7 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
 
     // The embedded module wins for both spellings of the miss.
     try expectDisplay(&runtime, "[1 2] result.ok", "{'ok [1 2]}");
-    try expectDisplay(&runtime, "'result use [3] ok", "{'ok [1 2]} {'ok [3]}");
+    try expectDisplay(&runtime, "'result.ok 'ok import [3] ok", "{'ok [1 2]} {'ok [3]}");
     // Completion reaches the same ECL_PATH module before any execution or
     // reflection has registered it.
     var completed = try runtime.completionCandidates("cold-local.a");
@@ -149,7 +154,7 @@ test "stdlib: concurrent first references converge on one published module" {
         try expectDisplay(
             &runtime,
             "[[1] [2] [3] [4] [5] [6] [7] [8]] (result.ok) @each " ++
-                "([1] result.ok) ('result use [2] ok) 2 pack (@spawn) each await-all",
+                "([1] result.ok) ('result.ok 'ok import [2] ok) 2 pack (@spawn) each await-all",
             "({'ok [1]} {'ok [2]} {'ok [3]} {'ok [4]} " ++
                 "{'ok [5]} {'ok [6]} {'ok [7]} {'ok [8]}) " ++
                 "({'ok ({'ok [1]})} {'ok ({'ok [2]})})",
@@ -161,7 +166,7 @@ test "stdlib: embedded module names complete before anything has loaded them" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     // The bug this pins: the registry knows only published modules, so a
-    // stdlib name used to appear as a completion only after a `use` or a
+    // stdlib name used to appear as a completion only after an import or a
     // qualified call had already loaded it — you had to type the name in
     // full before the editor would offer it.
     const expected = [_][]const u8{ "result", "rng" };
@@ -178,7 +183,7 @@ test "stdlib: embedded module names complete before anything has loaded them" {
         }
     }
     // Loading one must not make it appear twice.
-    try expectOk(&runtime, "'rng use");
+    try expectOk(&runtime, "rng.float pop");
     var warm = try runtime.completionCandidates("rng");
     defer warm.deinit();
     var occurrences: usize = 0;

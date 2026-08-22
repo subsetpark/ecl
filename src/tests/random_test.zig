@@ -142,27 +142,27 @@ test "random: the rng module draws from durable module state" {
             // The module starts from a documented constant, so a sequential
             // program is reproducible without seeding.
             .name = "the default state is fixed",
-            .source = "'rng use 100 int 100 int",
+            .source = "100 rng.int 100 rng.int",
             .expected = "35 0",
         },
         .{
             .name = "seeding makes a sequence reproducible",
-            .source = "'rng use 42 seed 100 int 42 seed 100 int =",
+            .source = "42 rng.seed 100 rng.int 42 rng.seed 100 rng.int =",
             .expected = "1",
         },
         .{
             .name = "seeding with a different key changes the sequence",
-            .source = "'rng use 42 seed 100 int 43 seed 100 int <>",
+            .source = "42 rng.seed 100 rng.int 43 rng.seed 100 rng.int <>",
             .expected = "1",
         },
         .{
-            .name = "ints and its roll spelling agree",
-            .source = "'rng use 42 seed 3 6 ints 42 seed 3 6 roll match?",
+            .name = "reseeding reproduces an ints draw",
+            .source = "42 rng.seed 3 6 rng.ints 42 rng.seed 3 6 rng.ints match?",
             .expected = "1",
         },
         .{
             .name = "float lands in the unit interval",
-            .source = "'rng use float dup 0.0 >= swap 1.0 <",
+            .source = "rng.float dup 0.0 >= swap 1.0 <",
             .expected = "1 1",
         },
     });
@@ -174,36 +174,36 @@ test "random: deal draws without replacement and shuffle permutes" {
             // Distinctness is the property that separates deal from repeated
             // independent draws.
             .name = "deal returns distinct values inside the pool",
-            .source = "'rng use 5 10 deal dup distinct len swap dup len swap " ++
+            .source = "5 10 rng.deal dup distinct len swap dup len swap " ++
                 "dup (0 <) any? swap (10 >=) any?",
             .expected = "5 5 0 0",
         },
         .{
             .name = "a full deal is a permutation",
-            .source = "'rng use 8 8 deal sort",
+            .source = "8 8 rng.deal sort",
             .expected = "[0 1 2 3 4 5 6 7]",
         },
         .{
             .name = "the empty deal is legal",
-            .source = "'rng use 0 0 deal len 0 5 deal len",
+            .source = "0 0 rng.deal len 0 5 rng.deal len",
             .expected = "0 0",
         },
         .{
             .name = "shuffle preserves the multiset",
-            .source = "'rng use [10 20 30 40] shuffle sort",
+            .source = "[10 20 30 40] rng.shuffle sort",
             .expected = "[10 20 30 40]",
         },
     });
     try support.expectErrors(&.{
         .{
             .name = "deal cannot exceed its pool",
-            .source = "'rng use 11 10 deal",
+            .source = "11 10 rng.deal",
             .kind = "domain",
             .message_contains = "more values than the pool",
         },
         .{
             .name = "deal rejects a negative count",
-            .source = "'rng use -1 10 deal",
+            .source = "-1 10 rng.deal",
             .kind = "domain",
             .message_contains = "nonnegative count",
         },
@@ -211,11 +211,11 @@ test "random: deal draws without replacement and shuffle permutes" {
 }
 
 test "random: every rng word carries documentation" {
-    const names = [_][]const u8{ "seed", "int", "ints", "roll", "float", "deal", "shuffle" };
+    const names = [_][]const u8{ "seed", "int", "ints", "float", "deal", "shuffle" };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'rng use 'rng.{s} body type 'rng.{s} doc len 0 >",
+            "'rng.{s} body type 'rng.{s} doc len 0 >",
             .{ name, name },
         );
         defer std.testing.allocator.free(source);

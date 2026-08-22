@@ -27,7 +27,7 @@ fn runPath(source: []const u8, path: []const u8) !cli.Result {
 }
 
 test "native runtime: loaded artifacts behave identically at one and eight workers" {
-    const source = "'sample use 40 sample.increment sample.split sample.singleton " ++
+    const source = "40 sample.increment sample.split sample.singleton " ++
         "sample.cooperative 'sample.increment which";
     var one = try run(source, "1", false);
     defer one.deinit();
@@ -48,7 +48,7 @@ test "native runtime: loaded artifacts behave identically at one and eight worke
 }
 
 test "native runtime: spawned units inherit native loading context" {
-    const source = "('sample use 41 sample.increment) @spawn await";
+    const source = "(41 sample.increment) @spawn await";
     var one = try run(source, "1", false);
     defer one.deinit();
     var eight = try run(source, "8", false);
@@ -61,7 +61,7 @@ test "native runtime: spawned units inherit native loading context" {
 
 test "native runtime: aggregates larger than one quantum complete" {
     var result = try run(
-        "'sample use 100000 sample.large-list len 70000 sample.large-dict keys len",
+        "100000 sample.large-list len 70000 sample.large-dict keys len",
         "1",
         false,
     );
@@ -70,7 +70,7 @@ test "native runtime: aggregates larger than one quantum complete" {
 }
 
 test "native runtime: inadmissible values and duplicate keys are language errors" {
-    var task_input = try run("'sample use () @spawn sample.forward", "1", false);
+    var task_input = try run("() @spawn sample.forward", "1", false);
     defer task_input.deinit();
     try task_input.expect(.{
         .exit_code = 1,
@@ -80,7 +80,7 @@ test "native runtime: inadmissible values and duplicate keys are language errors
 
     // A module image is a runtime capability on the same terms as a task: the
     // ABI has no representation for it, in scalar or in view position.
-    var module_input = try run("'sample use (1) @module sample.forward", "1", false);
+    var module_input = try run("(1) @module sample.forward", "1", false);
     defer module_input.deinit();
     try module_input.expect(.{
         .exit_code = 1,
@@ -88,7 +88,7 @@ test "native runtime: inadmissible values and duplicate keys are language errors
         .stderr_contains = &.{ "'kind 'type", "native words cannot observe module capabilities" },
     });
 
-    var module_element = try run("'sample use ((1) @module) sample.sum-list", "1", false);
+    var module_element = try run("((1) @module) sample.sum-list", "1", false);
     defer module_element.deinit();
     try module_element.expect(.{
         .exit_code = 1,
@@ -96,7 +96,7 @@ test "native runtime: inadmissible values and duplicate keys are language errors
         .stderr_contains = &.{"'kind "},
     });
 
-    var duplicate = try run("'sample use sample.duplicate-dict", "1", false);
+    var duplicate = try run("sample.duplicate-dict", "1", false);
     defer duplicate.deinit();
     try duplicate.expect(.{
         .exit_code = 1,
@@ -106,13 +106,13 @@ test "native runtime: inadmissible values and duplicate keys are language errors
 }
 
 test "native runtime: execute uses ordinary native dispatch" {
-    var result = try run("'sample use 7 'sample 'increment qualify execute", "1", false);
+    var result = try run("'sample.increment 'increment import 7 'sample 'increment qualify execute", "1", false);
     defer result.deinit();
     try result.expect(.{ .exit_code = 0, .stdout = "8\n", .stderr = "" });
 }
 
 test "native runtime: SDK char scalars enforce Unicode scalar bounds" {
-    var upper = try run("'sample use 1114111 sample.make-char type", "1", false);
+    var upper = try run("1114111 sample.make-char type", "1", false);
     defer upper.deinit();
     try upper.expect(.{ .exit_code = 0, .stdout = "'char\n", .stderr = "" });
 
@@ -120,7 +120,7 @@ test "native runtime: SDK char scalars enforce Unicode scalar bounds" {
     for (invalid_codepoints) |codepoint| {
         const source = try std.fmt.allocPrint(
             allocator,
-            "'sample use {d} sample.make-char",
+            "{d} sample.make-char",
             .{codepoint},
         );
         defer allocator.free(source);
@@ -164,7 +164,7 @@ test "native runtime: source precedence and path-root order are observable" {
         allocator,
     );
     defer allocator.free(same_root_path);
-    var source_first = try runPath("'sample use sample.increment", same_root_path);
+    var source_first = try runPath("sample.increment", same_root_path);
     defer source_first.deinit();
     try source_first.expect(.{ .exit_code = 0, .stdout = "100\n", .stderr = "" });
 
@@ -202,7 +202,7 @@ test "native runtime: source precedence and path-root order are observable" {
         .{ native_root_path, std.fs.path.delimiter, source_root_path },
     );
     defer allocator.free(ordered_path);
-    var native_first = try runPath("'sample use 41 sample.increment", ordered_path);
+    var native_first = try runPath("41 sample.increment", ordered_path);
     defer native_first.deinit();
     try native_first.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
 }
@@ -238,7 +238,7 @@ test "native runtime: malformed artifacts are authoritative" {
         defer allocator.free(search);
         try environment.put("ECL_PATH", search);
         var result = try cli.runOptions(.{
-            .argv = &.{ build_options.ecl_exe, "-e", "'sample use" },
+            .argv = &.{ build_options.ecl_exe, "-e", "'sample.increment 'increment import" },
             .environ_map = &environment,
         });
         defer result.deinit();
@@ -265,7 +265,7 @@ test "native runtime: module-written wire values cannot trap or partially commit
     for (failures) |case| {
         const path = try std.fs.path.join(allocator, &.{ build_options.fixture_dir, case.defect });
         defer allocator.free(path);
-        var result = try runPath("'sample use sample.word", path);
+        var result = try runPath("sample.word", path);
         defer result.deinit();
         try result.expect(.{
             .exit_code = 1,
@@ -279,15 +279,15 @@ test "native runtime: module-written wire values cannot trap or partially commit
         &.{ build_options.fixture_dir, "partial-complete" },
     );
     defer allocator.free(partial_path);
-    var partial = try runPath("'sample use sample.word", partial_path);
+    var partial = try runPath("sample.word", partial_path);
     defer partial.deinit();
     try partial.expect(.{ .exit_code = 0, .stdout = "1 1\n", .stderr = "" });
 }
 
 test "native runtime: diagnostics are opt-in and never change results" {
-    var ordinary = try run("'sample use sample.noncooperative", "1", false);
+    var ordinary = try run("sample.noncooperative", "1", false);
     defer ordinary.deinit();
-    var observed = try run("'sample use sample.noncooperative", "1", true);
+    var observed = try run("sample.noncooperative", "1", true);
     defer observed.deinit();
     try ordinary.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
     try std.testing.expectEqual(ordinary.term, observed.term);

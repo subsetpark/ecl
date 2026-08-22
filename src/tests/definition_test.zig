@@ -62,7 +62,7 @@ test "every primitive exposes meaningful reflective documentation" {
         "times",      "cond",    "each",  "zip-with",  "for",       "fold",
         "scan",       "infra",   "def",   "set",       "defp",      "setp",
         "body",       "doc",     "which", "see",       "@module",   "@defm",
-        "register",   "use",     "alias", "words",     "load",      "@spawn",
+        "register",   "import",  "alias", "words",     "load",      "@spawn",
         "await",      "cancel",  "tasks", "await-any", "await-for", "@each",
         "+",          "-",       "*",     "/",         "div",       "mod",
         "pow",        "atan2",   "min",   "max",       "=",         "<>",
@@ -123,7 +123,7 @@ test "module annotations retain contracts documentation qualification and shadow
         "(2) (-- n : \"Private module word.\") 'private defp " ++
         "('private doc) (-- text : \"Expose private documentation.\") 'private-doc def" ++
         ") 'm @defm " ++
-        "'m use 'public doc \"Public module word.\" match? " ++
+        "'m.public 'public import 'public doc \"Public module word.\" match? " ++
         "m.private-doc \"Private module word.\" match? " ++
         "(9) (-- n : \"Session shadow.\") 'public def " ++
         "'public doc \"Session shadow.\" match? " ++

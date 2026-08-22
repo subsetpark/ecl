@@ -1,7 +1,13 @@
 # DoD-29: CSV text is explicitly cast, derived, filtered, grouped, and
 # aggregated with ordinary ECL quotations. No header or numeric inference
 # happens anywhere: every coercion below is requested by name.
-'table use
+'table.from-header-rows 'from-header-rows import
+'table.column 'column import
+'table.cast 'cast import
+'table.with-column 'with-column import
+'table.where 'where import
+'table.group-by 'group-by import
+'table.aggregate 'aggregate import
 
 "test/acceptance/sales.csv" io.slurp csv.parse from-header-rows 'raw set
 raw io.pp
