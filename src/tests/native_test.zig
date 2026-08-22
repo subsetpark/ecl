@@ -451,7 +451,7 @@ test "native: only exact completion mutates the operand stack" {
     defer diagnostics.deinit();
     var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
-    try expectOk(&runtime, "sample.singleton pop 7");
+    try expectOk(&runtime, "'sample.singleton 'singleton import 7");
     try expectErrorContains(
         &runtime,
         "sample.fail-user",
@@ -579,7 +579,7 @@ test "native: aggregate cursors and builders charge the scheduler budget" {
     defer diagnostics.deinit();
     var runtime = try initRuntime(&output.writer, &diagnostics.writer, native_fixture.directory);
     defer runtime.deinit();
-    try expectOk(&runtime, "sample.singleton pop 200000 range");
+    try expectOk(&runtime, "'sample.singleton 'singleton import 200000 range");
     try expectOk(&runtime, "sample.sum-list");
     try std.testing.expectEqual(@as(i64, 19_999_900_000), runtime.stackItems()[0].int);
     try std.testing.expect(runtime.lastPolls() >= 4);
@@ -612,7 +612,7 @@ test "native: cancellation after a yield preserves the pre-call operand stack" {
         .{ .worker_pool = 1 },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "sample.singleton pop 5");
+    try expectOk(&runtime, "'sample.singleton 'singleton import 5");
     try expectOk(
         &runtime,
         "(9 sample.yield-forever) @spawn dup 1 await-for pop dup cancel await pop",
