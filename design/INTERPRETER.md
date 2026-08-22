@@ -52,10 +52,14 @@ primitives, operationalized as two rules:
   Immutable readers are representation-specific; there is no public
   generic mutable-payload cast and no debug-only uniqueness gate.
 - **Leaf kinds (one frozen enum shared by header tags, kernel dispatch,
-  the idiom table, and the printer):** GenericSpine, I64, F64, Char1,
+  the idiom table, and the printer):** GenericSpine, U8, I64, F64, Char1,
   Char2, Char4, Symbol (u32 interned ids), Dict, Task, plus one reserved
   tag for a narrow-mask representation. Leaf kinds are representation
-  only, never semantics. A string leaf carries its width tag (1/2/4 bytes
+  only, never semantics. U8 stores ordinary integer-list elements in one
+  byte when every value is in `0..255`; construction selects it automatically,
+  and mutation outside that range widens to I64. Host binary consumers may
+  borrow its packed storage while retaining the list, but ECL code cannot
+  observe whether it is packed. A string leaf carries its width tag (1/2/4 bytes
   per char, per string), so ASCII costs one byte per char and indexing
   stays O(1). Specialization is a construction-time header fact, never
   recomputed by inspection — the printer reads a bit.

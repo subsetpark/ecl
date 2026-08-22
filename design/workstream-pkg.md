@@ -277,7 +277,9 @@ operator action before M3.
   `archive.unpack-tgz` (`byte-list destination -- regular-file-paths`). A
   byte list is an ordinary ECL list whose items are integers in `0..255`;
   strings are not accepted or coerced because Unicode string ingress cannot
-  preserve every possible archive byte spelling.
+  preserve every possible archive byte spelling. All-byte integer lists use a
+  packed one-byte leaf automatically, without introducing a distinct ECL value
+  kind; widening remains transparent when a later mutation adds another int.
 - `unpack-tgz` **fails closed on hostile archives**: absolute member paths,
   `..` traversal, duplicate members, symlinks, hardlinks, character/block
   devices, FIFOs, malformed gzip/tar/PAX data, invalid UTF-8 member names, and
@@ -554,9 +556,12 @@ fetcher. M6 is the join.
   Unicode values: valid UTF-8 ingress decodes scalars, while invalid bytes map
   one-to-one to characters, so no later string encoder can distinguish the
   original spellings for all binary inputs. Integers in `0..255` preserve the
-  octets using ordinary inert ECL data and avoid expanding the Value layout,
-  heap, printer, equality, reader, and native ABI. M4 must produce this list
-  directly from the HTTP byte stream.
+  octets using ordinary inert ECL data and avoid expanding the Value layout or
+  native ABI. The heap may represent an all-byte integer list as a packed
+  `leaf_u8`; ordinary ECL construction selects it automatically, all language
+  operations still expose integers, and an out-of-range mutation widens it to
+  `leaf_i64`. This is an invisible storage choice, not a native-only value.
+  M4 must produce this list directly from the HTTP byte stream.
 - **Archive extraction is absent-destination atomic and resource-bounded**
   (user ruling while planning M3, 2026-08-22). `archive.unpack-tgz` stages
   beside an absent destination, commits with one rename, refuses to overwrite

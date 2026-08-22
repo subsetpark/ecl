@@ -802,6 +802,58 @@ for the empty string — which is also the empty list, the two being one value �
 and 0 rather than raising for every other kind. `type` reports `'list` for every
 list, specialized or not, so this is the honest form of the question.
 
+### archive
+
+Binary package archives cross the language boundary as **byte lists**: ordinary
+ECL lists whose items are integers in `0..255`. Strings are Unicode values and
+are never accepted or coerced at this boundary; hashing and extraction consume
+each integer as exactly one octet in list order.
+
+Byte lists have no distinct language-level type. List construction may store an
+all-`0..255` integer list in a packed one-byte leaf, and host producers may build
+that representation directly. Indexing, equality, printing, reflection, and
+all other language operations still observe ordinary integers. A mutation that
+introduces an integer outside `0..255` transparently widens the list to the
+ordinary integer representation. Whether packed storage is present is never
+observable program behavior.
+
+`archive.sha256` `( bytes -- lowercase-hex )` returns the standard SHA-256
+digest as exactly 64 lowercase hexadecimal characters. It is pure and does not
+require host I/O.
+
+`archive.unpack-tgz` `( bytes destination -- regular-file-paths )` validates a
+gzip-compressed tar archive and extracts it beneath a previously absent
+destination. It accepts ordinary ustar regular-file and directory entries,
+per-entry PAX `path` and `size` records, and GNU long-name records. Other PAX
+metadata may not change a member's path, size, or kind. The result lists only
+regular-file paths, normalized with `/` separators and in archive order;
+directory entries are omitted.
+
+Extraction is contained and fail-closed. Member names must be valid UTF-8,
+relative, nonempty after normalization, and contain no empty, `.` or `..`
+component. Absolute names, platform-rooted names, duplicate normalized paths,
+links, devices, FIFOs, unsupported member kinds, malformed gzip/tar/PAX data,
+and checksum or size disagreement are `'domain`. The uncompressed tar stream
+may contain at most 1,073,741,824 bytes and at most 100,000 regular-file or
+directory members; exceeding either ceiling is `'domain`.
+
+The destination must not exist. The extractor creates a unique
+`.ecl-unpack-*` sibling staging directory, creates files exclusively, records
+every created path, and removes that staging tree in bounded reverse-order work
+on every pre-commit failure or cancellation. Only after the complete archive
+has validated and all handles are closed does one same-parent rename publish
+the staging tree as the destination. Concurrent calls may perform independent
+staging work, but at most one can publish; the others raise `'io` reporting
+that the destination exists. An existing destination is never overwritten,
+merged, or inspected as though it were a completed cache entry.
+
+A non-list byte container or non-string destination is `'type`. A non-integer
+byte item or an integer outside `0..255` is `'domain` carrying its zero-based
+`'index`. Missing host I/O, filesystem denial, exclusive-create failure,
+staging cleanup failure, and commit failure are `'io` carrying the relevant
+`'path`. No failure publishes a partial destination or opens a member path
+outside the staging root.
+
 ### io
 
 Observable text I/O lives here: `io.pp`, `io.prin`, `io.print`, `io.inspect`,
@@ -2233,6 +2285,23 @@ sequences. Equivalent to `(pair) zip-with`.
 Zip two lists with broadcast conformability (an atom on either side
 extends). Each-left/each-right are `partial` compositions, not separate
 words.
+
+## archive
+
+### sha256
+`( bytes -- lowercase-hex )` — Return the SHA-256 digest of an integer byte
+list. Every item must be an integer in `0..255`; strings are not byte vectors
+and are not coerced.
+
+### unpack-tgz
+`( bytes destination -- regular-file-paths )` — Validate and atomically unpack
+a gzip-compressed tar byte list beneath a previously absent destination.
+Return normalized regular-file paths in archive order. Unsafe, linked,
+special, duplicate, malformed, or over-limit members are `'domain`; invalid
+byte items are `'domain`; wrong container kinds are `'type`; unavailable host
+I/O and filesystem or destination conflicts are `'io`. Failure never publishes
+a partial destination. See The standard library / `archive` for the complete
+format, limit, containment, and publication contract.
 
 ## csv
 
