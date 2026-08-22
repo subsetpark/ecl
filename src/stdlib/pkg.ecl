@@ -13,8 +13,17 @@
  "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
  'identifier-chars setp
 
+ ### def chars-in?
+ (|string characters|
+  string empty? not
+  string characters (in?) partial all?
+  and)
+ (string characters -- bool :
+  "Test whether a string is nonempty and contains only the allowed characters.")
+ 'chars-in? defp
+
  ### def digits?
- (dup empty? (pop 0) ((digit-chars in?) all?) if)
+ (digit-chars chars-in?)
  (string -- bool : "Test whether a string is nonempty and contains only decimal digits.")
  'digits? defp
 
@@ -27,7 +36,7 @@
  'numeric-field? defp
 
  ### def identifier?
- (dup empty? (pop 0) ((identifier-chars in?) all?) if)
+ (identifier-chars chars-in?)
  (string -- bool : "Test whether a string is a nonempty prerelease identifier.")
  'identifier? defp
 
@@ -81,18 +90,8 @@
  (left right -- order : "Compare two validated decimal fields without converting them to integers.")
  'field-cmp defp
 
- ### def order-then
- (over 0 = (nip) (pop) if)
- (accumulated next -- order : "Keep the first nonzero comparison result.")
- 'order-then defp
-
- ### def first-nonzero
- (0 (order-then) fold)
- (orders -- order : "Return the first nonzero comparison result, or 0 if all are zero.")
- 'first-nonzero defp
-
  ### def core-cmp
- (zip (call field-cmp) each first-nonzero)
+ ((field-cmp) lex-cmp)
  (left right -- order : "Compare validated major, minor, and patch fields in order.")
  'core-cmp defp
 
@@ -104,25 +103,11 @@
   "Compare two prerelease identifiers. Numeric identifiers sort before nonnumeric identifiers.")
  'identifier-cmp defp
 
- ### def common-order
- ((|index left right| left index at right index at identifier-cmp) call)
- (index left right -- order : "Compare two prerelease identifiers at one index.")
- 'common-order defp
-
- ### def identifier-walk
- ((|left right|
-   left len right len cmp
-   left len right len min range left right (common-order) partial partial each first-nonzero
-   dup 0 = (pop) (nip) if)
-  call)
- (left right -- order : "Compare two nonempty prereleases by identifier, then by identifier count.")
- 'identifier-walk defp
-
  ### def prerelease-cmp
  ([(empty? swap empty? and) (pop pop 0)
    (pop empty?) (pop pop 1)
    (nip empty?) (pop pop -1)
-   (identifier-walk)]
+   ((identifier-cmp) lex-cmp)]
   cond)
  (left right -- order :
   "Compare prereleases. A release version sorts after a version with the same core and a
@@ -142,8 +127,8 @@
  'version< def
 
  ### def keep-larger
- (over over version< (nip) (pop) if)
- (accumulated candidate -- accumulated : "Return the version with higher precedence.")
+ (over 1 at over 1 at version-cmp -1 = (nip) (pop) if)
+ (accumulated candidate -- accumulated : "Return the entry with higher parsed version precedence.")
  'keep-larger defp
 
  ### def version-max
@@ -153,8 +138,9 @@
   {'kind 'shape 'msg "pkg.version-max needs at least one version"} assert
   dup (str.str?) all?
   {'kind 'type 'msg "pkg.version-max expects a list of version strings"} assert
-  dup (version-checked) each pop
-  dup first (keep-larger) fold)
+  (dup version-checked pair) each
+  dup first (keep-larger) fold
+  first)
  (versions -- version :
   "Return the highest version in a nonempty list. Validate every item before comparing.")
  'version-max def
@@ -177,7 +163,7 @@
  'hex-chars setp
 
  ### def segment?
- (dup empty? (pop 0) ((first lead-chars in?) ((segment-chars in?) all?) bi and) if)
+ (dup empty? (pop 0) ((first lead-chars in?) (segment-chars chars-in?) bi and) if)
  (text -- bool : "Test whether text is a valid package-name segment.")
  'segment? defp
 
@@ -252,7 +238,7 @@
  ((|key|
    {'kind 'domain 'msg "a manifest or lock holds only inert data"}
    'data
-   key wrap ('key) swap compose dict-of
+   'key key pair dict-of
    put
    raise)
   call)
@@ -260,8 +246,8 @@
  'offending defp
 
  ### def inert-entry
- (dup inert? (pop 0) (first offending) if)
- (pair -- flag : "Return 0 for an inert entry, or raise an error that names its key.")
+ (dup inert? (pop) (first offending) if)
+ (pair -- : "Discard an inert entry, or raise an error that names its key.")
  'inert-entry defp
 
  # --- manifests -----------------------------------------------------------
@@ -280,15 +266,6 @@
  # Required lock keys.
  ['format 'root 'packages 'requires]
  'lock-keys setp
-
- ### def keys-exactly?
- ((|candidate declared|
-   candidate keys len declared len =
-   declared candidate (swap has?) partial all?
-   and)
-  call)
- (candidate declared -- bool : "Test whether a dict has exactly the declared keys, in any order.")
- 'keys-exactly? defp
 
  ### def requirement-checked
  ((|requirement|
@@ -310,7 +287,7 @@
  ((|candidate|
    candidate type 'dict match?
    {'kind 'type 'msg "a manifest is a dict"} assert
-   candidate pairs (inert-entry) each pop
+   candidate pairs (inert-entry) for
    candidate manifest-keys keys-exactly?
    {'kind 'domain
     'msg "a manifest has exactly the keys 'format 'name 'version 'requires"}
@@ -324,7 +301,7 @@
    {'kind 'type 'msg "manifest requirements are a dict from package name to requirement"} assert
    candidate 'requires at keys (name?) all?
    {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
-   candidate 'requires at vals (requirement-checked) each pop
+   candidate 'requires at vals (requirement-checked pop) for
    candidate 'name at wrap candidate 'requires at keys cat collides? not
    {'kind 'domain 'msg "no package may own another's name, its own included"} assert
    candidate)
@@ -358,7 +335,7 @@
    {'kind 'type 'msg "a lock's requirements are a dict from package name to version"} assert
    minimums keys (name?) all?
    {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
-   minimums vals (version-checked) each pop
+   minimums vals (version-checked pop) for
    minimums)
   call)
  (minimums -- minimums : "Validate and return one package's minimum-version requirements.")
@@ -378,7 +355,7 @@
  ((|candidate|
    candidate type 'dict match?
    {'kind 'type 'msg "a lock is a dict"} assert
-   candidate pairs (inert-entry) each pop
+   candidate pairs (inert-entry) for
    candidate lock-keys keys-exactly?
    {'kind 'domain
     'msg "a lock has exactly the keys 'format 'root 'packages 'requires"}
@@ -391,12 +368,12 @@
    {'kind 'type 'msg "a lock's packages are a dict from package name to selection"} assert
    candidate 'packages at keys (name?) all?
    {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
-   candidate 'packages at vals (requirement-checked) each pop
+   candidate 'packages at vals (requirement-checked pop) for
    candidate 'requires at type 'dict match?
    {'kind 'type 'msg "a lock's requirements are keyed by the requiring package"} assert
    candidate 'requires at keys (name?) all?
    {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
-   candidate 'requires at vals (minimums-checked) each pop
+   candidate 'requires at vals (minimums-checked pop) for
    candidate 'requires at candidate 'root at has?
    {'kind 'domain 'msg "a lock records the root's own requirements under its name"} assert
    candidate 'requires at vals (pairs) each raze
@@ -428,40 +405,36 @@
 
  ### def render-requirement
  ((|requirement|
-   "{'version "
-   requirement 'version at str
-   " 'url "
-   requirement 'url at str
-   " 'hash "
-   requirement 'hash at str
-   "}"
-   7 pack "" join)
+   requirement 'version at
+   requirement 'url at
+   requirement 'hash at
+   3 pack "{{'version {} 'url {} 'hash {}}}" format)
   call)
  (requirement -- text : "Render one selection in the canonical field order.")
  'render-requirement defp
 
  ### def render-selection
- ((|pair| pair first str " " pair 1 at render-requirement 3 pack "" join) call)
+ ((|pair| pair first str " " pair 1 at render-requirement 3 pack raze) call)
  (pair -- text : "Render one `packages` entry.")
  'render-selection defp
 
  ### def render-minimum
- ((|pair| pair first str " " pair 1 at str 3 pack "" join) call)
+ ((|pair| pair first pair 1 at 2 pack "{} {}" format) call)
  (pair -- text : "Render one package name and minimum version.")
  'render-minimum defp
 
  ### def render-minimums
- ((|minimums| "{" minimums sorted-entries (render-minimum) each " " join "}" 3 pack "" join) call)
+ ((|minimums| "{" minimums sorted-entries (render-minimum) each " " join "}" 3 pack raze) call)
  (minimums -- text : "Render one package's minimum versions on a single line.")
  'render-minimums defp
 
  ### def render-requirer
- ((|pair| pair first str " " pair 1 at render-minimums 3 pack "" join) call)
+ ((|pair| pair first str " " pair 1 at render-minimums 3 pack raze) call)
  (pair -- text : "Render one `requires` entry.")
  'render-requirer defp
 
  ### def render-block
- ((|holder renderer| "{" holder sorted-entries renderer each "\n  " join "}" 3 pack "" join) call)
+ ((|holder renderer| "{" holder sorted-entries renderer each "\n  " join "}" 3 pack raze) call)
  (holder renderer -- text : "Render a dict as an indented block.")
  'render-block defp
 
@@ -475,7 +448,7 @@
    "\n 'requires\n "
    lock 'requires at (render-requirer) render-block
    "}\n"
-   7 pack "" join)
+   7 pack raze)
   call)
  (lock -- text :
   "Validate a lock and render canonical text. Keys are sorted and the output ends with a newline.")

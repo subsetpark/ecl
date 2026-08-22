@@ -104,14 +104,6 @@
  (rows -- table : "Build a table from rows whose first row holds the column names.")
  'from-header-rows def
 
- ### def record-fits?
- ((|record names| record keys len names len =
-   names record (swap has?) partial all?
-   and)
-  call)
- (record names -- bool : "Return 1 when a record's key set is exactly the given names.")
- 'record-fits? defp
-
  ### def record-column
  ((|name records| records name (at) partial each) call)
  (name records -- column : "Collect one named field from every record, in record order.")
@@ -129,7 +121,7 @@
    {'kind 'type 'msg "table column names must be strings"} assert
    records first keys (len 0 >) all?
    {'kind 'domain 'msg "table column names must not be empty"} assert
-   records records first keys (record-fits?) partial all?
+   records records first keys (keys-exactly?) partial all?
    {'kind 'domain 'msg "every record must carry exactly the first record's keys"} assert
    records first keys
    records first keys records (record-column) partial each

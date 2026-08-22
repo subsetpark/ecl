@@ -225,6 +225,23 @@
 (left right -- pairs : "Pair corresponding elements from two conforming sequences.")
 'zip def
 
+### def lex-cmp
+(0 0
+ (|left right comparator index order|
+  order 0 = index left len < and index right len < and)
+ (|left right comparator index order|
+  left right comparator index 1 +
+  left index at right index at comparator call)
+ while
+ (|left right comparator index order|
+  order left len right len cmp
+  over 0 = (nip) (pop) if)
+ call)
+(left right comparator -- order :
+ "Compare two sequences lexicographically. The comparator runs only through the first differing
+  pair; a shared prefix is ordered by sequence length.")
+'lex-cmp def
+
 ### def min-of
 (dup first (min) fold)
 (sequence -- value : "Return the least element of a nonempty sequence.")
@@ -254,6 +271,16 @@
 (dup keys swap (swap at) partial each)
 (dict -- values : "Return a dictionary's values in insertion order.")
 'vals def
+
+### def keys-exactly?
+(|candidate declared|
+ candidate keys len declared len =
+ declared distinct len declared len =
+ and
+ declared candidate (swap has?) partial all?
+ and)
+(candidate declared -- bool : "Test whether a dict has exactly the declared keys, in any order.")
+'keys-exactly? def
 
 ### def at-or
 (|d k default| d k default d k has? (pop at) (nip nip) if)

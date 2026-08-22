@@ -1734,6 +1734,10 @@ the value on top of the quotation's results. Equivalent to
 ### keys
 `( dict -- keys )` — Keys in insertion order.
 
+### keys-exactly?
+`( candidate declared -- bool )` — 1 when a dict has exactly the keys in
+`declared`, in any order. Defined in ecl.
+
 ### last
 `( sequence -- value )` — Final element of a nonempty sequence.
 Equivalent to `dup len 1 - at`.
@@ -1741,6 +1745,12 @@ Equivalent to `dup len 1 - at`.
 ### len
 `( list -- count )` — Top-level element count; works on any list,
 including ragged data.
+
+### lex-cmp
+`( left right comparator -- order )` — Lexicographically compare two
+sequences with an inline `( left-element right-element -- order )`
+comparator. Stop at the first nonzero result; when the shared prefix is
+equal, compare sequence lengths. Defined in ecl.
 
 ### literal
 `( value -- quotation )` — Return the plain quotation `((x) first)`:

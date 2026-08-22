@@ -106,6 +106,25 @@ test "embedded prelude exposes source bodies and derived dataflow" {
             .expected = "(('a 1) ('b 2)) [3 4] 1 0 2.0",
         },
         .{
+            .name = "exact dictionary keys",
+            .source = "{'a 1 'b 2} ['b 'a] keys-exactly? " ++
+                "{'a 1} ['a 'b] keys-exactly? {'a 1 'b 2} ['a] keys-exactly? " ++
+                "{'a 1 'b 2} ['a 'a] keys-exactly?",
+            .expected = "1 0 0 0",
+        },
+        .{
+            .name = "lexicographic comparison",
+            .source = "[1 2] [1 3] (cmp) lex-cmp [1 3] [1 2] (cmp) lex-cmp " ++
+                "[1] [1 0] (cmp) lex-cmp [1 0] [1] (cmp) lex-cmp [] [] (cmp) lex-cmp",
+            .expected = "-1 1 -1 1 0",
+        },
+        .{
+            .name = "lexicographic comparison stops at the first difference",
+            .source = "0 'lex-calls set [1 2 3] [9 0 0] " ++
+                "(lex-calls 1 + 'lex-calls set cmp) lex-cmp lex-calls",
+            .expected = "-1 1",
+        },
+        .{
             .name = "cyclic rotation",
             .source = "[10 20 30 40] 1 rotate [10 20 30 40] -1 rotate " ++
                 "[10 20 30 40] 6 rotate [] 3 rotate \"hello\" 2 rotate [1 2 3] 0 rotate",
@@ -116,16 +135,17 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose bodies and nonempty documentation" {
     const names = [_][]const u8{
-        "compose", "first",     "wrap",   "literal", "dip",    "over",
-        "partial", "with",      "str",    "mod",     "neg",    "abs",
-        "<>",      "<=",        ">=",     "and",     "or",     "nip",
-        "keep",    "bi",        "tri",    "bi2",     "both",   "when",
-        "unless",  "case",      "signum", "clamp",   "last",   "pair",
-        "pack",    "append",    "rest",   "reverse", "uncons", "unappend",
-        "empty?",  "zip",       "min-of", "max-of",  "sort",   "distinct",
-        "at-path", "vals",      "at-or",  "pairs",   "filter", "partition",
-        "any?",    "all?",      "sum",    "prod",    "mean",   "fail",
-        "find",    "await-all", "set",    "setp",    "assert", "rotate",
+        "compose",  "first",     "wrap",    "literal",       "dip",    "over",
+        "partial",  "with",      "str",     "mod",           "neg",    "abs",
+        "<>",       "<=",        ">=",      "and",           "or",     "nip",
+        "keep",     "bi",        "tri",     "bi2",           "both",   "when",
+        "unless",   "case",      "signum",  "clamp",         "last",   "pair",
+        "pack",     "append",    "rest",    "reverse",       "uncons", "unappend",
+        "empty?",   "zip",       "lex-cmp", "min-of",        "max-of", "sort",
+        "distinct", "at-path",   "vals",    "keys-exactly?", "at-or",  "pairs",
+        "filter",   "partition", "any?",    "all?",          "sum",    "prod",
+        "mean",     "fail",      "find",    "await-all",     "set",    "setp",
+        "assert",   "rotate",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
