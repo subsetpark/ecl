@@ -374,3 +374,69 @@
  "Rotate a list left by a count, wrapping cyclically; a negative count rotates right and an empty
   list is returned unchanged.")
 'rotate def
+
+### def windows
+(() stencil)
+(list width -- windows : "Return every overlapping window of a positive width.")
+'windows def
+
+### def each-prior
+(|xs seed quotation| xs seed xs cons -1 drop quotation zip-with)
+(list seed quotation -- list :
+ "Apply a binary quotation to each element and its predecessor, using the explicit seed before the
+  first element.")
+'each-prior def
+
+### def fold1
+(|xs quotation| xs uncons swap quotation fold)
+(list quotation -- value :
+ "Reduce a nonempty list from its first element rather than from an explicit accumulator.")
+'fold1 def
+
+### def scan1
+(|xs quotation| xs first wrap xs rest xs first quotation scan cat)
+(list quotation -- list :
+ "Return a nonempty list's first element followed by successive accumulator values from reducing its
+  remaining elements.")
+'scan1 def
+
+### def iterations
+(|value count quotation|
+ value wrap count range value (pop) quotation compose scan cat)
+(value count quotation -- list :
+ "Return the initial value followed by a nonnegative number of successive quotation applications.")
+'iterations def
+
+### def while-values
+(|value predicate step|
+ value predicate step (dup) compose unfold nip value swap cons)
+(value predicate step -- list :
+ "Return the initial value and successive states through the first state for which the predicate is
+  false.")
+'while-values def
+
+### def converges
+(|value quotation|
+ value value value wrap quotation each first 3 pack
+ (|state|
+  state 2 at state 0 at match? not
+  state 2 at state 1 at match? not
+  and)
+ quotation
+ (|state quotation|
+  state 0 at
+  state 2 at
+  state 2 at wrap quotation each first
+  3 pack
+  state 2 at)
+ partial
+ unfold nip value swap cons)
+(value quotation -- list :
+ "Return successive unary quotation applications until the next value equals either the initial or
+  immediately preceding value, without repeating that boundary value.")
+'converges def
+
+### def converge
+(converges last)
+(value quotation -- value : "Return the last value before unary iteration converges or cycles.")
+'converge def

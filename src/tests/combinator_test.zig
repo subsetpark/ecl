@@ -70,6 +70,51 @@ test "combinators: isolated iteration broadcast reduction and infra" {
     });
 }
 
+test "combinators: stencil and unfold isolate applications and preserve order" {
+    try support.expectStacks(&.{
+        .{
+            .name = "string windows",
+            .source = "\"abcdef\" 3 () stencil",
+            .expected = "(\"abc\" \"bcd\" \"cde\" \"def\")",
+        },
+        .{
+            .name = "stencil application",
+            .source = "[1 2 3 4] 2 (sum) stencil",
+            .expected = "[3 5 7]",
+        },
+        .{
+            .name = "stencil wider than input does not apply quotation",
+            .source = "[1] 2 (missing) stencil",
+            .expected = "()",
+        },
+        .{
+            .name = "unfold outputs current states",
+            .source = "3 (0 >) (dup 1 - swap) unfold",
+            .expected = "0 [3 2 1]",
+        },
+        .{
+            .name = "unfold empty output",
+            .source = "0 (0 >) (dup 1 - swap) unfold",
+            .expected = "0 ()",
+        },
+        .{
+            .name = "unfold retains heap states and items",
+            .source = "[1 2 3] (len 0 >) (uncons swap) unfold",
+            .expected = "[] [1 2 3]",
+        },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "stencil no result", .source = "[1 2] 2 (pop) stencil", .kind = "contract", .word = "stencil" },
+        .{ .name = "stencil extra result", .source = "[1 2] 2 (dup) stencil", .kind = "contract", .word = "stencil" },
+        .{ .name = "stencil zero width", .source = "[1] 0 () stencil", .kind = "domain", .word = "stencil" },
+        .{ .name = "stencil input type", .source = "1 1 () stencil", .kind = "type", .word = "stencil" },
+        .{ .name = "unfold predicate result", .source = "0 (dup) () unfold", .kind = "contract", .word = "unfold" },
+        .{ .name = "unfold predicate bool", .source = "0 (pop 'no) () unfold", .kind = "type", .word = "unfold" },
+        .{ .name = "unfold step no result", .source = "0 (pop 1) (pop) unfold", .kind = "contract", .word = "unfold" },
+        .{ .name = "unfold step extra result", .source = "0 (pop 1) (dup dup) unfold", .kind = "contract", .word = "unfold" },
+    });
+}
+
 test "combinators: contracts and conformability are structural errors" {
     try support.expectErrors(&.{
         .{
@@ -136,6 +181,18 @@ test "combinators: child scopes are fresh and discarded" {
         .{
             .name = "infra scope",
             .source = "[1] (dup 'k set) infra pop k",
+            .kind = "undefined-word",
+            .word = "k",
+        },
+        .{
+            .name = "stencil scope",
+            .source = "[1] 1 (dup 'k set) stencil pop k",
+            .kind = "undefined-word",
+            .word = "k",
+        },
+        .{
+            .name = "unfold scope",
+            .source = "0 (dup 'k set pop 0) () unfold pop pop k",
             .kind = "undefined-word",
             .word = "k",
         },
@@ -262,6 +319,8 @@ test "combinators: loops guards reductions and result materialization stay cance
     // The idiom loop consumes fewer than one kernel quantum; its second
     // traversal, result specialization, is what crosses the poll boundary.
     try expectCancelledAfterSetup("40000 range", "(1 +) each", .automatic);
+    try expectCancelledAfterSetup("70000 range", "2 () stencil", .automatic);
+    try expectCancelledAfterSetup("0", "(pop 1) (1 + dup) unfold", .automatic);
 }
 
 test "idioms: automatic hits and forced generic preserves behavior" {

@@ -393,7 +393,8 @@ per-element boxed path that Step 14 removes after the v1 terminal.
 ### Milestone 6: combinators-and-recognition
 
 **Definition of Done**:
-The d.14 combinators (`each zip-with for fold scan`) plus `infra` with
+The d.14 combinators (`each zip-with for fold scan`) plus `stencil`,
+`unfold`, and `infra` with
 per-application contract checks as base-depth compares; the full
 inline Control/Cleave surface finalized (`dip keep bi tri bi2 both
 when unless times cond`, `case` as prelude — the Joy/APCL capture
@@ -407,6 +408,15 @@ inference per d.9), `zip`, `min-of`, `max-of`,
 `dip`, `mod`, `neg`, `abs`, `<>`, `<=`, `>=`, `and`, `or`, `first`,
 `rest`, `reverse`, `distinct`, and `vals`; `body` returns the real list); and pure reader
 reification through `parse` [P].
+
+The post-v1 K-adverb audit keeps only the two generally useful state shapes
+as new primitives. `stencil` owns one exact result and stages one bounded
+window at a time; `unfold` owns its current state and accumulates an unknown
+result in fixed chunks before one exact, polled materialization. The prelude
+composes `windows`, `each-prior`, `fold1`, `scan1`, `iterations`,
+`while-values`, `converges`, and `converge` over those shapes and the existing
+iteration primitives. Numeric encode/decode and binary search remain ordinary
+library algorithms rather than expanding the core.
 
 **Conditional clauses use one flat, exhaustive shape.** `cond` consumes a
 nonempty `2n+1` list of quotations: alternating test/action slots followed

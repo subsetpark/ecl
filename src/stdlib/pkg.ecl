@@ -139,7 +139,7 @@
   dup (str.str?) all?
   {'kind 'type 'msg "pkg.version-max expects a list of version strings"} assert
   (dup version-checked pair) each
-  dup first (keep-larger) fold
+  (keep-larger) fold1
   first)
  (versions -- version :
   "Return the highest version in a nonempty list. Validate every item before comparing.")
@@ -213,13 +213,12 @@
  (left right -- bool : "Test whether either package name owns the other as a prefix.")
  'related? defp
 
- ### def row-related?
- ((|index names| names index 1 + drop names index at (swap related?) partial each (1 =) any?) call)
- (index names -- bool : "Test one name against the names after it for prefix overlap.")
- 'row-related? defp
-
  ### def collides?
- ((|names| names len range names (row-related?) partial each (1 =) any?) call)
+ (dup ("." cat) each grade at
+  2
+  (|neighbors| neighbors first neighbors 1 at related?)
+  stencil
+  (1 =) any?)
  (names -- bool : "Test whether any two package names have overlapping owned prefixes.")
  'collides? defp
 

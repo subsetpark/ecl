@@ -221,8 +221,8 @@ Three quotation-application behaviors exist:
 - **Isolated**: the quotation runs on a fresh substack per application,
   seeded with its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
-  `fold`, `scan`, `infra`, `@attempt`, `@spawn`, `@each`, `@module`, and
-  `@defm`.
+  `fold`, `scan`, `stencil`, `unfold`, `infra`, `@attempt`, `@spawn`,
+  `@each`, `@module`, and `@defm`.
 
 Every isolated combinator states the stack effect it requires of its
 quotation argument (given per word in the reference). The contract is
@@ -244,8 +244,9 @@ module value and takes no quotation.
 
 Words that are isolated but *not* marked, with their reasons:
 
-- `each`, `zip-with`, `fold`, `scan`, `for` — they apply in the **same**
-  unit, on a substack, and are implicitly fed their elements.
+- `each`, `zip-with`, `fold`, `scan`, `stencil`, `unfold`, `for` — they
+  apply in the **same** unit, on a substack, and are implicitly fed their
+  elements, windows, or states.
 - `infra` and `within` — they apply on an explicitly named *other* stack;
   the substitution is the word's meaning, not a new unit.
 - `import`, `load`, `unmodule`, `register` — they construct, publish, or retire
@@ -1554,6 +1555,17 @@ effects performed by tests.
 executes when the result is called, so `cons` is not safe partial
 application — that is `partial`.
 
+### converge
+`( value quotation -- value )` — *Isolated*, unary contract `( a -- a )`.
+Return the last value before repeated application reaches a fixed point or
+returns to the initial value. Equivalent to `converges last`.
+
+### converges
+`( value quotation -- list )` — *Isolated*, unary contract `( a -- a )`.
+Return the initial value and successive applications until the next value
+is structurally equal to either the initial or immediately preceding value;
+the repeated boundary value is not appended. Defined in ecl over `unfold`.
+
 ### cos
 `( x -- y )` — **Pervasive.** Cosine; float transcendental.
 
@@ -1610,6 +1622,13 @@ follows dynamic stack behavior: filtering is the mask idiom (or
 `filter`), and flat-map is `each raze`. Derived verbs come free from
 homoiconicity: `((1 +) each) 'inc-all def`.
 
+### each-prior
+`( list seed quotation -- list )` — *Isolated*, contract
+`( current prior -- result )`. Apply left-to-right, using the explicit seed
+as the predecessor of the first element. Thus
+`[12 13 11] 10 (-) each-prior` is `[2 1 -2]`. Defined in ecl over
+`zip-with`.
+
 ### empty?
 `( sequence -- bool )` — 1 when the sequence has no elements. Equivalent
 to `len 0 =`.
@@ -1662,6 +1681,11 @@ list-of-lists.
 ### fold
 `( list accumulator quotation -- accumulator )` — *Isolated*, contract
 `( acc a -- acc )`. Reduce left-to-right from the supplied accumulator.
+
+### fold1
+`( list quotation -- value )` — *Isolated*, contract `( acc a -- acc )`.
+Reduce a nonempty list left-to-right from its first element. The explicit
+accumulator form `fold` is required for an empty list. Defined in ecl.
 
 ### for
 `( list quotation -- )` — *Isolated*, contract `( a -- )`. The ordered
@@ -1721,6 +1745,12 @@ quotation. An unqualified original or a qualified binding is `'domain`.
 `( list quotation -- list )` — *Isolated*, contract unconstrained. Run
 the quotation with the list's elements as the entire substack; the
 substack that remains is the result list.
+
+### iterations
+`( value count quotation -- list )` — *Isolated*, unary contract
+`( a -- a )`. Return the initial value followed by `count` successive
+applications. `count` must be a nonnegative int, and a zero count returns a
+singleton list. Defined in ecl over `scan`.
 
 ### join
 `( strings separator -- string )` — Join a list of strings with a
@@ -1927,6 +1957,11 @@ int64, `'overflow` outside its range.
 `( acc a -- acc )`. Like `fold` but returns every intermediate
 accumulator; same length as the input.
 
+### scan1
+`( list quotation -- list )` — *Isolated*, contract `( acc a -- acc )`.
+Return a nonempty list's first element followed by the intermediate
+accumulators from reducing its remainder. Defined in ecl over `scan`.
+
 ### see
 `( 'name -- )` — Print a canonical, re-readable definition with one
 combined annotation, omitting each portion that was not supplied. What
@@ -1973,6 +2008,13 @@ parts; splitting an empty string this way returns an empty list.
 `( x -- y )` — **Pervasive.** Square root. `'domain` on negative inputs
 (the result would be NaN).
 
+### stencil
+`( list width quotation -- list )` — *Isolated*, contract
+`( window -- result )`. Apply to each overlapping window of a positive int
+width, left-to-right. A width larger than the input returns `()` without
+applying the quotation; zero and negative widths are `'domain`. The result
+has `max(len-width+1, 0)` elements.
+
 ### str
 `( value -- string )` — The canonical printed representation; carries the
 round-trip guarantee (see Printing): reading it back yields the same
@@ -2018,6 +2060,15 @@ elements and last element. Equivalent to `reverse uncons reverse swap`.
 `( list -- first rest )` — Split a nonempty list into first element and
 remainder. Equivalent to `dup first swap rest`.
 
+### unfold
+`( state predicate step -- state list )` — *Isolated*. Before every step,
+apply the predicate under contract `( state -- bool )`. When it returns 0,
+return the current state and all generated items. When it returns 1, apply
+the step under contract `( state -- state item )`, append the item, and
+continue from the returned state. The predicate is therefore always checked
+before the first step, and a false initial predicate returns the initial
+state and `()`.
+
 ### unless
 `( bool else -- ... )` — *Inline.* Run the quotation when the condition
 is 0. Equivalent to `() swap if`.
@@ -2056,6 +2107,16 @@ stack result is discarded. On 1, run `body` from the checkpoint and use the
 body's result as the next iteration's checkpoint. On 0, restore the checkpoint
 and exit. Environment and IO effects from the condition survive. Tail-call
 optimized.
+
+### while-values
+`( value predicate step -- list )` — *Isolated*, contracts
+`( state -- bool )` and `( state -- state )`. Return the initial value and
+successive states through the first state for which the predicate is false.
+Defined in ecl over `unfold`.
+
+### windows
+`( list width -- windows )` — Return every overlapping window of a positive
+width. Equivalent to `() stencil`.
 
 ### with
 `( values quotation -- quotation )` — Capture every element of a list as

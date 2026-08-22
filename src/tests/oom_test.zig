@@ -200,6 +200,8 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[1] 0 (+ dup 'fold-local set) fold pop " ++
             "[1] 0 (+ dup 'scan-local set) scan pop " ++
             "[1] (dup 'infra-local set) infra pop " ++
+            "[1 2] 2 (sum) stencil pop " ++
+            "1 (0 >) (dup 1 - swap) unfold pop pop " ++
             // Capture-shape recognition allocates on its own path (the fused
             // kernel) and on the rejected one (the generic frame machine);
             // both belong in the consolidated allocation-failure sweep.

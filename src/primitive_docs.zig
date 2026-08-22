@@ -53,6 +53,8 @@ const entries = [_]Metadata{
     .{ .name = "for", .effect = "list quotation --", .text = "Apply a one-input, zero-output quotation to each list element in order." },
     .{ .name = "fold", .effect = "list accumulator quotation -- accumulator", .text = "Reduce a list from the supplied accumulator with a binary quotation." },
     .{ .name = "scan", .effect = "list accumulator quotation -- list", .text = "Return the successive accumulator values produced while reducing a list." },
+    .{ .name = "stencil", .effect = "list width quotation -- list", .text = "Apply a one-input, one-output quotation independently to each overlapping window of a positive width." },
+    .{ .name = "unfold", .effect = "state predicate step -- state list", .text = "Generate values while a one-input predicate holds; the step returns the next state and one output." },
     .{ .name = "infra", .effect = "list quotation -- list", .text = "Run a quotation with a list's elements as its isolated stack and collect the results." },
 
     .{ .name = "def", .effect = null, .text = "Bind a quotation to a public word, with optional effect and documentation metadata." },

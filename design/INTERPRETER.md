@@ -380,6 +380,16 @@ allocation failure interrupt it at bounded intervals.
   `ChunkedMaterializer`; action-producing reflection drivers accumulate
   through `ActionPlan`, which owns counting, exact allocation, filling,
   and rendering.
+- **Stateful list combinators use those same shapes.** `stencil` computes
+  its result count up front, owns one exact result buffer, and stages and
+  materializes only the current overlapping window before its isolated
+  application. `unfold` owns the current state and distinct predicate/step
+  contracts while generated values accumulate in a non-relocating
+  `OwnedValueChain`; a parallel fixed-chunk metadata cursor borrows those
+  values. Termination allocates the now-known exact result once, copies into
+  it in bounded chunks, and hands it to the ordinary polled value
+  materializer. Cancellation, application failure, and allocation failure
+  therefore all retire through driver fields without a synchronous walk.
 - **One accounted native step per unwind pass.** An application
   continuation that resumes records a bounded native step, and the machine
   loop consumes exactly one of those per pass before returning the Unit to
@@ -992,6 +1002,11 @@ honest source with no public dual representation.
   or isolated mode. The continuation frame owns its trace and immutable
   driver; callbacks return only the next `ApplicationStep`, so they cannot
   substitute a context or destructor.
+- `StencilControl` is the single owner of a stencil's input, quotation,
+  contract, exact result storage, and current window index across alternating
+  bootstrap and application continuations. `UnfoldState` similarly makes the
+  predicate/step phase exhaustive and owns the only current state; the stack
+  receives retained seeds rather than an alias with implicit ownership.
 - Fallible continuation insertion consumes an `OwnedFrame` capability only
   after storage growth succeeds. Failure leaves the same capability with
   the caller — there is no implicit "append also deinitializes" contract.

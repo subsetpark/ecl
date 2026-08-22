@@ -8,6 +8,7 @@ const env = @import("env.zig");
 const modules = @import("modules.zig");
 const machine = @import("machine.zig");
 const storage = @import("kernel_storage.zig");
+const poll = @import("poll.zig");
 
 const Value = value.Value;
 const Header = value.ListHandle;
@@ -30,6 +31,8 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "for", .primitive = forWord },
         .{ .name = "fold", .primitive = fold },
         .{ .name = "scan", .primitive = scan },
+        .{ .name = "stencil", .primitive = stencil },
+        .{ .name = "unfold", .primitive = unfold },
         .{ .name = "infra", .primitive = infra },
     };
     try core.installBuiltins(definitions);
@@ -609,6 +612,379 @@ const CollectedDriver = struct {
 
     pub const ownership: heap.DriverOwnership = .fields;
 };
+
+const StencilControl = struct {
+    input: heap.Owned(Value),
+    quotation: heap.Owned(*Header),
+    expected: heap.Owned(Value),
+    results: heap.OwnedValueBuffer,
+    parent: *env.Scope,
+    home: ?*modules.ModuleHome,
+    index: usize = 0,
+    count: usize,
+    width: usize,
+    word: intern.TraceWord,
+
+    pub fn retire(
+        self: *StencilControl,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.input.deinit(releases, allocator);
+        self.quotation.deinit(releases, allocator);
+        self.expected.deinit(releases, allocator);
+        self.results.deinit();
+    }
+};
+
+const StencilBootstrapDriver = struct {
+    control: heap.Owned(StencilControl),
+    window_values: heap.Owned(heap.OwnedValueBuffer),
+    stack: machine.StackReservation,
+    fill_index: usize = 0,
+    materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+
+    pub fn advance(
+        evaluator: *Machine,
+        self: *StencilBootstrapDriver,
+    ) MachineError!machine.WorkProgress {
+        evaluator.setActiveWord(self.control.borrow().word);
+        try evaluator.pollKernel();
+        const control = self.control.borrow();
+        if (self.materializer == null) {
+            const end = @min(self.fill_index + machine.kernel_poll_quantum, control.width);
+            while (self.fill_index != end) : (self.fill_index += 1) {
+                self.window_values.borrowMut().appendBorrowed(list.atUnchecked(
+                    control.input.borrow(),
+                    control.index + self.fill_index,
+                ));
+            }
+            if (self.fill_index != control.width) return .yielded;
+            self.materializer = .init(.init(
+                evaluator.allocator(),
+                self.window_values.borrow().values(),
+            ));
+        }
+        switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+            .pending => return .yielded,
+            .complete => |window| {
+                var window_owner = heap.OwnedValue.init(evaluator.releaseDomain(), window);
+                defer window_owner.deinit();
+                const state = try evaluator.allocator().create(StencilApplication);
+                var state_owner: ?*StencilApplication = state;
+                errdefer if (state_owner) |owned| heap.destroyDriver(
+                    evaluator.releaseDomain(),
+                    evaluator.allocator(),
+                    owned,
+                );
+                state.* = .{ .control = .init(self.control.take()) };
+                var stack = self.stack;
+                evaluator.retireDriver(self);
+                stack.pushBorrowed(window_owner.borrow());
+                state_owner = null;
+                try evaluator.beginIsolatedApplication(state.application());
+                return .detached;
+            },
+        }
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+const StencilApplication = struct {
+    control: heap.Owned(StencilControl),
+
+    fn application(self: *StencilApplication) Application {
+        const control = self.control.borrow();
+        return machine.typedApplication(
+            self,
+            control.quotation.borrow(),
+            control.parent,
+            control.home,
+            1,
+        );
+    }
+
+    pub fn resumeApplication(
+        evaluator: *Machine,
+        self: *StencilApplication,
+        window: StackWindow,
+    ) MachineError!?ApplicationStep {
+        const control = self.control.borrowMut();
+        evaluator.setActiveWord(control.word);
+        try evaluator.yieldNativeStep();
+        const observed = window.observed(evaluator.unit.stack.items.len) orelse
+            return evaluator.applicationContractError(control.expected.borrow(), 1, 0, control.index);
+        if (observed != 1)
+            return evaluator.applicationContractError(control.expected.borrow(), 1, observed, control.index);
+        var result = try evaluator.popValue();
+        control.results.appendOwned(result.take());
+        control.index += 1;
+        if (control.index == control.count) {
+            const values = control.results.take();
+            try evaluator.startDriver(CollectedDriver{
+                .materializer = .init(.init(evaluator.allocator(), values.values())),
+                .values = .init(values),
+            });
+            return null;
+        }
+        const stack = try evaluator.reserveStack(1);
+        const window_values = try heap.OwnedValueBuffer.init(
+            evaluator.releaseDomain(),
+            control.width,
+        );
+        const next = StencilBootstrapDriver{
+            .control = .init(self.control.take()),
+            .window_values = .init(window_values),
+            .stack = stack,
+        };
+        try evaluator.startDriver(next);
+        return null;
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn stencil(evaluator: *Machine) MachineError!void {
+    try evaluator.require(3);
+    var quotation = try evaluator.popQuotation();
+    defer quotation.deinit();
+    var width_value = try evaluator.popValue();
+    defer width_value.deinit();
+    var input = try evaluator.popValue();
+    defer input.deinit();
+    if (input.borrow() != .list or width_value.borrow() != .int)
+        return evaluator.typeError("a list, positive int width, and quotation");
+    const width_integer = width_value.borrow().int;
+    if (width_integer <= 0)
+        return evaluator.fail(.domain, "stencil requires a positive width");
+    const width = std.math.cast(usize, width_integer) orelse
+        return evaluator.fail(.domain, "stencil width is too large");
+    const input_count: usize = @intCast(input.borrow().list.length());
+    const count = if (width > input_count) 0 else input_count - width + 1;
+    if (count == 0) {
+        try pushGenericEmpty(evaluator);
+        return;
+    }
+    var expected = heap.OwnedValue.init(
+        evaluator.releaseDomain(),
+        try effectValue(evaluator.allocator(), &.{ "window", "--", "result" }),
+    );
+    defer expected.deinit();
+    var results = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
+    defer results.deinit();
+    var window_values = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), width);
+    defer window_values.deinit();
+    const stack = try evaluator.reserveStack(1);
+    const control = StencilControl{
+        .input = .init(input.take()),
+        .quotation = .init(quotation.take().list),
+        .expected = .init(expected.take()),
+        .results = results.take(),
+        .parent = evaluator.currentScope(),
+        .home = evaluator.currentHome(),
+        .count = count,
+        .width = width,
+        .word = evaluator.activeWordId(),
+    };
+    try evaluator.startDriver(StencilBootstrapDriver{
+        .control = .init(control),
+        .window_values = .init(window_values.take()),
+        .stack = stack,
+    });
+}
+
+const UnfoldItems = poll.ChunkList(Value);
+
+const UnfoldState = struct {
+    phase: enum { predicate, step } = .predicate,
+    current: heap.Owned(Value),
+    predicate: heap.Owned(*Header),
+    step_quotation: heap.Owned(*Header),
+    predicate_expected: heap.Owned(Value),
+    step_expected: heap.Owned(Value),
+    values: heap.Owned(heap.OwnedValueChain),
+    items: heap.Owned(UnfoldItems),
+    parent: *env.Scope,
+    home: ?*modules.ModuleHome,
+    index: usize = 0,
+    word: intern.TraceWord,
+
+    fn application(self: *UnfoldState) Application {
+        return machine.typedApplication(
+            self,
+            self.predicate.borrow(),
+            self.parent,
+            self.home,
+            1,
+        );
+    }
+    fn nextStep(self: *UnfoldState) ApplicationStep {
+        return .{
+            .quotation = switch (self.phase) {
+                .predicate => self.predicate.borrow(),
+                .step => self.step_quotation.borrow(),
+            },
+            .seeded = 1,
+        };
+    }
+
+    pub fn resumeApplication(
+        evaluator: *Machine,
+        self: *UnfoldState,
+        window: StackWindow,
+    ) MachineError!?ApplicationStep {
+        evaluator.setActiveWord(self.word);
+        try evaluator.yieldNativeStep();
+        const observed = window.observed(evaluator.unit.stack.items.len) orelse
+            return evaluator.applicationContractError(
+                if (self.phase == .predicate) self.predicate_expected.borrow() else self.step_expected.borrow(),
+                1,
+                0,
+                self.index,
+            );
+        return switch (self.phase) {
+            .predicate => self.resumePredicate(evaluator, observed),
+            .step => self.resumeStep(evaluator, observed),
+        };
+    }
+
+    fn resumePredicate(
+        self: *UnfoldState,
+        evaluator: *Machine,
+        observed: usize,
+    ) MachineError!?ApplicationStep {
+        if (observed != 1)
+            return evaluator.applicationContractError(
+                self.predicate_expected.borrow(),
+                1,
+                observed,
+                self.index,
+            );
+        var predicate_result = try evaluator.popValue();
+        defer predicate_result.deinit();
+        if (try boolValue(evaluator, &predicate_result)) {
+            try evaluator.pushBorrowed(self.current.borrow());
+            self.phase = .step;
+            return self.nextStep();
+        }
+        const count = self.items.borrow().count;
+        const buffer = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
+        const iterator = self.items.borrow().iterator();
+        try evaluator.pushOwned(self.current.take());
+        try evaluator.startDriver(UnfoldCollectDriver{
+            .values = .init(self.values.take()),
+            .items = .init(self.items.take()),
+            .iterator = iterator,
+            .result = .init(buffer),
+            .count = count,
+        });
+        return null;
+    }
+
+    fn resumeStep(
+        self: *UnfoldState,
+        evaluator: *Machine,
+        observed: usize,
+    ) MachineError!?ApplicationStep {
+        if (observed != 2)
+            return evaluator.applicationContractError(
+                self.step_expected.borrow(),
+                1,
+                observed,
+                self.index,
+            );
+        var item = try evaluator.popValue();
+        defer item.deinit();
+        var next_state = try evaluator.popValue();
+        defer next_state.deinit();
+        try self.items.borrowMut().append(item.borrow());
+        try self.values.borrowMut().appendOwned(item.take());
+        self.current.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        self.current = .init(next_state.take());
+        self.index += 1;
+        self.phase = .predicate;
+        try evaluator.pushBorrowed(self.current.borrow());
+        return self.nextStep();
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+const UnfoldCollectDriver = struct {
+    values: heap.Owned(heap.OwnedValueChain),
+    items: heap.Owned(UnfoldItems),
+    iterator: UnfoldItems.Iterator,
+    result: heap.Owned(heap.OwnedValueBuffer),
+    copied: usize = 0,
+    count: usize,
+
+    pub fn advance(
+        evaluator: *Machine,
+        self: *UnfoldCollectDriver,
+    ) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const end = @min(self.copied + machine.kernel_poll_quantum, self.count);
+        while (self.copied != end) : (self.copied += 1)
+            self.result.borrowMut().appendBorrowed(self.iterator.next().?.*);
+        if (self.copied != self.count) return .yielded;
+        const result = self.result.take();
+        evaluator.retireDriver(self);
+        try evaluator.startDriver(CollectedDriver{
+            .materializer = .init(.init(evaluator.allocator(), result.values())),
+            .values = .init(result),
+        });
+        return .detached;
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn unfold(evaluator: *Machine) MachineError!void {
+    try evaluator.require(3);
+    var step_quotation = try evaluator.popQuotation();
+    defer step_quotation.deinit();
+    var predicate = try evaluator.popQuotation();
+    defer predicate.deinit();
+    var initial = try evaluator.popValue();
+    defer initial.deinit();
+    var predicate_expected = heap.OwnedValue.init(
+        evaluator.releaseDomain(),
+        try effectValue(evaluator.allocator(), &.{ "state", "--", "bool" }),
+    );
+    defer predicate_expected.deinit();
+    var step_expected = heap.OwnedValue.init(
+        evaluator.releaseDomain(),
+        try effectValue(evaluator.allocator(), &.{ "state", "--", "state", "item" }),
+    );
+    defer step_expected.deinit();
+    var values = heap.Owned(heap.OwnedValueChain).init(
+        try .init(evaluator.releaseDomain()),
+    );
+    defer values.deinit(evaluator.releaseDomain(), evaluator.allocator());
+    const state = try evaluator.allocator().create(UnfoldState);
+    var state_owner: ?*UnfoldState = state;
+    errdefer if (state_owner) |owned| heap.destroyDriver(
+        evaluator.releaseDomain(),
+        evaluator.allocator(),
+        owned,
+    );
+    state.* = .{
+        .current = .init(initial.take()),
+        .predicate = .init(predicate.take().list),
+        .step_quotation = .init(step_quotation.take().list),
+        .predicate_expected = .init(predicate_expected.take()),
+        .step_expected = .init(step_expected.take()),
+        .values = .init(values.take()),
+        .items = .init(.init(evaluator.allocator())),
+        .parent = evaluator.currentScope(),
+        .home = evaluator.currentHome(),
+        .word = evaluator.activeWordId(),
+    };
+    try evaluator.pushBorrowed(state.current.borrow());
+    state_owner = null;
+    try evaluator.beginIsolatedApplication(state.application());
+}
 
 const InfraResultDriver = struct {
     base: usize,

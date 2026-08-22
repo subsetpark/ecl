@@ -389,6 +389,30 @@ test "pkg: read-manifest accepts the canonical manifest and rejects undeclared k
             .kind = "domain",
             .message_contains = "own another's name",
         },
+        .{
+            // Appending the ownership boundary before sorting keeps `p-`
+            // outside the contiguous `p.` prefix range.
+            .name = "a hyphenated sibling cannot separate an owner from its child",
+            .source = "\"{'format 1 'name \\\"p\\\" 'version \\\"0.1.0\\\" 'requires " ++
+                "{\\\"p-\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+                "'hash \\\"" ++ hash_a ++ "\\\"} " ++
+                "\\\"p.a\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/g.tgz\\\" " ++
+                "'hash \\\"" ++ hash_b ++ "\\\"}}}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "own another's name",
+        },
+        .{
+            // Digits sort on the other side of `.`, and must likewise leave
+            // the owner adjacent to its dotted child.
+            .name = "a numeric sibling cannot separate an owner from its child",
+            .source = "\"{'format 1 'name \\\"p\\\" 'version \\\"0.1.0\\\" 'requires " ++
+                "{\\\"p0\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+                "'hash \\\"" ++ hash_a ++ "\\\"} " ++
+                "\\\"p.a\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/g.tgz\\\" " ++
+                "'hash \\\"" ++ hash_b ++ "\\\"}}}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "own another's name",
+        },
     });
 }
 
