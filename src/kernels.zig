@@ -147,8 +147,10 @@ const rejected_numeric_atoms = without(non_numeric_atoms, char_atom);
 const any_atom = OperandSet{ .atoms = &.{ .int, .float, .char, .symbol, .word, .task, .module } };
 const integers = OperandSet{ .atoms = &.{.int} };
 const numeric_leaves = OperandSet{ .aggregates = &.{ .leaf_i64, .leaf_f64 } };
+const byte_leaf = OperandSet{ .aggregates = &.{.leaf_u8} };
 const char_leaves = OperandSet{ .aggregates = &.{ .leaf_char1, .leaf_char2, .leaf_char4 } };
 const all_leaves = OperandSet{ .aggregates = &.{
+    .leaf_u8,
     .leaf_i64,
     .leaf_f64,
     .leaf_char1,
@@ -231,6 +233,21 @@ pub const registry = binary_rows ++ unary_rows ++ sequence_rows ++ order_rows ++
 /// different dispatch.
 const binary_rows = [_]Row{
     .{
+        .operations = all_binary,
+        .left = byte_leaf,
+        .right = without(any_operand, union2(spine, dictionary)),
+        .class = .generic_fallback,
+        // packed bytes have ordinary integer semantics; the profiling route widens results when
+        // an operation leaves 0..255 and may select packed storage again when it does not
+    },
+    .{
+        .operations = all_binary,
+        .left = without(any_operand, union2(byte_leaf, union2(spine, dictionary))),
+        .right = byte_leaf,
+        .class = .generic_fallback,
+        // mirrored packed-byte pervasion uses the same representation-independent scalar path
+    },
+    .{
         .operations = computing_binary,
         .left = numeric_leaves,
         .right = union2(numeric_leaves, numbers),
@@ -305,7 +322,7 @@ const binary_rows = [_]Row{
     .{
         .operations = all_binary,
         .left = union2(char_leaves, OperandSet{ .aggregates = &.{.leaf_symbol} }),
-        .right = without(any_operand, union2(spine, dictionary)),
+        .right = without(any_operand, union2(union2(spine, dictionary), byte_leaf)),
         .class = .typed_loop,
         // character results profile faults and maximum codepoint, then fill one exact-width writer;
         // fixed i64 results use one pass, and symbol elements reject before a loop
@@ -314,7 +331,10 @@ const binary_rows = [_]Row{
         .operations = all_binary,
         .left = without(
             any_operand,
-            union2(union2(spine, dictionary), union2(char_leaves, OperandSet{ .aggregates = &.{.leaf_symbol} })),
+            union2(
+                union2(spine, dictionary),
+                union2(byte_leaf, union2(char_leaves, OperandSet{ .aggregates = &.{.leaf_symbol} })),
+            ),
         ),
         .right = union2(char_leaves, OperandSet{ .aggregates = &.{.leaf_symbol} }),
         .class = .typed_loop,
@@ -381,6 +401,12 @@ const binary_rows = [_]Row{
 };
 
 const unary_rows = [_]Row{
+    .{
+        .operations = all_unary,
+        .left = byte_leaf,
+        .class = .generic_fallback,
+        // packed bytes are boxed as ordinary integers and widened only when the result requires it
+    },
     .{
         .operations = all_unary,
         .left = numeric_leaves,
@@ -626,7 +652,7 @@ const order_rows = [_]Row{
     },
     .{
         .operations = only(.{Operation{ .order = .grade }}),
-        .left = union2(numeric_leaves, char_leaves),
+        .left = union2(byte_leaf, union2(numeric_leaves, char_leaves)),
         .class = .sequential_typed,
         // stable merge sort over pinned typed keys, publishing its i64 index vector directly
     },
@@ -730,7 +756,7 @@ const text_rows = [_]Row{
 const random_rows = [_]Row{
     .{
         .operations = only(.{Operation{ .random = .rand_ints }}),
-        .left = OperandSet{ .aggregates = &.{.leaf_i64} },
+        .left = union2(byte_leaf, OperandSet{ .aggregates = &.{.leaf_i64} }),
         .class = .typed_loop,
         // counter-addressed typed i64 fill; element i depends only on its own index, so a resumed
         // fill needs no replay
@@ -747,7 +773,7 @@ const random_rows = [_]Row{
     },
     .{
         .operations = only(.{Operation{ .random = .rand_ints }}),
-        .left = without(any_aggregate, OperandSet{ .aggregates = &.{.leaf_i64} }),
+        .left = without(any_aggregate, union2(byte_leaf, OperandSet{ .aggregates = &.{.leaf_i64} })),
         .class = .generic_fallback,
         // a state that is not a typed int pair is rejected before any draw
     },
@@ -761,6 +787,7 @@ const random_rows = [_]Row{
 const atom_domain = [_]AtomTag{ .int, .float, .char, .symbol, .word, .task, .module };
 const aggregate_domain = [_]HeapKind{
     .generic_spine,
+    .leaf_u8,
     .leaf_i64,
     .leaf_f64,
     .leaf_char1,

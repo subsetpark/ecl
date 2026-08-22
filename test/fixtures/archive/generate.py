@@ -27,12 +27,22 @@ def member(name: str, data: bytes = b"", kind: bytes = tarfile.REGTYPE) -> tarfi
     return info
 
 
-def archive(entries: list[tuple[tarfile.TarInfo, bytes]]) -> bytes:
+def tar_payload(
+    entries: list[tuple[tarfile.TarInfo, bytes]],
+    format: int = tarfile.USTAR_FORMAT,
+) -> bytes:
     tar_bytes = io.BytesIO()
-    with tarfile.open(fileobj=tar_bytes, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+    with tarfile.open(fileobj=tar_bytes, mode="w", format=format) as tar:
         for info, data in entries:
             tar.addfile(info, io.BytesIO(data) if info.type == tarfile.REGTYPE else None)
-    return compress(tar_bytes.getvalue())
+    return tar_bytes.getvalue()
+
+
+def archive(
+    entries: list[tuple[tarfile.TarInfo, bytes]],
+    format: int = tarfile.USTAR_FORMAT,
+) -> bytes:
+    return compress(tar_payload(entries, format))
 
 
 def compress(payload: bytes) -> bytes:
@@ -50,8 +60,7 @@ def oversized() -> bytes:
 
 def emit(name: str, payload: bytes) -> None:
     encoded = payload.hex()
-    text = "\n".join(encoded[index : index + 64] for index in range(0, len(encoded), 64))
-    (ROOT / name).write_text(text + "\n", encoding="ascii")
+    (ROOT / name).write_text(encoded + "\n", encoding="ascii")
 
 
 def fixtures() -> dict[str, bytes]:
@@ -62,8 +71,18 @@ def fixtures() -> dict[str, bytes]:
     ]
     duplicate_info = member("same.ecl", b"one\n")
     duplicate_again = member("same.ecl", b"two\n")
+    long_path = "pkg/" + "s" * 110 + ".ecl"
+    long_info = member(long_path, b"long\n")
+    malformed_tar = bytearray(tar_payload([(member("bad.ecl", b"x"), b"x")]))
+    malformed_tar[0] ^= 1
+    malformed_pax = bytearray(tar_payload([(long_info, b"long\n")], tarfile.PAX_FORMAT))
+    assert malformed_pax[156] == ord("x")
+    malformed_pax[512] = ord("0")
     return {
+        "empty.tgz.hex": archive([]),
         "valid.tgz.hex": archive(valid_entries),
+        "pax.tgz.hex": archive([(long_info, b"long\n")], tarfile.PAX_FORMAT),
+        "gnu-long-name.tgz.hex": archive([(long_info, b"long\n")], tarfile.GNU_FORMAT),
         "absolute-path.tgz.hex": archive([(member("/escape.ecl", b"x"), b"x")]),
         "parent-path.tgz.hex": archive([(member("../escape.ecl", b"x"), b"x")]),
         "symlink.tgz.hex": archive([(member("link", kind=tarfile.SYMTYPE), b"")]),
@@ -75,6 +94,8 @@ def fixtures() -> dict[str, bytes]:
             [(duplicate_info, b"one\n"), (duplicate_again, b"two\n")]
         ),
         "oversized.tgz.hex": oversized(),
+        "malformed-tar.tgz.hex": compress(bytes(malformed_tar)),
+        "malformed-pax.tgz.hex": compress(bytes(malformed_pax)),
         "malformed.tgz.hex": b"not a gzip stream",
     }
 def main() -> None:

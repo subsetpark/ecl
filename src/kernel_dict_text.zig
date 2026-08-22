@@ -229,6 +229,7 @@ fn putPrimitive(evaluator: *Machine) MachineError!void {
 }
 
 const put_leaf_kinds = [_]value.HeapKind{
+    .leaf_u8,
     .leaf_i64,
     .leaf_f64,
     .leaf_char1,
@@ -239,6 +240,10 @@ const put_leaf_kinds = [_]value.HeapKind{
 
 fn typedReplacement(comptime kind: value.HeapKind, item: Value) ?heap.LeafElement(kind) {
     return switch (kind) {
+        .leaf_u8 => switch (item) {
+            .int => |number| std.math.cast(u8, number),
+            else => null,
+        },
         .leaf_i64 => switch (item) {
             .int => |number| number,
             else => null,

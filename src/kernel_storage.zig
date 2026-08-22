@@ -11,7 +11,7 @@ const poll = @import("poll.zig");
 const Value = value.Value;
 const Header = value.DictHandle;
 
-const ProfileKind = enum { empty, int, float, char, symbol, mixed };
+const ProfileKind = enum { empty, byte, int, float, char, symbol, mixed };
 const Profile = struct { kind: ProfileKind, max_codepoint: u32 = 0 };
 
 pub const MaterializeResult = poll.Progress(Value);
@@ -231,6 +231,93 @@ pub const TextMaterializer = struct {
 };
 
 pub const StringEncodeResult = union(enum) { pending, complete: []u8 };
+
+/// An exact byte view over an ordinary ECL integer list. Packed byte leaves
+/// stay borrowed through a retained typed reader; equivalent list
+/// representations use an owned validated copy. Consumers never branch on the
+/// representation that produced the bytes.
+pub const ByteVector = union(enum) {
+    borrowed: heap.LeafReader(.leaf_u8),
+    allocated: []u8,
+
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    pub fn bytes(self: *const ByteVector) []const u8 {
+        return switch (self.*) {
+            .borrowed => |*reader| reader.slice(),
+            .allocated => |bytes_value| bytes_value,
+        };
+    }
+
+    pub fn retire(
+        self: *ByteVector,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .borrowed => |*reader| reader.release(releases),
+            .allocated => |bytes_value| allocator.free(bytes_value),
+        }
+        // SAFETY: retirement has released the union's active owned resource;
+        // poisoning prevents an accidental second disposal through this value.
+        self.* = undefined;
+    }
+};
+
+pub const ByteVectorEncodeResult = poll.Progress(ByteVector);
+
+/// Resumably validates an ordinary integer list as bytes. A packed list
+/// completes without allocation; every other representation is checked and
+/// copied one item per charged step.
+pub const ByteVectorEncoder = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .deinit;
+
+    allocator: std.mem.Allocator,
+    source: Value,
+    index: usize = 0,
+    output: ?[]u8 = null,
+    invalid_index: ?usize = null,
+    complete: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator, source: Value) ByteVectorEncoder {
+        std.debug.assert(source == .list);
+        return .{ .allocator = allocator, .source = source };
+    }
+
+    pub fn deinit(self: *ByteVectorEncoder) void {
+        if (self.output) |output| self.allocator.free(output);
+        self.* = undefined;
+    }
+
+    pub fn advance(
+        self: *ByteVectorEncoder,
+        budget: usize,
+    ) (error{OutOfMemory} || error{InvalidByte})!ByteVectorEncodeResult {
+        std.debug.assert(budget != 0 and !self.complete);
+        if (self.source.list.kind() == .leaf_u8) {
+            self.complete = true;
+            return .{ .complete = .{
+                .borrowed = heap.LeafReader(.leaf_u8).acquire(self.source.list),
+            } };
+        }
+        const count: usize = @intCast(self.source.list.length());
+        if (self.output == null) self.output = try self.allocator.alloc(u8, count);
+        const end = @min(self.index + budget, count);
+        while (self.index != end) : (self.index += 1) {
+            const item = list.atUnchecked(self.source, self.index);
+            if (item != .int or item.int < 0 or item.int > std.math.maxInt(u8)) {
+                self.invalid_index = self.index;
+                return error.InvalidByte;
+            }
+            self.output.?[self.index] = @intCast(item.int);
+        }
+        if (self.index != count) return .pending;
+        const output = self.output.?;
+        self.output = null;
+        self.complete = true;
+        return .{ .complete = .{ .allocated = output } };
+    }
+};
 
 /// Exact-size resumable encoding for language strings. The first pass counts
 /// bytes and validates scalars; the second writes one codepoint per step.
@@ -852,7 +939,9 @@ pub const ValueMaterializer = struct {
     fn profileOne(self: *ValueMaterializer, item: Value) void {
         if (self.index == 0) {
             self.item_profile = switch (item) {
-                .int => .{ .kind = .int },
+                .int => |integer| .{
+                    .kind = if (integer >= 0 and integer <= std.math.maxInt(u8)) .byte else .int,
+                },
                 .float => .{ .kind = .float },
                 .char => |codepoint| .{ .kind = .char, .max_codepoint = codepoint },
                 .symbol => .{ .kind = .symbol },
@@ -862,6 +951,12 @@ pub const ValueMaterializer = struct {
         }
         switch (self.item_profile.kind) {
             .empty => unreachable,
+            .byte => {
+                if (item == .int) {
+                    if (item.int < 0 or item.int > std.math.maxInt(u8))
+                        self.item_profile.kind = .int;
+                } else self.item_profile.kind = .mixed;
+            },
             .int => {
                 if (item != .int) self.item_profile.kind = .mixed;
             },
@@ -883,6 +978,7 @@ pub const ValueMaterializer = struct {
     fn beginFill(self: *ValueMaterializer) error{OutOfMemory}!void {
         const kind: value.HeapKind = switch (self.item_profile.kind) {
             .empty, .mixed => .generic_spine,
+            .byte => .leaf_u8,
             .int => .leaf_i64,
             .float => .leaf_f64,
             .char => if (self.item_profile.max_codepoint <= std.math.maxInt(u8))

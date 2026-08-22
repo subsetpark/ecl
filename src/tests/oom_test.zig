@@ -24,6 +24,33 @@
 const std = @import("std");
 const session = @import("../session.zig");
 const native_fixture = @import("native_fixture_options");
+const archive_fixtures = @import("archive_fixture_options");
+
+fn archiveSource(allocator: std.mem.Allocator, destination: []const u8) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try source.writer.writeByte('[');
+    var high: ?u8 = null;
+    var index: usize = 0;
+    for (archive_fixtures.valid) |byte| {
+        if (std.ascii.isWhitespace(byte)) continue;
+        const nibble = try std.fmt.charToDigit(byte, 16);
+        if (high) |first| {
+            if (index != 0) try source.writer.writeByte(' ');
+            try source.writer.print("{d}", .{first << 4 | nibble});
+            high = null;
+            index += 1;
+        } else high = nibble;
+    }
+    if (high != null) return error.InvalidFixture;
+    try source.writer.writeAll("] \"");
+    for (destination) |byte| {
+        if (byte == '\\' or byte == '"') try source.writer.writeByte('\\');
+        try source.writer.writeByte(byte);
+    }
+    try source.writer.writeAll("\" archive.unpack-tgz pop");
+    return allocator.dupe(u8, source.written());
+}
 
 const LockedAllocator = struct {
     child: std.mem.Allocator,
@@ -357,6 +384,7 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[\"r\"] [[\"t\" \"v\" (sum)]] table.aggregate pop " ++
             "{\"id\" [1 2]} {\"cid\" [2] \"n\" [9]} [[\"id\" \"cid\"]] " ++
             "{\"n\" 0} table.left-join-with pop " ++
+            "[97] archive.sha256 pop " ++
             "{'format 1 'name \"r\" 'version \"0.1.0\" 'requires " ++
             "{\"a\" {'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
             "'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}} " ++
@@ -375,6 +403,15 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         thread_safe_allocator,
     );
     defer thread_safe_allocator.free(scratch_path);
+    const archive_destination = try std.fmt.allocPrint(
+        thread_safe_allocator,
+        "{s}{c}archive",
+        .{ scratch_path, std.fs.path.sep },
+    );
+    defer thread_safe_allocator.free(archive_destination);
+    const archive_source = try archiveSource(thread_safe_allocator, archive_destination);
+    defer thread_safe_allocator.free(archive_source);
+    try runOk(&runtime, "oom-archive.ecl", archive_source);
     const host_io_source = try std.fmt.allocPrint(
         thread_safe_allocator,
         "\"probe\\ntext\" \"{s}{c}probe.txt\" io.spit " ++

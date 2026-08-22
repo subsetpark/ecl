@@ -68,6 +68,7 @@ fn cmpPrimitive(evaluator: *Machine) MachineError!void {
 }
 
 const order_leaf_kinds = [_]value.HeapKind{
+    .leaf_u8,
     .leaf_i64,
     .leaf_f64,
     .leaf_char1,
@@ -163,7 +164,7 @@ fn startGrade(evaluator: *Machine, sorted_values: bool) MachineError!void {
 
 fn typedOrder(comptime kind: value.HeapKind, left: heap.LeafElement(kind), right: heap.LeafElement(kind)) std.math.Order {
     return switch (kind) {
-        .leaf_i64, .leaf_char1, .leaf_char2, .leaf_char4 => if (left < right)
+        .leaf_u8, .leaf_i64, .leaf_char1, .leaf_char2, .leaf_char4 => if (left < right)
             .lt
         else if (left > right)
             .gt
@@ -663,6 +664,7 @@ fn groupPrimitive(evaluator: *Machine) MachineError!void {
 
 fn typedValue(comptime kind: value.HeapKind, item: heap.LeafElement(kind)) Value {
     return switch (kind) {
+        .leaf_u8 => .{ .int = item },
         .leaf_i64 => .{ .int = item },
         .leaf_f64 => .{ .float = item },
         .leaf_char1, .leaf_char2, .leaf_char4 => .{ .char = @intCast(item) },

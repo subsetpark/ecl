@@ -63,7 +63,9 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
     defer collection.deinit();
     // A typed index vector over a typed source is one gather: the result's
     // representation is the source's, known before the first read.
-    if (index.borrow() == .list and index.borrow().list.kind() == .leaf_i64) {
+    if (index.borrow() == .list and
+        (index.borrow().list.kind() == .leaf_u8 or index.borrow().list.kind() == .leaf_i64))
+    {
         if (try startTypedCopy(
             evaluator,
             collection.borrow(),
@@ -424,8 +426,8 @@ fn inPrimitive(evaluator: *Machine) MachineError!void {
 }
 
 fn membershipKindsCompatible(comptime needle_kind: value.HeapKind, comptime haystack_kind: value.HeapKind) bool {
-    const needle_numeric = needle_kind == .leaf_i64 or needle_kind == .leaf_f64;
-    const haystack_numeric = haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64;
+    const needle_numeric = needle_kind == .leaf_u8 or needle_kind == .leaf_i64 or needle_kind == .leaf_f64;
+    const haystack_numeric = haystack_kind == .leaf_u8 or haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64;
     const needle_char = needle_kind == .leaf_char1 or needle_kind == .leaf_char2 or needle_kind == .leaf_char4;
     const haystack_char = haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4;
     return (needle_numeric and haystack_numeric) or
@@ -439,6 +441,13 @@ fn typedElementsMatch(
     needle: heap.LeafElement(needle_kind),
     candidate: heap.LeafElement(haystack_kind),
 ) bool {
+    if (needle_kind == .leaf_u8 and haystack_kind == .leaf_u8) return needle == candidate;
+    if (needle_kind == .leaf_u8 and haystack_kind == .leaf_i64) return @as(i64, needle) == candidate;
+    if (needle_kind == .leaf_i64 and haystack_kind == .leaf_u8) return needle == @as(i64, candidate);
+    if (needle_kind == .leaf_u8 and haystack_kind == .leaf_f64)
+        return equal.intFloatEqual(needle, candidate);
+    if (needle_kind == .leaf_f64 and haystack_kind == .leaf_u8)
+        return equal.intFloatEqual(candidate, needle);
     if (needle_kind == .leaf_i64 and haystack_kind == .leaf_i64) return needle == candidate;
     if (needle_kind == .leaf_i64 and haystack_kind == .leaf_f64)
         return equal.intFloatEqual(needle, candidate);
@@ -459,6 +468,11 @@ fn scalarMatchesElement(
     candidate: heap.LeafElement(haystack_kind),
 ) bool {
     return switch (haystack_kind) {
+        .leaf_u8 => switch (needle) {
+            .int => |integer| integer == candidate,
+            .float => |floating| equal.intFloatEqual(candidate, floating),
+            else => false,
+        },
         .leaf_i64 => switch (needle) {
             .int => |integer| integer == candidate,
             .float => |floating| equal.intFloatEqual(candidate, floating),
@@ -483,7 +497,7 @@ fn scalarMatchesElement(
 
 fn scalarCanMatchKind(needle: Value, haystack_kind: value.HeapKind) bool {
     return switch (needle) {
-        .int, .float => haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64,
+        .int, .float => haystack_kind == .leaf_u8 or haystack_kind == .leaf_i64 or haystack_kind == .leaf_f64,
         .char => haystack_kind == .leaf_char1 or haystack_kind == .leaf_char2 or haystack_kind == .leaf_char4,
         .symbol => haystack_kind == .leaf_symbol,
         .word, .list, .dict, .task, .module => false,
@@ -1728,6 +1742,7 @@ const CopyShape = union(enum) {
 };
 
 const leaf_kinds = [_]value.HeapKind{
+    .leaf_u8,
     .leaf_i64,
     .leaf_f64,
     .leaf_char1,
@@ -1736,7 +1751,7 @@ const leaf_kinds = [_]value.HeapKind{
     .leaf_symbol,
 };
 
-fn TypedCopyDriver(comptime kind: value.HeapKind) type {
+fn TypedCopyDriver(comptime kind: value.HeapKind, comptime index_kind: value.HeapKind) type {
     const Element = heap.LeafElement(kind);
     return struct {
         const Self = @This();
@@ -1745,7 +1760,7 @@ fn TypedCopyDriver(comptime kind: value.HeapKind) type {
         source: heap.Owned(heap.LeafReader(kind)),
         other: ?heap.Owned(heap.LeafReader(kind)) = null,
         /// A typed index vector, pinned for the gather's whole life.
-        indices: ?heap.Owned(heap.LeafReader(.leaf_i64)) = null,
+        indices: ?heap.Owned(heap.LeafReader(index_kind)) = null,
         writer: heap.Owned(heap.LeafWriter(kind)),
         shape: CopyShape,
         cursor: kernel_flat.FlatCursor,
@@ -1786,7 +1801,7 @@ fn TypedCopyDriver(comptime kind: value.HeapKind) type {
                             const indices = self.indices.?.borrow().slice();
                             for (piece.start..piece.end) |index| {
                                 const position = indices[index];
-                                if (position < 0)
+                                if (index_kind == .leaf_i64 and position < 0)
                                     return context.fail(.domain, "at index is negative");
                                 const offset_position = std.math.cast(usize, position) orelse
                                     return context.fail(.domain, "at index is out of bounds");
@@ -1828,33 +1843,36 @@ fn startTypedCopy(
     if (other) |right| {
         if (right != .list or right.list.kind() != source_kind) return false;
     }
-    if (indices) |vector| {
-        if (vector != .list or vector.list.kind() != .leaf_i64) return false;
-    }
+    const index_kind = if (indices) |vector| index: {
+        if (vector != .list or (vector.list.kind() != .leaf_u8 and vector.list.kind() != .leaf_i64)) return false;
+        break :index vector.list.kind();
+    } else .leaf_i64;
     inline for (leaf_kinds) |candidate| {
-        if (candidate == source_kind) {
-            const Driver = TypedCopyDriver(candidate);
-            var writer = try heap.LeafWriter(candidate).init(evaluator.allocator(), length);
-            // Ownership passes to the driver below; a failing `startDriver`
-            // retires the driver's fields, so this guard covers only the window
-            // before the hand-off.
-            var held_locally = true;
-            errdefer if (held_locally) writer.retirePartial(evaluator.releaseDomain());
-            var driver = Driver{
-                .source = .init(heap.LeafReader(candidate).acquire(source.list)),
-                .writer = .init(writer),
-                .shape = shape,
-                .cursor = kernel_flat.FlatCursor.init(length),
-            };
-            if (other) |right| {
-                driver.other = .init(heap.LeafReader(candidate).acquire(right.list));
+        inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate_index| {
+            if (candidate == source_kind and candidate_index == index_kind) {
+                const Driver = TypedCopyDriver(candidate, candidate_index);
+                var writer = try heap.LeafWriter(candidate).init(evaluator.allocator(), length);
+                // Ownership passes to the driver below; a failing `startDriver`
+                // retires the driver's fields, so this guard covers only the window
+                // before the hand-off.
+                var held_locally = true;
+                errdefer if (held_locally) writer.retirePartial(evaluator.releaseDomain());
+                var driver = Driver{
+                    .source = .init(heap.LeafReader(candidate).acquire(source.list)),
+                    .writer = .init(writer),
+                    .shape = shape,
+                    .cursor = kernel_flat.FlatCursor.init(length),
+                };
+                if (other) |right| {
+                    driver.other = .init(heap.LeafReader(candidate).acquire(right.list));
+                }
+                if (indices) |vector| {
+                    driver.indices = .init(heap.LeafReader(candidate_index).acquire(vector.list));
+                }
+                held_locally = false;
+                try evaluator.startDriver(driver);
+                return true;
             }
-            if (indices) |vector| {
-                driver.indices = .init(heap.LeafReader(.leaf_i64).acquire(vector.list));
-            }
-            held_locally = false;
-            try evaluator.startDriver(driver);
-            return true;
         }
     }
     return false;

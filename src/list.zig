@@ -13,6 +13,7 @@ pub const Error = error{ OutOfMemory, NotAList, IndexOutOfBounds };
 
 pub const ElemProfile = enum {
     empty,
+    all_byte,
     all_int,
     all_float,
     all_char,
@@ -32,6 +33,7 @@ pub fn fromValues(
     const element_profile = profile(source);
     return switch (element_profile.kind) {
         .empty => fromGenericValues(allocator, source),
+        .all_byte => fromByteValues(allocator, source),
         .all_int => fromIntValues(allocator, source),
         .all_float => fromFloatValues(allocator, source),
         .all_char => fromCharValues(allocator, source, element_profile.max_codepoint),
@@ -54,6 +56,15 @@ pub fn fromI64Slice(
     source: []const i64,
 ) error{OutOfMemory}!Value {
     var builder = try heap.ListBuilder(.leaf_i64).init(allocator, source.len, initialCapacity(source.len));
+    @memcpy(builder.items()[0..source.len], source);
+    return .{ .list = builder.finish() };
+}
+
+pub fn fromU8Slice(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+) error{OutOfMemory}!Value {
+    var builder = try heap.ListBuilder(.leaf_u8).init(allocator, source.len, initialCapacity(source.len));
     @memcpy(builder.items()[0..source.len], source);
     return .{ .list = builder.finish() };
 }
@@ -124,6 +135,7 @@ pub fn atUnchecked(collection: Value, index: usize) Value {
     const header = collection.list;
     return switch (header.kind()) {
         .generic_spine => heap.valuesConst(header)[index],
+        .leaf_u8 => .{ .int = heap.u8s(header)[index] },
         .leaf_i64 => .{ .int = heap.i64s(header)[index] },
         .leaf_f64 => .{ .float = heap.f64s(header)[index] },
         .leaf_char1 => .{ .char = heap.chars8(header)[index] },
@@ -153,6 +165,7 @@ pub fn append(
 
     const same_kind = switch (header.kind()) {
         .generic_spine => true,
+        .leaf_u8 => item == .int and item.int >= 0 and item.int <= std.math.maxInt(u8),
         .leaf_i64 => item == .int,
         .leaf_f64 => item == .float,
         .leaf_char1 => item == .char and item.char <= std.math.maxInt(u8),
@@ -172,7 +185,7 @@ pub fn append(
             heap.retainValue(item);
             heap.writeUniqueList(unique, used, item);
         },
-        .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => heap.writeUniqueList(unique, used, item),
+        .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => heap.writeUniqueList(unique, used, item),
         .dict, .task, .module, .reserved_mask => return error.NotAList,
     }
     heap.setUniqueListLength(unique, used + 1);
@@ -183,6 +196,7 @@ fn listHeader(collection: Value) error{NotAList}!*ListHandle {
     return switch (collection) {
         .list => |header| switch (header.kind()) {
             .generic_spine,
+            .leaf_u8,
             .leaf_i64,
             .leaf_f64,
             .leaf_char1,
@@ -199,7 +213,7 @@ fn listHeader(collection: Value) error{NotAList}!*ListHandle {
 fn profile(source: []const Value) Profile {
     if (source.len == 0) return .{ .kind = .empty };
     var result: Profile = switch (source[0]) {
-        .int => .{ .kind = .all_int },
+        .int => |integer| .{ .kind = if (integer >= 0 and integer <= std.math.maxInt(u8)) .all_byte else .all_int },
         .float => .{ .kind = .all_float },
         .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
         .symbol => .{ .kind = .all_symbol },
@@ -207,6 +221,9 @@ fn profile(source: []const Value) Profile {
     };
     for (source[1..]) |item| switch (result.kind) {
         .empty => unreachable,
+        .all_byte => if (item == .int) {
+            if (item.int < 0 or item.int > std.math.maxInt(u8)) result.kind = .all_int;
+        } else return .{ .kind = .mixed },
         .all_int => if (item != .int) return .{ .kind = .mixed },
         .all_float => if (item != .float) return .{ .kind = .mixed },
         .all_char => if (item == .char) {
@@ -216,6 +233,12 @@ fn profile(source: []const Value) Profile {
         .mixed => return result,
     };
     return result;
+}
+
+fn fromByteValues(allocator: std.mem.Allocator, source: []const Value) !Value {
+    var builder = try heap.ListBuilder(.leaf_u8).init(allocator, source.len, initialCapacity(source.len));
+    for (source, 0..) |item, index| builder.items()[index] = @intCast(item.int);
+    return .{ .list = builder.finish() };
 }
 
 fn fromIntValues(allocator: std.mem.Allocator, source: []const Value) !Value {
@@ -313,6 +336,8 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.releaseValue(generic);
     const ints = try fromI64Slice(allocator, &.{ 1, 2 });
     defer cleanup.releaseValue(ints);
+    const bytes = try fromU8Slice(allocator, &.{ 0, 255 });
+    defer cleanup.releaseValue(bytes);
     const floats = try fromF64Slice(allocator, &.{ 1.0, 2.0 });
     defer cleanup.releaseValue(floats);
     const chars = try fromCodepoints(allocator, &.{ 'a', 0x100, 0x10000 });

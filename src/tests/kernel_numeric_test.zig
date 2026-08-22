@@ -7,8 +7,9 @@ const helper = @import("kernel_test_support.zig");
 
 test "numeric: scalar leaf and mixed numeric semantics match" {
     try helper.expectStack(
-        "[1 2 3] 0.5 + 9007199254740993 9007199254740992.0 = \\a 1 +",
-        "[1.5 2.5 3.5] 0 \\b",
+        "[1 2 3] 0.5 + 9007199254740993 9007199254740992.0 = \\a 1 + " ++
+            "[0 127 128 255] 1 + [0 1 255] neg [0 255] abs",
+        "[1.5 2.5 3.5] 0 \\b [1 128 129 256] [0 -1 -255] [0 255]",
     );
     try helper.expectError(.{
         .name = "symbols are not numeric leaves",

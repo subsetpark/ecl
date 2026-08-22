@@ -311,10 +311,13 @@ depended on by nothing. Existing programs are unaffected.
 **Unlocks**: The fetcher (M4). Independent of M1 and M2, so it can run in
 parallel with them.
 
-**Status**: Planned, 2026-08-22. The autonomous three-patch plan is
-`gameplans/pkg-host-primitives.json`: freeze the contract, add the pending
-fixture-backed proof surface, then implement the builtin module and bounded
-driver. It has no unresolved questions.
+**Status**: Implemented in the working tree, 2026-08-22. Commits `8a9ebb6` and
+`d7929a4` froze the contract and added the pending fixture-backed proof surface;
+the implementation adds the invisible U8 leaf, representation-independent byte
+view, builtin archive module, bounded hashing/extraction/rollback drivers, and
+activated public cases. `zig build precommit` and the Linux/x86_64 Alpine TSan
+gate pass locally. The implementation commit and complete CI matrix remain the
+handoff boundary before M4.
 
 ---
 

@@ -963,15 +963,19 @@ fn asFloat(operand: Value) f64 {
 // that same function to report the first failing index, kind, and message.
 // ===========================================================================
 
-/// The two numeric element classes a typed loop carries. Chars and symbols are
-/// deliberately absent: a char result chooses its width from the codepoints it
-/// produces, which is a profiling decision, and symbols are not arithmetic.
+/// The numeric element classes a typed loop carries. `byte` is an invisible
+/// storage class for ordinary integers; operations widen whenever their result
+/// is not provably within the byte range. Chars and symbols are deliberately
+/// absent: a char result chooses its width from the codepoints it produces,
+/// which is a profiling decision, and symbols are not arithmetic.
 const Number = enum {
+    byte,
     integer,
     real,
 
     fn Element(comptime self: Number) type {
         return switch (self) {
+            .byte => u8,
             .integer => i64,
             .real => f64,
         };
@@ -979,6 +983,7 @@ const Number = enum {
 
     fn kind(comptime self: Number) value.HeapKind {
         return switch (self) {
+            .byte => .leaf_u8,
             .integer => .leaf_i64,
             .real => .leaf_f64,
         };
@@ -986,20 +991,21 @@ const Number = enum {
 
     fn boxed(comptime self: Number, element: self.Element()) Value {
         return switch (self) {
-            .integer => .{ .int = element },
+            .byte, .integer => .{ .int = element },
             .real => .{ .float = element },
         };
     }
 
     fn unboxed(comptime self: Number, item: Value) self.Element() {
         return switch (self) {
+            .byte => @intCast(item.int),
             .integer => item.int,
             .real => item.float,
         };
     }
 };
 
-const number_classes = [_]Number{ .integer, .real };
+const number_classes = [_]Number{ .byte, .integer, .real };
 
 fn scalarNumber(item: Value) ?Number {
     return switch (item) {
@@ -1012,6 +1018,7 @@ fn scalarNumber(item: Value) ?Number {
 fn leafNumber(item: Value) ?Number {
     if (item != .list) return null;
     return switch (item.list.kind()) {
+        .leaf_u8 => .byte,
         .leaf_i64 => .integer,
         .leaf_f64 => .real,
         else => null,
@@ -1058,6 +1065,7 @@ fn leafCharacter(item: Value) ?Character {
 }
 
 const FlatScalarClass = enum {
+    byte,
     integer,
     char1,
     char2,
@@ -1065,6 +1073,7 @@ const FlatScalarClass = enum {
 
     fn Element(comptime self: FlatScalarClass) type {
         return switch (self) {
+            .byte => u8,
             .integer => i64,
             .char1 => u8,
             .char2 => u16,
@@ -1074,13 +1083,13 @@ const FlatScalarClass = enum {
 
     fn boxed(comptime self: FlatScalarClass, element: self.Element()) Value {
         return switch (self) {
-            .integer => .{ .int = element },
+            .byte, .integer => .{ .int = element },
             .char1, .char2, .char4 => .{ .char = @intCast(element) },
         };
     }
 
     fn isCharacter(self: FlatScalarClass) bool {
-        return self != .integer;
+        return self != .byte and self != .integer;
     }
 };
 
@@ -1095,6 +1104,7 @@ fn characterFlatClass(character: Character) FlatScalarClass {
 const FlatScalarOperand = union(enum) {
     absent,
     scalar: Value,
+    bytes: heap.LeafReader(.leaf_u8),
     ints: heap.LeafReader(.leaf_i64),
     char1: heap.LeafReader(.leaf_char1),
     char2: heap.LeafReader(.leaf_char2),
@@ -1110,6 +1120,7 @@ const FlatScalarOperand = union(enum) {
 
     fn slice(self: *const FlatScalarOperand, comptime class: FlatScalarClass) []const class.Element() {
         return switch (class) {
+            .byte => self.bytes.slice(),
             .integer => self.ints.slice(),
             .char1 => self.char1.slice(),
             .char2 => self.char2.slice(),
@@ -1120,6 +1131,7 @@ const FlatScalarOperand = union(enum) {
 
 fn acquireFlatScalarOperand(comptime class: FlatScalarClass, item: Value) FlatScalarOperand {
     return switch (class) {
+        .byte => .{ .bytes = .acquire(item.list) },
         .integer => .{ .ints = .acquire(item.list) },
         .char1 => .{ .char1 = .acquire(item.list) },
         .char2 => .{ .char2 = .acquire(item.list) },
@@ -1140,13 +1152,19 @@ fn binaryResult(comptime operation: BinaryOp, comptime left: Number, comptime ri
         .div, .pow, .atan2 => .real,
         .int_div, .mod, .band, .bor, .bxor, .bsl, .bsr, .and_word, .or_word => .integer,
         .eq, .ne, .lt, .gt, .le, .ge => .integer,
-        .min, .max => if (left != right) null else left,
+        .min, .max => if (real)
+            if (left != right) null else .real
+        else if (left == .byte and right == .byte)
+            .byte
+        else
+            .integer,
     };
 }
 
 fn unaryResult(comptime operation: UnaryOp, comptime operand: Number) Number {
     return switch (operation) {
-        .neg, .abs => operand,
+        .neg => if (operand == .byte) .integer else operand,
+        .abs => operand,
         .sqrt, .exp, .log, .sin, .cos => .real,
         .floor, .ceil, .round => .integer,
         .not_word, .bnot => .integer,
@@ -1165,6 +1183,7 @@ const binary_shapes = [_]Shape{ .leaf_leaf, .leaf_scalar, .scalar_leaf };
 const TypedOperand = union(enum) {
     absent,
     scalar: Value,
+    bytes: heap.LeafReader(.leaf_u8),
     ints: heap.LeafReader(.leaf_i64),
     reals: heap.LeafReader(.leaf_f64),
     aliased,
@@ -1172,6 +1191,7 @@ const TypedOperand = union(enum) {
     fn release(self: *TypedOperand, releases: *heap.ReleaseDomain) void {
         switch (self.*) {
             .absent, .scalar, .aliased => {},
+            .bytes => |*reader| reader.release(releases),
             .ints => |*reader| reader.release(releases),
             .reals => |*reader| reader.release(releases),
         }
@@ -1180,6 +1200,7 @@ const TypedOperand = union(enum) {
 
     fn slice(self: *const TypedOperand, comptime class: Number) []const class.Element() {
         return switch (class) {
+            .byte => self.bytes.slice(),
             .integer => self.ints.slice(),
             .real => self.reals.slice(),
         };
@@ -1189,22 +1210,29 @@ const TypedOperand = union(enum) {
 /// The typed result buffer: freshly allocated, or a solely-owned input buffer
 /// taken over in place under the mask-before-store protocol.
 const TypedOutput = union(enum) {
+    fresh_bytes: heap.LeafWriter(.leaf_u8),
     fresh_ints: heap.LeafWriter(.leaf_i64),
     fresh_reals: heap.LeafWriter(.leaf_f64),
+    reuse_bytes: heap.UniqueLeafAdoption(.leaf_u8),
     reuse_ints: heap.UniqueLeafAdoption(.leaf_i64),
     reuse_reals: heap.UniqueLeafAdoption(.leaf_f64),
 
     fn store(self: *TypedOutput, comptime class: Number, offset: usize, block: []const class.Element()) void {
         switch (class) {
+            .byte => switch (self.*) {
+                .fresh_bytes => |*writer| writer.writeRange(offset, block),
+                .reuse_bytes => |*adoption| adoption.writeRange(offset, block),
+                .fresh_ints, .fresh_reals, .reuse_ints, .reuse_reals => unreachable,
+            },
             .integer => switch (self.*) {
                 .fresh_ints => |*writer| writer.writeRange(offset, block),
                 .reuse_ints => |*adoption| adoption.writeRange(offset, block),
-                .fresh_reals, .reuse_reals => unreachable,
+                .fresh_bytes, .fresh_reals, .reuse_bytes, .reuse_reals => unreachable,
             },
             .real => switch (self.*) {
                 .fresh_reals => |*writer| writer.writeRange(offset, block),
                 .reuse_reals => |*adoption| adoption.writeRange(offset, block),
-                .fresh_ints, .reuse_ints => unreachable,
+                .fresh_bytes, .fresh_ints, .reuse_bytes, .reuse_ints => unreachable,
             },
         }
     }
@@ -1212,9 +1240,10 @@ const TypedOutput = union(enum) {
     /// The reused buffer read as the operand representation it still holds.
     fn aliasedSlice(self: *const TypedOutput, comptime class: Number) []const class.Element() {
         return switch (self.*) {
+            .reuse_bytes => |*adoption| adoption.sourceSlice(class.kind()),
             .reuse_ints => |*adoption| adoption.sourceSlice(class.kind()),
             .reuse_reals => |*adoption| adoption.sourceSlice(class.kind()),
-            .fresh_ints, .fresh_reals => unreachable,
+            .fresh_bytes, .fresh_ints, .fresh_reals => unreachable,
         };
     }
 
@@ -1226,17 +1255,19 @@ const TypedOutput = union(enum) {
 
     fn reusing(self: *const TypedOutput) bool {
         return switch (self.*) {
-            .reuse_ints, .reuse_reals => true,
-            .fresh_ints, .fresh_reals => false,
+            .reuse_bytes, .reuse_ints, .reuse_reals => true,
+            .fresh_bytes, .fresh_ints, .fresh_reals => false,
         };
     }
 
     fn retire(self: *TypedOutput, releases: *heap.ReleaseDomain) void {
         switch (self.*) {
+            .fresh_bytes => |*writer| writer.retirePartial(releases),
             .fresh_ints => |*writer| writer.retirePartial(releases),
             .fresh_reals => |*writer| writer.retirePartial(releases),
             // An abandoned reuse leaves the input exactly as it was; the
             // caller's reference to it is the one `root` holds.
+            .reuse_bytes => |*adoption| adoption.abandon(),
             .reuse_ints => |*adoption| adoption.abandon(),
             .reuse_reals => |*adoption| adoption.abandon(),
         }
@@ -1319,6 +1350,7 @@ fn fixedCharStep(
         fn leftValue(state: *const FixedCharState, index: usize) left_class.Element() {
             return if (shape == .scalar_leaf)
                 switch (left_class) {
+                    .byte => @intCast(state.left.scalar.int),
                     .integer => state.left.scalar.int,
                     .char1, .char2, .char4 => @intCast(state.left.scalar.char),
                 }
@@ -1329,6 +1361,7 @@ fn fixedCharStep(
         fn rightValue(state: *const FixedCharState, index: usize) right_class.Element() {
             return if (shape == .leaf_scalar)
                 switch (right_class) {
+                    .byte => @intCast(state.right.scalar.int),
                     .integer => state.right.scalar.int,
                     .char1, .char2, .char4 => @intCast(state.right.scalar.char),
                 }
@@ -1457,6 +1490,7 @@ fn dynamicCharStep(
         fn leftValue(state: *const DynamicCharState, index: usize) left_class.Element() {
             return if (shape == .scalar_leaf)
                 switch (left_class) {
+                    .byte => @intCast(state.left.scalar.int),
                     .integer => state.left.scalar.int,
                     .char1, .char2, .char4 => @intCast(state.left.scalar.char),
                 }
@@ -1467,6 +1501,7 @@ fn dynamicCharStep(
         fn rightValue(state: *const DynamicCharState, index: usize) right_class.Element() {
             return if (shape == .leaf_scalar)
                 switch (right_class) {
+                    .byte => @intCast(state.right.scalar.int),
                     .integer => state.right.scalar.int,
                     .char1, .char2, .char4 => @intCast(state.right.scalar.char),
                 }
@@ -1758,6 +1793,7 @@ fn acquireOutput(
         if (heap.UniqueLeafAdoption(out.kind()).claim(item.list, length)) |adoption| {
             return .{
                 .output = switch (out) {
+                    .byte => .{ .reuse_bytes = adoption },
                     .integer => .{ .reuse_ints = adoption },
                     .real => .{ .reuse_reals = adoption },
                 },
@@ -1769,6 +1805,7 @@ fn acquireOutput(
     const writer = try heap.LeafWriter(out.kind()).init(evaluator.allocator(), length);
     return .{
         .output = switch (out) {
+            .byte => .{ .fresh_bytes = writer },
             .integer => .{ .fresh_ints = writer },
             .real => .{ .fresh_reals = writer },
         },
@@ -1779,6 +1816,7 @@ fn acquireOutput(
 
 fn acquireOperand(comptime class: Number, item: Value) TypedOperand {
     return switch (class) {
+        .byte => .{ .bytes = heap.LeafReader(.leaf_u8).acquire(item.list) },
         .integer => .{ .ints = heap.LeafReader(.leaf_i64).acquire(item.list) },
         .real => .{ .reals = heap.LeafReader(.leaf_f64).acquire(item.list) },
     };
@@ -1795,6 +1833,7 @@ fn startTypedDriver(
 
 fn leafFlatScalarClass(item: Value) ?FlatScalarClass {
     if (leafNumber(item)) |number| return switch (number) {
+        .byte => .byte,
         .integer => .integer,
         .real => null,
     };
@@ -1849,7 +1888,7 @@ fn buildNestedTypedCharBinaryFor(
     };
     if (!fixed_result and !dynamic_result) return null;
 
-    const flat_classes = [_]FlatScalarClass{ .integer, .char1, .char2, .char4 };
+    const flat_classes = [_]FlatScalarClass{ .byte, .integer, .char1, .char2, .char4 };
     inline for (flat_classes) |candidate_left| {
         inline for (flat_classes) |candidate_right| {
             inline for (binary_shapes) |candidate_shape| {
@@ -1958,6 +1997,7 @@ fn startTypedCharBinary(
 fn firstFlatElement(item: Value) ?Value {
     if (item != .list or item.list.length() == 0) return null;
     return switch (item.list.kind()) {
+        .leaf_u8 => .{ .int = heap.u8s(item.list)[0] },
         .leaf_i64 => .{ .int = heap.i64s(item.list)[0] },
         .leaf_f64 => .{ .float = heap.f64s(item.list)[0] },
         .leaf_char1 => .{ .char = heap.chars8(item.list)[0] },
@@ -2436,6 +2476,7 @@ fn reduceStep(
     return struct {
         fn accumulated(state: *const TypedReduceState) accumulator_class.Element() {
             return switch (accumulator_class) {
+                .byte => unreachable,
                 .integer => state.accumulator.integer,
                 .real => state.accumulator.real,
             };
@@ -2443,6 +2484,7 @@ fn reduceStep(
 
         fn store(state: *TypedReduceState, element: accumulator_class.Element()) void {
             state.accumulator = switch (accumulator_class) {
+                .byte => unreachable,
                 .integer => .{ .integer = element },
                 .real => .{ .real = element },
             };
@@ -2549,6 +2591,7 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
                                 .input = acquireOperand(candidate_element, input),
                                 .output = null,
                                 .accumulator = switch (candidate_accumulator) {
+                                    .byte => unreachable,
                                     .integer => .{ .integer = initial.int },
                                     .real => .{ .real = initial.float },
                                 },
@@ -2564,6 +2607,7 @@ pub fn idiomReduceStart(operation: BinaryOp) IdiomReduceStart {
                                             length,
                                         );
                                         state.output = switch (out) {
+                                            .byte => .{ .fresh_bytes = writer },
                                             .integer => .{ .fresh_ints = writer },
                                             .real => .{ .fresh_reals = writer },
                                         };

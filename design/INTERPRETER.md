@@ -834,6 +834,27 @@ operand shape, and rows that still run boxed say so.
   host IO capability and calls the platform CSPRNG. Every other random
   word is pure, which is what makes an ecl program reproducible without a
   recording layer.
+- **Archive bytes cross one representation-independent capability.**
+  `ByteVectorEncoder` retains and borrows a U8 leaf when one is present, or
+  validates and copies any equivalent ordinary integer list in bounded
+  chunks. `archive.sha256` and `archive.unpack-tgz` consume only the resulting
+  `ByteVector`; neither can assign semantics to the list's storage kind.
+- **Archive extraction separates validation, mutation, and publication.** The
+  driver checks the gzip footer limit before allocating the exact tar buffer,
+  decompresses and verifies CRC in bounded chunks, then parses tar headers,
+  PAX records, duplicate membership, paths, result strings, and the complete
+  extraction plan before its first filesystem mutation. Its member table has
+  a fixed ceiling and its entry storage is a non-relocating chunk list, so
+  cancellation cannot invalidate recorded cleanup paths.
+- **An archive destination is one atomic publication.** Host IO is required
+  before the extraction driver starts. The driver creates a unique sibling
+  stage, records each mutation before attempting it, writes files in bounded
+  chunks, closes every handle, and performs one non-replacing same-parent
+  rename. Its bounded-retirement state removes created entries and implicit
+  parent directories in reverse order; failure, cancellation, allocation
+  failure, and a losing concurrent rename all reach that same cleanup path.
+  Neither recursive deletion nor a user-sized traversal is hidden in a
+  scheduler turn.
 
 ## Idiom recognition
 

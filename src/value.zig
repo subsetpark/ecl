@@ -18,6 +18,7 @@ pub const Tag = enum(u8) {
 /// a design event: all dispatch sites switch exhaustively over these members.
 pub const HeapKind = enum(u8) {
     generic_spine,
+    leaf_u8,
     leaf_i64,
     leaf_f64,
     leaf_char1,
@@ -111,7 +112,7 @@ pub const Value = union(Tag) {
         if (self != .list) return false;
         return switch (self.list.kind()) {
             .leaf_char1, .leaf_char2, .leaf_char4 => true,
-            .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .module, .reserved_mask => false,
+            .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .module, .reserved_mask => false,
         };
     }
 };
@@ -125,6 +126,6 @@ pub fn unicodeScalar(codepoint: u64) ?u21 {
 
 comptime {
     if (@sizeOf(Value) != 16) @compileError("Value must remain exactly 16 bytes");
-    if (@typeInfo(HeapKind).@"enum".fields.len != 11)
+    if (@typeInfo(HeapKind).@"enum".fields.len != 12)
         @compileError("HeapKind dispatch count changed; update every exhaustive representation switch");
 }

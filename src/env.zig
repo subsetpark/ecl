@@ -29,7 +29,7 @@ pub const EffectQuotation = opaque {};
 
 pub fn quotation(header: *value.ListHandle) ?*Quotation {
     return switch (header.kind()) {
-        .generic_spine, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => @ptrCast(@alignCast(header)),
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => @ptrCast(@alignCast(header)),
         .dict, .task, .module, .reserved_mask => null,
     };
 }
@@ -41,7 +41,7 @@ pub fn quotationHeader(body: *const Quotation) *value.ListHandle {
 pub fn documentation(header: *value.ListHandle) ?*DocumentationString {
     return switch (header.kind()) {
         .leaf_char1, .leaf_char2, .leaf_char4 => @ptrCast(@alignCast(header)),
-        .generic_spine, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .module, .reserved_mask => null,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .module, .reserved_mask => null,
     };
 }
 

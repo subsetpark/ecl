@@ -62,8 +62,9 @@ test "sequence: len shape and ragged shape errors" {
 
 test "sequence: at gathers list string and dict indices" {
     try helper.expectStack(
-        "[10 20 30] [2 0] at \"abc\" [2 0] at {'a 7} 'a at",
-        "[30 10] \"ca\" 7",
+        "[10 20 30] [2 0] at \"abc\" [2 0] at {'a 7} 'a at " ++
+            "[0 127 128 255] [3 1] at",
+        "[30 10] \"ca\" 7 [255 127]",
     );
 }
 
@@ -120,8 +121,9 @@ test "sequence: zero-length string results remain strings" {
 
 test "sequence: raze and cat specialize their outputs" {
     try helper.expectStack(
-        "[[1 2] [3]] raze [1 2] [3 4] cat \"ab\" \"cd\" cat",
-        "[1 2 3] [1 2 3 4] \"abcd\"",
+        "[[1 2] [3]] raze [1 2] [3 4] cat \"ab\" \"cd\" cat " ++
+            "[0 255] [256] cat [0 255] 1 256 put",
+        "[1 2 3] [1 2 3 4] \"abcd\" [0 255 256] [0 256]",
     );
 }
 

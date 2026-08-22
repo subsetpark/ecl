@@ -14,6 +14,7 @@ const env = @import("env.zig");
 const Csv = @import("stdlib/csv.zig").Extension;
 const json_module = @import("stdlib/json.zig");
 const http_module = @import("stdlib/http.zig");
+const archive_module = @import("stdlib/archive.zig");
 const io_module = @import("stdlib/io.zig");
 
 /// One complete transport for one embedded module. Each arm carries
@@ -61,6 +62,7 @@ const modules = [_]Module{
         .text = @embedFile("stdlib/table.ecl"),
     } } },
     .{ .name = "http", .entry = .{ .builtin = &http_module.words } },
+    .{ .name = "archive", .entry = .{ .builtin = &archive_module.words } },
     .{ .name = "rng", .entry = .{ .source = .{
         .name = "<stdlib:rng>",
         .text = @embedFile("stdlib/rng.ecl"),

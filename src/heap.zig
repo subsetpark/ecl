@@ -510,7 +510,7 @@ fn mutableHeader(handle: anytype) *Header {
 pub fn listKind(handle: *ListHandle) HeapKind {
     const result = kind(headerFromList(handle));
     std.debug.assert(switch (result) {
-        .generic_spine, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
         .dict, .task, .module, .reserved_mask => false,
     });
     return result;
@@ -600,6 +600,7 @@ fn allocObject(
     };
     obj.payload = switch (kind_value) {
         .generic_spine => try allocPayload(Value, allocator, capacity_value),
+        .leaf_u8 => try allocPayload(u8, allocator, capacity_value),
         .leaf_i64 => try allocPayload(i64, allocator, capacity_value),
         .leaf_f64 => try allocPayload(f64, allocator, capacity_value),
         .leaf_char1 => try allocPayload(u8, allocator, capacity_value),
@@ -620,7 +621,7 @@ fn allocListHeader(
     capacity_value: usize,
 ) error{OutOfMemory}!*InitializingList {
     std.debug.assert(switch (kind_value) {
-        .generic_spine, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
         .dict, .task, .module, .reserved_mask => false,
     });
     return @ptrCast(@alignCast(try allocObject(allocator, kind_value, len_value, capacity_value)));
@@ -633,6 +634,7 @@ fn allocListHeader(
 pub fn LeafElement(comptime kind_value: HeapKind) type {
     return switch (kind_value) {
         .generic_spine => Value,
+        .leaf_u8 => u8,
         .leaf_i64 => i64,
         .leaf_f64 => f64,
         .leaf_char1 => u8,
@@ -643,12 +645,14 @@ pub fn LeafElement(comptime kind_value: HeapKind) type {
 }
 
 /// Two representations are reuse-compatible when their elements occupy the same
-/// bytes: `leaf_i64`/`leaf_f64` and `leaf_char4`/`leaf_symbol` are the only
-/// such pairs, and that is exactly when a unique input buffer can carry a
-/// result of the other kind by retag rather than by reallocation.
+/// bytes: `leaf_u8`/`leaf_char1`, `leaf_i64`/`leaf_f64`, and
+/// `leaf_char4`/`leaf_symbol` are the compatible pairs. That is exactly when a
+/// unique input buffer can carry a result of the other kind by retag rather
+/// than by reallocation.
 pub fn leafElementSize(kind_value: HeapKind) usize {
     return switch (kind_value) {
         .generic_spine => @sizeOf(Value),
+        .leaf_u8 => @sizeOf(u8),
         .leaf_i64 => @sizeOf(i64),
         .leaf_f64 => @sizeOf(f64),
         .leaf_char1 => @sizeOf(u8),
@@ -724,6 +728,7 @@ pub fn ListBuilder(comptime kind_value: HeapKind) type {
 /// representation; no caller receives a raw initializing header.
 pub const AnyListBuilder = union(enum) {
     generic: ListBuilder(.generic_spine),
+    u8: ListBuilder(.leaf_u8),
     i64: ListBuilder(.leaf_i64),
     f64: ListBuilder(.leaf_f64),
     char1: ListBuilder(.leaf_char1),
@@ -739,6 +744,7 @@ pub const AnyListBuilder = union(enum) {
     ) error{OutOfMemory}!AnyListBuilder {
         return switch (kind_value) {
             .generic_spine => .{ .generic = try .init(allocator, len_value, capacity_value) },
+            .leaf_u8 => .{ .u8 = try .init(allocator, len_value, capacity_value) },
             .leaf_i64 => .{ .i64 = try .init(allocator, len_value, capacity_value) },
             .leaf_f64 => .{ .f64 = try .init(allocator, len_value, capacity_value) },
             .leaf_char1 => .{ .char1 = try .init(allocator, len_value, capacity_value) },
@@ -777,6 +783,7 @@ pub const AnyListBuilder = union(enum) {
                 builder.items()[index] = item;
                 builder.setLen(index + 1);
             },
+            .u8 => |*builder| builder.items()[index] = @intCast(item.int),
             .i64 => |*builder| builder.items()[index] = item.int,
             .f64 => |*builder| builder.items()[index] = item.float,
             .char1 => |*builder| builder.items()[index] = @intCast(item.char),
@@ -950,6 +957,11 @@ pub fn i64s(header: *ListHandle) []const i64 {
     return payloadItems(i64, mutableHeader(header));
 }
 
+pub fn u8s(header: *ListHandle) []const u8 {
+    std.debug.assert(listKind(header) == .leaf_u8);
+    return payloadItems(u8, mutableHeader(header));
+}
+
 pub fn f64s(header: *ListHandle) []const f64 {
     std.debug.assert(listKind(header) == .leaf_f64);
     return payloadItems(f64, mutableHeader(header));
@@ -981,6 +993,7 @@ pub fn writeUniqueList(list_header: *UniqueList, index: usize, item: Value) void
     std.debug.assert(index < capacity(raw));
     switch (uniqueImpl(header).kind()) {
         .generic_spine => payloadItems(Value, raw)[index] = item,
+        .leaf_u8 => payloadItems(u8, raw)[index] = @intCast(item.int),
         .leaf_i64 => payloadItems(i64, raw)[index] = item.int,
         .leaf_f64 => payloadItems(f64, raw)[index] = item.float,
         .leaf_char1 => payloadItems(u8, raw)[index] = @intCast(item.char),
@@ -1393,6 +1406,7 @@ pub const ReleaseDomain = struct {
                 storage.release(storage.payload);
                 return true;
             },
+            .leaf_u8,
             .leaf_i64,
             .leaf_f64,
             .leaf_char1,
@@ -1886,6 +1900,7 @@ fn freePayload(allocator: std.mem.Allocator, header: *Header) void {
     const cap = obj.capacity;
     switch (kind(header)) {
         .generic_spine => freeItems(Value, allocator, obj.payload, cap),
+        .leaf_u8 => freeItems(u8, allocator, obj.payload, cap),
         .leaf_i64 => freeItems(i64, allocator, obj.payload, cap),
         .leaf_f64 => freeItems(f64, allocator, obj.payload, cap),
         .leaf_char1 => freeItems(u8, allocator, obj.payload, cap),
@@ -1953,6 +1968,7 @@ pub fn replaceBuffer(
     const raw = uniqueHeader(header);
     return switch (uniqueImpl(header).kind()) {
         .generic_spine => resizePayload(Value, allocator, raw, new_capacity),
+        .leaf_u8 => resizePayload(u8, allocator, raw, new_capacity),
         .leaf_i64 => resizePayload(i64, allocator, raw, new_capacity),
         .leaf_f64 => resizePayload(f64, allocator, raw, new_capacity),
         .leaf_char1 => resizePayload(u8, allocator, raw, new_capacity),

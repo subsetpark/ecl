@@ -122,7 +122,7 @@ pub const RenderCursor = struct {
                         try self.writeByte(writer, '(');
                         try self.pushSequence(render.item, render.indent + 1, false);
                     },
-                    .leaf_i64, .leaf_f64, .leaf_symbol => {
+                    .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol => {
                         if (self.style == .display and header.length() > display_list_limit) {
                             try self.writeFmt(writer, "[<{d}-values-elided>]", .{header.length()});
                             return;
@@ -473,7 +473,7 @@ pub fn toOwnedDisplayString(
 fn isFlatRow(item: Value) bool {
     if (item != .list) return false;
     return switch (item.list.kind()) {
-        .leaf_i64, .leaf_f64, .leaf_symbol => true,
+        .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol => true,
         .leaf_char1, .leaf_char2, .leaf_char4, .generic_spine, .dict, .task, .module, .reserved_mask => false,
     };
 }

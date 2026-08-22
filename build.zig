@@ -64,6 +64,24 @@ pub fn build(b: *std.Build) void {
         "directory",
         fixture_files.getDirectory(),
     );
+    const archive_fixture_options = b.addOptions();
+    archive_fixture_options.addOption([]const u8, "empty", @embedFile("test/fixtures/archive/empty.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "valid", @embedFile("test/fixtures/archive/valid.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "pax", @embedFile("test/fixtures/archive/pax.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "gnu_long_name", @embedFile("test/fixtures/archive/gnu-long-name.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "absolute_path", @embedFile("test/fixtures/archive/absolute-path.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "parent_path", @embedFile("test/fixtures/archive/parent-path.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "symlink", @embedFile("test/fixtures/archive/symlink.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "hardlink", @embedFile("test/fixtures/archive/hardlink.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "char_device", @embedFile("test/fixtures/archive/char-device.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "block_device", @embedFile("test/fixtures/archive/block-device.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "fifo", @embedFile("test/fixtures/archive/fifo.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "duplicate", @embedFile("test/fixtures/archive/duplicate.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "oversized", @embedFile("test/fixtures/archive/oversized.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "malformed_tar", @embedFile("test/fixtures/archive/malformed-tar.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "malformed_pax", @embedFile("test/fixtures/archive/malformed-pax.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "malformed", @embedFile("test/fixtures/archive/malformed.tgz.hex"));
+    archive_fixture_options.addOption([]const u8, "long_path", "pkg/" ++ ("s" ** 110) ++ ".ecl");
 
     const malformed_defects = [_][]const u8{
         "wrong-name",
@@ -209,6 +227,7 @@ pub fn build(b: *std.Build) void {
     test_mod.addOptions("native_fixture_options", native_fixture_options);
     test_mod.addOptions("native_runtime_options", native_runtime_options);
     test_mod.addOptions("http_fixture_options", http_fixture_options);
+    test_mod.addOptions("archive_fixture_options", archive_fixture_options);
     test_mod.link_libc = true;
     const tests = b.addTest(.{ .root_module = test_mod });
     tests.linkage = runtime_linkage;
@@ -339,6 +358,7 @@ pub fn build(b: *std.Build) void {
     full_session_oom_mod.addImport("native-abi", native_abi);
     full_session_oom_mod.addImport("ecl-native", native_sdk);
     full_session_oom_mod.addOptions("native_fixture_options", native_fixture_options);
+    full_session_oom_mod.addOptions("archive_fixture_options", archive_fixture_options);
     full_session_oom_mod.link_libc = true;
     const full_session_oom_tests = b.addTest(.{
         .root_module = full_session_oom_mod,
@@ -357,6 +377,7 @@ pub fn build(b: *std.Build) void {
     stdlib_session_oom_mod.addImport("native-abi", native_abi);
     stdlib_session_oom_mod.addImport("ecl-native", native_sdk);
     stdlib_session_oom_mod.addOptions("native_fixture_options", native_fixture_options);
+    stdlib_session_oom_mod.addOptions("archive_fixture_options", archive_fixture_options);
     stdlib_session_oom_mod.link_libc = true;
     const stdlib_session_oom_tests = b.addTest(.{
         .root_module = stdlib_session_oom_mod,
@@ -462,6 +483,7 @@ pub fn build(b: *std.Build) void {
         worker_test_mod.addOptions("native_fixture_options", native_fixture_options);
         worker_test_mod.addOptions("native_runtime_options", native_runtime_options);
         worker_test_mod.addOptions("http_fixture_options", http_fixture_options);
+        worker_test_mod.addOptions("archive_fixture_options", archive_fixture_options);
         worker_test_mod.link_libc = true;
         const worker_tests = b.addTest(.{
             .root_module = worker_test_mod,
@@ -492,6 +514,7 @@ pub fn build(b: *std.Build) void {
     tsan_mod.addOptions("native_fixture_options", native_fixture_options);
     tsan_mod.addOptions("native_runtime_options", native_runtime_options);
     tsan_mod.addOptions("http_fixture_options", http_fixture_options);
+    tsan_mod.addOptions("archive_fixture_options", archive_fixture_options);
     tsan_mod.link_libc = true;
     const tsan_tests = b.addTest(.{
         .root_module = tsan_mod,
@@ -501,6 +524,7 @@ pub fn build(b: *std.Build) void {
             "env: concurrent readers writers and retirement reclaim production snapshots",
             "registry: concurrent commits are linearized without lost names",
             "native:",
+            "archive: unpack-tgz preserves existing destinations and has one concurrent winner",
         },
     });
     tsan_tests.linkage = runtime_linkage;
