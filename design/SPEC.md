@@ -1056,7 +1056,8 @@ deleting it and resolving again reproduces it.
 The lock is machine-owned, so comments in it are not preserved and its layout
 is canonical rather than free: a newline precedes each top-level key and each
 entry of `'packages` and `'requires`, everything below an entry stays on one
-line, and every scalar is in `str`'s canonical spelling. A reader that ignores
+line, every scalar is in `str`'s canonical spelling, and the text ends with a
+newline because a lock is a file. A reader that ignores
 whitespace paired with a writer that is layout-exact is what makes the round
 trip a fixed point — reading a canonical lock and writing it back reproduces
 its bytes — and it keeps one dependency change a one-line diff.

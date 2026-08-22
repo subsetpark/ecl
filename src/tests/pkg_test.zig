@@ -29,11 +29,82 @@ const reference_corpus =
     "[\"1.0.0-alpha\" \"1.0.0-alpha.1\" \"1.0.0-alpha.beta\" \"1.0.0-beta\" " ++
     "\"1.0.0-beta.2\" \"1.0.0-beta.11\" \"1.0.0-rc.1\" \"1.0.0\" \"1.0.1\" " ++
     "\"1.1.0\" \"2.0.0\"] ";
+
+/// A hash is `sha256-` and exactly 64 lowercase hex digits.
+const hash_a = "sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const hash_b = "sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+/// One canonical manifest, as ecl source that evaluates to its text.
+const manifest_text =
+    "\"{'format 1 'name \\\"my.proj\\\" 'version \\\"0.1.0\\\" 'requires " ++
+    "{\\\"foo\\\" {'version \\\"1.2.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+    "'hash \\\"" ++ hash_a ++ "\\\"}}}\" ";
+
+/// The canonical text of one lock, byte for byte — the artifact contract this
+/// suite is entitled to compare against, since the format is documented output.
+const canonical_lock =
+    "{'format 1\n" ++
+    " 'root \"my.proj\"\n" ++
+    " 'packages\n" ++
+    " {\"bar\" {'version \"0.3.0\" 'url \"https://e.com/b.tgz\" 'hash \"" ++ hash_b ++ "\"}\n" ++
+    "  \"foo\" {'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"" ++ hash_a ++ "\"}}\n" ++
+    " 'requires\n" ++
+    " {\"foo\" {\"bar\" \"0.3.0\"}\n" ++
+    "  \"my.proj\" {\"foo\" \"1.2.0\"}}}\n";
+
+/// Escape text into an ecl string literal, so the readable reference above
+/// stays the single source of truth for both the comparison and the layout.
+fn eclLiteral(comptime text: []const u8) []const u8 {
+    comptime {
+        var out: []const u8 = "\"";
+        for (text) |byte| out = out ++ switch (byte) {
+            '\n' => "\\n",
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            else => &[_]u8{byte},
+        };
+        return out ++ "\"";
+    }
+}
+
+const canonical_lock_source = eclLiteral(canonical_lock) ++ " ";
+
+/// The same lock as ecl source, with its entries deliberately out of order so
+/// only the emitted text can catch a missing sort.
+const unsorted_lock_source =
+    "{'format 1 'root \"my.proj\" 'packages " ++
+    "{\"foo\" {'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"" ++ hash_a ++ "\"} " ++
+    "\"bar\" {'version \"0.3.0\" 'url \"https://e.com/b.tgz\" 'hash \"" ++ hash_b ++ "\"}} " ++
+    "'requires {\"my.proj\" {\"foo\" \"1.2.0\"} \"foo\" {\"bar\" \"0.3.0\"}}} ";
 test "pkg: every export carries a body and nonempty documentation" {
-    // PENDING: Patch 4
-    // Reflection reaches all seven exports and each one is annotated, the
-    // module-level form of the prelude's embedded-vocabulary case.
-    return error.SkipZigTest;
+    // The module-level form of the prelude's embedded-vocabulary case. Seven
+    // exports, no more: everything else the module needs is private.
+    const exports = [_][]const u8{
+        "owns-prefix?", "read-lock", "read-manifest", "validate-manifest",
+        "version-max",  "version<",  "write-lock",
+    };
+    inline for (exports) |name| {
+        try support.expectStack(
+            "'pkg." ++ name ++ " body type 'pkg." ++ name ++ " doc len 0 >",
+            "'list 1",
+        );
+    }
+    // And nothing else is exported: a private helper is absent from the
+    // module's public face rather than merely undocumented.
+    try support.expectErrors(&.{
+        .{
+            .name = "a private helper is not reachable",
+            .source = "\"1.0.0\" pkg.version-checked",
+            .kind = "undefined-word",
+            .word = "pkg.version-checked",
+        },
+        .{
+            .name = "an internal predicate is not reachable",
+            .source = "\"foo\" pkg.name?",
+            .kind = "undefined-word",
+            .word = "pkg.name?",
+        },
+    });
 }
 
 test "pkg: version ordering is a strict total order over a generated corpus" {
@@ -209,44 +280,284 @@ test "pkg: version-max returns a member no element exceeds" {
 }
 
 test "pkg: read-manifest accepts the canonical manifest and rejects undeclared keys" {
-    // PENDING: Patch 4
-    // Every key is declared, so a misspelling is an error rather than an
-    // entry that is silently ignored.
-    return error.SkipZigTest;
+    try support.expectStacks(&.{
+        .{
+            .name = "a canonical manifest reads back as itself",
+            .source = manifest_text ++ "pkg.read-manifest 'name at",
+            .expected = "\"my.proj\"",
+        },
+        .{
+            // Comments are permitted in a manifest and the reader drops them,
+            // which is why nothing that rewrites the file can preserve them.
+            .name = "comments are permitted",
+            .source = "\"# a comment\\n{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
+                "'requires {}}\" pkg.read-manifest 'requires at keys len",
+            .expected = "0",
+        },
+        .{
+            .name = "validate-manifest returns its argument unchanged",
+            .source = manifest_text ++ "parse first dup pkg.validate-manifest match?",
+            .expected = "1",
+        },
+    });
+    try support.expectErrors(&.{
+        .{
+            .name = "unreadable text is the reader's own failure",
+            .source = "\"{'format 1\" pkg.read-manifest",
+            .kind = "parse",
+        },
+        .{
+            .name = "two forms are not a manifest",
+            .source = "\"{} {}\" pkg.read-manifest",
+            .kind = "shape",
+            .message_contains = "exactly one form",
+        },
+        .{
+            .name = "no forms are not a manifest",
+            .source = "\"\" pkg.read-manifest",
+            .kind = "shape",
+            .message_contains = "exactly one form",
+        },
+        .{
+            .name = "a non-dict is not a manifest",
+            .source = "\"[1 2]\" pkg.read-manifest",
+            .kind = "type",
+            .message_contains = "a manifest is a dict",
+        },
+        .{
+            // The case the declared-key rule exists for: a misspelling that a
+            // tolerant reader would ignore, leaving the requirement unapplied.
+            .name = "an undeclared key",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
+                "'requires {} 'require {}}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "exactly the keys",
+        },
+        .{
+            .name = "a missing key",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\"}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "exactly the keys",
+        },
+        .{
+            .name = "an unsupported format",
+            .source = "\"{'format 2 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
+                "'requires {}}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "format is 1",
+        },
+        .{
+            .name = "a name that is not a canonical package name",
+            .source = "\"{'format 1 'name \\\"My.Proj\\\" 'version \\\"0.1.0\\\" " ++
+                "'requires {}}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "lowercase segments",
+        },
+        .{
+            .name = "a requirement url that is not https",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" 'requires " ++
+                "{\\\"foo\\\" {'version \\\"1.0.0\\\" 'url \\\"http://e.com/f.tgz\\\" " ++
+                "'hash \\\"" ++ hash_a ++ "\\\"}}}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "https",
+        },
+        .{
+            .name = "a hash that is not sha256 and 64 lowercase hex digits",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" 'requires " ++
+                "{\\\"foo\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+                "'hash \\\"sha256-ABC\\\"}}}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "lowercase hex",
+        },
+        .{
+            // Self-requirement and a prefix collision are the same question,
+            // so one rule answers both.
+            .name = "a package may not require itself",
+            .source = "\"{'format 1 'name \\\"foo\\\" 'version \\\"0.1.0\\\" 'requires " ++
+                "{\\\"foo\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+                "'hash \\\"" ++ hash_a ++ "\\\"}}}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "own another's name",
+        },
+        .{
+            .name = "two requirements may not own one another",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" 'requires " ++
+                "{\\\"foo\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+                "'hash \\\"" ++ hash_a ++ "\\\"} " ++
+                "\\\"foo.bar\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/g.tgz\\\" " ++
+                "'hash \\\"" ++ hash_b ++ "\\\"}}}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "own another's name",
+        },
+    });
 }
 
 test "pkg: a manifest holding an executable form is rejected, not evaluated" {
-    // PENDING: Patch 4
-    // A word value anywhere in the candidate is 'domain naming the offending
-    // key. `type` reports 'word for an executable reference while a quotation
-    // is an ordinary 'list, so this is the whole inertness test.
-    return error.SkipZigTest;
+    try support.expectErrors(&.{
+        .{
+            // The quotation would write a file if anything called it. Nothing
+            // does: validation classifies it and the error names the key it
+            // was found under.
+            .name = "a quotation holding an executable reference",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
+                "'requires ((\\\"pwned\\\" \\\"/tmp/pkg-pwned\\\" io.spit))}\" " ++
+                "pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "inert data",
+            .data = &.{.{ .name = "key", .expected = .{ .symbol = "requires" } }},
+        },
+        .{
+            .name = "a bare word as a value",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
+                "'requires exit}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "inert data",
+            .data = &.{.{ .name = "key", .expected = .{ .symbol = "requires" } }},
+        },
+        .{
+            // A dict literal stores a bare word as a word value, keys
+            // included, so the key side is checked too.
+            .name = "a word nested deep inside a requirement",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" 'requires " ++
+                "{\\\"foo\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+                "'hash exit}}}\" pkg.read-manifest",
+            .kind = "domain",
+            .message_contains = "inert data",
+            .data = &.{.{ .name = "key", .expected = .{ .symbol = "requires" } }},
+        },
+    });
+    // Inertness is about executable references and not about lists. Nothing in
+    // the manifest grammar admits a bare list, so the way to see the
+    // distinction through the public surface is that an ordinary manifest —
+    // whose every string is itself a list of chars — validates at all.
 }
 
 test "pkg: read-lock and write-lock round-trip a canonical lock byte for byte" {
-    // PENDING: Patch 4
-    // The lock format is a documented artifact contract, so comparing text is
-    // the assertion rather than an inspection of implementation detail.
-    return error.SkipZigTest;
+    try support.expectStacks(&.{
+        .{
+            // Reading the canonical text and writing it back reproduces its
+            // bytes. The lock format is documented output, so comparing text
+            // is the contract rather than an inspection of internals.
+            .name = "writing a read lock reproduces its text",
+            .source = canonical_lock_source ++ "dup pkg.read-lock pkg.write-lock match?",
+            .expected = "1",
+        },
+        .{
+            // And the other direction: a lock value survives the trip.
+            .name = "reading a written lock reproduces its value",
+            .source = unsorted_lock_source ++ "dup pkg.write-lock pkg.read-lock match?",
+            .expected = "1",
+        },
+        .{
+            .name = "the text ends with a newline, because a lock is a file",
+            .source = unsorted_lock_source ++ "pkg.write-lock \"\\n\" str.ends?",
+            .expected = "1",
+        },
+    });
 }
 
 test "pkg: write-lock canonicalizes entry order and refuses an invalid lock" {
-    // PENDING: Patch 4
-    // Dict equality ignores insertion order, so only the emitted text can
-    // catch a missing sort. An invalid lock raises instead of emitting.
-    return error.SkipZigTest;
+    // The input's entries are in the opposite order to the output's. Dict
+    // equality ignores insertion order, so only the emitted text can catch a
+    // missing sort.
+    try support.expectStack(
+        unsorted_lock_source ++ "pkg.write-lock " ++ canonical_lock_source ++ "match?",
+        "1",
+    );
+    try support.expectErrors(&.{
+        .{
+            .name = "an invalid lock raises instead of emitting partial text",
+            .source = "{'format 1 'root \"a\"} pkg.write-lock",
+            .kind = "domain",
+            .message_contains = "exactly the keys",
+        },
+        .{
+            .name = "a non-dict is not a lock",
+            .source = "5 pkg.write-lock",
+            .kind = "type",
+            .message_contains = "a lock is a dict",
+        },
+    });
 }
 
 test "pkg: owns-prefix? admits a package's own name and its dotted children only" {
-    // PENDING: Patch 4
-    // Ownership continues across a `.` boundary and nowhere else, which is
-    // what stops `foo` from owning `foobar`.
-    return error.SkipZigTest;
+    try support.expectStacks(&.{
+        .{
+            // The middle case is the whole point of the word: ownership
+            // continues across a dot boundary and nowhere else.
+            .name = "own name, dotted child, and a shared prefix that is neither",
+            .source = "\"foo\" \"foo\" pkg.owns-prefix? " ++
+                "\"foo\" \"foo.bar\" pkg.owns-prefix? " ++
+                "\"foo\" \"foo.bar.baz\" pkg.owns-prefix? " ++
+                "\"foo\" \"foobar\" pkg.owns-prefix?",
+            .expected = "1 1 1 0",
+        },
+        .{
+            .name = "ownership is not symmetric",
+            .source = "\"foo.bar\" \"foo\" pkg.owns-prefix? " ++
+                "\"a.b\" \"a.b.c\" pkg.owns-prefix? " ++
+                "\"a.b\" \"a.c\" pkg.owns-prefix?",
+            .expected = "0 1 0",
+        },
+    });
+    try support.expectErrors(&.{
+        .{
+            .name = "a non-string",
+            .source = "5 \"foo\" pkg.owns-prefix?",
+            .kind = "type",
+            .message_contains = "two package names",
+        },
+        .{
+            .name = "a malformed name is not merely unowned",
+            .source = "\"foo\" \"Foo.Bar\" pkg.owns-prefix?",
+            .kind = "domain",
+            .message_contains = "lowercase segments",
+        },
+        .{
+            .name = "a doubled dot leaves an empty segment",
+            .source = "\"foo\" \"foo..bar\" pkg.owns-prefix?",
+            .kind = "domain",
+            .message_contains = "lowercase segments",
+        },
+    });
 }
 
 test "pkg: the lock keys requirements by the requiring package" {
-    // PENDING: Patch 4
-    // The retrofit door: requirements are keyed by requirer, the root under
-    // its own name, and no selection sits below a minimum recorded for it.
-    return error.SkipZigTest;
+    try support.expectStacks(&.{
+        .{
+            // The retrofit door: the table is keyed by the package that
+            // declared the requirement, root included, so a later format can
+            // record two versions of one name without a break.
+            .name = "requirements are keyed by requirer, the root under its own name",
+            .source = canonical_lock_source ++ "pkg.read-lock dup 'requires at keys sort " ++
+                "swap dup 'root at swap 'requires at over at keys",
+            .expected = "(\"foo\" \"my.proj\") \"my.proj\" (\"foo\")",
+        },
+    });
+    try support.expectErrors(&.{
+        .{
+            // A lock whose selection is below a recorded minimum cannot be
+            // trusted without re-resolving, so it is not a lock.
+            .name = "a selection below a recorded minimum",
+            .source = "{'format 1 'root \"a\" 'packages " ++
+                "{\"foo\" {'version \"1.0.0\" 'url \"https://e.com/f.tgz\" " ++
+                "'hash \"" ++ hash_a ++ "\"}} " ++
+                "'requires {\"a\" {\"foo\" \"1.2.0\"}}} pkg.write-lock",
+            .kind = "domain",
+            .message_contains = "never below a minimum",
+        },
+        .{
+            .name = "a required name with no selection",
+            .source = "{'format 1 'root \"a\" 'packages {} " ++
+                "'requires {\"a\" {\"foo\" \"1.2.0\"}}} pkg.write-lock",
+            .kind = "domain",
+            .message_contains = "has a selection",
+        },
+        .{
+            .name = "the root does not key the requirement table",
+            .source = "{'format 1 'root \"a\" 'packages {} 'requires {}} pkg.write-lock",
+            .kind = "domain",
+            .message_contains = "root's own requirements",
+        },
+    });
 }
