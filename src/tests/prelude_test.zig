@@ -148,18 +148,18 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose bodies and nonempty documentation" {
     const names = [_][]const u8{
-        "compose",    "first",        "wrap",      "literal",       "dip",    "over",
-        "partial",    "with",         "str",       "mod",           "neg",    "abs",
-        "<>",         "<=",           ">=",        "and",           "or",     "nip",
-        "keep",       "bi",           "tri",       "bi2",           "both",   "when",
-        "unless",     "case",         "signum",    "clamp",         "last",   "pair",
-        "pack",       "append",       "rest",      "reverse",       "uncons", "unappend",
-        "empty?",     "zip",          "lex-cmp",   "min-of",        "max-of", "sort",
-        "distinct",   "at-path",      "vals",      "keys-exactly?", "at-or",  "pairs",
-        "filter",     "partition",    "any?",      "all?",          "sum",    "prod",
-        "mean",       "fail",         "find",      "await-all",     "set",    "setp",
-        "assert",     "rotate",       "windows",   "each-prior",    "fold1",  "scan1",
-        "iterations", "while-values", "converges", "converge",
+        "compose",      "first",     "wrap",          "literal", "dip",      "over",
+        "partial",      "with",      "mod",           "neg",     "abs",      "<>",
+        "<=",           ">=",        "and",           "or",      "nip",      "keep",
+        "bi",           "tri",       "bi2",           "both",    "when",     "unless",
+        "case",         "signum",    "clamp",         "last",    "pair",     "pack",
+        "append",       "rest",      "reverse",       "uncons",  "unappend", "empty?",
+        "zip",          "lex-cmp",   "min-of",        "max-of",  "sort",     "distinct",
+        "at-path",      "vals",      "keys-exactly?", "at-or",   "pairs",    "filter",
+        "partition",    "any?",      "all?",          "sum",     "prod",     "mean",
+        "fail",         "find",      "await-all",     "set",     "setp",     "assert",
+        "rotate",       "windows",   "each-prior",    "fold1",   "scan1",    "iterations",
+        "while-values", "converges", "converge",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(

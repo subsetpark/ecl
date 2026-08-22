@@ -129,10 +129,12 @@ test "dict-text: join requires strings and chooses narrow char width" {
     });
 }
 
-test "dict-text: format enforces braces placeholders and canonical values" {
+test "dict-text: format splices strings and canonically renders other values" {
     try helper.expectStack(
-        "[3.14 2] \"pi={} n={} {{ok}}\" format",
-        "\"pi=3.14 n=2 {ok}\"",
+        "[\"Ada\" 2] \"name={} n={} {{ok}}\" format " ++
+            "\"foo\" str wrap \"source={}\" format " ++
+            "[\"\"] \"a{}b\" format",
+        "\"name=Ada n=2 {ok}\" \"source=\\\"foo\\\"\" \"ab\"",
     );
     try helper.expectErrors(&.{
         .{

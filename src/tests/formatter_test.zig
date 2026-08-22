@@ -139,9 +139,9 @@ test "formatter owns canonical definition section comments" {
         "# ordinary lead\n" ++
         "# defp stale-public\n" ++
         "# public details\n" ++
-        "(1)\n(-- n)\n'public def\n\n\n" ++
+        "(-- n)\n(1)\n'public def\n\n\n" ++
         "# def stale-private\n" ++
-        "(2)\n[-- n]\n'private defp\n" ++
+        "[-- n]\n(2)\n'private defp\n" ++
         "# def stale-constant\n" ++
         "\"secret\" 'constant setp\n" ++
         "42 'answer set\n" ++
@@ -152,9 +152,9 @@ test "formatter owns canonical definition section comments" {
         "# ordinary lead\n\n" ++
             "### def public\n" ++
             "# public details\n" ++
-            "(1)\n(-- n)\n'public def\n\n" ++
+            "(-- n)\n(1)\n'public def\n\n" ++
             "### defp private\n" ++
-            "(2)\n[-- n]\n'private defp\n" ++
+            "[-- n]\n(2)\n'private defp\n" ++
             "\n### defp constant\n" ++
             "\"secret\" 'constant setp\n" ++
             "\n### def answer\n" ++
@@ -167,19 +167,19 @@ test "formatter owns canonical definition section comments" {
 
     const nested =
         "(\n" ++
-        "(1)\n(-- n)\n'visible def\n" ++
+        "(-- n)\n(1)\n'visible def\n" ++
         "# note\n# def stale\n# hidden details\n" ++
-        "(2)\n(-- n)\n'hidden defp\n" ++
+        "(-- n)\n(2)\n'hidden defp\n" ++
         ") 'm @defm\n";
     try expectFormat(
         nested,
         "### module m\n" ++
             "(\n" ++
             " ### def visible\n" ++
-            " (1)\n (-- n)\n 'visible def\n # note\n\n" ++
+            " (-- n)\n (1)\n 'visible def\n # note\n\n" ++
             " ### defp hidden\n" ++
             " # hidden details\n" ++
-            " (2)\n (-- n)\n 'hidden defp\n )\n" ++
+            " (-- n)\n (2)\n 'hidden defp\n )\n" ++
             "'m\n@defm\n",
     );
     try expectParseEquivalent(nested);
@@ -187,7 +187,7 @@ test "formatter owns canonical definition section comments" {
     const nested_synthesized =
         "(\n" ++
         "# attached inside the module\n" ++
-        "(3)\n(-- n)\n'generated def\n" ++
+        "(-- n)\n(3)\n'generated def\n" ++
         ") 'm @defm\n";
     try expectFormat(
         nested_synthesized,
@@ -195,7 +195,7 @@ test "formatter owns canonical definition section comments" {
             "(\n" ++
             " ### def generated\n" ++
             " # attached inside the module\n" ++
-            " (3)\n (-- n)\n 'generated def\n" ++
+            " (-- n)\n (3)\n 'generated def\n" ++
             " )\n" ++
             "'m\n@defm\n",
     );
@@ -204,17 +204,32 @@ test "formatter owns canonical definition section comments" {
     const synthesized =
         "# attached details\n" ++
         "# remain with the definition\n" ++
-        "(3)\n(-- n)\n'generated def\n";
+        "(-- n)\n(3)\n'generated def\n";
     try expectFormat(
         synthesized,
         "### def generated\n" ++
             "# attached details\n" ++
             "# remain with the definition\n" ++
-            "(3)\n(-- n)\n'generated def\n",
+            "(-- n)\n(3)\n'generated def\n",
     );
     try expectParseEquivalent(synthesized);
 
-    const inert_dict = "{(1) (-- n) 'not-a-definition def}";
+    const duplicated_between_annotation_and_body =
+        "### def generated\n" ++
+        "(-- n)\n" ++
+        "### def generated\n" ++
+        "(3)\n" ++
+        "'generated def\n";
+    try expectFormat(
+        duplicated_between_annotation_and_body,
+        "### def generated\n" ++
+            "(-- n)\n" ++
+            "(3)\n" ++
+            "'generated def\n",
+    );
+    try expectParseEquivalent(duplicated_between_annotation_and_body);
+
+    const inert_dict = "{(-- n) (1) 'not-a-definition def}";
     try expectFormat(inert_dict, inert_dict ++ "\n");
     try expectParseEquivalent(inert_dict);
 }
@@ -222,30 +237,30 @@ test "formatter owns canonical definition section comments" {
 test "formatter reflows only structurally recognized documentation" {
     const source =
         "### def explain\n" ++
-        "(dup)\n" ++
         "(value -- value : \"This documentation contains enough ordinary prose to exceed the configured " ++
         "width and therefore needs to flow across several lines at clean word boundaries.\")\n" ++
+        "(dup)\n" ++
         "'explain def\n";
     const expected =
         "### def explain\n" ++
-        "(dup)\n" ++
         "(value -- value :\n" ++
         " \"This documentation contains enough ordinary prose to exceed the configured width and therefore\n" ++
         "  needs to flow across several lines at clean word boundaries.\")\n" ++
+        "(dup)\n" ++
         "'explain def\n";
     try expectFormat(source, expected);
 
     const square_source =
-        "(dup)\n" ++
         "[value -- value : \"This square-delimited annotation contains enough ordinary prose to exceed " ++
         "the configured width and must retain its original delimiters when reflowed.\"]\n" ++
+        "(dup)\n" ++
         "'square-doc def\n";
     const square_expected =
         "### def square-doc\n" ++
-        "(dup)\n" ++
         "[value -- value :\n" ++
         " \"This square-delimited annotation contains enough ordinary prose to exceed the configured width and\n" ++
         "  must retain its original delimiters when reflowed.\"]\n" ++
+        "(dup)\n" ++
         "'square-doc def\n";
     try expectFormat(square_source, square_expected);
 
@@ -256,16 +271,16 @@ test "formatter reflows only structurally recognized documentation" {
 
 test "doc-only prose keeps its prefix and preserves paragraphs and bullets" {
     const source =
-        "(1)\n" ++
         "(: \"  First prose line that continues softly across\n" ++
         "      physical source lines and is long enough to need canonical wrapping in the formatter output.\n\n" ++
         "      - One bullet whose continuation is also folded into the same logical bullet item.\n" ++
         "        More words for that item.\n" ++
         "      - Two.\")\n" ++
+        "(1)\n" ++
         "'documented def\n";
     const formatted = try formatter.format(allocator, source);
     defer allocator.free(formatted);
-    try std.testing.expect(std.mem.startsWith(u8, formatted, "### def documented\n(1)\n(: \"First prose line"));
+    try std.testing.expect(std.mem.startsWith(u8, formatted, "### def documented\n(: \"First prose line"));
     try std.testing.expect(std.mem.indexOf(u8, formatted, "\n    - One bullet") != null);
     try std.testing.expect(std.mem.indexOf(u8, formatted, "\n    - Two.\")") != null);
     var lines = std.mem.splitScalar(u8, formatted, '\n');
@@ -302,7 +317,7 @@ test "formatting preserves parsed structure across the ordinary grammar" {
 fn formatterAllocationProbe(failing: std.mem.Allocator) !void {
     const output = try formatter.format(
         failing,
-        "(dup) (value -- value : \"Documentation that exercises normalized prose.\") 'x def",
+        "(value -- value : \"Documentation that exercises normalized prose.\") (dup) 'x def",
     );
     failing.free(output);
 }

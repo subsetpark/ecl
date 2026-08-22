@@ -3,133 +3,135 @@
 # non-ASCII characters unchanged.
 (
  ### defp blanks
- (" \t\n\u{B}\u{C}\u{D}")
  (-- string : "Return the ASCII whitespace characters recognized by trimming operations.")
+ (" \t\n\u{B}\u{C}\u{D}")
  'blanks defp
 
  ### defp type-error
- (wrap ('kind 'type 'msg) swap compose dict-of)
  (message -- error : "Build a type error with the given message.")
+ (wrap ('kind 'type 'msg) swap compose dict-of)
  'type-error defp
 
  ### def str?
- (dup type 'list match? ((type 'char match?) all?) (pop 0) if)
  (value -- bool :
   "Return 1 for a list containing only characters and 0 for every other value.
 
    The empty string and empty list are the same value and return 1.")
+ (dup type 'list match? ((type 'char match?) all?) (pop 0) if)
  'str? def
 
  ### defp checked-error
- (|candidate failure| candidate str? failure assert candidate)
  (candidate failure -- string :
   "Validate and return a string, using the supplied error on failure.")
+ (|candidate failure| candidate str? failure assert candidate)
  'checked-error defp
 
  ### defp checked
- (type-error checked-error)
  (candidate message -- string : "Validate and return a string, using the message for a type error.")
+ (type-error checked-error)
  'checked defp
 
  ### defp checked-int
- (|candidate failure| candidate type 'int match? failure assert candidate)
  (candidate failure -- integer :
   "Validate and return an integer, using the supplied error on failure.")
+ (|candidate failure| candidate type 'int match? failure assert candidate)
  'checked-int defp
 
  ### defp checked-pair
- (type-error (|a b failure| a failure checked-error pop b failure checked-error pop a b) call)
  (first second message -- first second : "Validate and return two strings.")
+ (type-error (|a b failure| a failure checked-error pop b failure checked-error pop a b) call)
  'checked-pair defp
 
  ### defp checked-triple
+ (first second third message -- first second third : "Validate and return three strings.")
  (type-error
   (|a b c failure|
    a failure checked-error pop b failure checked-error pop c failure checked-error pop a b c)
   call)
- (first second third message -- first second third : "Validate and return three strings.")
  'checked-triple defp
 
  ### defp checked-string-int
+ (text integer message -- text integer : "Validate and return a string and an integer.")
  (type-error
   (|text integer failure|
    text failure checked-error pop integer failure checked-int pop text integer)
   call)
- (text integer message -- text integer : "Validate and return a string and an integer.")
  'checked-string-int defp
 
  ### def upper
+ (string -- string : "Convert ASCII lowercase letters to uppercase.")
  ("str.upper expects a string" checked
   dup dup \a >= swap \z <= and 32 * -)
- (string -- string : "Convert ASCII lowercase letters to uppercase.")
  'upper def
 
  ### def lower
+ (string -- string : "Convert ASCII uppercase letters to lowercase.")
  ("str.lower expects a string" checked
   dup dup \A >= swap \Z <= and 32 * +)
- (string -- string : "Convert ASCII uppercase letters to lowercase.")
  'lower def
 
  ### defp trim-left-valid
+ (string -- string : "Remove leading ASCII whitespace from a validated string.")
  (dup blanks in? not where dup len 0 =
   (pop pop "")
   (first drop)
   if)
- (string -- string : "Remove leading ASCII whitespace from a validated string.")
  'trim-left-valid defp
 
  ### def trim-left
- ("str.trim-left expects a string" checked trim-left-valid)
  (string -- string : "Remove leading ASCII whitespace.")
+ ("str.trim-left expects a string" checked trim-left-valid)
  'trim-left def
 
  ### defp trim-right-valid
+ (string -- string : "Remove trailing ASCII whitespace from a validated string.")
  (dup blanks in? not where dup len 0 =
   (pop pop "")
   (last 1 + take)
   if)
- (string -- string : "Remove trailing ASCII whitespace from a validated string.")
  'trim-right-valid defp
 
  ### def trim-right
- ("str.trim-right expects a string" checked trim-right-valid)
  (string -- string : "Remove trailing ASCII whitespace.")
+ ("str.trim-right expects a string" checked trim-right-valid)
  'trim-right def
 
  ### def trim
- ("str.trim expects a string" checked trim-left-valid trim-right-valid)
  (string -- string : "Remove ASCII whitespace from both ends of a string.")
+ ("str.trim expects a string" checked trim-left-valid trim-right-valid)
  'trim def
 
  ### defp opens-with?
- (|s p| s p len take p match?)
  (string prefix -- bool : "Compare a validated string with a prefix no longer than the string.")
+ (|s p| s p len take p match?)
  'opens-with? defp
 
  ### defp closes-with?
- (|s p| s p len neg take p match?)
  (string suffix -- bool : "Compare a validated string with a suffix no longer than the string.")
+ (|s p| s p len neg take p match?)
  'closes-with? defp
 
  ### def starts?
+ (string prefix -- bool : "Return 1 when the string starts with the prefix.")
  ("str.starts? expects a string and a string prefix" checked-pair
   (|s p| s len p len >= s p pair (opens-with?) with (0) if) call)
- (string prefix -- bool : "Return 1 when the string starts with the prefix.")
  'starts? def
 
  ### def ends?
+ (string suffix -- bool : "Return 1 when the string ends with the suffix.")
  ("str.ends? expects a string and a string suffix" checked-pair
   (|s p| s len p len >= s p pair (closes-with?) with (0) if) call)
- (string suffix -- bool : "Return 1 when the string ends with the suffix.")
  'ends? def
 
  ### def contains?
+ (string needle -- bool : "Return 1 when the needle occurs in the string. An empty needle matches.")
  ("str.contains? expects a string and a string needle" checked-pair
   (|s n| n len 0 = s n split len 1 > or) call)
- (string needle -- bool : "Return 1 when the needle occurs in the string. An empty needle matches.")
  'contains? def
 
  ### def index-of
+ (string needle -- index :
+  "Return the index of the first occurrence of the needle. Raise 'domain when it is absent.")
  ("str.index-of expects a string and a string needle" checked-pair
   (|s n| n len 0 =
    (0)
@@ -140,17 +142,16 @@
    with
    if)
   call)
- (string needle -- index :
-  "Return the index of the first occurrence of the needle. Raise 'domain when it is absent.")
  'index-of def
 
  ### def replace
+ (string needle replacement -- string : "Replace every occurrence of the needle.")
  ("str.replace expects string, needle, and replacement strings" checked-triple
   (|s n r| s n split r join) call)
- (string needle replacement -- string : "Replace every occurrence of the needle.")
  'replace def
 
  ### def repeat
+ (string count -- string : "Concatenate count copies of the string. Count must be nonnegative.")
  ("str.repeat expects a string and an integer count" checked-string-int
   (|s n| n 0 >=
    {'kind 'domain 'msg "str.repeat requires a nonnegative count"} assert
@@ -159,19 +160,18 @@
    ("")
    if)
   call)
- (string count -- string : "Concatenate count copies of the string. Count must be nonnegative.")
  'repeat def
 
  ### def pad-left
+ (string width -- string : "Add leading spaces until the string reaches the requested width.")
  ("str.pad-left expects a string and an integer width" checked-string-int
   (|s w| " " w s len - 0 max take s pair raze) call)
- (string width -- string : "Add leading spaces until the string reaches the requested width.")
  'pad-left def
 
  ### def pad-right
+ (string width -- string : "Add trailing spaces until the string reaches the requested width.")
  ("str.pad-right expects a string and an integer width" checked-string-int
   (|s w| s " " w s len - 0 max take pair raze) call)
- (string width -- string : "Add trailing spaces until the string reaches the requested width.")
  'pad-right def
 
  )

@@ -140,7 +140,8 @@ const entries = [_]Metadata{
     .{ .name = "has?", .effect = "dict key -- bool", .text = "Return whether a dictionary contains a whole-value key." },
     .{ .name = "split", .effect = "string separator -- parts", .text = "Split a string at every occurrence of a separator; an empty separator yields its Unicode scalar strings." },
     .{ .name = "join", .effect = "strings separator -- string", .text = "Join a list of strings with a separator string." },
-    .{ .name = "format", .effect = "values template -- string", .text = "Interpolate a list of values into a template's positional placeholders." },
+    .{ .name = "str", .effect = "value -- string", .text = "Return the canonical printed representation of a value as a string." },
+    .{ .name = "format", .effect = "values template -- string", .text = "Interpolate strings directly and other values canonically into a template's positional placeholders." },
 };
 
 comptime {

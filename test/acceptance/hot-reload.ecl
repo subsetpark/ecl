@@ -1,7 +1,8 @@
 ### module math
 (
  ### def inc
- (1 +) (n -- n) 'inc def)
+ (n -- n)
+ (1 +) 'inc def)
 'math
 @defm
 'math.inc 'inc import
@@ -11,7 +12,8 @@
 ### module math
 (
  ### def inc
- (2 +) (n -- n) 'inc def)
+ (n -- n)
+ (2 +) 'inc def)
 'math
 @defm
 10 math.inc io.pp 20 inc io.pp 30 m.inc io.pp

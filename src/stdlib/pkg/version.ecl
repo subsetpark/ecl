@@ -12,59 +12,60 @@
  'identifier-chars setp
 
  ### defp chars-in?
+ (string characters -- bool :
+  "Return 1 when a string is nonempty and contains only characters from the given set.")
  (|string characters|
   string empty? not
   string characters (in?) partial all?
   and)
- (string characters -- bool :
-  "Return 1 when a string is nonempty and contains only characters from the given set.")
  'chars-in? defp
 
  ### defp digits?
- (digit-chars chars-in?)
  (string -- bool : "Return 1 for a nonempty string of decimal digits.")
+ (digit-chars chars-in?)
  'digits? defp
 
  ### defp numeric-field?
+ (string -- bool : "Return 1 for a decimal field with no leading zero except 0.")
  ([(digits? not) (pop 0)
    (len 1 =) (pop 1)
    (first \0 <>)]
   cond)
- (string -- bool : "Return 1 for a decimal field with no leading zero except 0.")
  'numeric-field? defp
 
  ### defp identifier?
- (identifier-chars chars-in?)
  (string -- bool : "Return 1 for a nonempty prerelease identifier.")
+ (identifier-chars chars-in?)
  'identifier? defp
 
  ### defp prerelease-identifier?
+ (string -- bool :
+  "Return 1 for a valid prerelease identifier. Numeric identifiers may not have leading zeros.")
  ([(identifier? not) (pop 0)
    (digits?) (numeric-field?)
    (pop 1)]
   cond)
- (string -- bool :
-  "Return 1 for a valid prerelease identifier. Numeric identifiers may not have leading zeros.")
  'prerelease-identifier? defp
 
  ### defp hyphen-parts
- ("-" split)
  (candidate -- parts :
   "Split a version at hyphens. The first item is the core; later items make up the prerelease.")
+ ("-" split)
  'hyphen-parts defp
 
  ### defp core-fields
- (hyphen-parts first "." split)
  (candidate -- fields : "Return the dot-separated fields before the first hyphen.")
+ (hyphen-parts first "." split)
  'core-fields defp
 
  ### defp identifiers
- (hyphen-parts dup len 1 = (pop []) (rest "-" join "." split) if)
  (candidate -- identifiers :
   "Return the dot-separated prerelease identifiers, or an empty list when none are present.")
+ (hyphen-parts dup len 1 = (pop []) (rest "-" join "." split) if)
  'identifiers defp
 
  ### def validate
+ (candidate -- parts : "Validate a version and return [core-fields prerelease-identifiers].")
  (dup str.str?
   {'kind 'type 'msg "a package version is a string"} assert
   dup "+" split len 1 =
@@ -80,56 +81,57 @@
    'msg "a prerelease identifier is alphanumeric or hyphen, with no leading zero when numeric"}
   assert
   pair)
- (candidate -- parts : "Validate a version and return [core-fields prerelease-identifiers].")
  'validate def
 
  ### defp field-cmp
- (over len over len = (cmp) (swap len swap len cmp) if)
  (left right -- order : "Compare two validated decimal fields by numeric value.")
+ (over len over len = (cmp) (swap len swap len cmp) if)
  'field-cmp defp
 
  ### defp core-cmp
- ((field-cmp) lex-cmp)
  (left right -- order : "Compare validated major, minor, and patch fields in order.")
+ ((field-cmp) lex-cmp)
  'core-cmp defp
 
  ### defp identifier-cmp
+ (left right -- order :
+  "Compare two prerelease identifiers. Numeric identifiers sort before nonnumeric identifiers.")
  ([(digits? swap digits? =) (over digits? (field-cmp) (cmp) if)
    (over digits? (pop pop -1) (pop pop 1) if)]
   cond)
- (left right -- order :
-  "Compare two prerelease identifiers. Numeric identifiers sort before nonnumeric identifiers.")
  'identifier-cmp defp
 
  ### defp prerelease-cmp
+ (left right -- order :
+  "Compare prereleases. A release version sorts after a version with the same core and a
+   prerelease.")
  ([(empty? swap empty? and) (pop pop 0)
    (pop empty?) (pop pop 1)
    (nip empty?) (pop pop -1)
    ((identifier-cmp) lex-cmp)]
   cond)
- (left right -- order :
-  "Compare prereleases. A release version sorts after a version with the same core and a
-   prerelease.")
  'prerelease-cmp defp
 
  ### defp version-cmp
+ (left right -- order : "Compare validated versions by core, then prerelease.")
  (over first over first core-cmp
   dup 0 = (pop swap 1 at swap 1 at prerelease-cmp) (nip nip) if)
- (left right -- order : "Compare validated versions by core, then prerelease.")
  'version-cmp defp
 
  ### def less?
- (validate swap validate swap version-cmp -1 =)
  (left right -- bool :
   "Return 1 when the left version has lower SemVer 2.0.0 precedence. Validate both versions.")
+ (validate swap validate swap version-cmp -1 =)
  'less? def
 
  ### defp keep-larger
- (over 1 at over 1 at version-cmp -1 = (nip) (pop) if)
  (accumulated candidate -- accumulated : "Return the entry with higher version precedence.")
+ (over 1 at over 1 at version-cmp -1 = (nip) (pop) if)
  'keep-larger defp
 
  ### def max
+ (versions -- version :
+  "Return the highest version in a nonempty list. Validate every item before comparing.")
  (dup type 'list match?
   {'kind 'type 'msg "pkg.version.max expects a list of version strings"} assert
   dup empty? not
@@ -139,8 +141,6 @@
   (dup validate pair) each
   (keep-larger) fold1
   first)
- (versions -- version :
-  "Return the highest version in a nonempty list. Validate every item before comparing.")
  'max def
  )
 'pkg.version

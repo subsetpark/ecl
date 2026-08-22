@@ -174,7 +174,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "{'a 1} 'b 2 put keys pop [\"a\" \"b\"] \"—\" join \"—\" split pop " ++
             "['a 'b] [1 2] to-dict keys pop ['c 3] dict-of keys pop " ++
             "[1 2 3] 1 9 put pop \"ab\" reverse 0 \\λ put pop " ++
-            "['a 1] str [1] \"{}\" format pop",
+            "['a 1] str [1] \"{}\" format pop [\"raw\"] \"{}\" format pop",
     );
     try runOk(
         &runtime,
@@ -222,7 +222,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-reflection.ecl",
-        "((1) ( -- n ) 'f def) 'reflection-module @defm " ++
+        "(( -- n ) (1) 'f def) 'reflection-module @defm " ++
             "'reflection-module.f 'f import 'reflection-module.f body pop words " ++
             "'f which 'reflection-module.f see",
     );
@@ -240,9 +240,9 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-module.ecl",
-        "(1 'x setp (x) ( -- n ) 'get def) 'allocation-module @defm " ++
+        "(1 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm " ++
             "'allocation-module.get 'get import get pop 'short 'allocation-module alias short.get pop " ++
-            "(2 'x setp (x) ( -- n ) 'get def) 'allocation-module @defm get pop " ++
+            "(2 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm get pop " ++
             "(((dup) 'f def) 'bad @defm) @attempt pop " ++
             // A non-empty construction stack is captured as durable slot
             // state, so capture, commit, and re-registration discard each
@@ -284,11 +284,11 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-definition-initial.ecl",
-        "(1) (-- n : \"Old.\") 'allocation-target def",
+        "(-- n : \"Old.\") (1) 'allocation-target def",
     );
     const outcome = runtime.runUnit(
         "oom-definition-replacement.ecl",
-        "(2) (input -- output : \"Replacement.\") 'allocation-target def",
+        "(input -- output : \"Replacement.\") (2) 'allocation-target def",
     ) catch |err| {
         try runOk(
             &runtime,

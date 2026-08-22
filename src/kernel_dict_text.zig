@@ -38,11 +38,90 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
                 .has => hasPrimitive(evaluator),
                 .split => splitPrimitive(evaluator),
                 .join => joinPrimitive(evaluator),
+                .str => strPrimitive(evaluator),
                 .format => formatPrimitive(evaluator),
             };
         }
     }.run;
 }
+
+fn strPrimitive(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    const renderer = try printer.OwnedStringCursor.init(evaluator.allocator(), item.borrow());
+    try evaluator.startDriver(StrDriver{
+        .item = .init(item.take()),
+        .work = .init(.{ .rendering = renderer }),
+    });
+}
+
+const StrPhase = union(enum) {
+    rendering: printer.OwnedStringCursor,
+    materializing: struct {
+        bytes: []u8,
+        cursor: storage.Utf8Materializer,
+    },
+    complete,
+
+    pub fn retire(
+        self: *StrPhase,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (self.*) {
+            .rendering => |*renderer| renderer.deinit(),
+            .materializing => |*materializing| {
+                materializing.cursor.retire(releases);
+                allocator.free(materializing.bytes);
+            },
+            .complete => {},
+        }
+        self.* = .complete;
+    }
+};
+
+const StrDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    pub const inline_driver = true;
+    item: heap.Owned(Value),
+    work: heap.Owned(StrPhase),
+
+    pub fn advance(evaluator: *Machine, self: *StrDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const phase = self.work.borrowMut();
+        return switch (phase.*) {
+            .rendering => |*renderer| switch (try renderer.advance(machine.kernel_poll_quantum)) {
+                .pending => .yielded,
+                .complete => |bytes| transitioned: {
+                    renderer.deinit();
+                    phase.* = .{ .materializing = .{
+                        .bytes = bytes,
+                        .cursor = .init(evaluator.allocator(), bytes),
+                    } };
+                    break :transitioned .yielded;
+                },
+            },
+            .materializing => |*materializing| switch (materializing.cursor.advance(
+                machine.kernel_poll_quantum,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidUtf8 => return evaluator.fail(
+                    .domain,
+                    "canonical rendering is not valid UTF-8",
+                ),
+            }) {
+                .pending => .yielded,
+                .complete => |result| completed: {
+                    materializing.cursor.deinit();
+                    evaluator.allocator().free(materializing.bytes);
+                    phase.* = .complete;
+                    break :completed .{ .output = result };
+                },
+            },
+            .complete => unreachable,
+        };
+    }
+};
 
 fn keysPrimitive(evaluator: *Machine) MachineError!void {
     var dictionary = try evaluator.popDict();
@@ -1064,12 +1143,26 @@ const FormatDriver = struct {
                     if (self.replacement_index == self.replacements.borrow().len) {
                         return evaluator.fail(.contract, "format has more placeholders than values");
                     }
-                    self.renderer = .init(try printer.OwnedStringCursor.init(
-                        evaluator.allocator(),
-                        list.atUnchecked(self.values.borrow(), self.replacement_index),
-                    ));
                     self.cursor += 2;
-                    self.phase = .render;
+                    const replacement = list.atUnchecked(
+                        self.values.borrow(),
+                        self.replacement_index,
+                    );
+                    if (replacement.isString()) {
+                        self.replacements.borrow()[self.replacement_index] = .{ .text = replacement };
+                        try addFormatCount(
+                            evaluator,
+                            &self.output_count,
+                            @intCast(replacement.list.length()),
+                        );
+                        self.replacement_index += 1;
+                    } else {
+                        self.renderer = .init(try printer.OwnedStringCursor.init(
+                            evaluator.allocator(),
+                            replacement,
+                        ));
+                        self.phase = .render;
+                    }
                 } else if (pair.codepoint == '{' or pair.codepoint == '}') {
                     return evaluator.fail(.domain, "format contains an unmatched brace");
                 } else {

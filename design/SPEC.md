@@ -290,14 +290,16 @@ always applies it. Values are bound by capturing them in a body.
 - `(body) 'name def` binds a word: reference applies the body. The body
   must be a list (a non-list is an error directing to `set`); a list of
   plain data is legal and yields a multi-value constant word.
-- `value 'name set` binds a constant. It is sugar, defined in ecl as
-  `swap literal swap def`: the value is captured with `literal`, so the
+- `annotation? value 'name set` binds a constant. It is sugar, defined in ecl
+  as `swap literal swap def`: the value is captured with `literal`, so the
   published body is `((value) first)`. Reference applies that body and
   pushes exactly the captured value, quotations included — the capture is
   inert, so nothing in it executes or resolves. `v 'name set` is therefore
   observationally `v literal 'name def`, exactly: the sugar synthesizes no
-  annotation, so `which` and `see` report a public `def` with no effect and
-  no documentation, and nothing distinguishes the two spellings. `set` is
+  annotation of its own, while an annotation beneath `v` is preserved for
+  `def` to consume. `which` and `see` report the resulting public `def`; an
+  unannotated `set` has no effect or documentation, and nothing distinguishes
+  it from the corresponding `literal` plus `def` spelling. `set` is
   environment assignment, not a lexical binding form. For ordinary local
   values, prefer stack flow or binder locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
@@ -312,14 +314,13 @@ always applies it. Values are bound by capturing them in a body.
 
 ### Definition annotations
 
-A definition may place one annotation quotation between the body and the
-quoted name:
+A definition may place one annotation quotation immediately before its body:
 
 ```
 (body) 'name def
-(body) (before -- after) 'name def
-(body) (: "Documentation.") 'name def
-(body) (before -- after : "Documentation.") 'name def
+(before -- after) (body) 'name def
+(: "Documentation.") (body) 'name def
+(before -- after : "Documentation.") (body) 'name def
 ```
 
 The annotation is ordinary quotation data — no special grammar — and is
@@ -328,11 +329,12 @@ markers and the quoted symbols `'--`/`':` are inert. A recognized
 annotation is validated as a whole before the binding publishes: at most
 one marker of each kind, `--` before `:`, only words around `--`, and
 exactly one string after `:`. A malformed recognized annotation is a
-`'domain` error, never reinterpreted as a body; an annotation with no body
-beneath it is `'underflow`. `set`/`setp` capture their value with
-`literal` before `def`/`defp` sees it, so the value sits nested one list
-deep inside the capture body, where markers are inert: a constant holding
-bare marker words is never reinterpreted as an annotation.
+`'domain` error. The quotation adjacent to the name is unconditionally the
+body; only the value beneath it is considered for annotation recognition.
+`set`/`setp` capture their value with `literal` before `def`/`defp` sees it,
+so marker words belonging to the captured value sit nested inside the body
+and remain inert. A separate annotation beneath that value is still visible
+to `def`/`defp`, giving constants the same optional metadata as words.
 
 Annotations are optional everywhere. Module `def`/`defp` accept the same
 four forms as top-level `def`: no annotation, effect only, documentation
@@ -359,7 +361,7 @@ The after portion of an effect is either **all named slots** or exactly
 the token `...`:
 
 ```
-(body) (result on-ok on-err -- ...) 'case def
+(result on-ok on-err -- ...) (body) 'case def
 ```
 
 `...` declares a **fixed before row and a variable after row**: how many
@@ -804,8 +806,9 @@ list, specialized or not, so this is the honest form of the question.
 
 Observable text I/O lives here: `io.pp`, `io.prin`, `io.print`, `io.inspect`,
 `io.stdin`, `io.slurp`, `io.spit`, and `io.lines`. A qualified reference or
-an explicit import such as `'io.print 'print import` makes the boundary explicit. `str`, which canonically renders any
-value *as a string value* without performing I/O, remains in the prelude.
+an explicit import such as `'io.print 'print import` makes the boundary
+explicit. Core `str` canonically renders any value *as a string value* without
+performing I/O.
 
 ### csv
 
@@ -1315,7 +1318,7 @@ on a form's first word. Specifics:
   attached to their neighboring forms.
 - Strings are indivisible and byte-preserved, with one exception: the
   docstring of a structurally recognized definition annotation immediately
-  followed by `'name def`/`defp` is refilled paragraph-aware (semantics
+  preceding a body and `'name def`/`defp` is refilled paragraph-aware (semantics
   unchanged — `doc` canonicalization already ignores soft wrapping).
 - Every structurally literal definition block is introduced by a navigation
   comment: `### def <name>` for `def`/`set`, and `### defp <name>` for
@@ -1638,13 +1641,13 @@ the repeated boundary value is not appended. Defined in ecl over `unfold`.
 `( x -- y )` — **Pervasive.** Cosine; float transcendental.
 
 ### def
-`( body annotation? 'name -- )` — Bind a quotation to a public word, with
+`( annotation? body 'name -- )` — Bind a quotation to a public word, with
 optional effect and documentation metadata. See Definition annotations
 for the annotation forms and validation; see Modules for module-context
 requirements.
 
 ### defp
-`( body annotation? 'name -- )` — Bind a private module word, with
+`( annotation? body 'name -- )` — Bind a private module word, with
 optional effect and documentation metadata. A top-level `defp` is an
 error.
 
@@ -1761,9 +1764,11 @@ effect loop: left-to-right, collects nothing.
 
 ### format
 `( values template -- string )` — Interpolate a list of values into the
-template's `{}` positional placeholders, each filled with the value's
-`str`; `{{` and `}}` are literal braces. `[3.14 2] "pi={} n={}" format`
-is `"pi=3.14 n=2"`.
+template's `{}` positional placeholders. A string contributes its contents;
+every other value contributes its canonical `str`. `{{` and `}}` are literal
+braces. `["Ada" 2] "name={} n={}" format` is `"name=Ada n=2"`. Apply
+`str` explicitly before `format` when a string's quoted source representation
+is wanted.
 
 ### getenv
 `( name -- string )` — The value of an environment variable, read from an
@@ -2045,16 +2050,16 @@ provenance fall back to their canonical value form. Native and module origins
 are displayed.
 
 ### set
-`( value 'name -- )` — Bind a value as a constant word in the current
+`( annotation? value 'name -- )` — Bind a value as a constant word in the current
 environment. Reference applies the constant's body and pushes the exact
 captured value, quotations included. Defined in ecl as
 `swap literal swap def`, so `v 'name set` is observationally
-`v literal 'name def`: the stored body is `((v) first)` and no metadata is
-published at all, which `which` and `see` both show. The value is captured
-before `def` sees it and therefore can never be read as an annotation.
+`v literal 'name def`: the stored body is `((v) first)`. An optional
+annotation beneath `v` is published as the constant's metadata; marker words
+inside `v` are nested by `literal` and remain captured data.
 
 ### setp
-`( value 'name -- )` — Bind a private module constant. Defined in ecl as
+`( annotation? value 'name -- )` — Bind a private module constant. Defined in ecl as
 `swap literal swap defp`. A top-level `setp` is an error, raised by the
 `defp` it calls.
 
@@ -2093,7 +2098,7 @@ has `max(len-width+1, 0)` elements.
 ### str
 `( value -- string )` — The canonical printed representation; carries the
 round-trip guarantee (see Printing): reading it back yields the same
-value, task handles excepted. Equivalent to `wrap "{}" format`.
+value, task handles excepted.
 
 ### sum
 `( sequence -- total )` — Sum of a numeric sequence; 0 when empty.
@@ -2267,7 +2272,7 @@ Semantically `io.slurp "\n" split`.
 ### pp
 `( value -- )` — Pretty-print any value plus newline in the display layout of
 Printing. Best-effort: huge leaves may be elided, so there is no round-trip
-guarantee. Use prelude `str` for canonical rendering.
+guarantee. Use core `str` for canonical rendering.
 
 ### prin
 `( string -- )` — Write a string's characters as UTF-8 without adding a

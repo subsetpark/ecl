@@ -29,7 +29,7 @@ primitives, operationalized as two rules:
 
    The same audit lexes `src/prelude.ecl` well enough to distinguish
    comments from multiline strings and requires each top-level definition
-   to be a `### def <name>` / attached comments / body / annotation /
+   to be a `### def <name>` / attached comments / annotation / body /
    matching quoted name / `def` block. This source-layout rule lives in
    build tooling, deliberately not in a runtime test that searches
    implementation text.
@@ -1084,8 +1084,9 @@ honest source with no public dual representation.
   the only routes to those words. The
   primitive callbacks keep host authority private, while `print`, `inspect`,
   and `lines` schedule fixed quotations over sibling exports. The canonical
-  any-value renderer `str` remains in the prelude because it produces a value
-  and performs no I/O; the `str` module contains only transformations whose
+  any-value renderer `str` is a bounded core primitive because `format`
+  interpolates string contents directly; it still produces a value and
+  performs no I/O. The `str` module contains only transformations whose
   subject is a string.
 - **Static linkage needs no entry symbol.** `ecl.module` takes a `linkage`
   spec: a dynamically loaded extension exports `ecl_module_abi_v1`, while a

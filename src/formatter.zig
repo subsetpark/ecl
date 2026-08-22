@@ -421,6 +421,10 @@ const Formatter = struct {
                 .space => newlines += lineBreakCount(trivia.bytes),
                 .comment => {
                     if (existingDefinitionHeader(sequence, part_index, trivia.bytes)) |header| {
+                        if (pending_definition == header.part) {
+                            newlines = 0;
+                            continue;
+                        }
                         if (have_content) try self.rootBreak(&output, &line, 2);
                         try line.append(self.allocator(), try self.definitionHeader(header.name, header.private));
                         have_content = true;
@@ -494,7 +498,11 @@ const Formatter = struct {
                 }
                 have_content = true;
                 previous_comment = false;
-                pending_definition = null;
+                if (!(skip_header and isAnnotationCandidate(sequence.parts[part_index].form) and
+                    definitionInfo(sequence, part_index) != null))
+                {
+                    pending_definition = null;
+                }
                 newlines = 0;
             },
         };
@@ -585,6 +593,10 @@ const Formatter = struct {
                 .space => newlines += lineBreakCount(trivia.bytes),
                 .comment => {
                     if (existingDefinitionHeader(sequence, part_index, trivia.bytes)) |header| {
+                        if (pending_definition == header.part) {
+                            newlines = 0;
+                            continue;
+                        }
                         force_break = true;
                         try self.appendHardlines(&output, if (have_content) 2 else 1);
                         try output.append(self.allocator(), try self.definitionHeader(header.name, header.private));
@@ -664,7 +676,12 @@ const Formatter = struct {
                 have_content = true;
                 previous_comment = false;
                 previous_form = part_index;
-                pending_definition = null;
+                if (!(pending_definition == part_index and
+                    isAnnotationCandidate(sequence.parts[part_index].form) and
+                    definitionInfo(sequence, part_index) != null))
+                {
+                    pending_definition = null;
+                }
                 newlines = 0;
             },
         };
@@ -700,7 +717,8 @@ const Formatter = struct {
         part_index: usize,
         form_item: *Form,
     ) Error!?Annotation {
-        if (!definitionFollows(parent, part_index)) return null;
+        const body_index = nextFormPart(parent, part_index) orelse return null;
+        if (!definitionFollows(parent, body_index)) return null;
         const delimited = switch (form_item.kind) {
             .delimited => |item| item,
             else => return null,
@@ -896,17 +914,25 @@ fn definitionFollows(sequence: Sequence, current: usize) bool {
 }
 const DefinitionInfo = struct { name: []const u8, private: bool };
 fn definitionInfo(sequence: Sequence, start: usize) ?DefinitionInfo {
-    const body = sequence.parts[start].form;
-    const following = nextFormPart(sequence, start) orelse return null;
-    const anchor = if (isAnnotationCandidate(sequence.parts[following].form)) following else start;
-    if (!definitionFollows(sequence, anchor)) return null;
-    const quoted_index = nextFormPart(sequence, anchor).?;
+    const first = sequence.parts[start].form;
+    if (!isAnnotationCandidate(first)) {
+        if (previousFormPart(sequence, start)) |previous| {
+            if (isAnnotationCandidate(sequence.parts[previous].form)) return null;
+        }
+    }
+    const body_index = if (isAnnotationCandidate(first))
+        nextFormPart(sequence, start) orelse return null
+    else
+        start;
+    const body = sequence.parts[body_index].form;
+    if (!definitionFollows(sequence, body_index)) return null;
+    const quoted_index = nextFormPart(sequence, body_index).?;
     const terminator_index = nextFormPart(sequence, quoted_index).?;
     const terminator = sequence.parts[terminator_index].form.kind.atom;
     const set_binding = std.mem.eql(u8, terminator, "set") or std.mem.eql(u8, terminator, "setp");
     if (set_binding) {
-        if (anchor != start or !isLiteralValueForm(body)) return null;
-    } else if (!isListForm(body) or isAnnotationCandidate(body)) return null;
+        if (!isLiteralValueForm(body)) return null;
+    } else if (!isListForm(body)) return null;
     const quoted = sequence.parts[quoted_index].form.kind.atom;
     return .{
         .name = quoted[1..],
@@ -986,6 +1012,17 @@ fn nextFormPart(sequence: Sequence, after: usize) ?usize {
     };
     return null;
 }
+fn previousFormPart(sequence: Sequence, before: usize) ?usize {
+    var index = before;
+    while (index != 0) {
+        index -= 1;
+        switch (sequence.parts[index]) {
+            .form => return index,
+            .trivia => {},
+        }
+    }
+    return null;
+}
 fn isListForm(form_item: *const Form) bool {
     return switch (form_item.kind) {
         .delimited => |item| item.open[0] != '{',
@@ -1015,7 +1052,16 @@ fn existingDefinitionHeader(sequence: Sequence, index: usize, bytes: []const u8)
         !std.mem.startsWith(u8, bytes, "### def ") and
         !std.mem.startsWith(u8, bytes, "# defp ") and
         !std.mem.startsWith(u8, bytes, "### defp ")) return null;
-    const part = nextFormPart(sequence, index) orelse return null;
+    const next = nextFormPart(sequence, index) orelse return null;
+    const part = if (definitionInfo(sequence, next) != null)
+        next
+    else if (previousFormPart(sequence, next)) |previous|
+        if (nextFormPart(sequence, previous) == next and definitionInfo(sequence, previous) != null)
+            previous
+        else
+            return null
+    else
+        return null;
     return .{
         .part = part,
         .name = definitionName(sequence, part) orelse return null,

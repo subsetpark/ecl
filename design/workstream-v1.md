@@ -306,9 +306,9 @@ an unregistered qualified reference, and the native-builtin-module mechanism (mo
 pre-registered at startup whose bindings are primitive-backed — the
 static substrate M12 reuses after M9 replaces the public callback seam).
 **New over the skeleton (d.9, re-ruled
-2026-08-12, supplemented after M6)**: module `def`/`defp` consume a body
-plus a unified annotation whose effect portion is mandatory —
-`( body ) ( a b -- c : "Documentation." ) 'name def`. The annotation is
+2026-08-12, supplemented after M6 and reordered 2026-08-22)**: module
+`def`/`defp` consume an annotation followed by a body —
+`( a b -- c : "Documentation." ) ( body ) 'name def`. The annotation is
 shape-validated before registration and its effect/doc portions are stored in
 the binding snapshot,
 enforced dynamically through the d.14 contract machinery when execution
@@ -477,7 +477,7 @@ every namespace-introduction path (including locals and native registration)
 without preventing their use as ordinary word values.
 
 Every prelude definition begins with the exact section header
-`### def <name>`, followed by attached comments, its body, documented annotation, matching quoted
+`### def <name>`, followed by attached comments, its documented annotation, body, matching quoted
 name, and `def`. Fixed successful effects are declared; quotation- or
 count-dependent definitions use documentation-only annotations. A dedicated
 build source audit scans comments, quotations, and multiline strings to
@@ -3029,6 +3029,12 @@ INTERPRETER.md and its entry here is retired.
   equivalence with `literal` plus `def`/`defp`. Native `Call` effects remain
   mandatory ABI declarations, and shipped prelude documentation remains a
   repository authoring requirement rather than a source-language restriction.
+- **Annotations precede the value they describe** (2026-08-22, user ruling).
+  `def`/`defp` take `annotation? body 'name`; `set`/`setp` take the parallel
+  `annotation? value 'name` through their existing `literal` expansion. The
+  adjacent value is always the body, while only the quotation beneath it is
+  shape-tested as optional metadata. Reflection and canonical formatting emit
+  that same order.
 - **Host = Zig** (user ruling, this session). Consequences absorbed into the
   plan: Step 14 generates the kernel matrix via comptime; later explicit SIMD
   rides `@Vector` behind that same typed range ABI;
@@ -3307,10 +3313,11 @@ INTERPRETER.md and its entry here is retired.
 - **Observable text I/O is one `io` module** (user ruling, 2026-08-19):
   `pp prin print inspect stdin slurp spit lines`. Arbitrary-value input does
   not make `pp` or `inspect` a poor I/O fit—the words perform output.
-  Conversely, canonical `str` stays in the prelude because it returns a value
-  without an I/O effect, and `lines` belongs in `io` because its subject is a
-  path/stream, not a string. No compatibility globals remain for the eight
-  module words.
+  `str` originally stayed in the prelude because it returns a value without an
+  I/O effect; it later became a core primitive when `format` adopted direct
+  string interpolation and could no longer define canonical rendering.
+  `lines` belongs in `io` because its subject is a path/stream, not a string.
+  No compatibility globals remain for the eight module words.
 - **http words are fixed full arity** (user ruling, 2026-08-18):
   `http.get ( url headers -- response )` and
   `http.post ( url headers body -- response )`, with `{}` for no headers.
@@ -3587,7 +3594,7 @@ script in CI.
   - **Assert**: privates are reachable from publics, unreachable
     qualified, and extracted bodies lose private context.
   - **Verify by** `cmd`: fixture `modules-privacy.ecl` defines
-    `(40 's setp (s 2 +) ( -- n ) 'f def) 'm @module`, calls `m.f`,
+    `(40 's setp ( -- n ) (s 2 +) 'f def) 'm @module`, calls `m.f`,
     then attempts `m.s`; companion fixture `body-extraction.ecl`
     defines the same module and runs `'m.f body call` at session scope.
   - **Expected**: the privacy fixture prints `42`, then exits ≠ 0 with
@@ -3938,8 +3945,8 @@ script in CI.
     and optional documentation in the same annotation remains visible through
     `doc` and `see`.
   - **Verify by** `cmd`:
-    `ecl -e "((dup +) (a -- b c) 'lies def) 'm @module 1 m.lies"`;
-    `ecl -e "((dup +) (a -- b : \"Double.\") 'dbl def) 'm @module 'm.dbl see 'm.dbl doc"`;
+    `ecl -e "((a -- b c) (dup +) 'lies def) 'm @module 1 m.lies"`;
+    `ecl -e "((a -- b : \"Double.\") (dup +) 'dbl def) 'm @module 'm.dbl see 'm.dbl doc"`;
     and the `module: effect shape cross-home contract and same-home TCO` fixture
     at depths 20 and 20,000.
   - **Expected**: the false declaration raises `'contract`; `see` includes

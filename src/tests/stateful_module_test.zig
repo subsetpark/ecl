@@ -61,9 +61,9 @@ test "definitions: module def and defp accept all four annotation forms" {
     // All four forms register, publicly and privately, and each word runs.
     try expectOk(&runtime, "(" ++
         "(1 +) 'bare def " ++
-        "(2 *) ( n -- n ) 'effected def " ++
-        "(3 -) ( : \"Subtract three.\" ) 'documented def " ++
-        "(4 div) ( n -- n : \"Divide by four.\" ) 'complete def " ++
+        "( n -- n ) (2 *) 'effected def " ++
+        "( : \"Subtract three.\" ) (3 -) 'documented def " ++
+        "( n -- n : \"Divide by four.\" ) (4 div) 'complete def " ++
         "(dup +) 'hidden defp " ++
         "(hidden 1 +) 'via-private def" ++
         ") 'forms @defm");
@@ -80,11 +80,11 @@ test "definitions: module def and defp accept all four annotation forms" {
         "### def forms.bare\n" ++
             "(1 +) 'forms.bare def\n" ++
             "### def forms.effected\n" ++
-            "(2 *) (n -- n) 'forms.effected def\n" ++
+            "(n -- n) (2 *) 'forms.effected def\n" ++
             "### def forms.documented\n" ++
-            "(3 -) (: \"Subtract three.\") 'forms.documented def\n" ++
+            "(: \"Subtract three.\") (3 -) 'forms.documented def\n" ++
             "### def forms.complete\n" ++
-            "(4 div) (n -- n : \"Divide by four.\") 'forms.complete def\n",
+            "(n -- n : \"Divide by four.\") (4 div) 'forms.complete def\n",
         output.written(),
     );
     try expectStack(&runtime, "'forms.documented doc", "\"Subtract three.\"");
@@ -93,14 +93,14 @@ test "definitions: module def and defp accept all four annotation forms" {
     // no inferred check, so a word leaving two values crosses unimpeded.
     try expectErrorContains(
         &runtime,
-        "((1 2) ( -- n ) 'two def) 'liar @defm liar.two",
+        "(( -- n ) (1 2) 'two def) 'liar @defm liar.two",
         &.{ "'kind 'contract", "'word 'liar.two", "declared (0 -- 1)" },
     );
     try expectStack(&runtime, "((1 2) 'two def) 'quiet @defm quiet.two", "1 2");
     // Malformed recognized annotations remain 'domain in a module root.
     try expectErrorContains(
         &runtime,
-        "((3) ( : ) 'bad def) 'broken @defm",
+        "(( : ) (3) 'bad def) 'broken @defm",
         &.{ "'kind 'domain", "malformed definition annotation" },
     );
 }
@@ -215,7 +215,7 @@ test "modules: execute preserves ordinary dispatch home contracts and errors" {
         "'kind 'undefined-word",
         "missing.home.f",
     });
-    try expectOk(&runtime, "(1 +) (n -- n) 'annotated def");
+    try expectOk(&runtime, "(n -- n) (1 +) 'annotated def");
     try expectErrorContains(&runtime, "(annotated) first execute", &.{ "'kind 'underflow", "annotated" });
 }
 
@@ -438,7 +438,7 @@ test "concurrency: hot reload retains the durable stack and quiesces old generat
         // Failed registration changes neither behaviour nor state.
         try expectErrorContains(
             &runtime,
-            "((1) (bad -- shape -- here) 'x def) 'c @defm",
+            "((bad -- shape -- here) (1) 'x def) 'c @defm",
             &.{"'kind 'domain"},
         );
         try expectStack(&runtime, "c.tick c.peek c.doubled swap 2 * match?", "1");

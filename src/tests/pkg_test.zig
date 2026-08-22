@@ -12,17 +12,16 @@ const support = @import("kernel_test_support.zig");
 /// earlier member of a list precedes every later one, which over a list already
 /// known to be ascending is transitivity and totality together.
 const order_laws =
-    "((|a b| a b pkg.version.less? b a pkg.version.less? + a b match? +) call) " ++
-    "(a b -- count) 'trichotomy def " ++
-    "((|element corpus| corpus element (pair) partial each) call) " ++
-    "(element corpus -- pairs) 'row-of def " ++
-    "((|corpus| corpus corpus (row-of) partial each raze) call) " ++
-    "(corpus -- pairs) 'pairs-of def " ++
-    "((|index reference| reference index 1 + drop reference index at " ++
-    "(swap pkg.version.less?) partial each) call) " ++
-    "(index reference -- flags) 'ascending-row def " ++
-    "((|reference| reference len range reference (ascending-row) partial each raze) call) " ++
-    "(reference -- flags) 'ascending-flags def ";
+    "(a b -- count) ((|a b| a b pkg.version.less? b a pkg.version.less? + a b match? +) call) " ++
+    "'trichotomy def " ++
+    "(element corpus -- pairs) ((|element corpus| corpus element (pair) partial each) call) " ++
+    "'row-of def " ++
+    "(corpus -- pairs) ((|corpus| corpus corpus (row-of) partial each raze) call) " ++
+    "'pairs-of def " ++
+    "(index reference -- flags) ((|index reference| reference index 1 + drop reference index at " ++
+    "(swap pkg.version.less?) partial each) call) 'ascending-row def " ++
+    "(reference -- flags) ((|reference| reference len range reference (ascending-row) partial each raze) call) " ++
+    "'ascending-flags def ";
 
 /// Semver 2.0.0 §11's own precedence example, ascending.
 const reference_corpus =
@@ -601,9 +600,9 @@ test "pkg: the lock keys requirements by the requiring package" {
             // declared the requirement, root included, so a later format can
             // record two versions of one name without a break.
             .name = "requirements are keyed by requirer, the root under its own name",
-            .source = "(|lock| lock 'root at " ++
+            .source = "(lock -- root names) (|lock| lock 'root at " ++
                 "lock 'requires lock 'root at pair at-path keys) " ++
-                "(lock -- root names) 'root-requirements def " ++
+                "'root-requirements def " ++
                 canonical_lock_source ++
                 "pkg.lock.read dup 'requires at keys sort swap root-requirements",
             .expected = "(\"foo\" \"my.proj\") \"my.proj\" (\"foo\")",
@@ -647,9 +646,9 @@ test "pkg: resolve selects the maximum of every reachable declared minimum" {
 
 test "pkg: every resolved selection meets every recorded minimum" {
     try support.expectStack(
-        "(|entry packages| packages entry first 'version pair at-path " ++
+        "(entry packages -- bool) (|entry packages| packages entry first 'version pair at-path " ++
             "entry 1 at pkg.version.less? not) " ++
-            "(entry packages -- bool) 'selection-meets? def " ++
+            "'selection-meets? def " ++
             mvs_root ++ " " ++ mvs_catalog ++
             "pkg.mvs.resolve dup 'requires at vals (pairs) each raze " ++
             "swap 'packages at (selection-meets?) partial all?",
@@ -676,9 +675,9 @@ test "pkg: resolution is deterministic and order-independent over shuffled graph
 
 test "pkg: adding an already satisfied requirement preserves selections" {
     try support.expectStack(
-        "(|packages lock| packages lock 'packages at match? " ++
+        "(packages lock -- bool version) (|packages lock| packages lock 'packages at match? " ++
             "lock ['requires \"app\" \"c\"] at-path) " ++
-            "(packages lock -- bool version) 'compare-augmentation def " ++
+            "'compare-augmentation def " ++
             mvs_root_without_c ++ " " ++ mvs_catalog ++ "pkg.mvs.resolve 'packages at " ++
             mvs_root ++ " " ++ mvs_catalog ++ "pkg.mvs.resolve compare-augmentation",
         "1 \"1.2.0\"",

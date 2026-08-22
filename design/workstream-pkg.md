@@ -132,6 +132,12 @@ workstream terminal).
   `name-version-hash`, and a hash mismatch as a hard failure. `zig-pkg/` in
   this checkout is the working reference for the store layout.
 
+- **[pattern] Write-then-rename atomic publication** — stage a complete value
+  under a unique sibling name, close and validate it, then expose it with one
+  same-parent rename. M3 applies this to archive extraction so no store
+  destination is partly visible; M4 retains the absent-destination and
+  immutable-entry rule when several fetches race for one content key.
+
 - **[pattern] Janet's `bundle/` and `spork/pm` layering** — https://janet-lang.org/api/bundle.html
   Janet's core `bundle/` module is explicitly "a package manager without
   networking, letting package managers built on top handle user workflows."
@@ -252,6 +258,14 @@ to download.
 **Established Precedents** (milestone-scoped):
 - **[algorithm] Minimal Version Selection** — https://research.swtch.com/vgo-mvs — This milestone *is* the algorithm; the workstream-level entry applies here in full and the "algorithm 1" section is the direct implementation reference.
 
+**Status**: Executed on `zax--pkg-mvs-resolver`, 2026-08-22. Commits
+`4243885`, `6c585c9`, and `de3ceaf` pinned the resolver contract, added its
+pending public cases, then implemented `pkg.mvs.resolve` while splitting the
+package vocabulary into six ordinary dotted ECL modules. The final working
+tree passed `zig build precommit` and the Linux/x86_64 TSan gate locally;
+SourceHut build 1869043 then passed the complete CI matrix. M2 required no
+operator action before M3.
+
 ---
 
 ### Milestone 3: pkg-host-primitives
@@ -259,25 +273,46 @@ to download.
 **Definition of Done**:
 - A new embedded builtin module `archive` in `src/stdlib.zig` (single atom,
   `builtin` arm, modelled on `src/stdlib/io.zig`) exporting:
-  `archive.sha256` (bytes → lowercase hex string) and `archive.unpack-tgz`
-  (archive bytes plus a destination path → the list of extracted relative
-  paths).
+  `archive.sha256` (`byte-list -- lowercase-hex`) and
+  `archive.unpack-tgz` (`byte-list destination -- regular-file-paths`). A
+  byte list is an ordinary ECL list whose items are integers in `0..255`;
+  strings are not accepted or coerced because Unicode string ingress cannot
+  preserve every possible archive byte spelling.
 - `unpack-tgz` **fails closed on hostile archives**: absolute member paths,
-  `..` traversal, symlinks, hardlinks, device nodes, and members resolving
-  outside the destination root are rejected with a precise error and leave
-  nothing extracted. Extraction is atomic — unpack to a temporary directory
-  and rename, so an interrupted unpack never yields a half-populated store
-  entry.
-- Every word carries documentation and a declared effect, matching the
-  existing builtin-module contract enforced at `src/stdlib.zig:88`.
+  `..` traversal, duplicate members, symlinks, hardlinks, character/block
+  devices, FIFOs, malformed gzip/tar/PAX data, invalid UTF-8 member names, and
+  members resolving outside the destination root are rejected with a precise
+  error. Extraction accepts at most 1 GiB (1,073,741,824 bytes) of total
+  uncompressed tar data and 100,000 regular-file/directory members.
+- The destination must be absent. Extraction creates a unique sibling
+  `.ecl-unpack-*` staging directory, writes and rolls back through bounded
+  scheduler phases, and publishes the complete tree with one same-parent
+  rename. It never calls whole-input `std.tar.extract` or recursive
+  `std.Io.Dir.deleteTree` from a scheduler turn. Failure or cancellation never
+  exposes a partial destination; concurrent calls can have at most one
+  successful commit. Success returns normalized regular-file paths in archive
+  order.
+- Every word carries nonempty reflective documentation including its stack
+  shape, matching the builtin-module contract enforced in `src/stdlib.zig`.
+  The driver-backed words omit an enforceable binding effect: builtin effect
+  checks run when the primitive returns, before a scheduled driver has
+  produced its output.
 - Tests include known-answer vectors for SHA-256 and a checked-in corpus of
-  malicious tarballs, each asserted to be rejected.
+  valid and malicious tarballs. Public Session cases cover byte fidelity,
+  exact failures, filesystem containment, absent/existing destinations,
+  concurrent commit, cancellation, host-IO refusal, reflection, and
+  initialized-Session allocation failure.
 
 **Why this is a safe pause point**: Two new words in a new embedded module,
 depended on by nothing. Existing programs are unaffected.
 
 **Unlocks**: The fetcher (M4). Independent of M1 and M2, so it can run in
 parallel with them.
+
+**Status**: Planned, 2026-08-22. The autonomous three-patch plan is
+`gameplans/pkg-host-primitives.json`: freeze the contract, add the pending
+fixture-backed proof surface, then implement the builtin module and bounded
+driver. It has no unresolved questions.
 
 ---
 
@@ -291,6 +326,11 @@ parallel with them.
   downloaded archive is hashed with `archive.sha256` and compared against the
   declared hash **before** it is unpacked; a mismatch aborts the whole sync
   and writes no lock.
+- M4 adds a raw HTTP response-body surface that materializes received octets
+  directly as M3's integer byte list. The existing textual `http.get` body
+  remains a string for compatibility; a tarball must never pass through that
+  Unicode conversion before hashing or unpacking. The exact new HTTP word or
+  response spelling is settled in the M4 gameplan.
 - The store is content-addressed at `$ECL_CACHE` (default
   `$XDG_CACHE_HOME/ecl/pkg`, then `~/.cache/ecl/pkg`), one directory per
   entry keyed `<name>-<version>-<hash>`, mirroring `zig-pkg/`. Store entries
@@ -445,7 +485,7 @@ format's per-package structure and the tier's insertion point unchanged.
 7 (pkg-integrity-and-documentation) → [6]
 ```
 
-M1 and M3 are independent and start together. M5 needs only the format, so
+M1 and M3 are independent in the dependency graph. M5 needs only the format, so
 the Zig-side lock tier proceeds in parallel with the ECL-side resolver and
 fetcher. M6 is the join.
 
@@ -498,6 +538,32 @@ fetcher. M6 is the join.
   of the Zig side, and makes the package manager the language's first
   substantial self-hosted program. Zig's share is confined to host primitives
   the language cannot express (SHA-256, tar, gzip) and the lock tier.
+- **`format` splices strings and renders other values canonically** (user
+  ruling, 2026-08-22). Rendered text is already text, so interpolating it must
+  not add source quotes. A caller that wants a string's quoted source spelling
+  applies `str` explicitly. This makes `str` an independent bounded core
+  primitive rather than a prelude definition in terms of `format`.
+- **Definition annotations precede bodies and constant values** (user ruling,
+  2026-08-22). The canonical forms are `annotation? body 'name def` and
+  `annotation? value 'name set`, with the same private variants. The adjacent
+  operand is unconditionally the body or value; only the quotation beneath it
+  is shape-tested as optional metadata. `see` and the formatter emit that
+  order.
+- **Archive payloads are integer byte lists, not strings or a new runtime
+  value kind** (settled while planning M3, 2026-08-22). ECL strings are
+  Unicode values: valid UTF-8 ingress decodes scalars, while invalid bytes map
+  one-to-one to characters, so no later string encoder can distinguish the
+  original spellings for all binary inputs. Integers in `0..255` preserve the
+  octets using ordinary inert ECL data and avoid expanding the Value layout,
+  heap, printer, equality, reader, and native ABI. M4 must produce this list
+  directly from the HTTP byte stream.
+- **Archive extraction is absent-destination atomic and resource-bounded**
+  (user ruling while planning M3, 2026-08-22). `archive.unpack-tgz` stages
+  beside an absent destination, commits with one rename, refuses to overwrite
+  or merge an existing tree, and returns only regular-file paths. It rejects
+  more than 1 GiB of uncompressed data or 100,000 members. These fixed limits
+  bound expansion and metadata floods without adding an options argument to
+  the v1 word.
 - **Manifest and lock are inert data, parsed and never evaluated.** Resolution
   cannot execute code from a dependency, which is npm's standing wound and
   what JSR and Go both deliberately designed out. Janet reached the same split
@@ -572,21 +638,21 @@ fetcher. M6 is the join.
     `src/machine.zig:2565`.
 
 - **DoD-4 — MVS selects the maximum of declared minimums**
-  - **Assert**: Given a root requiring `a >= 1.0` and `b >= 1.0`, where `a`
-    requires `c >= 1.2` and `b` requires `c >= 1.5`, the resolution selects
-    `c` at exactly `1.5`.
+  - **Assert**: Given a root requiring `a >= 1.0.0` and `b >= 1.0.0`, where
+    `a` requires `c >= 1.2.0` and `b` requires `c >= 1.5.0`, the resolution
+    selects `c` at exactly `1.5.0`.
   - **Verify by** `cmd`: `ecl pkg sync` in that fixture, then
     `ecl pkg tree`.
-  - **Expected**: `c 1.5` appears exactly once; no other version of `c` is
+  - **Expected**: `c 1.5.0` appears exactly once; no other version of `c` is
     present in the lock or the store.
   - **Traces to**: Milestone 2 — `pkg.mvs.resolve` in `src/stdlib/pkg/mvs.ecl`.
 
 - **DoD-5 — A newer available version is not selected**
-  - **Assert**: If `c 2.0` exists at a reachable URL but nothing in the graph
-    declares it, resolution still selects `c 1.5`.
-  - **Verify by** `cmd`: Serve `c 2.0` from the fixture server, re-run
+  - **Assert**: If `c 2.0.0` exists at a reachable URL but nothing in the graph
+    declares it, resolution still selects `c 1.5.0`.
+  - **Verify by** `cmd`: Serve `c 2.0.0` from the fixture server, re-run
     `ecl pkg sync` against the DoD-4 fixture unchanged, and read `ecl.lock`.
-  - **Expected**: `c 1.5`. MVS never upgrades without a manifest edit.
+  - **Expected**: `c 1.5.0`. MVS never upgrades without a manifest edit.
   - **Traces to**: Milestone 2 — `pkg.mvs.resolve`.
 
 - **DoD-6 — Resolution is deterministic and recomputable**
@@ -622,15 +688,20 @@ fetcher. M6 is the join.
     module name, and no store entry retained.
   - **Traces to**: Milestone 4 — prefix enforcement at unpack.
 
-- **DoD-10 — Path traversal in an archive is rejected**
-  - **Assert**: A tarball containing a member resolving outside the
-    destination root extracts nothing.
+- **DoD-10 — Hostile archives are rejected without publication**
+  - **Assert**: A malformed, over-limit, absolute/parent-traversing,
+    duplicate, linked, or special-node tarball publishes no destination and
+    changes nothing outside its staging root.
   - **Verify by** `cmd`: Run the checked-in malicious-tarball corpus through
-    `archive.unpack-tgz`.
-  - **Expected**: Every case errors, and no file exists outside the
-    destination root afterwards.
-  - **Traces to**: Milestone 3 — `archive.unpack-tgz` in `src/stdlib.zig`'s
-    `archive` module.
+    `archive.unpack-tgz` in `src/tests/archive_test.zig`, including its outside
+    sentinel, existing-destination, concurrent-commit, and cancellation
+    cases.
+  - **Expected**: Every hostile case produces its classified error; the
+    destination is absent or byte-for-byte unchanged, the outside sentinel is
+    unchanged, and concurrent valid attempts expose exactly one complete
+    tree.
+  - **Traces to**: Milestone 3 — `archive.unpack-tgz` and its bounded staging
+    driver in `src/stdlib/archive.zig`.
 
 - **DoD-11 — Evaluation never reaches the network**
   - **Assert**: Running a locked project with the store deleted fails with a
@@ -723,3 +794,16 @@ fetcher. M6 is the join.
   - **Traces to**: Milestone 1 — `pkg.lock.write` in `src/stdlib/pkg/lock.ecl`,
     proved by `pkg: read-lock and write-lock round-trip a canonical lock byte
     for byte` in `src/tests/pkg_test.zig`.
+
+- **DoD-19 — SHA-256 hashes exact archive octets**
+  - **Assert**: `archive.sha256` hashes integer byte-list items one-for-one,
+    including values above 127, with no Unicode normalization or UTF-8
+    re-encoding.
+  - **Verify by** `cmd`: Run
+    `archive: sha256 matches known-answer vectors and preserves high bytes` in
+    `src/tests/archive_test.zig` against the empty, `abc`, multi-block, and
+    high-byte vectors.
+  - **Expected**: Every lowercase 64-digit digest matches the independent
+    known answer; changing one byte changes the result.
+  - **Traces to**: Milestone 3 — `archive.sha256` and
+    `kernel_storage.ByteVectorEncoder`.

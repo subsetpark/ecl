@@ -64,13 +64,13 @@ test "fuzz: formatter is idempotent for every accepted source" {
             "1 2 +",
             "# comment\n(foo [bar] {baz})",
             "\"raw\n  string\" \\space",
-            "(dup) (value -- value : \"documentation\") 'same def",
+            "(value -- value : \"documentation\") (dup) 'same def",
             // The `### module` header path: bare, seeded, and with a stale header
             // the formatter must rewrite from the registration itself.
             "((1) 'x def) 'stats @defm",
             "[[0]] ((1 +) 'tick def) with 'counter @defm",
             "### module wrong\n# attached\n((1) 'x def) 'stats @defm",
-            "(dup) (a -- ...) 'row def",
+            "(a -- ...) (dup) 'row def",
         },
     });
 }

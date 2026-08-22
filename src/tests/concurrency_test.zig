@@ -307,7 +307,7 @@ test "concurrency: await-any ties and @each preserve program order" {
 test "concurrency: @each seeds children without resolving capture helpers" {
     var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
-    try runOk(&runtime, "(pop 99) (x -- y) 'first def [1 2 3] () @each");
+    try runOk(&runtime, "(x -- y) (pop 99) 'first def [1 2 3] () @each");
     var actual = try display(&runtime);
     defer actual.deinit();
     try std.testing.expectEqualStrings("[1 2 3]", actual.bytes());
@@ -394,10 +394,10 @@ test "concurrency: primitive @each is reflective and task-join is absent" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         output.buffered(),
-        "<primitive>\n" ++
-            "(sequence quotation -- results :\n" ++
+        "(sequence quotation -- results :\n" ++
             " \"Apply a quotation concurrently in one fresh unit per element and return one result per element in\n" ++
             "  input order.\")\n" ++
+            "<primitive>\n" ++
             "'@each\n" ++
             "def\n",
     ) != null);

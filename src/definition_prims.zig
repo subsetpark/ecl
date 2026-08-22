@@ -63,19 +63,24 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
     defer item.deinit();
     const separator = try intern.intern("--");
     const colon = try intern.intern(":");
-    const phase: DefineDriver.Phase = if (item.borrow() == .list)
-        .scan_annotation
-    else
-        .validate_name;
+    var annotation_candidate: ?heap.Owned(Value) = null;
+    if (item.borrow() == .list and evaluator.available() != 0) {
+        const candidate = evaluator.visibleOperandBorrowed(evaluator.available() - 1);
+        if (candidate == .list) {
+            heap.retainValue(candidate);
+            annotation_candidate = .init(candidate);
+        }
+    }
     try evaluator.startDriver(DefineDriver{
         .mode = mode,
         .scope = scope,
         .name = name,
         .binding_validation = .init(name),
         .item = .init(item.take()),
+        .annotation_candidate = annotation_candidate,
         .separator = separator,
         .colon = colon,
-        .phase = phase,
+        .phase = if (annotation_candidate == null) .validate_name else .scan_annotation,
         .annotation = .init(.{}),
     });
 }
@@ -88,6 +93,7 @@ const DefineDriver = struct {
     binding_validation: intern.NamespaceCursor,
     binding_name: ?intern.BindingName = null,
     item: ?heap.Owned(Value),
+    annotation_candidate: ?heap.Owned(Value) = null,
     annotation_source: ?heap.Owned(Value) = null,
     separator: u32,
     colon: u32,
@@ -114,13 +120,21 @@ const DefineDriver = struct {
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) switch (self.phase) {
             .scan_annotation => {
-                const count: usize = @intCast(self.item.?.borrow().list.length());
+                const count: usize = @intCast(self.annotation_candidate.?.borrow().list.length());
                 if (self.index == count) {
                     if (self.separator_at == null and self.colon_at == null) {
+                        self.annotation_candidate.?.deinit(
+                            evaluator.releaseDomain(),
+                            evaluator.allocator(),
+                        );
+                        self.annotation_candidate = null;
                         self.phase = .validate_name;
                         self.index = 0;
                         continue;
                     }
+                    self.annotation_source = .init(self.annotation_candidate.?.take());
+                    self.annotation_candidate = null;
+                    evaluator.discard(1);
                     if (self.separator_at != null and self.colon_at != null and
                         self.separator_at.? > self.colon_at.?) return malformed(evaluator);
                     self.effect_end = self.colon_at orelse count;
@@ -128,7 +142,7 @@ const DefineDriver = struct {
                         return malformed(evaluator);
                     if (self.colon_at) |doc_at| {
                         if (count != doc_at + 2) return malformed(evaluator);
-                        const document = list.atUnchecked(self.item.?.borrow(), doc_at + 1);
+                        const document = list.atUnchecked(self.annotation_source.?.borrow(), doc_at + 1);
                         if (!document.isString()) return malformed(evaluator);
                         self.document = document;
                     }
@@ -136,7 +150,7 @@ const DefineDriver = struct {
                     self.phase = .validate_annotation;
                     continue;
                 }
-                const item = list.atUnchecked(self.item.?.borrow(), self.index);
+                const item = list.atUnchecked(self.annotation_candidate.?.borrow(), self.index);
                 if (item == .word and item.word == self.separator) {
                     if (self.separator_at != null) return malformed(evaluator);
                     self.separator_at = self.index;
@@ -150,7 +164,7 @@ const DefineDriver = struct {
             .validate_annotation => {
                 if (self.separator_at) |split| {
                     if (self.index != self.effect_end) {
-                        const slot = list.atUnchecked(self.item.?.borrow(), self.index);
+                        const slot = list.atUnchecked(self.annotation_source.?.borrow(), self.index);
                         if (self.index != split and slot != .word)
                             return malformed(evaluator);
                         // The after portion is all named slots or exactly the
@@ -164,11 +178,6 @@ const DefineDriver = struct {
                         continue;
                     }
                 }
-                self.annotation_source = .init(self.item.?.take());
-                self.item = null;
-                try evaluator.require(1);
-                var item = try evaluator.popValue();
-                self.item = .init(item.take());
                 self.index = 0;
                 if (self.document) |document| {
                     self.normalizer = .init(try .init(evaluator.allocator(), document));
@@ -526,6 +535,13 @@ const SeeDriver = struct {
     }
 
     fn buildPlan(self: *SeeDriver) error{OutOfMemory}!void {
+        if (self.annotation) |*annotation| {
+            try self.add(.{ .value = annotation.borrow() });
+            try self.add(.{ .bytes = " " });
+        } else if (self.resolved.?.borrow().lease.effect) |effect| {
+            try self.add(.{ .value = .{ .list = effect.header() } });
+            try self.add(.{ .bytes = " " });
+        }
         switch (self.resolved.?.borrow().lease.binding) {
             .word => |word_body| if (self.resolved.?.borrow().lease.source) |source|
                 try self.add(.{ .bytes = source.bytes() })
@@ -537,13 +553,6 @@ const SeeDriver = struct {
                 try self.add(.{ .trace_word = self.resolved.?.borrow().trace_word });
                 try self.add(.{ .bytes = ">" });
             },
-        }
-        if (self.annotation) |*annotation| {
-            try self.add(.{ .bytes = " " });
-            try self.add(.{ .value = annotation.borrow() });
-        } else if (self.resolved.?.borrow().lease.effect) |effect| {
-            try self.add(.{ .bytes = " " });
-            try self.add(.{ .value = .{ .list = effect.header() } });
         }
         switch (self.resolved.?.borrow().lease.binding) {
             .native => |callable| {

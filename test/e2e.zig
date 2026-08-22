@@ -116,7 +116,7 @@ test "e2e: native extension discovery ABI and reflection acceptance" {
         .exit_code = 0,
         .stdout = "sample.increment -> sample.increment native public generation 1 " ++
             "(n -- result) requires call, build-values, reschedule\n" ++
-            "<native:sample.increment> (n -- result : \"Increment an integer.\") requires call build-values\n" ++
+            "(n -- result : \"Increment an integer.\") <native:sample.increment> requires call build-values\n" ++
             "reschedule\n'sample.increment\ndef\n42\n",
         .stderr = "",
     });
@@ -386,14 +386,14 @@ test "e2e: module effect declaration acceptance" {
     defer missing.deinit();
     try missing.expect(.{ .exit_code = 0, .stdout = "4\n", .stderr = "" });
 
-    var lying = try run(&.{ build_options.ecl_exe, "-e", "((dup +) ( a -- b c ) 'lies def) 'm @defm 1 m.lies" });
+    var lying = try run(&.{ build_options.ecl_exe, "-e", "(( a -- b c ) (dup +) 'lies def) 'm @defm 1 m.lies" });
     defer lying.deinit();
     try lying.expect(.{
         .exit_code = 1,
         .stderr_contains = &.{ "'kind 'contract", "'word 'm.lies" },
     });
 
-    var visible = try run(&.{ build_options.ecl_exe, "-e", "((dup +) ( a -- b ) 'dbl def) 'm @defm 'm.dbl see" });
+    var visible = try run(&.{ build_options.ecl_exe, "-e", "(( a -- b ) (dup +) 'dbl def) 'm @defm 'm.dbl see" });
     defer visible.deinit();
     try visible.expect(.{
         .exit_code = 0,
@@ -421,13 +421,13 @@ test "e2e: reflection acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(40 's setp (s 2 +) ( -- n ) 'f def) 'm @defm 'm.f 'f import 'm.f see 'f which words",
+        "(40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm.f 'f import 'm.f see 'f which words",
     });
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
         .stdout_contains = &.{
-            "(s 2 +) (-- n) 'm.f def",
+            "(-- n) (s 2 +) 'm.f def",
             "f -> f def public (-- n)",
         },
         .stdout_excludes = &.{" s "},
@@ -492,16 +492,16 @@ test "e2e: optional module annotation acceptance" {
     try result.expect(.{
         .exit_code = 0,
         .stdout = "### def forms.bare\n(1 +) 'forms.bare def\n" ++
-            "### def forms.effected\n(2 *) (n -- n) 'forms.effected def\n" ++
-            "### def forms.documented\n(3 -) (: \"Subtract three.\") 'forms.documented def\n" ++
-            "### def forms.complete\n(4 div) (n -- n : \"Divide by four.\") 'forms.complete def\n" ++
+            "### def forms.effected\n(n -- n) (2 *) 'forms.effected def\n" ++
+            "### def forms.documented\n(: \"Subtract three.\") (3 -) 'forms.documented def\n" ++
+            "### def forms.complete\n(n -- n : \"Divide by four.\") (4 div) 'forms.complete def\n" ++
             "\"Subtract three.\"\n" ++
             "11\n20\n7\n3\n59\n" ++
             "1\n" ++
-            "### def answer\n([42] first) 'answer def\n" ++
+            "### def answer\n(: \"The answer.\") ([42] first) 'answer def\n" ++
             "### def spelled\n([42] first) 'spelled def\n" ++
             "'contract\n'domain\n'domain\n" ++
-            "(a b)\n(dup)\n",
+            "(dup)\n(a b)\n",
         .stderr = "",
     });
 }
@@ -584,7 +584,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     var constant = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(40 literal (-- value) 'k def) 'm @defm m.k 'm.k body 'm.k which",
+        "((-- value) 40 literal 'k def) 'm @defm m.k 'm.k body 'm.k which",
     });
     defer constant.deinit();
     try constant.expect(.{
@@ -593,7 +593,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
         .stderr = "",
     });
 
-    const partial_module = "((pop pop 7 8) (a b -- ...) 'row def) 'm @defm ";
+    const partial_module = "((a b -- ...) (pop pop 7 8) 'row def) 'm @defm ";
     var partial = try run(&.{ build_options.ecl_exe, "-e", partial_module ++ "1 2 m.row" });
     defer partial.deinit();
     try partial.expect(.{ .exit_code = 0, .stdout = "7 8\n", .stderr = "" });

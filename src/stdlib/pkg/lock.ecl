@@ -7,6 +7,7 @@
  'lock-keys setp
 
  ### defp minimums-checked
+ (minimums -- minimums : "Validate and return one package's minimum-version requirements.")
  (|minimums|
   minimums type 'dict match?
   {'kind 'type 'msg "a lock's requirements are a dict from package name to version"} assert
@@ -14,21 +15,23 @@
   {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
   minimums vals (pkg.version.validate pop) for
   minimums)
- (minimums -- minimums : "Validate and return one package's minimum-version requirements.")
  'minimums-checked defp
 
  ### defp known?
- (|pair packages| packages pair first has?)
  (pair packages -- bool : "Test whether a required package has a locked selection.")
+ (|pair packages| packages pair first has?)
  'known? defp
 
  ### defp satisfied?
+ (entry packages -- bool : "Test whether a locked version meets a minimum version.")
  (|entry packages|
   packages entry first 'version pair at-path entry 1 at pkg.version.less? not)
- (entry packages -- bool : "Test whether a locked version meets a minimum version.")
  'satisfied? defp
 
  ### def validate
+ (candidate -- lock :
+  "Validate and return a lock. Each required package must have a selection that meets every recorded
+   minimum version.")
  (|candidate|
   candidate type 'dict match?
   {'kind 'type 'msg "a lock is a dict"} assert
@@ -59,67 +62,65 @@
   candidate 'packages at (satisfied?) partial all?
   {'kind 'domain 'msg "a selected version is never below a minimum recorded for it"} assert
   candidate)
- (candidate -- lock :
-  "Validate and return a lock. Each required package must have a selection that meets every recorded
-   minimum version.")
  'validate def
 
  ### def read
- (pkg.data.read-one pkg.lock.validate)
  (text -- lock : "Parse and validate a lock without evaluating it.")
+ (pkg.data.read-one pkg.lock.validate)
  'read def
 
  ### defp render-requirement
- (|requirement|
-  requirement 'version at
-  requirement 'url at
-  requirement 'hash at
-  3 pack "{{'version {} 'url {} 'hash {}}}" format)
  (requirement -- text : "Render one selection in the canonical field order.")
+ (('version at) ('url at) ('hash at) tri
+  3 pack (str) each
+  "{{'version {} 'url {} 'hash {}}}" format)
  'render-requirement defp
 
  ### defp render-selection
- (|pair| pair first str " " pair 1 at render-requirement 3 pack raze)
  (pair -- text : "Render one `packages` entry.")
+ ((first str) (1 at render-requirement) bi
+  2 pack "{} {}" format)
  'render-selection defp
 
  ### defp render-minimum
- (|pair| pair first pair 1 at 2 pack "{} {}" format)
  (pair -- text : "Render one package name and minimum version.")
+ ((str) each "{} {}" format)
  'render-minimum defp
 
  ### defp render-minimums
- (|minimums| "{" minimums pkg.data.sorted-entries (render-minimum) each " " join "}" 3 pack raze)
  (minimums -- text : "Render one package's minimum versions on a single line.")
+ (pkg.data.sorted-entries (render-minimum) each " " join
+  wrap "{{{}}}" format)
  'render-minimums defp
 
  ### defp render-requirer
- (|pair| pair first str " " pair 1 at render-minimums 3 pack raze)
  (pair -- text : "Render one `requires` entry.")
+ ((first str) (1 at render-minimums) bi
+  2 pack "{} {}" format)
  'render-requirer defp
 
  ### defp render-block
- (|holder renderer| "{" holder pkg.data.sorted-entries renderer each "\n  " join "}" 3 pack raze)
  (holder renderer -- text : "Render a dict as an indented block.")
+ (|holder renderer|
+  holder pkg.data.sorted-entries renderer each "\n  " join
+  wrap "{{{}}}" format)
  'render-block defp
 
  ### def write
- (pkg.lock.validate render-validated)
  (lock -- text :
   "Validate a lock and render canonical text. Keys are sorted and the output ends with a newline.")
+ (pkg.lock.validate render-validated)
  'write def
 
  ### defp render-validated
- (|lock|
-  "{'format 1\n 'root "
-  lock 'root at str
-  "\n 'packages\n "
-  lock 'packages at (render-selection) render-block
-  "\n 'requires\n "
-  lock 'requires at (render-requirer) render-block
-  "}\n"
-  7 pack raze)
  (lock -- text : "Render an already validated lock in canonical layout.")
+ (wrap
+  (('root at str)
+   ('packages at (render-selection) render-block)
+   ('requires at (render-requirer) render-block)
+   tri)
+  infra
+  "{{'format 1\n 'root {}\n 'packages\n {}\n 'requires\n {}}}\n" format)
  'render-validated defp
  )
 'pkg.lock

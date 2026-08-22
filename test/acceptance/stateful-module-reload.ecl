@@ -60,7 +60,8 @@ counter.peek io.pp
 ### A failed registration changes neither the code generation nor the state.
 ((
   ### def x
-  (1 2) (bad -- shape -- here) 'x def)
+  (bad -- shape -- here)
+  (1 2) 'x def)
  'counter
  @defm)
 @attempt

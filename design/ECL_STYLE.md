@@ -55,8 +55,8 @@ or imply re-exports.
 # Small collection helpers.
 (
  ### def singleton
- (wrap)
  (value -- list : "Return a one-element list containing the value.")
+ (wrap)
  'singleton def
  )
 'example
@@ -72,17 +72,17 @@ The following rules are enforced for checked-in first-party source:
   `defp`/`setp`.
 - Every `def`/`defp` definition has a meaningful nonempty annotation
   docstring. State a fixed successful stack effect when one can be expressed.
-  A literal constant installed by `set`/`setp` has no annotation operand, so
-  put its concise explanatory comment immediately beneath the navigation
-  header.
+  `set`/`setp` accept the same annotation-before-value position; an
+  intentionally undocumented literal constant instead puts its concise
+  explanatory comment immediately beneath the navigation header.
 - The annotation, not the navigation comment, is reflective documentation.
 
 Pass the definition body directly to `def` or `defp`. A body that only calls
 another quotation adds no behavior:
 
 ```ecl
-(foo bar)
 (x -- y : "Transform x into y.")
+(foo bar)
 'transform def
 ```
 
@@ -114,6 +114,29 @@ Use `keep` when the original input must remain beneath one quotation's
 result. Use `both` for the same quotation over two inputs, and `bi2` for two
 quotations over the same pair of inputs.
 
+### Locals must change the flow
+
+Do not bind locals when every bound name appears only at the beginning of the
+quotation body, exactly once and in binding order. Removing that binder leaves
+the same values in the same positions and makes the stack flow direct.
+
+Prefer:
+
+```ecl
+(pkg.name.owns?)
+```
+
+over:
+
+```ecl
+(|left right| left right pkg.name.owns?)
+```
+
+Use locals when they make a real dataflow change visible: a value is reused,
+arguments are reordered, or a name is referenced after intervening work. The
+point is not to avoid binders; it is to avoid binders that only repeat the
+quotation's input stack.
+
 ### Captures
 
 Use `partial` for one captured value. For several captures, collect them once
@@ -142,8 +165,8 @@ when it has a domain meaning:
 
 ```ecl
 ### defp manifest-node
-(['name 'version] swap (swap at) partial each)
 (manifest -- node : "Return a manifest's [name version] identity.")
+(['name 'version] swap (swap at) partial each)
 'manifest-node defp
 ```
 
@@ -203,7 +226,7 @@ Use comments for decisions that are not evident from the stack program:
 format compatibility, a deliberate validation boundary, or why a stricter
 contract exists. Do not translate each line of code into prose. Put a
 definition's explanatory comments immediately after its `### def` or
-`### defp` header and before its body.
+`### defp` header and before its annotation.
 
 ## Verification
 

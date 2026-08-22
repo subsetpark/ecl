@@ -106,7 +106,7 @@ pub const Operation = union(enum) {
                 // `split`, `join`, `format`, and `merge` read two sized
                 // operands; the rest dispatch on their collection alone.
                 .split, .join, .format, .merge => .two,
-                .keys, .put, .to_dict, .del, .has => .one,
+                .keys, .put, .to_dict, .del, .has, .str => .one,
             },
             .random => .one,
         };
@@ -684,6 +684,12 @@ const text_rows = [_]Row{
         .class = .generic_fallback,
         // the outer list is a spine of strings; each child crosses a once-per-source typed reader
         // before the exact-width joined result is selected
+    },
+    .{
+        .operations = only(.{Operation{ .text = .str }}),
+        .left = any_operand,
+        .class = .generic_fallback,
+        // canonical rendering follows whole values and may descend through any representation
     },
     .{
         .operations = only(.{

@@ -4,7 +4,8 @@
  40 's setp
 
  ### def f
- (s 2 +) (-- n) 'f def)
+ (-- n)
+ (s 2 +) 'f def)
 'm
 @defm
 m.f io.pp

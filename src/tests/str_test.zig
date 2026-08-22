@@ -1,4 +1,4 @@
-//! The embedded `str` module: text operations and prelude-derived string words.
+//! The embedded `str` module: derived operations whose subject is a string.
 const std = @import("std");
 const support = @import("kernel_test_support.zig");
 

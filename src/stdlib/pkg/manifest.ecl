@@ -12,6 +12,7 @@
  'requirement-keys setp
 
  ### def validate-requirement
+ (requirement -- requirement : "Validate and return a package requirement.")
  (|requirement|
   requirement type 'dict match?
   {'kind 'type 'msg "a requirement is a dict"} assert
@@ -23,10 +24,11 @@
   requirement 'hash at pkg.name.hash?
   {'kind 'domain 'msg "a requirement hash is sha256- and 64 lowercase hex digits"} assert
   requirement)
- (requirement -- requirement : "Validate and return a package requirement.")
  'validate-requirement def
 
  ### def validate
+ (candidate -- manifest :
+  "Validate and return a manifest. Executable word values are rejected before structural checks.")
  (|candidate|
   candidate type 'dict match?
   {'kind 'type 'msg "a manifest is a dict"} assert
@@ -48,13 +50,11 @@
   candidate 'name at wrap candidate 'requires at keys cat pkg.name.collides? not
   {'kind 'domain 'msg "no package may own another's name, its own included"} assert
   candidate)
- (candidate -- manifest :
-  "Validate and return a manifest. Executable word values are rejected before structural checks.")
  'validate def
 
  ### def read
- (pkg.data.read-one pkg.manifest.validate)
  (text -- manifest : "Parse and validate a manifest without evaluating it.")
+ (pkg.data.read-one pkg.manifest.validate)
  'read def
  )
 'pkg.manifest

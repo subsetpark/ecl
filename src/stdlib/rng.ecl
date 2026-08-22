@@ -10,48 +10,50 @@
 [[0 0]]
 (
  ### def seed
- ((pop) swap 0 pair literal compose within)
  (key -- : "Set the generator key and reset its counter to zero.")
+ ((pop) swap 0 pair literal compose within)
  'seed def
 
  ### def int
- ((rand-int without) partial within)
  (bound -- result : "Return a uniform integer from 0 through bound - 1.")
+ ((rand-int without) partial within)
  'int def
 
  ### def ints
- (pair (rand-ints without) with within)
  (count bound -- results : "Return count uniform integers from 0 through bound - 1.")
+ (pair (rand-ints without) with within)
  'ints def
 
  ### def float
- ((rand-float without) within)
  (-- result : "Return a uniform float in the half-open interval [0, 1).")
+ ((rand-float without) within)
  'float def
 
  ### defp deal-pick
+ (pool picked remaining index -- accumulated :
+  "Append one selected pool entry and replace it with the final live entry.")
  (|pool picked remaining chosen-index|
   pool chosen-index at
   picked swap append
   pool chosen-index pool remaining 1 - at put
   swap pair)
-
- (pool picked remaining index -- accumulated :
-  "Append one selected pool entry and replace it with the final live entry.")
  'deal-pick defp
 
  ### defp deal-step
+ (accumulated index bound -- accumulated : "Apply one partial Fisher-Yates selection step.")
  (|accumulated index bound|
   accumulated first
   accumulated 1 at
   bound index -
   bound index - int
   deal-pick)
-
- (accumulated index bound -- accumulated : "Apply one partial Fisher-Yates selection step.")
  'deal-step defp
 
  ### def deal
+ (count bound -- results :
+  "Return count distinct integers selected uniformly from 0 through bound - 1.
+
+   Count and bound must be nonnegative, and count must not exceed bound.")
  (|count bound|
   count 0 >=
   {'kind 'domain 'msg "rng.deal needs a nonnegative count"} assert
@@ -64,16 +66,11 @@
   bound (deal-step) partial
   fold
   1 at)
-
- (count bound -- results :
-  "Return count distinct integers selected uniformly from 0 through bound - 1.
-
-   Count and bound must be nonnegative, and count must not exceed bound.")
  'deal def
 
  ### def shuffle
- (dup len dup deal at)
  (values -- values : "Return a uniformly selected permutation of a list.")
+ (dup len dup deal at)
  'shuffle def
 
  )

@@ -166,8 +166,8 @@ const cases = [_]Case{
     },
     .{ .name = "module marker is unreadable", .source = "\"<module>\" parse" },
     .{ .name = "old spelling", .source = "(1) attempt" },
-    .{ .name = "row annotation", .source = "(dup) (a -- ...) 'f def 'f see" },
-    .{ .name = "row after mixing", .source = "(dup) (a -- ... b) 'f def" },
+    .{ .name = "row annotation", .source = "(a -- ...) (dup) 'f def 'f see" },
+    .{ .name = "row after mixing", .source = "(a -- ... b) (dup) 'f def" },
 };
 
 test "promoted Zig CLI behavior matches the reference snapshot" {
@@ -706,7 +706,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 337 'col 47}}
+        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 333 'col 47}}
         \\=== result.ok? ===
         \\source: (2 3 +) @attempt result.ok?
         \\exit: 0
@@ -804,7 +804,9 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\### def set
-        \\(swap literal swap def) (value name -- : "Bind a value as a constant word in the current scope.")
+        \\(: "Bind a value as a constant word in the current scope; an optional annotation may precede the
+        \\    value.")
+        \\(swap literal swap def)
         \\'set
         \\def
         \\stderr:
@@ -815,7 +817,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 361 'col 20}}
+        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 358 'col 20}}
         \\=== qualify execute ===
         \\source: ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute
         \\exit: 0
@@ -855,10 +857,10 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: 'within see
         \\exit: 0
         \\stdout:
-        \\<primitive>
         \\(quotation -- ... :
         \\ "Run a quotation against a private draft of the home module's durable stack and publish the
         \\  result.")
+        \\<primitive>
         \\'within
         \\def
         \\stderr:
@@ -918,7 +920,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 366 'col 14}}
+        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 364 'col 14}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0
@@ -932,7 +934,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'str.index-of] 'data {'source "prelude.ecl" 'line 366 'col 14}}
+        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'str.index-of] 'data {'source "prelude.ecl" 'line 364 'col 14}}
         \\=== csv parse ===
         \\source: "a,,c
         \\d" csv.parse
@@ -1003,7 +1005,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 366 'col 14}}
+        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 364 'col 14}}
         \\=== getenv unset ===
         \\source: "ECL_SNAPSHOT_ABSENT" getenv
         \\exit: 1
@@ -1173,15 +1175,15 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'undefined-word 'msg "undefined word `attempt`" 'word 'attempt 'trace ['attempt] 'data {'name 'attempt 'source "<command>" 'line 1 'col 5}}
         \\=== row annotation ===
-        \\source: (dup) (a -- ...) 'f def 'f see
+        \\source: (a -- ...) (dup) 'f def 'f see
         \\exit: 0
         \\stdout:
         \\### def f
-        \\(dup) (a -- ...) 'f def
+        \\(a -- ...) (dup) 'f def
         \\stderr:
         \\<empty>
         \\=== row after mixing ===
-        \\source: (dup) (a -- ... b) 'f def
+        \\source: (a -- ... b) (dup) 'f def
         \\exit: 1
         \\stdout:
         \\<empty>

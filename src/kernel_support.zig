@@ -188,6 +188,7 @@ pub const TextOp = enum {
     has,
     split,
     join,
+    str,
     format,
 
     pub fn spelling(self: TextOp) []const u8 {
@@ -200,6 +201,7 @@ pub const TextOp = enum {
             .has => "has?",
             .split => "split",
             .join => "join",
+            .str => "str",
             .format => "format",
         };
     }

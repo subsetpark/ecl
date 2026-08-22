@@ -268,7 +268,7 @@ test "module registration: invocation context comes from the registration" {
         "0 ((1 + dup without) within) 'tick defp " ++
         "(tick) 'bump def " ++
         "('bump which) 'report def " ++
-        "(1 2) ( -- n ) 'liar def " ++
+        "( -- n ) (1 2) 'liar def " ++
         "(liar) 'same-home def" ++
         ") @module dup 'left register 'right register");
     try expectEmptyStack(&runtime);
@@ -307,7 +307,7 @@ test "module registration: a diagnostic spells the same word its failure reports
     // which registration failed. A name long enough to exhaust the scratch is
     // the case that used to substitute it.
     const long = "m" ** 330;
-    const source = "((1 2) ( -- n ) 'two def) '" ++ long ++ " @defm " ++ long ++ ".two";
+    const source = "(( -- n ) (1 2) 'two def) '" ++ long ++ " @defm " ++ long ++ ".two";
     const failure = switch (try runtime.runUnit("module-value-test.ecl", source)) {
         .err => |item| item,
         .ok, .incomplete => return error.ExpectedLanguageError,

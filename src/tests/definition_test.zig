@@ -35,21 +35,21 @@ fn expectErrorContains(runtime: *session.Session, source: []const u8, text: []co
 test "definition annotations support all top-level forms and dynamic data" {
     try support.expectStack(
         "(1) 'plain def " ++
-            "(2) (-- out) 'effect-only def " ++
-            "(3) (: \"Documented.\") 'doc-only def " ++
-            "(dup *) (x -- y : \"Square a numeric value.\") 'square def " ++
+            "(-- out) (2) 'effect-only def " ++
+            "(: \"Documented.\") (3) 'doc-only def " ++
+            "(x -- y : \"Square a numeric value.\") (dup *) 'square def " ++
             "(: \"Built as data.\") 'annotation set " ++
-            "(5) annotation 'dynamic def " ++
+            "annotation (5) 'dynamic def " ++
             "plain effect-only doc-only 4 square dynamic " ++
             "'doc-only doc 'square doc 'dynamic doc 'square body",
         "1 2 3 16 5 \"Documented.\" \"Square a numeric value.\" \"Built as data.\" (dup *)",
     );
     try support.expectErrors(&.{
-        .{ .name = "no documentation", .source = "(1) (-- x) 'x def 'x doc", .kind = "domain", .word = "doc" },
+        .{ .name = "no documentation", .source = "(-- x) (1) 'x def 'x doc", .kind = "domain", .word = "doc" },
         .{ .name = "missing binding", .source = "'absent doc", .kind = "undefined-word", .word = "absent" },
     });
     try support.expectStack(
-        "(dup +) (a -- b c : \"Reflective only.\") 'top-level-lie def 4 top-level-lie",
+        "(a -- b c : \"Reflective only.\") (dup +) 'top-level-lie def 4 top-level-lie",
         "8",
     );
 }
@@ -74,8 +74,9 @@ test "every primitive exposes meaningful reflective documentation" {
         "rest",     "range",     "shape",     "len",       "flip",        "reshape",
         "cmp",      "grade",     "distinct",  "group",     "keys",        "vals",
         "put",      "to-dict",   "del",       "merge",     "has?",        "split",
-        "join",     "format",    "band",      "bor",       "bxor",        "bsl",
-        "bsr",      "bnot",      "rand-int",  "rand-ints", "rand-float",  "entropy",
+        "join",     "str",       "format",    "band",      "bor",         "bxor",
+        "bsl",      "bsr",       "bnot",      "rand-int",  "rand-ints",   "rand-float",
+        "entropy",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
@@ -101,10 +102,10 @@ test "every primitive exposes meaningful reflective documentation" {
     try expectOk(&runtime, "'over see 'call see");
     try std.testing.expectEqualStrings(
         "### def over\n" ++
-            "(swap dup (swap) dip) (x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\")\n" ++
+            "(x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") (swap dup (swap) dip)\n" ++
             "'over\n" ++
             "def\n" ++
-            "<primitive> (quotation -- ... : \"Run a quotation on the current stack.\") 'call def\n",
+            "(quotation -- ... : \"Run a quotation on the current stack.\") <primitive> 'call def\n",
         output.written(),
     );
 }
@@ -114,7 +115,7 @@ test "which reports effect metadata without expanding documentation" {
     defer output.deinit();
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
-    try expectOk(&runtime, "(dup *) (x -- y : \"Not part of concise which output.\") 'square def 'square which");
+    try expectOk(&runtime, "(x -- y : \"Not part of concise which output.\") (dup *) 'square def 'square which");
     try std.testing.expectEqualStrings("square -> square def public (x -- y)\n", output.written());
 }
 
@@ -122,13 +123,13 @@ test "module annotations retain contracts documentation qualification and shadow
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     try expectOk(&runtime, "(" ++
-        "(1) (-- n : \"Public module word.\") 'public def " ++
-        "(2) (-- n : \"Private module word.\") 'private defp " ++
-        "('private doc) (-- text : \"Expose private documentation.\") 'private-doc def" ++
+        "(-- n : \"Public module word.\") (1) 'public def " ++
+        "(-- n : \"Private module word.\") (2) 'private defp " ++
+        "(-- text : \"Expose private documentation.\") ('private doc) 'private-doc def" ++
         ") 'm @defm " ++
         "'m.public 'public import 'public doc \"Public module word.\" match? " ++
         "m.private-doc \"Private module word.\" match? " ++
-        "(9) (-- n : \"Session shadow.\") 'public def " ++
+        "(-- n : \"Session shadow.\") (9) 'public def " ++
         "'public doc \"Session shadow.\" match? " ++
         "'m.public doc \"Public module word.\" match?");
     var display = try runtime.stackDisplay();
@@ -137,9 +138,9 @@ test "module annotations retain contracts documentation qualification and shadow
     try expectErrorContains(&runtime, "'m.private doc", "'kind 'undefined-word");
     // A documentation-only module word is one of the four legal forms, and
     // its documentation is what reflection reports.
-    try expectOk(&runtime, "((1) (: \"Documentation only.\") 'f def) 'docs @defm " ++
+    try expectOk(&runtime, "((: \"Documentation only.\") (1) 'f def) 'docs @defm " ++
         "'docs.f doc \"Documentation only.\" match? pop");
-    try expectErrorContains(&runtime, "((dup +) (a -- b c : \"An intentionally false contract.\") 'f def) 'lies @defm 1 lies.f", "'kind 'contract");
+    try expectErrorContains(&runtime, "((a -- b c : \"An intentionally false contract.\") (dup +) 'f def) 'lies @defm 1 lies.f", "'kind 'contract");
 }
 
 test "multiline documentation is normalized and see is canonical and re-readable" {
@@ -147,17 +148,17 @@ test "multiline documentation is normalized and see is canonical and re-readable
     defer output.deinit();
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
-    try expectOk(&runtime, "(dup *) (x -- y : \"Square a numeric value.\") 'square def " ++
-        "(42) (: \"Only docs.\") 'answer def " ++
-        "(1) (: \"  First line wraps\n    softly.\n\n  - One\n    continues\n  - Two.\") 'multiline def " ++
+    try expectOk(&runtime, "(x -- y : \"Square a numeric value.\") (dup *) 'square def " ++
+        "(: \"Only docs.\") (42) 'answer def " ++
+        "(: \"  First line wraps\n    softly.\n\n  - One\n    continues\n  - Two.\") (1) 'multiline def " ++
         "'multiline doc \"First line wraps softly.\n\n- One continues\n- Two.\" match? " ++
         "'square see 'answer see");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqualStrings(
         "### def square\n" ++
-            "(dup *) (x -- y : \"Square a numeric value.\") 'square def\n" ++
+            "(x -- y : \"Square a numeric value.\") (dup *) 'square def\n" ++
             "### def answer\n" ++
-            "(42) (: \"Only docs.\") 'answer def\n",
+            "(: \"Only docs.\") (42) 'answer def\n",
         output.written(),
     );
 
@@ -179,10 +180,10 @@ test "see retains source binders while execution uses their lowered body" {
 
     // Define and reflect in separate units: the binding, rather than the
     // already-retired input turn, owns the shared source slice.
-    try expectOk(&runtime, "(|x| x 1 +) (n -- n : \"Increment.\") 'inc def");
+    try expectOk(&runtime, "(n -- n : \"Increment.\") (|x| x 1 +) 'inc def");
     try expectOk(&runtime, "'inc see");
     try std.testing.expectEqualStrings(
-        "### def inc\n(|x| x 1 +) (n -- n : \"Increment.\") 'inc def\n",
+        "### def inc\n(n -- n : \"Increment.\") (|x| x 1 +) 'inc def\n",
         output.written(),
     );
 
@@ -200,40 +201,38 @@ test "see retains source binders while execution uses their lowered body" {
 test "redefinition and set replace behavior and clear metadata" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    try expectOk(&runtime, "(1) (-- n : \"Old metadata.\") 'lease-target def");
+    try expectOk(&runtime, "(-- n : \"Old metadata.\") (1) 'lease-target def");
     try expectOk(&runtime, "(2) 'lease-target def");
     try expectOk(&runtime, "lease-target 2 match?");
     try expectErrorContains(&runtime, "'lease-target doc", "'kind 'domain");
 
-    try expectOk(&runtime, "(3) (-- n : \"Temporary.\") 'set-target def 9 'set-target set");
+    try expectOk(&runtime, "(-- n : \"Temporary.\") (3) 'set-target def 9 'set-target set");
     try expectOk(&runtime, "set-target 9 match?");
     try expectErrorContains(&runtime, "'set-target doc", "'kind 'domain");
 }
 
-test "recognized malformed annotations are domain errors and missing bodies underflow" {
+test "recognized malformed annotations are domain errors" {
     try support.expectErrors(&.{
-        .{ .name = "duplicate separator", .source = "(1) (a -- b -- c) 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "duplicate colon", .source = "(1) (: \"a\" : \"b\") 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "separator after colon", .source = "(1) (: \"a\" -- b) 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "nonword input", .source = "(1) (1 -- b) 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "nonword output", .source = "(1) (a -- 1) 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "colon not first without effect", .source = "(1) (a : \"doc\") 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "missing doc", .source = "(1) (:) 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "nonstring doc", .source = "(1) (: 1) 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "extra doc", .source = "(1) (: \"a\" \"b\") 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "combined missing doc", .source = "(1) (a -- b :) 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "combined extra doc", .source = "(1) (a -- b : \"a\" \"b\") 'x def", .kind = "domain", .word = "def" },
-        .{ .name = "doc annotation missing body", .source = "(: \"doc\") 'x def", .kind = "underflow", .word = "def" },
-        .{ .name = "effect annotation missing body", .source = "(-- x) 'x def", .kind = "underflow", .word = "def" },
+        .{ .name = "duplicate separator", .source = "(a -- b -- c) (1) 'x def", .kind = "domain", .word = "def" },
+        .{ .name = "duplicate colon", .source = "(: \"a\" : \"b\") (1) 'x def", .kind = "domain", .word = "def" },
+        .{ .name = "separator after colon", .source = "(: \"a\" -- b) (1) 'x def", .kind = "domain", .word = "def" },
+        .{ .name = "nonword input", .source = "(1 -- b) (1) 'x def", .kind = "domain", .word = "def" },
+        .{ .name = "nonword output", .source = "(a -- 1) (1) 'x def", .kind = "domain", .word = "def" },
+        .{ .name = "colon not first without effect", .source = "(a : \"doc\") (1) 'x def", .kind = "domain", .word = "def" },
+        .{ .name = "missing doc", .source = "(:) (1) 'x def", .kind = "domain", .word = "def" },
+        .{ .name = "nonstring doc", .source = "(: 1) (1) 'x def", .kind = "domain", .word = "def" },
+        .{ .name = "extra doc", .source = "(: \"a\" \"b\") (1) 'x def", .kind = "domain", .word = "def" },
+        .{ .name = "combined missing doc", .source = "(a -- b :) (1) 'x def", .kind = "domain", .word = "def" },
+        .{ .name = "combined extra doc", .source = "(a -- b : \"a\" \"b\") (1) 'x def", .kind = "domain", .word = "def" },
     });
 }
 
-test "nested and quoted markers remain body data and set never recognizes annotations" {
+test "nested and quoted markers remain body data" {
     try support.expectStack(
         "((-- :) '-- ':) 'inert def inert " ++
             "(-- :) 'markers set markers " ++
             "((-- :) 'private-markers setp " ++
-            "(private-markers) (-- value : \"Return private marker data.\") 'get def) 'm @defm m.get",
+            "(-- value : \"Return private marker data.\") (private-markers) 'get def) 'm @defm m.get",
         "(-- :) '-- ': (-- :) (-- :)",
     );
 }
@@ -248,7 +247,7 @@ test "reserved namespace names reject every binding surface but remain readable"
         .{ .name = "local colon", .source = "1 (|:| :)", .kind = "parse" },
         .{ .name = "@defm", .source = "() '-- @defm", .kind = "domain", .word = "@defm" },
         .{ .name = "alias", .source = "() 'm @defm '-- 'm alias", .kind = "domain", .word = "alias" },
-        .{ .name = "public export", .source = "((1) (-- x) '-- def) 'm @defm", .kind = "domain", .word = "def" },
+        .{ .name = "public export", .source = "((-- x) (1) '-- def) 'm @defm", .kind = "domain", .word = "def" },
         .{ .name = "private value", .source = "(1 ': setp) 'm @defm", .kind = "domain", .word = "defp" },
         .{ .name = "bare reserved word is readable", .source = "--", .kind = "undefined-word", .word = "--" },
     });
@@ -271,8 +270,6 @@ test "long annotation traversal and reflection observe cancellation" {
     defer cleanup.deinit();
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    try runtime.pushOwned(body);
     const marker = try intern.intern("--");
     const name = try intern.intern("value");
     const items = try allocator.alloc(value.Value, 70_000);
@@ -281,6 +278,8 @@ test "long annotation traversal and reflection observe cancellation" {
     items[0] = .{ .word = marker };
     const annotation = try list.fromValuesGeneric(allocator, items);
     try runtime.pushOwned(annotation);
+    const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
+    try runtime.pushOwned(body);
     runtime.requestCancellation();
     try expectErrorContains(&runtime, "'cancelled-definition def", "unit cancelled");
     try std.testing.expect(runtime.lastPolls() >= 1);
@@ -289,8 +288,6 @@ test "long annotation traversal and reflection observe cancellation" {
 
     var doc_runtime = try session.Session.init(std.testing.allocator, &.{});
     defer doc_runtime.deinit();
-    const doc_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
-    try doc_runtime.pushOwned(doc_body);
     const doc_codepoints = try allocator.alloc(u32, 70_000);
     defer allocator.free(doc_codepoints);
     @memset(doc_codepoints, 'd');
@@ -301,6 +298,8 @@ test "long annotation traversal and reflection observe cancellation" {
         cancellable_doc,
     });
     try doc_runtime.pushOwned(doc_annotation);
+    const doc_body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
+    try doc_runtime.pushOwned(doc_body);
     doc_runtime.requestCancellation();
     try expectErrorContains(&doc_runtime, "'cancelled-doc def", "unit cancelled");
     try std.testing.expect(doc_runtime.lastPolls() >= 1);
@@ -408,13 +407,22 @@ test "definitions: which and see render set bindings as public defs" {
     try std.testing.expectEqualStrings("3 ([3] first)", display.bytes());
 }
 
-test "definitions: set never recognizes annotations in captured data" {
+test "definitions: set distinguishes binding annotations from captured data" {
     // The guarantee is now mechanical rather than a mode test: the sugar
     // wraps its value before def sees it, so a captured marker list is
     // always nested one level down, and nested markers are inert.
     try support.expectStack("(-- :) 'markers set markers", "(-- :)");
     try support.expectStack("(: \"doc\") 'ann set ann", "(: \"doc\")");
     try support.expectStack("(a -- b) 'eff set eff 'eff body", "(a -- b) (((a -- b)) first)");
+    try support.expectStack(
+        "(: \"Documented constant.\") 7 'answer set answer 'answer doc",
+        "7 \"Documented constant.\"",
+    );
+    try support.expectStack(
+        "(: \"Binding documentation.\") (: \"Captured data.\") 'annotated-data set " ++
+            "annotated-data 'annotated-data doc",
+        "(: \"Captured data.\") \"Binding documentation.\"",
+    );
     // The captured annotation is data, not metadata: it never becomes the
     // binding's own documentation or effect.
     try support.expectErrors(&.{
@@ -454,7 +462,7 @@ test "definitions: def inside a word body writes the caller's scope" {
     // At top level the definition lands in the session environment and
     // outlives the helper that made it.
     try support.expectStack(
-        "((1) (-- n) 'made-here def) ( -- ) 'maker def maker made-here",
+        "( -- ) ((-- n) (1) 'made-here def) 'maker def maker made-here",
         "1",
     );
 
@@ -462,7 +470,7 @@ test "definitions: def inside a word body writes the caller's scope" {
     // how the core words set and setp publish module constants, including
     // the privacy distinction. Module bodies resolve against the module's
     // own chain, so only core words (not session helpers) can be used here.
-    try support.expectStack("(7 'x set 8 'h setp (h) (-- n) 'peek def) 'm @defm m.x m.peek", "7 8");
+    try support.expectStack("(7 'x set 8 'h setp (-- n) (h) 'peek def) 'm @defm m.x m.peek", "7 8");
     try support.expectErrors(&.{
         .{ .name = "private stays private", .source = "(8 'h setp) 'm @defm m.h", .kind = "undefined-word", .word = "m.h" },
     });
@@ -471,7 +479,7 @@ test "definitions: def inside a word body writes the caller's scope" {
     try support.expectErrors(&.{
         .{
             .name = "child scope is disposable",
-            .source = "((1) (-- n) 'scoped def) ( -- ) 'h def (h) @attempt pop scoped",
+            .source = "( -- ) ((-- n) (1) 'scoped def) 'h def (h) @attempt pop scoped",
             .kind = "undefined-word",
             .word = "scoped",
         },

@@ -349,7 +349,7 @@ fn sameSourcePath(actual: []const u8, expected: []const u8) bool {
     return true;
 }
 
-const PreludeStage = enum { header, body, annotation, name, def };
+const PreludeStage = enum { header, annotation, body, name, def };
 
 fn auditPreludeLayout() bool {
     const source = @embedFile("../prelude.ecl");
@@ -372,14 +372,14 @@ fn auditPreludeLayout() bool {
                     index += 2;
                 }
             },
-            .body => {
+            .annotation => {
                 if (index == source.len or source[index] != '\n') {
-                    std.log.err("prelude layout: header must be followed by its definition body", .{});
+                    std.log.err("prelude layout: header must be followed by its definition annotation", .{});
                     return true;
                 }
                 index += 1;
             },
-            .annotation, .name => {
+            .body, .name => {
                 if (index == source.len or source[index] != '\n') {
                     std.log.err("prelude layout: definition block stages must occupy separate lines", .{});
                     return true;
@@ -400,7 +400,7 @@ fn auditPreludeLayout() bool {
             var line = source[index..end];
             if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
             const navigation = std.mem.startsWith(u8, line, "### def ");
-            if (stage == .body and !navigation) {
+            if (stage == .annotation and !navigation) {
                 index = end;
                 continue;
             }
@@ -414,7 +414,7 @@ fn auditPreludeLayout() bool {
                 return true;
             }
             expected_name = name;
-            stage = .body;
+            stage = .annotation;
             index = end;
             continue;
         }
@@ -423,14 +423,14 @@ fn auditPreludeLayout() bool {
                 std.log.err("prelude layout: definition lacks a ### def <name> header", .{});
                 return true;
             },
-            .body, .annotation => {
+            .annotation, .body => {
                 if (source[index] != '(' or !skipPreludeQuotation(source, &index)) {
                     std.log.err("prelude layout: {s} for `{s}` is not one complete quotation", .{
                         @tagName(stage), expected_name,
                     });
                     return true;
                 }
-                stage = if (stage == .body) .annotation else .name;
+                stage = if (stage == .annotation) .body else .name;
             },
             .name => {
                 if (source[index] != '\'') {
