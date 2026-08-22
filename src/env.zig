@@ -1566,6 +1566,27 @@ pub fn assertStaticNamespace(comptime name: []const u8) void {
         @compileError("invalid builtin namespace name: " ++ name);
     }
 }
+pub fn assertStaticModuleName(comptime name: []const u8) void {
+    @setEvalBranchQuota(10_000);
+    if (name.len == 0) @compileError("embedded module name must be nonempty");
+    var segment_start: usize = 0;
+    for (name, 0..) |byte, index| {
+        if (byte != '.') continue;
+        if (index == segment_start or
+            intern.isReservedBytes(name[segment_start..index]) or
+            !lexer.validSymbolSegment(name[segment_start..index]))
+        {
+            @compileError("invalid embedded module name: " ++ name);
+        }
+        segment_start = index + 1;
+    }
+    if (segment_start == name.len or
+        intern.isReservedBytes(name[segment_start..]) or
+        !lexer.validSymbolSegment(name[segment_start..]))
+    {
+        @compileError("invalid embedded module name: " ++ name);
+    }
+}
 pub const testing = if (builtin.is_test) struct {
     pub fn deinitEnvironment(environment: *Environment) void {
         var cursor = Environment.TeardownCursor.init(environment);

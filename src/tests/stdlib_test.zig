@@ -37,8 +37,11 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
     // A bare Session has no host IO and no search path at all, so nothing
     // here could reach a file even if one existed.
     const exports = [_][]const u8{
-        "result.ok",    "str.upper", "io.print",  "csv.parse",    "json.parse",
-        "table.valid?", "http.get",  "rng.float", "pkg.version<",
+        "result.ok",       "str.upper",         "io.print",
+        "csv.parse",       "json.parse",        "table.valid?",
+        "http.get",        "rng.float",         "pkg.version.less?",
+        "pkg.name.valid?", "pkg.data.read-one", "pkg.manifest.read",
+        "pkg.lock.read",   "pkg.mvs.resolve",
     };
     for (stdlib.names(), exports) |name, qualified| {
         var heap: test_heap.SessionHeap = .init;

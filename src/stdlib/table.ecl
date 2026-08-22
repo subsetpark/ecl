@@ -7,17 +7,17 @@
 # their normal behavior. Exported table operations validate table arguments and
 # raise an error for invalid dictionaries.
 (
- ### def text?
+ ### defp text?
  ((type 'char match?) all?)
  (value -- bool : "Return 1 when every item in a list is a character.")
  'text? defp
 
- ### def string?
+ ### defp string?
  (dup type 'list match? (text?) (pop 0) if)
  (value -- bool : "Return 1 when a value is a string and 0 for every other value.")
  'string? defp
 
- ### def checked
+ ### defp checked
  (dup type 'dict match?
   {'kind 'type 'msg "a table must be a dict of columns"} assert
   dup keys len 0 >
@@ -33,7 +33,7 @@
  (candidate -- table : "Validate and return a table candidate.")
  'checked defp
 
- ### def convention-miss?
+ ### defp convention-miss?
  (dup 'err at 'kind at ['type 'shape 'domain] in? (pop 0) ('err at raise) if)
  (result -- bool : "Return 0 for a table validation error and re-raise any other error.")
  'convention-miss? defp
@@ -95,7 +95,7 @@
  (rows -- table : "Build a table using the first row as column names and the rest as data rows.")
  'from-header-rows def
 
- ### def record-column
+ ### defp record-column
  (|name records| records name (at) partial each)
  (name records -- column : "Return one field from each record, preserving record order.")
  'record-column defp
@@ -165,7 +165,7 @@
    validated before a quotation runs.")
  'cast def
 
- ### def cast-column
+ ### defp cast-column
  (|table pair| table pair first
   table pair first at pair 1 at each
   put)
@@ -223,17 +223,17 @@
   "Replace a named column or append a new column. The column length must equal the row count.")
  'with-column def
 
- ### def selected
+ ### defp selected
  (|mask| mask len range mask (swap at) partial filter)
  (mask -- indices : "Return the indices selected by a 0/1 mask.")
  'selected defp
 
- ### def slice-at
+ ### defp slice-at
  (|position lists| lists position (at) partial each)
  (position lists -- slice : "Return the item at one position from each list.")
  'slice-at defp
 
- ### def transpose
+ ### defp transpose
  (|lists count| count range lists (slice-at) partial each)
  (lists count -- transposed :
   "Transpose a rectangular list of lists with the given output length.
@@ -241,12 +241,12 @@
    Cells are not traversed. This supports heterogeneous rows, including strings, and zero rows.")
  'transpose defp
 
- ### def name-set
+ ### defp name-set
  (|names| names names (pop 1) each to-dict)
  (names -- set : "Build a dictionary for whole-name membership tests.")
  'name-set defp
 
- ### def exclude
+ ### defp exclude
  (|names excluded|
   names excluded name-set (swap has? not) partial filter)
  (names excluded -- names : "Remove excluded names while preserving the order of the input names.")
@@ -270,22 +270,22 @@
 
  # --- grouping, aggregation, and joins -------------------------------------
 
- ### def cell
+ ### defp cell
  (|name table index| table name at index at)
  (name table index -- cell : "Return a cell by column name and row index.")
  'cell defp
 
- ### def row-key
+ ### defp row-key
  (|index table names| names table index (cell) partial partial each)
  (index table names -- key : "Return the named cells of one row as a composite key.")
  'row-key defp
 
- ### def composite-keys
+ ### defp composite-keys
  (|table names| table height range table names (row-key) partial partial each)
  (table names -- keys : "Return one composite key per row.")
  'composite-keys defp
 
- ### def group-keys
+ ### defp group-keys
  (|table names| names len 1 =
   table names first (at) partial partial
   table names (composite-keys) partial partial if)
@@ -294,7 +294,7 @@
    columns.")
  'group-keys defp
 
- ### def global-group
+ ### defp global-group
  (|table| [] wrap table height range wrap to-dict)
  (table -- groups : "Return one group containing every row index.")
  'global-group defp
@@ -321,7 +321,7 @@
    list returns one group keyed by the empty list.")
  'group-by def
 
- ### def apply-aggregate
+ ### defp apply-aggregate
  (|column quotation| column wrap quotation each first)
  (column quotation -- value :
   "Apply an isolated ( column -- value ) quotation to one column slice.
@@ -329,22 +329,22 @@
    The quotation must return exactly one value.")
  'apply-aggregate defp
 
- ### def group-value
+ ### defp group-value
  (|indices table spec| table spec 1 at at indices at spec 2 at apply-aggregate)
  (indices table spec -- value : "Apply one aggregate specification to one group.")
  'group-value defp
 
- ### def aggregate-column
+ ### defp aggregate-column
  (|spec table groups| groups vals table spec (group-value) partial partial each)
  (spec table groups -- column : "Return one aggregate value per group.")
  'aggregate-column defp
 
- ### def key-component
+ ### defp key-component
  (|position groups| groups keys position (at) partial each)
  (position groups -- column : "Return one component from every composite group key.")
  'key-component defp
 
- ### def key-columns
+ ### defp key-columns
  (|groups names| names len 1 =
   groups (keys wrap) partial
   groups names (composite-key-columns) partial partial
@@ -352,12 +352,12 @@
  (groups names -- columns : "Return grouping-key columns in name order.")
  'key-columns defp
 
- ### def composite-key-columns
+ ### defp composite-key-columns
  (|groups names| names len range groups (key-component) partial each)
  (groups names -- columns : "Split composite group keys into one column per name.")
  'composite-key-columns defp
 
- ### def spec-shaped?
+ ### defp spec-shaped?
  (dup type 'list match?
   (dup len 3 =
    (dup first string? over 1 at string? and swap 2 at type 'list match? and)
@@ -368,7 +368,7 @@
  (spec -- bool : "Return 1 for an [output-name input-name quotation] aggregate specification.")
  'spec-shaped? defp
 
- ### def aggregate-build
+ ### defp aggregate-build
  (|table names specs groups|
   names specs (first) each cat
   groups names key-columns
@@ -409,23 +409,23 @@
    columns first, followed by aggregate columns in specification order, with one row per group.")
  'aggregate def
 
- ### def key-matches
+ ### defp key-matches
  (|index left-keys right-keys|
   right-keys left-keys index at (match?) partial each selected)
  (index left-keys right-keys -- indices : "Return matching right-row indices in ascending order.")
  'key-matches defp
 
- ### def table-row
+ ### defp table-row
  (|index table| table vals index (at) partial each)
  (index table -- row : "Return one row in column order.")
  'table-row defp
 
- ### def named-row
+ ### defp named-row
  (|index table names| names table index (cell) partial partial each)
  (index table names -- row : "Return selected cells from one row in name order.")
  'named-row defp
 
- ### def emit-pair
+ ### defp emit-pair
  (|rows right-index context left-index|
   rows
   left-index context first table-row
@@ -435,13 +435,13 @@
  (rows right-index context left-index -- rows : "Append one matched left/right row pair.")
  'emit-pair defp
 
- ### def emit-matches
+ ### defp emit-matches
  (|matches rows index context|
   matches rows context index (emit-pair) partial partial fold)
  (matches rows index context -- rows : "Append all right matches for one left row.")
  'emit-matches defp
 
- ### def emit-filled
+ ### defp emit-filled
  (|matches rows index context|
   rows
   index context first table-row
@@ -451,14 +451,14 @@
  (matches rows index context -- rows : "Append a fill row for an unmatched left row.")
  'emit-filled defp
 
- ### def inner-step
+ ### defp inner-step
  (|rows index context|
   index context 3 at context 4 at key-matches
   rows index context emit-matches)
  (rows index context -- rows : "Append inner-join results for one left row.")
  'inner-step defp
 
- ### def left-step
+ ### defp left-step
  (|rows index context|
   index context 3 at context 4 at key-matches
   dup len 0 =
@@ -468,7 +468,7 @@
  (rows index context -- rows : "Append left-join results for one left row.")
  'left-step defp
 
- ### def pair-shaped?
+ ### defp pair-shaped?
  (dup type 'list match?
   (dup len 2 =
    (dup first string? swap 1 at string? and)
@@ -479,7 +479,7 @@
  (pair -- bool : "Return 1 for a [left-name right-name] join-key pair.")
  'pair-shaped? defp
 
- ### def join-plan
+ ### defp join-plan
  (|left right pairs|
   pairs type 'list match?
   {'kind 'type 'msg "join keys are a list of [left-name right-name] pairs"} assert
@@ -503,7 +503,7 @@
  (left right pairs -- extra : "Validate join keys and return the right columns to append.")
  'join-plan defp
 
- ### def join-context
+ ### defp join-context
  (|left right pairs extra fill|
   left right extra
   left height range left pairs (first) each (row-key) partial partial each
@@ -514,7 +514,7 @@
   "Build a join context containing both tables, output names, row keys, and fill values.")
  'join-context defp
 
- ### def join-rows
+ ### defp join-rows
  (|left right pairs extra fill step|
   left keys extra cat
   left height range
@@ -542,7 +542,7 @@
    all left columns followed by right non-key columns. Colliding non-key names raise 'domain.")
  'inner-join def
 
- ### def left-join-checked
+ ### defp left-join-checked
  (|left right pairs fill extra|
   extra fill (swap has?) partial all?
   {'kind 'domain 'msg "a fill must cover every appended right column"} assert

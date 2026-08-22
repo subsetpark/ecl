@@ -123,7 +123,7 @@ non-TTY stdin remains a single noninteractive source unit.
 
 `ecl fmt FILE` formats source without evaluating it. Use `ecl fmt -` for
 standard input. Literal definitions and modules receive navigable
-`### def <name>` and `### module <name>` headers.
+`### def <name>`, `### defp <name>`, and `### module <name>` headers.
 
 ## Source modules
 
@@ -273,6 +273,7 @@ evaluator, or durable module-state authority.
 ## Build and verification
 
 Verification has three tiers. Only the first is meant to be run by hand.
+First-party ECL source follows the [ECL authoring guide](design/ECL_STYLE.md).
 
 **Local — before every commit:**
 

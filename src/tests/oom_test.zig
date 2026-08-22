@@ -356,7 +356,12 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "{\"r\" [\"e\" \"w\"] \"v\" [1 2]} " ++
             "[\"r\"] [[\"t\" \"v\" (sum)]] table.aggregate pop " ++
             "{\"id\" [1 2]} {\"cid\" [2] \"n\" [9]} [[\"id\" \"cid\"]] " ++
-            "{\"n\" 0} table.left-join-with pop",
+            "{\"n\" 0} table.left-join-with pop " ++
+            "{'format 1 'name \"r\" 'version \"0.1.0\" 'requires " ++
+            "{\"a\" {'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
+            "'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}} " ++
+            "{\"a\" {\"1.0.0\" {'format 1 'name \"a\" 'version \"1.0.0\" 'requires {}}}} " ++
+            "pkg.mvs.resolve pop",
     );
 
     // The host scripting words allocate on the read buffer, the decoded

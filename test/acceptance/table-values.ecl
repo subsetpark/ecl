@@ -16,6 +16,7 @@
 'table.rename 'rename import
 'table.with-column 'with-column import
 
+### def sales
 {"id" [1 2 3] "city" ["Oslo" "Lima" "Oslo"]} 'sales set
 
 # Core reflection is honest: a table is a dict and behaves as one.

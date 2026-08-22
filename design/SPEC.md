@@ -730,16 +730,16 @@ a trusted-code boundary.
 
 ## The standard library
 
-Nine modules ship inside the binary. They are ordinary modules — registered,
+Fourteen modules ship inside the binary. They are ordinary modules — registered,
 enumerable, shadowable — and they load lazily on the first qualified mention of
 their name, whether that is a bare `str.upper` or `'str.upper 'upper import`. Resolution consults
 the embedded manifest before `ECL_PATH`, so a stray `csv.ecl` on the search
 path cannot silently replace a stdlib name; in-session shadowing and explicit
-`@defm` registration remain the documented overrides. All nine resolve with no
+`@defm` registration remain the documented overrides. All fourteen resolve with no
 `ECL_PATH` set and no filesystem access at all.
 
 Three transports back them, chosen per module rather than uniformly:
-embedded ECL source (`result`, `str`, `table`, `rng`, `pkg`), a linked first-party
+embedded ECL source (`result`, `str`, `table`, `rng`, and the six `pkg.*` modules), a linked first-party
 native descriptor published through the same contract as an external
 extension (`csv`), and builtin word tables published under a module name
 (`io`, `json`, `http`).
@@ -899,26 +899,27 @@ A fresh process starts from a fixed key, so a program using `rng` and
 never calling `rng.seed` is fully reproducible. Seeding from `entropy` is
 the explicit opt out.
 
-### pkg
+### Package modules
 
-The package formats as data (see Packages). Pure value vocabulary: every word
-takes and returns text or values, so finding a file, reading it, and writing
-one back are the caller's business — this module reaches no host capability at
-all.
+The package formats are data (see Packages). Six ordinary modules divide the
+pure value vocabulary by responsibility: `pkg.version`, `pkg.name`, `pkg.data`,
+`pkg.manifest`, `pkg.lock`, and `pkg.mvs`. There is no root `pkg` facade. Every
+word takes and returns text or values, so finding a file, reading it, and
+writing one back are the caller's business; none reaches a host capability.
 
-- versions: `pkg.version<` `( left right -- bool )`, `pkg.version-max`
+- versions: `pkg.version.less?` `( left right -- bool )`, `pkg.version.max`
   `( versions -- version )`
-- manifest: `pkg.read-manifest` `( text -- manifest )`,
-  `pkg.validate-manifest` `( candidate -- manifest )`
-- lock: `pkg.read-lock` `( text -- lock )`, `pkg.write-lock`
+- manifest: `pkg.manifest.read` `( text -- manifest )`,
+  `pkg.manifest.validate` `( candidate -- manifest )`
+- lock: `pkg.lock.read` `( text -- lock )`, `pkg.lock.write`
   `( lock -- text )`
-- resolution: `pkg.resolve` `( root-manifest manifests -- lock )`
-- names: `pkg.owns-prefix?` `( package-name module-name -- bool )`
+- resolution: `pkg.mvs.resolve` `( root-manifest manifests -- lock )`
+- names: `pkg.name.owns?` `( package-name module-name -- bool )`
 
-`validate-manifest` returns its argument unchanged or raises; it is not a
+`pkg.manifest.validate` returns its argument unchanged or raises; it is not a
 `valid?`-style predicate. Failures follow the frozen kinds and introduce no
 user kind: unreadable text is `'parse`; text that is not exactly one form, and
-an empty `version-max` list, are `'shape`; a wrong value kind is `'type`; and
+an empty `pkg.version.max` list, are `'shape`; a wrong value kind is `'type`; and
 everything inside a legal type but outside the grammar — an undeclared key, an
 unsupported `'format`, a malformed name, version, hash, or URL, a
 self-requirement, an ownership collision, a word value anywhere — is
@@ -939,10 +940,10 @@ dependency. Importing stays by qualified name — `'foo.bar.baz 'baz import`
 never mentions a file, a URL, or a version — and a checkout plus a lock reproduces the same module
 images on any machine.
 
-The vocabulary that reads, validates, and writes these files is the `pkg`
-module (see The standard library). Nothing in this section reaches the network
-or the filesystem: ordinary evaluation reads a lock and never writes one, and
-fetching is an explicit command.
+The `pkg.manifest`, `pkg.lock`, `pkg.version`, and `pkg.name` modules read,
+validate, order, and write these values (see The standard library). Nothing in
+this section reaches the network or the filesystem: ordinary evaluation reads
+a lock and never writes one, and fetching is an explicit command.
 
 ### Versions
 
@@ -1040,7 +1041,7 @@ lock small enough for prefix matching to be cheap.
 
 ### Resolution
 
-`pkg.resolve` takes a validated root manifest and a catalog of already-read
+`pkg.mvs.resolve` takes a validated root manifest and a catalog of already-read
 dependency manifests. The catalog is nested by exact package version:
 
 ```
@@ -1057,7 +1058,7 @@ Resolution implements minimal version selection over the exact
 package-version requirement graph. Starting from the root's requirements, it
 visits every reachable `(name, version)` node and its requirements. It then
 keeps the greatest reachable version of each package name under
-`pkg.version<`. Catalog entries that no reachable requirement names are not
+`pkg.version.less?`. Catalog entries that no reachable requirement names are not
 candidates, are not validated, and cannot affect either the lock or an error.
 An active-path repeat is a requirement cycle and is rejected; this is a
 deliberate restriction of the otherwise cycle-tolerant MVS graph traversal.
@@ -1067,7 +1068,7 @@ The returned lock uses the format below. `'root` is the root manifest's name.
 `'requires` contains the root and every selected package as requirers, each
 mapped to the minimum versions in its manifest. Every selected version is at
 least every recorded minimum, and the complete value satisfies the same
-validation as `pkg.read-lock` and `pkg.write-lock`.
+validation as `pkg.lock.read` and `pkg.lock.write`.
 
 Traversal and diagnostics do not depend on dict insertion order. Requirements
 are considered in canonical name/version/requirer order. If equal
@@ -1316,11 +1317,14 @@ on a form's first word. Specifics:
   docstring of a structurally recognized definition annotation immediately
   followed by `'name def`/`defp` is refilled paragraph-aware (semantics
   unchanged — `doc` canonicalization already ignores soft wrapping).
-- Every literal definition block is introduced by a `### def <name>`
-  navigation comment, preceded by exactly one empty line (omitted at the
-  start of a file or container). Existing `# def`/`### def` comments are
-  canonicalized; recognition is purely structural — never evaluation — and
-  is disabled for words directly contained by dict literals.
+- Every structurally literal definition block is introduced by a navigation
+  comment: `### def <name>` for `def`/`set`, and `### defp <name>` for
+  `defp`/`setp`. It is preceded by exactly one empty line (omitted at the start
+  of a file or container).
+  Existing `# def`/`### def`/`# defp`/`### defp` comments are canonicalized
+  from the structural terminator rather than trusted; recognition is purely
+  structural — never evaluation — and is disabled for words directly
+  contained by dict literals.
 
 ---
 
@@ -2028,9 +2032,10 @@ accumulators from reducing its remainder. Defined in ecl over `scan`.
 
 ### see
 `( 'name -- )` — Print a re-readable definition through the standard source
-formatter, including its width-aware layout and `### def` navigation header
-when the reflected form is an ordinary source definition. The definition has
-one combined annotation, omitting each portion that was not supplied. What
+formatter, including its width-aware layout and matching `### def` or
+`### defp` navigation header when the reflected form is an ordinary source
+definition. The definition has one combined annotation, omitting each portion
+that was not supplied. What
 prints is what is stored: a name bound by `set` prints its capture body ending
 in `'name def`, with no annotation, not the `set` spelling that produced it.
 Reader-built bodies retain a shared slice of their source unit, so head binders
@@ -2299,57 +2304,98 @@ arrays become lists, in-range integral numbers become ints, and other numbers
 become floats. JSON null and booleans become the ordinary symbols `'null`,
 `'true`, and `'false`.
 
-## pkg
+## pkg.data
 
-Pure vocabulary over the package formats (see Packages). No word here reaches
-the filesystem or the network.
+Pure structural helpers shared by the package-format modules.
 
-### owns-prefix?
+### assert-inert-entry
+`( pair -- )` — Discard an inert dict entry, or raise `'domain` with its key
+when its value recursively contains an executable word.
+
+### read-one
+`( text -- form )` — Parse exactly one form without evaluating it. Unreadable
+text is `'parse`; zero or multiple forms are `'shape`.
+
+### sorted-entries
+`( dict -- pairs )` — Return a dict's entries in ascending key order.
+
+## pkg.name
+
+### valid?
+`( value -- bool )` — Test the canonical dot-joined lowercase package-name
+grammar without raising.
+
+### hash?
+`( value -- bool )` — Test for `sha256-` followed by exactly 64 lowercase
+hexadecimal digits.
+
+### url?
+`( value -- bool )` — Test for a nonempty HTTPS URL.
+
+### owns?
 `( package-name module-name -- bool )` — Return 1 when a package owns a module
 name: the name itself, or a name continuing after a `.` boundary. `foo` owns
 `foo.bar` and does not own `foobar`. A non-string is `'type`; a malformed
 canonical name is `'domain`.
 
-### read-lock
-`( text -- lock )` — Parse and validate a lock. Unreadable text is `'parse`;
-text that is not exactly one form is `'shape`; anything else answers as the
-lock grammar decides, including the rule that no selection is below a minimum
-recorded for it.
+### collides?
+`( names -- bool )` — Return 1 when any two canonical names overlap under
+`pkg.name.owns?`.
 
-### read-manifest
-`( text -- manifest )` — Parse and validate a manifest. Unreadable text is
-`'parse`, text that is not exactly one form is `'shape`, and the single form is
-then handed to `validate-manifest`. The form is never evaluated.
+## pkg.version
+
+### validate
+`( candidate -- parts )` — Validate a package version and return its core
+fields and prerelease identifiers. A non-string is `'type`; a spelling outside
+the supported SemVer grammar is `'domain`.
+
+### less?
+`( left right -- bool )` — Return 1 when the left version precedes the right
+under Semantic Versioning 2.0.0 §11. Both operands are validated.
+
+### max
+`( versions -- version )` — Return the greatest member of a nonempty list of
+version strings. The empty list is `'shape`; a non-list or non-string member is
+`'type`; every member is validated before comparison.
+
+## pkg.manifest
+
+### validate-requirement
+`( requirement -- requirement )` — Validate and return one exact version, URL,
+and hash declaration.
+
+### validate
+`( candidate -- manifest )` — Return a manifest unchanged, or raise. A non-dict
+is `'type`; an undeclared key, unsupported format, malformed name, version,
+hash, or URL, self-requirement, ownership collision, or executable word value
+is `'domain`.
+
+### read
+`( text -- manifest )` — Parse one form with `pkg.data.read-one`, validate it,
+and never evaluate it.
+
+## pkg.lock
+
+### validate
+`( candidate -- lock )` — Return a lock unchanged after checking its grammar,
+root provenance, selected packages, recorded minimums, and satisfaction.
+
+### read
+`( text -- lock )` — Parse one form without evaluation and validate it.
+
+### write
+`( lock -- text )` — Validate a lock and render its canonical sorted layout,
+including the terminal newline.
+
+## pkg.mvs
 
 ### resolve
 `( root-manifest manifests -- lock )` — Resolve the reachable exact-version
-requirement graph by minimal version selection. `manifests` is a dict from
-canonical package name to a dict from exact version to an already-read
-manifest. Return a lock directly, or raise a structured error for a malformed
-input, hash conflict, selected-prefix collision, requirement cycle, or missing
-manifest. No filesystem, network, or evaluation capability is reached.
-
-### validate-manifest
-`( candidate -- manifest )` — Return a manifest unchanged, or raise. A non-dict
-is `'type`; an undeclared key, an unsupported `'format`, a malformed name,
-version, hash, or URL, a self-requirement, an ownership collision between two
-requirement names, and a word value anywhere are `'domain`.
-
-### version-max
-`( versions -- version )` — The greatest of a nonempty list of version
-strings. The empty list is `'shape`, a non-list or a non-string element is
-`'type`, and a malformed version is `'domain` whether or not it is the
-maximum.
-
-### version<
-`( left right -- bool )` — Return 1 when the left version precedes the right
-under Semantic Versioning 2.0.0 §11. A non-string is `'type`; a spelling
-outside the version grammar is `'domain` rather than a false answer.
-
-### write-lock
-`( lock -- text )` — Render a lock in its canonical layout. An invalid lock
-raises rather than producing partial text, so its kinds are `read-lock`'s
-minus `'parse`.
+requirement graph by minimal version selection. `manifests` maps package names
+to exact-version manifest maps. Return a validated lock, or raise a structured
+error for malformed input, conflicting hashes, a selected-prefix collision, a
+requirement cycle, or a missing manifest. It reaches no filesystem, network,
+or evaluation capability.
 
 ## result
 

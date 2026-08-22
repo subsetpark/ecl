@@ -137,11 +137,14 @@ test "formatter preserves comments and atomic literal contents" {
 test "formatter owns canonical definition section comments" {
     const source =
         "# ordinary lead\n" ++
-        "# def stale\n" ++
+        "# defp stale-public\n" ++
         "# public details\n" ++
         "(1)\n(-- n)\n'public def\n\n\n" ++
         "# def stale-private\n" ++
         "(2)\n[-- n]\n'private defp\n" ++
+        "# def stale-constant\n" ++
+        "\"secret\" 'constant setp\n" ++
+        "42 'answer set\n" ++
         "### overview\n" ++
         "\"ab\" 'letters def\n";
     try expectFormat(
@@ -150,8 +153,12 @@ test "formatter owns canonical definition section comments" {
             "### def public\n" ++
             "# public details\n" ++
             "(1)\n(-- n)\n'public def\n\n" ++
-            "### def private\n" ++
+            "### defp private\n" ++
             "(2)\n[-- n]\n'private defp\n" ++
+            "\n### defp constant\n" ++
+            "\"secret\" 'constant setp\n" ++
+            "\n### def answer\n" ++
+            "42 'answer set\n" ++
             "### overview\n\n" ++
             "### def letters\n" ++
             "\"ab\" 'letters def\n",
@@ -170,7 +177,7 @@ test "formatter owns canonical definition section comments" {
             "(\n" ++
             " ### def visible\n" ++
             " (1)\n (-- n)\n 'visible def\n # note\n\n" ++
-            " ### def hidden\n" ++
+            " ### defp hidden\n" ++
             " # hidden details\n" ++
             " (2)\n (-- n)\n 'hidden defp\n )\n" ++
             "'m\n@defm\n",

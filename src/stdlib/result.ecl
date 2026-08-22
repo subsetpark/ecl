@@ -8,7 +8,7 @@
 #
 # `raise`, `fail`, and `assert` operate on errors directly and remain core words.
 (
- ### def checked
+ ### defp checked
  (dup type 'dict match?
   {'kind 'type 'msg "a result must be a dict tagged {'ok values} or {'err error}"} assert
   dup keys len 1 =
@@ -24,7 +24,7 @@
  (result -- result : "Validate and return a result.")
  'checked defp
 
- ### def checked-all
+ ### defp checked-all
  (dup type 'list match?
   {'kind 'type 'msg "expected a list of results"} assert
   dup (checked pop) for)

@@ -1,2 +1,6 @@
 ### module stats
-(1 'answer set) 'stats @defm
+(
+ ### def answer
+ 1 'answer set)
+'stats
+@defm

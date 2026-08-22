@@ -17,10 +17,10 @@ second tool to install.
 Verified in the checkout (2026-08-21, `0.1.0` tagged 2026-08-19, the v1
 workstream terminal).
 
-- **There is no package manager, no manifest, no lock, and no notion of a
-  version anywhere in `src/`.** `design/workstream-v1.md` follow-up 12 scopes
-  one as post-v1 work and the 2026-08-21 Decisions Made entry records the MVS
-  and lock-table rulings this workstream implements.
+- **The pure format and resolution layers now exist, but no package IO or
+  runtime lock tier does.** M1 added inert manifest/lock values and version
+  ordering; M2 adds the pure MVS resolver. Fetching, project-file discovery,
+  CLI mutation, and runtime module lookup remain later milestones.
 - **Module resolution today is embedded manifest, then `ECL_PATH`.**
   `AutoLoadDriver` (`src/machine.zig:2366`) is a poll-budgeted state machine
   with phases `begin → registered → filename → component_start →
@@ -33,11 +33,10 @@ workstream terminal).
   comptime array of `{name, entry}` with `find(name) ?Entry` and three
   transport arms — `source` (embedded text plus a provenance name), `native`
   (`*const abi.Descriptor`), `builtin` (`[]const env.BuiltinWord`).
-  Constraint verified at `src/stdlib.zig:75`: **embedded module names are
-  comptime-rejected if they contain a dot or whitespace**, so every embedded
-  module is a single atom. Dotted names have only ever come from `ECL_PATH`,
-  where `core.utils` names the file `core.utils.ecl` in a search directory —
-  flat, no directory nesting (`src/machine.zig:2580`–`2620`).
+  Embedded module names are validated segment by segment at comptime, so
+  ordinary dotted modules such as `pkg.version` and `pkg.mvs` use the same
+  flat registry as path-loaded modules. `ECL_PATH` still maps `core.utils` to
+  the flat filename `core.utils.ecl`; it does not imply directory nesting.
 - **`ecl_path` and `host_io` ride on `unit.inherited`** (`src/machine.zig:1088`,
   threaded from `src/session.zig:52` and owned at `:276`). A lock table
   attaches at exactly the same place, and the existing
@@ -97,10 +96,11 @@ workstream terminal).
 - **Version ordering is a specification, not a detail.** MVS needs a total
   order on versions to take a maximum. Semver's prerelease ordering rules are
   subtle and must be pinned in SPEC.md before the resolver is written.
-- **Embedded names cannot be dotted.** `src/stdlib.zig:75` forbids it, so the
-  resolver module is the single atom `pkg` and host primitives cannot live at
-  `pkg.host`. Either they take their own single-atom module name or the
-  comptime check is relaxed. This workstream takes the former.
+- **Package code must retain ordinary module semantics.** M2 relaxed the old
+  single-atom embedded-name check and split the pure vocabulary into dotted
+  `pkg.*` modules. Later host-backed capabilities may use their own modules,
+  but the host must not concatenate ECL fragments, synthesize a facade, or
+  grant private cross-module access.
 
 ## Established Precedents
 
@@ -169,20 +169,24 @@ workstream terminal).
 - Both files are ECL data literals — nested dicts and lists of scalars — read
   with `parse` and **never evaluated**. A manifest containing a quotation, a
   word reference, or any non-literal form is rejected by validation, not run.
-- A new embedded stdlib module `pkg` (single atom, per the comptime check at
-  `src/stdlib.zig:75`) registered in `src/stdlib.zig` with the `source` arm,
-  exporting pure functions: `pkg.read-manifest`, `pkg.read-lock`,
-  `pkg.write-lock`, `pkg.version<`, `pkg.version-max`,
-  `pkg.validate-manifest`, `pkg.owns-prefix?`. No network, no filesystem.
+- Five ordinary embedded stdlib modules under `src/stdlib/pkg/` are registered
+  separately through the `source` arm: `pkg.version`, `pkg.name`, `pkg.data`,
+  `pkg.manifest`, and `pkg.lock`. They export pure format and validation words,
+  including `pkg.manifest.read`, `pkg.lock.read`, `pkg.lock.write`,
+  `pkg.version.less?`, `pkg.version.max`, `pkg.manifest.validate`, and
+  `pkg.name.owns?`. There is no synthetic root `pkg` facade. No word reaches
+  the network or filesystem.
   **The three reading and writing words take and return text, not paths** —
   slurping a file and discovering it belong to M6 — and the lock validator
-  they share is private, so the export count stays seven.
+  they share is `pkg.lock.validate`; cross-module helpers are ordinary public
+  ECL words because the modules have no privileged friendship relation.
 - **The lock is structurally per-package from this first version**: its
   entries key requirements by the *requiring* package, even though MVS makes
   every map identical today. This is the recorded retrofit door for admitting
   two versions of one name later without a breaking format change.
-- Round-trip property tests: `write-lock` of `read-lock` is byte-identical;
-  `version<` is a total order over a generated version corpus.
+- Round-trip property tests: `pkg.lock.write` of `pkg.lock.read` is
+  byte-identical; `pkg.version.less?` is a total order over a generated
+  version corpus.
 - **The canonical lock layout is pinned in SPEC.md**, because it is what
   byte-identical means: a newline before each top-level key and before each
   `'packages` / `'requires` entry, entries in ascending `cmp` order of their
@@ -194,13 +198,13 @@ workstream terminal).
   also pins the **store-key derivation** (`<name>-<version>-<64 lowercase hex
   digits>`, mirroring `zig-pkg/`), because M4 creates those directories and M5
   resolves through them *in parallel* and would otherwise each invent a
-  spelling. And `pkg.read-lock` enforces the lock's **internal consistency** —
+  spelling. And `pkg.lock.read` enforces the lock's **internal consistency** —
   no selection below a minimum recorded for it — so M5's tier can trust the
   file it reads.
 
-**Why this is a safe pause point**: Nothing outside `src/stdlib.zig` and
-`src/stdlib/pkg.ecl` changes. `pkg` is an ordinary embedded module that
-manipulates data; no resolution path, CLI surface, or IO behavior is touched.
+**Why this is a safe pause point**: The focused `pkg.*` modules manipulate
+data through ordinary ECL module semantics; no resolution path, CLI surface,
+or IO behavior is touched.
 The binary behaves identically for every program that does not reference or
 import a `pkg` word.
 
@@ -223,7 +227,7 @@ plan and proof ledger are in `gameplans/pkg-manifest-and-lock-format.json`.
 ### Milestone 2: pkg-mvs-resolver
 
 **Definition of Done**:
-- `pkg.resolve` in `src/stdlib/pkg.ecl`: a pure function from a root manifest
+- `pkg.mvs.resolve` in `src/stdlib/pkg/mvs.ecl`: a pure function from a root manifest
   plus a dict of already-read dependency manifests to either a lock value or
   a structured error. No IO of any kind.
 - Implements MVS algorithm 1: walk the requirement graph, take the maximum of
@@ -238,7 +242,7 @@ plan and proof ledger are in `gameplans/pkg-manifest-and-lock-format.json`.
   declared minimum for that name; adding a requirement already satisfied
   changes nothing.
 
-**Why this is a safe pause point**: `pkg.resolve` is a pure function over
+**Why this is a safe pause point**: `pkg.mvs.resolve` is a pure function over
 data. It is callable and testable from an ordinary script, and nothing in the
 interpreter consults it yet.
 
@@ -280,8 +284,8 @@ parallel with them.
 ### Milestone 4: pkg-fetch-and-store
 
 **Definition of Done**:
-- `pkg.sync` in `src/stdlib/pkg.ecl`: given a root manifest, read transitive
-  manifests, resolve via `pkg.resolve`, fetch every selected package that is
+- `pkg.sync.run` in `src/stdlib/pkg/sync.ecl`: given a root manifest, read transitive
+  manifests, resolve via `pkg.mvs.resolve`, fetch every selected package that is
   not already in the store, and write `ecl.lock`.
 - Fetch is tarball-over-HTTPS only, via the existing `http` module. Each
   downloaded archive is hashed with `archive.sha256` and compared against the
@@ -300,7 +304,7 @@ parallel with them.
 - Acceptance runs against `test/http_fixture_server.zig` with checked-in
   fixture tarballs. No CI network access.
 
-**Why this is a safe pause point**: `pkg.sync` is callable from a script and
+**Why this is a safe pause point**: `pkg.sync.run` is callable from a script and
 produces a real store and a real lock, but nothing reads the lock yet — the
 interpreter still resolves through the embedded manifest and `ECL_PATH`
 exactly as before. A user who runs it has downloaded files and gained a lock
@@ -313,7 +317,7 @@ genuinely fetched packages.
 1. Publish one real source-only package tarball to a durable URL (a GitHub
    release or `archive/refs/tags/*.tar.gz` is sufficient) and record its
    SHA-256.
-2. Run `pkg.sync` against a manifest naming it, on a machine with network
+2. Run `pkg.sync.run` against a manifest naming it, on a machine with network
    access, outside CI. Confirm the store directory, the lock contents, and the
    hash all match.
 3. **Decision, with criteria**: if the live fetch surfaces TLS, redirect, or
@@ -373,8 +377,8 @@ an ordinary `ecl script.ecl` is the whole user story.
 
 **Definition of Done**:
 - `ecl pkg <subcommand>` dispatched at `src/main.zig:56` alongside `ecl fmt`,
-  delegating to the embedded `pkg` module rather than reimplementing logic in
-  Zig. Subcommands: `init`, `add <name> <version> <url>`, `sync`, `tree`,
+  delegating to the ordinary `pkg.*` modules rather than reimplementing logic
+  in Zig. Subcommands: `init`, `add <name> <version> <url>`, `sync`, `tree`,
   `why <module>`, `verify`.
 - `add` performs MVS algorithm 3 — raise one requirement to a new minimum,
   leave every other selection alone — and rewrites `ecl.pkg` preserving the
@@ -575,7 +579,7 @@ fetcher. M6 is the join.
     `ecl pkg tree`.
   - **Expected**: `c 1.5` appears exactly once; no other version of `c` is
     present in the lock or the store.
-  - **Traces to**: Milestone 2 — `pkg.resolve` in `src/stdlib/pkg.ecl`.
+  - **Traces to**: Milestone 2 — `pkg.mvs.resolve` in `src/stdlib/pkg/mvs.ecl`.
 
 - **DoD-5 — A newer available version is not selected**
   - **Assert**: If `c 2.0` exists at a reachable URL but nothing in the graph
@@ -583,7 +587,7 @@ fetcher. M6 is the join.
   - **Verify by** `cmd`: Serve `c 2.0` from the fixture server, re-run
     `ecl pkg sync` against the DoD-4 fixture unchanged, and read `ecl.lock`.
   - **Expected**: `c 1.5`. MVS never upgrades without a manifest edit.
-  - **Traces to**: Milestone 2 — `pkg.resolve`.
+  - **Traces to**: Milestone 2 — `pkg.mvs.resolve`.
 
 - **DoD-6 — Resolution is deterministic and recomputable**
   - **Assert**: Deleting `ecl.lock` and re-syncing reproduces it byte for
@@ -591,7 +595,7 @@ fetcher. M6 is the join.
   - **Verify by** `cmd`: `cp ecl.lock ecl.lock.bak && rm ecl.lock &&
     ecl pkg sync && diff ecl.lock ecl.lock.bak`.
   - **Expected**: `diff` exits 0. The lock is derived, not a transcript.
-  - **Traces to**: Milestone 2 — `pkg.resolve`; Milestone 4 — `pkg.sync`.
+  - **Traces to**: Milestone 2 — `pkg.mvs.resolve`; Milestone 4 — `pkg.sync.run`.
 
 - **DoD-7 — A hash mismatch aborts before unpacking**
   - **Assert**: A tarball whose content does not match its declared hash is
@@ -600,7 +604,7 @@ fetcher. M6 is the join.
     deliberately wrong hash and run `ecl pkg sync`.
   - **Expected**: Nonzero exit, an error naming the package and both hashes,
     no new store directory, and no `ecl.lock` written.
-  - **Traces to**: Milestone 4 — the hash check in `pkg.sync`.
+  - **Traces to**: Milestone 4 — the hash check in `pkg.sync.run`.
 
 - **DoD-8 — Conflicting hashes for one name and version are a hard error**
   - **Assert**: Two manifests declaring `c 1.5` with different hashes fail
@@ -608,7 +612,7 @@ fetcher. M6 is the join.
   - **Verify by** `cmd`: `ecl pkg sync` against that fixture.
   - **Expected**: Nonzero exit and an error naming both declaring packages and
     both hashes.
-  - **Traces to**: Milestone 2 — the hash-conflict arm of `pkg.resolve`.
+  - **Traces to**: Milestone 2 — the hash-conflict arm of `pkg.mvs.resolve`.
 
 - **DoD-9 — A package cannot publish outside its prefix**
   - **Assert**: A package `foo` whose tarball contains `bar.ecl` fails the
@@ -644,8 +648,8 @@ fetcher. M6 is the join.
     that would write a file if evaluated, then run `ecl pkg sync`.
   - **Expected**: Nonzero exit, a validation error naming the offending key,
     and the file the quotation would have written does not exist.
-  - **Traces to**: Milestone 1 — `pkg.validate-manifest` in
-    `src/stdlib/pkg.ecl`. The terminal form of this assertion needs M6's
+  - **Traces to**: Milestone 1 — `pkg.manifest.validate` in
+    `src/stdlib/pkg/manifest.ecl`. The terminal form of this assertion needs M6's
     `ecl pkg sync` to run; M1 lands its unit-level half as
     `pkg: a manifest holding an executable form is rejected, not evaluated`
     in `src/tests/pkg_test.zig`, which asserts the `'domain` rejection and
@@ -689,33 +693,33 @@ fetcher. M6 is the join.
   - **Traces to**: Milestone 7 — terminal state across all milestones.
 
 - **DoD-17 — Version precedence matches semver 2.0.0 §11**
-  - **Assert**: `pkg.version<` is a strict total order agreeing with §11 over
+  - **Assert**: `pkg.version.less?` is a strict total order agreeing with §11 over
     the prerelease corpus, and a spelling outside the grammar is an error
     rather than a false answer.
   - **Verify by** `cmd`: adjacent pairs of the ascending corpus, then two
     rejections. The pair plumbing was verified against `0.1.0`:
-    `ecl -e '[…corpus…] dup unappend pop swap 1 drop zip (call pkg.version<) each'`,
+    `ecl -e '[…corpus…] dup unappend pop swap 1 drop zip (call pkg.version.less?) each'`,
     with the corpus `["1.0.0-alpha" "1.0.0-alpha.1" "1.0.0-alpha.beta"
     "1.0.0-beta.2" "1.0.0-beta.11" "1.0.0-rc.1" "1.0.0"]`; then
-    `ecl -e '"1.0.0+build" "1.0.1" pkg.version<'` and
-    `ecl -e '"1.01.0" "1.2.0" pkg.version<'`.
+    `ecl -e '"1.0.0+build" "1.0.1" pkg.version.less?'` and
+    `ecl -e '"1.01.0" "1.2.0" pkg.version.less?'`.
   - **Expected**: `[1 1 1 1 1 1]` for the corpus; nonzero exit and a
     `'domain` error for each of the two malformed spellings.
-  - **Traces to**: Milestone 1 — `pkg.version<` in `src/stdlib/pkg.ecl`,
+  - **Traces to**: Milestone 1 — `pkg.version.less?` in `src/stdlib/pkg/version.ecl`,
     proved by `pkg: version ordering is a strict total order over a generated
     corpus` in `src/tests/pkg_test.zig`.
 
 - **DoD-18 — The lock is a fixed point of its own writer**
   - **Assert**: Reading a canonical `ecl.lock` and writing it back reproduces
     the bytes, and writing a lock value then reading it reproduces the value.
-  - **Verify by** `cmd`: `ecl -e '"ecl.lock" io.slurp pkg.read-lock
-    pkg.write-lock io.prin' > round-tripped && diff ecl.lock round-tripped`.
+  - **Verify by** `cmd`: `ecl -e '"ecl.lock" io.slurp pkg.lock.read
+    pkg.lock.write io.prin' > round-tripped && diff ecl.lock round-tripped`.
     `io.prin` rather than the final-stack print: `-e` renders the stack as a
     quoted, escaped value, which is not the file's bytes (verified against
     `0.1.0`).
   - **Expected**: `diff` exits 0. Distinct from DoD-6, which asserts the lock
     is *recomputable* from the manifests; this asserts the format's spelling
     is canonical, which is what makes DoD-6's `diff` meaningful.
-  - **Traces to**: Milestone 1 — `pkg.write-lock` in `src/stdlib/pkg.ecl`,
+  - **Traces to**: Milestone 1 — `pkg.lock.write` in `src/stdlib/pkg/lock.ecl`,
     proved by `pkg: read-lock and write-lock round-trip a canonical lock byte
     for byte` in `src/tests/pkg_test.zig`.

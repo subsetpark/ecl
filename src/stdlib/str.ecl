@@ -2,12 +2,12 @@
 # String operations use ASCII case and whitespace rules. Case conversion leaves
 # non-ASCII characters unchanged.
 (
- ### def blanks
+ ### defp blanks
  (" \t\n\u{B}\u{C}\u{D}")
  (-- string : "Return the ASCII whitespace characters recognized by trimming operations.")
  'blanks defp
 
- ### def type-error
+ ### defp type-error
  (wrap ('kind 'type 'msg) swap compose dict-of)
  (message -- error : "Build a type error with the given message.")
  'type-error defp
@@ -20,29 +20,29 @@
    The empty string and empty list are the same value and return 1.")
  'str? def
 
- ### def checked-error
+ ### defp checked-error
  (|candidate failure| candidate str? failure assert candidate)
  (candidate failure -- string :
   "Validate and return a string, using the supplied error on failure.")
  'checked-error defp
 
- ### def checked
+ ### defp checked
  (type-error checked-error)
  (candidate message -- string : "Validate and return a string, using the message for a type error.")
  'checked defp
 
- ### def checked-int
+ ### defp checked-int
  (|candidate failure| candidate type 'int match? failure assert candidate)
  (candidate failure -- integer :
   "Validate and return an integer, using the supplied error on failure.")
  'checked-int defp
 
- ### def checked-pair
+ ### defp checked-pair
  (type-error (|a b failure| a failure checked-error pop b failure checked-error pop a b) call)
  (first second message -- first second : "Validate and return two strings.")
  'checked-pair defp
 
- ### def checked-triple
+ ### defp checked-triple
  (type-error
   (|a b c failure|
    a failure checked-error pop b failure checked-error pop c failure checked-error pop a b c)
@@ -50,7 +50,7 @@
  (first second third message -- first second third : "Validate and return three strings.")
  'checked-triple defp
 
- ### def checked-string-int
+ ### defp checked-string-int
  (type-error
   (|text integer failure|
    text failure checked-error pop integer failure checked-int pop text integer)
@@ -70,7 +70,7 @@
  (string -- string : "Convert ASCII uppercase letters to lowercase.")
  'lower def
 
- ### def trim-left-valid
+ ### defp trim-left-valid
  (dup blanks in? not where dup len 0 =
   (pop pop "")
   (first drop)
@@ -83,7 +83,7 @@
  (string -- string : "Remove leading ASCII whitespace.")
  'trim-left def
 
- ### def trim-right-valid
+ ### defp trim-right-valid
  (dup blanks in? not where dup len 0 =
   (pop pop "")
   (last 1 + take)
@@ -101,12 +101,12 @@
  (string -- string : "Remove ASCII whitespace from both ends of a string.")
  'trim def
 
- ### def opens-with?
+ ### defp opens-with?
  (|s p| s p len take p match?)
  (string prefix -- bool : "Compare a validated string with a prefix no longer than the string.")
  'opens-with? defp
 
- ### def closes-with?
+ ### defp closes-with?
  (|s p| s p len neg take p match?)
  (string suffix -- bool : "Compare a validated string with a suffix no longer than the string.")
  'closes-with? defp

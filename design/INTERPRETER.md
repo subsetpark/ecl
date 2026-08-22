@@ -1029,6 +1029,13 @@ honest source with no public dual representation.
   builtin word table (`[]const env.BuiltinWord`). Duplicate names, empty
   sources, and undocumented builtin words are compile errors, so the manifest
   cannot describe a module the loader would have to repair.
+- **Embedded ECL files preserve the language's module boundaries.** Each source
+  entry is one independently parsed file whose terminal `@defm` registers the
+  exact canonical path named by the manifest. `env.assertStaticModuleName`
+  validates dotted paths segment by segment at comptime. The host neither
+  concatenates definition fragments nor synthesizes umbrella modules, so
+  privacy, cold loading, and cross-module qualified dispatch are the same for
+  `pkg.*` modules as for user-authored modules.
 - **The manifest is consulted before `ECL_PATH`.** `AutoLoadDriver` acquires
   the loading lease, checks whether the module is already registered, then
   consults the manifest, and only then walks the search path. So a stdlib name
@@ -1380,8 +1387,9 @@ space-separated structural run, so a hard break in one child cannot
 explode its surrounding phrase into one-item lines. Existing source line
 boundaries remain hard. Only binders and structurally recognized
 definition annotations receive syntax-specific layout; doc paragraphs use
-fill rather than one all-or-nothing group. Literal `def`/`defp` blocks
-receive canonical `### def <name>` section comments, separated from
+fill rather than one all-or-nothing group. Structurally literal
+`def`/`defp`/`set`/`setp` blocks receive matching canonical
+`### def <name>` / `### defp <name>` section comments, separated from
 preceding material by one empty line.
 
 ## Verification

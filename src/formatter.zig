@@ -422,7 +422,7 @@ const Formatter = struct {
                 .comment => {
                     if (existingDefinitionHeader(sequence, part_index, trivia.bytes)) |header| {
                         if (have_content) try self.rootBreak(&output, &line, 2);
-                        try line.append(self.allocator(), try self.definitionHeader(header.name));
+                        try line.append(self.allocator(), try self.definitionHeader(header.name, header.private));
                         have_content = true;
                         previous_comment = true;
                         pending_definition = header.part;
@@ -444,7 +444,7 @@ const Formatter = struct {
                             try line.append(self.allocator(), if (header.module)
                                 try self.moduleHeader(header.name)
                             else
-                                try self.definitionHeader(header.name));
+                                try self.definitionHeader(header.name, header.private));
                             have_content = true;
                             previous_comment = true;
                             pending_definition = header.part;
@@ -473,7 +473,7 @@ const Formatter = struct {
                 if (name orelse module_name) |header_name| {
                     if (have_content) try self.rootBreak(&output, &line, 2);
                     try line.append(self.allocator(), if (name != null)
-                        try self.definitionHeader(header_name)
+                        try self.definitionHeader(header_name, definitionPrivate(sequence, part_index))
                     else
                         try self.moduleHeader(header_name));
                     try self.rootBreak(&output, &line, 1);
@@ -531,8 +531,11 @@ const Formatter = struct {
             .delimited => form_item.layout.?,
         };
     }
-    fn definitionHeader(self: *Formatter, name: []const u8) Error!*const Doc {
-        return self.docs.concat(&.{ try self.docs.text("### def "), try self.docs.text(name) });
+    fn definitionHeader(self: *Formatter, name: []const u8, private: bool) Error!*const Doc {
+        return self.docs.concat(&.{
+            try self.docs.text(if (private) "### defp " else "### def "),
+            try self.docs.text(name),
+        });
     }
     fn moduleHeader(self: *Formatter, name: []const u8) Error!*const Doc {
         return self.docs.concat(&.{ try self.docs.text("### module "), try self.docs.text(name) });
@@ -584,7 +587,7 @@ const Formatter = struct {
                     if (existingDefinitionHeader(sequence, part_index, trivia.bytes)) |header| {
                         force_break = true;
                         try self.appendHardlines(&output, if (have_content) 2 else 1);
-                        try output.append(self.allocator(), try self.definitionHeader(header.name));
+                        try output.append(self.allocator(), try self.definitionHeader(header.name, header.private));
                         have_content = true;
                         previous_comment = true;
                         pending_definition = header.part;
@@ -595,7 +598,7 @@ const Formatter = struct {
                         force_break = true;
                         if (pending_definition != header.part) {
                             try self.appendHardlines(&output, if (have_content) 2 else 1);
-                            try output.append(self.allocator(), try self.definitionHeader(header.name));
+                            try output.append(self.allocator(), try self.definitionHeader(header.name, header.private));
                             have_content = true;
                             previous_comment = true;
                             pending_definition = header.part;
@@ -619,7 +622,10 @@ const Formatter = struct {
                 const name = if (pending_definition == part_index) null else definitionName(sequence, part_index);
                 if (name) |definition_name| {
                     if (!have_content) try self.appendHardlines(&output, 1) else try self.appendHardlines(&output, 2);
-                    try output.append(self.allocator(), try self.definitionHeader(definition_name));
+                    try output.append(
+                        self.allocator(),
+                        try self.definitionHeader(definition_name, definitionPrivate(sequence, part_index)),
+                    );
                     try output.append(self.allocator(), try self.docs.hardline());
                 } else if (have_content) {
                     if (previous_comment) {
@@ -880,23 +886,54 @@ fn definitionFollows(sequence: Sequence, current: usize) bool {
             if (stage == 0) {
                 if (bytes.len < 2 or bytes[0] != '\'' or !lexer.validSymbol(bytes[1..])) return false;
                 stage = 1;
-            } else return std.mem.eql(u8, bytes, "def") or std.mem.eql(u8, bytes, "defp");
+            } else return std.mem.eql(u8, bytes, "def") or
+                std.mem.eql(u8, bytes, "defp") or
+                std.mem.eql(u8, bytes, "set") or
+                std.mem.eql(u8, bytes, "setp");
         },
     };
     return false;
 }
-fn definitionName(sequence: Sequence, start: usize) ?[]const u8 {
+const DefinitionInfo = struct { name: []const u8, private: bool };
+fn definitionInfo(sequence: Sequence, start: usize) ?DefinitionInfo {
     const body = sequence.parts[start].form;
-    if (!isListForm(body) or isAnnotationCandidate(body)) return null;
     const following = nextFormPart(sequence, start) orelse return null;
     const anchor = if (isAnnotationCandidate(sequence.parts[following].form)) following else start;
     if (!definitionFollows(sequence, anchor)) return null;
-    const quoted = sequence.parts[nextFormPart(sequence, anchor).?].form.kind.atom;
-    return quoted[1..];
+    const quoted_index = nextFormPart(sequence, anchor).?;
+    const terminator_index = nextFormPart(sequence, quoted_index).?;
+    const terminator = sequence.parts[terminator_index].form.kind.atom;
+    const set_binding = std.mem.eql(u8, terminator, "set") or std.mem.eql(u8, terminator, "setp");
+    if (set_binding) {
+        if (anchor != start or !isLiteralValueForm(body)) return null;
+    } else if (!isListForm(body) or isAnnotationCandidate(body)) return null;
+    const quoted = sequence.parts[quoted_index].form.kind.atom;
+    return .{
+        .name = quoted[1..],
+        .private = std.mem.eql(u8, terminator, "defp") or std.mem.eql(u8, terminator, "setp"),
+    };
+}
+fn definitionName(sequence: Sequence, start: usize) ?[]const u8 {
+    return (definitionInfo(sequence, start) orelse return null).name;
+}
+fn definitionPrivate(sequence: Sequence, start: usize) bool {
+    return (definitionInfo(sequence, start) orelse return false).private;
+}
+fn isLiteralValueForm(form_item: *const Form) bool {
+    return switch (form_item.kind) {
+        .string, .delimited => true,
+        .atom => |bytes| if (bytes.len > 0 and (bytes[0] == '\'' or bytes[0] == '\\'))
+            true
+        else switch (lexer.classify(bytes)) {
+            .int, .float => true,
+            .word, .out_of_range => false,
+        },
+    };
 }
 /// `(body) 'name @defm`, or its seeded spelling `values (body) with 'name
 /// @defm`: the registration shape that earns a navigation header, mirroring
-/// `### def`. A computed name gets no header, exactly as a definition does.
+/// definition navigation. A computed name gets no header, exactly as a
+/// definition does.
 /// A bare `@module` is an ordinary value-producing expression: it names
 /// nothing, so there is no header to write.
 fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
@@ -967,12 +1004,23 @@ fn isAnnotationCandidate(form_item: *const Form) bool {
     };
     return false;
 }
-const HeaderTarget = struct { part: usize, name: []const u8, module: bool = false };
+const HeaderTarget = struct {
+    part: usize,
+    name: []const u8,
+    module: bool = false,
+    private: bool = false,
+};
 fn existingDefinitionHeader(sequence: Sequence, index: usize, bytes: []const u8) ?HeaderTarget {
     if (!std.mem.startsWith(u8, bytes, "# def ") and
-        !std.mem.startsWith(u8, bytes, "### def ")) return null;
+        !std.mem.startsWith(u8, bytes, "### def ") and
+        !std.mem.startsWith(u8, bytes, "# defp ") and
+        !std.mem.startsWith(u8, bytes, "### defp ")) return null;
     const part = nextFormPart(sequence, index) orelse return null;
-    return .{ .part = part, .name = definitionName(sequence, part) orelse return null };
+    return .{
+        .part = part,
+        .name = definitionName(sequence, part) orelse return null,
+        .private = definitionPrivate(sequence, part),
+    };
 }
 fn existingModuleHeader(sequence: Sequence, index: usize, bytes: []const u8) ?HeaderTarget {
     if (!std.mem.startsWith(u8, bytes, "# module ") and
@@ -1003,9 +1051,15 @@ fn attachedDefinitionAfterComment(sequence: Sequence, index: usize) ?HeaderTarge
         },
         .form => {
             if (newlines != 1) return null;
-            const name = definitionName(sequence, part_index) orelse
-                moduleRegistrationName(sequence, part_index) orelse return null;
-            return .{ .part = part_index, .name = name, .module = definitionName(sequence, part_index) == null };
+            if (definitionName(sequence, part_index)) |name| {
+                return .{
+                    .part = part_index,
+                    .name = name,
+                    .private = definitionPrivate(sequence, part_index),
+                };
+            }
+            const name = moduleRegistrationName(sequence, part_index) orelse return null;
+            return .{ .part = part_index, .name = name, .module = true };
         },
     };
     return null;

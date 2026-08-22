@@ -14,16 +14,16 @@
  ### def complete
  (4 div) (n -- n : "Divide by four.") 'complete def
 
- ### def hidden
+ ### defp hidden
  (dup +) 'hidden defp
 
- ### def hidden-effect
+ ### defp hidden-effect
  (3 *) (n -- n) 'hidden-effect defp
 
- ### def hidden-doc
+ ### defp hidden-doc
  (4 +) (: "Private and documented.") 'hidden-doc defp
 
- ### def hidden-both
+ ### defp hidden-both
  (5 -) (n -- n : "Private, both portions.") 'hidden-both defp
 
  ### def via-private
@@ -48,6 +48,8 @@
 10 forms.via-private io.pp
 
 ### `set` is exactly literal capture plus unannotated `def`.
+
+### def answer
 42 'answer set
 42 literal 'spelled def
 'answer body 'spelled body match? io.pp

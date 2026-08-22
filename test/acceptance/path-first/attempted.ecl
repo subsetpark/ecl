@@ -1,2 +1,6 @@
 ### module attempted
-(3 'answer set) 'attempted @defm
+(
+ ### def answer
+ 3 'answer set)
+'attempted
+@defm

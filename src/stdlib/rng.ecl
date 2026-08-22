@@ -29,7 +29,7 @@
  (-- result : "Return a uniform float in the half-open interval [0, 1).")
  'float def
 
- ### def deal-pick
+ ### defp deal-pick
  (|pool picked remaining chosen-index|
   pool chosen-index at
   picked swap append
@@ -40,7 +40,7 @@
   "Append one selected pool entry and replace it with the final live entry.")
  'deal-pick defp
 
- ### def deal-step
+ ### defp deal-step
  (|accumulated index bound|
   accumulated first
   accumulated 1 at

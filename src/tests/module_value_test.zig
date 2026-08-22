@@ -473,8 +473,11 @@ test "module sources: formatter and standard modules use @defm" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     const exports = [_][]const u8{
-        "result.ok",    "str.upper", "io.print",  "csv.parse",    "json.parse",
-        "table.valid?", "http.get",  "rng.float", "pkg.version<",
+        "result.ok",       "str.upper",         "io.print",
+        "csv.parse",       "json.parse",        "table.valid?",
+        "http.get",        "rng.float",         "pkg.version.less?",
+        "pkg.name.valid?", "pkg.data.read-one", "pkg.manifest.read",
+        "pkg.lock.read",   "pkg.mvs.resolve",
     };
     for (stdlib.names(), exports) |name, qualified| {
         const source = try std.fmt.allocPrint(std.testing.allocator, "'{s} 'local import", .{qualified});
@@ -489,5 +492,5 @@ test "module sources: formatter and standard modules use @defm" {
     try expectStack(&runtime, "\"ab\" str.upper", "\"AB\"");
     try expectStack(&runtime, "[\"n\"] [[1] [2]] table.from-rows table.height", "2");
     try expectStack(&runtime, "7 rng.seed 6 rng.int type", "'int");
-    try expectStack(&runtime, "\"1.2.0\" \"1.10.0\" pkg.version<", "1");
+    try expectStack(&runtime, "\"1.2.0\" \"1.10.0\" pkg.version.less?", "1");
 }

@@ -65,19 +65,35 @@ const modules = [_]Module{
         .name = "<stdlib:rng>",
         .text = @embedFile("stdlib/rng.ecl"),
     } } },
-    .{ .name = "pkg", .entry = .{ .source = .{
-        .name = "<stdlib:pkg>",
-        .text = @embedFile("stdlib/pkg.ecl"),
+    .{ .name = "pkg.version", .entry = .{ .source = .{
+        .name = "<stdlib:pkg.version>",
+        .text = @embedFile("stdlib/pkg/version.ecl"),
+    } } },
+    .{ .name = "pkg.name", .entry = .{ .source = .{
+        .name = "<stdlib:pkg.name>",
+        .text = @embedFile("stdlib/pkg/name.ecl"),
+    } } },
+    .{ .name = "pkg.data", .entry = .{ .source = .{
+        .name = "<stdlib:pkg.data>",
+        .text = @embedFile("stdlib/pkg/data.ecl"),
+    } } },
+    .{ .name = "pkg.manifest", .entry = .{ .source = .{
+        .name = "<stdlib:pkg.manifest>",
+        .text = @embedFile("stdlib/pkg/manifest.ecl"),
+    } } },
+    .{ .name = "pkg.lock", .entry = .{ .source = .{
+        .name = "<stdlib:pkg.lock>",
+        .text = @embedFile("stdlib/pkg/lock.ecl"),
+    } } },
+    .{ .name = "pkg.mvs", .entry = .{ .source = .{
+        .name = "<stdlib:pkg.mvs>",
+        .text = @embedFile("stdlib/pkg/mvs.ecl"),
     } } },
 };
 
 comptime {
     for (modules, 0..) |module, index| {
-        if (module.name.len == 0) @compileError("embedded module names must be nonempty");
-        for (module.name) |byte| {
-            if (byte == '.' or std.ascii.isWhitespace(byte))
-                @compileError("embedded module name is not a single atom: " ++ module.name);
-        }
+        env.assertStaticModuleName(module.name);
         for (modules[0..index]) |prior| {
             if (std.mem.eql(u8, prior.name, module.name))
                 @compileError("duplicate embedded module: " ++ module.name);
