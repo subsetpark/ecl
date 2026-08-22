@@ -126,6 +126,7 @@ test "all embedded vocabulary entries expose bodies and nonempty documentation" 
         "at-path", "vals",      "at-or",  "pairs",   "filter", "partition",
         "any?",    "all?",      "sum",    "prod",    "mean",   "fail",
         "find",    "await-all", "set",    "setp",    "assert", "rotate",
+        "import",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(

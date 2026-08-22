@@ -1698,6 +1698,15 @@ sublist is an element: `[1 1] [[0 0] [1 1]] in?` is `[0 0]`, two atom
 searches, not a `0` answer about `[1 1]`. Use `([1 1] match?) any?` for
 that.
 
+### import
+`( 'short 'qualified-word -- )` — Bind one module word under an unqualified
+local name: `'upper 'str.upper import` makes `upper` mean `str.upper`. The
+binding dispatches through the module, so an imported word resolves against its
+own home exactly as the qualified spelling does. Shadowing an existing binding
+is allowed — it is the documented way to patch one — but it takes naming the
+word, so it cannot happen by accident. An unqualified target is `'domain`.
+Defined in ecl.
+
 ### infra
 `( list quotation -- list )` — *Isolated*, contract unconstrained. Run
 the quotation with the list's elements as the entire substack; the
