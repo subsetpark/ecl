@@ -11,6 +11,16 @@ const test_heap = @import("test_heap.zig");
 
 const allocator = std.testing.allocator;
 
+test "http: HTTPS get-bytes preserves arbitrary response octets" {
+    // PENDING: Patch 3.
+    return error.SkipZigTest;
+}
+
+test "http: custom TLS trust uses fixed verification time" {
+    // PENDING: Patch 3.
+    return error.SkipZigTest;
+}
+
 /// A running fixture server plus the port it actually bound.
 const Fixture = struct {
     child: std.process.Child,

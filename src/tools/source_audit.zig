@@ -179,6 +179,7 @@ const test_files = [_][]const u8{
     "tests/json_test.zig",
     "tests/table_test.zig",
     "tests/pkg_test.zig",
+    "tests/pkg_sync_test.zig",
     "tests/archive_test.zig",
     "tests/http_test.zig",
     "tests/random_test.zig",

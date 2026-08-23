@@ -196,6 +196,15 @@ pub fn build(b: *std.Build) void {
     const http_fixture_options = b.addOptions();
     http_fixture_options.addOptionPath("server_exe", http_fixture.getEmittedBin());
 
+    // Hermetic HTTPS/package fixture. The test process receives every path
+    // explicitly; it binds loopback only and generates its deterministic
+    // package graph after learning the OS-selected port.
+    const pkg_fixture_options = b.addOptions();
+    pkg_fixture_options.addOptionPath("server_script", b.path("test/pkg_https_fixture.py"));
+    pkg_fixture_options.addOptionPath("ca_file", b.path("test/fixtures/pkg/ca.pem"));
+    pkg_fixture_options.addOptionPath("server_cert", b.path("test/fixtures/pkg/server.pem"));
+    pkg_fixture_options.addOptionPath("server_key", b.path("test/fixtures/pkg/server-key.pem"));
+
     const captured_test_runner_mod = b.createModule(.{
         .root_source_file = b.path("src/tools/captured_test_runner.zig"),
         .target = b.graph.host,
@@ -227,6 +236,7 @@ pub fn build(b: *std.Build) void {
     test_mod.addOptions("native_fixture_options", native_fixture_options);
     test_mod.addOptions("native_runtime_options", native_runtime_options);
     test_mod.addOptions("http_fixture_options", http_fixture_options);
+    test_mod.addOptions("pkg_fixture_options", pkg_fixture_options);
     test_mod.addOptions("archive_fixture_options", archive_fixture_options);
     test_mod.link_libc = true;
     const tests = b.addTest(.{ .root_module = test_mod });
@@ -483,6 +493,7 @@ pub fn build(b: *std.Build) void {
         worker_test_mod.addOptions("native_fixture_options", native_fixture_options);
         worker_test_mod.addOptions("native_runtime_options", native_runtime_options);
         worker_test_mod.addOptions("http_fixture_options", http_fixture_options);
+        worker_test_mod.addOptions("pkg_fixture_options", pkg_fixture_options);
         worker_test_mod.addOptions("archive_fixture_options", archive_fixture_options);
         worker_test_mod.link_libc = true;
         const worker_tests = b.addTest(.{
@@ -514,6 +525,7 @@ pub fn build(b: *std.Build) void {
     tsan_mod.addOptions("native_fixture_options", native_fixture_options);
     tsan_mod.addOptions("native_runtime_options", native_runtime_options);
     tsan_mod.addOptions("http_fixture_options", http_fixture_options);
+    tsan_mod.addOptions("pkg_fixture_options", pkg_fixture_options);
     tsan_mod.addOptions("archive_fixture_options", archive_fixture_options);
     tsan_mod.link_libc = true;
     const tsan_tests = b.addTest(.{
@@ -642,7 +654,9 @@ pub fn build(b: *std.Build) void {
     // source or family joins the tier automatically. Excluded by measured cost
     // or by ambient resource: `concurrency:`, `typed differential:`,
     // `dict-text:`, `module:`, `native:`, `fuzz:`, `acceptance:`,
-    // `line editor:` (PTY), and `http:` (sockets).
+    // `line editor:` (PTY), `http:` (sockets), and `pkg sync:` / `pkg store:`
+    // (a Python TLS process). The package cases still compile through the
+    // analyzed root; process startup would exceed the measured fast budget.
     const precommit_tests = b.addTest(.{
         .root_module = test_mod,
         .filters = &.{
