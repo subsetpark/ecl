@@ -1,336 +1,278 @@
 # ecl
 
-ecl is a small homoiconic concatenative array language for command-line data
-work. The shipped implementation is the Zig interpreter in this repository:
-one executable containing the evaluator, interactive editor, core vocabulary,
-and standard library.
+ecl is a concatenative array language for command-line data work. Programs run
+from left to right over an operand stack. Lists are both data and code;
+pervasive arithmetic and comparison apply the same way to scalars, vectors,
+nested arrays, and ragged data.
 
-Version `0.1.0` is the first prerelease. The language is usable, but source and
-native-extension compatibility are not yet promised across prereleases.
+The implementation is one Zig executable containing the evaluator, REPL,
+formatter, core vocabulary, and standard library. It has no runtime dependency
+on a prelude or module directory.
 
-ecl is distributed under the [BSD 3-Clause License](LICENSE).
+ecl is pre-1.0 software. Version `0.1.0` is usable, but language and native
+extension compatibility may change between prereleases.
 
-## Install
+## Build
 
-Building requires Zig 0.16.0, the version pinned by `build.zig.zon` and CI.
+Building requires Zig 0.16.0, as pinned by `build.zig.zon` and CI.
 
 ```sh
 git clone https://git.sr.ht/~subsetpark/ecl
 cd ecl
 zig build -Doptimize=ReleaseSafe
+./zig-out/bin/ecl --version
+```
+
+To install the binary in a directory on your `PATH`:
+
+```sh
 install -m 0755 zig-out/bin/ecl ~/.local/bin/ecl
-ecl --version
 ```
 
-The executable does not need a separate prelude or standard-library directory.
-Optional source and native modules are discovered through `ECL_PATH`.
+## The language model
 
-## A quick tour
+### Values move through a stack
 
-ecl reads values and words from left to right. Values accumulate on a stack;
-words consume inputs and leave results.
+Literals push values. Words consume values and leave results.
 
 ```sh
-ecl '3 4 +'                               # 7
-ecl '[1 2 3] 10 *'                        # [10 20 30]
-ecl '[[1 2] [3]] 10 *'                    # ([10 20] [30])
-ecl '[5 -3 8 -1] dup 0 > where at'        # [5 8]
+ecl '3 4 +'                         # 7
+ecl '1 2 3 3 pack sum'              # 6
+ecl '[5 -3 8 -1] dup 0 > where at'  # [5 8]
 ```
 
-Parentheses quote code and generic data. Square brackets are the same list
-value with a request for flat specialization; printing exposes the resulting
-representation. Quotations can be applied sequentially or in isolated units:
+There are no statement or expression forms around this model. A word's inputs
+are the values immediately beneath it, and its outputs become the inputs to
+the words that follow.
+
+### A list is an array and a quotation
+
+Parentheses and square brackets read the same immutable list value. Printing
+uses brackets for specialized homogeneous storage and parentheses for generic
+storage; the delimiter is not a distinct runtime type. Strings are lists of
+characters, and matrices and higher-dimensional data are nested lists.
+
+Arithmetic and comparison pervade through list structure:
 
 ```sh
-ecl '6 (dup *) call'                       # 36
-ecl '[1 2 3] (dup *) each'                # [1 4 9]
-ECL_WORKERS=8 ecl '[1 2 3] (dup *) @each' # [1 4 9]
-ecl '(1 0 /) @attempt'                     # {'err {...}}
+ecl '[1 2 3] 10 *'        # [10 20 30]
+ecl '[[1 2] [3]] 10 *'    # ([10 20] [30])
 ```
 
-Definitions are ordinary quoted bodies. The optional annotation is reflective
-documentation and, when it contains an effect, a live module-boundary
-contract.
+Dictionaries are immutable insertion-ordered maps. Any value can be a key;
+quoted symbols are the usual choice:
+
+```sh
+ecl "{'name \"Ada\" 'scores [8 9]} 'scores at mean"  # 8.5
+```
+
+A list is inert until a word applies it as code:
+
+```sh
+ecl '6 (dup *) call'          # 36
+ecl '[1 2 3] (dup *) each'    # [1 4 9]
+ecl '3 (1 +) (2 *) bi'        # 4 6
+```
+
+Quotations carry no hidden environment. Names resolve when the quotation runs,
+and quotation construction is the metaprogramming system.
+
+### Definitions are data
+
+`def` binds a quotation to a name. An optional annotation quotation comes
+before the body and supplies a stack effect, documentation, or both.
 
 ```ecl
 ### def square
-(dup *)
 (number -- square : "Return a number multiplied by itself.")
+(dup *)
 'square def
 
 9 square
 ```
 
-Run a source file without implicitly printing its final stack, or use `-e` to
-print the final stack. Scripts print explicitly with `io.pp` or `io.prin`.
+At top level an effect is reflective metadata. On a public module word it is
+also a dynamically checked boundary contract. `doc`, `body`, `which`, and
+`see` inspect definitions through ordinary language values.
+
+### Failure has an explicit boundary
+
+An error aborts its current unit and restores that unit's operand stack.
+`@attempt` runs a self-contained quotation in a fresh unit and returns an
+ordinary result dictionary:
 
 ```sh
-ecl program.ecl
-ecl -e '9 square'
-printf 'a\nb\n' | ecl -e 'io.stdin "\n" split len'
+ecl '(1 0 /) @attempt'
+# {'err {'kind 'domain ...}}
 ```
 
-`str` is the canonical, round-trippable value rendering. `io.pp` and the REPL
-favor readable matrix layout and elide very large lists, so a mistaken terminal
-probe stays bounded.
+The `result` module validates and composes the same `{'ok values}` and
+`{'err error}` envelopes produced by tasks. Errors carry a kind, message,
+ecl-level trace, and source position when one is known.
 
-## Standard library and data pipelines
+### Concurrency is structured
 
-The `result`, `str`, `io`, `csv`, `json`, `table`, `http`, and `rng` modules are
-embedded and load on first qualified reference. `import` binds one qualified
-word to one bare name in the current environment while preserving its effect
-and documentation.
+`@spawn` starts a quotation in an isolated unit. `await`, `await-any`, and
+`await-for` observe its result; `cancel` stops it. A unit cannot leave detached
+tasks behind. `@each` is the parallel counterpart of `each` and preserves input
+order:
 
 ```sh
-ecl '"hello" str.upper'                         # "HELLO"
-ecl "['a 1] str"                                # "('a 1)"
-ecl '"a,b\nc,d" csv.parse'                      # (("a" "b") ("c" "d"))
-ecl '"{\"a\":[1,null]}" json.parse'            # {"a" (1 'null)}
-ecl -e "'result.or-raise 'or-raise import 3 result.ok or-raise call"
+ECL_WORKERS=8 ecl '[1 2 3] (dup *) @each'  # [1 4 9]
 ```
 
-Tables are validated ordinary dictionaries whose string keys name equal-length
-list columns. There is no hidden table runtime kind. CSV and JSON preserve
-their external data models; scalar conversion is explicit through
-`table.cast`.
+Immutable values cross task boundaries safely. Sequential combinators remain
+left-to-right and deterministic; parallel combinators define their result and
+failure ordering independently of scheduling.
 
-The `io` module contains `pp`, `prin`, `print`, `inspect`, `stdin`, `slurp`,
-`spit`, and `lines`; the last composes `io.slurp` with newline splitting.
-Process capabilities `args`, `getenv`, and `exit` remain global. `http.get` and
-`http.post` return ordinary response
-dictionaries. See [`design/SPEC.md`](design/SPEC.md) for the complete grammar,
-vocabulary, errors, and module contracts.
+## Running ecl
 
-## Interactive use
+```text
+ecl                         Start a REPL, or read non-TTY stdin as one unit
+ecl -e <SOURCE> [ARGS...]  Evaluate source and print the final stack
+ecl <FILE> [ARGS...]       Run a UTF-8 script
+ecl <SOURCE> [ARGS...]     Evaluate source and print the final stack
+ecl fmt <FILE|->           Format source without evaluating it
+ecl -h | --help            Show command help
+ecl -V | --version         Show the version
+```
 
-Running `ecl` on a terminal starts the built-in line editor. It supports
-UTF-8-scalar cursor movement, common Emacs keys, a shared 100-line history,
-multiline continuation, and completion from the live environment. Tab
-completion understands qualified module names such as `str.<Tab>`.
+A script file prints only when it calls `io.pp`, `io.print`, or `io.prin`.
+Calculator input, `-e`, and non-TTY stdin print the final stack. Trailing
+arguments are available through `args`.
+
+Running `ecl` on a terminal starts the built-in editor:
+
+```text
+$ ecl
+ecl> 3 4
+3 4
+ecl> +
+7
+```
+
+The REPL retains its stack between units and provides multiline input,
+history, UTF-8 cursor movement, and completion from the live environment.
+Ctrl-C abandons the current unit; Ctrl-D exits from an empty primary prompt.
+
+`str` is the compact, round-trippable rendering of a value. REPL display and
+`io.pp` favor readable matrix layout and bound terminal output by eliding very
+large values.
+
+## Modules and the standard library
+
+A qualified reference loads its module on first use. The embedded standard
+library is checked before the filesystem, so it works without `ECL_PATH` and
+cannot be replaced accidentally by a file with the same name.
+
+| Modules | Purpose |
+|---|---|
+| `result` | Validated success and error envelopes |
+| `str` | Text search, replacement, case, trimming, and padding |
+| `io` | Terminal, stdin, and UTF-8 file operations |
+| `csv`, `json` | External data formats |
+| `table` | Column-oriented tables represented as ordinary dictionaries |
+| `http` | HTTP GET and POST |
+| `rng` | Explicit-state and module-state random generation |
+| `archive` | SHA-256 and atomic validated `.tgz` extraction |
+| `pkg.*` | Package names, versions, manifests, locks, and minimal-version resolution |
+
+Use a qualified word directly:
 
 ```sh
-ecl
-> 10
-10
-> dup *
-10 100
+ecl '"hello" str.upper'                    # "HELLO"
+ecl '"a,b\nc,d" csv.parse'                 # (("a" "b") ("c" "d"))
+ecl '"{\"a\":[1,null]}" json.parse'       # {"a" (1 'null)}
 ```
 
-Ctrl-C abandons the current edit or continuation. Ctrl-D deletes at a nonempty
-cursor, exits at an empty primary prompt, and reports incomplete input at an
-empty continuation prompt. Raw editing is supported on Linux and macOS;
-non-TTY stdin remains a single noninteractive source unit.
+`import` gives one qualified word a chosen bare name in the current
+environment. It does not import or re-export an entire module.
 
-`ecl fmt FILE` formats source without evaluating it. Use `ecl fmt -` for
-standard input. Literal definitions and modules receive navigable
-`### def <name>`, `### defp <name>`, and `### module <name>` headers.
+```ecl
+'str.upper 'upper import
+"hello" upper
+```
 
-## Source modules
+### Source modules
 
-A source module is an ordinary `.ecl` file that registers a canonical module
-name. The filename is transport, not identity. For example, save this as
-`modules/stats.ecl`:
+A source module is an ordinary `.ecl` program that registers a canonical
+module name. For example, save this as `modules/stats.ecl`:
 
 ```ecl
 ### module stats
+# Small statistical helpers.
 (
  ### def twice
+ (value -- doubled : "Double a number.")
  (2 *)
- (x -- y : "Double a number.")
- 'twice def)
+ 'twice def
+ )
 'stats
 @defm
 ```
 
-Place the containing directory on `ECL_PATH`. On the first unresolved
-qualified reference, including the original named by `import`, ecl loads
-`stats.ecl`, requires it to register `stats`, and retries resolution.
+Put its containing directory on `ECL_PATH`:
 
 ```sh
 ECL_PATH="$PWD/modules" ecl '21 stats.twice'
 ECL_PATH="$PWD/modules" ecl "'stats.twice 'twice import 21 twice"
 ```
 
-Inside a module, `def` publishes a public word and `defp` publishes a private
-word. Public bodies can resolve their definition-site privates; callers cannot
-name them. Re-registering the same canonical name atomically publishes a new
-code generation, healing qualified, used, and aliased access paths.
+The first unresolved `stats.*` reference loads `stats.ecl`, requires it to
+register `stats`, and resumes the original operation. Inside a module, `def`
+publishes a public word and `defp` creates a private implementation word.
+Module bodies may also own transactional durable state through `within` and
+`without`.
 
-`@defm` is the source spelling for a module definition, and it is exactly
-`@module` followed by `register`. `@module` alone is `( body -- module )`: it
-returns an anonymous immutable module value that reports type `'module`, prints
-as `<module>`, and compares by identity. `register` is
-`( module 'module-name -- )` and publishes that value under a canonical name,
-so one image can be registered under several names — each with its own durable
-state and lifetime.
+`ECL_PATH` is an ordered platform path list. For each root, the loader tries
+`<module>.ecl` and then `<module>.eclmod`; the first existing candidate is
+authoritative, including its errors.
 
-A module body may leave construction values behind. Those values are the
-image's initial-state template, and the first registration of a name copies
-them into that registration's durable stack. Module-homed code accesses that
-stack transactionally with `within` and transfers explicit outputs with
-`without`; re-registration preserves the durable stack and ignores the new
-image's template. `unmodule` closes new admission and retires the slot after
-active operations quiesce.
+### Native modules
 
-`ECL_PATH` is an ordered platform path list. For each root, ecl tries
-`<name>.ecl` before `<name>.eclmod`; the first existing candidate is
-authoritative, including parse, validation, or initialization failure.
+A `.eclmod` is a target-specific shared library for trusted Zig code. Native
+words use the public `ecl-native` SDK, declare exact effects, and request only
+the narrow host capabilities they need. Their tables validate and publish
+atomically through the same module registry used by source modules.
 
-## Native extensions
+[`test/native/sample.zig`](test/native/sample.zig) is the reference extension
+used by the acceptance suite. Native loading is a trusted-code boundary:
+opening a shared library executes machine code before ecl can validate its
+descriptor. Do not place untrusted directories on an `ECL_PATH` used for
+native modules.
 
-Native extensions are optional target-specific `.eclmod` shared libraries.
-They are for trusted Zig code that needs host performance or facilities not in
-the source language. Core and the embedded standard library do not depend on
-them.
+## Documentation
 
-Author against the public `ecl-native` module on Zig 0.16.0. A callback's
-typed `Call` declares its exact effect. Additional typed parameters request
-the narrow capabilities the adapter will expose.
+- [`design/SPEC.md`](design/SPEC.md) is the authority on syntax, semantics,
+  errors, modules, and the complete vocabulary.
+- [`design/ECL_STYLE.md`](design/ECL_STYLE.md) is the authoring guide for
+  first-party ECL source.
+- [`design/INTERPRETER.md`](design/INTERPRETER.md) describes the runtime
+  architecture and its ownership, scheduling, and reclamation invariants.
+- [`design/workstream-v1.md`](design/workstream-v1.md) records the language's
+  design history. [`design/workstream-pkg.md`](design/workstream-pkg.md)
+  tracks the package-management workstream.
 
-```zig
-const ecl = @import("ecl-native");
+The runtime also documents itself:
 
-fn increment(call: *ecl.Call("n -- result")) ecl.CallbackResult {
-    const n = call.input(0).int() orelse
-        return call.fail(.type, "increment expects an integer");
-    return call.complete(.{ecl.Scalar.int(n + 1)});
-}
-
-pub const Extension = ecl.module(.{
-    .name = "sample",
-    .doc = "Example native extension.",
-    .words = .{
-        ecl.word("increment", "Increment an integer.", increment),
-    },
-});
-
-comptime {
-    _ = Extension;
-}
+```ecl
+'fold1 doc
+'fold1 see
+'str.upper which
 ```
 
-Add ecl as a package dependency and build one dynamic library whose installed
-name is exactly `<module>.eclmod`. This minimal `build.zig` uses the exported
-SDK module directly:
+## Development
 
-```zig
-const std = @import("std");
-
-pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
-    const ecl_dep = b.dependency("ecl", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const root = b.createModule(.{
-        .root_source_file = b.path("src/sample.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    root.addImport("ecl-native", ecl_dep.module("ecl-native"));
-    const extension = b.addLibrary(.{
-        .name = "sample",
-        .root_module = root,
-        .linkage = .dynamic,
-    });
-    const install = b.addInstallFileWithDir(
-        extension.getEmittedBin(),
-        .{ .custom = "ecl" },
-        "sample.eclmod",
-    );
-    b.getInstallStep().dependOn(&install.step);
-}
-```
-
-Then load it from its installed directory:
-
-```sh
-zig build -Doptimize=ReleaseSafe
-ECL_PATH="$PWD/zig-out/ecl" ecl '41 sample.increment'
-```
-
-The loader validates the exact ABI version and record sizes, module identity,
-word uniqueness, effects, documentation, continuation layout, and declared
-capabilities before publishing anything. Validation is not sandboxing:
-opening a shared library executes arbitrary machine code, native side effects
-are outside operand-stack rollback, and a callback that does not return cannot
-be preempted. Only put trusted directories on `ECL_PATH`.
-
-Long or aggregate native work must be cooperative. Request
-`ecl.Reschedule(State)` and consume scheduler budget; request
-`*ecl.BuildValues` for incremental list or dictionary construction. Candidate
-handles live for one callback turn, while the host-owned builder carries
-validated values across yields. `ECL_NATIVE_DIAGNOSTICS=1` enables an
-after-the-fact warning for long callback slices; it does not impose a deadline
-or make untrusted code safe.
-
-The supported SDK deliberately exposes no allocator, raw operand stack,
-environment, scheduler, reclamation root, external wake handle, quotation
-evaluator, or durable module-state authority.
-
-## Build and verification
-
-Verification has three tiers. Only the first is meant to be run by hand.
-First-party ECL source follows the [ECL authoring guide](design/ECL_STYLE.md).
-
-**Local — before every commit:**
+Run the local gate before committing:
 
 ```sh
 zig build precommit < /dev/null
 ```
 
-About eighty seconds after a source change. It lints, checks Zig and ECL
-source formatting, runs the source-architecture audit, builds the binary,
-semantically analyzes every test root with codegen suppressed, and executes the
-fast core of the test suite. Its parts are also available alone: `zig build
-check` for whole-tree analysis, `zig build test-precommit` for the fast core,
-`zig build check-ecl` for the checked-in ECL source conventions, and `zig build
-lint` for [zlint](https://github.com/DonIsaac/zlint), which is included only
-when it is on PATH.
+`zig build check` is the quicker whole-tree compile check. Per-push CI owns the
+complete Debug and ReleaseSafe suites, PTY and native-extension acceptance,
+worker-count variants, fuzz and differential checks, TSan, lint, and terminal
+acceptance. See [`AGENTS.md`](AGENTS.md) for the repository's testing and
+architectural rules.
 
-**Per-push CI** (`.builds/ci.yml`) owns the complete matrix: the whole suite in
-Debug and in the distributed ReleaseSafe mode, plus PTY, native, snapshot,
-one/eight-worker, fuzz, differential, sanitizer, lint, and terminal-acceptance
-gates. Running that matrix locally is a slower copy of evidence CI already
-produces; `zig build test` alone is a five-minute round trip after a one-line
-change.
-
-**Release candidate** adds the exhaustive initialized-Session
-allocation-failure sweep and the complete ReleaseFast suite.
-
-The terminal release-candidate gate uses a ReleaseSafe binary:
-
-```sh
-zig build acceptance -Doptimize=ReleaseSafe
-```
-
-This is a narrow final gate: it runs the M13 release assertions and the
-source-architecture audit. In CI it follows, rather than repeats, the ordinary
-behavioral, PTY, snapshot, native-runtime, one/eight-worker, fuzz, focused
-allocation-failure, differential, sanitizer, and lint gates.
-
-Per-push CI runs the complete suite in Debug and in the distributed
-ReleaseSafe mode. ReleaseFast, which disables safety checks and is not a
-distributed configuration, compiles the real binary and runs the promoted CLI
-snapshot corpus per push; its complete suite belongs to the release-candidate
-matrix.
-
-The exhaustive initialized-Session allocation-failure proof is run once for a
-release candidate, while the sanitizer proof remains in per-push CI:
-
-```sh
-zig build test-oom < /dev/null
-zig build test-tsan < /dev/null        # Linux/x86_64 CI environment
-```
-
-Focused CI gates are individually available for when a specific one is expected
-to fail: `zig build test`, `test-repl`, `test-workers`, `test-native-runtime`,
-`test-native-sdk-negative`, `differential`, `test-kernels`, `source-audit`, and
-`test-snapshots`. `zig build fuzz` runs all seed corpora; the named `fuzz-*`
-steps start bounded coverage-guided campaigns.
-
-Implementation architecture and proof boundaries are documented in
-[`design/INTERPRETER.md`](design/INTERPRETER.md). The historical milestone and
-decision record is [`design/workstream-v1.md`](design/workstream-v1.md).
+ecl is distributed under the [BSD 3-Clause License](LICENSE).
