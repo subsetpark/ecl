@@ -6,6 +6,7 @@
 const std = @import("std");
 const pkg_fixture = @import("pkg_fixture_options");
 const archive_fixtures = @import("archive_fixture_options");
+const machine = @import("../machine.zig");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 const test_heap = @import("test_heap.zig");
@@ -213,6 +214,12 @@ test "pkg store: atomic lock replacement preserves prior bytes on failure" {
 const HttpsFixture = struct {
     child: std.process.Child,
     port: u16,
+    root_manifest: []u8,
+    hash_mismatch_actual_hash: []u8,
+    hash_mismatch_manifest: []u8,
+    prefix_violation_manifest: []u8,
+    identity_mismatch_manifest: []u8,
+    non_success_manifest: []u8,
 
     fn start() !HttpsFixture {
         var child = try std.process.spawn(std.testing.io, .{
@@ -235,16 +242,46 @@ const HttpsFixture = struct {
         defer announcement.deinit();
         const port_value = announcement.value.object.get("port") orelse return error.FixtureHandshakeFailed;
         if (port_value != .integer) return error.FixtureHandshakeFailed;
+        const root_manifest = try announcementString(announcement.value, "root_manifest");
+        errdefer allocator.free(root_manifest);
+        const hash_mismatch_actual_hash = try announcementString(announcement.value, "hash_mismatch_actual_hash");
+        errdefer allocator.free(hash_mismatch_actual_hash);
+        const hash_mismatch_manifest = try announcementString(announcement.value, "hash_mismatch_manifest");
+        errdefer allocator.free(hash_mismatch_manifest);
+        const prefix_violation_manifest = try announcementString(announcement.value, "prefix_violation_manifest");
+        errdefer allocator.free(prefix_violation_manifest);
+        const identity_mismatch_manifest = try announcementString(announcement.value, "identity_mismatch_manifest");
+        errdefer allocator.free(identity_mismatch_manifest);
+        const non_success_manifest = try announcementString(announcement.value, "non_success_manifest");
+        errdefer allocator.free(non_success_manifest);
         return .{
             .child = child,
             .port = std.math.cast(u16, port_value.integer) orelse return error.FixtureHandshakeFailed,
+            .root_manifest = root_manifest,
+            .hash_mismatch_actual_hash = hash_mismatch_actual_hash,
+            .hash_mismatch_manifest = hash_mismatch_manifest,
+            .prefix_violation_manifest = prefix_violation_manifest,
+            .identity_mismatch_manifest = identity_mismatch_manifest,
+            .non_success_manifest = non_success_manifest,
         };
     }
 
     fn stop(self: *HttpsFixture) void {
         self.child.kill(std.testing.io);
+        allocator.free(self.root_manifest);
+        allocator.free(self.hash_mismatch_actual_hash);
+        allocator.free(self.hash_mismatch_manifest);
+        allocator.free(self.prefix_violation_manifest);
+        allocator.free(self.identity_mismatch_manifest);
+        allocator.free(self.non_success_manifest);
     }
 };
+
+fn announcementString(announcement: std.json.Value, name: []const u8) ![]u8 {
+    const item = announcement.object.get(name) orelse return error.FixtureHandshakeFailed;
+    if (item != .string) return error.FixtureHandshakeFailed;
+    return allocator.dupe(u8, item.string);
+}
 
 const Scratch = struct {
     directory: std.testing.TmpDir,
@@ -327,6 +364,15 @@ fn appendString(writer: *std.Io.Writer, text: []const u8) !void {
 }
 
 fn expectHostStack(source: []const u8, expected: []const u8, tls: bool) !void {
+    return expectHostStackEnviron(source, expected, tls, &.{});
+}
+
+fn expectHostStackEnviron(
+    source: []const u8,
+    expected: []const u8,
+    tls: bool,
+    environ: []const machine.Environ.Entry,
+) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
@@ -338,6 +384,7 @@ fn expectHostStack(source: []const u8, expected: []const u8, tls: bool) !void {
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .tls_trust = if (tls) .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time } else null,
+        .environ = environ,
     }, .cooperative);
     defer runtime.deinit();
     switch (try runtime.runUnit("<pkg-store-test>", source)) {
@@ -357,6 +404,15 @@ fn expectHostStack(source: []const u8, expected: []const u8, tls: bool) !void {
 }
 
 fn expectHostError(source: []const u8, expected: support.ErrorCase, tls: bool) !void {
+    return expectHostErrorEnviron(source, expected, tls, &.{});
+}
+
+fn expectHostErrorEnviron(
+    source: []const u8,
+    expected: support.ErrorCase,
+    tls: bool,
+    environ: []const machine.Environ.Entry,
+) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
@@ -368,6 +424,7 @@ fn expectHostError(source: []const u8, expected: support.ErrorCase, tls: bool) !
         .output = &output.writer,
         .diagnostics = &diagnostics.writer,
         .tls_trust = if (tls) .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time } else null,
+        .environ = environ,
     }, .cooperative);
     defer runtime.deinit();
     const failure = switch (try runtime.runUnit("<pkg-store-test>", source)) {
@@ -424,37 +481,318 @@ fn concurrentInstall(result: *ConcurrentResult) void {
     test_heap.retire(&heap);
 }
 
+fn syncSource(manifest: []const u8, project: []const u8, suffix: []const u8) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try appendString(&source.writer, manifest);
+    try source.writer.writeAll(" pkg.manifest.read ");
+    try appendString(&source.writer, project);
+    try source.writer.writeAll(" pkg.sync.run");
+    try source.writer.writeAll(suffix);
+    return allocator.dupe(u8, source.written());
+}
+
+fn canonicalLockSource(lock: []const u8) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try appendString(&source.writer, lock);
+    try source.writer.writeAll(" dup pkg.lock.read pkg.lock.write match?");
+    return allocator.dupe(u8, source.written());
+}
+
+fn requestCountSource(port: u16) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try source.writer.print(
+        "\"https://127.0.0.1:{d}/__counts\" {{}} http.get 'body at json.parse ",
+        .{port},
+    );
+    for ([_][]const u8{
+        "/pkg/a-1.0.0.tgz",
+        "/pkg/b-1.0.0.tgz",
+        "/pkg/c-1.2.0.tgz",
+        "/pkg/c-1.5.0.tgz",
+    }) |endpoint| {
+        try source.writer.writeAll("dup ");
+        try appendString(&source.writer, endpoint);
+        try source.writer.writeAll(" at swap ");
+    }
+    try source.writer.writeAll("pop");
+    return allocator.dupe(u8, source.written());
+}
+
+fn expectStoreEntries(path: []const u8, prefixes: []const []const u8) !void {
+    var directory = try std.Io.Dir.cwd().openDir(std.testing.io, path, .{ .iterate = true });
+    defer directory.close(std.testing.io);
+    var found = try allocator.alloc(bool, prefixes.len);
+    defer allocator.free(found);
+    @memset(found, false);
+    var count: usize = 0;
+    var iterator = directory.iterate();
+    while (try iterator.next(std.testing.io)) |entry| {
+        count += 1;
+        try std.testing.expect(entry.kind == .directory);
+        var matched = false;
+        for (prefixes, 0..) |prefix, index| {
+            if (std.mem.startsWith(u8, entry.name, prefix)) {
+                try std.testing.expect(!found[index]);
+                found[index] = true;
+                matched = true;
+            }
+        }
+        try std.testing.expect(matched);
+    }
+    try std.testing.expectEqual(prefixes.len, count);
+    for (found) |present| try std.testing.expect(present);
+}
+
+fn expectPathAbsent(path: []const u8) !void {
+    _ = std.Io.Dir.cwd().statFile(std.testing.io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    return error.ExpectedPathAbsent;
+}
+
+const FailurePaths = struct {
+    scratch: *Scratch,
+    cache: []u8,
+    project: []u8,
+
+    fn init(scratch: *Scratch) !FailurePaths {
+        try scratch.directory.dir.createDir(std.testing.io, "project", .default_dir);
+        try scratch.directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "project/ecl.lock",
+            .data = "prior lock bytes\n",
+        });
+        const cache = try scratch.pathFor("cache");
+        errdefer allocator.free(cache);
+        const project = try scratch.pathFor("project");
+        return .{ .scratch = scratch, .cache = cache, .project = project };
+    }
+
+    fn deinit(self: FailurePaths) void {
+        allocator.free(self.cache);
+        allocator.free(self.project);
+    }
+
+    fn expectUnchanged(self: FailurePaths) !void {
+        const lock = try self.scratch.directory.dir.readFileAlloc(
+            std.testing.io,
+            "project/ecl.lock",
+            allocator,
+            .unlimited,
+        );
+        defer allocator.free(lock);
+        try std.testing.expectEqualStrings("prior lock bytes\n", lock);
+        try expectPathAbsent(self.cache);
+    }
+};
+
 test "pkg sync: resolves transitive MVS and writes canonical lock" {
-    // PENDING: Patch 5.
-    return error.SkipZigTest;
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try scratch.directory.dir.createDir(std.testing.io, "project", .default_dir);
+    const cache = try scratch.pathFor("cache");
+    defer allocator.free(cache);
+    const project = try scratch.pathFor("project");
+    defer allocator.free(project);
+    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = cache }};
+    const source = try syncSource(
+        fixture.root_manifest,
+        project,
+        " dup 'packages at keys sort swap ['packages \"c\" 'version] at-path",
+    );
+    defer allocator.free(source);
+    try expectHostStackEnviron(source, "(\"a\" \"b\" \"c\") \"1.5.0\"", true, environ);
+
+    const lock = try scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
+    defer allocator.free(lock);
+    const canonical = try canonicalLockSource(lock);
+    defer allocator.free(canonical);
+    try expectHostStack(canonical, "1", false);
+    try expectStoreEntries(cache, &.{ "a-1.0.0-", "b-1.0.0-", "c-1.5.0-" });
 }
 
 test "pkg sync: deleting lock reproduces identical bytes without refetching present entries" {
-    // PENDING: Patch 5.
-    return error.SkipZigTest;
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try scratch.directory.dir.createDir(std.testing.io, "project", .default_dir);
+    const cache = try scratch.pathFor("cache");
+    defer allocator.free(cache);
+    const project = try scratch.pathFor("project");
+    defer allocator.free(project);
+    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = cache }};
+    const source = try syncSource(fixture.root_manifest, project, " pop");
+    defer allocator.free(source);
+    try expectHostStackEnviron(source, "", true, environ);
+    const first = try scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
+    defer allocator.free(first);
+    try scratch.directory.dir.deleteFile(std.testing.io, "project/ecl.lock");
+    try expectHostStackEnviron(source, "", true, environ);
+    const second = try scratch.directory.dir.readFileAlloc(std.testing.io, "project/ecl.lock", allocator, .unlimited);
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
+
+    const counts = try requestCountSource(fixture.port);
+    defer allocator.free(counts);
+    try expectHostStack(counts, "2 2 2 2", true);
 }
 
 test "pkg sync: hash mismatch names package and hashes without store or lock" {
-    // PENDING: Patch 5.
-    return error.SkipZigTest;
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const paths = try FailurePaths.init(&scratch);
+    defer paths.deinit();
+    const source = try syncSource(fixture.hash_mismatch_manifest, paths.project, "");
+    defer allocator.free(source);
+    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = paths.cache }};
+    try expectHostErrorEnviron(source, .{
+        .name = "hash mismatch",
+        .source = source,
+        .kind = "domain",
+        .message_contains = "hash does not match",
+        .data = &.{
+            .{ .name = "package", .expected = .{ .string = "bad" } },
+            .{ .name = "declared-hash", .expected = .{ .string = "sha256-0000000000000000000000000000000000000000000000000000000000000000" } },
+            .{ .name = "actual-hash", .expected = .{ .string = fixture.hash_mismatch_actual_hash } },
+        },
+    }, true, environ);
+    try paths.expectUnchanged();
 }
 
 test "pkg sync: prefix violation names offender without retained entry" {
-    // PENDING: Patch 5.
-    return error.SkipZigTest;
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const paths = try FailurePaths.init(&scratch);
+    defer paths.deinit();
+    const source = try syncSource(fixture.prefix_violation_manifest, paths.project, "");
+    defer allocator.free(source);
+    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = paths.cache }};
+    try expectHostErrorEnviron(source, .{
+        .name = "prefix violation",
+        .source = source,
+        .kind = "domain",
+        .message_contains = "package `foo`, member `bar.ecl`",
+        .data = &.{.{ .name = "package", .expected = .{ .string = "foo" } }},
+    }, true, environ);
+    try paths.expectUnchanged();
 }
 
 test "pkg sync: manifest identity mismatch retains no entry or lock" {
-    // PENDING: Patch 5.
-    return error.SkipZigTest;
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const paths = try FailurePaths.init(&scratch);
+    defer paths.deinit();
+    const source = try syncSource(fixture.identity_mismatch_manifest, paths.project, "");
+    defer allocator.free(source);
+    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = paths.cache }};
+    try expectHostErrorEnviron(source, .{
+        .name = "identity mismatch",
+        .source = source,
+        .kind = "domain",
+        .message_contains = "identity does not match",
+        .data = &.{
+            .{ .name = "requested-name", .expected = .{ .string = "expected" } },
+            .{ .name = "requested-version", .expected = .{ .string = "1.0.0" } },
+            .{ .name = "actual-name", .expected = .{ .string = "actual" } },
+            .{ .name = "actual-version", .expected = .{ .string = "1.0.0" } },
+        },
+    }, true, environ);
+    try paths.expectUnchanged();
 }
 
 test "pkg sync: non-success HTTP names package URL and status" {
-    // PENDING: Patch 5.
-    return error.SkipZigTest;
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const paths = try FailurePaths.init(&scratch);
+    defer paths.deinit();
+    const source = try syncSource(fixture.non_success_manifest, paths.project, "");
+    defer allocator.free(source);
+    const url = try std.fmt.allocPrint(allocator, "https://127.0.0.1:{d}/status/503", .{fixture.port});
+    defer allocator.free(url);
+    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = paths.cache }};
+    try expectHostErrorEnviron(source, .{
+        .name = "non-success response",
+        .source = source,
+        .kind = "io",
+        .message_contains = "non-success HTTP status",
+        .data = &.{
+            .{ .name = "package", .expected = .{ .string = "down" } },
+            .{ .name = "url", .expected = .{ .string = url } },
+            .{ .name = "status", .expected = .{ .int = 503 } },
+        },
+    }, true, environ);
+    try paths.expectUnchanged();
 }
 
 test "pkg sync: cache precedence selects ECL CACHE then XDG then HOME" {
-    // PENDING: Patch 5.
-    return error.SkipZigTest;
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const ecl_cache = try scratch.pathFor("ecl-cache");
+    defer allocator.free(ecl_cache);
+    const xdg_cache = try scratch.pathFor("xdg-cache");
+    defer allocator.free(xdg_cache);
+    const home = try scratch.pathFor("home");
+    defer allocator.free(home);
+
+    try scratch.directory.dir.createDir(std.testing.io, "project-ecl", .default_dir);
+    const project_ecl = try scratch.pathFor("project-ecl");
+    defer allocator.free(project_ecl);
+    const ecl_source = try syncSource(fixture.root_manifest, project_ecl, " pop");
+    defer allocator.free(ecl_source);
+    const ecl_environ: []const machine.Environ.Entry = &.{
+        .{ .name = "ECL_CACHE", .value = ecl_cache },
+        .{ .name = "XDG_CACHE_HOME", .value = xdg_cache },
+        .{ .name = "HOME", .value = home },
+    };
+    try expectHostStackEnviron(ecl_source, "", true, ecl_environ);
+    try expectStoreEntries(ecl_cache, &.{ "a-1.0.0-", "b-1.0.0-", "c-1.5.0-" });
+    try expectPathAbsent(xdg_cache);
+    try expectPathAbsent(home);
+
+    try scratch.directory.dir.createDir(std.testing.io, "project-xdg", .default_dir);
+    const project_xdg = try scratch.pathFor("project-xdg");
+    defer allocator.free(project_xdg);
+    const xdg_source = try syncSource(fixture.root_manifest, project_xdg, " pop");
+    defer allocator.free(xdg_source);
+    const xdg_environ: []const machine.Environ.Entry = &.{
+        .{ .name = "ECL_CACHE", .value = "" },
+        .{ .name = "XDG_CACHE_HOME", .value = xdg_cache },
+        .{ .name = "HOME", .value = home },
+    };
+    try expectHostStackEnviron(xdg_source, "", true, xdg_environ);
+    const xdg_store = try std.fmt.allocPrint(allocator, "{s}/ecl/pkg", .{xdg_cache});
+    defer allocator.free(xdg_store);
+    try expectStoreEntries(xdg_store, &.{ "a-1.0.0-", "b-1.0.0-", "c-1.5.0-" });
+    try expectPathAbsent(home);
+
+    try scratch.directory.dir.createDir(std.testing.io, "project-home", .default_dir);
+    const project_home = try scratch.pathFor("project-home");
+    defer allocator.free(project_home);
+    const home_source = try syncSource(fixture.root_manifest, project_home, " pop");
+    defer allocator.free(home_source);
+    const home_environ: []const machine.Environ.Entry = &.{
+        .{ .name = "ECL_CACHE", .value = "" },
+        .{ .name = "XDG_CACHE_HOME", .value = "" },
+        .{ .name = "HOME", .value = home },
+    };
+    try expectHostStackEnviron(home_source, "", true, home_environ);
+    const home_store = try std.fmt.allocPrint(allocator, "{s}/.cache/ecl/pkg", .{home});
+    defer allocator.free(home_store);
+    try expectStoreEntries(home_store, &.{ "a-1.0.0-", "b-1.0.0-", "c-1.5.0-" });
 }

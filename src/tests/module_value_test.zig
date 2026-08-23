@@ -479,7 +479,7 @@ test "module sources: formatter and standard modules use @defm" {
         "pkg.store.inspect",
         "rng.float",         "pkg.version.less?", "pkg.name.valid?",
         "pkg.data.read-one", "pkg.manifest.read", "pkg.lock.read",
-        "pkg.mvs.resolve",
+        "pkg.mvs.resolve",   "pkg.sync.run",
     };
     for (stdlib.names(), exports) |name, qualified| {
         const source = try std.fmt.allocPrint(std.testing.allocator, "'{s} 'local import", .{qualified});

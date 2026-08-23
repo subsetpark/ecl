@@ -97,6 +97,10 @@ const modules = [_]Module{
         .name = "<stdlib:pkg.mvs>",
         .text = @embedFile("stdlib/pkg/mvs.ecl"),
     } } },
+    .{ .name = "pkg.sync", .entry = .{ .source = .{
+        .name = "<stdlib:pkg.sync>",
+        .text = @embedFile("stdlib/pkg/sync.ecl"),
+    } } },
 };
 
 comptime {

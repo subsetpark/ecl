@@ -56,6 +56,19 @@ fn packageStoreSource(
     return allocator.dupe(u8, source.written());
 }
 
+fn packageSyncSource(allocator: std.mem.Allocator, project: []const u8) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try source.writer.writeAll(
+        "{'format 1 'name \"r\" 'version \"0.1.0\" 'requires " ++
+            "{\"a\" {'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
+            "'hash \"sha256-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\"}}} ",
+    );
+    try appendQuoted(&source.writer, project);
+    try source.writer.writeAll(" pkg.sync.run pop");
+    return allocator.dupe(u8, source.written());
+}
+
 fn appendFixtureBytes(writer: *std.Io.Writer, encoded: []const u8) !void {
     try writer.writeByte('[');
     var high: ?u8 = null;
@@ -368,6 +381,18 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
 fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     var locked_allocator = LockedAllocator{ .child = allocator };
     const thread_safe_allocator = locked_allocator.allocator();
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    // Paths and source strings are borrowed test scaffolding, not values the
+    // Session owns. Keep their construction outside the injected allocator so
+    // the sweep enumerates live Session paths rather than this helper's writer.
+    const scaffold_allocator = std.testing.allocator;
+    const scratch_path = try scratch.dir.realPathFileAlloc(
+        std.testing.io,
+        ".",
+        scaffold_allocator,
+    );
+    defer scaffold_allocator.free(scratch_path);
     var output_buffer: [16384]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
@@ -379,7 +404,10 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             .io = std.testing.io,
             .output = &output,
             .diagnostics = &diagnostics,
-            .environ = &.{.{ .name = "ECL_OOM_PROBE", .value = "probe" }},
+            .environ = &.{
+                .{ .name = "ECL_OOM_PROBE", .value = "probe" },
+                .{ .name = "ECL_CACHE", .value = scratch_path },
+            },
             .standard_input = .program_source,
         },
         .cooperative,
@@ -428,18 +456,6 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     // The host scripting words allocate on the read buffer, the decoded
     // path, the materialized string, and the environ snapshot lookup; only
     // this sweep injects failure at each of those ordinals.
-    var scratch = std.testing.tmpDir(.{});
-    defer scratch.cleanup();
-    // Paths and source strings are borrowed test scaffolding, not values the
-    // Session owns. Keep their construction outside the injected allocator so
-    // the sweep enumerates live Session paths rather than this helper's writer.
-    const scaffold_allocator = std.testing.allocator;
-    const scratch_path = try scratch.dir.realPathFileAlloc(
-        std.testing.io,
-        ".",
-        scaffold_allocator,
-    );
-    defer scaffold_allocator.free(scratch_path);
     const archive_destination = try std.fmt.allocPrint(
         scaffold_allocator,
         "{s}{c}archive",
@@ -451,7 +467,7 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(&runtime, "oom-archive.ecl", archive_source);
     const package_destination = try std.fmt.allocPrint(
         thread_safe_allocator,
-        "{s}{c}package",
+        "{s}{c}a-1.0.0-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9",
         .{ scratch_path, std.fs.path.sep },
     );
     defer thread_safe_allocator.free(package_destination);
@@ -468,6 +484,12 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     );
     defer thread_safe_allocator.free(package_source);
     try runOk(&runtime, "oom-pkg-store.ecl", package_source);
+    // The present one-package graph reaches sync discovery, MVS, the
+    // selected-entry skip, canonical rendering, and lock replacement without
+    // introducing an ambient network read into the allocation sweep.
+    const sync_source = try packageSyncSource(thread_safe_allocator, scratch_path);
+    defer thread_safe_allocator.free(sync_source);
+    try runOk(&runtime, "oom-pkg-sync.ecl", sync_source);
     const host_io_source = try std.fmt.allocPrint(
         scaffold_allocator,
         "1 \"probe\" io.debug pop " ++

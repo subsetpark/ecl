@@ -130,6 +130,7 @@ test "pkg: every module export carries a body and nonempty documentation" {
         "pkg.lock.read",
         "pkg.lock.write",
         "pkg.mvs.resolve",
+        "pkg.sync.run",
     };
     inline for (exports) |qualified| {
         try support.expectStack(

@@ -960,6 +960,17 @@ operand shape, and rows that still run boxed say so.
   existing target is regular without following links, and becomes visible by
   one same-parent rename. Cancellation and every pre-publication failure
   retire the private temporary while preserving the previous lock bytes.
+- **Package synchronization separates observation from mutation.** The
+  ordinary-ECL `pkg.sync.run` first walks exact reachable requirements using
+  checked manifests from present entries or hash-verified HTTPS archives,
+  retaining only the manifest catalog. It then resolves through
+  `pkg.mvs.resolve`, re-fetches and revalidates only selected absent entries,
+  and invokes the narrow store publisher. The canonical lock is rendered and
+  atomically replaced only after every selected entry is present, so transport,
+  hash, archive-policy, identity, resolution, cancellation, and allocation
+  failures cannot publish a new lock. Cache selection reads only the Session's
+  immutable environment snapshot in `ECL_CACHE`, `XDG_CACHE_HOME`, `HOME`
+  precedence; no process-global environment is consulted during the run.
 
 ## Idiom recognition
 

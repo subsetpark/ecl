@@ -938,6 +938,7 @@ fn auditUnitConstructorSpelling() bool {
         @embedFile("../stdlib/pkg/manifest.ecl"),
         @embedFile("../stdlib/pkg/lock.ecl"),
         @embedFile("../stdlib/pkg/mvs.ecl"),
+        @embedFile("../stdlib/pkg/sync.ecl"),
     };
     for (definition_sources) |source| {
         var scan: usize = 0;
