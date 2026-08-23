@@ -19,6 +19,7 @@ const kernel_storage = @import("kernel_storage.zig");
 const console_api = @import("console.zig");
 const task_join_core = @import("task_join_core.zig");
 const resolution_core = @import("resolution_core.zig");
+const pkg_lock = @import("pkg_lock.zig");
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -1311,6 +1312,7 @@ pub const InheritedContext = struct {
     host_io: ?std.Io = null,
     tls_trust: ?TlsTrust = null,
     ecl_path: ?[]const u8 = null,
+    project_lock: ?*const pkg_lock.ProjectLock = null,
     environ: ?*const Environ = null,
     standard_input: ?*StandardInput = null,
     idiom_mode: IdiomMode = .automatic,
@@ -2633,13 +2635,17 @@ pub const Machine = struct {
     }
     const AutoLoadDriver = struct {
         const FileKind = enum { source, native };
-        const FilenameTarget = enum { component_start, candidate };
+        const FilenameTarget = enum { component_start, candidate, locked_candidate };
 
         name: intern.ModuleName,
         request: QualifiedLoadRequest,
         cursor: modules.Registry.BeginLoadingCursor,
         embedded: ?stdlib.Entry = null,
         loading: ?heap.Owned(modules.LoadingLease) = null,
+        lock_lookup: ?heap.Owned(pkg_lock.LookupCursor) = null,
+        locked_package: ?[]const u8 = null,
+        locked_store: ?[]const u8 = null,
+        locked_candidate: bool = false,
         filename: ?heap.Owned([]u8) = null,
         filename_index: usize = 0,
         file_kind: FileKind = .source,
@@ -2657,6 +2663,8 @@ pub const Machine = struct {
         phase: enum {
             begin,
             registered,
+            lock_lookup,
+            locked_store,
             filename,
             component_start,
             component_end,
@@ -2701,8 +2709,12 @@ pub const Machine = struct {
             self.phase = .filename;
         }
         fn beginCandidate(self: *AutoLoadDriver, evaluator: *Machine) error{OutOfMemory}!void {
-            const search = evaluator.unit.inherited.ecl_path.?;
-            const directory = search[self.component_start..self.component_end];
+            const directory = if (self.locked_candidate)
+                self.locked_store.?
+            else legacy: {
+                const search = evaluator.unit.inherited.ecl_path.?;
+                break :legacy search[self.component_start..self.component_end];
+            };
             self.separator = directory.len != 0 and !std.fs.path.isSep(directory[directory.len - 1]);
             var length = std.math.add(usize, directory.len, self.filename.?.borrow().len) catch
                 return error.OutOfMemory;
@@ -2804,10 +2816,73 @@ pub const Machine = struct {
                             try self.beginEmbedded(evaluator, entry);
                             continue;
                         }
+                        if (evaluator.unit.inherited.project_lock) |project_lock| {
+                            self.lock_lookup = .init(project_lock.lookupCursor(
+                                intern.get(intern.moduleId(self.name)),
+                            ));
+                            self.phase = .lock_lookup;
+                            continue;
+                        }
                         if (evaluator.unit.inherited.host_io == null or evaluator.unit.inherited.ecl_path == null)
                             return self.notFound(evaluator);
                         try self.beginFilename(evaluator, .source, .component_start);
                     },
+                },
+                .lock_lookup => switch (self.lock_lookup.?.borrowMut().advance()) {
+                    .pending => {},
+                    .complete => |outcome| {
+                        self.lock_lookup.?.deinit(
+                            evaluator.releaseDomain(),
+                            evaluator.allocator(),
+                        );
+                        self.lock_lookup = null;
+                        switch (outcome) {
+                            .invalid => |message| return evaluator.fail(.domain, message),
+                            .unmatched => {
+                                if (evaluator.unit.inherited.host_io == null or
+                                    evaluator.unit.inherited.ecl_path == null)
+                                {
+                                    return self.notFound(evaluator);
+                                }
+                                try self.beginFilename(evaluator, .source, .component_start);
+                            },
+                            .matched => |match| {
+                                self.locked_package = match.package;
+                                self.locked_store = match.store_dir;
+                                if (match.store_dir == null) return evaluator.failFmt(
+                                    .io,
+                                    "locked package `{s}` is missing from the package store; run `ecl pkg sync`",
+                                    .{match.package},
+                                );
+                                self.phase = .locked_store;
+                            },
+                        }
+                    },
+                },
+                .locked_store => {
+                    const info = std.Io.Dir.cwd().statFile(
+                        evaluator.unit.inherited.host_io.?,
+                        self.locked_store.?,
+                        .{ .follow_symlinks = false },
+                    ) catch |err| switch (err) {
+                        error.FileNotFound => return evaluator.failFmt(
+                            .io,
+                            "locked package `{s}` is missing from the package store; run `ecl pkg sync`",
+                            .{self.locked_package.?},
+                        ),
+                        else => return evaluator.failFmt(
+                            .io,
+                            "cannot inspect locked package `{s}` in the package store: {s}; run `ecl pkg sync`",
+                            .{ self.locked_package.?, @errorName(err) },
+                        ),
+                    };
+                    if (info.kind != .directory) return evaluator.failFmt(
+                        .io,
+                        "locked package `{s}` is not a real package-store directory; run `ecl pkg sync`",
+                        .{self.locked_package.?},
+                    );
+                    self.locked_candidate = true;
+                    try self.beginFilename(evaluator, .source, .locked_candidate);
                 },
                 .filename => {
                     const module_name = intern.get(intern.moduleId(self.name));
@@ -2823,7 +2898,7 @@ pub const Machine = struct {
                         self.filename_index += 1;
                     } else switch (self.filename_target) {
                         .component_start => self.phase = .component_start,
-                        .candidate => try self.beginCandidate(evaluator),
+                        .candidate, .locked_candidate => try self.beginCandidate(evaluator),
                     }
                 },
                 .component_start => {
@@ -2847,8 +2922,12 @@ pub const Machine = struct {
                     } else self.search_index += 1;
                 },
                 .candidate => {
-                    const search = evaluator.unit.inherited.ecl_path.?;
-                    const directory = search[self.component_start..self.component_end];
+                    const directory = if (self.locked_candidate)
+                        self.locked_store.?
+                    else legacy: {
+                        const search = evaluator.unit.inherited.ecl_path.?;
+                        break :legacy search[self.component_start..self.component_end];
+                    };
                     if (self.candidate_index != self.candidate.?.borrow().len) {
                         self.candidate.?.borrow()[self.candidate_index] = if (self.candidate_index < directory.len)
                             directory[self.candidate_index]
@@ -2866,6 +2945,14 @@ pub const Machine = struct {
                         .{ .read = true },
                     ) catch |err| switch (err) {
                         error.FileNotFound => {
+                            if (self.locked_candidate) return evaluator.failFmt(
+                                .undefined_word,
+                                "locked module `{s}` is absent from package `{s}`",
+                                .{
+                                    intern.get(intern.moduleId(self.name)),
+                                    self.locked_package.?,
+                                },
+                            );
                             self.resetCandidate(evaluator);
                             if (self.file_kind == .source) {
                                 try self.beginFilename(evaluator, .native, .candidate);

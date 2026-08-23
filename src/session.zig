@@ -18,6 +18,7 @@ const poll = @import("poll.zig");
 const reflection = @import("reflection.zig");
 const scheduler_api = @import("scheduler.zig");
 const console_api = @import("console.zig");
+const pkg_lock = @import("pkg_lock.zig");
 const session_options = @import("session_options");
 const stdlib = @import("stdlib.zig");
 pub const Value = value.Value;
@@ -58,6 +59,9 @@ pub const Host = struct {
     diagnostics: *std.Io.Writer,
     tls_trust: ?TlsTrustOverride = null,
     ecl_path: ?[]const u8 = null,
+    /// Borrowed directory from which project discovery begins. Null disables
+    /// ambient project metadata reads for library Sessions.
+    project_start: ?[]const u8 = null,
     /// Borrowed name/value pairs; the Session owns its own copy.
     environ: []const machine.Environ.Entry = &.{},
     /// Whether the process has already claimed stdin as the program source.
@@ -222,6 +226,7 @@ const SessionCore = struct {
     host_io: ?std.Io,
     tls_trust: ?machine.TlsTrust,
     ecl_path: ?[]u8,
+    project_lock: ?*pkg_lock.ProjectLock,
     environ: machine.Environ,
     environ_bytes: ?[]u8,
     standard_input: machine.StandardInput,
@@ -358,6 +363,20 @@ pub const Session = enum(usize) {
         else
             null;
         errdefer if (owned_tls_trust) |trust| allocator.free(trust.ca_file);
+        const owned_project_lock = if (host) |services|
+            if (services.project_start) |start| try pkg_lock.ProjectLock.discover(
+                host_owner.cleanup(),
+                services.io,
+                start,
+                .{
+                    .ecl_cache = environValue(services.environ, "ECL_CACHE"),
+                    .xdg_cache_home = environValue(services.environ, "XDG_CACHE_HOME"),
+                    .home = environValue(services.environ, "HOME"),
+                },
+            ) else null
+        else
+            null;
+        errdefer if (owned_project_lock) |project_lock| project_lock.deinit();
         var snapshot = try EnvironSnapshot.capture(
             allocator,
             if (host) |services| services.environ else &.{},
@@ -383,6 +402,7 @@ pub const Session = enum(usize) {
             .host_io = if (host) |services| services.io else null,
             .tls_trust = owned_tls_trust,
             .ecl_path = owned_ecl_path,
+            .project_lock = owned_project_lock,
             .environ = .{ .entries = snapshot.entries },
             .environ_bytes = snapshot.bytes,
             .standard_input = .init(
@@ -411,6 +431,7 @@ pub const Session = enum(usize) {
         core.releaseDomain().releaseValue(core.arguments);
         if (core.ecl_path) |path| core.allocator().free(path);
         if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);
+        if (core.project_lock) |project_lock| project_lock.deinit();
         var snapshot = EnvironSnapshot{
             .entries = @constCast(core.environ.entries),
             .bytes = core.environ_bytes,
@@ -524,6 +545,7 @@ pub const Session = enum(usize) {
             .host_io = core.host_io,
             .tls_trust = core.tls_trust,
             .ecl_path = core.ecl_path,
+            .project_lock = core.project_lock,
             .environ = &core.environ,
             .standard_input = &core.standard_input,
             .idiom_mode = core.idiom_mode,
@@ -545,10 +567,11 @@ pub const Session = enum(usize) {
         unit.deinit();
     }
 
-    /// Resolve a module name through the ordinary embedded/ECL_PATH loader
-    /// without importing or executing one of its exports. A missing or broken
-    /// candidate simply offers no completion; invoking or reflecting on the
-    /// same qualified name will surface the loader's full language error.
+    /// Resolve a module name through the ordinary embedded/lock/ECL_PATH
+    /// loader without importing or executing one of its exports. A missing or
+    /// broken candidate simply offers no completion; invoking or reflecting
+    /// on the same qualified name will surface the loader's full language
+    /// error.
     fn loadModuleForObservation(
         self: *Session,
         namespace: []const u8,
@@ -913,6 +936,11 @@ fn sessionTypeExposesAuthority(
         },
         else => false,
     };
+}
+
+fn environValue(entries: []const machine.Environ.Entry, name: []const u8) ?[]const u8 {
+    for (entries) |entry| if (std.mem.eql(u8, entry.name, name)) return entry.value;
+    return null;
 }
 
 comptime {

@@ -52,11 +52,12 @@ const source_groups = [_]SourceGroup{
     // opaque rendered result rather than folding those lifetime boundaries
     // into Session internals.
     .{ .production = true, .files = &.{
-        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig",
+        "env.zig", "modules.zig", "snapshot.zig", "module_prims.zig", "reflection.zig", "session.zig", "pkg_lock.zig",
     }, .sources = &.{
         @embedFile("../env.zig"),        @embedFile("../modules.zig"),
         @embedFile("../snapshot.zig"),   @embedFile("../module_prims.zig"),
         @embedFile("../reflection.zig"), @embedFile("../session.zig"),
+        @embedFile("../pkg_lock.zig"),
     } },
     // The embedded prelude loader and the embedded stdlib manifest are one
     // bootstrap surface: both hand constant source to the ordinary reader.
@@ -208,6 +209,7 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/duplicate_word.zig",
     "test/native/negative/empty_doc.zig",
     "test/http_fixture_server.zig",
+    "test/pkg_lock_fixture.zig",
 };
 pub fn main(init: std.process.Init) !void {
     var failed = false;

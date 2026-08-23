@@ -14,15 +14,16 @@ second tool to install.
 
 ## Current State
 
-Verified in the checkout (2026-08-22, `0.1.0` tagged 2026-08-19, the v1
+Verified in the checkout (2026-08-23, `0.1.0` tagged 2026-08-19, the v1
 workstream terminal).
 
-- **The format, resolution, and binary archive host layers now exist, but no
-  package sync or runtime lock tier does.** M1 added inert manifest/lock values
-  and version ordering; M2 added the pure MVS resolver; M3 added exact byte
-  lists, SHA-256, and hostile-input-safe atomic tgz extraction. Fetching,
-  project-file discovery, CLI mutation, and runtime module lookup remain later
-  milestones.
+- **The format, resolution, binary archive, and package-sync layers now exist,
+  but no runtime lock tier does.** M1 added inert manifest/lock values and
+  version ordering; M2 added the pure MVS resolver; M3 added exact byte lists,
+  SHA-256, and hostile-input-safe atomic tgz extraction; M4 added exact-byte
+  HTTPS fetching, immutable package-store publication, and canonical atomic
+  lock writes. Project-file discovery, CLI mutation, and runtime module lookup
+  remain later milestones.
 - **Module resolution today is embedded manifest, then `ECL_PATH`.**
   `AutoLoadDriver` (`src/machine.zig:2366`) is a poll-budgeted state machine
   with phases `begin → registered → filename → component_start →
@@ -397,26 +398,23 @@ file, and lost nothing.
 **Unlocks**: Real end-to-end verification of the lock tier (M5) against
 genuinely fetched packages.
 
-**Status**: Planned, 2026-08-22. The atomic five-patch plan, formal per-patch
-specifications, dependency graph, exact public-test ledger, and reachability
-proofs are in `gameplans/pkg-fetch-and-store.json`. Patches 1 and 2 independently
-freeze the contract and fixture surface; Patches 3 through 5 add exact HTTPS
-bytes/trust, package-store transactions, then ordinary-ECL orchestration. The
-plan has no open questions or interpatch operator action. M3's SourceHut
-prerequisite is green, so execution may proceed.
+**Status**: Executed, 2026-08-23. The five planned patches landed as
+`e964616`, `be50981`, `12f9814`, `afac073`, and `a9318d5`; SourceHut build
+1869377 passed the complete matrix, including acceptance and TSan. The plan,
+formal per-patch specifications, dependency graph, exact public-test ledger,
+and reachability proofs remain in `gameplans/pkg-fetch-and-store.json`.
 
-**Operator Actions Before Next Milestone**:
-1. Publish one real source-only package tarball to a durable URL (a GitHub
-   release or `archive/refs/tags/*.tar.gz` is sufficient) and record its
-   SHA-256.
-2. Run `pkg.sync.run` against a manifest naming it, on a machine with network
-   access, outside CI. Confirm the store directory, the lock contents, and the
-   hash all match.
-3. **Decision, with criteria**: if the live fetch surfaces TLS, redirect, or
-   content-encoding behavior the fixture server does not model, extend the
-   fixture server to model it *before* M5 begins rather than discovering it
-   during lock-tier work. Abort condition: if `http` cannot fetch GitHub
-   release tarballs at all, M4 is not done and M5 must not start.
+The live-network operator acceptance passed on 2026-08-23 against the public
+source-only package at
+`https://github.com/subsetpark/ecl-pkg-smoke/releases/download/v1.0.0/smoke-1.0.0.tgz`
+(`sha256-315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745`).
+Production system trust and current-time verification followed GitHub's 302
+redirect to its release-asset host. A cold `pkg.sync.run` published exactly
+`smoke-1.0.0-315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745`
+and a canonical lock; a warm run produced byte-identical output without
+changing the immutable entry. The downloaded bytes independently matched the
+declared hash. No TLS, redirect, or content-encoding fixture gap surfaced, so
+M5 is unblocked.
 
 ---
 
@@ -428,8 +426,9 @@ prerequisite is green, so execution may proceed.
   manifest → lock → `ECL_PATH`.
 - Lookup is **longest-prefix match** on the requested dotted module name
   against the lock's package prefixes; the winning entry names a store
-  directory, and the module file within it is derived from the remainder of
-  the dotted name.
+  directory, and the module file within it is the requested module's full
+  canonical name plus `.ecl`. This matches M4's root-level archive contract:
+  package `foo` publishes `foo.bar.ecl`, never `bar.ecl`.
 - The lock is read once at session initialization from the `ecl.lock` beside
   the discovered `ecl.pkg` — **not** from the working directory; the discovery
   walk settled in M1 means initialization pays O(directory depth) stats rather
@@ -448,6 +447,16 @@ prerequisite is green, so execution may proceed.
 - `zig build test-tsan` is green, and the existing module-load and
   stateful-module suites are extended to cover the new tier.
 
+**Status**: Executed, 2026-08-23. The atomic three-patch implementation plan,
+formal per-patch specifications, exact ten-test ledger, dependency graph, and
+runtime reachability proofs are in `gameplans/pkg-lock-tier.json`. All ten
+public behavior cases were proven fail-first and enabled. `zig build
+precommit`, `test-e2e`, `test-workers`, and the CI-matching Linux/x86_64
+`test-tsan` gate pass. The exhaustive allocation sweep found and fixed an M5
+snapshot leak; it then reached the checkout's two existing release-candidate
+OOM failures, both reproduced from untouched `HEAD`, so they are not recorded
+as M5 regressions or successes.
+
 **Why this is a safe pause point**: The tier is inert without a lock file, so
 every existing program, test, and CLI transcript behaves exactly as before.
 With a lock file it resolves locked modules by name. Either state is
@@ -456,12 +465,9 @@ coherent.
 **Unlocks**: The CLI (M6) — with the tier in place, `ecl pkg sync` followed by
 an ordinary `ecl script.ecl` is the whole user story.
 
-**Operator Actions Before Next Milestone**:
-1. Run `zig build test-tsan` on Linux and confirm green. This milestone
-   changes module-load timing, which is the specific class of bug only TSan
-   catches; a green precommit is not sufficient evidence here.
-2. Abort condition: any TSan finding in the loading-lease or registry
-   publication path blocks M6 until resolved.
+**Operator Actions Before Next Milestone**: None. The required Linux/x86_64
+TSan acceptance is green; no loading-lease or registry-publication finding
+blocks M6.
 
 ---
 

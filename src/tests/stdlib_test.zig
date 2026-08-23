@@ -40,10 +40,9 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         "error.new",         "result.ok",         "str.upper",
         "io.print",          "csv.parse",         "json.parse",
         "table.valid?",      "http.get-bytes",    "archive.sha256",
-        "pkg.store.inspect",
-        "rng.float",         "pkg.version.less?", "pkg.name.valid?",
-        "pkg.data.read-one", "pkg.manifest.read", "pkg.lock.read",
-        "pkg.mvs.resolve",   "pkg.sync.run",
+        "pkg.store.inspect", "rng.float",         "pkg.version.less?",
+        "pkg.name.valid?",   "pkg.data.read-one", "pkg.manifest.read",
+        "pkg.lock.read",     "pkg.mvs.resolve",   "pkg.sync.run",
     };
     for (stdlib.names(), exports) |name, qualified| {
         var heap: test_heap.SessionHeap = .init;

@@ -1177,12 +1177,34 @@ honest source with no public dual representation.
   concatenates definition fragments nor synthesizes umbrella modules, so
   privacy, cold loading, and cross-module qualified dispatch are the same for
   `pkg.*` modules as for user-authored modules.
-- **The manifest is consulted before `ECL_PATH`.** `AutoLoadDriver` acquires
-  the loading lease, checks whether the module is already registered, then
-  consults the manifest, and only then walks the search path. So a stdlib name
-  resolves with no host IO and no `ECL_PATH`, and no path module can shadow
-  one. The host-IO/search-path bail moved after the manifest check for exactly
-  this reason.
+- **The manifest and project lock are ordered before `ECL_PATH`.**
+  `AutoLoadDriver` acquires the loading lease, rechecks whether a racing Unit
+  registered the module, consults the embedded manifest, advances the
+  Session's optional project-lock cursor, and only then walks the search path.
+  A stdlib name therefore resolves with no host IO and cannot be shadowed by
+  either a lock or a path. A valid lock uses longest dotted-prefix ownership;
+  only an unmatched name reaches `ECL_PATH`, while a matched missing artifact
+  fails closed instead of silently changing the selected source.
+- **`ProjectLock` is one opaque Session-owned snapshot.** Library Sessions
+  have no discovery authority by default. The CLI supplies
+  `Host.project_start = "."`; with host IO, initialization resolves that
+  directory, walks upward to the first `ecl.pkg`, and reads its sibling
+  `ecl.lock` once. Session owns the opaque allocation until after scheduler
+  teardown, and Units inherit only `?*const ProjectLock`. The backing state
+  derives its allocator and parser reclamation domain from one
+  `HostCleanup`, so no separately correlated allocator/domain/host tuple can
+  be forged. Absent marker/lock/capability is represented by no handle; a
+  malformed lock is an owned tagged state whose error is materialized only
+  after embedded lookup.
+- **Lock observation is bounded and read-only.** `LookupCursor` compares at
+  most one package-name byte per advance and returns borrowed immutable match
+  metadata. The driver owns it with `heap.Owned` across scheduler yields,
+  checks the selected store directory, and constructs only the full canonical
+  `<module>.ecl` path within M4's immutable store key. It has no HTTP/TLS,
+  lock-write, installation, native-loader, allocator, or reclamation
+  capability. Candidate construction and source transfer then reuse the
+  existing poll-budgeted loader and publication continuation, preserving the
+  loading lease, cycle distinction, racing-winner recheck, and single commit.
 - **Every qualified execution carries its request through auto-load.** Resolution
   acquires the module *before* looking up the export atom, because a first
   reference is precisely the state in which that atom has never been interned;
@@ -1268,10 +1290,12 @@ honest source with no public dual representation.
   one SDK-generated ABI-v1 entry point. Its complete word table validates
   and publishes atomically; an artifact cannot partially register, publish
   a second namespace, or leave definitions behind after failed
-  initialization. `ECL_PATH` is the only module search path: for each path
-  entry in order, resolution tries `<name>.ecl` and then `<name>.eclmod`;
-  the first existing candidate is authoritative, including its errors, and
-  a native descriptor's canonical name must equal the requested name.
+  initialization. `ECL_PATH` is the only host-configured module search path:
+  after embedded and lock resolution decline a name, each path entry is tried
+  in order as `<name>.ecl` and then `<name>.eclmod`. The first existing path
+  candidate is authoritative, including its errors, and a native descriptor's
+  canonical name must equal the requested name. Locked packages are
+  source-only and never enter this native branch.
 - **Nested input reads are addressed by path.** `list_at`/`dict_at` reach only
   a declared input's top level, and a `ValueView` of an aggregate exposes a
   length and nothing else — so no module, first-party or otherwise, could read

@@ -9,6 +9,84 @@
 //! routing; the rest run in the ordinary suite.
 const std = @import("std");
 const session = @import("../session.zig");
+const machine = @import("../machine.zig");
+
+test "concurrency: lock-tier auto-loads converge through one loading lease" {
+    var fixture = try ConcurrentLockFixture.init();
+    defer fixture.deinit();
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    const environ = [_]machine.Environ.Entry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.initWithHostConfig(
+        std.testing.allocator,
+        &.{},
+        .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .project_start = fixture.nested,
+            .environ = &environ,
+        },
+        .{ .worker_pool = 8 },
+    );
+    defer runtime.deinit();
+    try expectStack(
+        &runtime,
+        "[1 2 3 4 5 6 7 8] (race.answer) @each",
+        "[42 42 42 42 42 42 42 42]",
+    );
+}
+
+const concurrent_hash = "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+const ConcurrentLockFixture = struct {
+    directory: std.testing.TmpDir,
+    root: [:0]u8,
+    nested: []u8,
+    cache: []u8,
+
+    fn init() !ConcurrentLockFixture {
+        const allocator = std.testing.allocator;
+        var directory = std.testing.tmpDir(.{});
+        errdefer directory.cleanup();
+        const root = try directory.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+        errdefer allocator.free(root);
+        try directory.dir.createDir(std.testing.io, "project", .default_dir);
+        try directory.dir.createDir(std.testing.io, "project/nested", .default_dir);
+        try directory.dir.createDir(std.testing.io, "cache", .default_dir);
+        try directory.dir.createDir(
+            std.testing.io,
+            "cache/race-1.0.0-" ++ concurrent_hash[7..],
+            .default_dir,
+        );
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "project/ecl.pkg",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {}}\n",
+        });
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "project/ecl.lock",
+            .data = "{'format 1\n 'root \"root\"\n 'packages\n {\"race\" {'version \"1.0.0\" 'url \"https://example.invalid/race.tgz\" 'hash \"" ++ concurrent_hash ++ "\"}}\n 'requires\n {\"root\" {\"race\" \"1.0.0\"}}}\n",
+        });
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "cache/race-1.0.0-" ++ concurrent_hash[7..] ++ "/race.ecl",
+            .data = "((pop 42) 'answer def) 'race @defm\n",
+        });
+        const nested = try std.fs.path.join(allocator, &.{ root, "project", "nested" });
+        errdefer allocator.free(nested);
+        const cache = try std.fs.path.join(allocator, &.{ root, "cache" });
+        return .{ .directory = directory, .root = root, .nested = nested, .cache = cache };
+    }
+
+    fn deinit(self: *ConcurrentLockFixture) void {
+        const allocator = std.testing.allocator;
+        allocator.free(self.cache);
+        allocator.free(self.nested);
+        allocator.free(self.root);
+        self.directory.cleanup();
+    }
+};
 
 fn expectOk(runtime: *session.Session, source: []const u8) !void {
     switch (try runtime.runUnit("stateful-module-test.ecl", source)) {

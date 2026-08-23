@@ -166,6 +166,7 @@ fn runOk(runtime: *session.Session, name: []const u8, source: []const u8) !void 
         .incomplete => return error.UnexpectedIncomplete,
         .err => |failure| {
             runtime.release(failure);
+            std.log.err("OOM probe `{s}` produced an unexpected language error", .{name});
             return error.UnexpectedLanguageError;
         },
     }
@@ -393,6 +394,24 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         scaffold_allocator,
     );
     defer scaffold_allocator.free(scratch_path);
+    const lock_probe_hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    try scratch.dir.writeFile(std.testing.io, .{
+        .sub_path = "ecl.pkg",
+        .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {}}\n",
+    });
+    try scratch.dir.writeFile(std.testing.io, .{
+        .sub_path = "ecl.lock",
+        .data = "{'format 1 'root \"root\" 'packages {\"lockprobe\" {'version \"1.0.0\" 'url \"https://e.com/p.tgz\" 'hash \"sha256-" ++ lock_probe_hash ++ "\"}} 'requires {\"root\" {\"lockprobe\" \"1.0.0\"}}}\n",
+    });
+    try scratch.dir.createDir(
+        std.testing.io,
+        "lockprobe-1.0.0-" ++ lock_probe_hash,
+        .default_dir,
+    );
+    try scratch.dir.writeFile(std.testing.io, .{
+        .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/lockprobe.ecl",
+        .data = "((42) 'answer def) 'lockprobe @defm\n",
+    });
     var output_buffer: [16384]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
@@ -404,6 +423,7 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             .io = std.testing.io,
             .output = &output,
             .diagnostics = &diagnostics,
+            .project_start = scratch_path,
             .environ = &.{
                 .{ .name = "ECL_OOM_PROBE", .value = "probe" },
                 .{ .name = "ECL_CACHE", .value = scratch_path },
@@ -413,6 +433,11 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         .cooperative,
     );
     defer runtime.deinit();
+
+    // The smallest locked program reaches one-time project discovery,
+    // independent format-1 validation, bounded prefix lookup, candidate
+    // materialization, and ordinary source publication.
+    try runOk(&runtime, "oom-lock-tier.ecl", "lockprobe.answer pop");
 
     // M12's embedded modules and host effects form a second coarse Session
     // bundle. checkAllAllocationFailures is quadratic in one probe's total

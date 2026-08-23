@@ -1230,6 +1230,54 @@ whitespace paired with a writer that is layout-exact is what makes the round
 trip a fixed point — reading a canonical lock and writing it back reproduces
 its bytes — and it keeps one dependency change a one-line diff.
 
+### Runtime lock tier
+
+Ordinary CLI evaluation opts a Session into project discovery from the
+process working directory. Embedders do so explicitly with the borrowed
+`Host.project_start` capability; its default is absent, so a library Session
+never reads ambient project state merely because its caller happens to run
+inside an ECL project. With host filesystem access and a start path, Session
+initialization walks upward once, stops at the first `ecl.pkg`, and reads only
+the sibling `ecl.lock`. No marker, no sibling lock, no host filesystem access,
+or no project-start capability means that the lock tier is absent.
+
+The Session owns one immutable result of that discovery for the complete
+lifetime of all its Units. A valid format-1 lock becomes an opaque observation
+capability carried in inherited context. A malformed or unreadable sibling
+lock is also remembered rather than reread: embedded modules remain usable,
+and the first non-embedded lookup reports the invalid project lock as a
+structured error before consulting `ECL_PATH`.
+
+Cold module resolution has exactly three tiers:
+
+1. the embedded standard-library manifest;
+2. the Session's valid lock, using the longest package name that owns the
+   requested dotted module name;
+3. `ECL_PATH`, only when no locked package owns the name.
+
+A locked selection names the immutable store directory derived with the cache
+precedence and `<name>-<version>-<hex>` key below. The source candidate inside
+that directory is the requested module's **full canonical name** plus `.ecl`:
+package `foo` resolves module `foo.bar` at `foo.bar.ecl`, never `bar.ecl`.
+This is the same root-level layout accepted by package inspection and
+installation.
+
+Package ownership is authoritative. Once a lock prefix matches, a missing
+store directory reports the package and tells the user to run `ecl pkg sync`;
+a present store entry missing the requested source reports both module and
+package. Neither failure falls through to `ECL_PATH`. Runtime resolution never
+calls HTTP or TLS, fetches or installs an artifact, writes the lock, or admits
+an `.eclmod` package candidate. Synchronization remains the only network and
+package-mutation boundary.
+
+The lock snapshot is immutable across concurrent Units. `AutoLoadDriver`
+acquires the existing loading lease and rechecks for a racing winner before it
+starts the bounded longest-prefix cursor. Lock scanning, candidate
+construction, and filesystem transfer remain poll-budgeted, and all state
+held across polls carries explicit heap ownership. Thus locked loading keeps
+the existing cycle detection, single-publication, and scheduler arbitration
+protocol rather than adding a parallel loader.
+
 ### Hashes and the store
 
 A hash is the literal `sha256-` followed by exactly 64 lowercase hex digits.

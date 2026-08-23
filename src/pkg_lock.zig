@@ -1,0 +1,561 @@
+//! Immutable project-lock snapshots consumed by runtime module loading.
+//!
+//! Synchronization owns network and mutation. This module owns only one
+//! Session-scoped read of local project metadata and a bounded observation
+//! cursor over the validated selections.
+const std = @import("std");
+const value = @import("value.zig");
+const heap = @import("heap.zig");
+const reader = @import("reader.zig");
+const dict = @import("dict.zig");
+const storage = @import("kernel_storage.zig");
+const intern = @import("intern.zig");
+
+const Value = value.Value;
+const max_lock_bytes = 16 * 1024 * 1024;
+
+/// Environment values already captured by the Session host boundary. Empty
+/// values are absent and never name the working directory.
+pub const CacheInputs = struct {
+    ecl_cache: ?[]const u8 = null,
+    xdg_cache_home: ?[]const u8 = null,
+    home: ?[]const u8 = null,
+};
+
+const Entry = struct {
+    name: []u8,
+    version: []u8,
+    store_dir: ?[]u8,
+
+    fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.version);
+        if (self.store_dir) |path| allocator.free(path);
+        self.* = undefined;
+    }
+};
+
+const State = union(enum) {
+    valid: []Entry,
+    invalid: []u8,
+};
+
+const Backing = struct {
+    host: *const heap.HostCleanup,
+    state: State,
+};
+comptime {
+    heap.requireSingleHostCapability(Backing);
+}
+
+/// Opaque, immutable capability. Only Session can obtain one from discovery;
+/// Units can borrow it for lookup but cannot construct, retarget, or mutate it.
+pub const ProjectLock = opaque {
+    pub fn discover(
+        host: *const heap.HostCleanup,
+        io: std.Io,
+        start: []const u8,
+        cache: CacheInputs,
+    ) error{OutOfMemory}!?*ProjectLock {
+        const allocator = host.allocator();
+        const absolute = std.Io.Dir.cwd().realPathFileAlloc(io, start, allocator) catch |err|
+            return try invalidSnapshot(host, "cannot resolve project start `{s}`: {s}", .{ start, @errorName(err) });
+        defer allocator.free(absolute);
+
+        var current: []const u8 = absolute;
+        while (true) {
+            const manifest_path = std.fs.path.join(allocator, &.{ current, "ecl.pkg" }) catch
+                return error.OutOfMemory;
+            defer allocator.free(manifest_path);
+            const manifest_info = std.Io.Dir.cwd().statFile(
+                io,
+                manifest_path,
+                .{ .follow_symlinks = false },
+            ) catch |err| switch (err) {
+                error.FileNotFound => null,
+                else => return try invalidSnapshot(
+                    host,
+                    "cannot inspect project marker `{s}`: {s}",
+                    .{ manifest_path, @errorName(err) },
+                ),
+            };
+            if (manifest_info) |info| {
+                if (info.kind != .file) return try invalidSnapshot(
+                    host,
+                    "project marker `{s}` is not a regular file",
+                    .{manifest_path},
+                );
+                return discoverLock(host, io, current, cache);
+            }
+
+            const parent = std.fs.path.dirname(current) orelse return null;
+            if (std.mem.eql(u8, parent, current)) return null;
+            current = parent;
+        }
+    }
+
+    pub fn lookupCursor(self: *const ProjectLock, module_name: []const u8) LookupCursor {
+        return .{ .lock = backingConst(self), .module_name = module_name };
+    }
+
+    pub fn deinit(self: *ProjectLock) void {
+        const owned = backing(self);
+        const allocator = owned.host.allocator();
+        switch (owned.state) {
+            .valid => |entries| {
+                for (entries) |*entry| entry.deinit(allocator);
+                allocator.free(entries);
+            },
+            .invalid => |message| allocator.free(message),
+        }
+        allocator.destroy(owned);
+    }
+};
+
+pub const Match = struct {
+    package: []const u8,
+    store_dir: ?[]const u8,
+};
+
+pub const LookupOutcome = union(enum) {
+    unmatched,
+    matched: Match,
+    invalid: []const u8,
+};
+
+pub const LookupProgress = union(enum) {
+    pending,
+    complete: LookupOutcome,
+};
+
+/// Processes at most one package-name byte per advance. AutoLoadDriver owns
+/// this cursor across yields and applies its ordinary kernel poll budget.
+pub const LookupCursor = struct {
+    lock: *const Backing,
+    module_name: []const u8,
+    entry_index: usize = 0,
+    byte_index: usize = 0,
+    still_matches: bool = true,
+    best_index: ?usize = null,
+    complete: bool = false,
+
+    pub const owned_disposal: heap.OwnedDisposal = .deinit;
+
+    pub fn advance(self: *LookupCursor) LookupProgress {
+        std.debug.assert(!self.complete);
+        const entries = switch (self.lock.state) {
+            .invalid => |message| {
+                self.complete = true;
+                return .{ .complete = .{ .invalid = message } };
+            },
+            .valid => |entries| entries,
+        };
+        if (self.entry_index == entries.len) {
+            self.complete = true;
+            return .{ .complete = if (self.best_index) |index|
+                .{ .matched = .{
+                    .package = entries[index].name,
+                    .store_dir = entries[index].store_dir,
+                } }
+            else
+                .unmatched };
+        }
+
+        const candidate = entries[self.entry_index].name;
+        if (self.still_matches and self.byte_index < candidate.len) {
+            if (self.byte_index >= self.module_name.len or
+                candidate[self.byte_index] != self.module_name[self.byte_index])
+            {
+                self.still_matches = false;
+            }
+            self.byte_index += 1;
+            return .pending;
+        }
+
+        if (self.still_matches and
+            self.module_name.len >= candidate.len and
+            (self.module_name.len == candidate.len or self.module_name[candidate.len] == '.'))
+        {
+            if (self.best_index == null or candidate.len > entries[self.best_index.?].name.len)
+                self.best_index = self.entry_index;
+        }
+        self.entry_index += 1;
+        self.byte_index = 0;
+        self.still_matches = true;
+        return .pending;
+    }
+
+    pub fn deinit(self: *LookupCursor) void {
+        self.* = undefined;
+    }
+};
+
+fn backing(self: *ProjectLock) *Backing {
+    return @ptrCast(@alignCast(self));
+}
+
+fn backingConst(self: *const ProjectLock) *const Backing {
+    return @ptrCast(@alignCast(self));
+}
+
+fn projectLock(owned: *Backing) *ProjectLock {
+    return @ptrCast(@alignCast(owned));
+}
+
+fn discoverLock(
+    host: *const heap.HostCleanup,
+    io: std.Io,
+    project_root: []const u8,
+    cache: CacheInputs,
+) error{OutOfMemory}!?*ProjectLock {
+    const allocator = host.allocator();
+    const lock_path = std.fs.path.join(allocator, &.{ project_root, "ecl.lock" }) catch
+        return error.OutOfMemory;
+    defer allocator.free(lock_path);
+    const lock_info = std.Io.Dir.cwd().statFile(
+        io,
+        lock_path,
+        .{ .follow_symlinks = false },
+    ) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return try invalidSnapshot(
+            host,
+            "cannot inspect project lock `{s}`: {s}",
+            .{ lock_path, @errorName(err) },
+        ),
+    };
+    if (lock_info.kind != .file) return try invalidSnapshot(
+        host,
+        "project lock `{s}` is not a regular file",
+        .{lock_path},
+    );
+    const source = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        lock_path,
+        allocator,
+        .limited(max_lock_bytes),
+    ) catch |err| return try invalidSnapshot(
+        host,
+        "cannot read project lock `{s}`: {s}",
+        .{ lock_path, @errorName(err) },
+    );
+    defer allocator.free(source);
+
+    var diag: reader.Diag = .{};
+    const read_result = reader.read(host, lock_path, source, &diag) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Parse => return try invalidSnapshot(
+            host,
+            "invalid project lock `{s}`: {s}",
+            .{ lock_path, diag.text() },
+        ),
+    };
+    return switch (read_result) {
+        .incomplete => |incomplete| invalidSnapshot(
+            host,
+            "invalid project lock `{s}`: {s}",
+            .{ lock_path, incomplete.message },
+        ),
+        .complete => |complete| result: {
+            var parsed = complete;
+            defer parsed.deinit();
+            if (parsed.values().len != 1) break :result try invalidSnapshot(
+                host,
+                "invalid project lock `{s}`: expected exactly one form",
+                .{lock_path},
+            );
+            const entries = validateLock(host, parsed.values()[0], cache) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Invalid => break :result try invalidSnapshot(
+                    host,
+                    "invalid project lock `{s}`: format-1 validation failed",
+                    .{lock_path},
+                ),
+            };
+            errdefer deinitEntries(allocator, entries);
+            const owned = try allocator.create(Backing);
+            owned.* = .{ .host = host, .state = .{ .valid = entries } };
+            break :result projectLock(owned);
+        },
+    };
+}
+
+fn deinitEntries(allocator: std.mem.Allocator, entries: []Entry) void {
+    for (entries) |*entry| entry.deinit(allocator);
+    allocator.free(entries);
+}
+
+fn invalidSnapshot(
+    host: *const heap.HostCleanup,
+    comptime format: []const u8,
+    args: anytype,
+) error{OutOfMemory}!*ProjectLock {
+    const allocator = host.allocator();
+    const message = std.fmt.allocPrint(allocator, format, args) catch return error.OutOfMemory;
+    errdefer allocator.free(message);
+    const owned = try allocator.create(Backing);
+    owned.* = .{ .host = host, .state = .{ .invalid = message } };
+    return projectLock(owned);
+}
+
+const ValidationError = error{ Invalid, OutOfMemory };
+
+fn validateLock(
+    host: *const heap.HostCleanup,
+    item: Value,
+    cache: CacheInputs,
+) ValidationError![]Entry {
+    const allocator = host.allocator();
+    const top = try exactFields(item, &.{ "format", "root", "packages", "requires" });
+    const format = try field(top, "format");
+    if (format != .int or format.int != 1) return error.Invalid;
+    const root_value = try field(top, "root");
+    const root = try ownedUtf8(allocator, root_value);
+    defer allocator.free(root);
+    if (!validPackageName(root)) return error.Invalid;
+
+    const packages_value = try field(top, "packages");
+    const packages = try asDict(packages_value);
+    var entries: std.ArrayList(Entry) = .empty;
+    errdefer {
+        for (entries.items) |*entry| entry.deinit(allocator);
+        entries.deinit(allocator);
+    }
+    const cache_root = try cacheRoot(allocator, cache);
+    defer if (cache_root) |path| allocator.free(path);
+
+    const package_count: usize = @intCast(packages.length());
+    try entries.ensureTotalCapacity(allocator, package_count);
+    for (0..package_count) |index| {
+        const name = try ownedUtf8(allocator, dict.keyAt(packages, index));
+        errdefer allocator.free(name);
+        if (!validPackageName(name)) return error.Invalid;
+        const selection = try exactFields(
+            dict.valueAt(packages, index),
+            &.{ "version", "url", "hash" },
+        );
+        const version = try ownedUtf8(allocator, try field(selection, "version"));
+        errdefer allocator.free(version);
+        if (!validVersion(version)) return error.Invalid;
+        const url = try ownedUtf8(allocator, try field(selection, "url"));
+        defer allocator.free(url);
+        if (!validUrl(url)) return error.Invalid;
+        const hash = try ownedUtf8(allocator, try field(selection, "hash"));
+        defer allocator.free(hash);
+        if (!validHash(hash)) return error.Invalid;
+        const store_dir = if (cache_root) |root_path|
+            std.fmt.allocPrint(
+                allocator,
+                "{s}{c}{s}-{s}-{s}",
+                .{ root_path, std.fs.path.sep, name, version, hash[7..] },
+            ) catch return error.OutOfMemory
+        else
+            null;
+        errdefer if (store_dir) |path| allocator.free(path);
+        entries.appendAssumeCapacity(.{
+            .name = name,
+            .version = version,
+            .store_dir = store_dir,
+        });
+    }
+
+    const requires = try asDict(try field(top, "requires"));
+    var found_root = false;
+    const requirer_count: usize = @intCast(requires.length());
+    for (0..requirer_count) |requirer_index| {
+        const requirer = try ownedUtf8(allocator, dict.keyAt(requires, requirer_index));
+        defer allocator.free(requirer);
+        if (!validPackageName(requirer)) return error.Invalid;
+        found_root = found_root or std.mem.eql(u8, requirer, root);
+        const minimums = try asDict(dict.valueAt(requires, requirer_index));
+        const minimum_count: usize = @intCast(minimums.length());
+        for (0..minimum_count) |minimum_index| {
+            const required_name = try ownedUtf8(allocator, dict.keyAt(minimums, minimum_index));
+            defer allocator.free(required_name);
+            if (!validPackageName(required_name)) return error.Invalid;
+            const minimum = try ownedUtf8(allocator, dict.valueAt(minimums, minimum_index));
+            defer allocator.free(minimum);
+            if (!validVersion(minimum)) return error.Invalid;
+            const selected = findEntry(entries.items, required_name) orelse return error.Invalid;
+            if (versionLess(selected.version, minimum)) return error.Invalid;
+        }
+    }
+    if (!found_root) return error.Invalid;
+    return entries.toOwnedSlice(allocator);
+}
+
+fn exactFields(item: Value, names: []const []const u8) ValidationError!*value.DictHandle {
+    const header = try asDict(item);
+    if (header.length() != names.len) return error.Invalid;
+    for (0..names.len) |index| {
+        const key = dict.keyAt(header, index);
+        if (key != .symbol) return error.Invalid;
+        var known = false;
+        for (names) |name| known = known or std.mem.eql(u8, intern.get(key.symbol), name);
+        if (!known) return error.Invalid;
+    }
+    for (names) |name| _ = try field(header, name);
+    return header;
+}
+
+fn field(header: *value.DictHandle, name: []const u8) ValidationError!Value {
+    const count: usize = @intCast(header.length());
+    for (0..count) |index| {
+        const key = dict.keyAt(header, index);
+        if (key == .symbol and std.mem.eql(u8, intern.get(key.symbol), name))
+            return dict.valueAt(header, index);
+    }
+    return error.Invalid;
+}
+
+fn asDict(item: Value) ValidationError!*value.DictHandle {
+    return switch (item) {
+        .dict => |header| header,
+        else => error.Invalid,
+    };
+}
+
+fn ownedUtf8(allocator: std.mem.Allocator, item: Value) ValidationError![]u8 {
+    if (!item.isString()) return error.Invalid;
+    var cursor = storage.ToUtf8Cursor.init(allocator, item);
+    defer cursor.deinit();
+    while (true) switch (cursor.advance(65_536) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidCodepoint => return error.Invalid,
+    }) {
+        .pending => {},
+        .complete => |bytes| return bytes,
+    };
+}
+
+fn cacheRoot(allocator: std.mem.Allocator, cache: CacheInputs) error{OutOfMemory}!?[]u8 {
+    if (nonEmpty(cache.ecl_cache)) |root|
+        return @as(?[]u8, try allocator.dupe(u8, root));
+    if (nonEmpty(cache.xdg_cache_home)) |root| return @as(
+        ?[]u8,
+        std.fs.path.join(allocator, &.{ root, "ecl", "pkg" }) catch return error.OutOfMemory,
+    );
+    if (nonEmpty(cache.home)) |root| return @as(
+        ?[]u8,
+        std.fs.path.join(allocator, &.{ root, ".cache", "ecl", "pkg" }) catch return error.OutOfMemory,
+    );
+    return null;
+}
+
+fn nonEmpty(value_bytes: ?[]const u8) ?[]const u8 {
+    const bytes = value_bytes orelse return null;
+    return if (bytes.len == 0) null else bytes;
+}
+
+fn findEntry(entries: []const Entry, name: []const u8) ?*const Entry {
+    for (entries) |*entry| if (std.mem.eql(u8, entry.name, name)) return entry;
+    return null;
+}
+
+fn validPackageName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    var segment_start: usize = 0;
+    for (name, 0..) |byte, index| {
+        if (byte == '.') {
+            if (!validNameSegment(name[segment_start..index])) return false;
+            segment_start = index + 1;
+        }
+    }
+    return validNameSegment(name[segment_start..]);
+}
+
+fn validNameSegment(segment: []const u8) bool {
+    if (segment.len == 0 or segment[0] < 'a' or segment[0] > 'z') return false;
+    for (segment[1..]) |byte| if (!((byte >= 'a' and byte <= 'z') or
+        (byte >= '0' and byte <= '9') or byte == '-')) return false;
+    return true;
+}
+
+fn validHash(hash: []const u8) bool {
+    if (hash.len != 71 or !std.mem.eql(u8, hash[0..7], "sha256-")) return false;
+    for (hash[7..]) |byte| if (!((byte >= '0' and byte <= '9') or
+        (byte >= 'a' and byte <= 'f'))) return false;
+    return true;
+}
+
+fn validUrl(url: []const u8) bool {
+    return url.len > "https://".len and std.mem.startsWith(u8, url, "https://");
+}
+
+fn validVersion(version: []const u8) bool {
+    if (version.len == 0 or std.mem.indexOfScalar(u8, version, '+') != null) return false;
+    const hyphen = std.mem.indexOfScalar(u8, version, '-');
+    const core = if (hyphen) |index| version[0..index] else version;
+    var fields = std.mem.splitScalar(u8, core, '.');
+    var count: usize = 0;
+    while (fields.next()) |part| {
+        count += 1;
+        if (!validNumeric(part)) return false;
+    }
+    if (count != 3) return false;
+    if (hyphen) |index| {
+        const prerelease = version[index + 1 ..];
+        var identifiers = std.mem.splitScalar(u8, prerelease, '.');
+        var identifier_count: usize = 0;
+        while (identifiers.next()) |identifier| {
+            identifier_count += 1;
+            if (identifier.len == 0) return false;
+            var numeric = true;
+            for (identifier) |byte| {
+                const digit = byte >= '0' and byte <= '9';
+                numeric = numeric and digit;
+                if (!(digit or (byte >= 'a' and byte <= 'z') or
+                    (byte >= 'A' and byte <= 'Z') or byte == '-')) return false;
+            }
+            if (numeric and identifier.len > 1 and identifier[0] == '0') return false;
+        }
+        if (identifier_count == 0) return false;
+    }
+    return true;
+}
+
+fn validNumeric(field_bytes: []const u8) bool {
+    if (field_bytes.len == 0 or (field_bytes.len > 1 and field_bytes[0] == '0')) return false;
+    for (field_bytes) |byte| if (byte < '0' or byte > '9') return false;
+    return true;
+}
+
+fn versionLess(left: []const u8, right: []const u8) bool {
+    const left_hyphen = std.mem.indexOfScalar(u8, left, '-');
+    const right_hyphen = std.mem.indexOfScalar(u8, right, '-');
+    var left_core = std.mem.splitScalar(u8, if (left_hyphen) |index| left[0..index] else left, '.');
+    var right_core = std.mem.splitScalar(u8, if (right_hyphen) |index| right[0..index] else right, '.');
+    while (left_core.next()) |left_field| {
+        const order = numericOrder(left_field, right_core.next().?);
+        if (order != .eq) return order == .lt;
+    }
+    if (left_hyphen == null) return false;
+    if (right_hyphen == null) return true;
+    var left_ids = std.mem.splitScalar(u8, left[left_hyphen.? + 1 ..], '.');
+    var right_ids = std.mem.splitScalar(u8, right[right_hyphen.? + 1 ..], '.');
+    while (true) {
+        const left_id = left_ids.next();
+        const right_id = right_ids.next();
+        if (left_id == null or right_id == null) return left_id == null and right_id != null;
+        const order = identifierOrder(left_id.?, right_id.?);
+        if (order != .eq) return order == .lt;
+    }
+}
+
+fn numericOrder(left: []const u8, right: []const u8) std.math.Order {
+    if (left.len != right.len) return std.math.order(left.len, right.len);
+    return std.mem.order(u8, left, right);
+}
+
+fn identifierOrder(left: []const u8, right: []const u8) std.math.Order {
+    const left_numeric = allDigits(left);
+    const right_numeric = allDigits(right);
+    if (left_numeric and !right_numeric) return .lt;
+    if (!left_numeric and right_numeric) return .gt;
+    return if (left_numeric) numericOrder(left, right) else std.mem.order(u8, left, right);
+}
+
+fn allDigits(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte < '0' or byte > '9') return false;
+    return true;
+}

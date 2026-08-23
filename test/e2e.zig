@@ -1,4 +1,48 @@
 const std = @import("std");
+const pkg_lock_fixture = @import("pkg_lock_fixture.zig");
+
+test "e2e: package lock resolves import by name with ECL PATH unset" {
+    var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, true);
+    defer fixture.deinit();
+    var nested = try fixture.openNested();
+    defer nested.close(io);
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_CACHE", fixture.cache);
+    var result = try cli.runOptions(.{
+        .argv = &.{ exe, "-e", "smoke.answer io.pp" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
+}
+
+test "e2e: locked missing store entry never fetches or falls back" {
+    var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, false);
+    defer fixture.deinit();
+    var nested = try fixture.openNested();
+    defer nested.close(io);
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_CACHE", fixture.cache);
+    try environment.put("ECL_PATH", fixture.search);
+    var result = try cli.runOptions(.{
+        .argv = &.{ exe, "-e", "smoke.answer io.pp" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{ "'kind 'io", "locked package `smoke`", "ecl pkg sync" },
+    });
+}
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const cli = @import("cli_test_support.zig");

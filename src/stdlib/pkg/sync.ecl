@@ -310,6 +310,4 @@
   project "/ecl.lock" cat
   pkg.store.write-lock)
  'run-validated defp
- )
-'pkg.sync
-@defm
+ ) 'pkg.sync @defm
