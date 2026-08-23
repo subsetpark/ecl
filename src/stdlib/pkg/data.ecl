@@ -13,10 +13,9 @@
  ### defp offending
  (key -- : "Raise an inert-data error for a dict entry.")
  (|key|
-  {'kind 'domain 'msg "a manifest or lock holds only inert data"}
-  'data
+  'domain error.new "a manifest or lock holds only inert data" error.with-message
   'key key pair dict-of
-  put
+  error.with-data
   raise)
  'offending defp
 
@@ -29,10 +28,10 @@
  (text -- form : "Parse text containing exactly one form and return it without evaluation.")
  (|text|
   text str.str?
-  {'kind 'type 'msg "pkg reads a package file from text"} assert
+  'type error.new "pkg reads a package file from text" error.with-message assert
   text parse
   dup len 1 =
-  {'kind 'shape 'msg "a package file is exactly one form"} assert
+  'shape error.new "a package file is exactly one form" error.with-message assert
   first)
  'read-one def
 

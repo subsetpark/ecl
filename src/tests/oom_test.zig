@@ -376,7 +376,9 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-stdlib.ecl",
-        "[1 2] result.ok (+) result.and-then result.or-raise pop " ++
+        "'io error.new \"read failed\" error.with-message {'path \"p\"} error.with-data " ++
+            "dup error.valid? pop dup 'io error.kind? pop ['io 'timeout] error.kind-in? pop " ++
+            "[1 2] result.ok (+) result.and-then result.or-raise pop " ++
             "\"  hi  \" str.trim str.upper pop " ++
             "\"a,b\\nc,d\" csv.parse dup csv.emit pop pop " ++
             "\"{\\\"a\\\":[1,null]}\" json.parse json.emit pop " ++

@@ -46,6 +46,12 @@ test "result: constructors and observations follow the tagged shape" {
             .kind = "type",
             .message_contains = "result.err expects an error dict",
         },
+        .{
+            .name = "err requires the error schema",
+            .source = "{'kind 7} result.err",
+            .kind = "type",
+            .message_contains = "result.err expects an error dict",
+        },
     });
 }
 

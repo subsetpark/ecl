@@ -473,11 +473,12 @@ test "module sources: formatter and standard modules use @defm" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     const exports = [_][]const u8{
-        "result.ok",         "str.upper",       "io.print",
-        "csv.parse",         "json.parse",      "table.valid?",
-        "http.get-bytes",    "archive.sha256",  "rng.float",
-        "pkg.version.less?", "pkg.name.valid?", "pkg.data.read-one",
-        "pkg.manifest.read", "pkg.lock.read",   "pkg.mvs.resolve",
+        "error.new",         "result.ok",         "str.upper",
+        "io.print",          "csv.parse",         "json.parse",
+        "table.valid?",      "http.get-bytes",    "archive.sha256",
+        "rng.float",         "pkg.version.less?", "pkg.name.valid?",
+        "pkg.data.read-one", "pkg.manifest.read", "pkg.lock.read",
+        "pkg.mvs.resolve",
     };
     for (stdlib.names(), exports) |name, qualified| {
         const source = try std.fmt.allocPrint(std.testing.allocator, "'{s} 'local import", .{qualified});
@@ -488,6 +489,7 @@ test "module sources: formatter and standard modules use @defm" {
         };
     }
     // And their words run, one per source-transport module.
+    try expectStack(&runtime, "'io error.new error.valid?", "1");
     try expectStack(&runtime, "[1] result.ok result.ok?", "1");
     try expectStack(&runtime, "\"ab\" str.upper", "\"AB\"");
     try expectStack(&runtime, "[\"n\"] [[1] [2]] table.from-rows table.height", "2");

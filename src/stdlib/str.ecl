@@ -9,7 +9,7 @@
 
  ### defp type-error
  (message -- error : "Build a type error with the given message.")
- (wrap ('kind 'type 'msg) swap compose dict-of)
+ ('type error.new swap error.with-message)
  'type-error defp
 
  ### def str?
@@ -137,7 +137,7 @@
    (0)
    s n pair
    (split dup len 1 >
-    {'kind 'domain 'msg "str.index-of found no occurrence of the needle"} assert
+    'domain error.new "str.index-of found no occurrence of the needle" error.with-message assert
     first len)
    with
    if)
@@ -154,7 +154,7 @@
  (string count -- string : "Concatenate count copies of the string. Count must be nonnegative.")
  ("str.repeat expects a string and an integer count" checked-string-int
   (|s n| n 0 >=
-   {'kind 'domain 'msg "str.repeat requires a nonnegative count"} assert
+   'domain error.new "str.repeat requires a nonnegative count" error.with-message assert
    n 0 > s len 0 > and
    s s len n * pair (take) with
    ("")

@@ -11,37 +11,38 @@
  ### defp checked
  (result -- result : "Validate and return a result.")
  (dup type 'dict match?
-  {'kind 'type 'msg "a result must be a dict tagged {'ok values} or {'err error}"} assert
+  'type error.new "a result must be a dict tagged {'ok values} or {'err error}" error.with-message
+  assert
   dup keys len 1 =
-  {'kind 'type 'msg "a result must carry exactly one of 'ok or 'err"} assert
+  'type error.new "a result must carry exactly one of 'ok or 'err" error.with-message assert
   dup 'ok has?
   (dup 'ok at type 'list match?
-   {'kind 'type 'msg "an ok result must carry a list of success values"} assert)
+   'type error.new "an ok result must carry a list of success values" error.with-message assert)
   (dup 'err has?
-   {'kind 'type 'msg "a result must carry exactly one of 'ok or 'err"} assert
-   dup 'err at type 'dict match?
-   {'kind 'type 'msg "an err result must carry an error dict"} assert)
+   'type error.new "a result must carry exactly one of 'ok or 'err" error.with-message assert
+   dup 'err at error.valid?
+   'type error.new "an err result must carry an error dict" error.with-message assert)
   if)
  'checked defp
 
  ### defp checked-all
  (results -- results : "Validate and return a list of results.")
  (dup type 'list match?
-  {'kind 'type 'msg "expected a list of results"} assert
+  'type error.new "expected a list of results" error.with-message assert
   dup (checked pop) for)
  'checked-all defp
 
  ### def ok
  (values -- result : "Build an ok result from a list of successful stack values.")
  (dup type 'list match?
-  {'kind 'type 'msg "result.ok expects a list of success values"} assert
+  'type error.new "result.ok expects a list of success values" error.with-message assert
   'ok swap pair dict-of)
  'ok def
 
  ### def err
  (error -- result : "Tag an error dict as a failed result.")
- (dup type 'dict match?
-  {'kind 'type 'msg "result.err expects an error dict"} assert
+ (dup error.valid?
+  'type error.new "result.err expects an error dict" error.with-message assert
   'err swap pair dict-of)
  'err def
 
@@ -82,9 +83,9 @@
   (swap 'err at wrap swap with @attempt
    dup 'ok has?
    ('ok at dup len 1 =
-    {'kind 'contract 'msg "result.map-err expects ( error -- error )"} assert
-    first dup type 'dict match?
-    {'kind 'type 'msg "result.map-err must produce an error dict"} assert
+    'contract error.new "result.map-err expects ( error -- error )" error.with-message assert
+    first dup error.valid?
+    'type error.new "result.map-err must produce an error dict" error.with-message assert
     err)
    when)
   (pop)
@@ -107,12 +108,16 @@
  (|result kinds handler|
   result checked pop
   kinds type 'list match?
-  {'kind 'type 'msg "result.recover-kinds expects a list of kind symbols"} assert
+  'type error.new "result.recover-kinds expects a list of kind symbols" error.with-message assert
   kinds
   (type 'symbol match?
-   {'kind 'type 'msg "result.recover-kinds expects a list of kind symbols"} assert)
+   'type error.new "result.recover-kinds expects a list of kind symbols" error.with-message assert)
   for
-  result 'err {} at-or 'kind 'no-kind-present at-or kinds in?
+  result 'err {} at-or
+  dup error.valid?
+  kinds (error.kind-in?) partial
+  (pop 0)
+  if
   result 'err has? and
   result handler pair (recover) with
   result literal

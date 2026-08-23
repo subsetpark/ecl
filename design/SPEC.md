@@ -732,22 +732,43 @@ a trusted-code boundary.
 
 ## The standard library
 
-Fourteen modules ship inside the binary. They are ordinary modules — registered,
+Sixteen modules ship inside the binary. They are ordinary modules — registered,
 enumerable, shadowable — and they load lazily on the first qualified mention of
 their name, whether that is a bare `str.upper` or `'str.upper 'upper import`. Resolution consults
 the embedded manifest before `ECL_PATH`, so a stray `csv.ecl` on the search
 path cannot silently replace a stdlib name; in-session shadowing and explicit
-`@defm` registration remain the documented overrides. All fourteen resolve with no
+`@defm` registration remain the documented overrides. All sixteen resolve with no
 `ECL_PATH` set and no filesystem access at all.
 
 Three transports back them, chosen per module rather than uniformly:
-embedded ECL source (`result`, `str`, `table`, `rng`, and the six `pkg.*` modules), a linked first-party
+embedded ECL source (`error`, `result`, `str`, `table`, `rng`, and the six `pkg.*` modules), a linked first-party
 native descriptor published through the same contract as an external
 extension (`csv`), and builtin word tables published under a module name
-(`io`, `json`, `http`).
+(`io`, `json`, `http`, `archive`).
 The last is reserved for authority the native SDK deliberately withholds — an
 allocator, TLS, sockets — which is why `json` and `http` are not SDK modules
 and `csv` is.
+
+### error
+
+Errors remain ordinary immutable dictionaries. `error.new` starts one from its
+required kind symbol; `error.with-message` and `error.with-data` return updated
+values without raising. `error.valid?` recognizes the same typed fields as
+`raise`: required symbol `'kind`, optional string `'msg`, optional symbol
+`'word`, optional list-of-symbols `'trace`, and optional dict `'data`. Other
+diagnostic keys are permitted. `error.kind?` and `error.kind-in?` inspect a
+validated error without repeating raw dictionary plumbing.
+
+This module owns data construction and inspection only. `raise`, `fail`,
+`assert`, and `@attempt` remain core because they are control effects rather
+than error values.
+
+- `error.new` `( kind -- error )`
+- `error.with-message` `( error message -- error )`
+- `error.with-data` `( error data -- error )`
+- `error.valid?` `( value -- bool )`
+- `error.kind?` `( error kind -- bool )`
+- `error.kind-in?` `( error kinds -- bool )`
 
 ### result
 
@@ -2504,6 +2525,36 @@ Non-list rows and non-string cells are `'type`; a zero-field row is `'shape`.
 fields are all strings. Accept CRLF or LF records, quoted commas and newlines,
 and doubled-quote escapes; preserve empty fields and record widths. Malformed
 quoting is `'parse`.
+
+## error
+
+Errors are ordinary dictionaries. Construction and inspection do not raise
+unless an operation's own input violates its contract; control effects remain
+core words.
+
+### kind-in?
+`( error kinds -- bool )` — Validate an error and a list of kind symbols, then
+return 1 when the error's kind occurs in the list.
+
+### kind?
+`( error kind -- bool )` — Validate both inputs and return 1 when the error has
+the supplied kind.
+
+### new
+`( kind -- error )` — Build `{'kind kind}` from a symbol.
+
+### valid?
+`( value -- bool )` — Return 1 when a value has a required symbol `'kind` and
+well-typed optional `'msg`, `'word`, `'trace`, and `'data` fields. Extra fields
+are allowed.
+
+### with-data
+`( error data -- error )` — Validate both dictionaries and return the error
+with `'data` set to `data`.
+
+### with-message
+`( error message -- error )` — Validate the error and string message and return
+the error with `'msg` set to `message`.
 
 ## http
 

@@ -173,6 +173,7 @@ const test_files = [_][]const u8{
     "tests/stateful_module_test.zig",
     "tests/stdlib_test.zig",
     "tests/hostio_test.zig",
+    "tests/error_test.zig",
     "tests/result_test.zig",
     "tests/str_test.zig",
     "tests/csv_test.zig",

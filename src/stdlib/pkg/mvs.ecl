@@ -20,8 +20,7 @@
  (package required-package version -- :
   "Raise a malformed-version error naming the requirer, target, and spelling.")
  (|package required version|
-  {'kind 'domain 'msg "a reachable package version is malformed"}
-  'data
+  'domain error.new "a reachable package version is malformed" error.with-message
   package required version 3 pack
   (|package required version|
    'package package
@@ -29,7 +28,7 @@
    'version version)
   infra
   dict-of
-  put
+  error.with-data
   raise)
  'malformed-version defp
 
@@ -97,7 +96,7 @@
   "Validate a resolver input manifest after attaching package provenance to malformed versions.")
  (|candidate fallback|
   candidate type 'dict match?
-  {'kind 'type 'msg "a manifest is a dict"} assert
+  'type error.new "a manifest is a dict" error.with-message assert
   candidate
   candidate 'name fallback at-or
   precheck-and-validate-manifest)
@@ -120,8 +119,7 @@
  (package required-package version -- :
   "Raise a missing-manifest error naming the requirer and exact target.")
  (|package required version|
-  {'kind 'domain 'msg "pkg.mvs.resolve is missing a declared manifest"}
-  'data
+  'domain error.new "pkg.mvs.resolve is missing a declared manifest" error.with-message
   package required version 3 pack
   (|package required version|
    'package package
@@ -129,7 +127,7 @@
    'version version)
   infra
   dict-of
-  put
+  error.with-data
   raise)
  'missing-manifest defp
 
@@ -156,8 +154,7 @@
  ### defp raise-hash-conflict
  (name version declarations -- : "Raise a hash conflict from canonically ordered declarations.")
  (|name version declarations|
-  {'kind 'domain 'msg "one package version has conflicting hashes"}
-  'data
+  'domain error.new "one package version has conflicting hashes" error.with-message
   name version declarations 3 pack
   (|name version declarations|
    'package name
@@ -168,7 +165,7 @@
    'right-hash declarations [1 1] at-path)
   infra
   dict-of
-  put
+  error.with-data
   raise)
  'raise-hash-conflict defp
 
@@ -186,10 +183,9 @@
  ### defp raise-cycle-packages
  (packages -- : "Raise a requirement-cycle error from sorted package names.")
  (|packages|
-  {'kind 'domain 'msg "the package requirement graph has a cycle"}
-  'data
+  'domain error.new "the package requirement graph has a cycle" error.with-message
   'packages packages pair dict-of
-  put
+  error.with-data
   raise)
  'raise-cycle-packages defp
 
@@ -208,15 +204,14 @@
  ### defp raise-prefix-collision
  (pair -- : "Raise a prefix collision from one canonically ordered pair.")
  (|pair|
-  {'kind 'domain 'msg "selected packages have overlapping prefixes"}
-  'data
+  'domain error.new "selected packages have overlapping prefixes" error.with-message
   pair wrap
   (|pair|
    'left-package pair first
    'right-package pair 1 at)
   infra
   dict-of
-  put
+  error.with-data
   raise)
  'raise-prefix-collision defp
 
@@ -336,7 +331,8 @@
   dup 'name at package match?
   over 'version at version match?
   and
-  {'kind 'domain 'msg "a catalog manifest must match its name and version keys"} assert)
+  'domain error.new "a catalog manifest must match its name and version keys" error.with-message
+  assert)
  'matching-manifest defp
 
  ### defp walk-manifest
@@ -493,7 +489,7 @@
    lock.")
  (|root catalog|
   catalog type 'dict match?
-  {'kind 'type 'msg "pkg.mvs.resolve expects a manifest catalog dict"} assert
+  'type error.new "pkg.mvs.resolve expects a manifest catalog dict" error.with-message assert
   catalog
   root "root" resolve-manifest-checked
   resolve-validated)

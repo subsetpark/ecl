@@ -56,11 +56,11 @@
    Count and bound must be nonnegative, and count must not exceed bound.")
  (|count bound|
   count 0 >=
-  {'kind 'domain 'msg "rng.deal needs a nonnegative count"} assert
+  'domain error.new "rng.deal needs a nonnegative count" error.with-message assert
   bound 0 >=
-  {'kind 'domain 'msg "rng.deal needs a nonnegative pool size"} assert
+  'domain error.new "rng.deal needs a nonnegative pool size" error.with-message assert
   count bound <=
-  {'kind 'domain 'msg "rng.deal cannot draw more values than the pool holds"} assert
+  'domain error.new "rng.deal cannot draw more values than the pool holds" error.with-message assert
   count range
   bound range [] pair
   bound (deal-step) partial

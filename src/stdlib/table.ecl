@@ -20,22 +20,22 @@
  ### defp checked
  (candidate -- table : "Validate and return a table candidate.")
  (dup type 'dict match?
-  {'kind 'type 'msg "a table must be a dict of columns"} assert
+  'type error.new "a table must be a dict of columns" error.with-message assert
   dup keys len 0 >
-  {'kind 'shape 'msg "a table must have at least one column"} assert
+  'shape error.new "a table must have at least one column" error.with-message assert
   dup keys (string?) all?
-  {'kind 'type 'msg "table column names must be strings"} assert
+  'type error.new "table column names must be strings" error.with-message assert
   dup keys (len 0 >) all?
-  {'kind 'domain 'msg "table column names must not be empty"} assert
+  'domain error.new "table column names must not be empty" error.with-message assert
   dup vals (type 'list match?) all?
-  {'kind 'type 'msg "table columns must be lists"} assert
+  'type error.new "table columns must be lists" error.with-message assert
   dup vals (len) each distinct len 2 <
-  {'kind 'shape 'msg "table columns must share one length"} assert)
+  'shape error.new "table columns must share one length" error.with-message assert)
  'checked defp
 
  ### defp convention-miss?
  (result -- bool : "Return 0 for a table validation error and re-raise any other error.")
- (dup 'err at 'kind at ['type 'shape 'domain] in? (pop 0) ('err at raise) if)
+ (dup 'err at ['type 'shape 'domain] error.kind-in? (pop 0) ('err at raise) if)
  'convention-miss? defp
 
  ### def valid?
@@ -68,30 +68,30 @@
    An empty row list produces a zero-row table with the given columns.")
  (|names rows|
   names type 'list match?
-  {'kind 'type 'msg "table.from-rows expects a list of column names"} assert
+  'type error.new "table.from-rows expects a list of column names" error.with-message assert
   names len 0 >
-  {'kind 'shape 'msg "a table must have at least one column"} assert
+  'shape error.new "a table must have at least one column" error.with-message assert
   names (string?) all?
-  {'kind 'type 'msg "table column names must be strings"} assert
+  'type error.new "table column names must be strings" error.with-message assert
   names (len 0 >) all?
-  {'kind 'domain 'msg "table column names must not be empty"} assert
+  'domain error.new "table column names must not be empty" error.with-message assert
   names distinct len names len =
-  {'kind 'domain 'msg "table.from-rows rejects duplicate column names"} assert
+  'domain error.new "table.from-rows rejects duplicate column names" error.with-message assert
   rows type 'list match?
-  {'kind 'type 'msg "table.from-rows expects a list of rows"} assert
+  'type error.new "table.from-rows expects a list of rows" error.with-message assert
   rows (type 'list match?) all?
-  {'kind 'type 'msg "table.from-rows expects every row to be a list"} assert
+  'type error.new "table.from-rows expects every row to be a list" error.with-message assert
   rows names (len swap len =) partial all?
-  {'kind 'shape 'msg "every row must have one cell per column name"} assert
+  'shape error.new "every row must have one cell per column name" error.with-message assert
   names rows names len transpose to-dict)
  'from-rows def
 
  ### def from-header-rows
  (rows -- table : "Build a table using the first row as column names and the rest as data rows.")
  (dup type 'list match?
-  {'kind 'type 'msg "table.from-header-rows expects a list of rows"} assert
+  'type error.new "table.from-header-rows expects a list of rows" error.with-message assert
   dup len 0 >
-  {'kind 'shape 'msg "table.from-header-rows needs a header row"} assert
+  'shape error.new "table.from-header-rows needs a header row" error.with-message assert
   dup first swap 1 drop from-rows)
  'from-header-rows def
 
@@ -107,17 +107,19 @@
    The first record sets column order. Later records may use a different key order.")
  (|records|
   records type 'list match?
-  {'kind 'type 'msg "table.from-records expects a list of records"} assert
+  'type error.new "table.from-records expects a list of records" error.with-message assert
   records len 0 >
-  {'kind 'shape 'msg "table.from-records cannot infer a schema from no records"} assert
+  'shape error.new "table.from-records cannot infer a schema from no records" error.with-message
+  assert
   records (type 'dict match?) all?
-  {'kind 'type 'msg "table.from-records expects every record to be a dict"} assert
+  'type error.new "table.from-records expects every record to be a dict" error.with-message assert
   records first keys (string?) all?
-  {'kind 'type 'msg "table column names must be strings"} assert
+  'type error.new "table column names must be strings" error.with-message assert
   records first keys (len 0 >) all?
-  {'kind 'domain 'msg "table column names must not be empty"} assert
+  'domain error.new "table column names must not be empty" error.with-message assert
   records records first keys (keys-exactly?) partial all?
-  {'kind 'domain 'msg "every record must carry exactly the first record's keys"} assert
+  'domain error.new "every record must carry exactly the first record's keys" error.with-message
+  assert
   records first keys
   records first keys records (record-column) partial each
   to-dict)
@@ -144,7 +146,7 @@
  (|table name|
   table checked pop
   table name has?
-  {'kind 'domain 'msg "table.column requires an existing column name"} assert
+  'domain error.new "table.column requires an existing column name" error.with-message assert
   table name at)
  'column def
 
@@ -157,11 +159,12 @@
  (|table spec|
   table checked pop
   spec type 'dict match?
-  {'kind 'type 'msg "table.cast expects a dict from column name to quotation"} assert
+  'type error.new "table.cast expects a dict from column name to quotation" error.with-message
+  assert
   spec keys table (swap has?) partial all?
-  {'kind 'domain 'msg "table.cast requires existing column names"} assert
+  'domain error.new "table.cast requires existing column names" error.with-message assert
   spec vals (type 'list match?) all?
-  {'kind 'type 'msg "table.cast expects a quotation for every named column"} assert
+  'type error.new "table.cast expects a quotation for every named column" error.with-message assert
   spec pairs table (cast-column) fold)
  'cast def
 
@@ -177,13 +180,13 @@
  (|table names|
   table checked pop
   names type 'list match?
-  {'kind 'type 'msg "table.select expects a list of column names"} assert
+  'type error.new "table.select expects a list of column names" error.with-message assert
   names len 0 >
-  {'kind 'shape 'msg "a table must have at least one column"} assert
+  'shape error.new "a table must have at least one column" error.with-message assert
   names distinct len names len =
-  {'kind 'domain 'msg "table.select rejects duplicate column names"} assert
+  'domain error.new "table.select rejects duplicate column names" error.with-message assert
   names table (swap has?) partial all?
-  {'kind 'domain 'msg "table.select requires existing column names"} assert
+  'domain error.new "table.select requires existing column names" error.with-message assert
   names
   names table (swap at) partial each
   to-dict)
@@ -194,16 +197,16 @@
  (|table mapping|
   table checked pop
   mapping type 'dict match?
-  {'kind 'type 'msg "table.rename expects a dict from old name to new name"} assert
+  'type error.new "table.rename expects a dict from old name to new name" error.with-message assert
   mapping keys table (swap has?) partial all?
-  {'kind 'domain 'msg "table.rename requires existing column names"} assert
+  'domain error.new "table.rename requires existing column names" error.with-message assert
   mapping vals (string?) all?
-  {'kind 'type 'msg "table column names must be strings"} assert
+  'type error.new "table column names must be strings" error.with-message assert
   mapping vals (len 0 >) all?
-  {'kind 'domain 'msg "table column names must not be empty"} assert
+  'domain error.new "table column names must not be empty" error.with-message assert
   table keys mapping (swap dup at-or) partial each
   dup distinct len over len =
-  {'kind 'domain 'msg "table.rename would collide two columns onto one name"} assert
+  'domain error.new "table.rename would collide two columns onto one name" error.with-message assert
   table vals to-dict)
  'rename def
 
@@ -213,13 +216,13 @@
  (|table name column|
   table checked pop
   name string?
-  {'kind 'type 'msg "table column names must be strings"} assert
+  'type error.new "table column names must be strings" error.with-message assert
   name len 0 >
-  {'kind 'domain 'msg "table column names must not be empty"} assert
+  'domain error.new "table column names must not be empty" error.with-message assert
   column type 'list match?
-  {'kind 'type 'msg "table.with-column expects a list"} assert
+  'type error.new "table.with-column expects a list" error.with-message assert
   column len table height =
-  {'kind 'shape 'msg "a replacement column must match the table's row count"} assert
+  'shape error.new "a replacement column must match the table's row count" error.with-message assert
   table name column put)
  'with-column def
 
@@ -258,11 +261,11 @@
  (|table mask|
   table checked pop
   mask type 'list match?
-  {'kind 'type 'msg "table.where expects a mask list"} assert
+  'type error.new "table.where expects a mask list" error.with-message assert
   mask ([0 1] in?) all?
-  {'kind 'type 'msg "a table mask holds only 0 and 1"} assert
+  'type error.new "a table mask holds only 0 and 1" error.with-message assert
   mask len table height =
-  {'kind 'shape 'msg "a table mask must match the table's row count"} assert
+  'shape error.new "a table mask must match the table's row count" error.with-message assert
   table keys
   table vals mask selected (at) partial each
   to-dict)
@@ -308,13 +311,13 @@
  (|table names|
   table checked pop
   names type 'list match?
-  {'kind 'type 'msg "table.group-by expects a list of column names"} assert
+  'type error.new "table.group-by expects a list of column names" error.with-message assert
   names (string?) all?
-  {'kind 'type 'msg "table column names must be strings"} assert
+  'type error.new "table column names must be strings" error.with-message assert
   names table (swap has?) partial all?
-  {'kind 'domain 'msg "table.group-by requires existing column names"} assert
+  'domain error.new "table.group-by requires existing column names" error.with-message assert
   names distinct len names len =
-  {'kind 'domain 'msg "table.group-by rejects duplicate column names"} assert
+  'domain error.new "table.group-by rejects duplicate column names" error.with-message assert
   names len 0 =
   table (global-group) partial
   table names (group-keys group) partial partial
@@ -387,25 +390,27 @@
  (|table names specs|
   table checked pop
   names type 'list match?
-  {'kind 'type 'msg "table.aggregate expects a list of column names"} assert
+  'type error.new "table.aggregate expects a list of column names" error.with-message assert
   names (string?) all?
-  {'kind 'type 'msg "table column names must be strings"} assert
+  'type error.new "table column names must be strings" error.with-message assert
   names table (swap has?) partial all?
-  {'kind 'domain 'msg "table.aggregate requires existing column names"} assert
+  'domain error.new "table.aggregate requires existing column names" error.with-message assert
   names distinct len names len =
-  {'kind 'domain 'msg "table.aggregate rejects duplicate column names"} assert
+  'domain error.new "table.aggregate rejects duplicate column names" error.with-message assert
   specs type 'list match?
-  {'kind 'type 'msg "table.aggregate expects a list of specifications"} assert
+  'type error.new "table.aggregate expects a list of specifications" error.with-message assert
   specs (spec-shaped?) all?
-  {'kind 'type
-   'msg "each aggregate specification is [output-name input-name quotation]"}
+  'type error.new "each aggregate specification is [output-name input-name quotation]"
+  error.with-message
   assert
   specs (1 at) each table (swap has?) partial all?
-  {'kind 'domain 'msg "table.aggregate requires existing input column names"} assert
+  'domain error.new "table.aggregate requires existing input column names" error.with-message assert
   names specs (first) each cat dup distinct len swap len =
-  {'kind 'domain 'msg "aggregate output names must not collide with each other or a key"} assert
+  'domain error.new "aggregate output names must not collide with each other or a key"
+  error.with-message assert
   names len specs len + 0 >
-  {'kind 'domain 'msg "table.aggregate needs at least one key or aggregate output"} assert
+  'domain error.new "table.aggregate needs at least one key or aggregate output" error.with-message
+  assert
   table names specs table names group-by aggregate-build)
  'aggregate def
 
@@ -483,23 +488,23 @@
  (left right pairs -- extra : "Validate join keys and return the right columns to append.")
  (|left right pairs|
   pairs type 'list match?
-  {'kind 'type 'msg "join keys are a list of [left-name right-name] pairs"} assert
+  'type error.new "join keys are a list of [left-name right-name] pairs" error.with-message assert
   pairs len 0 >
-  {'kind 'domain 'msg "a join needs at least one key pair"} assert
+  'domain error.new "a join needs at least one key pair" error.with-message assert
   pairs (pair-shaped?) all?
-  {'kind 'type 'msg "join keys are a list of [left-name right-name] pairs"} assert
+  'type error.new "join keys are a list of [left-name right-name] pairs" error.with-message assert
   pairs (first) each left (swap has?) partial all?
-  {'kind 'domain 'msg "join keys must name existing left columns"} assert
+  'domain error.new "join keys must name existing left columns" error.with-message assert
   pairs (1 at) each right (swap has?) partial all?
-  {'kind 'domain 'msg "join keys must name existing right columns"} assert
+  'domain error.new "join keys must name existing right columns" error.with-message assert
   pairs (first) each dup distinct len swap len =
-  {'kind 'domain 'msg "a join may not repeat a left column"} assert
+  'domain error.new "a join may not repeat a left column" error.with-message assert
   pairs (1 at) each dup distinct len swap len =
-  {'kind 'domain 'msg "a join may not repeat a right column"} assert
+  'domain error.new "a join may not repeat a right column" error.with-message assert
   right keys pairs (1 at) each exclude
   dup left keys name-set (swap has?) partial any? not
-  {'kind 'domain
-   'msg "a join may not collide non-key column names; rename one first"}
+  'domain error.new "a join may not collide non-key column names; rename one first"
+  error.with-message
   assert)
  'join-plan defp
 
@@ -546,9 +551,9 @@
  (left right pairs fill extra -- table : "Build a left join from validated fill values.")
  (|left right pairs fill extra|
   extra fill (swap has?) partial all?
-  {'kind 'domain 'msg "a fill must cover every appended right column"} assert
+  'domain error.new "a fill must cover every appended right column" error.with-message assert
   extra len fill keys len =
-  {'kind 'domain 'msg "a fill must cover exactly the appended right columns"} assert
+  'domain error.new "a fill must cover exactly the appended right columns" error.with-message assert
   left right pairs extra
   extra fill (swap at) partial each
   (left-step)
@@ -564,7 +569,7 @@
   left checked pop
   right checked pop
   fill type 'dict match?
-  {'kind 'type 'msg "table.left-join-with expects a fill dict"} assert
+  'type error.new "table.left-join-with expects a fill dict" error.with-message assert
   left right pairs fill
   left right pairs join-plan
   left-join-checked)

@@ -15,14 +15,16 @@
  (requirement -- requirement : "Validate and return a package requirement.")
  (|requirement|
   requirement type 'dict match?
-  {'kind 'type 'msg "a requirement is a dict"} assert
+  'type error.new "a requirement is a dict" error.with-message assert
   requirement requirement-keys keys-exactly?
-  {'kind 'domain 'msg "a requirement has exactly the keys 'version 'url 'hash"} assert
+  'domain error.new "a requirement has exactly the keys 'version 'url 'hash" error.with-message
+  assert
   requirement 'version at pkg.version.validate pop
   requirement 'url at pkg.name.url?
-  {'kind 'domain 'msg "a requirement url is an https url"} assert
+  'domain error.new "a requirement url is an https url" error.with-message assert
   requirement 'hash at pkg.name.hash?
-  {'kind 'domain 'msg "a requirement hash is sha256- and 64 lowercase hex digits"} assert
+  'domain error.new "a requirement hash is sha256- and 64 lowercase hex digits" error.with-message
+  assert
   requirement)
  'validate-requirement def
 
@@ -31,24 +33,25 @@
   "Validate and return a manifest. Executable word values are rejected before structural checks.")
  (|candidate|
   candidate type 'dict match?
-  {'kind 'type 'msg "a manifest is a dict"} assert
+  'type error.new "a manifest is a dict" error.with-message assert
   candidate pairs (pkg.data.assert-inert-entry) for
   candidate manifest-keys keys-exactly?
-  {'kind 'domain
-   'msg "a manifest has exactly the keys 'format 'name 'version 'requires"}
+  'domain error.new "a manifest has exactly the keys 'format 'name 'version 'requires"
+  error.with-message
   assert
   candidate 'format at 1 match?
-  {'kind 'domain 'msg "the only manifest format is 1"} assert
+  'domain error.new "the only manifest format is 1" error.with-message assert
   candidate 'name at pkg.name.valid?
-  {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
+  'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   candidate 'version at pkg.version.validate pop
   candidate 'requires at type 'dict match?
-  {'kind 'type 'msg "manifest requirements are a dict from package name to requirement"} assert
+  'type error.new "manifest requirements are a dict from package name to requirement"
+  error.with-message assert
   candidate 'requires at keys (pkg.name.valid?) all?
-  {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
+  'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   candidate 'requires at vals (pkg.manifest.validate-requirement pop) for
   candidate 'name at wrap candidate 'requires at keys cat pkg.name.collides? not
-  {'kind 'domain 'msg "no package may own another's name, its own included"} assert
+  'domain error.new "no package may own another's name, its own included" error.with-message assert
   candidate)
  'validate def
 

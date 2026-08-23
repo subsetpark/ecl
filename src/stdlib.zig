@@ -46,6 +46,10 @@ const Module = struct {
 };
 
 const modules = [_]Module{
+    .{ .name = "error", .entry = .{ .source = .{
+        .name = "<stdlib:error>",
+        .text = @embedFile("stdlib/error.ecl"),
+    } } },
     .{ .name = "result", .entry = .{ .source = .{
         .name = "<stdlib:result>",
         .text = @embedFile("stdlib/result.ecl"),

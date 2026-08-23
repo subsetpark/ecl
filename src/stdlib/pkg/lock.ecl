@@ -10,9 +10,10 @@
  (minimums -- minimums : "Validate and return one package's minimum-version requirements.")
  (|minimums|
   minimums type 'dict match?
-  {'kind 'type 'msg "a lock's requirements are a dict from package name to version"} assert
+  'type error.new "a lock's requirements are a dict from package name to version" error.with-message
+  assert
   minimums keys (pkg.name.valid?) all?
-  {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
+  'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   minimums vals (pkg.version.validate pop) for
   minimums)
  'minimums-checked defp
@@ -34,33 +35,37 @@
    minimum version.")
  (|candidate|
   candidate type 'dict match?
-  {'kind 'type 'msg "a lock is a dict"} assert
+  'type error.new "a lock is a dict" error.with-message assert
   candidate pairs (pkg.data.assert-inert-entry) for
   candidate lock-keys keys-exactly?
-  {'kind 'domain
-   'msg "a lock has exactly the keys 'format 'root 'packages 'requires"}
+  'domain error.new "a lock has exactly the keys 'format 'root 'packages 'requires"
+  error.with-message
   assert
   candidate 'format at 1 match?
-  {'kind 'domain 'msg "the only lock format is 1"} assert
+  'domain error.new "the only lock format is 1" error.with-message assert
   candidate 'root at pkg.name.valid?
-  {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
+  'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   candidate 'packages at type 'dict match?
-  {'kind 'type 'msg "a lock's packages are a dict from package name to selection"} assert
+  'type error.new "a lock's packages are a dict from package name to selection" error.with-message
+  assert
   candidate 'packages at keys (pkg.name.valid?) all?
-  {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
+  'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   candidate 'packages at vals (pkg.manifest.validate-requirement pop) for
   candidate 'requires at type 'dict match?
-  {'kind 'type 'msg "a lock's requirements are keyed by the requiring package"} assert
+  'type error.new "a lock's requirements are keyed by the requiring package" error.with-message
+  assert
   candidate 'requires at keys (pkg.name.valid?) all?
-  {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
+  'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   candidate 'requires at vals (minimums-checked pop) for
   candidate 'requires at candidate 'root at has?
-  {'kind 'domain 'msg "a lock records the root's own requirements under its name"} assert
+  'domain error.new "a lock records the root's own requirements under its name" error.with-message
+  assert
   candidate 'requires at vals (pairs) each raze
   dup candidate 'packages at (known?) partial all?
-  {'kind 'domain 'msg "every required package has a selection in the lock"} assert
+  'domain error.new "every required package has a selection in the lock" error.with-message assert
   candidate 'packages at (satisfied?) partial all?
-  {'kind 'domain 'msg "a selected version is never below a minimum recorded for it"} assert
+  'domain error.new "a selected version is never below a minimum recorded for it" error.with-message
+  assert
   candidate)
  'validate def
 

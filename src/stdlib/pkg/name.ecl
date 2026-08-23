@@ -60,13 +60,13 @@
    dot.")
  (|package module|
   package str.str?
-  {'kind 'type 'msg "pkg.name.owns? expects two package names"} assert
+  'type error.new "pkg.name.owns? expects two package names" error.with-message assert
   module str.str?
-  {'kind 'type 'msg "pkg.name.owns? expects two package names"} assert
+  'type error.new "pkg.name.owns? expects two package names" error.with-message assert
   package valid?
-  {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
+  'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   module valid?
-  {'kind 'domain 'msg "a package name is dot-joined lowercase segments"} assert
+  'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   package module match?
   module package "." cat str.starts?
   or)

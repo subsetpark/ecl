@@ -67,18 +67,20 @@
  ### def validate
  (candidate -- parts : "Validate a version and return [core-fields prerelease-identifiers].")
  (dup str.str?
-  {'kind 'type 'msg "a package version is a string"} assert
+  'type error.new "a package version is a string" error.with-message assert
   dup "+" split len 1 =
-  {'kind 'domain 'msg "build metadata is not part of a package version"} assert
+  'domain error.new "build metadata is not part of a package version" error.with-message assert
   dup core-fields
   dup len 3 =
-  {'kind 'domain 'msg "a package version core is major.minor.patch"} assert
+  'domain error.new "a package version core is major.minor.patch" error.with-message assert
   dup (numeric-field?) all?
-  {'kind 'domain 'msg "a package version field is digits with no leading zero"} assert
+  'domain error.new "a package version field is digits with no leading zero" error.with-message
+  assert
   swap identifiers
   dup (prerelease-identifier?) all?
-  {'kind 'domain
-   'msg "a prerelease identifier is alphanumeric or hyphen, with no leading zero when numeric"}
+  'domain error.new
+  "a prerelease identifier is alphanumeric or hyphen, with no leading zero when numeric"
+  error.with-message
   assert
   pair)
  'validate def
@@ -133,11 +135,11 @@
  (versions -- version :
   "Return the highest version in a nonempty list. Validate every item before comparing.")
  (dup type 'list match?
-  {'kind 'type 'msg "pkg.version.max expects a list of version strings"} assert
+  'type error.new "pkg.version.max expects a list of version strings" error.with-message assert
   dup empty? not
-  {'kind 'shape 'msg "pkg.version.max needs at least one version"} assert
+  'shape error.new "pkg.version.max needs at least one version" error.with-message assert
   dup (str.str?) all?
-  {'kind 'type 'msg "pkg.version.max expects a list of version strings"} assert
+  'type error.new "pkg.version.max expects a list of version strings" error.with-message assert
   (dup validate pair) each
   (keep-larger) fold1
   first)

@@ -696,6 +696,7 @@ pub fn build(b: *std.Build) void {
             "tests.formatter_test.",
             "tests.module_value_test.",
             "tests.stdlib_test.",
+            "tests.error_test.",
             "tests.result_test.",
             "tests.str_test.",
             "tests.csv_test.",
