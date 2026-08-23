@@ -206,7 +206,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-primitives.ecl",
-        "(3 4 +) 'sum def sum pop (1 0 /) @attempt pop (5 6 +) @attempt pop " ++
+        "(3 4 +) 'oom-sum def oom-sum pop (1 0 /) @attempt pop (5 6 +) @attempt pop " ++
             "({'kind 'custom 'data {'detail 7}} raise) @attempt pop " ++
             "[3 4] (+) with call pop [5 6] (+) with @attempt pop " ++
             "[7 8] (+) with @spawn await pop " ++
@@ -397,23 +397,27 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     // this sweep injects failure at each of those ordinals.
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();
+    // Paths and source strings are borrowed test scaffolding, not values the
+    // Session owns. Keep their construction outside the injected allocator so
+    // the sweep enumerates live Session paths rather than this helper's writer.
+    const scaffold_allocator = std.testing.allocator;
     const scratch_path = try scratch.dir.realPathFileAlloc(
         std.testing.io,
         ".",
-        thread_safe_allocator,
+        scaffold_allocator,
     );
-    defer thread_safe_allocator.free(scratch_path);
+    defer scaffold_allocator.free(scratch_path);
     const archive_destination = try std.fmt.allocPrint(
-        thread_safe_allocator,
+        scaffold_allocator,
         "{s}{c}archive",
         .{ scratch_path, std.fs.path.sep },
     );
-    defer thread_safe_allocator.free(archive_destination);
-    const archive_source = try archiveSource(thread_safe_allocator, archive_destination);
-    defer thread_safe_allocator.free(archive_source);
+    defer scaffold_allocator.free(archive_destination);
+    const archive_source = try archiveSource(scaffold_allocator, archive_destination);
+    defer scaffold_allocator.free(archive_source);
     try runOk(&runtime, "oom-archive.ecl", archive_source);
     const host_io_source = try std.fmt.allocPrint(
-        thread_safe_allocator,
+        scaffold_allocator,
         "1 \"probe\" io.debug pop " ++
             "\"probe\\ntext\" \"{s}{c}probe.txt\" io.spit " ++
             "\"{s}{c}probe.txt\" io.slurp pop " ++
@@ -428,7 +432,7 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             scratch_path, std.fs.path.sep,
         },
     );
-    defer thread_safe_allocator.free(host_io_source);
+    defer scaffold_allocator.free(host_io_source);
     try runOk(&runtime, "oom-hostio.ecl", host_io_source);
 
     // The socket/client path has the largest fixed cost per allocation site;
