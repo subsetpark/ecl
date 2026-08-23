@@ -156,32 +156,67 @@ pub const SpanArchive = enum(usize) {
     }
     pub const LocateProgress = poll.Progress(?LocatedSpan);
     pub const LocateCursor = struct {
+        const Query = union(enum) {
+            token: usize,
+            quotation,
+        };
+        const Lookup = union(enum) {
+            token: struct {
+                cursor: reader.SpanTable.LookupCursor,
+                index: usize,
+            },
+            quotation: reader.SpanTable.ContainerLookupCursor,
+        };
         entries: poll.ChunkList(Entry).ReverseIterator,
         header: *value.ListHandle,
-        index: usize,
+        query: Query,
         active: ?struct {
             entry: *const Entry,
-            lookup: reader.SpanTable.LookupCursor,
+            lookup: Lookup,
         } = null,
 
         pub fn advance(self: *LocateCursor) LocateProgress {
-            if (self.active) |*active| return switch (active.lookup.advance()) {
-                .pending => .pending,
-                .complete => |maybe_spans| result: {
-                    if (maybe_spans) |found| {
-                        if (self.index >= found.len) return .{ .complete = null };
-                        return .{ .complete = .{
+            if (self.active) |*active| return switch (active.lookup) {
+                .token => |*token| switch (token.cursor.advance()) {
+                    .pending => .pending,
+                    .complete => |maybe_spans| result: {
+                        if (maybe_spans) |found| {
+                            if (token.index >= found.len) return .{ .complete = null };
+                            return .{ .complete = .{
+                                .source_name = active.entry.source_name,
+                                .span = found[token.index],
+                            } };
+                        }
+                        self.active = null;
+                        break :result .pending;
+                    },
+                },
+                .quotation => |*lookup| switch (lookup.advance()) {
+                    .pending => .pending,
+                    .complete => |maybe_span| result: {
+                        if (maybe_span) |found| return .{ .complete = .{
                             .source_name = active.entry.source_name,
-                            .span = found[self.index],
+                            .span = found,
                         } };
-                    }
-                    self.active = null;
-                    break :result .pending;
+                        self.active = null;
+                        break :result .pending;
+                    },
                 },
             };
             const entry = self.entries.next() orelse return .{ .complete = null };
-            if (entry.spans.lookupCursor(@constCast(self.header))) |lookup|
-                self.active = .{ .entry = entry, .lookup = lookup };
+            switch (self.query) {
+                .token => |index| {
+                    if (entry.spans.lookupCursor(@constCast(self.header))) |lookup|
+                        self.active = .{ .entry = entry, .lookup = .{ .token = .{
+                            .cursor = lookup,
+                            .index = index,
+                        } } };
+                },
+                .quotation => {
+                    if (entry.spans.containerLookupCursor(@constCast(self.header))) |lookup|
+                        self.active = .{ .entry = entry, .lookup = .{ .quotation = lookup } };
+                },
+            }
             return .pending;
         }
     };
@@ -193,7 +228,16 @@ pub const SpanArchive = enum(usize) {
         const backing = self.privateState();
         std.Io.Threaded.mutexLock(&backing.mutex);
         defer std.Io.Threaded.mutexUnlock(&backing.mutex);
-        return .{ .entries = backing.entries.reverseIterator(), .header = header, .index = index };
+        return .{ .entries = backing.entries.reverseIterator(), .header = header, .query = .{ .token = index } };
+    }
+    pub fn locateQuotationCursor(
+        self: *const SpanArchive,
+        header: *value.ListHandle,
+    ) LocateCursor {
+        const backing = self.privateState();
+        std.Io.Threaded.mutexLock(&backing.mutex);
+        defer std.Io.Threaded.mutexUnlock(&backing.mutex);
+        return .{ .entries = backing.entries.reverseIterator(), .header = header, .query = .quotation };
     }
 
     pub const SourceProgress = poll.Progress(?reader.SourceSlice);

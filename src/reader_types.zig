@@ -72,6 +72,7 @@ pub const SpanTable = struct {
         header: *Header,
         spans: []Span,
         source_range: ?SourceRange = null,
+        container_span: ?Span = null,
         next_bucket: ?*Entry = null,
     };
     pub const EntryList = poll.ChunkList(Entry);
@@ -152,6 +153,23 @@ pub const SpanTable = struct {
         return .{ .header = header, .entry = self.buckets[bucket(header)] };
     }
 
+    pub const ContainerLookupProgress = poll.Progress(?Span);
+    pub const ContainerLookupCursor = struct {
+        header: *Header,
+        entry: ?*Entry,
+        pub fn advance(self: *ContainerLookupCursor) ContainerLookupProgress {
+            const current = self.entry orelse return .{ .complete = null };
+            self.entry = current.next_bucket;
+            if (current.header == self.header and current.container_span != null)
+                return .{ .complete = current.container_span };
+            return .pending;
+        }
+    };
+    pub fn containerLookupCursor(self: *const SpanTable, header: *Header) ?ContainerLookupCursor {
+        if (self.buckets.len == 0) return null;
+        return .{ .header = header, .entry = self.buckets[bucket(header)] };
+    }
+
     pub const PutProgress = poll.Progress(void);
     pub const PutCursor = struct {
         table: *SpanTable,
@@ -160,6 +178,7 @@ pub const SpanTable = struct {
         source: []const Span,
         uniform: ?Span,
         source_range: ?SourceRange = null,
+        container_span: ?Span = null,
         owned: ?[]Span = null,
         index: usize = 0,
         initializing_buckets: bool = false,
@@ -185,6 +204,7 @@ pub const SpanTable = struct {
                 .header = header,
                 .source = &.{},
                 .uniform = span,
+                .container_span = span,
             };
         }
         pub fn initSource(
@@ -194,6 +214,7 @@ pub const SpanTable = struct {
             source: []const Span,
             start: usize,
             end: usize,
+            container_span: Span,
         ) PutCursor {
             return .{
                 .table = table,
@@ -202,6 +223,7 @@ pub const SpanTable = struct {
                 .source = source,
                 .uniform = null,
                 .source_range = .{ .start = start, .end = end },
+                .container_span = container_span,
             };
         }
         pub fn deinit(self: *PutCursor) void {
@@ -248,6 +270,7 @@ pub const SpanTable = struct {
                         .header = self.header,
                         .spans = self.owned.?,
                         .source_range = self.source_range,
+                        .container_span = self.container_span,
                         .next_bucket = self.table.buckets[bucket_index],
                     });
                     self.table.buckets[bucket_index] = entry;

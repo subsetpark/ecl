@@ -315,8 +315,9 @@ primitives, operationalized as two rules:
   effect and documentation back into one quotation, materializes that source
   through the poll-aware reflection plan, and sends it through the same
   canonical layout as `ecl fmt`. Every parsed unit owns one ref-counted source
-  buffer; provenance records the byte range of each reader-built quotation,
-  and a published binding retains only that slice handle. `see` can therefore
+  buffer; provenance records the byte range and opening-delimiter span of each
+  reader-built quotation, and a published binding retains only that slice
+  handle. `see` can therefore
   render authored binder names while dispatch continues to use the lowered
   executable quotation, with no duplicated source body per binding.
   `doc.zig` normalizes documentation with an
@@ -353,6 +354,38 @@ primitives, operationalized as two rules:
   mapping word-body frames to qualified symbols and the failing token to
   its span. The happy path pays nothing; TCO means traces show the
   non-tail spine; host frames never appear.
+- **Completion-contract provenance is an owned tail capability.** A source
+  effect-check frame owns one code header, initialized from its checked body,
+  and source checks form an intrusive `EffectCheckIndex` chain on the Unit.
+  `Eval.effect_tail` is the distinct nominal authority that permits ordinary
+  tail word or `call` dispatch to replace only the innermost candidate. A
+  non-tail callee receives no authority; reader-lowered binders preserve it
+  only across their exact `<count> _dl` epilogue. A nested source check mints
+  its own authority and restores its predecessor on completion or unwind.
+  Application frames and every `beginApplication` continuation receive no
+  authority, so generic iteration performs no provenance retain/release per
+  element for the enclosing completion check. An application's own contract
+  failure is a separate, per-application boundary. Its frame carries a nominal
+  `ApplicationSelection`: the newest dynamically called quotation is borrowed
+  while its `Eval` is live, and that Eval's existing header ownership moves
+  into the frame when it completes. Pointer identity prevents an older
+  suspended selection from overwriting a deeper one. Tail-transparent guard
+  applications target their enclosing application, while iterations mint a
+  fresh target, so a fold never carries one element's selection into the next.
+  Success performs no additional code-header retain/release and failure either
+  transfers the selected header or retains the driver-owned original once.
+  The existing application frame allocation is reused, and `Frame` remains
+  below the unchanged 104-byte ceiling. Native and builtin checks likewise own
+  no source candidate.
+- **Contract locations stay lazy and code-plane-only.** `SpanTable.Entry`
+  stores a quotation's opening span beside its token spans and source range.
+  The allocation-free failure record tags borrowed token sites separately
+  from an owned contract-quotation header; only `FailureDriver` selects the
+  bounded token or quotation lookup cursor. Success, row checks, failed frame
+  insertion, cancellation, attempt unwind, native transaction teardown, Unit
+  teardown, and completed failure materialization each consume the header
+  exactly once. Runtime-built and CoW headers remain absent from the archive,
+  and no `Value` carries provenance.
 - **Errors:** `Result<(), Box<EclError>>`-shaped returns through the
   machine (boxed so the happy-path return stays register-sized); host
   errors convert to error dicts only at IO boundary words. The `ErrorKind`

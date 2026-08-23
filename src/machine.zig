@@ -28,6 +28,8 @@ pub const MachineError = error{ OutOfMemory, Ecl };
 const no_word: intern.TraceWord = .none;
 const max_frame_count = std.math.maxInt(u32);
 const FrameIndex = enum(u32) { _ };
+const EffectCheckIndex = enum(u32) { _ };
+const ApplicationFrameIndex = enum(u32) { _ };
 const fuel_quantum: u32 = 1024;
 pub const kernel_poll_quantum: u32 = 65_536;
 pub const IdiomMode = enum { automatic, generic_only };
@@ -58,6 +60,94 @@ const ErrorSite = struct {
     code: *Header,
     index: u32,
 };
+const OwnedCode = struct {
+    header: ?*Header,
+
+    fn retain(header: *Header) OwnedCode {
+        heap.incRef(header);
+        return .{ .header = header };
+    }
+    fn initOwned(header: *Header) OwnedCode {
+        return .{ .header = header };
+    }
+    fn borrow(self: *const OwnedCode) *Header {
+        return self.header.?;
+    }
+    fn take(self: *OwnedCode) *Header {
+        const header = self.header.?;
+        self.header = null;
+        return header;
+    }
+    fn replaceBorrowed(self: *OwnedCode, releases: *heap.ReleaseDomain, header: *Header) void {
+        heap.incRef(header);
+        releases.releaseHeader(self.header.?);
+        self.header = header;
+    }
+    fn deinit(self: *OwnedCode, releases: *heap.ReleaseDomain) void {
+        if (self.header) |header| releases.releaseHeader(header);
+        self.header = null;
+    }
+};
+/// An optional dynamically selected quotation owned by exactly one
+/// application frame. The driver continues to own the original quotation;
+/// this field is populated only by moving an existing Eval-owned reference.
+const ApplicationSelection = struct {
+    /// Borrowed from the newest dynamically applied Eval until that Eval
+    /// completes; pointer identity lets older suspended selections recognize
+    /// that they are stale without a counter or another owned reference.
+    latest: ?*Header = null,
+    owned: ?*Header = null,
+
+    fn selectBorrowed(self: *ApplicationSelection, code: *Header) void {
+        self.latest = code;
+    }
+
+    /// Moves an Eval-owned reference into the application frame. Releasing a
+    /// prior selection here is the release it would otherwise have received
+    /// when its Eval completed, so selection tracking adds no reference-count
+    /// operations to a successful application.
+    fn completeOwned(
+        self: *ApplicationSelection,
+        releases: *heap.ReleaseDomain,
+        code: *Header,
+    ) void {
+        if (self.latest != code) {
+            releases.releaseHeader(code);
+            return;
+        }
+        if (self.owned) |previous| releases.releaseHeader(previous);
+        self.owned = code;
+    }
+    fn takeFailureSite(self: *ApplicationSelection, fallback: *Header) OwnedCode {
+        if (self.takeSelected()) |selected| return selected;
+        return .retain(fallback);
+    }
+    fn takeSelected(self: *ApplicationSelection) ?OwnedCode {
+        const selected = self.owned orelse return null;
+        self.owned = null;
+        return .initOwned(selected);
+    }
+    fn deinit(self: *ApplicationSelection, releases: *heap.ReleaseDomain) void {
+        if (self.owned) |selected| releases.releaseHeader(selected);
+        self.* = .{};
+    }
+};
+/// Opaque callback capability for consuming the candidate of exactly the
+/// application that just completed. Generic drivers can return it to the
+/// machine on a contract failure but cannot construct or retarget it.
+pub const ApplicationContractSite = opaque {};
+const FailureSite = union(enum) {
+    token: ErrorSite,
+    contract_quotation: OwnedCode,
+
+    fn deinit(self: *FailureSite, releases: *heap.ReleaseDomain) void {
+        switch (self.*) {
+            .token => {},
+            .contract_quotation => |*candidate| candidate.deinit(releases),
+        }
+        self.* = undefined;
+    }
+};
 pub const UnitConstructor = enum { spawn, each };
 
 const ErrorDataKey = enum {
@@ -86,7 +176,7 @@ pub const EclErr = struct {
     message_len: usize = 0,
     word: ?intern.TraceWord = null,
     trace_parent: ?intern.TraceWord = null,
-    site: ?ErrorSite = null,
+    site: ?FailureSite = null,
     data: [5]ErrorData = .{empty_error_data} ** 5,
     data_len: usize = 0,
     raised: ?Value = null,
@@ -137,6 +227,8 @@ pub const EclErr = struct {
     pub fn retire(self: *EclErr, releases: *heap.ReleaseDomain) void {
         for (self.data[0..self.data_len]) |entry| releases.releaseValue(entry.value);
         if (self.raised) |raised| releases.releaseValue(raised);
+        if (self.site) |*site| site.deinit(releases);
+        self.site = null;
     }
     pub fn setLocation(self: *EclErr, source_name: []const u8, span: @import("lexer.zig").Span) void {
         const selected = source_name[0..@min(source_name.len, self.source.len)];
@@ -764,6 +856,19 @@ const Eval = struct {
     resolution_scope: *env.Scope,
     home: ?*modules.ModuleHome,
     traced_word: intern.TraceWord,
+    /// Nominal authority to replace one source effect check's completion
+    /// provenance. A non-tail call and every application quotation receive
+    /// no authority, so their internal tail calls cannot overwrite the
+    /// checked activation's authored control choice.
+    effect_tail: ?EffectCheckIndex = null,
+    /// Authority for the current generic application's selection boundary.
+    /// Iterative continuations mint a fresh boundary per element; explicitly
+    /// tail-transparent control quotations inherit the enclosing boundary.
+    application_tail: ?ApplicationFrameIndex = null,
+    /// This Eval was entered through a dynamic `call` while in the named
+    /// application. If it completes or transfers tail control, its existing
+    /// code-header ownership becomes the application's selected quotation.
+    application_selection: ?ApplicationFrameIndex = null,
 };
 /// One tagged owner of everything a `within` transaction needs: the private
 /// draft of the home slot's durable stack (the unit window above
@@ -871,6 +976,15 @@ const Boundary = struct {
         }
     }
 };
+const SourceEffectProvenance = struct {
+    candidate: OwnedCode,
+    frame_index: EffectCheckIndex,
+    previous: ?EffectCheckIndex,
+};
+const EffectProvenance = union(enum) {
+    none,
+    source: SourceEffectProvenance,
+};
 pub const EffectCheck = struct {
     expected_depth: u32,
     entry_depth: u32,
@@ -880,6 +994,53 @@ pub const EffectCheck = struct {
     /// An anonymous after row is an input-only contract: entry consumption is
     /// still verified, the post-condition compare is skipped.
     row: bool = false,
+    provenance: EffectProvenance = .none,
+
+    fn activateSource(
+        self: *EffectCheck,
+        body: *Header,
+        frame_index: EffectCheckIndex,
+        previous: ?EffectCheckIndex,
+    ) void {
+        std.debug.assert(self.provenance == .none);
+        self.provenance = .{ .source = .{
+            .candidate = .retain(body),
+            .frame_index = frame_index,
+            .previous = previous,
+        } };
+    }
+    fn replaceSourceCandidate(
+        self: *EffectCheck,
+        releases: *heap.ReleaseDomain,
+        code: *Header,
+    ) void {
+        switch (self.provenance) {
+            .none => unreachable,
+            .source => self.provenance.source.candidate.replaceBorrowed(releases, code),
+        }
+    }
+    fn restoreActive(self: *const EffectCheck, unit: *Unit) void {
+        switch (self.provenance) {
+            .none => {},
+            .source => |source| {
+                std.debug.assert(unit.effect_check_index == source.frame_index);
+                unit.effect_check_index = source.previous;
+            },
+        }
+    }
+    fn takeCandidate(self: *EffectCheck) ?OwnedCode {
+        return switch (self.provenance) {
+            .none => null,
+            .source => .initOwned(self.provenance.source.candidate.take()),
+        };
+    }
+    pub fn deinit(self: *EffectCheck, releases: *heap.ReleaseDomain) void {
+        switch (self.provenance) {
+            .none => {},
+            .source => self.provenance.source.candidate.deinit(releases),
+        }
+        self.provenance = .none;
+    }
 };
 pub const StackWindow = enum(u32) {
     _,
@@ -901,14 +1062,19 @@ pub const ApplicationStep = struct {
     quotation: *Header,
     seeded: u32,
 };
+pub const ApplicationProvenancePolicy = enum {
+    boundary,
+    transparent_tail,
+};
 pub const IsolatedApplication = struct {
     quotation: *Header,
     context: *anyopaque,
-    resume_fn: *const fn (*Machine, *anyopaque, StackWindow) MachineError!?ApplicationStep,
+    resume_fn: *const fn (*Machine, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
     seeded: u32,
+    provenance_policy: ApplicationProvenancePolicy,
 };
 
 fn ApplicationAdapters(comptime Driver: type) type {
@@ -917,9 +1083,10 @@ fn ApplicationAdapters(comptime Driver: type) type {
             evaluator: *Machine,
             raw: *anyopaque,
             window: StackWindow,
+            site: *ApplicationContractSite,
         ) MachineError!?ApplicationStep {
             const driver: *Driver = @ptrCast(@alignCast(raw));
-            return Driver.resumeApplication(evaluator, driver, window);
+            return Driver.resumeApplication(evaluator, driver, window, site);
         }
 
         fn deinit(
@@ -956,6 +1123,10 @@ pub fn typedApplication(
         .parent_scope = parent_scope,
         .home = home,
         .seeded = seeded,
+        .provenance_policy = if (@hasDecl(Driver, "application_provenance"))
+            Driver.application_provenance
+        else
+            .boundary,
     };
 }
 const ApplicationMode = union(enum) {
@@ -967,13 +1138,16 @@ const ApplicationMode = union(enum) {
 };
 const ApplicationFrame = struct {
     context: *anyopaque,
-    resume_fn: *const fn (*Machine, *anyopaque, StackWindow) MachineError!?ApplicationStep,
+    resume_fn: *const fn (*Machine, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
     mode: ApplicationMode,
     traced_word: intern.TraceWord,
+    selection: ApplicationSelection,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+        var selection = self.selection;
+        selection.deinit(releases);
         switch (self.mode) {
             .in_place => {},
             .isolated => |isolated| {
@@ -1014,7 +1188,10 @@ pub const Frame = union(enum(u8)) {
     fn deinit(self: Frame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         switch (self) {
             .eval => |frame| releases.releaseHeader(frame.code),
-            .effect_check => {},
+            .effect_check => |owned| {
+                var check = owned;
+                check.deinit(releases);
+            },
             .application => |frame| frame.deinit(releases, allocator),
             .qualified_after_load => |frame| {
                 var loading = frame.loading;
@@ -1665,6 +1842,9 @@ pub const Unit = struct {
     entry_base: usize,
     stack_base: usize,
     boundary_index: ?FrameIndex = null,
+    /// The innermost active source effect check. Effect-check frames form an
+    /// intrusive chain so nested checks restore their predecessor exactly.
+    effect_check_index: ?EffectCheckIndex = null,
     pending: ?EclErr = null,
     last_error: ?Value = null,
     exit_status: ?u8 = null,
@@ -1995,7 +2175,7 @@ pub const Unit = struct {
                 continue;
             }
             if (self.frames.pop()) |frame| {
-                frame.deinit(self.releases, self.allocator);
+                self.deinitPoppedFrame(frame);
                 consumed += 1;
                 continue;
             }
@@ -2080,7 +2260,7 @@ pub const Unit = struct {
 
     pub fn deinit(self: *Unit) void {
         if (self.current) |current| self.releases.releaseHeader(current.code);
-        for (self.frames.items) |frame| frame.deinit(self.releases, self.allocator);
+        while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
         self.frames.deinit(self.allocator);
         for (self.stack.items) |item| self.releases.releaseValue(item);
         self.stack.deinit(self.allocator);
@@ -2098,6 +2278,12 @@ pub const Unit = struct {
         if (self.spare_scope) |spare| spare.retire();
         self.lifetime.deinit(self.releases, self.allocator);
         self.* = undefined;
+    }
+
+    fn deinitPoppedFrame(self: *Unit, popped: Frame) void {
+        var frame = popped;
+        if (frame == .effect_check) frame.effect_check.restoreActive(self);
+        frame.deinit(self.releases, self.allocator);
     }
 };
 /// One driver for a primitive that must encode a path argument to bytes before
@@ -3742,7 +3928,7 @@ pub const Machine = struct {
         self.unit.active_word = word;
     }
     pub fn setFailureSite(self: *Machine, code: *Header, index: u32) void {
-        if (self.unit.pending) |*pending| pending.site = .{ .code = code, .index = index };
+        if (self.unit.pending) |*pending| pending.site = .{ .token = .{ .code = code, .index = index } };
     }
     pub fn setWorkDriverSite(self: *Machine, code: *Header, index: u32) void {
         if (self.unit.workDriver()) |driver| driver.site = .{ .code = code, .index = index };
@@ -3903,6 +4089,8 @@ pub const Machine = struct {
     }
     pub fn applicationContractError(
         self: *Machine,
+        opaque_site: *ApplicationContractSite,
+        quotation: *Header,
         expected: Value,
         seeded: usize,
         observed: usize,
@@ -3926,6 +4114,8 @@ pub const Machine = struct {
         if (index) |element_index| {
             self.unit.pending.?.addData(.index, .{ .int = @intCast(element_index) });
         }
+        const site: *ApplicationSelection = @ptrCast(@alignCast(opaque_site));
+        self.unit.pending.?.site = .{ .contract_quotation = site.takeFailureSite(quotation) };
         return failure;
     }
     /// Kernel safe point. A flat loop calls this between bounded chunks;
@@ -3966,6 +4156,13 @@ pub const Machine = struct {
     }
     /// Consumes a quotation header and applies it inline.
     pub fn callOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
+        const effect_tail = self.replaceTailEffectCandidate(quotation);
+        const application_tail = self.tailApplicationIndex();
+        if (application_tail) |application_index| {
+            const frame = &self.unit.frames.items[@intFromEnum(application_index)];
+            std.debug.assert(frame.* == .application);
+            frame.application.selection.selectBorrowed(quotation);
+        }
         const scope = self.unit.current.?.scope;
         const home = self.unit.current.?.home;
         const inherited_trace = self.suspendCurrent() catch {
@@ -3979,7 +4176,64 @@ pub const Machine = struct {
             .resolution_scope = scope,
             .home = home,
             .traced_word = inherited_trace,
+            .effect_tail = effect_tail,
+            .application_tail = application_tail,
+            .application_selection = application_tail,
         };
+    }
+
+    /// A completion contract follows authored tail control, not application
+    /// machinery. Generic applications deliberately do not call this helper:
+    /// their continuation restarts once per element and must not add a pair of
+    /// code-header atomics to that hot path.
+    fn replaceTailEffectCandidate(self: *Machine, code: *Header) ?EffectCheckIndex {
+        const current = self.unit.current orelse return null;
+        const check_index = current.effect_tail orelse return null;
+        if (!self.isSourceTailPosition(current)) return null;
+        std.debug.assert(self.unit.effect_check_index == check_index);
+        const frame = &self.unit.frames.items[@intFromEnum(check_index)];
+        std.debug.assert(frame.* == .effect_check);
+        frame.effect_check.replaceSourceCandidate(self.releaseDomain(), code);
+        return check_index;
+    }
+
+    /// Propagates one application's authority through ordinary tail word
+    /// dispatch without changing its selected quotation. Only a dynamic
+    /// `call` marks code for ownership transfer into the candidate.
+    fn tailApplicationIndex(self: *Machine) ?ApplicationFrameIndex {
+        const current = self.unit.current orelse return null;
+        const application_index = current.application_tail orelse return null;
+        if (!self.isSourceTailPosition(current)) return null;
+        return application_index;
+    }
+
+    /// Consumes an exhausted Eval. A dynamically applied quotation moves its
+    /// already-owned header into the application frame; every other Eval uses
+    /// the ordinary release. This delays one existing release but creates no
+    /// additional retain/release pair.
+    fn retireCompletedEval(self: *Machine, current: Eval) void {
+        if (current.application_selection) |application_index| {
+            const frame = &self.unit.frames.items[@intFromEnum(application_index)];
+            std.debug.assert(frame.* == .application);
+            frame.application.selection.completeOwned(self.releaseDomain(), current.code);
+        } else {
+            self.releaseDomain().releaseHeader(current.code);
+        }
+    }
+
+    /// Reader-lowered binders end in `<count> _dl`. That cleanup must run
+    /// after the authored final form, but it does not make a final control
+    /// transfer semantically non-tail. The exact reserved epilogue is the only
+    /// continuation shape granted this exception.
+    fn isSourceTailPosition(self: *const Machine, current: Eval) bool {
+        const length = current.code.length();
+        if (current.ip == length) return true;
+        if (length - current.ip != 2) return false;
+        const count = list.atUnchecked(.{ .list = current.code }, current.ip);
+        const drop = list.atUnchecked(.{ .list = current.code }, current.ip + 1);
+        return count == .int and count.int >= 0 and
+            drop == .word and std.mem.eql(u8, intern.get(drop.word), "_dl") and
+            @as(usize, @intCast(count.int)) <= self.unit.locals.items.len;
     }
     /// Starts one quotation application behind a base-index stack barrier.
     /// `application.context` is consumed on every path. Its callback either
@@ -4048,6 +4302,10 @@ pub const Machine = struct {
             };
         }
         var inherited_trace = inherited orelse no_word;
+        const transparent_target = if (application.provenance_policy == .transparent_tail)
+            self.tailApplicationIndex()
+        else
+            null;
         if (self.unit.current != null) {
             std.debug.assert(inherited == null);
             inherited_trace = self.suspendCurrent() catch {
@@ -4058,6 +4316,7 @@ pub const Machine = struct {
                 return error.OutOfMemory;
             };
         }
+        const application_index: ApplicationFrameIndex = @enumFromInt(@as(u32, @intCast(self.unit.frames.items.len)));
         var continuation = OwnedFrame.init(.{ .application = .{
             .context = application.context,
             .resume_fn = application.resume_fn,
@@ -4072,6 +4331,7 @@ pub const Machine = struct {
                 } },
             },
             .traced_word = inherited_trace,
+            .selection = .{},
         } });
         defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
         try self.appendFrame(&continuation);
@@ -4084,6 +4344,7 @@ pub const Machine = struct {
             .resolution_scope = child orelse application.parent_scope,
             .home = application.home,
             .traced_word = inherited_trace,
+            .application_tail = transparent_target orelse application_index,
         };
     }
     pub fn attemptOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
@@ -4382,7 +4643,7 @@ pub const Machine = struct {
             try self.unit.frames.append(self.unit.allocator, .{ .eval = current });
             self.unit.max_frames = @max(self.unit.max_frames, self.unit.frames.items.len);
         } else {
-            self.releaseDomain().releaseHeader(current.code);
+            self.retireCompletedEval(current);
         }
         self.unit.current = null;
         return inherited_trace;
@@ -4481,7 +4742,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
             const driver = driver_ptr.*;
             const progress = driver.advance(self) catch |err| {
                 if (err == error.Ecl and self.unit.pending.?.site == null) {
-                    self.unit.pending.?.site = driver.site;
+                    if (driver.site) |site| self.unit.pending.?.site = .{ .token = site };
                 }
                 if (err == error.Ecl and self.unit.pending.?.trace_parent == null) {
                     self.unit.pending.?.trace_parent = driver.trace_parent;
@@ -4543,7 +4804,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
         }
         const current = &self.unit.current.?;
         if (current.ip >= current.code.length()) {
-            self.releaseDomain().releaseHeader(current.code);
+            self.retireCompletedEval(current.*);
             self.unit.current = null;
             continue;
         }
@@ -4572,10 +4833,10 @@ fn loop(self: *Machine) MachineError!RunStatus {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
                 if (self.unit.pending.?.site == null and self.unit.current != null) {
-                    self.unit.pending.?.site = .{
+                    self.unit.pending.?.site = .{ .token = .{
                         .code = self.unit.current.?.code,
                         .index = self.unit.active_index,
-                    };
+                    } };
                 }
                 try startFailure(self);
                 continue;
@@ -4959,7 +5220,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     self.unit.active_word = resolved.trace_word;
     const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home;
     const cross_home_effect = if (cross_home) resolved.lease.effect else null;
-    const check: ?EffectCheck = if (cross_home) switch (resolved.lease.binding) {
+    var check: ?EffectCheck = if (cross_home) switch (resolved.lease.binding) {
         // A native module word always carries a declared effect, so a missing
         // one is a malformed module rather than an omission.
         .native => try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
@@ -4973,6 +5234,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
             try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
         .word => null,
     } else null;
+    defer if (check) |*owned| owned.deinit(self.releaseDomain());
     switch (resolved.lease.binding) {
         .word => |body| {
             const body_header = env.quotationHeader(body);
@@ -5009,10 +5271,12 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
             if (self.takePrimitiveFailure()) |failure_value| {
                 return self.installPrimitiveFailure(failure_value);
             }
-            if (check) |effect_check| try finishEffectCheck(self, effect_check);
+            if (check) |*effect_check| try finishEffectCheck(self, effect_check);
         },
         .native => |callable| {
-            try native_call.begin(self, callable, check);
+            const transferred = check;
+            check = null;
+            try native_call.begin(self, callable, transferred);
         },
     }
 }
@@ -5632,12 +5896,18 @@ fn scheduleWord(
     else
         self.unit.lexicalScope();
     if (resolved_home) |generation| try self.unit.pinGeneration(generation);
-    const check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
+    var check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
+    var effect_tail = self.replaceTailEffectCandidate(body);
+    const application_tail = self.tailApplicationIndex();
     _ = self.suspendCurrent() catch return error.OutOfMemory;
-    if (check) |effect_check| {
-        var continuation = OwnedFrame.init(.{ .effect_check = effect_check });
+    if (check) |*effect_check| {
+        const check_index: EffectCheckIndex = @enumFromInt(@as(u32, @intCast(self.unit.frames.items.len)));
+        effect_check.activateSource(body, check_index, self.unit.effect_check_index);
+        var continuation = OwnedFrame.init(.{ .effect_check = effect_check.* });
         defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
         try self.appendFrame(&continuation);
+        self.unit.effect_check_index = check_index;
+        effect_tail = check_index;
     }
     heap.incRef(body);
     self.unit.current = .{
@@ -5647,6 +5917,8 @@ fn scheduleWord(
         .resolution_scope = resolution_scope,
         .home = home,
         .traced_word = word,
+        .effect_tail = effect_tail,
+        .application_tail = application_tail,
     };
 }
 fn prepareEffectCheck(
@@ -5685,8 +5957,14 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             self.unit.current = continuation;
             return true;
         },
-        .effect_check => |check| try finishEffectCheck(self, check),
+        .effect_check => |owned| {
+            var check = owned;
+            defer check.deinit(self.releaseDomain());
+            try finishEffectCheck(self, &check);
+        },
         .application => |continuation| {
+            var application_selection = continuation.selection;
+            defer application_selection.deinit(self.releaseDomain());
             const launch: Machine.ApplicationLaunch, const base: StackWindow = switch (continuation.mode) {
                 .in_place => |window| .{ .in_place, window },
                 .isolated => |isolated| blk: {
@@ -5700,6 +5978,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                 self,
                 continuation.context,
                 base,
+                @ptrCast(&application_selection),
             ) catch |err| {
                 if (continuation.traced_word != no_word) {
                     self.setFailureTraceParent(continuation.traced_word);
@@ -5716,6 +5995,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                     .parent_scope = continuation.parent_scope,
                     .home = continuation.home,
                     .seeded = step.seeded,
+                    .provenance_policy = .boundary,
                 }, launch, continuation.traced_word);
                 return true;
             }
@@ -5785,7 +6065,8 @@ fn resumeFrames(self: *Machine) MachineError!bool {
     };
     return false;
 }
-pub fn finishEffectCheck(self: *Machine, check: EffectCheck) MachineError!void {
+pub fn finishEffectCheck(self: *Machine, check: *EffectCheck) MachineError!void {
+    check.restoreActive(self.unit);
     if (check.row) return;
     const observed = self.unit.stack.items.len;
     if (observed == check.expected_depth) return;
@@ -5798,6 +6079,8 @@ pub fn finishEffectCheck(self: *Machine, check: EffectCheck) MachineError!void {
     );
     self.unit.pending.?.addData(.seeded, .{ .int = check.entry_depth });
     self.unit.pending.?.addData(.observed, .{ .int = @intCast(observed_relative) });
+    if (check.takeCandidate()) |candidate|
+        self.unit.pending.?.site = .{ .contract_quotation = candidate };
     return failure;
 }
 fn finishAttempt(self: *Machine, base: u32) MachineError!void {
@@ -6222,7 +6505,10 @@ const FailureDriver = struct {
     }
     fn beginLocation(self: *FailureDriver, evaluator: *Machine) void {
         if (self.failure.site) |site| {
-            self.location_cursor = evaluator.unit.archive.locateCursor(site.code, site.index);
+            self.location_cursor = switch (site) {
+                .token => |token| evaluator.unit.archive.locateCursor(token.code, token.index),
+                .contract_quotation => |candidate| evaluator.unit.archive.locateQuotationCursor(candidate.borrow()),
+            };
             self.phase = .locate;
         } else self.beginValue();
     }
@@ -6323,14 +6609,12 @@ const FailureDriver = struct {
                 else
                     @as(usize, @intFromEnum(self.attempt_index.?)) + 1;
                 if (evaluator.unit.frames.items.len != target) {
-                    var frame = evaluator.unit.frames.pop().?;
-                    frame.deinit(evaluator.releaseDomain(), self.allocator);
+                    evaluator.unit.deinitPoppedFrame(evaluator.unit.frames.pop().?);
                 } else self.phase = .boundary;
             },
             .boundary => {
                 if (self.attempt_index != null) {
-                    var frame = evaluator.unit.frames.pop().?;
-                    frame.deinit(evaluator.releaseDomain(), self.allocator);
+                    evaluator.unit.deinitPoppedFrame(evaluator.unit.frames.pop().?);
                 }
                 self.phase = .locals;
             },

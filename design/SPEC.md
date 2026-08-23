@@ -1360,6 +1360,24 @@ known are not present (test with `has?`), never nil — there is no nil.
 Code assembled at runtime has no source position by construction. No host
 exception or host stack frame ever leaks into an error.
 
+A completion-time source-word effect violation reports the opening delimiter
+of the deepest reader-built quotation selected by ordinary tail control in
+that checked activation. The checked body is the initial location, so a word
+with no such selection still points to its body. An empty quotation points to
+its opening `(`; it does not need a first token. Non-tail helper calls and
+isolated or inline application iterations do not replace this location, so an
+element quotation is not mistaken for a source branch and iteration cost does
+not acquire provenance allocation or reference-count traffic per element.
+This does not hide an application's own contract failure. Within one
+application, dynamically applied tail-control quotations replace that
+application's location; tail-transparent guards preserve the same boundary,
+while a new iteration starts a fresh boundary. The error reports the deepest
+such quotation's opening delimiter and preserves its element index, falling
+back to the application quotation when no dynamic selection occurred. If the
+selected tail or failing application quotation was assembled at runtime, all
+three source fields remain absent rather than falling back to a less-specific
+or invented position.
+
 The core kinds are a closed set: `'underflow`, `'undefined-word`, `'type`,
 `'shape`, `'conform`, `'overflow`, `'domain`, `'contract`, `'parse`,
 `'io`, `'cancelled`, `'timeout`, `'user`. User kinds are any other symbol.

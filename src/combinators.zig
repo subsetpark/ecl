@@ -97,7 +97,12 @@ const TimesState = struct {
         return .{ .quotation = self.quotation.borrow(), .seeded = 0 };
     }
 
-    pub fn resumeApplication(evaluator: *Machine, self: *TimesState, _: StackWindow) MachineError!?ApplicationStep {
+    pub fn resumeApplication(
+        evaluator: *Machine,
+        self: *TimesState,
+        _: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.word);
         try evaluator.yieldNativeStep();
         self.remaining -= 1;
@@ -166,7 +171,12 @@ const DipState = struct {
     /// The protected value returns exactly once, after the quotation's own
     /// application completes, so a failing quotation leaves it to this
     /// driver's field ownership rather than to the rolled-back stack.
-    pub fn resumeApplication(evaluator: *Machine, self: *DipState, _: StackWindow) MachineError!?ApplicationStep {
+    pub fn resumeApplication(
+        evaluator: *Machine,
+        self: *DipState,
+        _: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.word);
         try evaluator.yieldNativeStep();
         try evaluator.pushOwned(self.protected.take());
@@ -369,6 +379,8 @@ const GuardRestoreDriver = struct {
 const GuardPredicateState = struct {
     control: heap.Owned(GuardControl),
 
+    pub const application_provenance: machine.ApplicationProvenancePolicy = .transparent_tail;
+
     fn application(self: *GuardPredicateState, quotation: *Header) Application {
         const control = self.control.borrow();
         return machine.typedApplication(self, quotation, control.parent, control.home, 0);
@@ -377,6 +389,7 @@ const GuardPredicateState = struct {
         evaluator: *Machine,
         self: *GuardPredicateState,
         _: StackWindow,
+        _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.control.borrow().word);
         var predicate = try evaluator.popValue();
@@ -395,6 +408,8 @@ const GuardPredicateState = struct {
 const GuardActionState = struct {
     control: heap.Owned(GuardControl),
 
+    pub const application_provenance: machine.ApplicationProvenancePolicy = .transparent_tail;
+
     fn application(self: *GuardActionState, quotation: *Header) Application {
         const control = self.control.borrow();
         return machine.typedApplication(self, quotation, control.parent, control.home, 0);
@@ -403,6 +418,7 @@ const GuardActionState = struct {
         evaluator: *Machine,
         self: *GuardActionState,
         _: StackWindow,
+        _: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.control.borrow().word);
         const condition = self.control.borrowMut().afterAction() orelse return null;
@@ -497,24 +513,48 @@ const IterationState = struct {
         return .{ .quotation = self.quotation.borrow(), .seeded = seeded };
     }
 
-    pub fn resumeApplication(evaluator: *Machine, self: *IterationState, window: StackWindow) MachineError!?ApplicationStep {
+    pub fn resumeApplication(
+        evaluator: *Machine,
+        self: *IterationState,
+        window: StackWindow,
+        site: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.word);
         try evaluator.yieldNativeStep();
         const base: usize = window.base();
         const observed = window.observed(evaluator.unit.stack.items.len) orelse
-            return evaluator.applicationContractError(self.expected.?.borrow(), 0, 0, self.index);
+            return evaluator.applicationContractError(
+                site,
+                self.quotation.borrow(),
+                self.expected.?.borrow(),
+                0,
+                0,
+                self.index,
+            );
         return switch (self.kind) {
-            .each, .zip_with => self.resumeCollect(evaluator, observed),
-            .for_word => self.resumeFor(evaluator, observed),
-            .fold, .scan => self.resumeFold(evaluator, observed),
+            .each, .zip_with => self.resumeCollect(evaluator, site, observed),
+            .for_word => self.resumeFor(evaluator, site, observed),
+            .fold, .scan => self.resumeFold(evaluator, site, observed),
             .infra => resumeInfra(evaluator, base),
         };
     }
 
-    fn resumeCollect(self: *IterationState, evaluator: *Machine, observed: usize) MachineError!?ApplicationStep {
+    fn resumeCollect(
+        self: *IterationState,
+        evaluator: *Machine,
+        site: *machine.ApplicationContractSite,
+        observed: usize,
+    ) MachineError!?ApplicationStep {
         const seeded: usize = if (self.kind == .each) 1 else 2;
         if (observed != 1) {
-            return evaluator.applicationContractError(self.expected.?.borrow(), seeded, observed, self.index);
+            return evaluator.applicationContractError(
+                site,
+                self.quotation.borrow(),
+                self.expected.?.borrow(),
+                seeded,
+                observed,
+                self.index,
+            );
         }
         var result = try evaluator.popValue();
         self.results.?.borrowMut().appendOwned(result.take());
@@ -527,9 +567,21 @@ const IterationState = struct {
         return self.step(@intCast(seeded));
     }
 
-    fn resumeFor(self: *IterationState, evaluator: *Machine, observed: usize) MachineError!?ApplicationStep {
+    fn resumeFor(
+        self: *IterationState,
+        evaluator: *Machine,
+        site: *machine.ApplicationContractSite,
+        observed: usize,
+    ) MachineError!?ApplicationStep {
         if (observed != 0) {
-            return evaluator.applicationContractError(self.expected.?.borrow(), 1, observed, self.index);
+            return evaluator.applicationContractError(
+                site,
+                self.quotation.borrow(),
+                self.expected.?.borrow(),
+                1,
+                observed,
+                self.index,
+            );
         }
         self.index += 1;
         if (self.index == self.count) return null;
@@ -537,9 +589,21 @@ const IterationState = struct {
         return self.step(1);
     }
 
-    fn resumeFold(self: *IterationState, evaluator: *Machine, observed: usize) MachineError!?ApplicationStep {
+    fn resumeFold(
+        self: *IterationState,
+        evaluator: *Machine,
+        site: *machine.ApplicationContractSite,
+        observed: usize,
+    ) MachineError!?ApplicationStep {
         if (observed != 1) {
-            return evaluator.applicationContractError(self.expected.?.borrow(), 2, observed, self.index);
+            return evaluator.applicationContractError(
+                site,
+                self.quotation.borrow(),
+                self.expected.?.borrow(),
+                2,
+                observed,
+                self.index,
+            );
         }
         var accumulator = try evaluator.popValue();
         defer accumulator.deinit();
@@ -709,14 +773,29 @@ const StencilApplication = struct {
         evaluator: *Machine,
         self: *StencilApplication,
         window: StackWindow,
+        site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         const control = self.control.borrowMut();
         evaluator.setActiveWord(control.word);
         try evaluator.yieldNativeStep();
         const observed = window.observed(evaluator.unit.stack.items.len) orelse
-            return evaluator.applicationContractError(control.expected.borrow(), 1, 0, control.index);
+            return evaluator.applicationContractError(
+                site,
+                control.quotation.borrow(),
+                control.expected.borrow(),
+                1,
+                0,
+                control.index,
+            );
         if (observed != 1)
-            return evaluator.applicationContractError(control.expected.borrow(), 1, observed, control.index);
+            return evaluator.applicationContractError(
+                site,
+                control.quotation.borrow(),
+                control.expected.borrow(),
+                1,
+                observed,
+                control.index,
+            );
         var result = try evaluator.popValue();
         control.results.appendOwned(result.take());
         control.index += 1;
@@ -833,29 +912,38 @@ const UnfoldState = struct {
         evaluator: *Machine,
         self: *UnfoldState,
         window: StackWindow,
+        site: *machine.ApplicationContractSite,
     ) MachineError!?ApplicationStep {
         evaluator.setActiveWord(self.word);
         try evaluator.yieldNativeStep();
         const observed = window.observed(evaluator.unit.stack.items.len) orelse
             return evaluator.applicationContractError(
+                site,
+                switch (self.phase) {
+                    .predicate => self.predicate.borrow(),
+                    .step => self.step_quotation.borrow(),
+                },
                 if (self.phase == .predicate) self.predicate_expected.borrow() else self.step_expected.borrow(),
                 1,
                 0,
                 self.index,
             );
         return switch (self.phase) {
-            .predicate => self.resumePredicate(evaluator, observed),
-            .step => self.resumeStep(evaluator, observed),
+            .predicate => self.resumePredicate(evaluator, site, observed),
+            .step => self.resumeStep(evaluator, site, observed),
         };
     }
 
     fn resumePredicate(
         self: *UnfoldState,
         evaluator: *Machine,
+        site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
         if (observed != 1)
             return evaluator.applicationContractError(
+                site,
+                self.predicate.borrow(),
                 self.predicate_expected.borrow(),
                 1,
                 observed,
@@ -885,10 +973,13 @@ const UnfoldState = struct {
     fn resumeStep(
         self: *UnfoldState,
         evaluator: *Machine,
+        site: *machine.ApplicationContractSite,
         observed: usize,
     ) MachineError!?ApplicationStep {
         if (observed != 2)
             return evaluator.applicationContractError(
+                site,
+                self.step_quotation.borrow(),
                 self.step_expected.borrow(),
                 1,
                 observed,

@@ -28,6 +28,49 @@ fn errorKind(allocator: std.mem.Allocator, error_value: Value) ![]const u8 {
     return intern.get((try field(allocator, error_value, "kind")).symbol);
 }
 
+fn expectContractCore(
+    allocator: std.mem.Allocator,
+    error_value: Value,
+    expected_word: []const u8,
+    seeded: i64,
+    observed: i64,
+) !Value {
+    try std.testing.expectEqualStrings("contract", try errorKind(allocator, error_value));
+    try std.testing.expectEqualStrings(
+        expected_word,
+        intern.get((try field(allocator, error_value, "word")).symbol),
+    );
+    const trace = try field(allocator, error_value, "trace");
+    try std.testing.expectEqual(@as(u64, 1), trace.list.length());
+    try std.testing.expectEqualStrings(expected_word, intern.get(list.atUnchecked(trace, 0).symbol));
+    const data = try field(allocator, error_value, "data");
+    try std.testing.expectEqual(seeded, (try field(allocator, data, "seeded")).int);
+    try std.testing.expectEqual(observed, (try field(allocator, data, "observed")).int);
+    return data;
+}
+
+fn expectLocation(
+    allocator: std.mem.Allocator,
+    data: Value,
+    expected_source: []const u8,
+    line: i64,
+    col: i64,
+) !void {
+    const source = try field(allocator, data, "source");
+    const rendered = try printer.toOwnedString(allocator, source);
+    defer allocator.free(rendered);
+    try std.testing.expectEqualStrings(expected_source, rendered);
+    try std.testing.expectEqual(line, (try field(allocator, data, "line")).int);
+    try std.testing.expectEqual(col, (try field(allocator, data, "col")).int);
+}
+
+fn expectNoLocation(allocator: std.mem.Allocator, data: Value) !void {
+    inline for ([_][]const u8{ "source", "line", "col" }) |name| {
+        const key = try intern.intern(name);
+        try std.testing.expect((try dict.symbolField(allocator, data, key)) == null);
+    }
+}
+
 test "twenty-thousand-deep named recursion remains flat" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
@@ -136,33 +179,155 @@ test "errors: tail-position application continuations retain their enclosing wor
 }
 
 test "errors: source effect contract identifies the deepest tail-selected quotation" {
-    // PENDING: Patch 2 will assert the public contract error dictionary points
-    // at the opening delimiter of the nonempty quotation selected by `case`.
-    return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+    const source =
+        \\(
+        \\ (x -- y)
+        \\ (
+        \\  dup
+        \\  [0
+        \\   (pop 1 2)
+        \\   ()]
+        \\  case)
+        \\ 'pick def)
+        \\'arm @defm
+        \\0 arm.pick
+    ;
+    const failure = (try runtime.runUnit("fixture.ecl", source)).err;
+    defer runtime.release(failure);
+    const data = try expectContractCore(allocator, failure, "arm.pick", 1, 2);
+    try expectLocation(allocator, data, "\"fixture.ecl\"", 6, 4);
 }
 
 test "errors: source effect contract locates an empty selected quotation" {
-    // PENDING: Patch 2 will assert that an empty selected quotation is located
-    // at its opening delimiter even though it has no token index.
-    return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+    const source =
+        \\(
+        \\ (x -- )
+        \\ (
+        \\  dup
+        \\  [0
+        \\   (pop)
+        \\   ()]
+        \\  case)
+        \\ 'pick def)
+        \\'empty @defm
+        \\1 empty.pick
+    ;
+    const failure = (try runtime.runUnit("fixture.ecl", source)).err;
+    defer runtime.release(failure);
+    const data = try expectContractCore(allocator, failure, "empty.pick", 1, 1);
+    try expectLocation(allocator, data, "\"fixture.ecl\"", 7, 4);
 }
 
 test "errors: nested effect checks restore outer tail provenance" {
-    // PENDING: Patch 2 will assert that a completed nested checked word restores
-    // the enclosing source check before its later tail selection fails.
-    return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+    const source =
+        \\(
+        \\ (x -- x)
+        \\ ()
+        \\ 'ok def)
+        \\'inner @defm
+        \\(
+        \\ (x -- y)
+        \\ (
+        \\  inner.ok
+        \\  dup
+        \\  [0
+        \\   (pop 1 2)
+        \\   ()]
+        \\  case)
+        \\ 'pick def)
+        \\'outer @defm
+        \\0 outer.pick
+    ;
+    const failure = (try runtime.runUnit("fixture.ecl", source)).err;
+    defer runtime.release(failure);
+    const data = try expectContractCore(allocator, failure, "outer.pick", 1, 2);
+    try expectLocation(allocator, data, "\"fixture.ecl\"", 12, 4);
 }
 
 test "errors: source effect contract preserves absence for runtime-built code" {
-    // PENDING: Patch 2 will assert that runtime-built selected code preserves
-    // the contract error while omitting source, line, and column fields.
-    return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+    const source =
+        \\(
+        \\ (-- )
+        \\ (1 () cons call)
+        \\ 'run def)
+        \\'runtime @defm
+        \\runtime.run
+    ;
+    const failure = (try runtime.runUnit("fixture.ecl", source)).err;
+    defer runtime.release(failure);
+    const data = try expectContractCore(allocator, failure, "runtime.run", 0, 1);
+    try expectNoLocation(allocator, data);
 }
 
 test "errors: iterative applications do not replace source effect provenance" {
-    // PENDING: Patch 2 will assert that a successful generic iteration followed
-    // by an outer effect mismatch remains attributed to the checked source body.
-    return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+    const source =
+        \\(
+        \\ (-- )
+        \\ ([1 2] (1 +) each pop 1)
+        \\ 'run def)
+        \\'iter @defm
+        \\iter.run
+    ;
+    const failure = (try runtime.runUnit("fixture.ecl", source)).err;
+    defer runtime.release(failure);
+    const data = try expectContractCore(allocator, failure, "iter.run", 0, 1);
+    try expectLocation(allocator, data, "\"fixture.ecl\"", 3, 2);
+
+    const application_source =
+        \\(
+        \\ (-- )
+        \\ ([0] 0
+        \\  (dup
+        \\   [0
+        \\    (pop pop 1 2)
+        \\    ()]
+        \\   case)
+        \\  fold)
+        \\ 'run def)
+        \\'foldsite @defm
+        \\foldsite.run
+    ;
+    const application_failure = (try runtime.runUnit("fixture.ecl", application_source)).err;
+    defer runtime.release(application_failure);
+    try std.testing.expectEqualStrings("contract", try errorKind(allocator, application_failure));
+    try std.testing.expectEqualStrings(
+        "fold",
+        intern.get((try field(allocator, application_failure, "word")).symbol),
+    );
+    const trace = try field(allocator, application_failure, "trace");
+    try std.testing.expectEqual(@as(u64, 2), trace.list.length());
+    try std.testing.expectEqualStrings("fold", intern.get(list.atUnchecked(trace, 0).symbol));
+    try std.testing.expectEqualStrings("foldsite.run", intern.get(list.atUnchecked(trace, 1).symbol));
+    const application_data = try field(allocator, application_failure, "data");
+    try std.testing.expectEqual(@as(i64, 2), (try field(allocator, application_data, "seeded")).int);
+    try std.testing.expectEqual(@as(i64, 2), (try field(allocator, application_data, "observed")).int);
+    try std.testing.expectEqual(@as(i64, 0), (try field(allocator, application_data, "index")).int);
+    try expectLocation(allocator, application_data, "\"fixture.ecl\"", 6, 5);
 }
 
 test "machine_test: late binding redefinition heals existing callers" {

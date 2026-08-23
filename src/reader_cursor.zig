@@ -1021,6 +1021,7 @@ const CollectionBuilder = struct {
                         self.element_spans.?,
                         self.context.source_start,
                         self.context.source_end,
+                        self.context.start,
                     );
                     self.phase = .list_spans;
                     break :result .pending;
