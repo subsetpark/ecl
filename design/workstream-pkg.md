@@ -372,11 +372,14 @@ matrix. M3's execution prerequisite for M4 is satisfied.
   become store entries.
 - A narrow builtin `pkg.store` capability owns `inspect`, `install`,
   `present?`, and `write-lock`. `inspect` and `install` both require exactly
-  one root `ecl.pkg`, regular source-only flat files, exact manifest identity,
-  and package-prefix ownership. `install` validates again at the mutation
-  sink and publishes an absent immutable entry atomically; `write-lock` uses
-  atomic sibling replacement and preserves a prior lock on failure. Generic
-  recursive deletion or rename authority is not exposed to ECL.
+  one root `ecl.pkg`, regular source-only flat files, and package-prefix
+  ownership. `pkg.sync` parses the inspected manifest through the existing
+  `pkg.manifest` authority and checks exact name/version identity before
+  install. `install` repeats archive-layout and prefix validation at the
+  mutation sink and publishes an absent immutable entry atomically;
+  `write-lock` uses atomic sibling replacement and preserves a prior lock on
+  failure. Generic recursive deletion or rename authority is not exposed to
+  ECL.
 - **Prefix ownership is enforced before publication**: a package `foo` whose
   tarball contains a module file outside `foo.ecl` / `foo.*.ecl` fails the
   sync and retains no `foo` entry or new lock.
@@ -634,10 +637,12 @@ fetcher. M6 is the join.
   versions.
 - **Package publication is a narrow builtin authority** (settled while
   planning M4, 2026-08-22). `pkg.sync` remains ordinary ECL orchestration;
-  builtin `pkg.store` owns archive inspection, repeated prefix/identity
+  builtin `pkg.store` owns archive inspection, repeated layout/prefix
   validation at install, immutable absent-destination publication, presence
-  checks, and atomic lock replacement. ECL does not gain generic recursive
-  deletion or rename merely to implement a package cache.
+  checks, and atomic lock replacement. The existing ECL manifest reader owns
+  semantic parsing and `pkg.sync` checks exact identity before install. ECL
+  does not gain generic recursive deletion or rename merely to implement a
+  package cache.
 - **`pkg.sync.run` takes an explicit project root** (settled while planning
   M4, 2026-08-22). Its effect is `(root-manifest project-root -- lock)`.
   Upward manifest discovery belongs to M6, which passes the discovered root;

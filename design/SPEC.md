@@ -919,11 +919,24 @@ value.
 
 ### http
 
-Client only. `http.get` `( url headers -- response )` and `http.post`
-`( url headers body -- response )`, with `{}` for no headers, returning
-`{'status int, 'headers dict, 'body string}`. A refused connection, TLS
-failure, unparseable url, or protocol error is `'io` carrying the url in
-`'path`; a non-2xx status is an ordinary value, not an error.
+Client only. `http.get` `( url headers -- response )`, `http.get-bytes`
+`( url headers -- response )`, and `http.post`
+`( url headers body -- response )`, with `{}` for no headers, return
+`{'status int, 'headers dict, 'body value}`. `get` and `post` materialize
+`'body` as a string. `get-bytes` follows the same request, redirect, response-
+header, status, and content-decoding rules but materializes the resulting
+octets directly as an ordinary integer byte list; it never passes them through
+Unicode conversion. "Bytes" here means the representation after HTTP content
+decoding, not transfer framing or a compressed wire representation. A refused
+connection, TLS failure, unparseable url, or protocol error is `'io` carrying
+the url in `'path`; a non-2xx status is an ordinary value, not an error.
+
+A `Session.Host` may carry an optional TLS trust override consisting of an
+absolute CA-file path plus a fixed verification timestamp. In that mode the
+HTTP client loads only that CA file and verifies at that timestamp; it does not
+scan system roots or read the wall clock. A null override preserves system
+roots and current-time verification. This is explicit host configuration for
+hermetic HTTPS tests, not an ECL value or a process environment switch.
 
 **The request blocks the calling unit's worker thread.** That is the one
 documented first-party exception to cooperative scheduling: a `@each`
@@ -956,11 +969,13 @@ the explicit opt out.
 
 ### Package modules
 
-The package formats are data (see Packages). Six ordinary modules divide the
-pure value vocabulary by responsibility: `pkg.version`, `pkg.name`, `pkg.data`,
-`pkg.manifest`, `pkg.lock`, and `pkg.mvs`. There is no root `pkg` facade. Every
-word takes and returns text or values, so finding a file, reading it, and
-writing one back are the caller's business; none reaches a host capability.
+The package formats are data (see Packages). Seven ordinary source modules
+divide value operations and orchestration by responsibility: `pkg.version`,
+`pkg.name`, `pkg.data`, `pkg.manifest`, `pkg.lock`, `pkg.mvs`, and `pkg.sync`.
+There is no root `pkg` facade. The first six are pure: every word takes and
+returns text or values and none reaches a host capability. `pkg.sync` is the
+explicit network/filesystem orchestration boundary and composes those pure
+modules with `http`, `archive`, and the narrow builtin `pkg.store` capability.
 
 - versions: `pkg.version.less?` `( left right -- bool )`, `pkg.version.max`
   `( versions -- version )`
@@ -970,6 +985,12 @@ writing one back are the caller's business; none reaches a host capability.
   `( lock -- text )`
 - resolution: `pkg.mvs.resolve` `( root-manifest manifests -- lock )`
 - names: `pkg.name.owns?` `( package-name module-name -- bool )`
+- synchronization: `pkg.sync.run`
+  `( root-manifest project-root -- lock )`
+
+The builtin `pkg.store` module exposes only the package mutations ordinary ECL
+cannot express safely: `inspect`, `install`, `present?`, and `write-lock`. It
+does not expose raw directories, handles, generic rename, or recursive delete.
 
 `pkg.manifest.validate` returns its argument unchanged or raises; it is not a
 `valid?`-style predicate. Failures follow the frozen kinds and introduce no
@@ -996,9 +1017,10 @@ never mentions a file, a URL, or a version — and a checkout plus a lock reprod
 images on any machine.
 
 The `pkg.manifest`, `pkg.lock`, `pkg.version`, and `pkg.name` modules read,
-validate, order, and write these values (see The standard library). Nothing in
-this section reaches the network or the filesystem: ordinary evaluation reads
-a lock and never writes one, and fetching is an explicit command.
+validate, order, and write these values (see The standard library). Those
+format operations are pure. `pkg.sync.run` is the explicit network and
+filesystem boundary that derives and publishes a lock; ordinary evaluation
+reads a lock and never fetches or writes one.
 
 ### Versions
 
@@ -1196,6 +1218,123 @@ the same `name-version-hash` shape a content-addressed package cache
 conventionally uses. A hash mismatch is a hard failure and never a warning: a
 moved tag changes the content hash and fails rather than silently changing
 what a build means.
+
+The store root is selected from the Session's immutable environment snapshot,
+never by reading the ambient process environment during evaluation:
+
+1. a present, nonempty `ECL_CACHE` is the complete store root;
+2. otherwise a present, nonempty `XDG_CACHE_HOME` selects
+   `$XDG_CACHE_HOME/ecl/pkg`;
+3. otherwise a present, nonempty `HOME` selects `$HOME/.cache/ecl/pkg`;
+4. if all three are absent or empty, synchronization fails with `'io` before
+   creating a path.
+
+An empty variable is treated as absent; it never names the current directory.
+Each canonical store-key path is immutable. `pkg.store.present?`
+`( destination -- bool )` returns 0 only when the path is absent and 1 only
+for a real directory. A symlink, non-directory node, access denial, or other
+probe failure is `'io` carrying `'path`. A present entry is read locally and
+is never re-fetched or overwritten by sync.
+
+### Package archives
+
+A package artifact is one gzip-compressed tar byte list whose normalized
+members obey M3's archive limits and hostile-input rules plus all of these
+package rules:
+
+- exactly one regular file named `ecl.pkg` occurs at the archive root;
+- `ecl.pkg` is valid UTF-8 and parses as a format-1 manifest;
+- directories and ordinary package-data files are permitted, but links and
+  special nodes remain forbidden by the archive contract;
+- a file ending in `.eclmod` anywhere is forbidden because v1 packages are
+  source-only;
+- every file ending in `.ecl` is at the archive root, its filename stem is a
+  canonical module name, and `pkg.name.owns?` accepts the manifest package
+  name and that stem.
+
+Thus package `foo` may contain `foo.ecl` and `foo.bar.ecl`, never `bar.ecl` or
+`nested/foo.ecl`. Installation never evaluates a manifest or package source.
+
+`pkg.store.inspect` `( bytes package-name -- manifest-text )` performs the
+complete bounded gzip/tar and package-layout scan without creating a
+destination. It returns the sole root manifest's exact UTF-8 text. The caller
+parses that text with `pkg.manifest.read` and checks its exact name/version
+identity before any installation.
+
+`pkg.store.install`
+`( bytes package-name destination -- regular-file-paths )` repeats the same
+archive and package-policy validation at the mutation sink, then extracts to a
+unique sibling staging directory and publishes only by an absent-destination
+rename. It returns normalized regular-file paths only after commit. The
+destination is never overwritten or merged. Concurrent installers may both
+stage, but at most one publishes; after a destination-exists result, a caller
+may re-run `present?` and accept the immutable winner. Cancellation,
+allocation failure, malformed input, and filesystem failure remove private
+staging and expose no partial destination.
+
+`pkg.store.write-lock` `( text path -- )` writes through a unique sibling
+temporary file and replaces the named regular file with one same-parent atomic
+rename. Encoding and writes are bounded scheduler work. On cancellation,
+allocation failure, or filesystem failure the temporary is removed and an
+existing lock remains byte-for-byte unchanged; when no lock existed, none is
+published. A symlink or non-regular existing target is refused rather than
+followed.
+
+These four words are the complete package filesystem authority. ECL receives
+no generic recursive-delete or rename word as a side effect of package
+support.
+
+### Synchronization
+
+`pkg.sync.run` `( root-manifest project-root -- lock )` validates its root and
+uses `project-root` only to place `ecl.lock`; walking upward to discover the
+root belongs to the CLI layer. It executes two deterministic passes.
+
+The discovery pass walks exact `(name, version)` requirements in canonical
+order and builds the complete catalog required by `pkg.mvs.resolve`. For each
+node it derives the store key from the declaration's name, version, and hash:
+
+- when that exact entry is present, it reads `<entry>/ecl.pkg`, validates the
+  manifest, and requires its name and version to equal the requested node;
+- otherwise it calls `http.get-bytes`, requires status in `200..299`, computes
+  `sha256-` plus `archive.sha256` of the returned body, and compares that value
+  with the declaration **before** calling `pkg.store.inspect`;
+- after a matching hash, it inspects and parses the archive manifest, requires
+  exact name/version identity, inserts the exact node into the catalog, and
+  traverses its requirements.
+
+A non-success HTTP response is `'io` carrying `'package`, `'url`, and
+`'status`. A hash mismatch is `'domain` carrying `'package`,
+`'declared-hash`, and `'actual-hash`. A manifest identity mismatch is
+`'domain` carrying the requested and actual names and versions. Archive-policy
+errors additionally carry the package and offending member when one exists.
+None of these discovery failures calls install or lock publication.
+
+After `pkg.mvs.resolve` returns a validated lock, the installation pass visits
+the selected package names in canonical order. It skips a present entry.
+Every missing selection is fetched again, status-checked, hashed, inspected,
+identity-checked, and passed to `pkg.store.install`; the repeated verification
+keeps the publication sink independent of discovery state. A racing
+destination-exists result is success only when `present?` immediately confirms
+a real immutable directory.
+
+The two passes are deliberate. MVS needs manifests from reachable exact
+versions it may not select, while the store contains only selected versions.
+Re-fetching a selected cold artifact bounds retained archive memory to one
+body and avoids adding a temporary spool plus deletion authority. On a later
+sync every exact node already present is read locally and never re-fetched,
+but an absent reachable candidate that remains unselected may be fetched again
+because its manifest can still contribute graph edges. Fully offline
+resolution is the separate `sync --offline` contract.
+
+Only after every selected entry is present does sync render the lock once with
+`pkg.lock.write` and call `pkg.store.write-lock` for
+`<project-root>/ecl.lock`. It then returns the validated lock value. Deleting
+that lock and running sync against unchanged inputs reproduces its bytes.
+Failure preserves a prior lock and publishes no new lock. Verified immutable
+entries successfully installed before a later failure may remain: the lock is
+the project transaction boundary, while content-addressed cache population is
+safe and reusable.
 
 ## Errors
 
@@ -2324,6 +2463,13 @@ use `{}` for none. Return `{'status int, 'headers dict, 'body string}`. A
 transport or protocol failure is `'io` carrying the URL in `'path`; a non-2xx
 status is an ordinary response.
 
+### get-bytes
+`( url headers -- response )` — Perform the same GET as `get`, including
+redirects and content decoding, but return `'body` as the exact ordered octets
+in an ordinary integer byte list. Status and headers retain the same types.
+This is the binary ingress used for archives; no byte is decoded to or encoded
+from a Unicode character before hashing.
+
 ### post
 `( url headers body -- response )` — Post a body with caller-supplied headers
 and return the same response shape and errors as `get`.
@@ -2476,6 +2622,42 @@ to exact-version manifest maps. Return a validated lock, or raise a structured
 error for malformed input, conflicting hashes, a selected-prefix collision, a
 requirement cycle, or a missing manifest. It reaches no filesystem, network,
 or evaluation capability.
+
+## pkg.store
+
+Host-backed package archive and publication capabilities. Every traversal,
+write, rollback, and output materialization advances through bounded scheduler
+work; no word exposes a host handle or generic filesystem mutation.
+
+### inspect
+`( bytes package-name -- manifest-text )` — Validate one tgz as a v1
+source-only package owned by `package-name` without creating a filesystem
+destination. Return the sole root `ecl.pkg` as exact UTF-8 text.
+
+### install
+`( bytes package-name destination -- regular-file-paths )` — Repeat complete
+package validation and atomically publish the archive at a previously absent
+destination. Return normalized regular-file paths only after commit; failure
+never exposes a partial destination.
+
+### present?
+`( destination -- bool )` — Return 0 for an absent path and 1 for a real
+directory. A symlink, non-directory, inaccessible path, or unavailable host
+I/O is `'io`.
+
+### write-lock
+`( text path -- )` — Atomically replace a regular lock file through a unique
+sibling temporary. Failure preserves the prior file or absence.
+
+## pkg.sync
+
+### run
+`( root-manifest project-root -- lock )` — Discover and hash-check the complete
+exact transitive manifest graph, resolve it with `pkg.mvs.resolve`, fetch and
+atomically install only selected missing store entries, then atomically write
+the canonical `ecl.lock` beneath `project-root`. Return the validated lock.
+See Packages / Synchronization for cache selection, two-pass fetch, error, and
+partial-success contracts.
 
 ## result
 
