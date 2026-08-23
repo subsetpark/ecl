@@ -43,9 +43,27 @@ primitives, operationalized as two rules:
   with overflow-as-error cannot live in a 48-bit payload. The data stack
   is contiguous `Value` storage.
 - **Heap header (16 bytes):** `{ rc: AtomicU32, meta: u32, len: u64 }`;
-  `meta` holds the representation tag and flags. Capacity is an explicit
-  field in the leaf payload. Allocation rides the system allocator; there
-  is no custom bucket allocator.
+  `meta` holds the 8-bit representation tag and a 24-bit session-local
+  code-provenance identity. Identity zero denotes runtime-built and CoW code.
+  A nonzero identity is meaningful only after the receiving archive verifies
+  exact header membership; the number alone never grants provenance in another
+  Session. Each archive owns an opaque, process-unique provenance issuer.
+  Reader lists and their code root receive only that issuer's numeric namespace
+  while still under construction; assigning an identity later requires the
+  opaque issuer and validates the header's construction namespace. `HostOwner`
+  grants no provenance-assignment authority. Before reserving identities or
+  mutating the directory, absorption validates every candidate header in
+  bounded steps; a foreign namespace or an assigned header without exact local
+  membership returns `InvalidProvenance` while the caller still owns both
+  artifacts. Each validated assignment and directory publication is then one
+  O(1) mutex commit. After validation and every fallible directory-page
+  allocation, but before the first such commit, an O(1) adoption transition
+  links the stable archive entry and moves ownership of the root, spans, and
+  source into it. Cursor teardown reports `caller_owned` before adoption and
+  `archive_owned` afterward, so cancellation can neither free index-visible
+  storage nor release an adopted root.
+  Capacity is an explicit field in the leaf payload. Allocation rides the
+  system allocator; there is no custom bucket allocator.
 - **Mutation is capability-gated.** `Header` is opaque. Allocation yields
   an `InitializingHeader`, uniqueness checking yields a `UniqueHeader`, and
   only those capabilities expose their kind-checked mutation operations.
@@ -369,23 +387,45 @@ primitives, operationalized as two rules:
   `ApplicationSelection`: the newest dynamically called quotation is borrowed
   while its `Eval` is live, and that Eval's existing header ownership moves
   into the frame when it completes. Pointer identity prevents an older
-  suspended selection from overwriting a deeper one. Tail-transparent guard
-  applications target their enclosing application, while iterations mint a
-  fresh target, so a fold never carries one element's selection into the next.
+  suspended selection from overwriting a deeper one. A tail-position guard
+  captures the enclosing nominal target before its snapshot/restore drivers
+  run. Predicate applications mint disposable selection boundaries because
+  their stack results are restored away; each launched action explicitly
+  selects its quotation at the captured target, and a tail call inside that
+  action may then refine it. The target is an opaque Machine-issued capability
+  containing a process-unique frame nonce; use validates the issuing Unit's
+  live application-frame index, tag, and nonce before any frame access, so a
+  stale or foreign target fails as a domain error. Iterations mint a fresh
+  target, so a fold never carries one element's selection into the next.
   Success performs no additional code-header retain/release and failure either
   transfers the selected header or retains the driver-owned original once.
   The existing application frame allocation is reused, and `Frame` remains
   below the unchanged 104-byte ceiling. Native and builtin checks likewise own
   no source candidate.
-- **Contract locations stay lazy and code-plane-only.** `SpanTable.Entry`
-  stores a quotation's opening span beside its token spans and source range.
+- **Contract locations stay lazy, direct, and code-plane-only.**
+  `SpanTable.Entry` stores a quotation's opening span beside its token spans
+  and source range. Absorption assigns each reader-built header a session-local
+  identity and publishes its exact span entries in a three-level radix
+  directory. Every initialized directory leaf also records the exact header
+  issued that slot, and lookup verifies that membership before reading its span
+  entry. Lookup also authenticates the header's construction namespace against
+  the archive-owned issuer. An unrelated issuer cannot pre-stamp a reader-built
+  header, and a quotation transferred from another Session has no location in
+  the receiving archive even when its numeric identity collides. That lookup
+  absence is distinct from publication: attempting to absorb foreign or
+  unbound construction artifacts fails closed. A partially indexed absorption
+  remains backed by its already adopted archive entry if its driver is
+  cancelled. A token,
+  source slice, or quotation-opening lookup is three fixed array reads: neither
+  later archived sources nor pointer-hash collisions add diagnostic work.
   The allocation-free failure record tags borrowed token sites separately
   from an owned contract-quotation header; only `FailureDriver` selects the
   bounded token or quotation lookup cursor. Success, row checks, failed frame
   insertion, cancellation, attempt unwind, native transaction teardown, Unit
   teardown, and completed failure materialization each consume the header
-  exactly once. Runtime-built and CoW headers remain absent from the archive,
-  and no `Value` carries provenance.
+  exactly once. Runtime-built and CoW headers keep identity zero and remain
+  absent from the archive. Values remain 16 bytes and carry no source, span,
+  archive pointer, or provenance payload.
 - **Errors:** `Result<(), Box<EclError>>`-shaped returns through the
   machine (boxed so the happy-path return stays register-sized); host
   errors convert to error dicts only at IO boundary words. The `ErrorKind`

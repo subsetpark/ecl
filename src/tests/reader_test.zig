@@ -4,13 +4,126 @@ const std = @import("std");
 const minish = @import("minish");
 const heap = @import("../heap.zig");
 const equal = @import("../equal.zig");
+const list = @import("../list.zig");
 const printer = @import("../print.zig");
 const lexer = @import("../lexer.zig");
 const reader = @import("../reader.zig");
+const spans = @import("../spans.zig");
 const testgen = @import("testgen.zig");
 
 fn retireReadCursor(cursor: *reader.ReadCursor, releases: *heap.ReleaseDomain) void {
     while (!cursor.advanceRetirement()) _ = releases.advance(256);
+}
+
+test "span archive rejects a substitutable provenance issuer" {
+    const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
+    var archive = try spans.SpanArchive.init(host.cleanup());
+    defer archive.deinit();
+
+    var diag: reader.Diag = .{};
+    var parsed = switch (try archive.read("issuer.ecl", "(1)", &diag)) {
+        .complete => |complete| complete,
+        .incomplete => return error.UnexpectedIncomplete,
+    };
+    defer parsed.deinit();
+    const quotation = parsed.values()[0].list;
+
+    const unrelated = try heap.CodeProvenanceIssuer.init(allocator);
+    defer unrelated.deinit();
+    try std.testing.expectEqual(
+        heap.CodeProvenanceAssignment.foreign_namespace,
+        heap.assignCodeProvenance(unrelated, quotation, @enumFromInt(1)),
+    );
+
+    var root = heap.OwnedValue.init(host.domain(), try archive.codeRoot(parsed.values()));
+    defer root.deinit();
+    try archive.absorb(parsed.borrow(), root.borrow());
+    _ = root.take();
+
+    var location_cursor = archive.locateQuotationCursor(quotation);
+    const located = switch (location_cursor.advance()) {
+        .complete => |location| location orelse return error.ExpectedSourceLocation,
+        .pending => unreachable,
+    };
+    try std.testing.expectEqualStrings("issuer.ecl", located.source_name);
+    try std.testing.expectEqual(@as(u32, 1), located.span.line);
+    try std.testing.expectEqual(@as(u32, 1), located.span.col);
+}
+
+test "span archive fails closed on unbound publication artifacts" {
+    const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
+    var archive = try spans.SpanArchive.init(host.cleanup());
+    defer archive.deinit();
+
+    var diag: reader.Diag = .{};
+    var parsed = switch (try reader.read(host.cleanup(), "unbound.ecl", "(1)", &diag)) {
+        .complete => |complete| complete,
+        .incomplete => return error.UnexpectedIncomplete,
+    };
+    defer parsed.deinit();
+    var root = heap.OwnedValue.init(
+        host.domain(),
+        try list.fromValuesGeneric(allocator, parsed.values()),
+    );
+    defer root.deinit();
+
+    archive.absorb(parsed.borrow(), root.borrow()) catch |err| {
+        try std.testing.expectEqual(error.InvalidProvenance, err);
+        return;
+    };
+    _ = root.take();
+    return error.ExpectedInvalidProvenance;
+}
+
+test "span archive cancellation keeps committed location storage alive" {
+    const allocator = std.testing.allocator;
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
+    var archive = try spans.SpanArchive.init(host.cleanup());
+    defer archive.deinit();
+
+    var diag: reader.Diag = .{};
+    var parsed = switch (try archive.read("cancelled-absorb.ecl", "(1)", &diag)) {
+        .complete => |complete| complete,
+        .incomplete => return error.UnexpectedIncomplete,
+    };
+    var parsed_live = true;
+    defer if (parsed_live) parsed.deinit();
+    const quotation = parsed.values()[0].list;
+    var root = heap.OwnedValue.init(host.domain(), try archive.codeRoot(parsed.values()));
+    var root_live = true;
+    defer if (root_live) root.deinit();
+
+    var absorption = archive.absorbCursor(parsed.borrow(), root.borrow());
+    var absorption_live = true;
+    defer {
+        if (absorption_live and absorption.deinit() == .archive_owned) {
+            _ = root.take();
+            root_live = false;
+        }
+    }
+    while (true) {
+        var before = archive.locateQuotationCursor(quotation);
+        if (before.advance().complete != null) break;
+        try std.testing.expect((try absorption.advance()) == .pending);
+    }
+
+    try std.testing.expect(absorption.deinit() == .archive_owned);
+    absorption_live = false;
+    parsed.deinit();
+    parsed_live = false;
+    _ = root.take();
+    root_live = false;
+
+    var after = archive.locateQuotationCursor(quotation);
+    const located = after.advance().complete orelse return error.ExpectedSourceLocation;
+    try std.testing.expectEqualStrings("cancelled-absorb.ecl", located.source_name);
+    try std.testing.expectEqual(@as(u32, 1), located.span.line);
+    try std.testing.expectEqual(@as(u32, 1), located.span.col);
 }
 
 fn repeatedSource(

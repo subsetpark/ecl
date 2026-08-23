@@ -502,7 +502,7 @@ pub const Session = enum(usize) {
         if (core.root_scope == null)
             core.root_scope = try core.environment.createSessionRoot(core.allocator());
         var diag: reader.Diag = .{};
-        const read_result = reader.read(core.host_owner.cleanup(), source_name, source, &diag) catch |err| switch (err) {
+        const read_result = core.archive.read(source_name, source, &diag) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Parse => {
                 var parse_error = machine.EclErr.init(.parse, diag.text());
@@ -536,11 +536,14 @@ pub const Session = enum(usize) {
         const core = self.coreState();
         var root = heap.OwnedValue.init(
             core.releaseDomain(),
-            try list.fromValuesGeneric(core.allocator(), parsed.values()),
+            try core.archive.codeRoot(parsed.values()),
         );
         defer root.deinit();
         const root_header = root.borrow().list;
-        try core.archive.absorb(parsed, root.borrow());
+        core.archive.absorb(parsed, root.borrow()) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidProvenance => @panic("archive-bound reader produced foreign provenance"),
+        };
         _ = root.take();
         var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
         defer checkpoint.deinit();

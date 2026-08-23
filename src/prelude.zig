@@ -47,7 +47,7 @@ pub fn installSource(
     const release_domain = heap.hostDomain(host);
     const environment = building.runtime();
     var diag: reader.Diag = .{};
-    const result = reader.read(host, source_name, source, &diag) catch |err| switch (err) {
+    const result = archive.read(source_name, source, &diag) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Parse => return error.InvalidPrelude,
     };
@@ -56,10 +56,13 @@ pub fn installSource(
         .incomplete => return error.InvalidPrelude,
     };
     defer parsed.deinit();
-    var root = heap.OwnedValue.init(release_domain, try list.fromValuesGeneric(allocator, parsed.values()));
+    var root = heap.OwnedValue.init(release_domain, try archive.codeRoot(parsed.values()));
     defer root.deinit();
     const root_header = root.borrow().list;
-    try archive.absorb(parsed.borrow(), root.borrow());
+    archive.absorb(parsed.borrow(), root.borrow()) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidProvenance => @panic("archive-bound prelude reader produced foreign provenance"),
+    };
     _ = root.take();
     var arguments = heap.OwnedValue.init(release_domain, try list.fromValuesGeneric(allocator, &.{}));
     defer arguments.deinit();

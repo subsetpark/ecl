@@ -78,6 +78,7 @@ fn whileWord(evaluator: *Machine) MachineError!void {
             .parent = evaluator.currentScope(),
             .home = evaluator.currentHome(),
             .word = evaluator.activeWordId(),
+            .provenance_target = try evaluator.applicationProvenanceTarget(),
         }),
         .target = .{ .predicate = first_condition },
     });
@@ -274,6 +275,7 @@ const GuardControl = struct {
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
     word: intern.TraceWord,
+    provenance_target: ?*const machine.ApplicationProvenanceTarget,
 
     fn selectedTarget(self: *GuardControl, selected: bool) GuardTarget {
         return switch (self.selector) {
@@ -379,8 +381,6 @@ const GuardRestoreDriver = struct {
 const GuardPredicateState = struct {
     control: heap.Owned(GuardControl),
 
-    pub const application_provenance: machine.ApplicationProvenancePolicy = .transparent_tail;
-
     fn application(self: *GuardPredicateState, quotation: *Header) Application {
         const control = self.control.borrow();
         return machine.typedApplication(self, quotation, control.parent, control.home, 0);
@@ -408,11 +408,14 @@ const GuardPredicateState = struct {
 const GuardActionState = struct {
     control: heap.Owned(GuardControl),
 
-    pub const application_provenance: machine.ApplicationProvenancePolicy = .transparent_tail;
-
     fn application(self: *GuardActionState, quotation: *Header) Application {
         const control = self.control.borrow();
-        return machine.typedApplication(self, quotation, control.parent, control.home, 0);
+        var launched = machine.typedApplication(self, quotation, control.parent, control.home, 0);
+        launched.provenance = if (control.provenance_target) |target|
+            .{ .selected_target = target }
+        else
+            .boundary;
+        return launched;
     }
     pub fn resumeApplication(
         evaluator: *Machine,
@@ -449,6 +452,7 @@ fn cond(evaluator: *Machine) MachineError!void {
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
         .word = evaluator.activeWordId(),
+        .provenance_target = try evaluator.applicationProvenanceTarget(),
     });
 }
 
@@ -457,6 +461,7 @@ const CondDriver = struct {
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
     word: intern.TraceWord,
+    provenance_target: ?*const machine.ApplicationProvenanceTarget,
     index: usize = 0,
 
     pub fn advance(evaluator: *Machine, self: *CondDriver) MachineError!machine.WorkProgress {
@@ -480,6 +485,7 @@ const CondDriver = struct {
             .parent = self.parent,
             .home = self.home,
             .word = self.word,
+            .provenance_target = self.provenance_target,
         };
         evaluator.retireDriver(self);
         try evaluator.startDriver(GuardSnapshotDriver{

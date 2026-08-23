@@ -1370,13 +1370,34 @@ element quotation is not mistaken for a source branch and iteration cost does
 not acquire provenance allocation or reference-count traffic per element.
 This does not hide an application's own contract failure. Within one
 application, dynamically applied tail-control quotations replace that
-application's location; tail-transparent guards preserve the same boundary,
-while a new iteration starts a fresh boundary. The error reports the deepest
-such quotation's opening delimiter and preserves its element index, falling
-back to the application quotation when no dynamic selection occurred. If the
-selected tail or failing application quotation was assembled at runtime, all
-three source fields remain absent rather than falling back to a less-specific
-or invented position.
+application's location. A guard predicate is disposable observation and does
+not replace the enclosing selection; after restoration, the selected `cond`
+action or true `while` body replaces it at the preserved boundary, and tail
+control inside that action may refine it further. A new iteration starts a
+fresh boundary. The error reports the deepest such quotation's opening
+delimiter and preserves its element index, falling back to the application
+quotation when no dynamic selection occurred. If the selected tail or failing
+application quotation was assembled at runtime, all three source fields remain
+absent rather than falling back to a less-specific or invented position.
+
+Resolving those source fields is strict O(1) in the number of sources archived
+after the selected quotation and in pointer-hash collisions. Diagnostic
+materialization uses the selected code header's direct session identity; it
+does not scan session history to discover which span table owns the header.
+That identity is session-local: the archive also verifies exact header
+membership and the archive-owned construction namespace before reading the
+indexed entry. Only the archive's opaque issuer can assign an identity to a
+header built in that namespace; a generic heap owner supplies no such
+authority. Absorption validates all candidate headers before reserving or
+assigning identities and rejects a namespace mismatch without consuming its
+inputs. Once validation and fallible index-page allocation complete, the
+archive adopts the root and source record before exposing any index slot; a
+cancelled partial assignment therefore retains stable location storage, and
+teardown reports whether the caller or archive owns the artifacts. A quotation
+transferred from a different Session therefore has no
+source fields when merely looked up in the receiving Session, even when its
+numeric identity collides with a local quotation; attempting to publish that
+foreign construction into the receiving archive is an invariant error.
 
 The core kinds are a closed set: `'underflow`, `'undefined-word`, `'type`,
 `'shape`, `'conform`, `'overflow`, `'domain`, `'contract`, `'parse`,

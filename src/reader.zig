@@ -33,3 +33,13 @@ pub fn read(
 ) Error!ReadResult {
     return implementation.read(host, source_name, source, diag);
 }
+
+pub fn readCode(
+    host: *const @import("heap.zig").HostCleanup,
+    source_name: []const u8,
+    source: []const u8,
+    diag: *Diag,
+    provenance_namespace: @import("heap.zig").CodeProvenanceNamespace,
+) Error!ReadResult {
+    return implementation.readCode(host, source_name, source, diag, provenance_namespace);
+}

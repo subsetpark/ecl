@@ -442,12 +442,23 @@ pub const StringEncoder = struct {
 pub const I64MaterializeResult = MaterializeResult;
 
 const CodepointOps = struct {
+    const Context = struct {
+        kind: value.HeapKind,
+        provenance_namespace: heap.CodeProvenanceNamespace,
+    };
+
     fn begin(
         allocator: std.mem.Allocator,
         source: []const u32,
-        kind: value.HeapKind,
+        context: Context,
     ) error{OutOfMemory}!heap.AnyListBuilder {
-        return .init(allocator, kind, source.len, initialCapacity(source.len));
+        return .initCode(
+            allocator,
+            context.kind,
+            source.len,
+            initialCapacity(source.len),
+            context.provenance_namespace,
+        );
     }
     fn fill(
         builder: *heap.AnyListBuilder,
@@ -465,7 +476,7 @@ const CodepointOps = struct {
 const CodepointFill = ChunkedMaterializer(
     u32,
     heap.AnyListBuilder,
-    value.HeapKind,
+    CodepointOps.Context,
     CodepointOps,
 );
 
@@ -477,10 +488,23 @@ pub const CodepointMaterializer = struct {
     phase: enum { profile, fill, complete } = .profile,
     index: usize = 0,
     max_codepoint: u32 = 0,
+    provenance_namespace: heap.CodeProvenanceNamespace = .none,
     fill: ?CodepointFill = null,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u32) CodepointMaterializer {
         return .{ .allocator = allocator, .source = source };
+    }
+
+    pub fn initCode(
+        allocator: std.mem.Allocator,
+        source: []const u32,
+        provenance_namespace: heap.CodeProvenanceNamespace,
+    ) CodepointMaterializer {
+        return .{
+            .allocator = allocator,
+            .source = source,
+            .provenance_namespace = provenance_namespace,
+        };
     }
 
     pub fn deinit(self: *CodepointMaterializer) void {
@@ -503,7 +527,10 @@ pub const CodepointMaterializer = struct {
                         .leaf_char2
                     else
                         .leaf_char4;
-                    self.fill = .init(self.allocator, self.source, kind);
+                    self.fill = .init(self.allocator, self.source, .{
+                        .kind = kind,
+                        .provenance_namespace = self.provenance_namespace,
+                    });
                     self.phase = .fill;
                     continue;
                 }
@@ -936,12 +963,25 @@ pub const ValueMaterializer = struct {
     phase: Phase = .profile,
     index: usize = 0,
     item_profile: Profile = .{ .kind = .empty },
+    provenance_namespace: heap.CodeProvenanceNamespace = .none,
     builder: ?heap.AnyListBuilder = null,
 
     const Phase = enum { profile, fill, complete };
 
     pub fn init(allocator: std.mem.Allocator, source: []const Value) ValueMaterializer {
         return .{ .allocator = allocator, .source = source };
+    }
+
+    pub fn initCode(
+        allocator: std.mem.Allocator,
+        source: []const Value,
+        provenance_namespace: heap.CodeProvenanceNamespace,
+    ) ValueMaterializer {
+        return .{
+            .allocator = allocator,
+            .source = source,
+            .provenance_namespace = provenance_namespace,
+        };
     }
 
     pub fn deinit(self: *ValueMaterializer) void {
@@ -1042,11 +1082,12 @@ pub const ValueMaterializer = struct {
                 .leaf_char4,
             .symbol => .leaf_symbol,
         };
-        var builder = try heap.AnyListBuilder.init(
+        var builder = try heap.AnyListBuilder.initCode(
             self.allocator,
             kind,
             self.source.len,
             initialCapacity(self.source.len),
+            self.provenance_namespace,
         );
         if (kind == .generic_spine) switch (builder) {
             .generic => |*generic| generic.setLen(0),
@@ -1076,12 +1117,13 @@ const GenericValueOps = struct {
     fn begin(
         allocator: std.mem.Allocator,
         source: []const Value,
-        _: void,
+        provenance_namespace: heap.CodeProvenanceNamespace,
     ) error{OutOfMemory}!heap.ListBuilder(.generic_spine) {
-        var builder = try heap.ListBuilder(.generic_spine).init(
+        var builder = try heap.ListBuilder(.generic_spine).initCode(
             allocator,
             source.len,
             initialCapacity(source.len),
+            provenance_namespace,
         );
         builder.setLen(0);
         return builder;
@@ -1106,7 +1148,7 @@ const GenericValueOps = struct {
 const GenericValueChunked = ChunkedMaterializer(
     Value,
     heap.ListBuilder(.generic_spine),
-    void,
+    heap.CodeProvenanceNamespace,
     GenericValueOps,
 );
 pub const GenericValueMaterializer = struct {
@@ -1114,7 +1156,14 @@ pub const GenericValueMaterializer = struct {
 
     inner: GenericValueChunked,
     pub fn init(allocator: std.mem.Allocator, source: []const Value) GenericValueMaterializer {
-        return .{ .inner = .init(allocator, source, {}) };
+        return .{ .inner = .init(allocator, source, .none) };
+    }
+    pub fn initCode(
+        allocator: std.mem.Allocator,
+        source: []const Value,
+        provenance_namespace: heap.CodeProvenanceNamespace,
+    ) GenericValueMaterializer {
+        return .{ .inner = .init(allocator, source, provenance_namespace) };
     }
     pub fn deinit(self: *GenericValueMaterializer) void {
         self.inner.deinit();

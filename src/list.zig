@@ -51,6 +51,24 @@ pub fn fromValuesGeneric(
     return fromGenericValues(allocator, source);
 }
 
+pub fn fromValuesGenericCode(
+    allocator: std.mem.Allocator,
+    source: []const Value,
+    provenance_namespace: heap.CodeProvenanceNamespace,
+) error{OutOfMemory}!Value {
+    var builder = try heap.ListBuilder(.generic_spine).initCode(
+        allocator,
+        source.len,
+        initialCapacity(source.len),
+        provenance_namespace,
+    );
+    for (source, 0..) |item, index| {
+        heap.retainValue(item);
+        builder.items()[index] = item;
+    }
+    return .{ .list = builder.finish() };
+}
+
 pub fn fromI64Slice(
     allocator: std.mem.Allocator,
     source: []const i64,

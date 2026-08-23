@@ -1,19 +1,26 @@
-//! Session-lifetime ownership for reader provenance tables.
+//! Session-lifetime ownership and direct lookup for reader provenance tables.
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
+const list = @import("list.zig");
 const lexer = @import("lexer.zig");
 const reader = @import("reader.zig");
 const poll = @import("poll.zig");
+const storage = @import("kernel_storage.zig");
+
 pub const LocatedSpan = struct {
     source_name: []const u8,
     span: lexer.Span,
 };
+
 const Entry = struct {
+    previous: ?*Entry = null,
+    next: ?*Entry = null,
     root: value.Value,
     spans: reader.SpanTable,
     source_name: []u8,
     source: reader.SourceSlice,
+
     fn deinit(
         self: *Entry,
         allocator: std.mem.Allocator,
@@ -27,13 +34,216 @@ const Entry = struct {
         self.* = undefined;
     }
 };
+
+const IndexedSpan = struct {
+    archive_entry: *const Entry,
+    token_entry: *const reader.SpanTable.Entry,
+    source_entry: ?*const reader.SpanTable.Entry,
+    container_entry: ?*const reader.SpanTable.Entry,
+};
+
+/// A three-level direct directory keyed by the 24 provenance bits in a heap
+/// header. Each publication allocates at most the fixed pages its exact ID
+/// range touches; lookup is three array reads, independent of source history
+/// and pointer-hash collisions.
+const HeaderIndex = struct {
+    const radix = 256;
+    const Leaf = struct {
+        headers: [radix]?*value.ListHandle = @splat(null),
+        entries: [radix]IndexedSpan,
+    };
+    const Branch = struct { leaves: [radix]?*Leaf = @splat(null) };
+
+    branches: [radix]?*Branch = @splat(null),
+    next_identity: u32 = 1,
+
+    fn coordinates(identity: heap.CodeProvenanceId) struct { usize, usize, usize } {
+        const raw = @intFromEnum(identity);
+        std.debug.assert(raw != 0 and raw <= heap.max_code_provenance_id);
+        return .{
+            @intCast((raw >> 16) & 0xff),
+            @intCast((raw >> 8) & 0xff),
+            @intCast(raw & 0xff),
+        };
+    }
+
+    fn reserve(self: *HeaderIndex, count: usize) error{OutOfMemory}!u32 {
+        const end = @as(u64, self.next_identity) + count;
+        if (end > @as(u64, heap.max_code_provenance_id) + 1) return error.OutOfMemory;
+        const first = self.next_identity;
+        self.next_identity = @intCast(end);
+        return first;
+    }
+
+    fn set(
+        self: *HeaderIndex,
+        identity: heap.CodeProvenanceId,
+        header: *value.ListHandle,
+        indexed: IndexedSpan,
+    ) void {
+        const branch_index, const leaf_index, const entry_index = coordinates(identity);
+        const leaf = self.branches[branch_index].?.leaves[leaf_index].?;
+        std.debug.assert(leaf.headers[entry_index] == null or leaf.headers[entry_index] == header);
+        leaf.entries[entry_index] = indexed;
+        leaf.headers[entry_index] = header;
+    }
+
+    fn get(
+        self: *const HeaderIndex,
+        identity: heap.CodeProvenanceId,
+        header: *value.ListHandle,
+    ) ?IndexedSpan {
+        const branch_index, const leaf_index, const entry_index = coordinates(identity);
+        const branch = self.branches[branch_index] orelse return null;
+        const leaf = branch.leaves[leaf_index] orelse return null;
+        if (leaf.headers[entry_index] != header) return null;
+        return leaf.entries[entry_index];
+    }
+
+    fn deinit(self: *HeaderIndex, allocator: std.mem.Allocator) void {
+        for (&self.branches) |*maybe_branch| if (maybe_branch.*) |branch| {
+            for (&branch.leaves) |*maybe_leaf| if (maybe_leaf.*) |leaf|
+                allocator.destroy(leaf);
+            allocator.destroy(branch);
+        };
+        self.* = .{};
+    }
+};
+
 /// Span tables retain their source code roots. Besides keeping definitions'
-/// provenance alive, this prevents a freed header address from being reused
-/// while a stale identity key remains in the archive.
+/// provenance alive, this keeps every header's direct identity valid for the
+/// complete lifetime of its directory entry.
 const SpanArchiveState = struct {
     host: *const heap.HostCleanup,
+    provenance_issuer: *heap.CodeProvenanceIssuer,
     mutex: std.Io.Mutex = .init,
-    entries: poll.ChunkList(Entry),
+    first: ?*Entry = null,
+    last: ?*Entry = null,
+    index: HeaderIndex = .{},
+
+    fn reserveIdentities(self: *SpanArchiveState, count: usize) error{OutOfMemory}!u32 {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return self.index.reserve(count);
+    }
+
+    /// Installs fixed index pages without allocating while the publication
+    /// mutex is held. Concurrent absorbers may race to prepare the same page;
+    /// the loser destroys its unused candidate after the lock is released.
+    fn ensureIndexSlot(
+        self: *SpanArchiveState,
+        allocator: std.mem.Allocator,
+        identity: heap.CodeProvenanceId,
+    ) error{OutOfMemory}!void {
+        const branch_index, const leaf_index, _ = HeaderIndex.coordinates(identity);
+        var need_branch = false;
+        var need_leaf = false;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.index.branches[branch_index]) |branch| {
+            need_leaf = branch.leaves[leaf_index] == null;
+        } else {
+            need_branch = true;
+            need_leaf = true;
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (!need_leaf) return;
+
+        var branch_candidate: ?*HeaderIndex.Branch = null;
+        defer if (branch_candidate) |candidate| allocator.destroy(candidate);
+        if (need_branch) {
+            const candidate = try allocator.create(HeaderIndex.Branch);
+            candidate.* = .{};
+            branch_candidate = candidate;
+        }
+        var leaf_candidate: ?*HeaderIndex.Leaf = try allocator.create(HeaderIndex.Leaf);
+        // SAFETY: a null header makes its parallel entry unreachable, and set
+        // initializes the entry before publishing that exact header.
+        leaf_candidate.?.* = .{ .entries = undefined };
+        defer if (leaf_candidate) |candidate| allocator.destroy(candidate);
+
+        std.Io.Threaded.mutexLock(&self.mutex);
+        if (self.index.branches[branch_index] == null) {
+            self.index.branches[branch_index] = branch_candidate.?;
+            branch_candidate = null;
+        }
+        const branch = self.index.branches[branch_index].?;
+        if (branch.leaves[leaf_index] == null) {
+            branch.leaves[leaf_index] = leaf_candidate.?;
+            leaf_candidate = null;
+        }
+        std.Io.Threaded.mutexUnlock(&self.mutex);
+    }
+
+    fn publish(self: *SpanArchiveState, entry: *Entry) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        entry.previous = self.last;
+        if (self.last) |last| last.next = entry else self.first = entry;
+        self.last = entry;
+    }
+
+    fn indexed(self: *SpanArchiveState, header: *value.ListHandle) ?IndexedSpan {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        const identity = heap.codeProvenance(self.provenance_issuer, header) orelse return null;
+        return self.index.get(identity, header);
+    }
+
+    /// Validation precedes identity reservation and every header/index write.
+    /// Existing identities are accepted only when this exact archive already
+    /// indexes the exact header under that identity.
+    fn validateAbsorptionHeader(
+        self: *SpanArchiveState,
+        header: *value.ListHandle,
+    ) bool {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return switch (heap.inspectCodeProvenance(self.provenance_issuer, header)) {
+            .unassigned => true,
+            .assigned => |identity| self.index.get(identity, header) != null,
+            .foreign_namespace => false,
+        };
+    }
+
+    /// Commits one already-validated span in O(1) under the publication lock.
+    /// Assignment and exact-header membership become visible atomically to
+    /// other absorbers and diagnostic readers.
+    fn commitSpan(
+        self: *SpanArchiveState,
+        identity: heap.CodeProvenanceId,
+        archive_entry: *const Entry,
+        span_entry: *const reader.SpanTable.Entry,
+    ) bool {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        switch (heap.inspectCodeProvenance(self.provenance_issuer, span_entry.header)) {
+            .foreign_namespace => @panic("validated provenance namespace changed before commit"),
+            .assigned => |existing_identity| {
+                const existing = self.index.get(existing_identity, span_entry.header) orelse
+                    @panic("validated provenance membership changed before commit");
+                var updated = existing;
+                updated.archive_entry = archive_entry;
+                updated.token_entry = span_entry;
+                if (span_entry.source_range != null) updated.source_entry = span_entry;
+                if (span_entry.container_span != null) updated.container_entry = span_entry;
+                self.index.set(existing_identity, span_entry.header, updated);
+                return false;
+            },
+            .unassigned => {},
+        }
+        if (heap.assignCodeProvenance(
+            self.provenance_issuer,
+            span_entry.header,
+            identity,
+        ) != .assigned) @panic("validated provenance assignment changed before commit");
+        self.index.set(identity, span_entry.header, .{
+            .archive_entry = archive_entry,
+            .token_entry = span_entry,
+            .source_entry = if (span_entry.source_range != null) span_entry else null,
+            .container_entry = if (span_entry.container_span != null) span_entry else null,
+        });
+        return true;
+    }
 };
 
 pub const SpanArchive = enum(usize) {
@@ -48,9 +258,10 @@ pub const SpanArchive = enum(usize) {
     pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!SpanArchive {
         const owner_allocator = host.allocator();
         const backing = try owner_allocator.create(SpanArchiveState);
+        errdefer owner_allocator.destroy(backing);
         backing.* = .{
             .host = host,
-            .entries = .init(owner_allocator),
+            .provenance_issuer = try .init(owner_allocator),
         };
         return @enumFromInt(@intFromPtr(backing));
     }
@@ -62,51 +273,144 @@ pub const SpanArchive = enum(usize) {
     fn releaseDomain(self: *const SpanArchive) *heap.ReleaseDomain {
         return heap.hostDomain(self.privateState().host);
     }
+
+    fn provenanceNamespace(self: *const SpanArchive) heap.CodeProvenanceNamespace {
+        return self.privateState().provenance_issuer.constructionNamespace();
+    }
+
+    /// Reader-built lists receive this archive's namespace while still under
+    /// their construction capabilities. The opaque assignment issuer never
+    /// leaves the archive.
+    pub fn read(
+        self: *const SpanArchive,
+        source_name: []const u8,
+        source: []const u8,
+        diag: *reader.Diag,
+    ) reader.Error!reader.ReadResult {
+        const backing = self.privateState();
+        return reader.readCode(
+            backing.host,
+            source_name,
+            source,
+            diag,
+            backing.provenance_issuer.constructionNamespace(),
+        );
+    }
+
+    pub fn readCursor(
+        self: *const SpanArchive,
+        source_name: []const u8,
+        source: []const u8,
+        diag: *reader.Diag,
+    ) reader.ReadCursor {
+        return .initCode(
+            self.allocator(),
+            self.releaseDomain(),
+            source_name,
+            source,
+            diag,
+            self.provenanceNamespace(),
+        );
+    }
+
+    pub fn codeRoot(
+        self: *const SpanArchive,
+        values: []const value.Value,
+    ) error{OutOfMemory}!value.Value {
+        return list.fromValuesGenericCode(self.allocator(), values, self.provenanceNamespace());
+    }
+
+    pub fn rootMaterializer(
+        self: *const SpanArchive,
+        values: []const value.Value,
+    ) storage.GenericValueMaterializer {
+        return .initCode(self.allocator(), values, self.provenanceNamespace());
+    }
+
     pub fn deinit(self: *SpanArchive) void {
         const backing = self.privateState();
         const owner_allocator = backing.host.allocator();
         std.Io.Threaded.mutexLock(&backing.mutex);
-        var entries = backing.entries.iterator();
-        while (entries.next()) |entry| @constCast(entry).deinit(self.allocator(), self.releaseDomain());
-        backing.entries.retire(self.releaseDomain());
+        var current = backing.first;
+        backing.first = null;
+        backing.last = null;
+        var index = backing.index;
+        backing.index = .{};
         std.Io.Threaded.mutexUnlock(&backing.mutex);
+        while (current) |entry| {
+            current = entry.next;
+            entry.deinit(owner_allocator, self.releaseDomain());
+            owner_allocator.destroy(entry);
+        }
+        index.deinit(owner_allocator);
         backing.host.drain();
+        backing.provenance_issuer.deinit();
         owner_allocator.destroy(backing);
         self.* = .consumed;
     }
+
     /// Moves `parsed`'s provenance and source name into the archive and takes
-    /// ownership of `root`. The caller still owns both on allocation failure.
+    /// ownership of `root`. The caller still owns both on every failure.
+    pub const AbsorbError = error{ OutOfMemory, InvalidProvenance };
     pub fn absorb(
         self: *SpanArchive,
         parsed: *reader.Parsed,
         root: value.Value,
-    ) error{OutOfMemory}!void {
+    ) AbsorbError!void {
         var cursor = self.absorbCursor(parsed, root);
-        defer cursor.deinit();
-        while (try cursor.advance() == .pending) {}
+        while (cursor.advance() catch |err| {
+            std.debug.assert(cursor.deinit() == .caller_owned);
+            return err;
+        } == .pending) {}
+        std.debug.assert(cursor.deinit() == .archive_owned);
     }
+
     pub const AbsorbProgress = poll.Progress(void);
     pub const AbsorbCursor = struct {
+        pub const ArtifactOwnership = enum { caller_owned, archive_owned };
+        const Artifacts = union(enum) {
+            caller: struct {
+                root: value.Value,
+                pending_entry: ?*Entry = null,
+            },
+            archive: *Entry,
+        };
+
         archive: *SpanArchive,
         parsed: *reader.Parsed,
-        root: value.Value,
+        artifacts: Artifacts,
         writer: reader.SpanTable.PutCursor,
-        phase: enum { spans, publish, complete } = .spans,
+        index_entries: ?reader.SpanTable.EntryList.Iterator = null,
+        next_identity: u32 = 0,
+        phase: enum { spans, entry, validate, reserve, index, adopt, assign, complete } = .spans,
 
         pub fn init(archive: *SpanArchive, parsed: *reader.Parsed, root: value.Value) AbsorbCursor {
             std.debug.assert(root == .list);
             return .{
                 .archive = archive,
                 .parsed = parsed,
-                .root = root,
+                .artifacts = .{ .caller = .{ .root = root } },
                 .writer = .init(&parsed.spans, archive.allocator(), root.list, parsed.spans.top),
             };
         }
-        pub fn deinit(self: *AbsorbCursor) void {
+
+        /// Ends the cursor and reports the root/provenance ownership state.
+        /// Before adoption the caller still owns both inputs; after adoption
+        /// the archive keeps their stable storage even if indexing was partial.
+        pub fn deinit(self: *AbsorbCursor) ArtifactOwnership {
             if (self.phase == .spans) self.writer.deinit();
+            const ownership: ArtifactOwnership = switch (self.artifacts) {
+                .caller => |caller| result: {
+                    if (caller.pending_entry) |entry| self.archive.allocator().destroy(entry);
+                    break :result .caller_owned;
+                },
+                .archive => .archive_owned,
+            };
             self.* = undefined;
+            return ownership;
         }
-        pub fn advance(self: *AbsorbCursor) error{OutOfMemory}!AbsorbProgress {
+
+        pub fn advance(self: *AbsorbCursor) AbsorbError!AbsorbProgress {
             return switch (self.phase) {
                 .spans => switch (try self.writer.advance()) {
                     .pending => .pending,
@@ -115,30 +419,83 @@ pub const SpanArchive = enum(usize) {
                         if (self.parsed.spans.top.len != 0)
                             self.archive.allocator().free(self.parsed.spans.top);
                         self.parsed.spans.top = &.{};
-                        self.phase = .publish;
+                        self.phase = .entry;
                         break :result .pending;
                     },
                 },
-                .publish => result: {
-                    const backing = self.archive.privateState();
-                    std.Io.Threaded.mutexLock(&backing.mutex);
-                    defer std.Io.Threaded.mutexUnlock(&backing.mutex);
-                    try backing.entries.append(.{
-                        .root = self.root,
+                .entry => result: {
+                    const caller = &self.artifacts.caller;
+                    const entry = try self.archive.allocator().create(Entry);
+                    entry.* = .{
+                        .root = caller.root,
                         .spans = self.parsed.spans,
                         .source_name = self.parsed.source_name,
                         .source = self.parsed.source.?,
-                    });
+                    };
+                    caller.pending_entry = entry;
+                    self.index_entries = self.parsed.spans.entries.iterator();
+                    self.phase = .validate;
+                    break :result .pending;
+                },
+                .validate => result: {
+                    const span_entry = self.index_entries.?.next() orelse {
+                        self.index_entries = null;
+                        self.phase = .reserve;
+                        break :result .pending;
+                    };
+                    if (!self.archive.privateState().validateAbsorptionHeader(span_entry.header))
+                        return error.InvalidProvenance;
+                    break :result .pending;
+                },
+                .reserve => result: {
+                    const backing = self.archive.privateState();
+                    self.next_identity = try backing.reserveIdentities(self.parsed.spans.entries.count);
+                    self.index_entries = self.parsed.spans.entries.iterator();
+                    self.phase = .index;
+                    break :result .pending;
+                },
+                .index => result: {
+                    const span_entry = self.index_entries.?.next() orelse {
+                        self.index_entries = self.parsed.spans.entries.iterator();
+                        self.next_identity -= @intCast(self.parsed.spans.entries.count);
+                        self.phase = .adopt;
+                        break :result .pending;
+                    };
+                    _ = span_entry;
+                    const identity: heap.CodeProvenanceId = @enumFromInt(self.next_identity);
+                    try self.archive.privateState().ensureIndexSlot(self.archive.allocator(), identity);
+                    self.next_identity += 1;
+                    break :result .pending;
+                },
+                .adopt => result: {
+                    const entry = self.artifacts.caller.pending_entry.?;
+                    self.archive.privateState().publish(entry);
+                    self.artifacts = .{ .archive = entry };
                     self.parsed.spans = .init(self.archive.allocator());
                     self.parsed.source_name = &.{};
                     self.parsed.source = null;
-                    self.phase = .complete;
-                    break :result .complete;
+                    self.phase = .assign;
+                    break :result .pending;
+                },
+                .assign => result: {
+                    const span_entry = self.index_entries.?.next() orelse {
+                        self.phase = .complete;
+                        break :result .complete;
+                    };
+                    const backing = self.archive.privateState();
+                    const identity: heap.CodeProvenanceId = @enumFromInt(self.next_identity);
+                    if (backing.commitSpan(
+                        identity,
+                        self.artifacts.archive,
+                        span_entry,
+                    )) self.next_identity += 1;
+                    break :result .pending;
                 },
                 .complete => unreachable,
             };
         }
     };
+
     pub fn absorbCursor(
         self: *SpanArchive,
         parsed: *reader.Parsed,
@@ -146,6 +503,7 @@ pub const SpanArchive = enum(usize) {
     ) AbsorbCursor {
         return .init(self, parsed, root);
     }
+
     pub fn locate(
         self: *const SpanArchive,
         header: *value.ListHandle,
@@ -154,127 +512,62 @@ pub const SpanArchive = enum(usize) {
         var cursor = self.locateCursor(header, index);
         return poll.drive(?LocatedSpan, &cursor, .{});
     }
+
     pub const LocateProgress = poll.Progress(?LocatedSpan);
     pub const LocateCursor = struct {
-        const Query = union(enum) {
-            token: usize,
-            quotation,
-        };
-        const Lookup = union(enum) {
-            token: struct {
-                cursor: reader.SpanTable.LookupCursor,
-                index: usize,
-            },
-            quotation: reader.SpanTable.ContainerLookupCursor,
-        };
-        entries: poll.ChunkList(Entry).ReverseIterator,
-        header: *value.ListHandle,
-        query: Query,
-        active: ?struct {
-            entry: *const Entry,
-            lookup: Lookup,
-        } = null,
+        result: ?LocatedSpan,
 
         pub fn advance(self: *LocateCursor) LocateProgress {
-            if (self.active) |*active| return switch (active.lookup) {
-                .token => |*token| switch (token.cursor.advance()) {
-                    .pending => .pending,
-                    .complete => |maybe_spans| result: {
-                        if (maybe_spans) |found| {
-                            if (token.index >= found.len) return .{ .complete = null };
-                            return .{ .complete = .{
-                                .source_name = active.entry.source_name,
-                                .span = found[token.index],
-                            } };
-                        }
-                        self.active = null;
-                        break :result .pending;
-                    },
-                },
-                .quotation => |*lookup| switch (lookup.advance()) {
-                    .pending => .pending,
-                    .complete => |maybe_span| result: {
-                        if (maybe_span) |found| return .{ .complete = .{
-                            .source_name = active.entry.source_name,
-                            .span = found,
-                        } };
-                        self.active = null;
-                        break :result .pending;
-                    },
-                },
-            };
-            const entry = self.entries.next() orelse return .{ .complete = null };
-            switch (self.query) {
-                .token => |index| {
-                    if (entry.spans.lookupCursor(@constCast(self.header))) |lookup|
-                        self.active = .{ .entry = entry, .lookup = .{ .token = .{
-                            .cursor = lookup,
-                            .index = index,
-                        } } };
-                },
-                .quotation => {
-                    if (entry.spans.containerLookupCursor(@constCast(self.header))) |lookup|
-                        self.active = .{ .entry = entry, .lookup = .{ .quotation = lookup } };
-                },
-            }
-            return .pending;
+            return .{ .complete = self.result };
         }
     };
+
     pub fn locateCursor(
         self: *const SpanArchive,
         header: *value.ListHandle,
         index: usize,
     ) LocateCursor {
-        const backing = self.privateState();
-        std.Io.Threaded.mutexLock(&backing.mutex);
-        defer std.Io.Threaded.mutexUnlock(&backing.mutex);
-        return .{ .entries = backing.entries.reverseIterator(), .header = header, .query = .{ .token = index } };
+        const indexed = self.privateState().indexed(header) orelse return .{ .result = null };
+        if (index >= indexed.token_entry.spans.len) return .{ .result = null };
+        return .{ .result = .{
+            .source_name = indexed.archive_entry.source_name,
+            .span = indexed.token_entry.spans[index],
+        } };
     }
+
     pub fn locateQuotationCursor(
         self: *const SpanArchive,
         header: *value.ListHandle,
     ) LocateCursor {
-        const backing = self.privateState();
-        std.Io.Threaded.mutexLock(&backing.mutex);
-        defer std.Io.Threaded.mutexUnlock(&backing.mutex);
-        return .{ .entries = backing.entries.reverseIterator(), .header = header, .query = .quotation };
+        const indexed = self.privateState().indexed(header) orelse return .{ .result = null };
+        const span_entry = indexed.container_entry orelse return .{ .result = null };
+        const span = span_entry.container_span.?;
+        return .{ .result = .{
+            .source_name = indexed.archive_entry.source_name,
+            .span = span,
+        } };
     }
 
     pub const SourceProgress = poll.Progress(?reader.SourceSlice);
     pub const SourceCursor = struct {
-        entries: poll.ChunkList(Entry).ReverseIterator,
-        header: *value.ListHandle,
-        active: ?struct {
-            entry: *const Entry,
-            lookup: reader.SpanTable.SourceLookupCursor,
-        } = null,
+        source: ?reader.SourceSlice,
 
         pub fn advance(self: *SourceCursor) SourceProgress {
-            if (self.active) |*active| return switch (active.lookup.advance()) {
-                .pending => .pending,
-                .complete => |maybe_range| result: {
-                    if (maybe_range) |range| {
-                        const source = active.entry.source.slice(range.start, range.end);
-                        source.retain();
-                        return .{ .complete = source };
-                    }
-                    self.active = null;
-                    break :result .pending;
-                },
-            };
-            const entry = self.entries.next() orelse return .{ .complete = null };
-            if (entry.spans.sourceLookupCursor(@constCast(self.header))) |lookup|
-                self.active = .{ .entry = entry, .lookup = lookup };
-            return .pending;
+            const source = self.source orelse return .{ .complete = null };
+            source.retain();
+            self.source = null;
+            return .{ .complete = source };
         }
     };
+
     pub fn sourceCursor(self: *const SpanArchive, header: *value.ListHandle) SourceCursor {
-        const backing = self.privateState();
-        std.Io.Threaded.mutexLock(&backing.mutex);
-        defer std.Io.Threaded.mutexUnlock(&backing.mutex);
-        return .{ .entries = backing.entries.reverseIterator(), .header = header };
+        const indexed = self.privateState().indexed(header) orelse return .{ .source = null };
+        const span_entry = indexed.source_entry orelse return .{ .source = null };
+        const range = span_entry.source_range.?;
+        return .{ .source = indexed.archive_entry.source.slice(range.start, range.end) };
     }
 };
+
 comptime {
     heap.requireOpaqueHostRoot(SpanArchive, SpanArchiveState);
 }

@@ -30,6 +30,8 @@ const max_frame_count = std.math.maxInt(u32);
 const FrameIndex = enum(u32) { _ };
 const EffectCheckIndex = enum(u32) { _ };
 const ApplicationFrameIndex = enum(u32) { _ };
+const ApplicationProvenanceNonce = enum(u32) { _ };
+var next_application_provenance_nonce: std.atomic.Value(u64) = .init(1);
 const fuel_quantum: u32 = 1024;
 pub const kernel_poll_quantum: u32 = 65_536;
 pub const IdiomMode = enum { automatic, generic_only };
@@ -1062,9 +1064,41 @@ pub const ApplicationStep = struct {
     quotation: *Header,
     seeded: u32,
 };
-pub const ApplicationProvenancePolicy = enum {
+/// Opaque, non-dereferenced capability for one live application frame. The
+/// Machine encodes a process-unique nonce with the frame index and validates
+/// both before use; ordinary callers can neither construct nor inspect it.
+pub const ApplicationProvenanceTarget = opaque {};
+
+fn mintApplicationProvenanceNonce() error{OutOfMemory}!ApplicationProvenanceNonce {
+    var next = next_application_provenance_nonce.load(.monotonic);
+    while (next <= std.math.maxInt(u32)) {
+        if (next_application_provenance_nonce.cmpxchgWeak(
+            next,
+            next + 1,
+            .monotonic,
+            .monotonic,
+        )) |observed| {
+            next = observed;
+        } else return @enumFromInt(@as(u32, @intCast(next)));
+    }
+    return error.OutOfMemory;
+}
+
+fn encodeApplicationProvenanceTarget(
+    index: ApplicationFrameIndex,
+    nonce: ApplicationProvenanceNonce,
+) *const ApplicationProvenanceTarget {
+    comptime if (@sizeOf(usize) != 8)
+        @compileError("application provenance capabilities require a 64-bit target");
+    const raw = (@as(usize, @intFromEnum(nonce)) << 32) |
+        @as(usize, @intFromEnum(index));
+    std.debug.assert(raw != 0);
+    return @ptrFromInt(raw);
+}
+
+pub const ApplicationProvenance = union(enum) {
     boundary,
-    transparent_tail,
+    selected_target: *const ApplicationProvenanceTarget,
 };
 pub const IsolatedApplication = struct {
     quotation: *Header,
@@ -1074,7 +1108,7 @@ pub const IsolatedApplication = struct {
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
     seeded: u32,
-    provenance_policy: ApplicationProvenancePolicy,
+    provenance: ApplicationProvenance,
 };
 
 fn ApplicationAdapters(comptime Driver: type) type {
@@ -1123,10 +1157,7 @@ pub fn typedApplication(
         .parent_scope = parent_scope,
         .home = home,
         .seeded = seeded,
-        .provenance_policy = if (@hasDecl(Driver, "application_provenance"))
-            Driver.application_provenance
-        else
-            .boundary,
+        .provenance = .boundary,
     };
 }
 const ApplicationMode = union(enum) {
@@ -1145,6 +1176,7 @@ const ApplicationFrame = struct {
     mode: ApplicationMode,
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
+    provenance_nonce: ?ApplicationProvenanceNonce = null,
     fn deinit(self: ApplicationFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
         var selection = self.selection;
         selection.deinit(releases);
@@ -3200,9 +3232,7 @@ pub const Machine = struct {
             var budget: usize = kernel_poll_quantum;
             while (budget != 0) : (budget -= 1) switch (self.phase) {
                 .read => {
-                    if (self.reader_state == null) self.reader_state = reader_cursor.ReadCursor.init(
-                        self.allocator,
-                        evaluator.releaseDomain(),
+                    if (self.reader_state == null) self.reader_state = evaluator.unit.archive.readCursor(
                         self.source_name.borrow(),
                         self.source.borrow(),
                         &self.diag,
@@ -3232,7 +3262,7 @@ pub const Machine = struct {
                 .retire_reader => {
                     if (!self.reader_state.?.advanceRetirement()) continue;
                     self.reader_state = null;
-                    self.materializer = .init(self.allocator, self.parsed.?.values());
+                    self.materializer = evaluator.unit.archive.rootMaterializer(self.parsed.?.values());
                     self.phase = .materialize;
                 },
                 .materialize => switch (try self.materializer.?.advance(1)) {
@@ -3246,10 +3276,13 @@ pub const Machine = struct {
                         self.phase = .absorb;
                     },
                 },
-                .absorb => switch (try self.absorber.?.advance()) {
+                .absorb => switch (self.absorber.?.advance() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidProvenance => @panic("archive-bound source reader produced foreign provenance"),
+                }) {
                     .pending => {},
                     .complete => {
-                        self.absorber.?.deinit();
+                        std.debug.assert(self.absorber.?.deinit() == .archive_owned);
                         self.absorber = null;
                         self.root = null;
                         self.phase = .activate;
@@ -3312,7 +3345,9 @@ pub const Machine = struct {
         ) bool {
             return switch (self.retirement_phase) {
                 .prepare => result: {
-                    if (self.absorber) |*absorber| absorber.deinit();
+                    if (self.absorber) |*absorber| {
+                        if (absorber.deinit() == .archive_owned) self.root = null;
+                    }
                     self.absorber = null;
                     if (self.materializer) |*materializer| materializer.retire(releases);
                     self.materializer = null;
@@ -4207,6 +4242,37 @@ pub const Machine = struct {
         return application_index;
     }
 
+    fn validateApplicationProvenanceTarget(
+        self: *Machine,
+        target: *const ApplicationProvenanceTarget,
+    ) ?ApplicationFrameIndex {
+        const raw = @intFromPtr(target);
+        const raw_index: u32 = @truncate(raw);
+        const raw_nonce: u32 = @truncate(raw >> 32);
+        if (raw_nonce == 0 or raw_index >= self.unit.frames.items.len) return null;
+        const index: ApplicationFrameIndex = @enumFromInt(raw_index);
+        const frame = &self.unit.frames.items[@intFromEnum(index)];
+        if (frame.* != .application) return null;
+        const nonce = frame.application.provenance_nonce orelse return null;
+        if (@intFromEnum(nonce) != raw_nonce) return null;
+        return index;
+    }
+
+    /// Captures the current tail-selection boundary for trusted control
+    /// machinery that must suspend through bounded native work before it can
+    /// launch the semantically selected quotation. The frame owns the nonce;
+    /// relocation preserves it and frame retirement makes the handle stale.
+    pub fn applicationProvenanceTarget(
+        self: *Machine,
+    ) error{OutOfMemory}!?*const ApplicationProvenanceTarget {
+        const index = self.tailApplicationIndex() orelse return null;
+        const frame = &self.unit.frames.items[@intFromEnum(index)];
+        std.debug.assert(frame.* == .application);
+        if (frame.application.provenance_nonce == null)
+            frame.application.provenance_nonce = try mintApplicationProvenanceNonce();
+        return encodeApplicationProvenanceTarget(index, frame.application.provenance_nonce.?);
+    }
+
     /// Consumes an exhausted Eval. A dynamically applied quotation moves its
     /// already-owned header into the application frame; every other Eval uses
     /// the ordinary release. This delays one existing release but creates no
@@ -4294,6 +4360,14 @@ pub const Machine = struct {
             return err;
         };
         const base = StackWindow.init(self.unit.stack.items.len, application.seeded) orelse unreachable;
+        const provenance_target: ?ApplicationFrameIndex = switch (application.provenance) {
+            .boundary => null,
+            .selected_target => |target| self.validateApplicationProvenanceTarget(target) orelse {
+                application.deinit_fn(self.releaseDomain(), self.unit.allocator, application.context);
+                return self.fail(.domain, "application provenance target is stale or foreign");
+            },
+        };
+        const select_initial = application.provenance != .boundary;
         var child: ?*env.Scope = null;
         if (launch == .isolated) {
             child = self.acquireApplicationScope(application.parent_scope) catch {
@@ -4302,10 +4376,6 @@ pub const Machine = struct {
             };
         }
         var inherited_trace = inherited orelse no_word;
-        const transparent_target = if (application.provenance_policy == .transparent_tail)
-            self.tailApplicationIndex()
-        else
-            null;
         if (self.unit.current != null) {
             std.debug.assert(inherited == null);
             inherited_trace = self.suspendCurrent() catch {
@@ -4336,6 +4406,12 @@ pub const Machine = struct {
         defer continuation.deinit(self.releaseDomain(), self.unit.allocator);
         try self.appendFrame(&continuation);
         if (launch == .isolated) self.unit.stack_base = base.base();
+        if (select_initial) {
+            const target = provenance_target.?;
+            const frame = &self.unit.frames.items[@intFromEnum(target)];
+            std.debug.assert(frame.* == .application);
+            frame.application.selection.selectBorrowed(application.quotation);
+        }
         heap.incRef(application.quotation);
         self.unit.current = .{
             .code = application.quotation,
@@ -4344,7 +4420,8 @@ pub const Machine = struct {
             .resolution_scope = child orelse application.parent_scope,
             .home = application.home,
             .traced_word = inherited_trace,
-            .application_tail = transparent_target orelse application_index,
+            .application_tail = provenance_target orelse application_index,
+            .application_selection = if (select_initial) provenance_target else null,
         };
     }
     pub fn attemptOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
@@ -5995,7 +6072,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                     .parent_scope = continuation.parent_scope,
                     .home = continuation.home,
                     .seeded = step.seeded,
-                    .provenance_policy = .boundary,
+                    .provenance = .boundary,
                 }, launch, continuation.traced_word);
                 return true;
             }

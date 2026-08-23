@@ -12,6 +12,7 @@
 //! that never read a stack trace.
 const std = @import("std");
 const value = @import("../value.zig");
+const dict = @import("../dict.zig");
 const env = @import("../env.zig");
 const heap = @import("../heap.zig");
 const intern = @import("../intern.zig");
@@ -50,6 +51,32 @@ fn expectErrorContains(
     var rendered = try runtime.renderValue(failure);
     defer rendered.deinit();
     for (needles) |needle| try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), needle) != null);
+}
+
+fn errorField(allocator: std.mem.Allocator, error_value: value.Value, name: []const u8) !?value.Value {
+    return dict.symbolField(allocator, error_value, try intern.intern(name));
+}
+
+test "session: transferred quotation provenance is absent from another archive" {
+    const allocator = std.testing.allocator;
+    var source_session = try session.Session.init(allocator, &.{});
+    defer source_session.deinit();
+    var destination_session = try session.Session.init(allocator, &.{});
+    defer destination_session.deinit();
+
+    try expectOk(&source_session, "(1)");
+    try expectOk(&destination_session, "[0] 0");
+    try destination_session.pushBorrowed(source_session.stackItems()[0]);
+    const outcome = try destination_session.runUnit("destination.ecl", "fold");
+    const failure = switch (outcome) {
+        .err => |item| item,
+        .ok => return error.ExpectedLanguageError,
+        .incomplete => return error.UnexpectedIncomplete,
+    };
+    defer destination_session.release(failure);
+    const data = (try errorField(allocator, failure, "data")).?;
+    inline for ([_][]const u8{ "source", "line", "col" }) |name|
+        try std.testing.expect((try errorField(allocator, data, name)) == null);
 }
 
 /// Host-level publication helpers. The tests below measure generation

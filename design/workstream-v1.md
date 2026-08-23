@@ -229,9 +229,24 @@ char literals, strings with escapes, comma-as-whitespace, reserved `;`
 and `|`), forms (matched pairs, inert even-paired dict literals,
 binder lowering to point-free code with the boundary-crossing error),
 REPL incomplete-input detection, and **code-plane provenance**: spans in
-side tables keyed by list identity + token index, never on values
-(d.23). A parse∘print round-trip fuzz test runs in CI. The skeleton's
-reader tests are ported as fixtures.
+side tables keyed by a 24-bit session-local code-header identity + token index,
+never as a source or span payload on values (d.23). The Session archive owns a
+three-level direct directory, so provenance lookup is independent of archive
+history and pointer-hash collisions. Each initialized slot records and verifies
+the exact issuing header, so an identity collision from a quotation transferred
+between Sessions is absent rather than misresolved. Each archive owns an opaque,
+process-unique issuer; reader lists receive its numeric namespace only while
+under construction, and assignment validates that namespace and requires the
+issuer. A generic heap owner cannot substitute its authority. Runtime-built and
+CoW headers retain the reserved zero identity. Absorption validates every
+candidate in bounded steps before reserving identities, rejects foreign or
+unbound construction without consuming the inputs, and commits each validated
+header plus exact index entry in one O(1) critical section. After fallible page
+allocation and before the first commit, an O(1) adoption transition moves the
+root/source/span record into stable archive ownership; cursor teardown reports
+that ownership so cancellation cannot free index-visible storage. A
+parse∘print round-trip fuzz test runs in CI. The skeleton's reader tests are
+ported as fixtures.
 
 **Why this is a safe pause point**: Reader + values form a parse/print
 library with green tests; no evaluator yet.
@@ -266,7 +281,13 @@ switch-dispatch loop with ip/code/env in locals, ≤104-byte frames (raised from
 80 so a qualified-load frame owns its complete replay-or-dispatch request),
 base-index substack isolation, boundary frames with O(1) truncation,
 TCO as frame overwrite, lazy traces built only at unwind, and error
-dicts per d.19. Primitives are core-env bindings with fn-pointer
+dicts per d.19. Guard snapshot/restore carries a nominal enclosing application
+target: discarded predicates use local selection boundaries and launched
+actions select their quotation at that target before execution. The target is
+an opaque Machine-issued capability with a process-unique frame nonce; the
+Machine validates its live Unit, frame tag, and phase before indexing, so stale
+or foreign targets cannot name a frame. Primitives are
+core-env bindings with fn-pointer
 payloads (a minimal set: stack words, arithmetic via a provisional
 scalar path, `io.pp`/`io.prin`, `def`/`set`, `if`/`call`/`while`, `@attempt`/
 `raise`, `exit`, `args`). CLI modes: `-e`, script file, stdin, bare-stdin

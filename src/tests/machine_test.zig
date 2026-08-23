@@ -330,6 +330,88 @@ test "errors: iterative applications do not replace source effect provenance" {
     try expectLocation(allocator, application_data, "\"fixture.ecl\"", 6, 5);
 }
 
+test "errors: guard restoration preserves the enclosing application selection" {
+    const allocator = std.testing.allocator;
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+    const cases = [_]struct {
+        source_name: []const u8,
+        source: []const u8,
+        column: i64,
+    }{
+        .{
+            .source_name = "guard-cond.ecl",
+            .source =
+            \\(
+            \\(-- )
+            \\([0] 0
+            \\ (dup [((1) call) (pop pop 1 2) ()] cond)
+            \\ fold)
+            \\'run def)
+            \\'guardcond @defm
+            \\guardcond.run
+            ,
+            .column = 19,
+        },
+        .{
+            .source_name = "guard-while.ecl",
+            .source =
+            \\(
+            \\(-- )
+            \\([0] 0
+            \\ (dup ((dup 0 =) call) (pop pop 1 2) while)
+            \\ fold)
+            \\'run def)
+            \\'guardwhile @defm
+            \\guardwhile.run
+            ,
+            .column = 24,
+        },
+    };
+    for (cases) |case| {
+        const failure = (try runtime.runUnit(case.source_name, case.source)).err;
+        defer runtime.release(failure);
+        try std.testing.expectEqualStrings("contract", try errorKind(allocator, failure));
+        try std.testing.expectEqualStrings(
+            "fold",
+            intern.get((try field(allocator, failure, "word")).symbol),
+        );
+        const data = try field(allocator, failure, "data");
+        try std.testing.expectEqual(@as(i64, 0), (try field(allocator, data, "index")).int);
+        const rendered_name = try std.fmt.allocPrint(allocator, "\"{s}\"", .{case.source_name});
+        defer allocator.free(rendered_name);
+        try expectLocation(allocator, data, rendered_name, 4, case.column);
+    }
+}
+
+test "errors: archived contract locations remain attached after later sources" {
+    const allocator = std.testing.allocator;
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+    const source =
+        \\(
+        \\ (x -- y)
+        \\ (dup [0
+        \\  (pop 1 2)
+        \\  ()] case)
+        \\ 'pick def)
+        \\'early @defm
+    ;
+    try std.testing.expect((try runtime.runUnit("early.ecl", source)) == .ok);
+    var later: usize = 0;
+    while (later != 32) : (later += 1)
+        try std.testing.expect((try runtime.runUnit("later.ecl", "1 pop")) == .ok);
+
+    const failure = (try runtime.runUnit("invoke.ecl", "0 early.pick")).err;
+    defer runtime.release(failure);
+    const data = try expectContractCore(allocator, failure, "early.pick", 1, 2);
+    try expectLocation(allocator, data, "\"early.ecl\"", 4, 3);
+}
+
 test "machine_test: late binding redefinition heals existing callers" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);

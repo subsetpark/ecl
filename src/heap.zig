@@ -388,6 +388,8 @@ const HeaderImpl = extern struct {
     len: u64,
 
     const kind_mask: u32 = 0xff;
+    const provenance_shift = 8;
+    const provenance_max = std.math.maxInt(u24);
 
     fn init(kind_value: HeapKind, len_value: u64) HeaderImpl {
         return .{
@@ -403,6 +405,18 @@ const HeaderImpl = extern struct {
 
     fn setKind(self: *HeaderImpl, new_kind: HeapKind) void {
         self.meta = (self.meta & ~kind_mask) | @intFromEnum(new_kind);
+    }
+
+    fn provenance(self: *const HeaderImpl) ?CodeProvenanceId {
+        const raw = self.meta >> provenance_shift;
+        return if (raw == 0) null else @enumFromInt(raw);
+    }
+
+    fn assignProvenance(self: *HeaderImpl, identity: CodeProvenanceId) void {
+        std.debug.assert(self.provenance() == null);
+        const raw = @intFromEnum(identity);
+        std.debug.assert(raw != 0 and raw <= provenance_max);
+        self.meta |= raw << provenance_shift;
     }
 };
 
@@ -451,6 +465,7 @@ const Object = struct {
     header: HeaderImpl,
     capacity: usize,
     payload: ?*anyopaque,
+    provenance_namespace: CodeProvenanceNamespace,
     next_destroy: ?*Header,
     destroy_index: usize,
 };
@@ -485,6 +500,113 @@ fn uniqueImpl(header: *UniqueHeader) *HeaderImpl {
 
 pub fn kind(header: *const Header) HeapKind {
     return headerImplConst(header).kind();
+}
+
+/// Session-local identity for reader-built code provenance. Zero is reserved
+/// for runtime-built and copy-on-write headers, so those remain naturally
+/// absent from the source archive.
+pub const CodeProvenanceId = enum(u32) { _ };
+pub const max_code_provenance_id: u32 = std.math.maxInt(u24);
+pub const CodeProvenanceNamespace = enum(u64) { none = 0, _ };
+
+const CodeProvenanceIssuerState = struct {
+    allocator: std.mem.Allocator,
+    namespace: CodeProvenanceNamespace,
+};
+var next_code_provenance_namespace: std.atomic.Value(u64) = .init(1);
+
+/// Archive-owned issuer for one provenance namespace. Construction receives
+/// only its numeric namespace; assignment requires the still-opaque issuer.
+pub const CodeProvenanceIssuer = opaque {
+    pub fn init(allocator: std.mem.Allocator) error{OutOfMemory}!*CodeProvenanceIssuer {
+        var next = next_code_provenance_namespace.load(.monotonic);
+        while (next != 0) {
+            if (next_code_provenance_namespace.cmpxchgWeak(
+                next,
+                next +% 1,
+                .monotonic,
+                .monotonic,
+            )) |observed| {
+                next = observed;
+            } else {
+                const state = try allocator.create(CodeProvenanceIssuerState);
+                state.* = .{ .allocator = allocator, .namespace = @enumFromInt(next) };
+                return @ptrCast(state);
+            }
+        }
+        return error.OutOfMemory;
+    }
+
+    pub fn deinit(self: *CodeProvenanceIssuer) void {
+        const state = codeProvenanceIssuerState(self);
+        const allocator = state.allocator;
+        allocator.destroy(state);
+    }
+
+    pub fn constructionNamespace(self: *const CodeProvenanceIssuer) CodeProvenanceNamespace {
+        return codeProvenanceIssuerStateConst(self).namespace;
+    }
+};
+
+fn codeProvenanceIssuerState(issuer: *CodeProvenanceIssuer) *CodeProvenanceIssuerState {
+    return @ptrCast(@alignCast(issuer));
+}
+
+fn codeProvenanceIssuerStateConst(issuer: *const CodeProvenanceIssuer) *const CodeProvenanceIssuerState {
+    return @ptrCast(@alignCast(issuer));
+}
+
+pub const CodeProvenanceInspection = union(enum) {
+    unassigned,
+    assigned: CodeProvenanceId,
+    foreign_namespace,
+};
+
+pub fn inspectCodeProvenance(
+    issuer: *const CodeProvenanceIssuer,
+    handle: *ListHandle,
+) CodeProvenanceInspection {
+    const header = headerFromList(handle);
+    if (objectConst(header).provenance_namespace != issuer.constructionNamespace())
+        return .foreign_namespace;
+    return if (headerImplConst(header).provenance()) |identity|
+        .{ .assigned = identity }
+    else
+        .unassigned;
+}
+
+pub fn codeProvenance(
+    issuer: *const CodeProvenanceIssuer,
+    handle: *ListHandle,
+) ?CodeProvenanceId {
+    return switch (inspectCodeProvenance(issuer, handle)) {
+        .assigned => |identity| identity,
+        .unassigned, .foreign_namespace => null,
+    };
+}
+
+pub const CodeProvenanceAssignment = enum {
+    assigned,
+    already_assigned,
+    foreign_namespace,
+    invalid_identity,
+};
+
+pub fn assignCodeProvenance(
+    issuer: *const CodeProvenanceIssuer,
+    handle: *ListHandle,
+    identity: CodeProvenanceId,
+) CodeProvenanceAssignment {
+    const raw_identity = @intFromEnum(identity);
+    if (raw_identity == 0 or raw_identity > max_code_provenance_id)
+        return .invalid_identity;
+    const header = headerFromList(handle);
+    if (objectConst(header).provenance_namespace != issuer.constructionNamespace())
+        return .foreign_namespace;
+    const implementation = headerImpl(header);
+    if (implementation.provenance() != null) return .already_assigned;
+    implementation.assignProvenance(identity);
+    return .assigned;
 }
 
 pub fn headerFromList(handle: *ListHandle) *Header {
@@ -595,6 +717,7 @@ fn allocObject(
         .header = HeaderImpl.init(kind_value, len_value),
         .capacity = capacity_value,
         .payload = null,
+        .provenance_namespace = .none,
         .next_destroy = null,
         .destroy_index = 0,
     };
@@ -619,12 +742,15 @@ fn allocListHeader(
     kind_value: HeapKind,
     len_value: usize,
     capacity_value: usize,
+    provenance_namespace: CodeProvenanceNamespace,
 ) error{OutOfMemory}!*InitializingList {
     std.debug.assert(switch (kind_value) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
         .dict, .task, .module, .reserved_mask => false,
     });
-    return @ptrCast(@alignCast(try allocObject(allocator, kind_value, len_value, capacity_value)));
+    const header = try allocObject(allocator, kind_value, len_value, capacity_value);
+    object(header).provenance_namespace = provenance_namespace;
+    return @ptrCast(@alignCast(header));
 }
 
 /// The unboxed element each list representation stores. One mapping serves the
@@ -682,11 +808,21 @@ pub fn ListBuilder(comptime kind_value: HeapKind) type {
             len_value: usize,
             capacity_value: usize,
         ) error{OutOfMemory}!Self {
+            return initCode(allocator, len_value, capacity_value, .none);
+        }
+
+        pub fn initCode(
+            allocator: std.mem.Allocator,
+            len_value: usize,
+            capacity_value: usize,
+            provenance_namespace: CodeProvenanceNamespace,
+        ) error{OutOfMemory}!Self {
             return .{ .header = try allocListHeader(
                 allocator,
                 kind_value,
                 len_value,
                 capacity_value,
+                provenance_namespace,
             ) };
         }
 
@@ -742,15 +878,25 @@ pub const AnyListBuilder = union(enum) {
         len_value: usize,
         capacity_value: usize,
     ) error{OutOfMemory}!AnyListBuilder {
+        return initCode(allocator, kind_value, len_value, capacity_value, .none);
+    }
+
+    pub fn initCode(
+        allocator: std.mem.Allocator,
+        kind_value: HeapKind,
+        len_value: usize,
+        capacity_value: usize,
+        provenance_namespace: CodeProvenanceNamespace,
+    ) error{OutOfMemory}!AnyListBuilder {
         return switch (kind_value) {
-            .generic_spine => .{ .generic = try .init(allocator, len_value, capacity_value) },
-            .leaf_u8 => .{ .u8 = try .init(allocator, len_value, capacity_value) },
-            .leaf_i64 => .{ .i64 = try .init(allocator, len_value, capacity_value) },
-            .leaf_f64 => .{ .f64 = try .init(allocator, len_value, capacity_value) },
-            .leaf_char1 => .{ .char1 = try .init(allocator, len_value, capacity_value) },
-            .leaf_char2 => .{ .char2 = try .init(allocator, len_value, capacity_value) },
-            .leaf_char4 => .{ .char4 = try .init(allocator, len_value, capacity_value) },
-            .leaf_symbol => .{ .symbol = try .init(allocator, len_value, capacity_value) },
+            .generic_spine => .{ .generic = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
+            .leaf_u8 => .{ .u8 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
+            .leaf_i64 => .{ .i64 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
+            .leaf_f64 => .{ .f64 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
+            .leaf_char1 => .{ .char1 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
+            .leaf_char2 => .{ .char2 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
+            .leaf_char4 => .{ .char4 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
+            .leaf_symbol => .{ .symbol = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .dict, .task, .module, .reserved_mask => unreachable,
         };
     }
@@ -845,6 +991,7 @@ fn allocTaskHeader(
         .header = HeaderImpl.init(.task, identity),
         .capacity = 0,
         .payload = @ptrCast(storage),
+        .provenance_namespace = .none,
         .next_destroy = null,
         .destroy_index = 0,
     };
@@ -894,6 +1041,7 @@ fn allocModuleHeader(
         .header = HeaderImpl.init(.module, 0),
         .capacity = 0,
         .payload = @ptrCast(storage),
+        .provenance_namespace = .none,
         .next_destroy = null,
         .destroy_index = 0,
     };
