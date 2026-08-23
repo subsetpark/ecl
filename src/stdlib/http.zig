@@ -12,7 +12,7 @@
 //! unresponsive server occupies its worker until the host gives up. Both go
 //! away with the future `Offload` capability without changing the value-level
 //! API, which is why the response shape is fixed now: `{'status int,
-//! 'headers dict, 'body string}` leaks no backend detail.
+//! 'headers dict, 'body value}` leaks no backend detail.
 const std = @import("std");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
@@ -36,6 +36,12 @@ pub const words = [_]env.BuiltinWord{
         .primitive = get,
     },
     .{
+        .name = "get-bytes",
+        .doc = "( url headers -- response ) Fetch a url like get, returning " ++
+            "the response body as an exact list of byte integers.",
+        .primitive = getBytes,
+    },
+    .{
         .name = "post",
         .doc = "( url headers body -- response ) Post a body to a url with " ++
             "caller-supplied headers, returning {'status 'headers 'body}.",
@@ -47,14 +53,20 @@ pub const words = [_]env.BuiltinWord{
 const redirect_buffer_bytes: usize = 8 * 1024;
 
 fn get(evaluator: *Machine) MachineError!void {
-    return begin(evaluator, .GET);
+    return begin(evaluator, .GET, .text);
+}
+
+fn getBytes(evaluator: *Machine) MachineError!void {
+    return begin(evaluator, .GET, .bytes);
 }
 
 fn post(evaluator: *Machine) MachineError!void {
-    return begin(evaluator, .POST);
+    return begin(evaluator, .POST, .text);
 }
 
-fn begin(evaluator: *Machine, method: std.http.Method) MachineError!void {
+const ResponseMode = enum { text, bytes };
+
+fn begin(evaluator: *Machine, method: std.http.Method, response_mode: ResponseMode) MachineError!void {
     const sends_body = method == .POST;
     try evaluator.require(if (sends_body) 3 else 2);
     var body: ?heap.OwnedValue = null;
@@ -78,6 +90,8 @@ fn begin(evaluator: *Machine, method: std.http.Method) MachineError!void {
     try evaluator.startDriver(RequestDriver{
         .allocator = evaluator.allocator(),
         .method = method,
+        .response_mode = response_mode,
+        .tls_trust = evaluator.unit.inherited.tls_trust,
         .url_value = .init(url.take()),
         .headers_value = .init(headers.take()),
         .body_value = if (body) |*owned| .init(owned.take()) else null,
@@ -112,6 +126,8 @@ const RequestDriver = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     allocator: std.mem.Allocator,
     method: std.http.Method,
+    response_mode: ResponseMode,
+    tls_trust: ?machine.TlsTrust,
     url_value: heap.Owned(Value),
     headers_value: heap.Owned(Value),
     body_value: ?heap.Owned(Value),
@@ -132,6 +148,7 @@ const RequestDriver = struct {
 
     /// Materializing a string or a dict is resumable too.
     text: ?kernel_storage.TextMaterializer = null,
+    bytes: ?kernel_storage.ByteListMaterializer = null,
     pairs: std.ArrayList(dict.Pair) = .empty,
     pair_key: ?Value = null,
     dictionary: ?kernel_storage.DictMaterializer = null,
@@ -164,18 +181,34 @@ const RequestDriver = struct {
             },
             .response_headers => return self.advanceResponseHeaders(evaluator),
             .response_body => {
-                if (self.text == null)
-                    self.text = .init(self.allocator, self.response_body.items);
-                switch (try self.text.?.advance(machine.kernel_poll_quantum)) {
-                    .pending => return .yielded,
-                    .complete => |text| {
-                        self.text.?.deinit();
-                        self.text = null;
-                        self.body_result = text;
-                        self.phase = .finish;
-                        return .yielded;
+                switch (self.response_mode) {
+                    .text => {
+                        if (self.text == null)
+                            self.text = .init(self.allocator, self.response_body.items);
+                        switch (try self.text.?.advance(machine.kernel_poll_quantum)) {
+                            .pending => return .yielded,
+                            .complete => |text| {
+                                self.text.?.deinit();
+                                self.text = null;
+                                self.body_result = text;
+                            },
+                        }
+                    },
+                    .bytes => {
+                        if (self.bytes == null)
+                            self.bytes = .init(self.allocator, self.response_body.items);
+                        switch (try self.bytes.?.advance(machine.kernel_poll_quantum)) {
+                            .pending => return .yielded,
+                            .complete => |bytes| {
+                                self.bytes.?.deinit();
+                                self.bytes = null;
+                                self.body_result = bytes;
+                            },
+                        }
                     },
                 }
+                self.phase = .finish;
+                return .yielded;
             },
             .finish => return self.finish(evaluator),
         }
@@ -270,6 +303,18 @@ const RequestDriver = struct {
 
         var client: std.http.Client = .{ .allocator = self.allocator, .io = io };
         defer client.deinit();
+        if (self.tls_trust) |trust| {
+            client.now = trust.now;
+            client.ca_bundle.addCertsFromFilePathAbsolute(
+                self.allocator,
+                io,
+                trust.now,
+                trust.ca_file,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return self.failIo(evaluator, @errorName(err)),
+            };
+        }
         const sends_body = self.request_body != null;
         var request = client.request(self.method, uri, .{
             .redirect_behavior = if (sends_body) .unhandled else @enumFromInt(3),
@@ -437,6 +482,8 @@ const RequestDriver = struct {
         self.encoder = null;
         if (self.text) |*text| text.retire(releases);
         self.text = null;
+        if (self.bytes) |*bytes| bytes.retire(releases);
+        self.bytes = null;
         if (self.dictionary) |*dictionary| dictionary.retire(releases);
         self.dictionary = null;
         if (self.pair_key) |key| releases.releaseValue(key);

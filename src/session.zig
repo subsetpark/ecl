@@ -41,6 +41,13 @@ pub const Config = union(enum) {
 };
 pub const default_worker_count: usize = session_options.default_worker_count;
 
+/// Deterministic HTTPS verification inputs. `ca_file` is borrowed on input;
+/// the Session copies it and owns the copy for the lifetime of every Unit.
+pub const TlsTrustOverride = struct {
+    ca_file: []const u8,
+    now: std.Io.Timestamp,
+};
+
 /// The host services a Session inherits from its process. Grouping them
 /// nominally keeps adding one — an environment snapshot, a standard-input
 /// mode — from turning `init` into a positional checklist whose arguments
@@ -49,6 +56,7 @@ pub const Host = struct {
     io: std.Io,
     output: *std.Io.Writer,
     diagnostics: *std.Io.Writer,
+    tls_trust: ?TlsTrustOverride = null,
     ecl_path: ?[]const u8 = null,
     /// Borrowed name/value pairs; the Session owns its own copy.
     environ: []const machine.Environ.Entry = &.{},
@@ -273,6 +281,7 @@ const SessionCore = struct {
     output: ?*std.Io.Writer,
     diagnostics: ?*std.Io.Writer,
     host_io: ?std.Io,
+    tls_trust: ?machine.TlsTrust,
     ecl_path: ?[]u8,
     environ: machine.Environ,
     environ_bytes: ?[]u8,
@@ -402,6 +411,14 @@ pub const Session = enum(usize) {
         else
             null;
         errdefer if (owned_ecl_path) |path| allocator.free(path);
+        const owned_tls_trust: ?machine.TlsTrust = if (host) |services|
+            if (services.tls_trust) |trust| .{
+                .ca_file = try allocator.dupe(u8, trust.ca_file),
+                .now = trust.now,
+            } else null
+        else
+            null;
+        errdefer if (owned_tls_trust) |trust| allocator.free(trust.ca_file);
         var snapshot = try EnvironSnapshot.capture(
             allocator,
             if (host) |services| services.environ else &.{},
@@ -425,6 +442,7 @@ pub const Session = enum(usize) {
             .output = output,
             .diagnostics = if (host) |services| services.diagnostics else null,
             .host_io = if (host) |services| services.io else null,
+            .tls_trust = owned_tls_trust,
             .ecl_path = owned_ecl_path,
             .environ = .{ .entries = snapshot.entries },
             .environ_bytes = snapshot.bytes,
@@ -453,6 +471,7 @@ pub const Session = enum(usize) {
         core.stack.deinit(core.allocator());
         core.releaseDomain().releaseValue(core.arguments);
         if (core.ecl_path) |path| core.allocator().free(path);
+        if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);
         var snapshot = EnvironSnapshot{
             .entries = @constCast(core.environ.entries),
             .bytes = core.environ_bytes,
@@ -561,6 +580,7 @@ pub const Session = enum(usize) {
             .diagnostics = core.diagnostics,
             .console = &core.console,
             .host_io = core.host_io,
+            .tls_trust = core.tls_trust,
             .ecl_path = core.ecl_path,
             .environ = &core.environ,
             .standard_input = &core.standard_input,

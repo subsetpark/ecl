@@ -1095,11 +1095,19 @@ pub const InheritedContext = struct {
     diagnostics: ?*std.Io.Writer = null,
     console: ?*console_api.Console = null,
     host_io: ?std.Io = null,
+    tls_trust: ?TlsTrust = null,
     ecl_path: ?[]const u8 = null,
     environ: ?*const Environ = null,
     standard_input: ?*StandardInput = null,
     idiom_mode: IdiomMode = .automatic,
     phrase_recognizer: ?PhraseRecognizer = null,
+};
+
+/// Immutable HTTPS verification inputs inherited by every Unit. The CA path
+/// borrows Session-owned storage, whose lifetime encloses all Units.
+pub const TlsTrust = struct {
+    ca_file: []const u8,
+    now: std.Io.Timestamp,
 };
 
 /// One immutable snapshot of the host environment, captured once at session

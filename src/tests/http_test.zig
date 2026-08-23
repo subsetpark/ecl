@@ -5,6 +5,7 @@
 //! not provide it.
 const std = @import("std");
 const http_fixture = @import("http_fixture_options");
+const pkg_fixture = @import("pkg_fixture_options");
 const session = @import("../session.zig");
 const support = @import("kernel_test_support.zig");
 const test_heap = @import("test_heap.zig");
@@ -12,13 +13,145 @@ const test_heap = @import("test_heap.zig");
 const allocator = std.testing.allocator;
 
 test "http: HTTPS get-bytes preserves arbitrary response octets" {
-    // PENDING: Patch 3.
-    return error.SkipZigTest;
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    try expectTlsStack(
+        fixture.port,
+        "\"https://127.0.0.1:{d}/redirect-bytes\" {{}} http.get-bytes 'body at " ++
+            "\"https://127.0.0.1:{d}/gzip-bytes\" {{}} http.get-bytes 'body at",
+        "[0 1 127 128 255 195 40] [0 1 127 128 255 195 40]",
+        valid_cert_time,
+    );
 }
 
 test "http: custom TLS trust uses fixed verification time" {
-    // PENDING: Patch 3.
-    return error.SkipZigTest;
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+
+    // The fixture certificate is not yet valid at this instant. A failure
+    // here proves Client used the supplied time rather than the wall clock.
+    const source = try std.fmt.allocPrint(
+        allocator,
+        "\"https://127.0.0.1:{d}/bytes\" {{}} http.get-bytes",
+        .{fixture.port},
+    );
+    defer allocator.free(source);
+    try expectTlsIoError(source, invalid_cert_time);
+}
+
+const valid_cert_time = std.Io.Timestamp.fromNanoseconds(
+    @as(i96, 1_788_220_800) * std.time.ns_per_s,
+);
+const invalid_cert_time = std.Io.Timestamp.fromNanoseconds(
+    @as(i96, 1_756_684_800) * std.time.ns_per_s,
+);
+
+/// Python-backed HTTPS fixture used by both the exact-byte and package
+/// synchronization cases. Its JSON announcement is data from the process,
+/// not an ambient resource, and the child is synchronously reaped by kill.
+const HttpsFixture = struct {
+    child: std.process.Child,
+    port: u16,
+
+    fn start() !HttpsFixture {
+        var child = try std.process.spawn(std.testing.io, .{
+            .argv = &.{
+                "python3",
+                pkg_fixture.server_script,
+                "--cert",
+                pkg_fixture.server_cert,
+                "--key",
+                pkg_fixture.server_key,
+            },
+            .stdout = .pipe,
+            .stderr = .inherit,
+        });
+        errdefer child.kill(std.testing.io);
+        var buffer: [16 * 1024]u8 = undefined;
+        var reader = child.stdout.?.reader(std.testing.io, &buffer);
+        const line = try reader.interface.takeDelimiterExclusive('\n');
+        var announcement = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer announcement.deinit();
+        const port_value = announcement.value.object.get("port") orelse
+            return error.FixtureHandshakeFailed;
+        if (port_value != .integer) return error.FixtureHandshakeFailed;
+        return .{
+            .child = child,
+            .port = std.math.cast(u16, port_value.integer) orelse
+                return error.FixtureHandshakeFailed,
+        };
+    }
+
+    fn stop(self: *HttpsFixture) void {
+        self.child.kill(std.testing.io);
+    }
+};
+
+fn expectTlsStack(
+    port: u16,
+    comptime template: []const u8,
+    expected: []const u8,
+    now: std.Io.Timestamp,
+) !void {
+    const source = try std.fmt.allocPrint(allocator, template, .{ port, port });
+    defer allocator.free(source);
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(allocator);
+    defer diagnostics.deinit();
+    const borrowed_path = try allocator.dupe(u8, pkg_fixture.ca_file);
+    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .tls_trust = .{ .ca_file = borrowed_path, .now = now },
+    });
+    allocator.free(borrowed_path);
+    defer runtime.deinit();
+    switch (try runtime.runUnit("<http-tls-test>", source)) {
+        .ok => {},
+        .incomplete => return error.UnexpectedIncomplete,
+        .err => |failure| {
+            defer runtime.release(failure);
+            var rendered = try runtime.renderValue(failure);
+            defer rendered.deinit();
+            std.log.err("unexpected language error: {s}", .{rendered.bytes()});
+            return error.UnexpectedLanguageError;
+        },
+    }
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings(expected, display.bytes());
+}
+
+fn expectTlsIoError(source: []const u8, now: std.Io.Timestamp) !void {
+    var heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&heap);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(allocator);
+    defer diagnostics.deinit();
+    var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .tls_trust = .{ .ca_file = pkg_fixture.ca_file, .now = now },
+    });
+    defer runtime.deinit();
+    const failure = switch (try runtime.runUnit("<http-tls-test>", source)) {
+        .ok, .incomplete => return error.ExpectedLanguageError,
+        .err => |item| item,
+    };
+    defer runtime.release(failure);
+    try support.expectLanguageError(failure, .{
+        .name = "certificate rejected at the fixed time",
+        .source = source,
+        .kind = "io",
+        .word = "http.get-bytes",
+        .message_contains = "cannot reach",
+    });
 }
 
 /// A running fixture server plus the port it actually bound.
@@ -225,7 +358,7 @@ test "http: refused connection is an io error" {
 }
 
 test "http: every exported word carries documentation" {
-    for ([_][]const u8{ "get", "post" }) |name| {
+    for ([_][]const u8{ "get", "get-bytes", "post" }) |name| {
         const source = try std.fmt.allocPrint(
             allocator,
             "'http.{s} doc len 0 >",

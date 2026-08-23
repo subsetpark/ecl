@@ -475,7 +475,7 @@ test "module sources: formatter and standard modules use @defm" {
     const exports = [_][]const u8{
         "result.ok",         "str.upper",       "io.print",
         "csv.parse",         "json.parse",      "table.valid?",
-        "http.get",          "archive.sha256",  "rng.float",
+        "http.get-bytes",    "archive.sha256",  "rng.float",
         "pkg.version.less?", "pkg.name.valid?", "pkg.data.read-one",
         "pkg.manifest.read", "pkg.lock.read",   "pkg.mvs.resolve",
     };

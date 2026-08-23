@@ -839,6 +839,21 @@ operand shape, and rows that still run boxed say so.
   validates and copies any equivalent ordinary integer list in bounded
   chunks. `archive.sha256` and `archive.unpack-tgz` consume only the resulting
   `ByteVector`; neither can assign semantics to the list's storage kind.
+- **HTTPS trust is Session-owned and inherited as immutable data.** A Host
+  may supply one CA file and one fixed certificate-verification timestamp.
+  Session initialization copies the borrowed path, every Unit inherits only
+  that immutable pair, and the HTTP driver captures it when the request
+  starts. With an override, `std.http.Client` loads exactly that CA file and
+  uses exactly that timestamp; it never rescans system roots or consults the
+  wall clock. With no override, the ordinary system-trust behavior remains.
+  The Session-owned copy outlives every child Unit and is released only after
+  scheduler shutdown.
+- **HTTP response bytes are materialized after transport decoding.**
+  `http.get-bytes` shares `http.get`'s status, headers, redirects, and content
+  decompression, then constructs an exact-size ordinary integer list from the
+  decoded octets in bounded chunks. It never routes opaque bytes through UTF-8
+  or string fallback rules, and the list's eventual packed representation is
+  not part of the language contract.
 - **Archive extraction separates validation, mutation, and publication.** The
   driver checks the gzip footer limit before allocating the exact tar buffer,
   decompresses and verifies CRC in bounded chunks, then parses tar headers,

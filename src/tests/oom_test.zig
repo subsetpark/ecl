@@ -436,7 +436,8 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-http.ecl",
-        "(\"http://127.0.0.1:1/x\" {} http.get) @attempt pop",
+        "(\"http://127.0.0.1:1/x\" {} http.get) @attempt pop " ++
+            "(\"http://127.0.0.1:1/x\" {} http.get-bytes) @attempt pop",
     );
 }
 

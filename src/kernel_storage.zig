@@ -185,6 +185,59 @@ pub const ByteStringMaterializer = struct {
     }
 };
 
+const ByteListOps = struct {
+    fn begin(
+        allocator: std.mem.Allocator,
+        source: []const u8,
+        _: void,
+    ) error{OutOfMemory}!heap.ListBuilder(.leaf_u8) {
+        return .init(allocator, source.len, initialCapacity(source.len));
+    }
+    fn fill(
+        builder: *heap.ListBuilder(.leaf_u8),
+        source: []const u8,
+        index: *usize,
+        end: usize,
+    ) void {
+        @memcpy(builder.items()[index.*..end], source[index.*..end]);
+        index.* = end;
+    }
+    fn finish(builder: *heap.ListBuilder(.leaf_u8)) Value {
+        return .{ .list = builder.finish() };
+    }
+};
+
+const ByteListChunked = ChunkedMaterializer(
+    u8,
+    heap.ListBuilder(.leaf_u8),
+    void,
+    ByteListOps,
+);
+
+/// Exact-size resumable construction of an ordinary ECL list of byte
+/// integers. Unlike ByteStringMaterializer, this does not give the result
+/// string semantics: every source octet remains an independently observable
+/// integer from 0 through 255.
+pub const ByteListMaterializer = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    inner: ByteListChunked,
+
+    pub fn init(allocator: std.mem.Allocator, source: []const u8) ByteListMaterializer {
+        return .{ .inner = .init(allocator, source, {}) };
+    }
+    pub fn deinit(self: *ByteListMaterializer) void {
+        self.inner.deinit();
+        self.* = undefined;
+    }
+    pub fn retire(self: *ByteListMaterializer, releases: *heap.ReleaseDomain) void {
+        self.inner.retire(releases);
+    }
+    pub fn advance(self: *ByteListMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
+        return self.inner.advance(budget);
+    }
+};
+
 /// Resumable equivalent of the language's text convention: valid UTF-8 is
 /// decoded to scalars, while opaque host bytes map one-to-one to characters.
 pub const TextMaterializer = struct {
@@ -1074,6 +1127,34 @@ pub const GenericValueMaterializer = struct {
         return self.inner.advance(budget);
     }
 };
+
+fn byteListAllocationProbe(allocator: std.mem.Allocator) !void {
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
+    var materializer = ByteListMaterializer.init(
+        allocator,
+        &.{ 0, 1, 127, 128, 255 },
+    );
+    var completed = false;
+    defer if (!completed) materializer.retire(host.domain());
+    while (true) switch (try materializer.advance(2)) {
+        .pending => {},
+        .complete => |built| {
+            materializer.deinit();
+            completed = true;
+            host.domain().releaseValue(built);
+            return;
+        },
+    };
+}
+
+test "byte-list materialization propagates every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        byteListAllocationProbe,
+        .{},
+    );
+}
 
 pub const ToUtf8Progress = poll.Progress([]u8);
 pub const ToUtf8Cursor = struct {
