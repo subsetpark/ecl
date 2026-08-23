@@ -71,7 +71,7 @@ fn compareExecutions(source: []const u8) !void {
     try std.testing.expectEqual(@as(u64, 0), generic.runtime.lastIdiomHits());
     try std.testing.expectEqual(generic.failure != null, automatic.failure != null);
     if (automatic.failure == null) {
-        try expectStacksIdentical(automatic.runtime.stackItems(), generic.runtime.stackItems());
+        try expectStacksEquivalent(automatic.runtime.stackItems(), generic.runtime.stackItems());
         var automatic_display = try automatic.runtime.stackDisplay();
         defer automatic_display.deinit();
         var generic_display = try generic.runtime.stackDisplay();
@@ -342,12 +342,16 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
     };
 }
 
-fn expectStacksIdentical(left: []const ecl.value.Value, right: []const ecl.value.Value) !void {
+fn expectStacksEquivalent(left: []const ecl.value.Value, right: []const ecl.value.Value) !void {
     try std.testing.expectEqual(left.len, right.len);
-    for (left, right) |a, b| try expectValueIdentical(a, b);
+    for (left, right) |a, b| try expectValueEquivalent(a, b);
 }
 
-fn expectValueIdentical(left: ecl.value.Value, right: ecl.value.Value) !void {
+/// Compare language-visible values without treating an invisible packed leaf
+/// choice as behavior. Numeric leaves may differ when one execution can infer
+/// byte range earlier than the other; indexing must nevertheless expose the
+/// same integers, while floats remain bit-identical.
+fn expectValueEquivalent(left: ecl.value.Value, right: ecl.value.Value) !void {
     try std.testing.expectEqual(left.tag(), right.tag());
     switch (left) {
         .int => |item| try std.testing.expectEqual(item, right.int),
@@ -358,17 +362,16 @@ fn expectValueIdentical(left: ecl.value.Value, right: ecl.value.Value) !void {
         .task => |header| try std.testing.expectEqual(header, right.task),
         .module => |header| try std.testing.expectEqual(header, right.module),
         .list => |header| {
-            try std.testing.expectEqual(header.kind(), right.list.kind());
             try std.testing.expectEqual(header.length(), right.list.length());
             for (0..@as(usize, @intCast(header.length()))) |index| {
-                try expectValueIdentical(ecl.list.atUnchecked(left, index), ecl.list.atUnchecked(right, index));
+                try expectValueEquivalent(ecl.list.atUnchecked(left, index), ecl.list.atUnchecked(right, index));
             }
         },
         .dict => |header| {
             try std.testing.expectEqual(header.length(), right.dict.length());
             for (0..@as(usize, @intCast(header.length()))) |index| {
-                try expectValueIdentical(ecl.dict.keyAt(header, index), ecl.dict.keyAt(right.dict, index));
-                try expectValueIdentical(ecl.dict.valueAt(header, index), ecl.dict.valueAt(right.dict, index));
+                try expectValueEquivalent(ecl.dict.keyAt(header, index), ecl.dict.keyAt(right.dict, index));
+                try expectValueEquivalent(ecl.dict.valueAt(header, index), ecl.dict.valueAt(right.dict, index));
             }
         },
     }
@@ -376,7 +379,7 @@ fn expectValueIdentical(left: ecl.value.Value, right: ecl.value.Value) !void {
 
 /// Full observational comparison of the two execution modes: success or
 /// failure alike, stack values (bit-identical floats via
-/// expectValueIdentical), rendered representation, and — unlike the
+/// expectValueEquivalent), rendered representation, and — unlike the
 /// exhaustive harness above — the complete error dict on failure.
 fn compareModesExactly(source: []const u8) !void {
     var automatic_heap: SessionHeap = .init;
@@ -397,7 +400,7 @@ fn compareModesExactly(source: []const u8) !void {
         try std.testing.expectEqualStrings(generic_rendered.bytes(), automatic_rendered.bytes());
         return;
     }
-    try expectStacksIdentical(automatic.runtime.stackItems(), generic.runtime.stackItems());
+    try expectStacksEquivalent(automatic.runtime.stackItems(), generic.runtime.stackItems());
     var automatic_display = try automatic.runtime.stackDisplay();
     defer automatic_display.deinit();
     var generic_display = try generic.runtime.stackDisplay();
@@ -405,7 +408,7 @@ fn compareModesExactly(source: []const u8) !void {
     try std.testing.expectEqualStrings(generic_display.bytes(), automatic_display.bytes());
 }
 
-test "idioms: capture shapes match the generic path exactly" {
+test "idioms: capture shapes preserve generic behavior" {
     // The literal-capture shape `((v) first)` is what `literal` builds and
     // what `partial` prefixes onto a quotation. These sources build the
     // shape the way programs do, rather than spelling the list literally as
