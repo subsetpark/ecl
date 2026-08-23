@@ -21,6 +21,7 @@ const max_members: usize = 100_000;
 const max_path_bytes: usize = 4096;
 const member_slots = 1 << 18;
 const tar_block_bytes = 512;
+pub const package_seal_name = ".ecl-package.tgz";
 
 pub const words = [_]env.BuiltinWord{
     .{
@@ -245,6 +246,7 @@ const Phase = enum {
     destination_check,
     create_stage,
     extract,
+    seal_archive,
     commit,
 };
 
@@ -369,6 +371,9 @@ const UnpackDriver = struct {
     current_entry: ?*const Entry = null,
     current_file: ?std.Io.File = null,
     current_written: usize = 0,
+    seal_file: ?std.Io.File = null,
+    seal_written: usize = 0,
+    seal_created: bool = false,
     created_count: usize = 0,
     committed: bool = false,
 
@@ -401,6 +406,7 @@ const UnpackDriver = struct {
             .destination_check => self.destinationCheck(evaluator),
             .create_stage => self.createStage(evaluator),
             .extract => self.extract(evaluator),
+            .seal_archive => self.sealArchive(evaluator),
             .commit => self.commit(evaluator),
         };
     }
@@ -722,6 +728,8 @@ const UnpackDriver = struct {
         entry: Entry,
     ) MachineError!void {
         if (entry.kind == .directory) return;
+        if (std.mem.eql(u8, entry.path, package_seal_name))
+            return self.failPackageMember(evaluator, "package archive uses a reserved store member", entry.path);
         if (std.mem.eql(u8, entry.path, "ecl.pkg")) {
             if (self.manifest_data != null)
                 return self.failPackageMember(evaluator, "package archive contains more than one root manifest", entry.path);
@@ -863,9 +871,19 @@ const UnpackDriver = struct {
         const io = self.io.?;
         if (self.current_entry == null) {
             const entry = self.extract_iterator.?.next() orelse {
-                self.stage_dir.?.close(io);
-                self.stage_dir = null;
-                self.phase = .commit;
+                if (self.mode == .package_install) {
+                    self.seal_file = self.stage_dir.?.createFile(
+                        io,
+                        package_seal_name,
+                        .{ .exclusive = true },
+                    ) catch |err| return self.failIo(evaluator, "cannot create package archive seal", err);
+                    self.seal_created = true;
+                    self.phase = .seal_archive;
+                } else {
+                    self.stage_dir.?.close(io);
+                    self.stage_dir = null;
+                    self.phase = .commit;
+                }
                 return .yielded;
             };
             self.current_entry = entry;
@@ -896,6 +914,29 @@ const UnpackDriver = struct {
         self.current_file.?.close(io);
         self.current_file = null;
         self.current_entry = null;
+        return .yielded;
+    }
+
+    fn sealArchive(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const io = self.io.?;
+        const compressed = self.bytes.?.borrow().bytes();
+        if (self.seal_written != compressed.len) {
+            const end = @min(self.seal_written + work_quantum, compressed.len);
+            self.seal_file.?.writePositionalAll(
+                io,
+                compressed[self.seal_written..end],
+                self.seal_written,
+            ) catch |err| return self.failIo(evaluator, "cannot write package archive seal", err);
+            self.seal_written = end;
+            return .yielded;
+        }
+        self.seal_file.?.sync(io) catch |err|
+            return self.failIo(evaluator, "cannot synchronize package archive seal", err);
+        self.seal_file.?.close(io);
+        self.seal_file = null;
+        self.stage_dir.?.close(io);
+        self.stage_dir = null;
+        self.phase = .commit;
         return .yielded;
     }
 
@@ -957,6 +998,8 @@ const UnpackDriver = struct {
         const io = self.io;
         if (self.current_file) |file| file.close(io.?);
         self.current_file = null;
+        if (self.seal_file) |file| file.close(io.?);
+        self.seal_file = null;
         if (!self.committed and self.stage_created) {
             if (self.stage_dir == null) {
                 self.stage_dir = std.Io.Dir.cwd().openDir(io.?, self.stage_path.?.borrow(), .{}) catch |open_err| {
@@ -966,6 +1009,12 @@ const UnpackDriver = struct {
                     self.stage_created = false;
                     return false;
                 };
+            }
+            if (self.seal_created) {
+                self.stage_dir.?.deleteFile(io.?, package_seal_name) catch |err|
+                    observeCleanupError("remove the package archive seal", err);
+                self.seal_created = false;
+                return false;
             }
             if (self.cleanup_iterator == null) {
                 self.cleanup_iterator = self.entries.borrow().reverseIterator();

@@ -10,6 +10,7 @@ const reader = @import("reader.zig");
 const dict = @import("dict.zig");
 const storage = @import("kernel_storage.zig");
 const intern = @import("intern.zig");
+const project = @import("project.zig");
 
 const Value = value.Value;
 const max_lock_bytes = 16 * 1024 * 1024;
@@ -58,40 +59,17 @@ pub const ProjectLock = opaque {
         cache: CacheInputs,
     ) error{OutOfMemory}!?*ProjectLock {
         const allocator = host.allocator();
-        const absolute = std.Io.Dir.cwd().realPathFileAlloc(io, start, allocator) catch |err|
-            return try invalidSnapshot(host, "cannot resolve project start `{s}`: {s}", .{ start, @errorName(err) });
-        defer allocator.free(absolute);
-
-        var current: []const u8 = absolute;
-        while (true) {
-            const manifest_path = std.fs.path.join(allocator, &.{ current, "ecl.pkg" }) catch
-                return error.OutOfMemory;
-            defer allocator.free(manifest_path);
-            const manifest_info = std.Io.Dir.cwd().statFile(
-                io,
-                manifest_path,
-                .{ .follow_symlinks = false },
-            ) catch |err| switch (err) {
-                error.FileNotFound => null,
-                else => return try invalidSnapshot(
-                    host,
-                    "cannot inspect project marker `{s}`: {s}",
-                    .{ manifest_path, @errorName(err) },
-                ),
-            };
-            if (manifest_info) |info| {
-                if (info.kind != .file) return try invalidSnapshot(
-                    host,
-                    "project marker `{s}` is not a regular file",
-                    .{manifest_path},
-                );
-                return discoverLock(host, io, current, cache);
-            }
-
-            const parent = std.fs.path.dirname(current) orelse return null;
-            if (std.mem.eql(u8, parent, current)) return null;
-            current = parent;
-        }
+        return switch (try project.Root.discover(allocator, io, start)) {
+            .absent => null,
+            .invalid => |message| result: {
+                defer allocator.free(message);
+                break :result try invalidSnapshot(host, "{s}", .{message});
+            },
+            .found => |root| result: {
+                defer root.deinit();
+                break :result try discoverLock(host, io, root.path(), cache);
+            },
+        };
     }
 
     pub fn lookupCursor(self: *const ProjectLock, module_name: []const u8) LookupCursor {

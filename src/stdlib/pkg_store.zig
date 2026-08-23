@@ -34,11 +34,240 @@ pub const words = [_]env.BuiltinWord{
         .primitive = present,
     },
     .{
+        .name = "verify",
+        .doc = "( destination package-name hash -- ) Stream and verify an installed package's sealed source archive.",
+        .primitive = verify,
+    },
+    .{
         .name = "write-lock",
-        .doc = "( text path -- ) Atomically replace a regular lock file while preserving it on failure.",
+        .doc = "( text path -- ) Atomically replace a regular project data file while preserving it on failure.",
         .primitive = writeLock,
     },
 };
+
+fn verify(evaluator: *Machine) MachineError!void {
+    try evaluator.require(3);
+    var hash_value = try evaluator.popValue();
+    errdefer hash_value.deinit();
+    if (!hash_value.borrow().isString()) return evaluator.typeError("a package hash");
+    var package_value = try evaluator.popValue();
+    errdefer package_value.deinit();
+    if (!package_value.borrow().isString()) return evaluator.typeError("a package name");
+    var destination_value = try evaluator.popValue();
+    errdefer destination_value.deinit();
+    if (!destination_value.borrow().isString()) return evaluator.typeError("a string destination");
+    const io = evaluator.unit.inherited.host_io orelse {
+        const failure = evaluator.fail(.io, "package verification is unavailable");
+        evaluator.addErrorPath(destination_value.borrow());
+        return failure;
+    };
+    const destination_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), destination_value.borrow());
+    const package_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), package_value.borrow());
+    const hash_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), hash_value.borrow());
+    try evaluator.startDriver(VerifyDriver{
+        .allocator = evaluator.allocator(),
+        .io = io,
+        .destination_value = .init(destination_value.take()),
+        .package_value = .init(package_value.take()),
+        .hash_value = .init(hash_value.take()),
+        .destination_encoder = .init(destination_encoder),
+        .package_encoder = .init(package_encoder),
+        .hash_encoder = .init(hash_encoder),
+        // SAFETY: each hashed slice is fully initialized by readPositionalAll before use.
+        .buffer = undefined,
+    });
+}
+
+const VerifyDriver = struct {
+    pub const ownership: heap.DriverOwnership = .bounded_retirement;
+
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    destination_value: heap.Owned(Value),
+    package_value: heap.Owned(Value),
+    hash_value: heap.Owned(Value),
+    destination_encoder: heap.Owned(storage.ToUtf8Cursor),
+    package_encoder: heap.Owned(storage.ToUtf8Cursor),
+    hash_encoder: heap.Owned(storage.ToUtf8Cursor),
+    destination: ?heap.Owned([]u8) = null,
+    package: ?heap.Owned([]u8) = null,
+    hash: ?heap.Owned([]u8) = null,
+    seal_path: ?heap.Owned([]u8) = null,
+    file: ?std.Io.File = null,
+    size: u64 = 0,
+    offset: u64 = 0,
+    buffer: [work_quantum]u8,
+    hasher: std.crypto.hash.sha2.Sha256 = .init(.{}),
+    digest: [32]u8 = @splat(0),
+    rendered: [64]u8 = @splat(0),
+    phase: enum { encode_destination, encode_package, encode_hash, open, stat, read, compare } = .encode_destination,
+
+    pub fn advance(evaluator: *Machine, self: *VerifyDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        return switch (self.phase) {
+            .encode_destination => self.encodeDestination(evaluator),
+            .encode_package => self.encodePackage(evaluator),
+            .encode_hash => self.encodeHash(evaluator),
+            .open => self.open(evaluator),
+            .stat => self.stat(evaluator),
+            .read => self.read(evaluator),
+            .compare => self.compare(evaluator),
+        };
+    }
+
+    fn encodeDestination(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        switch (self.destination_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return self.failDomain(evaluator, "package destination contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |destination| {
+                if (destination.len == 0) {
+                    self.allocator.free(destination);
+                    return self.failDomain(evaluator, "package destination is empty");
+                }
+                self.destination = .init(destination);
+                self.phase = .encode_package;
+                return .yielded;
+            },
+        }
+    }
+
+    fn encodePackage(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        switch (self.package_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return self.failDomain(evaluator, "package name contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |package| {
+                if (package.len == 0) {
+                    self.allocator.free(package);
+                    return self.failDomain(evaluator, "package name is empty");
+                }
+                self.package = .init(package);
+                self.phase = .encode_hash;
+                return .yielded;
+            },
+        }
+    }
+
+    fn encodeHash(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        switch (self.hash_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return self.failDomain(evaluator, "package hash contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |hash| {
+                if (!isSha256(hash)) {
+                    self.allocator.free(hash);
+                    return self.failDomain(evaluator, "a package hash is sha256- and 64 lowercase hex digits");
+                }
+                self.hash = .init(hash);
+                self.seal_path = .init(try std.fs.path.join(self.allocator, &.{
+                    self.destination.?.borrow(),
+                    archive.package_seal_name,
+                }));
+                self.phase = .open;
+                return .yielded;
+            },
+        }
+    }
+
+    fn open(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        self.file = std.Io.Dir.cwd().openFile(self.io, self.seal_path.?.borrow(), .{}) catch |err|
+            return self.failIo(evaluator, "cannot open installed package archive seal", err);
+        self.phase = .stat;
+        return .yielded;
+    }
+
+    fn stat(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const info = self.file.?.stat(self.io) catch |err|
+            return self.failIo(evaluator, "cannot inspect installed package archive seal", err);
+        self.size = info.size;
+        self.phase = .read;
+        return .yielded;
+    }
+
+    fn read(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        if (self.offset == self.size) {
+            self.file.?.close(self.io);
+            self.file = null;
+            self.hasher.final(&self.digest);
+            self.rendered = std.fmt.bytesToHex(self.digest, .lower);
+            self.phase = .compare;
+            return .yielded;
+        }
+        const amount: usize = @intCast(@min(@as(u64, work_quantum), self.size - self.offset));
+        const read_amount = self.file.?.readPositionalAll(self.io, self.buffer[0..amount], self.offset) catch |err|
+            return self.failIo(evaluator, "cannot read installed package archive seal", err);
+        if (read_amount != amount)
+            return self.failIoName(evaluator, "installed package archive seal changed while being read");
+        self.hasher.update(self.buffer[0..amount]);
+        self.offset += amount;
+        return .yielded;
+    }
+
+    fn compare(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        if (!std.mem.eql(u8, self.hash.?.borrow()[7..], &self.rendered))
+            return evaluator.failFmt(
+                .domain,
+                "package `{s}` archive seal does not match lock hash",
+                .{self.package.?.borrow()},
+            );
+        return .completed;
+    }
+
+    fn failDomain(self: *VerifyDriver, evaluator: *Machine, message: []const u8) MachineError {
+        _ = self;
+        return evaluator.fail(.domain, message);
+    }
+
+    fn failIo(self: *VerifyDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
+        const failure = evaluator.failFmt(
+            .io,
+            "{s} for package `{s}`: {s}",
+            .{ message, self.package.?.borrow(), @errorName(err) },
+        );
+        evaluator.addErrorPath(self.destination_value.borrow());
+        return failure;
+    }
+
+    fn failIoName(self: *VerifyDriver, evaluator: *Machine, message: []const u8) MachineError {
+        const failure = evaluator.failFmt(.io, "{s} for package `{s}`", .{ message, self.package.?.borrow() });
+        evaluator.addErrorPath(self.destination_value.borrow());
+        return failure;
+    }
+
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *VerifyDriver,
+    ) bool {
+        if (self.file) |file| file.close(self.io);
+        if (self.seal_path) |*path| path.deinit(releases, allocator);
+        if (self.hash) |*hash| hash.deinit(releases, allocator);
+        if (self.package) |*package| package.deinit(releases, allocator);
+        if (self.destination) |*destination| destination.deinit(releases, allocator);
+        self.hash_encoder.deinit(releases, allocator);
+        self.package_encoder.deinit(releases, allocator);
+        self.destination_encoder.deinit(releases, allocator);
+        self.hash_value.deinit(releases, allocator);
+        self.package_value.deinit(releases, allocator);
+        self.destination_value.deinit(releases, allocator);
+        allocator.destroy(self);
+        return true;
+    }
+};
+
+fn isSha256(hash: []const u8) bool {
+    if (hash.len != 71 or !std.mem.eql(u8, hash[0..7], "sha256-")) return false;
+    for (hash[7..]) |byte| switch (byte) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    return true;
+}
 
 fn present(evaluator: *Machine) MachineError!void {
     var path_value = try evaluator.popValue();

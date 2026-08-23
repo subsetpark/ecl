@@ -127,4 +127,156 @@
   infra
   "{{'format 1\n 'root {}\n 'packages\n {}\n 'requires\n {}}}\n" format)
  'render-validated defp
+
+ ### defp append-tree-line
+ (line state -- state : "Append one rendered tree line to the edge accumulator.")
+ (|line state| state 'lines state 'lines at line append put)
+ 'append-tree-line defp
+
+ ### defp tree-edge
+ (state entry -- state : "Append one deterministic selected dependency edge.")
+ (|state entry|
+  state entry pair
+  (|state entry|
+   state 'requirer at
+   entry first
+   state 'lock at 'packages at entry first 'version pair at-path)
+  infra
+  "{} -> {} {}" format
+  state append-tree-line)
+ 'tree-edge defp
+
+ ### defp tree-requirer
+ (state pair -- state : "Append every edge for one requiring package.")
+ (|state pair|
+  state 'requirer pair first put
+  pair 1 at pkg.data.sorted-entries
+  swap (tree-edge) fold
+  )
+ 'tree-requirer defp
+
+ ### def tree
+ (lock -- text :
+  "Render the root and canonical dependency edges, ordered by requirer then requirement.")
+ (pkg.lock.validate
+  (|lock|
+   lock wrap
+   (|lock| 'lock lock 'lines [])
+   infra
+   dict-of
+   lock 'requires at pkg.data.sorted-entries
+   swap (tree-requirer) fold
+   'lines at
+   lock 'root at swap cons
+   "\n" join "\n" cat)
+  call)
+ 'tree def
+
+ ### defp path-has?
+ (path package -- bool : "Return 1 when a path already contains a package.")
+ ((match?) partial any?)
+ 'path-has? defp
+
+ ### defp path-child
+ (child state -- state : "Collect paths through one not-yet-visited child.")
+ (|child state|
+  state 'lock at
+  state 'target at
+  state 'path at
+  child
+  paths-from
+  state
+  (|paths state| state 'results state 'results at paths cat put)
+  call)
+ 'path-child defp
+
+ ### defp path-edge
+ (state entry -- state : "Skip a visited child or collect its paths.")
+ (|state entry|
+  entry first
+  state
+  state 'path at entry first path-has?
+  (swap pop)
+  (path-child)
+  if)
+ 'path-edge defp
+
+ ### defp expand-path
+ (path context -- paths : "Expand one path from its packed lock, target, and current node.")
+ (|path context|
+  path context cons
+  (|path lock target current|
+   lock target path 3 pack
+   (|lock target path| 'lock lock 'target target 'path path 'results [])
+   infra
+   dict-of
+   lock 'requires at current {} at-or pkg.data.sorted-entries
+   swap (path-edge) fold
+   'results at)
+  with call)
+ 'expand-path defp
+
+ ### defp paths-from
+ (lock target path current -- paths : "Collect deterministic acyclic paths to one package.")
+ (|lock target path current|
+  path current append
+  lock target current 3 pack
+  current target match?
+  (pop wrap)
+  (expand-path)
+  if)
+ 'paths-from defp
+
+ ### defp path-node
+ (name lock -- text : "Render a root path node with its selected version when applicable.")
+ (|name lock|
+  name " " cat lock 'packages at name {} at-or 'version "" at-or cat
+  name pair
+  name lock 'root at match? at)
+ 'path-node defp
+
+ ### defp append-path-text
+ (text state -- state : "Append one rendered node to the path accumulator.")
+ (|text state| state 'nodes state 'nodes at text append put)
+ 'append-path-text defp
+
+ ### defp render-path-node
+ (state name -- state : "Append one rendered package to a dependency path.")
+ (|state name|
+  name state 'lock at path-node
+  state append-path-text)
+ 'render-path-node defp
+
+ ### defp render-path
+ (path lock -- text : "Render one dependency path with selected versions.")
+ (|path lock|
+  lock wrap
+  (|lock| 'lock lock 'nodes [])
+  infra
+  dict-of
+  path swap (render-path-node) fold
+  'nodes at
+  " -> " join)
+ 'render-path defp
+
+ ### def why
+ (lock module -- text : "Render one deterministic root-to-owner explanation for a module name.")
+ (|lock module|
+  lock pkg.lock.validate pop
+  module pkg.name.valid?
+  'domain error.new "pkg why expects a canonical module name" error.with-message assert
+  lock 'packages at keys module (pkg.name.owns?) partial filter
+  dup len 1 =
+  'domain error.new "no locked package owns the requested module" error.with-message
+  'data 'module module pair dict-of put
+  assert
+  first
+  lock swap [] lock 'root at paths-from
+  dup empty? not
+  'domain error.new "the locked package is not reachable from the project root" error.with-message
+  assert
+  first
+  lock render-path
+  module ": " cat swap cat "\n" cat)
+ 'why def
  ) 'pkg.lock @defm

@@ -1,7 +1,7 @@
 //! Explicit local project/store fixture for built-binary lock-tier acceptance.
 const std = @import("std");
 
-pub const package_hash = "sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+pub const package_hash = "sha256-385df64d4c1510e029721e8c3f880b91ac879cca636beba399f87f85fa385e7a";
 
 pub const Fixture = struct {
     allocator: std.mem.Allocator,
@@ -22,7 +22,7 @@ pub const Fixture = struct {
         try directory.dir.createDir(io, "path", .default_dir);
         try directory.dir.writeFile(io, .{
             .sub_path = "project/ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {}}\n",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {\"smoke\" {'version \"1.0.0\" 'url \"https://127.0.0.1:1/unreachable.tgz\" 'hash \"" ++ package_hash ++ "\"}}}\n",
         });
         try directory.dir.writeFile(io, .{
             .sub_path = "project/ecl.lock",
@@ -37,6 +37,14 @@ pub const Fixture = struct {
             try directory.dir.writeFile(io, .{
                 .sub_path = "cache/smoke-1.0.0-" ++ package_hash[7..] ++ "/smoke.ecl",
                 .data = "((42) 'answer def) 'smoke @defm\n",
+            });
+            try directory.dir.writeFile(io, .{
+                .sub_path = "cache/smoke-1.0.0-" ++ package_hash[7..] ++ "/ecl.pkg",
+                .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'requires {}}\n",
+            });
+            try directory.dir.writeFile(io, .{
+                .sub_path = "cache/smoke-1.0.0-" ++ package_hash[7..] ++ "/.ecl-package.tgz",
+                .data = "sealed fixture\n",
             });
         }
         try directory.dir.writeFile(io, .{

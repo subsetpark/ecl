@@ -59,4 +59,39 @@
  (text -- manifest : "Parse and validate a manifest without evaluating it.")
  (pkg.data.read-one pkg.manifest.validate)
  'read def
+
+ ### defp render-requirement
+ (requirement -- text : "Render one exact requirement in canonical field order.")
+ (|requirement|
+  requirement wrap
+  (|requirement|
+   requirement 'version at str
+   requirement 'url at str
+   requirement 'hash at str)
+  infra
+  "{{'version {} 'url {} 'hash {}}}" format)
+ 'render-requirement defp
+
+ ### defp render-requirement-entry
+ (pair -- text : "Render one manifest requirement while retaining dictionary order.")
+ (wrap ((first str) (1 at render-requirement) bi) infra "{} {}" format)
+ 'render-requirement-entry defp
+
+ ### defp render-requirements
+ (requirements -- text : "Render manifest requirements in their retained insertion order.")
+ (pairs (render-requirement-entry) each " " join wrap "{{{}}}" format)
+ 'render-requirements defp
+
+ ### def write
+ (manifest -- text :
+  "Validate and render a manifest, retaining requirement insertion order and ending in newline.")
+ (pkg.manifest.validate
+  wrap
+  (|manifest|
+   manifest 'name at str
+   manifest 'version at str
+   manifest 'requires at render-requirements)
+  infra
+  "{{'format 1 'name {} 'version {} 'requires {}}}\n" format)
+ 'write def
  ) 'pkg.manifest @defm

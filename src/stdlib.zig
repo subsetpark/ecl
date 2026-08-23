@@ -101,6 +101,10 @@ const modules = [_]Module{
         .name = "<stdlib:pkg.sync>",
         .text = @embedFile("stdlib/pkg/sync.ecl"),
     } } },
+    .{ .name = "pkg.cli", .entry = .{ .source = .{
+        .name = "<stdlib:pkg.cli>",
+        .text = @embedFile("stdlib/pkg/cli.ecl"),
+    } } },
 };
 
 comptime {

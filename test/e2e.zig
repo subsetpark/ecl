@@ -43,6 +43,172 @@ test "e2e: locked missing store entry never fetches or falls back" {
         .stderr_contains = &.{ "'kind 'io", "locked package `smoke`", "ecl pkg sync" },
     });
 }
+
+test "e2e: pkg CLI reports usage without a subcommand" {
+    var result = try run(&.{ build_options.ecl_exe, "pkg" });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{
+            "ecl pkg <init|add|sync|tree|why|verify>",
+            "sync [--offline]",
+        },
+    });
+}
+
+test "e2e: pkg init derives a canonical root manifest without overwriting" {
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    try scratch.dir.createDir(io, "sample", .default_dir);
+    var project = try scratch.dir.openDir(io, "sample", .{});
+    defer project.close(io);
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+
+    var initialized = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "init" },
+        .cwd = .{ .dir = project },
+    });
+    defer initialized.deinit();
+    try initialized.expect(.{
+        .exit_code = 0,
+        .stdout = "initialized ecl.pkg for sample\n",
+        .stderr = "",
+    });
+    const manifest = try project.readFileAlloc(io, "ecl.pkg", allocator, .unlimited);
+    defer allocator.free(manifest);
+    try std.testing.expectEqualStrings(
+        "{'format 1 'name \"sample\" 'version \"0.1.0\" 'requires {}}\n",
+        manifest,
+    );
+
+    var repeated = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "init" },
+        .cwd = .{ .dir = project },
+    });
+    defer repeated.deinit();
+    try repeated.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{"ecl.pkg already exists"},
+    });
+}
+
+test "e2e: pkg tree and why explain the locked graph from a nested directory" {
+    var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, false);
+    defer fixture.deinit();
+    var nested = try fixture.openNested();
+    defer nested.close(io);
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_CACHE", fixture.cache);
+
+    var tree = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "tree" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer tree.deinit();
+    try tree.expect(.{
+        .exit_code = 0,
+        .stdout = "root\nroot -> smoke 1.0.0\n",
+        .stderr = "",
+    });
+
+    var why = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "why", "smoke.answer" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer why.deinit();
+    try why.expect(.{
+        .exit_code = 0,
+        .stdout = "smoke.answer: root -> smoke 1.0.0\n",
+        .stderr = "",
+    });
+}
+
+test "e2e: pkg offline sync and verify use sealed immutable store entries" {
+    var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, true);
+    defer fixture.deinit();
+    var nested = try fixture.openNested();
+    defer nested.close(io);
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_CACHE", fixture.cache);
+
+    var sync = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "sync", "--offline" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer sync.deinit();
+    try sync.expect(.{
+        .exit_code = 0,
+        .stdout = "synced 1 packages\n",
+        .stderr = "",
+    });
+
+    var verified = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "verify" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer verified.deinit();
+    try verified.expect(.{
+        .exit_code = 0,
+        .stdout = "verified 1 packages\n",
+        .stderr = "",
+    });
+
+    try fixture.directory.dir.writeFile(io, .{
+        .sub_path = "cache/smoke-1.0.0-" ++ pkg_lock_fixture.package_hash[7..] ++ "/.ecl-package.tgz",
+        .data = "tampered fixture\n",
+    });
+    var tampered = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "verify" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer tampered.deinit();
+    try tampered.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{"package `smoke` archive seal does not match lock hash"},
+    });
+}
+
+test "e2e: pkg offline sync names an absent immutable store entry without fetching" {
+    var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, false);
+    defer fixture.deinit();
+    var nested = try fixture.openNested();
+    defer nested.close(io);
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_CACHE", fixture.cache);
+
+    var result = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "sync", "--offline" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{
+            "offline synchronization is missing a package store entry",
+            "'package \"smoke\"",
+        },
+    });
+}
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const cli = @import("cli_test_support.zig");

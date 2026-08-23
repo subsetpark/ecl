@@ -34,14 +34,14 @@
   if)
  'xdg-cache-root defp
 
- ### defp cache-root
+ ### def cache-root
  (-- store-root : "Select the package store from the Session's captured environment snapshot.")
  ("ECL_CACHE" env-or-empty
   dup empty?
   (pop "XDG_CACHE_HOME" env-or-empty xdg-cache-root)
   ()
   if)
- 'cache-root defp
+ 'cache-root def
 
  ### defp store-key
  (package requirement -- key : "Derive the immutable name-version-hash store key.")
@@ -52,10 +52,10 @@
   requirement 'hash at 7 drop cat)
  'store-key defp
 
- ### defp store-path
+ ### def store-path
  (store package requirement -- path : "Derive one immutable package destination.")
  (|store package requirement| store "/" cat package requirement store-key cat)
- 'store-path defp
+ 'store-path def
 
  ### defp success-response
  (response package url -- response : "Require a successful HTTP status with package provenance.")
@@ -99,6 +99,34 @@
   'body at
   package requirement 'hash at hash-checked)
  'fetch-body defp
+
+ ### def requirement
+ (package version url -- requirement :
+  "Fetch and validate one exact package archive, returning its derived hash declaration.")
+ (|package version url|
+  package pkg.name.valid?
+  'domain error.new "pkg add expects a canonical package name" error.with-message assert
+  version pkg.version.validate pop
+  url pkg.name.url?
+  'domain error.new "pkg add expects an https url" error.with-message assert
+  url {} http.get-bytes package url success-response 'body at
+  dup archive.sha256 "sha256-" swap cat
+  package version url
+  requirement-checked)
+ 'requirement def
+
+ ### defp requirement-checked
+ (body hash package version url -- requirement :
+  "Validate fetched identity and construct one exact requirement declaration.")
+ (|body hash package version url|
+  body package inspect-checked pkg.manifest.read
+  package version matching-manifest pop
+  version wrap url append hash append
+  (|version url hash| 'version version 'url url 'hash hash)
+  infra
+  dict-of
+  pkg.manifest.validate-requirement)
+ 'requirement-checked defp
 
  ### defp raise-package-error
  (error package -- : "Attach package provenance to a store-policy error and re-raise it.")
@@ -214,17 +242,57 @@
   record-discovery-node)
  'load-fetched-discovery-node defp
 
+ ### defp load-stored-context
+ (context -- state : "Invoke stored-node discovery from one packed context.")
+ ((load-stored-discovery-node) with call)
+ 'load-stored-context defp
+
+ ### defp load-fetched-context
+ (context -- state : "Invoke fetched-node discovery from one packed context.")
+ ((load-fetched-discovery-node) with call)
+ 'load-fetched-context defp
+
+ ### defp offline-missing-context
+ (context -- : "Raise an offline missing-entry error from one packed context.")
+ ((offline-missing) with call)
+ 'offline-missing-context defp
+
+ ### defp load-absent-discovery-node
+ (state package requirement node destination -- state :
+  "Reject an absent offline node or fetch it in the network-enabled mode.")
+ (|state package requirement node destination|
+  state 'offline at
+  package destination 2 pack (offline-missing-context) partial
+  state package requirement node 4 pack (load-fetched-context) partial
+  if)
+ 'load-absent-discovery-node defp
+
+ ### defp load-absent-context
+ (context -- state : "Invoke absent-node handling from one packed context.")
+ ((load-absent-discovery-node) with call)
+ 'load-absent-context defp
+
  ### defp load-discovery-node
  (state package requirement node destination -- state :
   "Load one present or fetched manifest, then record and traverse its exact node.")
  (|state package requirement node destination|
   destination pkg.store.present?
-  state package requirement 'version at node destination 5 pack
-  (load-stored-discovery-node) with
-  state package requirement node 4 pack
-  (load-fetched-discovery-node) with
+  state package requirement 'version at node destination 5 pack (load-stored-context) partial
+  state package requirement node destination 5 pack (load-absent-context) partial
   if)
  'load-discovery-node defp
+
+ ### defp offline-missing
+ (package destination -- : "Raise when offline synchronization needs an absent exact store entry.")
+ (|package destination|
+  'io error.new "offline synchronization is missing a package store entry" error.with-message
+  package destination pair
+  (|package destination| 'package package 'path destination)
+  infra
+  dict-of
+  error.with-data
+  raise)
+ 'offline-missing defp
 
  ### defp discover-new-node
  (state package requirement node -- state : "Derive and load one previously unseen exact node.")
@@ -247,10 +315,11 @@
  'discover-node defp
 
  ### defp discover
- (root store -- catalog : "Discover the complete exact manifest catalog reachable from the root.")
- (|root store|
-  store wrap
-  (|store| 'catalog {} 'seen [] 'store store)
+ (root store offline -- catalog :
+  "Discover the complete exact manifest catalog, optionally refusing every network fetch.")
+ (|root store offline|
+  store offline pair
+  (|store offline| 'catalog {} 'seen [] 'store store 'offline offline)
   infra
   dict-of
   root discover-manifest
@@ -287,6 +356,23 @@
   for)
  'install-selected defp
 
+ ### defp verify-selection
+ (pair store -- : "Stream and hash-check one selected package's retained archive seal.")
+ (|pair store|
+  store pair first pair 1 at store-path
+  pair first
+  pair 1 at 'hash at
+  pkg.store.verify)
+ 'verify-selection defp
+
+ ### def verify
+ (lock -- count : "Verify every immutable package selected by a lock and return its count.")
+ (pkg.lock.validate 'packages at pkg.data.sorted-entries
+  dup len swap
+  cache-root (verify-selection) partial
+  for)
+ 'verify def
+
  ### def run
  (root-manifest project-root -- lock :
   "Discover and resolve transitive packages, install selected artifacts, atomically write ecl.lock,
@@ -294,16 +380,31 @@
  (|root project|
   project str.str?
   {'kind 'type 'msg "pkg.sync.run expects a string project root"} assert
+  root project 0 run-mode)
+ 'run def
+
+ ### def run-offline
+ (root-manifest project-root -- lock :
+  "Resolve and atomically lock using immutable store entries without opening a network request.")
+ (|root project| root project 1 run-mode)
+ 'run-offline def
+
+ ### defp run-mode
+ (root-manifest project-root offline -- lock : "Validate explicit sync inputs and select its mode.")
+ (|root project offline|
+  project str.str?
+  {'kind 'type 'msg "pkg.sync expects a string project root"} assert
   root pkg.manifest.validate
   cache-root
   project
+  offline
   run-validated)
- 'run def
+ 'run-mode defp
 
  ### defp run-validated
- (root store project-root -- lock : "Run synchronization after validating its explicit inputs.")
- (|root store project|
-  root store discover
+ (root store project-root offline -- lock : "Run synchronization after validating its inputs.")
+ (|root store project offline|
+  root store offline discover
   root swap pkg.mvs.resolve
   dup store install-selected
   dup pkg.lock.write

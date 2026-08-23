@@ -1185,12 +1185,19 @@ honest source with no public dual representation.
   either a lock or a path. A valid lock uses longest dotted-prefix ownership;
   only an unmatched name reaches `ECL_PATH`, while a matched missing artifact
   fails closed instead of silently changing the selected source.
+- **Project-root discovery has one nominal result.** `project.Root.discover`
+  owns the upward walk to the first regular `ecl.pkg`; both Session startup
+  and `ecl pkg` consume that same opaque handle. Its only observation is the
+  borrowed absolute root path, so sharing the rule grants neither file nor
+  mutation authority and prevents the two callers from drifting. The source
+  audit classifies `project.zig` with the snapshot and Session publication
+  boundary that owns `pkg_lock.zig`.
 - **`ProjectLock` is one opaque Session-owned snapshot.** Library Sessions
   have no discovery authority by default. The CLI supplies
-  `Host.project_start = "."`; with host IO, initialization resolves that
-  directory, walks upward to the first `ecl.pkg`, and reads its sibling
-  `ecl.lock` once. Session owns the opaque allocation until after scheduler
-  teardown, and Units inherit only `?*const ProjectLock`. The backing state
+  `Host.project_start = "."`; with host IO, initialization obtains the shared
+  project-root handle and reads its sibling `ecl.lock` once. Session owns the
+  opaque allocation until after scheduler teardown, and Units inherit only
+  `?*const ProjectLock`. The backing state
   derives its allocator and parser reclamation domain from one
   `HostCleanup`, so no separately correlated allocator/domain/host tuple can
   be forged. Absent marker/lock/capability is represented by no handle; a

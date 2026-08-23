@@ -37,6 +37,7 @@ test "pkg store: rejects invalid source package layouts before publication" {
         .{ .endpoint = "/pkg/foo-1.0.0-native.tgz", .message = "foo.eclmod" },
         .{ .endpoint = "/pkg/foo-1.0.0-missing-manifest.tgz", .message = "no root ecl.pkg" },
         .{ .endpoint = "/pkg/foo-1.0.0-invalid-manifest.tgz", .message = "not valid UTF-8" },
+        .{ .endpoint = "/pkg/foo-1.0.0-reserved-seal.tgz", .message = ".ecl-package.tgz" },
     };
     for (cases) |case| {
         const source = try packageSource(fixture.port, case.endpoint, "foo", .inspect, null);
@@ -69,6 +70,16 @@ test "pkg store: atomically installs one valid source package" {
     );
     defer allocator.free(manifest);
     try std.testing.expectEqualStrings("{'format 1 'name \"bad\" 'version \"1.0.0\" 'requires {}}\n", manifest);
+    const seal = try scratch.directory.dir.readFileAlloc(
+        std.testing.io,
+        "cache/pkg/bad-entry/.ecl-package.tgz",
+        allocator,
+        .unlimited,
+    );
+    defer allocator.free(seal);
+    const expected_seal = try decodeFixtureBytes(archive_fixtures.package_valid);
+    defer allocator.free(expected_seal);
+    try std.testing.expectEqualSlices(u8, expected_seal, seal);
     const present_source = try onePathSource(destination, " pkg.store.present?");
     defer allocator.free(present_source);
     try expectHostStack(present_source, "1", false);
@@ -128,6 +139,22 @@ fn appendFixtureBytes(writer: *std.Io.Writer, encoded: []const u8) !void {
     }
     if (high != null) return error.InvalidFixture;
     try writer.writeByte(']');
+}
+
+fn decodeFixtureBytes(encoded: []const u8) ![]u8 {
+    var bytes = std.Io.Writer.Allocating.init(allocator);
+    defer bytes.deinit();
+    var high: ?u8 = null;
+    for (encoded) |byte| {
+        if (std.ascii.isWhitespace(byte)) continue;
+        const nibble = try std.fmt.charToDigit(byte, 16);
+        if (high) |first| {
+            try bytes.writer.writeByte(first << 4 | nibble);
+            high = null;
+        } else high = nibble;
+    }
+    if (high != null) return error.InvalidFixture;
+    return allocator.dupe(u8, bytes.written());
 }
 
 test "pkg store: present distinguishes absent directory and invalid node" {
@@ -209,6 +236,20 @@ test "pkg store: atomic lock replacement preserves prior bytes on failure" {
     const preserved = try scratch.directory.dir.readFileAlloc(std.testing.io, "ecl.lock", allocator, .unlimited);
     defer allocator.free(preserved);
     try std.testing.expectEqualStrings("replacement\n", preserved);
+}
+
+test "pkg sync: requirement derives the exact archive hash after identity validation" {
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try source.writer.writeAll("\"bad\" \"1.0.0\" ");
+    try source.writer.print("\"https://127.0.0.1:{d}/pkg/bad-1.0.0.tgz\" ", .{fixture.port});
+    try source.writer.writeAll("pkg.sync.requirement dup 'version at swap 'hash at");
+    var expected = std.Io.Writer.Allocating.init(allocator);
+    defer expected.deinit();
+    try expected.writer.print("\"1.0.0\" \"{s}\"", .{fixture.hash_mismatch_actual_hash});
+    try expectHostStack(source.written(), expected.written(), true);
 }
 
 const HttpsFixture = struct {

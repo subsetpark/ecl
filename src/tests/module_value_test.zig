@@ -479,6 +479,7 @@ test "module sources: formatter and standard modules use @defm" {
         "pkg.store.inspect", "rng.float",         "pkg.version.less?",
         "pkg.name.valid?",   "pkg.data.read-one", "pkg.manifest.read",
         "pkg.lock.read",     "pkg.mvs.resolve",   "pkg.sync.run",
+        "pkg.cli.init",
     };
     for (stdlib.names(), exports) |name, qualified| {
         const source = try std.fmt.allocPrint(std.testing.allocator, "'{s} 'local import", .{qualified});
@@ -497,8 +498,9 @@ test "module sources: formatter and standard modules use @defm" {
     try expectStack(
         &runtime,
         "'pkg.store.inspect doc len 0 > 'pkg.store.install doc len 0 > " ++
-            "'pkg.store.present? doc len 0 > 'pkg.store.write-lock doc len 0 >",
-        "1 1 1 1",
+            "'pkg.store.present? doc len 0 > 'pkg.store.verify doc len 0 > " ++
+            "'pkg.store.write-lock doc len 0 >",
+        "1 1 1 1 1",
     );
     try expectStack(&runtime, "\"1.2.0\" \"1.10.0\" pkg.version.less?", "1");
 }

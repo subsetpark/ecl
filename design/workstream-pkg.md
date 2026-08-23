@@ -17,21 +17,19 @@ second tool to install.
 Verified in the checkout (2026-08-23, `0.1.0` tagged 2026-08-19, the v1
 workstream terminal).
 
-- **The format, resolution, binary archive, and package-sync layers now exist,
-  but no runtime lock tier does.** M1 added inert manifest/lock values and
+- **The format, resolution, binary archive, package-sync, runtime lock, and
+  user-facing CLI layers now exist.** M1 added inert manifest/lock values and
   version ordering; M2 added the pure MVS resolver; M3 added exact byte lists,
   SHA-256, and hostile-input-safe atomic tgz extraction; M4 added exact-byte
   HTTPS fetching, immutable package-store publication, and canonical atomic
-  lock writes. Project-file discovery, CLI mutation, and runtime module lookup
-  remain later milestones.
-- **Module resolution today is embedded manifest, then `ECL_PATH`.**
-  `AutoLoadDriver` (`src/machine.zig:2366`) is a poll-budgeted state machine
-  with phases `begin → registered → filename → component_start →
-  component_end → candidate → access → path_value → transfer`. At
-  `src/machine.zig:2565` — after the loading lease is granted and after the
-  recheck for a racing winner — it calls `stdlib.find` and only then falls
-  through to `beginFilename`. That fall-through is the single insertion point
-  for a lock tier; no other resolution path exists.
+  lock writes; M5 added project discovery and locked runtime module lookup;
+  M6 added `ecl pkg` mutation, offline synchronization, graph inspection, and
+  sealed-archive verification. Integrity hardening and documentation remain.
+- **Module resolution today is embedded manifest, locked package store, then
+  `ECL_PATH`.** `AutoLoadDriver` retains its loading lease and racing-winner
+  recheck while advancing an optional `ProjectLock` cursor between
+  `stdlib.find` and filename search. A lock match is authoritative: a missing
+  selected artifact fails closed instead of falling through or fetching.
 - **`src/stdlib.zig` is already the table shape the lock needs.** It is a
   comptime array of `{name, entry}` with `find(name) ?Entry` and three
   transport arms — `source` (embedded text plus a provenance name), `native`
@@ -40,28 +38,21 @@ workstream terminal).
   ordinary dotted modules such as `pkg.version` and `pkg.mvs` use the same
   flat registry as path-loaded modules. `ECL_PATH` still maps `core.utils` to
   the flat filename `core.utils.ecl`; it does not imply directory nesting.
-- **`ecl_path` and `host_io` ride on `unit.inherited`** (`src/machine.zig:1088`,
-  threaded from `src/session.zig:52` and owned at `:276`). A lock table
-  attaches at exactly the same place, and the existing
-  `host_io == null or ecl_path == null` bail already establishes the pattern
-  for "this tier is unavailable, skip it."
-- **A subcommand precedent exists.** `src/main.zig:56` dispatches `ecl fmt`
-  ahead of the flag handling; `ecl pkg …` slots into the same position.
-- **The client's remaining raw materials are embedded.** `http` supplies
-  `get`/`post` over TLS with transparent gzip/zstd decoding but materializes
-  every response body as text (`src/stdlib/http.zig`); M4 needs a parallel
-  exact-byte body word. `io` supplies `slurp`/`spit` (`src/stdlib/io.zig`),
-  `parse` reifies the reader as a value, and `json` and `csv` demonstrate both
-  the builtin-words and native-descriptor arms.
-- **M3 now supplies the binary host boundary.** `archive.sha256` consumes the
-  exact integer byte list, while `archive.unpack-tgz` performs bounded hostile-
-  input validation, staging, rollback, and absent-destination publication.
-  M4 must extend that scanner with package policy at the publication sink;
-  validating returned paths after `unpack-tgz` would be too late.
-- **`test/http_fixture_server.zig` is plaintext and cannot prove M4's HTTPS
-  contract.** M4 adds `test/pkg_https_fixture.py`, a loopback TLS fixture with
-  checked-in test trust and deterministic package graph generation. CI still
-  uses no public network.
+- **`host_io`, `ecl_path`, and the immutable lock snapshot ride on
+  `unit.inherited`.** Session startup and `ecl pkg` use one opaque
+  `project.Root` discovery result, so the upward first-marker rule cannot drift
+  between execution and mutation.
+- **The binary CLI has two fixed subcommand families.** `src/main.zig`
+  dispatches both `ecl fmt` and `ecl pkg` ahead of source evaluation. Package
+  semantics remain in the embedded ordinary `pkg.*` modules.
+- **The exact-byte host boundary is complete.** `http.get-bytes` fetches the
+  archive, `archive.sha256` hashes it, and package installation performs
+  bounded hostile-input validation, staging, rollback, and absent-destination
+  publication. Installed entries retain the exact archive as a reserved seal
+  so later verification needs neither a network request nor a full heap copy.
+- **Package network tests are hermetic HTTPS.** `test/pkg_https_fixture.py`
+  supplies checked-in test trust, deterministic archives and graphs, failure
+  variants, and request counts. CI reaches no public network.
 - **The target design is already in the repo.** `build.zig.zon` pins each
   dependency as a tarball URL plus a content hash with no registry, and
   `zig-pkg/` is a content-addressed store keyed `name-version-hash`. This
@@ -473,6 +464,12 @@ blocks M6.
 
 ### Milestone 6: pkg-cli
 
+**Status**: Implemented, 2026-08-23. The CLI dispatch, shared nominal project
+root, ordinary `pkg.cli` adapter, offline resolver mode, deterministic graph
+projections, and bounded sealed-archive verification are present. Local gate
+evidence is recorded with the implementation handoff. The exhaustive source
+audit classifies the new nominal root beside the Session-owned lock snapshot.
+
 **Definition of Done**:
 - `ecl pkg <subcommand>` dispatched at `src/main.zig:56` alongside `ecl fmt`,
   delegating to the ordinary `pkg.*` modules rather than reimplementing logic
@@ -480,7 +477,8 @@ blocks M6.
   `why <module>`, `verify`.
 - `add` performs MVS algorithm 3 — raise one requirement to a new minimum,
   leave every other selection alone — and rewrites `ecl.pkg` preserving the
-  author's ordering and comments where the format permits.
+  author's dictionary ordering. Comments are discarded because the inert-data
+  reader intentionally does not retain them.
 - `verify` rehashes every store entry named by the lock and reports any
   mismatch without touching the network.
 - `sync --offline` resolves and writes a lock from the store alone, failing if
@@ -489,8 +487,27 @@ blocks M6.
   registry there is no enumeration source for "newer versions," and upgrades
   are manifest edits by construction. `ecl pkg add` at a higher version is the
   upgrade path.
-- CLI behavior is covered by the `ohsnap` transcript gate in `test/e2e.zig`
-  with exact exit status, stdout, and stderr.
+- CLI behavior is covered by transcript-style cases in `test/e2e.zig` with
+  exact exit status, stdout, and stderr.
+- Project discovery is one shared nominal boundary used by Session startup and
+  the CLI. Every command except `init` walks upward from the process working
+  directory; `init` creates a root only in the working directory and refuses
+  to overwrite an existing `ecl.pkg`.
+- `init` derives the package name from an already-canonical working-directory
+  basename and writes version `0.1.0`. `add` fetches and validates the exact
+  archive to derive its SHA-256 declaration before updating the root
+  requirement. Rewriting preserves dictionary insertion order; comments are
+  necessarily discarded because the documented inert-data reader does not
+  retain them.
+- Successful output is line-oriented and stable: `init` names the created
+  package, `add` names the exact requirement, `sync` reports the selected
+  package count, `tree` prints the root followed by canonical dependency
+  edges, `why` prints one root-to-owner path, and `verify` reports the number
+  of sealed store archives whose bytes matched the lock hash.
+- Package installation retains the verified source archive as an internal
+  sealed payload in the immutable entry. `verify` streams and hashes that
+  payload without reaching the network; a missing or mismatched seal is a
+  failure naming the package.
 
 **Why this is a safe pause point**: This is the complete user-facing tool. A
 user can initialize a project, add a dependency, sync, and run code that

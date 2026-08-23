@@ -10,6 +10,7 @@ const help =
     \\    ecl <FILE> [ARGS...]       Run a UTF-8 script
     \\    ecl <SOURCE> [ARGS...]     Evaluate source and print the stack
     \\    ecl fmt <FILE|->           Format source to standard output
+    \\    ecl pkg <SUBCOMMAND>       Manage the current project's packages
     \\
     \\OPTIONS:
     \\    -e, --eval <SOURCE>        Evaluate source text
@@ -54,6 +55,7 @@ fn entry(init: std.process.Init) AppError!u8 {
         return 0;
     }
     if (std.mem.eql(u8, first, "fmt")) return formatCommand(init, cli[1..]);
+    if (std.mem.eql(u8, first, "pkg")) return packageCommand(init, cli[1..]);
     const worker_count = try configuredWorkers(init) orelse return 2;
     if (std.mem.eql(u8, first, "-e") or std.mem.eql(u8, first, "--eval")) {
         if (cli.len < 2) return emitSyntheticError(
@@ -92,6 +94,113 @@ fn entry(init: std.process.Init) AppError!u8 {
         return emitSyntheticError(init, .io, message, null);
     }
     return executeSource(init, "<command>", first, cli[1..], true, .data, worker_count);
+}
+
+const package_help =
+    \\USAGE:
+    \\    ecl pkg <init|add|sync|tree|why|verify>
+    \\    ecl pkg init
+    \\    ecl pkg add <name> <version> <https-url>
+    \\    ecl pkg sync [--offline]
+    \\    ecl pkg tree
+    \\    ecl pkg why <module>
+    \\    ecl pkg verify
+    \\
+;
+
+fn packageUsage(init: std.process.Init) AppError!u8 {
+    try writeFile(init.io, .stderr, package_help);
+    return 1;
+}
+
+fn packageArguments(
+    init: std.process.Init,
+    project_root: []const u8,
+    trailing: []const []const u8,
+) AppError![]const []const u8 {
+    const result = init.arena.allocator().alloc([]const u8, trailing.len + 1) catch
+        return error.OutOfMemory;
+    result[0] = project_root;
+    @memcpy(result[1..], trailing);
+    return result;
+}
+
+fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
+    if (arguments.len == 0) return packageUsage(init);
+    const command = arguments[0];
+    const worker_count = try configuredWorkers(init) orelse return 2;
+
+    if (std.mem.eql(u8, command, "init")) {
+        if (arguments.len != 1) return packageUsage(init);
+        const cwd = std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err|
+            return emitIoError(init, "cannot resolve package project directory", err);
+        defer init.gpa.free(cwd);
+        if (std.Io.Dir.cwd().statFile(init.io, "ecl.pkg", .{ .follow_symlinks = false })) |_| {
+            return emitSyntheticError(init, .io, "ecl.pkg already exists", null);
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return emitIoError(init, "cannot inspect ecl.pkg", err),
+        }
+        const cli_args = try packageArguments(init, cwd, &.{std.fs.path.basename(cwd)});
+        return executeSource(
+            init,
+            "<pkg:init>",
+            "args pkg.cli.init",
+            cli_args,
+            false,
+            .program_source,
+            worker_count,
+        );
+    }
+
+    const valid_shape = if (std.mem.eql(u8, command, "add"))
+        arguments.len == 4
+    else if (std.mem.eql(u8, command, "sync"))
+        arguments.len == 1 or
+            (arguments.len == 2 and std.mem.eql(u8, arguments[1], "--offline"))
+    else if (std.mem.eql(u8, command, "tree") or std.mem.eql(u8, command, "verify"))
+        arguments.len == 1
+    else if (std.mem.eql(u8, command, "why"))
+        arguments.len == 2
+    else
+        false;
+    if (!valid_shape) return packageUsage(init);
+
+    const discovery = try ecl.project.Root.discover(init.gpa, init.io, ".");
+    const project_root = switch (discovery) {
+        .absent => return emitSyntheticError(
+            init,
+            .io,
+            "no ecl.pkg found from the working directory to the filesystem root",
+            null,
+        ),
+        .invalid => |message| {
+            defer init.gpa.free(message);
+            return emitSyntheticError(init, .io, message, null);
+        },
+        .found => |root| root,
+    };
+    defer project_root.deinit();
+    const cli_args = try packageArguments(init, project_root.path(), arguments[1..]);
+    const source = if (std.mem.eql(u8, command, "add"))
+        "args pkg.cli.add"
+    else if (std.mem.eql(u8, command, "sync"))
+        if (arguments.len == 2) "args pkg.cli.sync-offline" else "args pkg.cli.sync"
+    else if (std.mem.eql(u8, command, "tree"))
+        "args pkg.cli.tree"
+    else if (std.mem.eql(u8, command, "why"))
+        "args pkg.cli.why"
+    else
+        "args pkg.cli.verify";
+    return executeSource(
+        init,
+        "<pkg>",
+        source,
+        cli_args,
+        false,
+        .program_source,
+        worker_count,
+    );
 }
 /// One immutable view of the process environment, borrowed from the arena so
 /// the Session can copy it once at init.

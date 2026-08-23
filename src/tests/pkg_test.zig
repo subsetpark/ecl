@@ -108,6 +108,19 @@ const mvs_root_without_c = manifest("app", "0.1.0", "{\"b\" " ++ requirement_b_1
 const mvs_catalog =
     "{\"b\" {\"1.0.0\" " ++ manifest_b_100 ++ "} " ++
     "\"c\" {\"1.2.0\" " ++ manifest_c_120 ++ " \"1.5.0\" " ++ manifest_c_150 ++ "}} ";
+
+const insertion_z_requirement = requirement("2.0.0", "https://e.com/z.tgz", hash_b);
+const insertion_b_requirement = requirement("1.0.0", "https://e.com/b.tgz", hash_a);
+const insertion_order_manifest = manifest(
+    "a",
+    "0.1.0",
+    "{\"z\" " ++ insertion_z_requirement ++ " \"b\" " ++ insertion_b_requirement ++ "}",
+);
+const insertion_order_manifest_text =
+    "{'format 1 'name \"a\" 'version \"0.1.0\" 'requires " ++
+    "{\"z\" " ++ insertion_z_requirement ++ " \"b\" " ++ insertion_b_requirement ++ "}}\n";
+const insertion_order_manifest_text_source = eclLiteral(insertion_order_manifest_text);
+
 test "pkg: every module export carries a body and nonempty documentation" {
     // Cross-module helpers are public because ordinary ECL modules have no
     // privileged friendship relation. Each remains documented and callable.
@@ -126,11 +139,26 @@ test "pkg: every module export carries a body and nonempty documentation" {
         "pkg.manifest.validate-requirement",
         "pkg.manifest.validate",
         "pkg.manifest.read",
+        "pkg.manifest.write",
         "pkg.lock.validate",
         "pkg.lock.read",
         "pkg.lock.write",
+        "pkg.lock.tree",
+        "pkg.lock.why",
         "pkg.mvs.resolve",
+        "pkg.sync.cache-root",
+        "pkg.sync.store-path",
+        "pkg.sync.requirement",
         "pkg.sync.run",
+        "pkg.sync.run-offline",
+        "pkg.sync.verify",
+        "pkg.cli.init",
+        "pkg.cli.add",
+        "pkg.cli.sync",
+        "pkg.cli.sync-offline",
+        "pkg.cli.tree",
+        "pkg.cli.why",
+        "pkg.cli.verify",
     };
     inline for (exports) |qualified| {
         try support.expectStack(
@@ -464,6 +492,21 @@ test "pkg: read-manifest accepts the canonical manifest and rejects undeclared k
     });
 }
 
+test "pkg: write-manifest round-trips and retains requirement insertion order" {
+    try support.expectStacks(&.{
+        .{
+            .name = "a written manifest reads back as the same value",
+            .source = insertion_order_manifest ++ " dup pkg.manifest.write pkg.manifest.read match?",
+            .expected = "1",
+        },
+        .{
+            .name = "requirement insertion order and the terminal newline are observable output",
+            .source = insertion_order_manifest ++ " pkg.manifest.write " ++ insertion_order_manifest_text_source ++ " match?",
+            .expected = "1",
+        },
+    });
+}
+
 test "pkg: a manifest holding an executable form is rejected, not evaluated" {
     try support.expectErrors(&.{
         .{
@@ -548,6 +591,21 @@ test "pkg: write-lock canonicalizes entry order and refuses an invalid lock" {
             .source = "5 pkg.lock.write",
             .kind = "type",
             .message_contains = "a lock is a dict",
+        },
+    });
+}
+
+test "pkg: tree and why expose deterministic locked dependency paths" {
+    try support.expectStacks(&.{
+        .{
+            .name = "tree orders requiring packages and their edges canonically",
+            .source = unsorted_lock_source ++ "pkg.lock.tree",
+            .expected = "\"my.proj\\nfoo -> bar 0.3.0\\nmy.proj -> foo 1.2.0\\n\"",
+        },
+        .{
+            .name = "why selects the root-to-owner path for a dotted module",
+            .source = unsorted_lock_source ++ "\"bar.worker\" pkg.lock.why",
+            .expected = "\"bar.worker: my.proj -> foo 1.2.0 -> bar 0.3.0\\n\"",
         },
     });
 }

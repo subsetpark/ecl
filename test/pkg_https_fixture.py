@@ -116,6 +116,15 @@ def build_graph(port: int) -> tuple[dict[str, bytes], dict[str, str]]:
         {"ecl.pkg": b"\xff", "foo.ecl": b"(() 'noop def) 'foo @defm\n"}
     )
 
+    reserved_seal_path = "/pkg/foo-1.0.0-reserved-seal.tgz"
+    artifacts[reserved_seal_path] = tgz(
+        {
+            "ecl.pkg": manifest("foo", "1.0.0", {}).encode("utf-8"),
+            "foo.ecl": b"(() 'noop def) 'foo @defm\n",
+            ".ecl-package.tgz": b"forged seal\n",
+        }
+    )
+
     identity_path = "/pkg/expected-1.0.0-identity.tgz"
     artifacts[identity_path] = package(
         "actual",

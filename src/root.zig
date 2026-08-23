@@ -15,6 +15,7 @@ pub const reader = @import("reader.zig");
 pub const formatter = @import("formatter.zig");
 pub const line_editor = @import("line_editor.zig");
 pub const spans = @import("spans.zig");
+pub const project = @import("project.zig");
 pub const env = @import("env.zig");
 pub const native_abi = @import("native-abi");
 pub const native_descriptor = @import("native_descriptor.zig");
@@ -48,6 +49,7 @@ test {
     _ = formatter;
     _ = line_editor;
     _ = spans;
+    _ = project;
     _ = env;
     _ = native_abi;
     _ = native_descriptor;

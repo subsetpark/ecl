@@ -52,7 +52,11 @@ fn packageStoreSource(
     try appendQuoted(&source.writer, lock_path);
     try source.writer.writeAll(" pkg.store.write-lock ");
     try appendQuoted(&source.writer, destination);
-    try source.writer.writeAll(" pkg.store.present? pop");
+    try source.writer.writeAll(" pkg.store.present? pop ");
+    try appendQuoted(&source.writer, destination);
+    try source.writer.writeAll(
+        " \"a\" \"sha256-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\" pkg.store.verify",
+    );
     return allocator.dupe(u8, source.written());
 }
 
@@ -66,6 +70,15 @@ fn packageSyncSource(allocator: std.mem.Allocator, project: []const u8) ![]u8 {
     );
     try appendQuoted(&source.writer, project);
     try source.writer.writeAll(" pkg.sync.run pop");
+    return allocator.dupe(u8, source.written());
+}
+
+fn packageCliSource(allocator: std.mem.Allocator, project: []const u8) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try source.writer.writeByte('[');
+    try appendQuoted(&source.writer, project);
+    try source.writer.writeAll("] pkg.cli.tree");
     return allocator.dupe(u8, source.written());
 }
 
@@ -515,6 +528,9 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     const sync_source = try packageSyncSource(thread_safe_allocator, scratch_path);
     defer thread_safe_allocator.free(sync_source);
     try runOk(&runtime, "oom-pkg-sync.ecl", sync_source);
+    const cli_source = try packageCliSource(thread_safe_allocator, scratch_path);
+    defer thread_safe_allocator.free(cli_source);
+    try runOk(&runtime, "oom-pkg-cli.ecl", cli_source);
     const host_io_source = try std.fmt.allocPrint(
         scaffold_allocator,
         "1 \"probe\" io.debug pop " ++

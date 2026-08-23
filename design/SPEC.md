@@ -990,27 +990,33 @@ the explicit opt out.
 
 ### Package modules
 
-The package formats are data (see Packages). Seven ordinary source modules
+The package formats are data (see Packages). Eight ordinary source modules
 divide value operations and orchestration by responsibility: `pkg.version`,
-`pkg.name`, `pkg.data`, `pkg.manifest`, `pkg.lock`, `pkg.mvs`, and `pkg.sync`.
-There is no root `pkg` facade. The first six are pure: every word takes and
-returns text or values and none reaches a host capability. `pkg.sync` is the
-explicit network/filesystem orchestration boundary and composes those pure
-modules with `http`, `archive`, and the narrow builtin `pkg.store` capability.
+`pkg.name`, `pkg.data`, `pkg.manifest`, `pkg.lock`, `pkg.mvs`, `pkg.sync`, and
+`pkg.cli`. There is no root `pkg` facade. The first six are pure: every word
+takes and returns text or values and none reaches a host capability. `pkg.sync`
+is the explicit network/filesystem orchestration boundary and composes those
+pure modules with `http`, `archive`, and the narrow builtin `pkg.store`
+capability. `pkg.cli` is the line-oriented command adapter invoked by `ecl pkg`.
 
 - versions: `pkg.version.less?` `( left right -- bool )`, `pkg.version.max`
   `( versions -- version )`
 - manifest: `pkg.manifest.read` `( text -- manifest )`,
-  `pkg.manifest.validate` `( candidate -- manifest )`
+  `pkg.manifest.validate` `( candidate -- manifest )`, `pkg.manifest.write`
+  `( manifest -- text )`
 - lock: `pkg.lock.read` `( text -- lock )`, `pkg.lock.write`
-  `( lock -- text )`
+  `( lock -- text )`, `pkg.lock.tree` `( lock -- text )`, and `pkg.lock.why`
+  `( lock module -- text )`
 - resolution: `pkg.mvs.resolve` `( root-manifest manifests -- lock )`
 - names: `pkg.name.owns?` `( package-name module-name -- bool )`
 - synchronization: `pkg.sync.run`
-  `( root-manifest project-root -- lock )`
+  `( root-manifest project-root -- lock )`, `pkg.sync.run-offline`
+  `( root-manifest project-root -- lock )`, and `pkg.sync.verify`
+  `( lock -- count )`
 
 The builtin `pkg.store` module exposes only the package mutations ordinary ECL
-cannot express safely: `inspect`, `install`, `present?`, and `write-lock`. It
+cannot express safely: `inspect`, `install`, `present?`, `verify`, and
+`write-lock`. It
 does not expose raw directories, handles, generic rename, or recursive delete.
 
 `pkg.manifest.validate` returns its argument unchanged or raises; it is not a
@@ -1404,6 +1410,37 @@ Failure preserves a prior lock and publishes no new lock. Verified immutable
 entries successfully installed before a later failure may remain: the lock is
 the project transaction boundary, while content-addressed cache population is
 safe and reusable.
+
+### Package CLI
+
+`ecl pkg` is a fixed CLI dispatcher over the ordinary `pkg.*` modules. It does
+not parse manifests, resolve graphs, hash archives, or render locks in Zig.
+Every command other than `init` uses the same upward `ecl.pkg` discovery seam
+as Session startup. `init` acts only on the working directory and refuses to
+replace an existing manifest.
+
+- `init` derives a canonical package name from the working-directory basename
+  and creates a format-1 manifest at version `0.1.0`.
+- `add <name> <version> <url>` downloads and validates that exact package,
+  derives its `sha256-` declaration, and raises the root minimum to the given
+  version through an atomic manifest replacement. The manifest dictionary's
+  insertion order is retained. Comments cannot survive a rewrite because
+  `pkg.manifest.read` deliberately returns inert values rather than a concrete
+  syntax tree.
+- `sync` performs ordinary synchronization. `sync --offline` discovers every
+  exact manifest from immutable store entries and never opens a network
+  request; an absent entry is an error naming the package.
+- `tree` prints the lock root followed by dependency edges ordered first by
+  requirer and then by required package. `why <module>` applies the same
+  package-prefix ownership rule as runtime lookup and prints one deterministic
+  root-to-owner path.
+- `verify` streams the sealed archive retained inside every selected immutable
+  store entry and compares its SHA-256 with the lock declaration. It never
+  reaches the network. Missing seals and mismatches identify the package.
+
+Successful command output is stable, line-oriented text. Usage failures are
+ordinary CLI diagnostics; package and I/O failures remain structured ECL error
+values rendered by the existing process boundary.
 
 ## Errors
 
