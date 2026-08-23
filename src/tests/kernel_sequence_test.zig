@@ -170,3 +170,36 @@ test "sequence: display indentation follows output columns and strings are not m
         "(\"a\" \"b\") (\"a\" \"bb\")",
     );
 }
+
+test "sequence: display expands structural dictionaries and str stays canonical" {
+    try expectRoundTripDisplay("{'type 'empty}", "{'type 'empty}");
+    try expectRoundTripDisplay(
+        "{'type 'concat 'left {'type 'empty} 'right {'type 'epsilon}}",
+        "{\n" ++
+            "  'type 'concat\n" ++
+            "  'left {'type 'empty}\n" ++
+            "  'right {'type 'epsilon}\n" ++
+            "}",
+    );
+    try expectRoundTripDisplay(
+        "{'node {'type 'concat 'left {'type 'empty} 'right {'type 'epsilon}}}",
+        "{\n" ++
+            "  'node {\n" ++
+            "    'type 'concat\n" ++
+            "    'left {'type 'empty}\n" ++
+            "    'right {'type 'epsilon}\n" ++
+            "  }\n" ++
+            "}",
+    );
+    try expectRoundTripDisplay(
+        "{'matrix ((1 2) (3 4))}",
+        "{\n" ++
+            "  'matrix ([1 2]\n" ++
+            "           [3 4])\n" ++
+            "}",
+    );
+    try helper.expectStack(
+        "{'type 'concat 'left {'type 'empty} 'right {'type 'epsilon}} str",
+        "\"{'type 'concat 'left {'type 'empty} 'right {'type 'epsilon}}\"",
+    );
+}

@@ -80,6 +80,7 @@ const cases = [_]Case{
     .{ .name = "mean", .source = "[1 2 3] mean" },
     .{ .name = "print", .source = "\"hi\" io.print" },
     .{ .name = "io.inspect", .source = "7 io.inspect" },
+    .{ .name = "io.stack", .source = "1 [2 3] io.stack" },
     .{ .name = "keep", .source = "2 (1 +) keep" },
     .{ .name = "bi", .source = "2 (1 +) (3 *) bi" },
     .{ .name = "tri", .source = "2 (1 +) (3 *) (4 -) tri" },
@@ -679,6 +680,15 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\7
         \\stderr:
         \\<empty>
+        \\=== io.stack ===
+        \\source: 1 [2 3] io.stack
+        \\exit: 0
+        \\stdout:
+        \\[0] 1
+        \\[1] [2 3]
+        \\1 [2 3]
+        \\stderr:
+        \\<empty>
         \\=== keep ===
         \\source: 2 (1 +) keep
         \\exit: 0
@@ -739,7 +749,9 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: {'kind 'io} result.err (pop {'kind 'domain}) result.map-err
         \\exit: 0
         \\stdout:
-        \\{'err {'kind 'domain}}
+        \\{
+        \\  'err {'kind 'domain}
+        \\}
         \\stderr:
         \\<empty>
         \\=== bare or-raise ===
@@ -911,7 +923,9 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: [1] result.ok {'kind 'io} result.err 2 pack result.all
         \\exit: 0
         \\stdout:
-        \\{'err {'kind 'io}}
+        \\{
+        \\  'err {'kind 'io}
+        \\}
         \\stderr:
         \\<empty>
         \\=== result malformed ===
@@ -1115,7 +1129,22 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: 3 (1 +) @attempt
         \\exit: 0
         \\stdout:
-        \\3 {'err {'kind 'underflow 'msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — seed it with `values (q) with @attempt` or capture with `partial`" 'word '+ 'trace ['+] 'data {'needed 2 'available 1 'isolation @attempt 'source "<command>" 'line 1 'col 6}}}
+        \\  {
+        \\    'err {
+        \\      'kind 'underflow
+        \\      'msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — seed it with `values (q) with @attempt` or capture with `partial`"
+        \\      'word '+
+        \\      'trace ['+]
+        \\      'data {
+        \\        'needed 2
+        \\        'available 1
+        \\        'isolation @attempt
+        \\        'source "<command>"
+        \\        'line 1
+        \\        'col 6
+        \\      }
+        \\    }
+        \\3 }
         \\stderr:
         \\<empty>
         \\=== isolated child ===

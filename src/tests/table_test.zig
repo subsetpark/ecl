@@ -374,7 +374,12 @@ test "table: joins expand stably with explicit missingness" {
             .name = "composite keys join on every pair",
             .source = "{\"a\" [1] \"b\" [2] \"v\" [\"p\"]} {\"c\" [1] \"d\" [2] \"n\" [\"q\"]} " ++
                 "[[\"a\" \"c\"] [\"b\" \"d\"]] table.inner-join",
-            .expected = "{\"a\" [1] \"b\" [2] \"v\" (\"p\") \"n\" (\"q\")}",
+            .expected = "{\n" ++
+                "  \"a\" [1]\n" ++
+                "  \"b\" [2]\n" ++
+                "  \"v\" (\"p\")\n" ++
+                "  \"n\" (\"q\")\n" ++
+                "}",
         },
         .{
             // The fill is the caller's value and nothing else; a JSON 'null

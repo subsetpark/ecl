@@ -711,6 +711,21 @@ test "e2e: M6 combinators parse and contract payloads" {
         },
     });
 
+    var fold_contract = try run(&.{ build_options.ecl_exe, "-e", "[1] 0 (pop pop 7 8) fold" });
+    defer fold_contract.deinit();
+    try fold_contract.expect(.{
+        .exit_code = 1,
+        .stderr_contains = &.{
+            "'kind 'contract",
+            "'word 'fold",
+            "expected final depth 1 from 2 seeded values, observed 2",
+            "'expected (acc a -- acc)",
+            "'seeded 2",
+            "'observed 2",
+            "'index 0",
+        },
+    });
+
     var rebound = try run(&.{ build_options.ecl_exe, "test/acceptance/redefined-plus.ecl" });
     defer rebound.deinit();
     try rebound.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });

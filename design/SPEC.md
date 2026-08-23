@@ -857,7 +857,7 @@ outside the staging root.
 ### io
 
 Observable text I/O lives here: `io.pp`, `io.prin`, `io.print`, `io.inspect`,
-`io.debug`, `io.stdin`, `io.slurp`, `io.spit`, and `io.lines`. A qualified
+`io.debug`, `io.stack`, `io.stdin`, `io.slurp`, `io.spit`, and `io.lines`. A qualified
 reference or an explicit import such as `'io.print 'print import` makes the
 boundary explicit. Core `str` canonically renders any value *as a string
 value* without performing I/O.
@@ -1487,6 +1487,17 @@ as `[1 2 3]`, and the ragged result of `[[1 2] [3]] 10 *` prints as
   than 256 elements displays as `"<N-characters-elided>"`. Elision happens
   before matrix-shape scanning or child rendering, keeping ordinary terminal
   probes bounded. Only `str` is canonical and never elides.
+- In display layout, a dictionary stays compact when it is a small scalar
+  record. A dictionary with more than three pairs, a nested dictionary, or a
+  matrix-valued key or value prints one pair per indented line. Nested
+  dictionaries apply the same rule recursively. Flat vector fields stay
+  compact. Canonical `str` output is always compact and unaffected by this
+  display choice.
+- `io.stack` uses that same per-value display layout but prints each visible
+  stack slot as its own bottom-up indexed block: `[0]` is the bottom of the
+  visible operand window and the largest index is its top. Continuation lines
+  align after the index prefix. This vertical diagnostic layout is distinct
+  from the denser side-by-side REPL display.
 - The stack display keeps stack order left to right whatever a value's
   height. Each value occupies the rectangle its own layout needs, and the
   rectangles sit side by side sharing a bottom row, so a matrix grows the
@@ -1494,7 +1505,7 @@ as `[1 2 3]`, and the ragged result of `[[1 2] [3]] 10 *` prints as
   counted in bytes, matching the column arithmetic of the row breaks above,
   and no row is padded past its last value. The display is not wrapped to
   the terminal: width is a measured fact the display has no access to.
-- Dicts print as `{key value ...}` in insertion order.
+- Dictionaries preserve insertion order in both compact and multiline display.
 
 Printing at unit end: script files and `load` print only explicitly
 (`io.pp`/`io.prin`); `-e`, stdin, and calculator invocations print the final
@@ -2550,6 +2561,14 @@ invalid UTF-8, or absent host I/O raises `'io` carrying the offending `'path`.
 `( string path -- )` — Write one file, truncating and replacing it. There is
 no temporary file and no rename, so a failure part-way through can leave a
 partial file; it raises `'io` carrying the offending `'path`.
+
+### stack
+Stack-polymorphic; leaves the operand stack unchanged. Print each value in the
+currently visible operand window as a bottom-up indexed display block. `[0]`
+is the bottom and the largest index is the top; continuation lines align after
+the prefix. An isolated quotation sees only values above its isolation floor.
+An empty visible window writes nothing. Rendering is best-effort and may use
+the same multiline dictionary, array, and elision layout as `io.pp`.
 
 ### stdin
 `( -- string )` — Read the whole standard input stream once. Legal where stdin

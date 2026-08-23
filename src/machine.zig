@@ -138,6 +138,11 @@ const ApplicationSelection = struct {
 /// application that just completed. Generic drivers can return it to the
 /// machine on a contract failure but cannot construct or retarget it.
 pub const ApplicationContractSite = opaque {};
+pub const ApplicationDepths = struct {
+    seeded: usize,
+    expected: usize,
+    observed: usize,
+};
 const FailureSite = union(enum) {
     token: ErrorSite,
     contract_quotation: OwnedCode,
@@ -4127,25 +4132,37 @@ pub const Machine = struct {
         opaque_site: *ApplicationContractSite,
         quotation: *Header,
         expected: Value,
-        seeded: usize,
-        observed: usize,
+        depths: ApplicationDepths,
         index: ?usize,
     ) MachineError {
         const failure = if (index) |element_index|
             self.failFmt(
                 .contract,
-                "{s} quotation at element {d} violated its stack effect; seeded {d}, observed {d}",
-                .{ self.activeWordName(), element_index, seeded, observed },
+                "{s} quotation at element {d} violated its stack effect; expected final depth {d} from {d} seeded value{s}, observed {d}",
+                .{
+                    self.activeWordName(),
+                    element_index,
+                    depths.expected,
+                    depths.seeded,
+                    if (depths.seeded == 1) "" else "s",
+                    depths.observed,
+                },
             )
         else
             self.failFmt(
                 .contract,
-                "{s} quotation violated its stack effect; seeded {d}, observed {d}",
-                .{ self.activeWordName(), seeded, observed },
+                "{s} quotation violated its stack effect; expected final depth {d} from {d} seeded value{s}, observed {d}",
+                .{
+                    self.activeWordName(),
+                    depths.expected,
+                    depths.seeded,
+                    if (depths.seeded == 1) "" else "s",
+                    depths.observed,
+                },
             );
         self.unit.pending.?.addData(.expected, expected);
-        self.unit.pending.?.addData(.seeded, .{ .int = @intCast(seeded) });
-        self.unit.pending.?.addData(.observed, .{ .int = @intCast(observed) });
+        self.unit.pending.?.addData(.seeded, .{ .int = @intCast(depths.seeded) });
+        self.unit.pending.?.addData(.observed, .{ .int = @intCast(depths.observed) });
         if (index) |element_index| {
             self.unit.pending.?.addData(.index, .{ .int = @intCast(element_index) });
         }

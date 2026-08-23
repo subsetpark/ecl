@@ -42,6 +42,11 @@ pub const words = [_]env.BuiltinWord{
         .primitive = debug,
     },
     .{
+        .name = "stack",
+        .doc = "Print bottom-up indexed blocks for the visible operand stack without changing it.",
+        .primitive = prims.ioStack,
+    },
+    .{
         .name = "stdin",
         .doc = "( -- string ) Read the whole standard input stream once.",
         .primitive = prims.ioStdin,

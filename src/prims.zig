@@ -507,6 +507,101 @@ const PpDriver = struct {
     }
 };
 
+pub fn ioStack(evaluator: *Machine) MachineError!void {
+    if (evaluator.unit.inherited.console == null and evaluator.unit.output == null)
+        return evaluator.fail(.io, "standard output is unavailable");
+    const count = evaluator.available();
+    if (count == 0) return;
+    try evaluator.startDriver(StackDisplayDriver{
+        .count = count,
+    });
+}
+
+const StackDisplayDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+
+    count: usize,
+    index: usize = 0,
+    render: ?heap.Owned(printer.OwnedStringCursor) = null,
+    rendered: ?heap.Owned([]u8) = null,
+    prefix_written: bool = false,
+    written: usize = 0,
+
+    pub fn advance(evaluator: *Machine, self: *StackDisplayDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        std.debug.assert(evaluator.available() == self.count);
+
+        var prefix_buffer: [64]u8 = undefined;
+        const prefix = stackDisplayPrefix(&prefix_buffer, self.index);
+        if (self.rendered == null) {
+            if (self.render == null) {
+                self.render = .init(try printer.OwnedStringCursor.initDisplayAtColumn(
+                    evaluator.allocator(),
+                    evaluator.visibleOperandBorrowed(self.index),
+                    prefix.len,
+                ));
+            }
+            switch (try self.render.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+                .pending => return .yielded,
+                .complete => |text| {
+                    self.render.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.render = null;
+                    self.rendered = .init(text);
+                    return .yielded;
+                },
+            }
+        }
+
+        if (!self.prefix_written) {
+            try writeStackDisplayChunk(evaluator, prefix, false);
+            self.prefix_written = true;
+            return .yielded;
+        }
+
+        const text = self.rendered.?.borrow();
+        const end = @min(self.written + 256, text.len);
+        const complete = end == text.len;
+        try writeStackDisplayChunk(evaluator, text[self.written..end], complete);
+        self.written = end;
+        if (!complete) return .yielded;
+
+        self.rendered.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        self.rendered = null;
+        self.prefix_written = false;
+        self.written = 0;
+        self.index += 1;
+        return if (self.index == self.count) .completed else .yielded;
+    }
+};
+
+fn stackDisplayPrefix(buffer: *[64]u8, index: usize) []const u8 {
+    var fixed = std.Io.Writer.fixed(buffer);
+    fixed.print("[{d}] ", .{index}) catch unreachable;
+    return fixed.buffered();
+}
+
+fn writeStackDisplayChunk(
+    evaluator: *Machine,
+    bytes: []const u8,
+    newline: bool,
+) MachineError!void {
+    if (evaluator.unit.inherited.console) |console| {
+        console.writeOutput(bytes, newline) catch
+            return evaluator.fail(.io, "standard output write failed");
+        return;
+    }
+    const output = evaluator.unit.output.?;
+    if (bytes.len != 0)
+        output.writeAll(bytes) catch
+            return evaluator.fail(.io, "standard output write failed");
+    if (newline) {
+        output.writeByte('\n') catch
+            return evaluator.fail(.io, "standard output write failed");
+        output.flush() catch
+            return evaluator.fail(.io, "standard output flush failed");
+    }
+}
+
 pub fn ioPrin(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popString();
     defer item.deinit();

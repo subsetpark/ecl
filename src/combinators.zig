@@ -533,8 +533,15 @@ const IterationState = struct {
                 site,
                 self.quotation.borrow(),
                 self.expected.?.borrow(),
-                0,
-                0,
+                .{
+                    .seeded = 0,
+                    .expected = switch (self.kind) {
+                        .each, .zip_with, .fold, .scan => 1,
+                        .for_word => 0,
+                        .infra => unreachable,
+                    },
+                    .observed = 0,
+                },
                 self.index,
             );
         return switch (self.kind) {
@@ -557,8 +564,7 @@ const IterationState = struct {
                 site,
                 self.quotation.borrow(),
                 self.expected.?.borrow(),
-                seeded,
-                observed,
+                .{ .seeded = seeded, .expected = 1, .observed = observed },
                 self.index,
             );
         }
@@ -584,8 +590,7 @@ const IterationState = struct {
                 site,
                 self.quotation.borrow(),
                 self.expected.?.borrow(),
-                1,
-                observed,
+                .{ .seeded = 1, .expected = 0, .observed = observed },
                 self.index,
             );
         }
@@ -606,8 +611,7 @@ const IterationState = struct {
                 site,
                 self.quotation.borrow(),
                 self.expected.?.borrow(),
-                2,
-                observed,
+                .{ .seeded = 2, .expected = 1, .observed = observed },
                 self.index,
             );
         }
@@ -789,8 +793,7 @@ const StencilApplication = struct {
                 site,
                 control.quotation.borrow(),
                 control.expected.borrow(),
-                1,
-                0,
+                .{ .seeded = 1, .expected = 1, .observed = 0 },
                 control.index,
             );
         if (observed != 1)
@@ -798,8 +801,7 @@ const StencilApplication = struct {
                 site,
                 control.quotation.borrow(),
                 control.expected.borrow(),
-                1,
-                observed,
+                .{ .seeded = 1, .expected = 1, .observed = observed },
                 control.index,
             );
         var result = try evaluator.popValue();
@@ -930,8 +932,11 @@ const UnfoldState = struct {
                     .step => self.step_quotation.borrow(),
                 },
                 if (self.phase == .predicate) self.predicate_expected.borrow() else self.step_expected.borrow(),
-                1,
-                0,
+                .{
+                    .seeded = 1,
+                    .expected = if (self.phase == .predicate) 1 else 2,
+                    .observed = 0,
+                },
                 self.index,
             );
         return switch (self.phase) {
@@ -951,8 +956,7 @@ const UnfoldState = struct {
                 site,
                 self.predicate.borrow(),
                 self.predicate_expected.borrow(),
-                1,
-                observed,
+                .{ .seeded = 1, .expected = 1, .observed = observed },
                 self.index,
             );
         var predicate_result = try evaluator.popValue();
@@ -987,8 +991,7 @@ const UnfoldState = struct {
                 site,
                 self.step_quotation.borrow(),
                 self.step_expected.borrow(),
-                1,
-                observed,
+                .{ .seeded = 1, .expected = 2, .observed = observed },
                 self.index,
             );
         var item = try evaluator.popValue();

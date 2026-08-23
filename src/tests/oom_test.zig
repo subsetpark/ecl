@@ -189,7 +189,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-display.ecl",
-        "[0 1 2 3 4 5] [2 3] reshape dup io.pp",
+        "[0 1 2 3 4 5] [2 3] reshape dup io.pp io.stack",
     );
     var display = try runtime.stackDisplay();
     display.deinit();

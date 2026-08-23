@@ -8,7 +8,9 @@ test "result: constructors and observations follow the tagged shape" {
         .{
             .name = "construction",
             .source = "[1 2] result.ok {'kind 'io} result.err",
-            .expected = "{'ok [1 2]} {'err {'kind 'io}}",
+            .expected = "            {\n" ++
+                "              'err {'kind 'io}\n" ++
+                "{'ok [1 2]} }",
         },
         .{
             // A success payload is a stack, so an empty one is legal and a
@@ -62,7 +64,7 @@ test "result: and-then composes success stacks and short-circuits errors" {
         .{
             .name = "an existing error is returned unchanged",
             .source = "{'kind 'io 'msg \"boom\"} result.err (+) result.and-then",
-            .expected = "{'err {'kind 'io 'msg \"boom\"}}",
+            .expected = "{\n  'err {'kind 'io 'msg \"boom\"}\n}",
         },
         .{
             .name = "a failing continuation becomes the new error",
@@ -78,7 +80,9 @@ test "result: and-then composes success stacks and short-circuits errors" {
             .name = "map-err rewrites only failures",
             .source = "{'kind 'io} result.err (pop {'kind 'domain}) result.map-err " ++
                 "[1] result.ok (pop {'kind 'domain}) result.map-err",
-            .expected = "{'err {'kind 'domain}} {'ok [1]}",
+            .expected = "{\n" ++
+                "  'err {'kind 'domain}\n" ++
+                "}                      {'ok [1]}",
         },
     });
     try support.expectErrors(&.{
@@ -102,7 +106,7 @@ test "result: recover-kinds recovers matched kinds and leaves others unchanged" 
         .{
             .name = "broad recovery seeds the error dict",
             .source = "{'kind 'io 'msg \"x\"} result.err ('kind at wrap) result.recover",
-            .expected = "{'ok (['io])}",
+            .expected = "{\n  'ok (['io])\n}",
         },
         .{
             .name = "recover leaves a success alone",
@@ -112,12 +116,12 @@ test "result: recover-kinds recovers matched kinds and leaves others unchanged" 
         .{
             .name = "a matched kind recovers",
             .source = "{'kind 'io} result.err ['io 'timeout] (pop 99 wrap) result.recover-kinds",
-            .expected = "{'ok ([99])}",
+            .expected = "{\n  'ok ([99])\n}",
         },
         .{
             .name = "an unmatched kind is unchanged",
             .source = "{'kind 'type} result.err ['io] (pop 99 wrap) result.recover-kinds",
-            .expected = "{'err {'kind 'type}}",
+            .expected = "{\n  'err {'kind 'type}\n}",
         },
         .{
             .name = "a success is unchanged",
@@ -127,7 +131,7 @@ test "result: recover-kinds recovers matched kinds and leaves others unchanged" 
         .{
             .name = "an empty kind list recovers nothing",
             .source = "{'kind 'io} result.err [] (pop 99 wrap) result.recover-kinds",
-            .expected = "{'err {'kind 'io}}",
+            .expected = "{\n  'err {'kind 'io}\n}",
         },
         .{
             .name = "a failing recovery quotation becomes the new error",
@@ -162,7 +166,7 @@ test "result: all returns leftmost error or ordered success stacks" {
             .name = "the leftmost error is returned unchanged",
             .source = "[1] result.ok {'kind 'io} result.err [2] result.ok " ++
                 "{'kind 'type} result.err 4 pack result.all",
-            .expected = "{'err {'kind 'io}}",
+            .expected = "{\n  'err {'kind 'io}\n}",
         },
         .{
             .name = "an empty list succeeds with no stacks",

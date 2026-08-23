@@ -279,7 +279,7 @@ test "hostio: stdin reads piped data and errors when stdin is the source" {
 
 test "hostio: io exports are documented and importable" {
     const names = [_][]const u8{
-        "pp", "prin", "print", "inspect", "debug", "stdin", "slurp", "spit", "lines",
+        "pp", "prin", "print", "inspect", "debug", "stack", "stdin", "slurp", "spit", "lines",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -295,4 +295,28 @@ test "hostio: io exports are documented and importable" {
 
 test "hostio: debug prints a label and preserves its value" {
     try expectStackWithOutput(.{ .source = "[1 2] \"value\" io.debug" }, "[1 2]", "value: [1 2]\n");
+}
+
+test "hostio: stack prints the visible operand window without changing it" {
+    try expectStackWithOutput(
+        .{ .source = "1 [2 3] io.stack" },
+        "1 [2 3]",
+        "[0] 1\n[1] [2 3]\n",
+    );
+    try expectStackWithOutput(.{ .source = "io.stack" }, "", "");
+    try expectStackWithOutput(
+        .{ .source = "1 ((1 2) (3 4)) io.stack" },
+        "  ([1 2]\n1  [3 4])",
+        "[0] 1\n[1] ([1 2]\n     [3 4])\n",
+    );
+    try expectStackWithOutput(
+        .{ .source = "{'type 'concat 'left {'type 'empty} 'right {'type 'epsilon}} io.stack" },
+        "{\n  'type 'concat\n  'left {'type 'empty}\n  'right {'type 'epsilon}\n}",
+        "[0] {\n      'type 'concat\n      'left {'type 'empty}\n      'right {'type 'epsilon}\n    }\n",
+    );
+    try expectStackWithOutput(
+        .{ .source = "[3] 10 (io.stack +) fold" },
+        "13",
+        "[0] 10\n[1] 3\n",
+    );
 }

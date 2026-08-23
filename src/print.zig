@@ -35,6 +35,7 @@ const Action = union(enum) {
         index: usize,
         key: bool,
         indent: usize,
+        multiline: bool,
     },
     string: struct { collection: Value, index: usize },
     bytes: struct { source: []const u8, index: usize },
@@ -52,18 +53,19 @@ pub const RenderCursor = struct {
     column: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, item: Value) error{OutOfMemory}!RenderCursor {
-        return initWithStyle(allocator, item, .canonical);
+        return initWithStyle(allocator, item, .canonical, 0);
     }
 
     fn initWithStyle(
         allocator: std.mem.Allocator,
         item: Value,
         style: RenderStyle,
+        initial_column: usize,
     ) error{OutOfMemory}!RenderCursor {
         var actions = poll_api.ChunkStack(Action).init(allocator);
         errdefer actions.deinit();
-        try actions.push(.{ .render = .{ .item = item, .indent = 0 } });
-        return .{ .actions = actions, .style = style };
+        try actions.push(.{ .render = .{ .item = item, .indent = initial_column } });
+        return .{ .actions = actions, .style = style, .column = initial_column };
     }
 
     pub fn deinit(self: *RenderCursor) void {
@@ -138,7 +140,8 @@ pub const RenderCursor = struct {
                         .header = header,
                         .index = 0,
                         .key = true,
-                        .indent = render.indent + 1,
+                        .indent = render.indent,
+                        .multiline = self.style == .display and displayDictionaryMultiline(header),
                     } });
                 },
                 .task => |header| try self.writeFmt(writer, "<task:{d}>", .{heap.taskStorage(header).identity}),
@@ -171,6 +174,44 @@ pub const RenderCursor = struct {
             },
             .dictionary => |continuation| {
                 const count: usize = @intCast(continuation.header.length());
+                if (continuation.multiline) {
+                    if (continuation.index == count) {
+                        try self.writeByte(writer, '\n');
+                        try self.pushBytes("}");
+                        if (continuation.indent != 0)
+                            try self.actions.push(.{ .spaces = continuation.indent });
+                        return;
+                    }
+                    if (continuation.key) {
+                        try self.writeByte(writer, '\n');
+                        try self.actions.push(.{ .dictionary = .{
+                            .header = continuation.header,
+                            .index = continuation.index,
+                            .key = false,
+                            .indent = continuation.indent,
+                            .multiline = true,
+                        } });
+                        try self.actions.push(.{ .render = .{
+                            .item = dict.keyAt(continuation.header, continuation.index),
+                            .indent = continuation.indent + 2,
+                        } });
+                        try self.actions.push(.{ .spaces = continuation.indent + 2 });
+                        return;
+                    }
+                    try self.writeByte(writer, ' ');
+                    try self.actions.push(.{ .dictionary = .{
+                        .header = continuation.header,
+                        .index = continuation.index + 1,
+                        .key = true,
+                        .indent = continuation.indent,
+                        .multiline = true,
+                    } });
+                    try self.actions.push(.{ .render = .{
+                        .item = dict.valueAt(continuation.header, continuation.index),
+                        .indent = continuation.indent + 2,
+                    } });
+                    return;
+                }
                 if (continuation.index == count) {
                     try self.writeByte(writer, '}');
                     return;
@@ -185,6 +226,7 @@ pub const RenderCursor = struct {
                     .index = continuation.index + @intFromBool(!continuation.key),
                     .key = !continuation.key,
                     .indent = continuation.indent,
+                    .multiline = false,
                 } });
                 try self.actions.push(.{ .render = .{
                     .item = child,
@@ -357,29 +399,40 @@ pub const OwnedStringCursor = struct {
     item: Value,
     cursor: RenderCursor,
     style: RenderStyle,
+    initial_column: usize,
     phase: enum { count, fill, complete } = .count,
     byte_count: usize = 0,
     output: ?[]u8 = null,
     written: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, item: Value) error{OutOfMemory}!OwnedStringCursor {
-        return initWithStyle(allocator, item, .canonical);
+        return initWithStyle(allocator, item, .canonical, 0);
     }
 
     pub fn initDisplay(allocator: std.mem.Allocator, item: Value) error{OutOfMemory}!OwnedStringCursor {
-        return initWithStyle(allocator, item, .display);
+        return initWithStyle(allocator, item, .display, 0);
+    }
+
+    pub fn initDisplayAtColumn(
+        allocator: std.mem.Allocator,
+        item: Value,
+        initial_column: usize,
+    ) error{OutOfMemory}!OwnedStringCursor {
+        return initWithStyle(allocator, item, .display, initial_column);
     }
 
     fn initWithStyle(
         allocator: std.mem.Allocator,
         item: Value,
         style: RenderStyle,
+        initial_column: usize,
     ) error{OutOfMemory}!OwnedStringCursor {
         return .{
             .allocator = allocator,
             .item = item,
-            .cursor = try RenderCursor.initWithStyle(allocator, item, style),
+            .cursor = try RenderCursor.initWithStyle(allocator, item, style, initial_column),
             .style = style,
+            .initial_column = initial_column,
         };
     }
 
@@ -407,7 +460,12 @@ pub const OwnedStringCursor = struct {
                 self.byte_count = std.math.add(usize, self.byte_count, produced) catch
                     return error.OutOfMemory;
                 if (progress == .pending) return .pending;
-                var fill_cursor = try RenderCursor.initWithStyle(self.allocator, self.item, self.style);
+                var fill_cursor = try RenderCursor.initWithStyle(
+                    self.allocator,
+                    self.item,
+                    self.style,
+                    self.initial_column,
+                );
                 errdefer fill_cursor.deinit();
                 const output = try self.allocator.alloc(u8, self.byte_count);
                 self.cursor.deinit();
@@ -434,6 +492,224 @@ pub const OwnedStringCursor = struct {
         }
     }
 };
+
+/// One rendered stack item, described as the rectangle of rows it occupies.
+/// `next_byte` is layout-cursor state: blocks are consumed top to bottom while
+/// the stack itself remains ordered left to right.
+pub const DisplayBlock = struct {
+    text: []u8,
+    width: usize,
+    rows: usize,
+    next_byte: usize = 0,
+};
+
+pub const DisplayMeasureProgress = poll_api.Progress(DisplayBlock);
+
+/// Bounded measurement of one rendered display value.
+pub const DisplayMeasureCursor = struct {
+    text: []u8,
+    index: usize = 0,
+    row_start: usize = 0,
+    width: usize = 0,
+    rows: usize = 1,
+
+    pub fn init(text: []u8) DisplayMeasureCursor {
+        return .{ .text = text };
+    }
+
+    pub fn advance(
+        self: *DisplayMeasureCursor,
+        budget: usize,
+    ) error{OutOfMemory}!DisplayMeasureProgress {
+        std.debug.assert(budget != 0);
+        const end = @min(self.index +| budget, self.text.len);
+        while (self.index != end) : (self.index += 1) {
+            if (self.text[self.index] != '\n') continue;
+            self.width = @max(self.width, self.index - self.row_start);
+            self.row_start = self.index + 1;
+            self.rows = std.math.add(usize, self.rows, 1) catch return error.OutOfMemory;
+        }
+        if (self.index != self.text.len) return .pending;
+        self.width = @max(self.width, self.text.len - self.row_start);
+        return .{ .complete = .{
+            .text = self.text,
+            .width = self.width,
+            .rows = self.rows,
+        } };
+    }
+};
+
+pub const StackLayoutProgress = poll_api.Progress(void);
+
+/// Paste display blocks side by side, aligned on their bottom row. Each
+/// transition examines or emits at most 256 bytes, so runtime words can drive
+/// the same layout cooperatively while blocking observers may drive it to
+/// completion.
+pub const StackLayoutCursor = struct {
+    blocks: []DisplayBlock,
+    phase: enum { height, row_start, block, scan_row, spaces, bytes, complete } = .height,
+    tallest: usize = 0,
+    height_index: usize = 0,
+    row_index: usize = 0,
+    block_index: usize = 0,
+    pending_spaces: usize = 0,
+    row_start_byte: usize = 0,
+    scan_index: usize = 0,
+    row_end_byte: usize = 0,
+    emit_index: usize = 0,
+
+    pub fn init(blocks: []DisplayBlock) StackLayoutCursor {
+        return .{ .blocks = blocks };
+    }
+
+    pub fn advance(
+        self: *StackLayoutCursor,
+        writer: *std.Io.Writer,
+        budget: usize,
+    ) (error{OutOfMemory} || std.Io.Writer.Error)!StackLayoutProgress {
+        std.debug.assert(budget != 0 and self.phase != .complete);
+        for (0..budget) |_| {
+            switch (self.phase) {
+                .height => {
+                    if (self.height_index == self.blocks.len) {
+                        if (self.tallest == 0) {
+                            self.phase = .complete;
+                            return .complete;
+                        }
+                        self.phase = .row_start;
+                        continue;
+                    }
+                    self.tallest = @max(self.tallest, self.blocks[self.height_index].rows);
+                    self.height_index += 1;
+                },
+                .row_start => {
+                    if (self.row_index != 0) try writer.writeByte('\n');
+                    self.block_index = 0;
+                    self.pending_spaces = 0;
+                    self.phase = .block;
+                },
+                .block => {
+                    if (self.block_index == self.blocks.len) {
+                        self.row_index += 1;
+                        if (self.row_index == self.tallest) {
+                            self.phase = .complete;
+                            return .complete;
+                        }
+                        self.phase = .row_start;
+                        continue;
+                    }
+                    if (self.block_index != 0)
+                        self.pending_spaces = std.math.add(usize, self.pending_spaces, 1) catch
+                            return error.OutOfMemory;
+                    const block = &self.blocks[self.block_index];
+                    if (self.row_index < self.tallest - block.rows) {
+                        self.pending_spaces = std.math.add(usize, self.pending_spaces, block.width) catch
+                            return error.OutOfMemory;
+                        self.block_index += 1;
+                        continue;
+                    }
+                    self.row_start_byte = block.next_byte;
+                    self.scan_index = block.next_byte;
+                    self.phase = .scan_row;
+                },
+                .scan_row => {
+                    const block = &self.blocks[self.block_index];
+                    const scan_end = @min(self.scan_index +| 256, block.text.len);
+                    if (std.mem.indexOfScalar(u8, block.text[self.scan_index..scan_end], '\n')) |relative| {
+                        self.finishRow(block, self.scan_index + relative, true) catch
+                            return error.OutOfMemory;
+                        continue;
+                    }
+                    self.scan_index = scan_end;
+                    if (scan_end == block.text.len)
+                        self.finishRow(block, scan_end, false) catch return error.OutOfMemory;
+                },
+                .spaces => {
+                    const padding = [_]u8{' '} ** 256;
+                    const count = @min(self.pending_spaces, padding.len);
+                    try writer.writeAll(padding[0..count]);
+                    self.pending_spaces -= count;
+                    if (self.pending_spaces == 0) self.phase = .bytes;
+                },
+                .bytes => {
+                    const count = @min(self.row_end_byte - self.emit_index, 256);
+                    try writer.writeAll(self.blocks[self.block_index].text[self.emit_index..][0..count]);
+                    self.emit_index += count;
+                    if (self.emit_index == self.row_end_byte) {
+                        const block = self.blocks[self.block_index];
+                        self.pending_spaces = std.math.add(
+                            usize,
+                            self.pending_spaces,
+                            block.width - (self.row_end_byte - self.row_start_byte),
+                        ) catch return error.OutOfMemory;
+                        self.block_index += 1;
+                        self.phase = .block;
+                    }
+                },
+                .complete => unreachable,
+            }
+        }
+        return .pending;
+    }
+
+    fn finishRow(
+        self: *StackLayoutCursor,
+        block: *DisplayBlock,
+        end: usize,
+        has_newline: bool,
+    ) error{OutOfMemory}!void {
+        block.next_byte = end + @intFromBool(has_newline);
+        self.row_end_byte = end;
+        if (end == self.row_start_byte) {
+            self.pending_spaces = std.math.add(usize, self.pending_spaces, block.width) catch
+                return error.OutOfMemory;
+            self.block_index += 1;
+            self.phase = .block;
+            return;
+        }
+        self.emit_index = self.row_start_byte;
+        self.phase = if (self.pending_spaces == 0) .bytes else .spaces;
+    }
+};
+
+pub fn measureDisplayBlock(text: []u8) error{OutOfMemory}!DisplayBlock {
+    var cursor = DisplayMeasureCursor.init(text);
+    return poll_api.driveFallible(DisplayBlock, &cursor, .{1024});
+}
+
+pub fn toOwnedStackDisplayString(
+    allocator: std.mem.Allocator,
+    blocks: []DisplayBlock,
+) error{OutOfMemory}![]u8 {
+    var count_buffer: [256]u8 = undefined;
+    var counter = std.Io.Writer.Discarding.init(&count_buffer);
+    var count_cursor = StackLayoutCursor.init(blocks);
+    while (true) switch (count_cursor.advance(&counter.writer, 1024) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.WriteFailed => return error.OutOfMemory,
+    }) {
+        .pending => {},
+        .complete => break,
+    };
+    const byte_count = std.math.cast(usize, counter.fullCount()) orelse
+        return error.OutOfMemory;
+    for (blocks) |*block| block.next_byte = 0;
+
+    const output = try allocator.alloc(u8, byte_count);
+    errdefer allocator.free(output);
+    var fixed = std.Io.Writer.fixed(output);
+    var fill_cursor = StackLayoutCursor.init(blocks);
+    while (true) switch (fill_cursor.advance(&fixed, 1024) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.WriteFailed => unreachable,
+    }) {
+        .pending => {},
+        .complete => {
+            std.debug.assert(fixed.buffered().len == output.len);
+            return output;
+        },
+    };
+}
 
 pub fn print(item: Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     printWithAllocator(std.heap.smp_allocator, item, writer) catch |err| switch (err) {
@@ -468,6 +744,45 @@ pub fn toOwnedDisplayString(
     var cursor = try OwnedStringCursor.initDisplay(allocator, item);
     defer cursor.deinit();
     return poll_api.driveFallible([]u8, &cursor, .{1024});
+}
+
+/// Display dictionaries stay compact when they are small scalar records.
+/// Larger records, and records containing structural values, break one pair
+/// per line. The bounded size test means this decision never hides a
+/// user-sized traversal inside one rendering transition.
+fn displayDictionaryMultiline(header: *value.DictHandle) bool {
+    const count: usize = @intCast(header.length());
+    if (count > 3) return true;
+    for (0..count) |index| {
+        if (isDisplayStructure(dict.keyAt(header, index)) or
+            isDisplayStructure(dict.valueAt(header, index))) return true;
+    }
+    return false;
+}
+
+fn isDisplayStructure(item: Value) bool {
+    return switch (item) {
+        .dict => true,
+        .list => displayListIsMatrix(item),
+        .int, .float, .char, .symbol, .word, .task, .module => false,
+    };
+}
+
+/// Match the first matrix case recognized by `DisplayScan`. The display limit
+/// is also the scan bound, so deciding a dictionary layout remains one fixed
+/// amount of work even when a list is user-sized.
+fn displayListIsMatrix(item: Value) bool {
+    if (item.list.kind() != .generic_spine or
+        item.list.length() == 0 or
+        item.list.length() > display_list_limit) return false;
+    var columns: u64 = 0;
+    for (0..@as(usize, @intCast(item.list.length()))) |index| {
+        const row = list.atUnchecked(item, index);
+        if (!isFlatRow(row) or (index != 0 and row.list.length() != columns))
+            return false;
+        if (index == 0) columns = row.list.length();
+    }
+    return true;
 }
 
 fn isFlatRow(item: Value) bool {

@@ -145,88 +145,27 @@ pub const RenderedText = enum(usize) {
     }
 };
 
-/// One rendered stack item, described as the rectangle of rows it occupies.
-/// Stack order is left to right, so an item that needs several rows grows the
-/// display upward from the shared bottom row rather than pushing its
-/// neighbours onto rows of their own.
-const DisplayBlock = struct {
-    text: []u8,
-    width: usize,
-    rows: usize,
-
-    fn measure(text: []u8) DisplayBlock {
-        var width: usize = 0;
-        var rows: usize = 1;
-        var start: usize = 0;
-        for (text, 0..) |byte, index| {
-            if (byte != '\n') continue;
-            width = @max(width, index - start);
-            start = index + 1;
-            rows += 1;
-        }
-        return .{ .text = text, .width = @max(width, text.len - start), .rows = rows };
-    }
-
-    /// The row `height` rows above this item's bottom row, or null when the
-    /// item does not reach that far up.
-    fn rowAbove(self: DisplayBlock, height: usize) ?[]const u8 {
-        if (height >= self.rows) return null;
-        var lines = std.mem.splitScalar(u8, self.text, '\n');
-        var skipped = self.rows - 1 - height;
-        while (skipped != 0) : (skipped -= 1) _ = lines.next();
-        return lines.next().?;
-    }
-};
-
 fn renderDisplayBlocks(
     allocator: std.mem.Allocator,
     items: []const Value,
-) error{OutOfMemory}!std.ArrayList(DisplayBlock) {
-    var blocks: std.ArrayList(DisplayBlock) = .empty;
+) error{OutOfMemory}!std.ArrayList(printer.DisplayBlock) {
+    var blocks: std.ArrayList(printer.DisplayBlock) = .empty;
     errdefer releaseDisplayBlocks(allocator, &blocks);
     try blocks.ensureTotalCapacityPrecise(allocator, items.len);
-    for (items) |item|
-        blocks.appendAssumeCapacity(.measure(try printer.toOwnedDisplayString(allocator, item)));
+    for (items) |item| {
+        const text = try printer.toOwnedDisplayString(allocator, item);
+        errdefer allocator.free(text);
+        blocks.appendAssumeCapacity(try printer.measureDisplayBlock(text));
+    }
     return blocks;
 }
 
 fn releaseDisplayBlocks(
     allocator: std.mem.Allocator,
-    blocks: *std.ArrayList(DisplayBlock),
+    blocks: *std.ArrayList(printer.DisplayBlock),
 ) void {
     for (blocks.items) |block| allocator.free(block.text);
     blocks.deinit(allocator);
-}
-
-/// Paste the blocks side by side, aligned on their bottom row. Padding is
-/// accumulated and only emitted once a later item on the same row has
-/// something to write, so no row carries trailing spaces.
-fn composeDisplayBlocks(
-    allocator: std.mem.Allocator,
-    blocks: []const DisplayBlock,
-) error{OutOfMemory}![]u8 {
-    var tallest: usize = 0;
-    for (blocks) |block| tallest = @max(tallest, block.rows);
-    var allocating = std.Io.Writer.Allocating.init(allocator);
-    defer allocating.deinit();
-    var height = tallest;
-    while (height != 0) {
-        height -= 1;
-        if (height + 1 != tallest)
-            allocating.writer.writeByte('\n') catch return error.OutOfMemory;
-        var pending: usize = 0;
-        for (blocks, 0..) |block, index| {
-            if (index != 0) pending += 1;
-            const row = block.rowAbove(height) orelse "";
-            if (row.len != 0) {
-                allocating.writer.splatByteAll(' ', pending) catch return error.OutOfMemory;
-                pending = 0;
-                allocating.writer.writeAll(row) catch return error.OutOfMemory;
-            }
-            pending += block.width - row.len;
-        }
-    }
-    return allocating.toOwnedSlice();
 }
 
 /// One owned copy of the host environment. Names and values live in a single
@@ -673,7 +612,7 @@ pub const Session = enum(usize) {
         const allocator = core.allocator();
         var blocks = try renderDisplayBlocks(allocator, core.stack.items);
         defer releaseDisplayBlocks(allocator, &blocks);
-        return .fromOwned(allocator, try composeDisplayBlocks(allocator, blocks.items));
+        return .fromOwned(allocator, try printer.toOwnedStackDisplayString(allocator, blocks.items));
     }
     pub fn renderValue(self: *const Session, item: Value) error{OutOfMemory}!RenderedText {
         const allocator = self.coreState().allocator();
