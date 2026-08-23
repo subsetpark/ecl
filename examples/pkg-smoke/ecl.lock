@@ -1,0 +1,7 @@
+{'format 1
+ 'root "example.pkg-smoke"
+ 'packages
+ {"smoke" {'version "1.0.0" 'url "https://github.com/subsetpark/ecl-pkg-smoke/releases/download/v1.0.0/smoke-1.0.0.tgz" 'hash "sha256-315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745"}}
+ 'requires
+ {"example.pkg-smoke" {"smoke" "1.0.0"}
+  "smoke" {}}}

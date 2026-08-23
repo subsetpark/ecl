@@ -138,6 +138,7 @@ ecl -e <SOURCE> [ARGS...]  Evaluate source and print the final stack
 ecl <FILE> [ARGS...]       Run a UTF-8 script
 ecl <SOURCE> [ARGS...]     Evaluate source and print the final stack
 ecl fmt <FILE|->           Format source without evaluating it
+ecl pkg <SUBCOMMAND>       Manage the current project's packages
 ecl -h | --help            Show command help
 ecl -V | --version         Show the version
 ```
@@ -163,6 +164,18 @@ Ctrl-C abandons the current unit; Ctrl-D exits from an empty primary prompt.
 `str` is the compact, round-trippable rendering of a value. REPL display and
 `io.pp` favor readable matrix layout and bound terminal output by eliding very
 large values.
+
+### Packages
+
+`ecl pkg` manages inert `ecl.pkg` manifests, reproducible `ecl.lock` files,
+and immutable source-package store entries. Its commands initialize projects,
+add exact HTTPS requirements, synchronize online or offline, inspect the
+locked graph, and verify retained archive hashes.
+
+[`examples/pkg-smoke`](examples/pkg-smoke) is a checked-in consumer of the
+public source-only smoke package. Its walkthrough covers `add`, `sync`, locked
+execution, offline sync, `tree`, `why`, and `verify` while asserting that the
+committed manifest and lock remain byte-stable.
 
 ## Modules and the standard library
 

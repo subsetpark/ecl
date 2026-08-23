@@ -516,14 +516,24 @@ imports it by name.
 **Unlocks**: Dogfooding, and the documentation and hardening pass.
 
 **Operator Actions Before Next Milestone**:
-1. Convert one real ECL project to `ecl.pkg`/`ecl.lock` and use it for at
-   least a week of ordinary work. Watch for: resolution errors that fail to
-   name the responsible package, store entries that grow without bound,
-   lock churn on unrelated commits.
-2. **Decision, with criteria**: M7's error-catalogue scope is set by what this
-   soak actually produced. Every resolution failure encountered during the
-   week that did not name both the responsible package and the conflicting
-   requirement becomes a required M7 fix.
+1. Until a non-fixture ECL application exists, use the checked-in
+   `examples/pkg-smoke` consumer as the dogfood baseline. Its complete
+   transcript covers `add`, online and offline `sync`, locked execution,
+   `tree`, `why`, and `verify`, and ends by proving that the committed manifest
+   and lock are byte-stable.
+2. The week-long application soak is deferred rather than fabricated. M7's
+   initial error catalogue is therefore set by the hermetic package suites and
+   the checked-in consumer. Any later real-project failure that omits the
+   responsible package or conflicting requirement reopens the catalogue as a
+   required hardening fix.
+
+The baseline was executed cold against the public `smoke` release on
+2026-08-23. Online sync, locked execution, offline sync, `tree`, `why`, and
+sealed-archive verification succeeded. The first hand-authored example lock
+omitted the leaf package's empty `requires` row; synchronization exposed and
+canonicalized that difference. The resolver-produced lock is now the committed
+artifact and a hermetic acceptance case proves subsequent offline sync remains
+byte-identical. No error omitted package provenance during this run.
 
 ---
 

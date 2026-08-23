@@ -1,5 +1,6 @@
 const std = @import("std");
 const pkg_lock_fixture = @import("pkg_lock_fixture.zig");
+const pkg_example_hash = "315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745";
 
 test "e2e: package lock resolves import by name with ECL PATH unset" {
     var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, true);
@@ -207,6 +208,69 @@ test "e2e: pkg offline sync names an absent immutable store entry without fetchi
             "offline synchronization is missing a package store entry",
             "'package \"smoke\"",
         },
+    });
+}
+
+test "e2e: checked-in package consumer executes and remains byte-stable offline" {
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    try scratch.dir.createDir(io, "project", .default_dir);
+    try scratch.dir.createDir(io, "cache", .default_dir);
+    try scratch.dir.createDir(
+        io,
+        "cache/smoke-1.0.0-" ++ pkg_example_hash,
+        .default_dir,
+    );
+    try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.pkg", .data = build_options.pkg_example_manifest });
+    try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.lock", .data = build_options.pkg_example_lock });
+    try scratch.dir.writeFile(io, .{ .sub_path = "project/main.ecl", .data = build_options.pkg_example_program });
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/ecl.pkg",
+        .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'requires {}}\n",
+    });
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/smoke.ecl",
+        .data = "((42) 'answer def) 'smoke @defm\n",
+    });
+    const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
+    defer allocator.free(cache);
+    var project = try scratch.dir.openDir(io, "project", .{});
+    defer project.close(io);
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_CACHE", cache);
+
+    var execution = try cli.runOptions(.{
+        .argv = &.{ exe, "main.ecl" },
+        .cwd = .{ .dir = project },
+        .environ_map = &environment,
+    });
+    defer execution.deinit();
+    try execution.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
+
+    var offline = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "sync", "--offline" },
+        .cwd = .{ .dir = project },
+        .environ_map = &environment,
+    });
+    defer offline.deinit();
+    try offline.expect(.{ .exit_code = 0, .stdout = "synced 1 packages\n", .stderr = "" });
+    const rewritten_lock = try project.readFileAlloc(io, "ecl.lock", allocator, .unlimited);
+    defer allocator.free(rewritten_lock);
+    try std.testing.expectEqualStrings(build_options.pkg_example_lock, rewritten_lock);
+
+    var why = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "why", "smoke.answer" },
+        .cwd = .{ .dir = project },
+        .environ_map = &environment,
+    });
+    defer why.deinit();
+    try why.expect(.{
+        .exit_code = 0,
+        .stdout = "smoke.answer: example.pkg-smoke -> smoke 1.0.0\n",
+        .stderr = "",
     });
 }
 const builtin = @import("builtin");

@@ -442,6 +442,9 @@ pub fn build(b: *std.Build) void {
         "native_fixture_dir",
         fixture_files.getDirectory(),
     );
+    e2e_options.addOption([]const u8, "pkg_example_manifest", @embedFile("examples/pkg-smoke/ecl.pkg"));
+    e2e_options.addOption([]const u8, "pkg_example_lock", @embedFile("examples/pkg-smoke/ecl.lock"));
+    e2e_options.addOption([]const u8, "pkg_example_program", @embedFile("examples/pkg-smoke/main.ecl"));
     const e2e_mod = b.createModule(.{
         .root_source_file = b.path("test/e2e.zig"),
         .target = target,
