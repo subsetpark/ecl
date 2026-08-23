@@ -135,6 +135,36 @@ test "errors: tail-position application continuations retain their enclosing wor
     try std.testing.expectEqualStrings("h", intern.get(list.atUnchecked(contract_trace, 1).symbol));
 }
 
+test "errors: source effect contract identifies the deepest tail-selected quotation" {
+    // PENDING: Patch 2 will assert the public contract error dictionary points
+    // at the opening delimiter of the nonempty quotation selected by `case`.
+    return error.SkipZigTest;
+}
+
+test "errors: source effect contract locates an empty selected quotation" {
+    // PENDING: Patch 2 will assert that an empty selected quotation is located
+    // at its opening delimiter even though it has no token index.
+    return error.SkipZigTest;
+}
+
+test "errors: nested effect checks restore outer tail provenance" {
+    // PENDING: Patch 2 will assert that a completed nested checked word restores
+    // the enclosing source check before its later tail selection fails.
+    return error.SkipZigTest;
+}
+
+test "errors: source effect contract preserves absence for runtime-built code" {
+    // PENDING: Patch 2 will assert that runtime-built selected code preserves
+    // the contract error while omitting source, line, and column fields.
+    return error.SkipZigTest;
+}
+
+test "errors: iterative applications do not replace source effect provenance" {
+    // PENDING: Patch 2 will assert that a successful generic iteration followed
+    // by an outer effect mismatch remains attributed to the checked source body.
+    return error.SkipZigTest;
+}
+
 test "machine_test: late binding redefinition heals existing callers" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
