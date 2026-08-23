@@ -29,27 +29,58 @@ const archive_fixtures = @import("archive_fixture_options");
 fn archiveSource(allocator: std.mem.Allocator, destination: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
-    try source.writer.writeByte('[');
+    try appendFixtureBytes(&source.writer, archive_fixtures.valid);
+    try source.writer.writeByte(' ');
+    try appendQuoted(&source.writer, destination);
+    try source.writer.writeAll(" archive.unpack-tgz pop");
+    return allocator.dupe(u8, source.written());
+}
+
+fn packageStoreSource(
+    allocator: std.mem.Allocator,
+    destination: []const u8,
+    lock_path: []const u8,
+) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try appendFixtureBytes(&source.writer, archive_fixtures.package_valid);
+    try source.writer.writeAll(" \"a\" pkg.store.inspect pop ");
+    try appendFixtureBytes(&source.writer, archive_fixtures.package_valid);
+    try source.writer.writeAll(" \"a\" ");
+    try appendQuoted(&source.writer, destination);
+    try source.writer.writeAll(" pkg.store.install pop \"lock\\n\" ");
+    try appendQuoted(&source.writer, lock_path);
+    try source.writer.writeAll(" pkg.store.write-lock ");
+    try appendQuoted(&source.writer, destination);
+    try source.writer.writeAll(" pkg.store.present? pop");
+    return allocator.dupe(u8, source.written());
+}
+
+fn appendFixtureBytes(writer: *std.Io.Writer, encoded: []const u8) !void {
+    try writer.writeByte('[');
     var high: ?u8 = null;
     var index: usize = 0;
-    for (archive_fixtures.valid) |byte| {
+    for (encoded) |byte| {
         if (std.ascii.isWhitespace(byte)) continue;
         const nibble = try std.fmt.charToDigit(byte, 16);
         if (high) |first| {
-            if (index != 0) try source.writer.writeByte(' ');
-            try source.writer.print("{d}", .{first << 4 | nibble});
+            if (index != 0) try writer.writeByte(' ');
+            try writer.print("{d}", .{first << 4 | nibble});
             high = null;
             index += 1;
         } else high = nibble;
     }
     if (high != null) return error.InvalidFixture;
-    try source.writer.writeAll("] \"");
-    for (destination) |byte| {
-        if (byte == '\\' or byte == '"') try source.writer.writeByte('\\');
-        try source.writer.writeByte(byte);
+    try writer.writeByte(']');
+}
+
+fn appendQuoted(writer: *std.Io.Writer, text: []const u8) !void {
+    try writer.writeByte('"');
+    for (text) |byte| {
+        if (byte == '\\' or byte == '"') try writer.writeByte('\\');
+        try writer.writeByte(byte);
     }
-    try source.writer.writeAll("\" archive.unpack-tgz pop");
-    return allocator.dupe(u8, source.written());
+    try writer.writeByte('"');
 }
 
 const LockedAllocator = struct {
@@ -418,6 +449,25 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     const archive_source = try archiveSource(scaffold_allocator, archive_destination);
     defer scaffold_allocator.free(archive_source);
     try runOk(&runtime, "oom-archive.ecl", archive_source);
+    const package_destination = try std.fmt.allocPrint(
+        thread_safe_allocator,
+        "{s}{c}package",
+        .{ scratch_path, std.fs.path.sep },
+    );
+    defer thread_safe_allocator.free(package_destination);
+    const lock_path = try std.fmt.allocPrint(
+        thread_safe_allocator,
+        "{s}{c}ecl.lock",
+        .{ scratch_path, std.fs.path.sep },
+    );
+    defer thread_safe_allocator.free(lock_path);
+    const package_source = try packageStoreSource(
+        thread_safe_allocator,
+        package_destination,
+        lock_path,
+    );
+    defer thread_safe_allocator.free(package_source);
+    try runOk(&runtime, "oom-pkg-store.ecl", package_source);
     const host_io_source = try std.fmt.allocPrint(
         scaffold_allocator,
         "1 \"probe\" io.debug pop " ++

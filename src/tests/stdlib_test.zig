@@ -40,6 +40,7 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         "error.new",         "result.ok",         "str.upper",
         "io.print",          "csv.parse",         "json.parse",
         "table.valid?",      "http.get-bytes",    "archive.sha256",
+        "pkg.store.inspect",
         "rng.float",         "pkg.version.less?", "pkg.name.valid?",
         "pkg.data.read-one", "pkg.manifest.read", "pkg.lock.read",
         "pkg.mvs.resolve",
@@ -55,6 +56,16 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         try expectOk(&runtime, source);
     }
     try support.expectStack("'result.ok 'ok import [1 2] ok", "{'ok [1 2]}");
+}
+
+test "stdlib: every pkg.store capability is documented and reflectable" {
+    try support.expectStack(
+        "'pkg.store.inspect doc len 0 > " ++
+            "'pkg.store.install doc len 0 > " ++
+            "'pkg.store.present? doc len 0 > " ++
+            "'pkg.store.write-lock doc len 0 >",
+        "1 1 1 1",
+    );
 }
 
 test "stdlib: qualified reference auto-loads an unregistered module" {

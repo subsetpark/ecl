@@ -943,6 +943,23 @@ operand shape, and rows that still run boxed say so.
   failure, and a losing concurrent rename all reach that same cleanup path.
   Neither recursive deletion nor a user-sized traversal is hidden in a
   scheduler turn.
+- **Package policy is enforced by the archive scanner at the publication
+  boundary.** `pkg.store.inspect` and `pkg.store.install` select a package
+  policy on the same bounded gzip/tar scanner used by `archive.unpack-tgz`.
+  The scanner requires one UTF-8 root `ecl.pkg`, rejects native artifacts and
+  nested source, and accepts a root `.ecl` member only when its canonical
+  module name belongs to the supplied package prefix. Installation repeats
+  that scan independently before staging; no caller can validate an archive
+  and then substitute different bytes at the mutation sink.
+- **Package filesystem authority is closed and transactional.** The builtin
+  `pkg.store` module exposes only inspection, absent immutable installation,
+  no-follow presence checks, and lock replacement. Installation creates a
+  unique sibling stage and inherits archive rollback; a concurrent loser
+  cannot merge with or replace the winner. Lock output is encoded and written
+  in bounded chunks to a unique sibling file, synchronized, rechecks that an
+  existing target is regular without following links, and becomes visible by
+  one same-parent rename. Cancellation and every pre-publication failure
+  retire the private temporary while preserving the previous lock bytes.
 
 ## Idiom recognition
 

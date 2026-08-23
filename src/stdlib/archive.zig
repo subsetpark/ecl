@@ -110,9 +110,72 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
         .io = io,
+        .mode = .unpack,
         .bytes_value = .init(bytes_value.take()),
         .destination_value = .init(destination.take()),
         .byte_encoder = .init(byte_encoder),
+        .path_encoder = .init(path_encoder),
+        .entries = .init(entries),
+    });
+}
+
+/// Package inspection shares the complete gzip/tar scanner with unpack-tgz,
+/// but stops before any filesystem mutation and returns the exact root
+/// manifest text. The active word remains pkg.store.inspect for diagnostics.
+pub fn inspectPackage(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var package = try evaluator.popValue();
+    errdefer package.deinit();
+    if (!package.borrow().isString()) return evaluator.typeError("a string package name");
+    var bytes_value = try evaluator.popValue();
+    errdefer bytes_value.deinit();
+    if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
+    const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
+    const package_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), package.borrow());
+    const entries = poll.ChunkList(Entry).init(evaluator.allocator());
+    try evaluator.startDriver(UnpackDriver{
+        .allocator = evaluator.allocator(),
+        .io = null,
+        .mode = .package_inspect,
+        .bytes_value = .init(bytes_value.take()),
+        .package_value = .init(package.take()),
+        .byte_encoder = .init(byte_encoder),
+        .package_encoder = .init(package_encoder),
+        .entries = .init(entries),
+    });
+}
+
+/// Package installation repeats the package scan at the mutation sink before
+/// staging any member. The active word remains pkg.store.install.
+pub fn installPackage(evaluator: *Machine) MachineError!void {
+    try evaluator.require(3);
+    var destination = try evaluator.popValue();
+    errdefer destination.deinit();
+    if (!destination.borrow().isString()) return evaluator.typeError("a string destination");
+    var package = try evaluator.popValue();
+    errdefer package.deinit();
+    if (!package.borrow().isString()) return evaluator.typeError("a string package name");
+    var bytes_value = try evaluator.popValue();
+    errdefer bytes_value.deinit();
+    if (bytes_value.borrow() != .list) return evaluator.typeError("an integer byte list");
+    const io = evaluator.unit.inherited.host_io orelse {
+        const failure = evaluator.fail(.io, "package installation is unavailable");
+        evaluator.addErrorPath(destination.borrow());
+        return failure;
+    };
+    const byte_encoder = storage.ByteVectorEncoder.init(evaluator.allocator(), bytes_value.borrow());
+    const package_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), package.borrow());
+    const path_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), destination.borrow());
+    const entries = poll.ChunkList(Entry).init(evaluator.allocator());
+    try evaluator.startDriver(UnpackDriver{
+        .allocator = evaluator.allocator(),
+        .io = io,
+        .mode = .package_install,
+        .bytes_value = .init(bytes_value.take()),
+        .package_value = .init(package.take()),
+        .destination_value = .init(destination.take()),
+        .byte_encoder = .init(byte_encoder),
+        .package_encoder = .init(package_encoder),
         .path_encoder = .init(path_encoder),
         .entries = .init(entries),
     });
@@ -165,6 +228,7 @@ const GzipDecoder = struct {
 const Phase = enum {
     encode_bytes,
     encode_destination,
+    encode_package,
     allocate_output,
     decompress,
     verify_gzip,
@@ -174,6 +238,7 @@ const Phase = enum {
     parse_pax,
     scan_pax,
     trailing_zeroes,
+    materialize_manifest,
     allocate_results,
     materialize_paths,
     materialize_result,
@@ -182,6 +247,8 @@ const Phase = enum {
     extract,
     commit,
 };
+
+const Mode = enum { unpack, package_inspect, package_install };
 
 var next_stage_identity: std.atomic.Value(u64) = .init(1);
 
@@ -246,16 +313,20 @@ const UnpackDriver = struct {
 
     retirement: heap.ReleaseDomain.Retirement = .{},
     allocator: std.mem.Allocator,
-    io: std.Io,
+    io: ?std.Io,
+    mode: Mode,
     bytes_value: heap.Owned(Value),
-    destination_value: heap.Owned(Value),
+    package_value: ?heap.Owned(Value) = null,
+    destination_value: ?heap.Owned(Value) = null,
     byte_encoder: heap.Owned(storage.ByteVectorEncoder),
-    path_encoder: heap.Owned(storage.ToUtf8Cursor),
+    package_encoder: ?heap.Owned(storage.ToUtf8Cursor) = null,
+    path_encoder: ?heap.Owned(storage.ToUtf8Cursor) = null,
     entries: heap.Owned(EntryList),
     phase: Phase = .encode_bytes,
 
     bytes: ?heap.Owned(storage.ByteVector) = null,
     destination: ?heap.Owned([]u8) = null,
+    package_name: ?heap.Owned([]u8) = null,
     decoder: ?heap.Owned(GzipDecoder) = null,
     tar: ?heap.Owned([]u8) = null,
     output_index: usize = 0,
@@ -281,6 +352,7 @@ const UnpackDriver = struct {
     pax_record_end: usize = 0,
     pax_key_start: usize = 0,
     pax_scan_offset: usize = 0,
+    manifest_data: ?struct { offset: usize, size: usize } = null,
 
     result_values: ?[]Value = null,
     result_values_built: usize = 0,
@@ -312,6 +384,7 @@ const UnpackDriver = struct {
         return switch (self.phase) {
             .encode_bytes => self.encodeBytes(evaluator),
             .encode_destination => self.encodeDestination(evaluator),
+            .encode_package => self.encodePackage(evaluator),
             .allocate_output => self.allocateOutput(evaluator),
             .decompress => self.decompress(evaluator),
             .verify_gzip => self.verifyGzip(evaluator),
@@ -321,6 +394,7 @@ const UnpackDriver = struct {
             .parse_pax => self.parsePaxRecord(evaluator),
             .scan_pax => self.scanPaxRecord(evaluator),
             .trailing_zeroes => self.trailingZeroes(evaluator),
+            .materialize_manifest => self.materializeManifest(evaluator),
             .allocate_results => self.allocateResults(),
             .materialize_paths => self.materializePaths(evaluator),
             .materialize_result => self.materializeResult(),
@@ -343,14 +417,17 @@ const UnpackDriver = struct {
             .pending => return .yielded,
             .complete => |bytes| {
                 self.bytes = .init(bytes);
-                self.phase = .encode_destination;
+                self.phase = switch (self.mode) {
+                    .unpack, .package_install => .encode_destination,
+                    .package_inspect => .encode_package,
+                };
                 return .yielded;
             },
         }
     }
 
     fn encodeDestination(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        switch (self.path_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+        switch (self.path_encoder.?.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failDomain(evaluator, "destination contains an invalid Unicode scalar"),
         }) {
@@ -361,6 +438,24 @@ const UnpackDriver = struct {
                     return self.failDomain(evaluator, "destination is empty");
                 }
                 self.destination = .init(path);
+                self.phase = if (self.mode == .package_install) .encode_package else .allocate_output;
+                return .yielded;
+            },
+        }
+    }
+
+    fn encodePackage(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        switch (self.package_encoder.?.borrowMut().advance(work_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return self.failDomain(evaluator, "package name contains an invalid Unicode scalar"),
+        }) {
+            .pending => return .yielded,
+            .complete => |name| {
+                if (!validPackageName(name)) {
+                    self.allocator.free(name);
+                    return self.failDomain(evaluator, "package name is not canonical");
+                }
+                self.package_name = .init(name);
                 self.phase = .allocate_output;
                 return .yielded;
             },
@@ -430,7 +525,7 @@ const UnpackDriver = struct {
         const tar = self.tar.?.borrow();
         if (self.tar_offset == tar.len) {
             if (self.zero_blocks < 2) return self.failDomain(evaluator, "tar archive has no end marker");
-            self.phase = .allocate_results;
+            self.phase = if (self.mode == .unpack) .allocate_results else .materialize_manifest;
             return .yielded;
         }
         if (self.tar_offset + tar_block_bytes > tar.len)
@@ -500,13 +595,15 @@ const UnpackDriver = struct {
         self.member_count += 1;
         if (self.member_count > max_members)
             return self.failDomain(evaluator, "archive exceeds the 100000 member limit");
-        if (kind == .file) self.file_count += 1;
-        self.pending_entry = .{
+        const entry = Entry{
             .path = path,
             .kind = kind,
             .data_offset = data_offset,
             .size = @intCast(effective_size),
         };
+        if (self.mode != .unpack) try self.validatePackageEntry(evaluator, entry);
+        if (kind == .file) self.file_count += 1;
+        self.pending_entry = entry;
         self.pending_next_offset = next_offset;
         self.pending_hash = std.hash.Wyhash.hash(0, path);
         self.pending_slot = @intCast(self.pending_hash & (member_slots - 1));
@@ -615,8 +712,55 @@ const UnpackDriver = struct {
             return self.failDomain(evaluator, "tar data follows its end marker");
         self.tar_offset = end;
         if (end != tar.len) return .yielded;
-        self.phase = .allocate_results;
+        self.phase = if (self.mode == .unpack) .allocate_results else .materialize_manifest;
         return .yielded;
+    }
+
+    fn validatePackageEntry(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        entry: Entry,
+    ) MachineError!void {
+        if (entry.kind == .directory) return;
+        if (std.mem.eql(u8, entry.path, "ecl.pkg")) {
+            if (self.manifest_data != null)
+                return self.failPackageMember(evaluator, "package archive contains more than one root manifest", entry.path);
+            self.manifest_data = .{ .offset = entry.data_offset, .size = entry.size };
+            return;
+        }
+        if (std.mem.endsWith(u8, entry.path, ".eclmod"))
+            return self.failPackageMember(evaluator, "native package members are not permitted", entry.path);
+        if (!std.mem.endsWith(u8, entry.path, ".ecl")) return;
+        if (lastSlash(entry.path) != null)
+            return self.failPackageMember(evaluator, "package source modules must be at the archive root", entry.path);
+        const module_name = entry.path[0 .. entry.path.len - ".ecl".len];
+        if (!validPackageName(module_name))
+            return self.failPackageMember(evaluator, "package source module name is not canonical", entry.path);
+        if (!packageOwns(self.package_name.?.borrow(), module_name))
+            return self.failPackageMember(evaluator, "package does not own source module", entry.path);
+    }
+
+    fn materializeManifest(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const manifest = self.manifest_data orelse
+            return self.failDomain(evaluator, "package archive has no root ecl.pkg manifest");
+        if (self.text_materializer == null) {
+            const tar = self.tar.?.borrow();
+            self.text_materializer = .init(self.allocator, tar[manifest.offset .. manifest.offset + manifest.size]);
+        }
+        return switch (self.text_materializer.?.advance(work_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidUtf8 => return self.failDomain(evaluator, "package root ecl.pkg is not valid UTF-8"),
+        }) {
+            .pending => .yielded,
+            .complete => |text| result: {
+                self.text_materializer.?.deinit();
+                self.text_materializer = null;
+                if (self.mode == .package_inspect) break :result .{ .output = text };
+                evaluator.releaseDomain().releaseValue(text);
+                self.phase = .allocate_results;
+                break :result .yielded;
+            },
+        };
     }
 
     fn allocateResults(self: *UnpackDriver) MachineError!machine.WorkProgress {
@@ -670,7 +814,13 @@ const UnpackDriver = struct {
     }
 
     fn destinationCheck(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        std.Io.Dir.cwd().access(self.io, self.destination.?.borrow(), .{}) catch |err| switch (err) {
+        const io = self.io.?;
+        if (self.mode == .package_install) {
+            const parent = std.fs.path.dirname(self.destination.?.borrow()) orelse ".";
+            std.Io.Dir.cwd().createDirPath(io, parent) catch |err|
+                return self.failIo(evaluator, "cannot create package store parents", err);
+        }
+        std.Io.Dir.cwd().access(io, self.destination.?.borrow(), .{}) catch |err| switch (err) {
             error.FileNotFound => {
                 self.phase = .create_stage;
                 return .yielded;
@@ -692,7 +842,8 @@ const UnpackDriver = struct {
                 .{ parent, std.fs.path.sep, identity, basename },
             ));
         }
-        std.Io.Dir.cwd().createDir(self.io, self.stage_path.?.borrow(), .default_dir) catch |err| switch (err) {
+        const io = self.io.?;
+        std.Io.Dir.cwd().createDir(io, self.stage_path.?.borrow(), .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 self.stage_path.?.deinit(evaluator.releaseDomain(), self.allocator);
                 self.stage_path = null;
@@ -701,7 +852,7 @@ const UnpackDriver = struct {
             else => return self.failIo(evaluator, "cannot create archive staging directory", err),
         };
         self.stage_created = true;
-        self.stage_dir = std.Io.Dir.cwd().openDir(self.io, self.stage_path.?.borrow(), .{}) catch |err|
+        self.stage_dir = std.Io.Dir.cwd().openDir(io, self.stage_path.?.borrow(), .{}) catch |err|
             return self.failIo(evaluator, "cannot open archive staging directory", err);
         self.extract_iterator = self.entries.borrow().iterator();
         self.phase = .extract;
@@ -709,9 +860,10 @@ const UnpackDriver = struct {
     }
 
     fn extract(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const io = self.io.?;
         if (self.current_entry == null) {
             const entry = self.extract_iterator.?.next() orelse {
-                self.stage_dir.?.close(self.io);
+                self.stage_dir.?.close(io);
                 self.stage_dir = null;
                 self.phase = .commit;
                 return .yielded;
@@ -719,15 +871,15 @@ const UnpackDriver = struct {
             self.current_entry = entry;
             self.created_count += 1;
             if (entry.kind == .directory) {
-                self.stage_dir.?.createDirPath(self.io, entry.path) catch |err|
+                self.stage_dir.?.createDirPath(io, entry.path) catch |err|
                     return self.failIo(evaluator, "cannot create archive directory", err);
                 self.current_entry = null;
                 return .yielded;
             }
             if (lastSlash(entry.path)) |slash|
-                self.stage_dir.?.createDirPath(self.io, entry.path[0..slash]) catch |err|
+                self.stage_dir.?.createDirPath(io, entry.path[0..slash]) catch |err|
                     return self.failIo(evaluator, "cannot create archive parent directory", err);
-            self.current_file = self.stage_dir.?.createFile(self.io, entry.path, .{ .exclusive = true }) catch |err|
+            self.current_file = self.stage_dir.?.createFile(io, entry.path, .{ .exclusive = true }) catch |err|
                 return self.failIo(evaluator, "cannot create archive file", err);
             self.current_written = 0;
             return .yielded;
@@ -736,28 +888,29 @@ const UnpackDriver = struct {
         if (self.current_written != entry.size) {
             const end = @min(self.current_written + work_quantum, entry.size);
             const source = self.tar.?.borrow()[entry.data_offset + self.current_written .. entry.data_offset + end];
-            self.current_file.?.writePositionalAll(self.io, source, self.current_written) catch |err|
+            self.current_file.?.writePositionalAll(io, source, self.current_written) catch |err|
                 return self.failIo(evaluator, "cannot write archive file", err);
             self.current_written = end;
             return .yielded;
         }
-        self.current_file.?.close(self.io);
+        self.current_file.?.close(io);
         self.current_file = null;
         self.current_entry = null;
         return .yielded;
     }
 
     fn commit(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const io = self.io.?;
         const destination = self.destination.?.borrow();
         const parent_path = std.fs.path.dirname(destination) orelse ".";
-        var parent = std.Io.Dir.cwd().openDir(self.io, parent_path, .{}) catch |err|
+        var parent = std.Io.Dir.cwd().openDir(io, parent_path, .{}) catch |err|
             return self.failIo(evaluator, "cannot open archive destination parent", err);
-        defer parent.close(self.io);
+        defer parent.close(io);
         renameDirectoryPreserve(
             parent,
             std.fs.path.basename(self.stage_path.?.borrow()),
             std.fs.path.basename(destination),
-            self.io,
+            io,
         ) catch |err| return self.failIo(evaluator, "cannot publish archive destination", err);
         self.committed = true;
         self.stage_created = false;
@@ -771,15 +924,28 @@ const UnpackDriver = struct {
         return evaluator.fail(.domain, message);
     }
 
+    fn failPackageMember(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        message: []const u8,
+        member: []const u8,
+    ) MachineError {
+        return evaluator.failFmt(
+            .domain,
+            "{s}: package `{s}`, member `{s}`",
+            .{ message, self.package_name.?.borrow(), member },
+        );
+    }
+
     fn failIo(self: *UnpackDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
         const failure = evaluator.failFmt(.io, "{s}: {s}", .{ message, @errorName(err) });
-        evaluator.addErrorPath(self.destination_value.borrow());
+        evaluator.addErrorPath(self.destination_value.?.borrow());
         return failure;
     }
 
     fn failIoName(self: *UnpackDriver, evaluator: *Machine, message: []const u8) MachineError {
         const failure = evaluator.fail(.io, message);
-        evaluator.addErrorPath(self.destination_value.borrow());
+        evaluator.addErrorPath(self.destination_value.?.borrow());
         return failure;
     }
 
@@ -788,13 +954,14 @@ const UnpackDriver = struct {
         allocator: std.mem.Allocator,
         self: *UnpackDriver,
     ) bool {
-        if (self.current_file) |file| file.close(self.io);
+        const io = self.io;
+        if (self.current_file) |file| file.close(io.?);
         self.current_file = null;
         if (!self.committed and self.stage_created) {
             if (self.stage_dir == null) {
-                self.stage_dir = std.Io.Dir.cwd().openDir(self.io, self.stage_path.?.borrow(), .{}) catch |open_err| {
+                self.stage_dir = std.Io.Dir.cwd().openDir(io.?, self.stage_path.?.borrow(), .{}) catch |open_err| {
                     observeCleanupError("reopen the stage", open_err);
-                    std.Io.Dir.cwd().deleteDir(self.io, self.stage_path.?.borrow()) catch |err|
+                    std.Io.Dir.cwd().deleteDir(io.?, self.stage_path.?.borrow()) catch |err|
                         observeCleanupError("remove an unopened stage", err);
                     self.stage_created = false;
                     return false;
@@ -806,7 +973,7 @@ const UnpackDriver = struct {
             }
             if (self.cleanup_parent_end) |end| {
                 const entry = self.cleanup_current.?;
-                self.stage_dir.?.deleteDir(self.io, entry.path[0..end]) catch |err|
+                self.stage_dir.?.deleteDir(io.?, entry.path[0..end]) catch |err|
                     observeCleanupError("remove an implicit parent directory", err);
                 self.cleanup_parent_end = lastSlash(entry.path[0..end]);
                 return false;
@@ -821,21 +988,21 @@ const UnpackDriver = struct {
                 self.cleanup_current = entry;
                 switch (entry.kind) {
                     .file => {
-                        self.stage_dir.?.deleteFile(self.io, entry.path) catch |err|
+                        self.stage_dir.?.deleteFile(io.?, entry.path) catch |err|
                             observeCleanupError("remove a staged file", err);
                         self.cleanup_parent_end = lastSlash(entry.path);
                     },
                     .directory => {
-                        self.stage_dir.?.deleteDir(self.io, entry.path) catch |err|
+                        self.stage_dir.?.deleteDir(io.?, entry.path) catch |err|
                             observeCleanupError("remove a staged directory", err);
                         self.cleanup_parent_end = lastSlash(entry.path);
                     },
                 }
                 return false;
             }
-            if (self.stage_dir) |directory| directory.close(self.io);
+            if (self.stage_dir) |directory| directory.close(io.?);
             self.stage_dir = null;
-            std.Io.Dir.cwd().deleteDir(self.io, self.stage_path.?.borrow()) catch |err|
+            std.Io.Dir.cwd().deleteDir(io.?, self.stage_path.?.borrow()) catch |err|
                 observeCleanupError("remove the stage root", err);
             self.stage_created = false;
             return false;
@@ -864,7 +1031,7 @@ const UnpackDriver = struct {
         self.pending_entry = null;
         if (self.pending_path) |*path| path.deinit(releases, allocator);
         self.pending_path = null;
-        if (self.stage_dir) |directory| directory.close(self.io);
+        if (self.stage_dir) |directory| directory.close(io.?);
         self.stage_dir = null;
         if (self.stage_path) |*path| path.deinit(releases, allocator);
         self.stage_path = null;
@@ -878,10 +1045,18 @@ const UnpackDriver = struct {
         self.bytes = null;
         if (self.destination) |*destination| destination.deinit(releases, allocator);
         self.destination = null;
+        if (self.package_name) |*name| name.deinit(releases, allocator);
+        self.package_name = null;
         self.byte_encoder.deinit(releases, allocator);
-        self.path_encoder.deinit(releases, allocator);
+        if (self.path_encoder) |*encoder| encoder.deinit(releases, allocator);
+        self.path_encoder = null;
+        if (self.package_encoder) |*encoder| encoder.deinit(releases, allocator);
+        self.package_encoder = null;
         self.bytes_value.deinit(releases, allocator);
-        self.destination_value.deinit(releases, allocator);
+        if (self.destination_value) |*destination| destination.deinit(releases, allocator);
+        self.destination_value = null;
+        if (self.package_value) |*package| package.deinit(releases, allocator);
+        self.package_value = null;
         self.entries.deinit(releases, allocator);
         allocator.destroy(self);
         return true;
@@ -936,6 +1111,24 @@ fn validMemberPath(path: []const u8) bool {
             return false;
     }
     return true;
+}
+
+fn validPackageName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    var segments = std.mem.splitScalar(u8, name, '.');
+    while (segments.next()) |segment| {
+        if (segment.len == 0 or segment[0] < 'a' or segment[0] > 'z') return false;
+        for (segment[1..]) |byte| if (!((byte >= 'a' and byte <= 'z') or
+            (byte >= '0' and byte <= '9') or byte == '-')) return false;
+    }
+    return true;
+}
+
+fn packageOwns(package: []const u8, module_name: []const u8) bool {
+    if (std.mem.eql(u8, package, module_name)) return true;
+    return module_name.len > package.len and
+        std.mem.startsWith(u8, module_name, package) and
+        module_name[package.len] == '.';
 }
 
 fn lastSlash(path: []const u8) ?usize {

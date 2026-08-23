@@ -82,6 +82,7 @@ pub fn build(b: *std.Build) void {
     archive_fixture_options.addOption([]const u8, "malformed_pax", @embedFile("test/fixtures/archive/malformed-pax.tgz.hex"));
     archive_fixture_options.addOption([]const u8, "malformed", @embedFile("test/fixtures/archive/malformed.tgz.hex"));
     archive_fixture_options.addOption([]const u8, "long_path", "pkg/" ++ ("s" ** 110) ++ ".ecl");
+    archive_fixture_options.addOption([]const u8, "package_valid", @embedFile("test/fixtures/pkg/valid.tgz.hex"));
 
     const malformed_defects = [_][]const u8{
         "wrong-name",
@@ -538,6 +539,7 @@ pub fn build(b: *std.Build) void {
             "registry: concurrent commits are linearized without lost names",
             "native:",
             "archive: unpack-tgz preserves existing destinations and has one concurrent winner",
+            "pkg store: existing immutable entry wins concurrent install",
         },
     });
     tsan_tests.linkage = runtime_linkage;

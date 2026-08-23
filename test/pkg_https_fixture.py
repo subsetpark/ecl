@@ -102,6 +102,20 @@ def build_graph(port: int) -> tuple[dict[str, bytes], dict[str, str]]:
     prefix_path = "/pkg/foo-1.0.0-prefix.tgz"
     artifacts[prefix_path] = package("foo", "1.0.0", {}, {"bar.ecl": "(() 'noop def) 'bar @defm\n"})
 
+    nested_path = "/pkg/foo-1.0.0-nested.tgz"
+    artifacts[nested_path] = package("foo", "1.0.0", {}, {"nested/foo.ecl": "(() 'noop def) 'foo @defm\n"})
+
+    native_path = "/pkg/foo-1.0.0-native.tgz"
+    artifacts[native_path] = package("foo", "1.0.0", {}, {"foo.eclmod": "fixture native payload\n"})
+
+    missing_manifest_path = "/pkg/foo-1.0.0-missing-manifest.tgz"
+    artifacts[missing_manifest_path] = tgz({"foo.ecl": b"(() 'noop def) 'foo @defm\n"})
+
+    invalid_manifest_path = "/pkg/foo-1.0.0-invalid-manifest.tgz"
+    artifacts[invalid_manifest_path] = tgz(
+        {"ecl.pkg": b"\xff", "foo.ecl": b"(() 'noop def) 'foo @defm\n"}
+    )
+
     identity_path = "/pkg/expected-1.0.0-identity.tgz"
     artifacts[identity_path] = package(
         "actual",
