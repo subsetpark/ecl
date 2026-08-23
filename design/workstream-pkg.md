@@ -14,13 +14,15 @@ second tool to install.
 
 ## Current State
 
-Verified in the checkout (2026-08-21, `0.1.0` tagged 2026-08-19, the v1
+Verified in the checkout (2026-08-22, `0.1.0` tagged 2026-08-19, the v1
 workstream terminal).
 
-- **The pure format and resolution layers now exist, but no package IO or
-  runtime lock tier does.** M1 added inert manifest/lock values and version
-  ordering; M2 adds the pure MVS resolver. Fetching, project-file discovery,
-  CLI mutation, and runtime module lookup remain later milestones.
+- **The format, resolution, and binary archive host layers now exist, but no
+  package sync or runtime lock tier does.** M1 added inert manifest/lock values
+  and version ordering; M2 added the pure MVS resolver; M3 added exact byte
+  lists, SHA-256, and hostile-input-safe atomic tgz extraction. Fetching,
+  project-file discovery, CLI mutation, and runtime module lookup remain later
+  milestones.
 - **Module resolution today is embedded manifest, then `ECL_PATH`.**
   `AutoLoadDriver` (`src/machine.zig:2366`) is a poll-budgeted state machine
   with phases `begin → registered → filename → component_start →
@@ -44,18 +46,21 @@ workstream terminal).
   for "this tier is unavailable, skip it."
 - **A subcommand precedent exists.** `src/main.zig:56` dispatches `ecl fmt`
   ahead of the flag handling; `ecl pkg …` slots into the same position.
-- **The client's raw materials are already embedded.** `http` supplies
-  `get`/`post` over TLS with transparent gzip/zstd decoding
-  (`src/stdlib/http.zig`), `io` supplies `slurp`/`spit`
-  (`src/stdlib/io.zig`), `parse` reifies the reader as a value, and `json`
-  and `csv` demonstrate both the builtin-words and native-descriptor arms.
-- **Missing from `src/` and required: SHA-256, tar, and gzip *decompression as
-  an exposed operation*.** No `std.crypto.hash` use exists anywhere;
-  `src/stdlib/http.zig:321`–`333` uses `std.compress.flate` only internally
-  for response bodies. All three are available in Zig 0.16 std
-  (`std.crypto.hash.sha2.Sha256`, `std.tar`, `std.compress.flate`).
-- **`test/http_fixture_server.zig` already exists**, so fetcher acceptance
-  runs against a local server with no CI network access.
+- **The client's remaining raw materials are embedded.** `http` supplies
+  `get`/`post` over TLS with transparent gzip/zstd decoding but materializes
+  every response body as text (`src/stdlib/http.zig`); M4 needs a parallel
+  exact-byte body word. `io` supplies `slurp`/`spit` (`src/stdlib/io.zig`),
+  `parse` reifies the reader as a value, and `json` and `csv` demonstrate both
+  the builtin-words and native-descriptor arms.
+- **M3 now supplies the binary host boundary.** `archive.sha256` consumes the
+  exact integer byte list, while `archive.unpack-tgz` performs bounded hostile-
+  input validation, staging, rollback, and absent-destination publication.
+  M4 must extend that scanner with package policy at the publication sink;
+  validating returned paths after `unpack-tgz` would be too late.
+- **`test/http_fixture_server.zig` is plaintext and cannot prove M4's HTTPS
+  contract.** M4 adds `test/pkg_https_fixture.py`, a loopback TLS fixture with
+  checked-in test trust and deterministic package graph generation. CI still
+  uses no public network.
 - **The target design is already in the repo.** `build.zig.zon` pins each
   dependency as a tarball URL plus a content hash with no registry, and
   `zig-pkg/` is a content-addressed store keyed `name-version-hash`. This
@@ -311,43 +316,74 @@ depended on by nothing. Existing programs are unaffected.
 **Unlocks**: The fetcher (M4). Independent of M1 and M2, so it can run in
 parallel with them.
 
-**Status**: Implemented in the working tree, 2026-08-22. Commits `8a9ebb6` and
-`d7929a4` froze the contract and added the pending fixture-backed proof surface;
-the implementation adds the invisible U8 leaf, representation-independent byte
-view, builtin archive module, bounded hashing/extraction/rollback drivers, and
+**Status**: Implemented, 2026-08-22. Commits `879f425`, `e73a8e7`, and
+`e7ebc59` froze the contract, added the pending fixture-backed proof surface,
+then added the invisible U8 leaf, representation-independent byte view,
+builtin archive module, bounded hashing/extraction/rollback drivers, and
 activated public cases. `zig build precommit` and the Linux/x86_64 Alpine TSan
-gate pass locally. The implementation commit and complete CI matrix remain the
-handoff boundary before M4.
+gate pass locally. SourceHut builds 1869270 (`e7ebc59`) and 1869282 (`754c62b`)
+exposed a stale differential assertion that compared the invisible
+`.leaf_i64`/`.leaf_u8` storage choice. Commit `808f92b` made that proof
+representation-independent, and SourceHut build 1869313 passed the complete
+matrix. M3's execution prerequisite for M4 is satisfied.
 
 ---
 
 ### Milestone 4: pkg-fetch-and-store
 
 **Definition of Done**:
-- `pkg.sync.run` in `src/stdlib/pkg/sync.ecl`: given a root manifest, read transitive
-  manifests, resolve via `pkg.mvs.resolve`, fetch every selected package that is
-  not already in the store, and write `ecl.lock`.
+- `pkg.sync.run` in `src/stdlib/pkg/sync.ecl` has effect
+  `(root-manifest project-root -- lock)`: read transitive manifests, resolve via
+  `pkg.mvs.resolve`, fetch every selected package that is not already in the
+  store, atomically write `<project-root>/ecl.lock`, and return the validated
+  lock value. M6 owns walking upward to discover the root manifest and passes
+  the already-known project root here.
 - Fetch is tarball-over-HTTPS only, via the existing `http` module. Each
   downloaded archive is hashed with `archive.sha256` and compared against the
   declared hash **before** it is unpacked; a mismatch aborts the whole sync
-  and writes no lock.
+  and writes no new lock while preserving an existing lock.
 - M4 adds a raw HTTP response-body surface that materializes received octets
   directly as M3's integer byte list. The existing textual `http.get` body
   remains a string for compatibility; a tarball must never pass through that
-  Unicode conversion before hashing or unpacking. The exact new HTTP word or
-  response spelling is settled in the M4 gameplan.
+  Unicode conversion before hashing or unpacking. The word is
+  `http.get-bytes (url headers -- response)`: status, headers, redirects, and
+  content decoding match `http.get`, while only `'body` changes to the exact
+  integer byte list.
+- `Session.Host` gains an optional nominal TLS trust override containing an
+  absolute CA-file path and fixed verification timestamp. Tests use it with a
+  checked-in fixture CA so HTTPS acceptance reads neither the public network
+  nor the wall clock; a null override preserves production system trust and
+  current-time verification.
 - The store is content-addressed at `$ECL_CACHE` (default
   `$XDG_CACHE_HOME/ecl/pkg`, then `~/.cache/ecl/pkg`), one directory per
   entry keyed `<name>-<version>-<hash>`, mirroring `zig-pkg/`. Store entries
   are treated as immutable: an existing directory whose name matches is used
-  as-is and never re-fetched.
+  as-is and never re-fetched, but its root manifest is parsed and checked
+  against the requested exact name/version.
 - A package's manifest is read from its own tarball, so transitive
   requirements are discovered during the fetch walk rather than declared by
   the root.
-- **Prefix ownership is enforced at unpack**: a package `foo` whose tarball
-  contains a module file outside `foo.ecl` / `foo.*.ecl` fails the sync.
-- Acceptance runs against `test/http_fixture_server.zig` with checked-in
-  fixture tarballs. No CI network access.
+- Discovery and installation are deliberately two passes. The first pass
+  fetches, hashes, and inspects one exact reachable archive at a time to build
+  the complete MVS catalog without publishing it. After resolution, the
+  second pass re-fetches and installs only selected missing archives. The
+  duplicate cold download keeps retained memory to one archive, requires no
+  temporary-spool deletion authority, and ensures unselected candidates never
+  become store entries.
+- A narrow builtin `pkg.store` capability owns `inspect`, `install`,
+  `present?`, and `write-lock`. `inspect` and `install` both require exactly
+  one root `ecl.pkg`, regular source-only flat files, exact manifest identity,
+  and package-prefix ownership. `install` validates again at the mutation
+  sink and publishes an absent immutable entry atomically; `write-lock` uses
+  atomic sibling replacement and preserves a prior lock on failure. Generic
+  recursive deletion or rename authority is not exposed to ECL.
+- **Prefix ownership is enforced before publication**: a package `foo` whose
+  tarball contains a module file outside `foo.ecl` / `foo.*.ecl` fails the
+  sync and retains no `foo` entry or new lock.
+- Acceptance runs against `test/pkg_https_fixture.py`, a loopback Python TLS
+  server using checked-in fixture-only credentials and deterministic tarballs
+  generated after binding its dynamic port. Python 3 is installed by the
+  SourceHut build; no CI test reaches the public network.
 
 **Why this is a safe pause point**: `pkg.sync.run` is callable from a script and
 produces a real store and a real lock, but nothing reads the lock yet — the
@@ -357,6 +393,14 @@ file, and lost nothing.
 
 **Unlocks**: Real end-to-end verification of the lock tier (M5) against
 genuinely fetched packages.
+
+**Status**: Planned, 2026-08-22. The atomic five-patch plan, formal per-patch
+specifications, dependency graph, exact public-test ledger, and reachability
+proofs are in `gameplans/pkg-fetch-and-store.json`. Patches 1 and 2 independently
+freeze the contract and fixture surface; Patches 3 through 5 add exact HTTPS
+bytes/trust, package-store transactions, then ordinary-ECL orchestration. The
+plan has no open questions or interpatch operator action. M3's SourceHut
+prerequisite is green, so execution may proceed.
 
 **Operator Actions Before Next Milestone**:
 1. Publish one real source-only package tarball to a durable URL (a GitHub
@@ -572,6 +616,32 @@ fetcher. M6 is the join.
   more than 1 GiB of uncompressed data or 100,000 members. These fixed limits
   bound expansion and metadata floods without adding an options argument to
   the v1 word.
+- **M4 uses an explicit custom-trust Host seam for hermetic HTTPS** (user
+  ruling while planning M4, 2026-08-22). Production's null override keeps
+  system certificate roots and current-time verification. Tests supply an
+  absolute checked-in CA path plus a fixed verification timestamp to the
+  Session, so the production HTTP client reaches a real loopback TLS server
+  without consulting the public network or ambient wall clock. Python serves
+  the fixture because Zig 0.16 has a standard TLS client but no standard TLS
+  server.
+- **M4 discovers first and installs selected artifacts second** (settled while
+  planning M4, 2026-08-22). MVS needs manifests from exact reachable
+  candidates that it may not select. Discovery therefore fetches, hashes, and
+  inspects one archive at a time without publishing it; after resolution, a
+  second fetch installs only missing selected artifacts. The duplicate cold
+  transfer is preferred to retaining the whole graph or granting temporary-
+  spool deletion authority, and it makes the store contain no unselected
+  versions.
+- **Package publication is a narrow builtin authority** (settled while
+  planning M4, 2026-08-22). `pkg.sync` remains ordinary ECL orchestration;
+  builtin `pkg.store` owns archive inspection, repeated prefix/identity
+  validation at install, immutable absent-destination publication, presence
+  checks, and atomic lock replacement. ECL does not gain generic recursive
+  deletion or rename merely to implement a package cache.
+- **`pkg.sync.run` takes an explicit project root** (settled while planning
+  M4, 2026-08-22). Its effect is `(root-manifest project-root -- lock)`.
+  Upward manifest discovery belongs to M6, which passes the discovered root;
+  scripts and M4 tests remain deterministic without duplicating discovery.
 - **Manifest and lock are inert data, parsed and never evaluated.** Resolution
   cannot execute code from a dependency, which is npm's standing wound and
   what JSR and Go both deliberately designed out. Janet reached the same split
@@ -653,7 +723,10 @@ fetcher. M6 is the join.
     `ecl pkg tree`.
   - **Expected**: `c 1.5.0` appears exactly once; no other version of `c` is
     present in the lock or the store.
-  - **Traces to**: Milestone 2 — `pkg.mvs.resolve` in `src/stdlib/pkg/mvs.ecl`.
+  - **Traces to**: Milestone 2 — `pkg.mvs.resolve` in
+    `src/stdlib/pkg/mvs.ecl` owns the selected lock version; Milestone 4 — the
+    two-pass selected-only install in `pkg.sync.run` owns the assertion that
+    no unselected `c` version is present in the store.
 
 - **DoD-5 — A newer available version is not selected**
   - **Assert**: If `c 2.0.0` exists at a reachable URL but nothing in the graph

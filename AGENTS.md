@@ -58,6 +58,10 @@
     acceptance. Do not run this locally. `zig build test` alone is a five-minute
     round trip after a one-line change, and re-running the matrix by hand
     replaces CI's evidence with a slower copy of it.
+    Use the authenticated `hut builds` commands to list, inspect, and manage
+    SourceHut jobs; do not scrape the builds website or guess job URLs. Start
+    with `hut builds list ~subsetpark --count <n>` and inspect a selected job
+    with `hut builds show <job-id>`.
   - **Release candidate.** The exhaustive initialized-Session `zig build
     test-oom` sweep and the complete ReleaseFast suite, run once against a
     candidate commit.
