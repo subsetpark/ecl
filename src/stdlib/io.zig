@@ -1,9 +1,10 @@
 //! Console and UTF-8 file operations, grouped behind the `io` module.
 //!
-//! The host-backed words reuse the core implementations directly. The two
-//! derived words schedule fixed quotations in their definition-site module,
-//! so `print` remains `prin "\n" prin` and `lines` remains
-//! `slurp "\n" split` without exposing the host primitives globally.
+//! The host-backed words reuse the core implementations directly. Derived
+//! words schedule fixed quotations in their definition-site module,
+//! so `print` remains `prin "\n" prin`, `debug` remains
+//! `prin ": " prin inspect`, and `lines` remains `slurp "\n" split`
+//! without exposing the host primitives globally.
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const intern = @import("../intern.zig");
@@ -36,6 +37,11 @@ pub const words = [_]env.BuiltinWord{
         .primitive = inspect,
     },
     .{
+        .name = "debug",
+        .doc = "( value label -- value ) Print a label, colon, and value while leaving the value on the stack.",
+        .primitive = debug,
+    },
+    .{
         .name = "stdin",
         .doc = "( -- string ) Read the whole standard input stream once.",
         .primitive = prims.ioStdin,
@@ -65,6 +71,21 @@ fn inspect(evaluator: *Machine) MachineError!void {
     const quotation = try list.fromValues(evaluator.allocator(), &.{
         .{ .word = try intern.intern("dup") },
         .{ .word = try intern.intern("io.pp") },
+    });
+    try evaluator.callOwned(quotation.list);
+}
+
+fn debug(evaluator: *Machine) MachineError!void {
+    var separator = heap.OwnedValue.init(
+        evaluator.releaseDomain(),
+        try machine.stringValue(evaluator.allocator(), evaluator.releaseDomain(), ": "),
+    );
+    defer separator.deinit();
+    const quotation = try list.fromValues(evaluator.allocator(), &.{
+        .{ .word = try intern.intern("io.prin") },
+        separator.borrow(),
+        .{ .word = try intern.intern("io.prin") },
+        .{ .word = try intern.intern("io.inspect") },
     });
     try evaluator.callOwned(quotation.list);
 }

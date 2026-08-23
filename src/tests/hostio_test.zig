@@ -22,6 +22,10 @@ const Case = struct {
 /// One host-connected session for one case. Sessions are per-case so no
 /// assertion depends on the residue of the previous one.
 fn expectStack(case: Case, expected: []const u8) !void {
+    return expectStackWithOutput(case, expected, null);
+}
+
+fn expectStackWithOutput(case: Case, expected: []const u8, expected_output: ?[]const u8) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output = std.Io.Writer.Allocating.init(allocator);
@@ -50,6 +54,9 @@ fn expectStack(case: Case, expected: []const u8) !void {
     var display = try runtime.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings(expected, display.bytes());
+    if (expected_output) |wanted| {
+        try std.testing.expectEqualStrings(wanted, output.written());
+    }
 }
 
 fn expectError(case: Case, expected: support.ErrorCase) !void {
@@ -272,7 +279,7 @@ test "hostio: stdin reads piped data and errors when stdin is the source" {
 
 test "hostio: io exports are documented and importable" {
     const names = [_][]const u8{
-        "pp", "prin", "print", "inspect", "stdin", "slurp", "spit", "lines",
+        "pp", "prin", "print", "inspect", "debug", "stdin", "slurp", "spit", "lines",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -284,4 +291,8 @@ test "hostio: io exports are documented and importable" {
         try expectStack(.{ .source = source }, "1");
     }
     try expectStack(.{ .source = "7 io.inspect" }, "7");
+}
+
+test "hostio: debug prints a label and preserves its value" {
+    try expectStackWithOutput(.{ .source = "[1 2] \"value\" io.debug" }, "[1 2]", "value: [1 2]\n");
 }

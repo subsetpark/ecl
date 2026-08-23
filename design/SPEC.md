@@ -857,10 +857,10 @@ outside the staging root.
 ### io
 
 Observable text I/O lives here: `io.pp`, `io.prin`, `io.print`, `io.inspect`,
-`io.stdin`, `io.slurp`, `io.spit`, and `io.lines`. A qualified reference or
-an explicit import such as `'io.print 'print import` makes the boundary
-explicit. Core `str` canonically renders any value *as a string value* without
-performing I/O.
+`io.debug`, `io.stdin`, `io.slurp`, `io.spit`, and `io.lines`. A qualified
+reference or an explicit import such as `'io.print 'print import` makes the
+boundary explicit. Core `str` canonically renders any value *as a string
+value* without performing I/O.
 
 ### csv
 
@@ -2329,6 +2329,12 @@ status is an ordinary response.
 and return the same response shape and errors as `get`.
 
 ## io
+
+### debug
+`( value label -- value )` — Write the string label, `": "`, and the value's
+pretty-printed representation plus newline, leaving the value on the stack.
+Semantically `io.prin ": " io.prin io.inspect`; a non-string label is the
+same `'type` failure as `io.prin`.
 
 ### inspect
 `( value -- value )` — Pretty-print a value while leaving it on the stack;

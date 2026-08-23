@@ -414,7 +414,8 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(&runtime, "oom-archive.ecl", archive_source);
     const host_io_source = try std.fmt.allocPrint(
         thread_safe_allocator,
-        "\"probe\\ntext\" \"{s}{c}probe.txt\" io.spit " ++
+        "1 \"probe\" io.debug pop " ++
+            "\"probe\\ntext\" \"{s}{c}probe.txt\" io.spit " ++
             "\"{s}{c}probe.txt\" io.slurp pop " ++
             "\"{s}{c}probe.txt\" io.lines pop " ++
             "\"{s}{c}absent.txt\" (io.slurp) partial @attempt pop " ++
