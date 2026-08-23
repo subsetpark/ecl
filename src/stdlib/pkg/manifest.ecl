@@ -56,6 +56,4 @@
  (text -- manifest : "Parse and validate a manifest without evaluating it.")
  (pkg.data.read-one pkg.manifest.validate)
  'read def
- )
-'pkg.manifest
-@defm
+ ) 'pkg.manifest @defm

@@ -174,6 +174,4 @@
   (|s w| s " " w s len - 0 max take pair raze) call)
  'pad-right def
 
- )
-'str
-@defm
+ ) 'str @defm

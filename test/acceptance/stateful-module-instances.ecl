@@ -30,16 +30,12 @@ right.peek io.pp
 ### module core
 (
  ### def utils
- (0) 'utils def)
-'core
-@defm
+ (0) 'utils def) 'core @defm
 
 ### module core.utils
 (
  ### def f
- (1) 'f def)
-'core.utils
-@defm
+ (1) 'f def) 'core.utils @defm
 core.utils io.pp
 'core.utils 'f qualify dup type io.pp execute io.pp
 
@@ -57,10 +53,7 @@ core.utils io.pp
 
  ### def size
  ((dup len without) within) 'size def
- )
-with
-'pool
-@defm
+ ) with 'pool @defm
 pool.size io.pp
 pool.checkout io.pp
 pool.size io.pp

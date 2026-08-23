@@ -5,8 +5,6 @@
 
  ### def f
  (-- n)
- (s 2 +) 'f def)
-'m
-@defm
+ (s 2 +) 'f def) 'm @defm
 m.f io.pp
 m.s

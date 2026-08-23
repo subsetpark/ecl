@@ -57,6 +57,26 @@ fn expectParseEquivalent(source: []const u8) !void {
     }
 }
 
+test "formatter keeps a fitting module registration tail together" {
+    const source = "((1) 'x def) 'stats @defm\n";
+    try expectFormat(
+        source,
+        "### module stats\n(\n ### def x\n (1) 'x def) 'stats @defm\n",
+    );
+    try expectParseEquivalent(source);
+
+    const long_name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const long_source = try std.fmt.allocPrint(allocator, "((1) 'x def) '{s} @defm\n", .{long_name});
+    defer allocator.free(long_source);
+    const long_expected = try std.fmt.allocPrint(
+        allocator,
+        "### module {s}\n(\n ### def x\n (1) 'x def)\n'{s} @defm\n",
+        .{ long_name, long_name },
+    );
+    defer allocator.free(long_expected);
+    try expectFormat(long_source, long_expected);
+}
+
 test "formatter applies uniform aligned structural layout" {
     try expectFormat(
         "(alpha beta gamma)",
@@ -179,8 +199,7 @@ test "formatter owns canonical definition section comments" {
             " (-- n)\n (1)\n 'visible def\n # note\n\n" ++
             " ### defp hidden\n" ++
             " # hidden details\n" ++
-            " (-- n)\n (2)\n 'hidden defp\n )\n" ++
-            "'m\n@defm\n",
+            " (-- n)\n (2)\n 'hidden defp\n ) 'm @defm\n",
     );
     try expectParseEquivalent(nested);
 
@@ -196,8 +215,7 @@ test "formatter owns canonical definition section comments" {
             " ### def generated\n" ++
             " # attached inside the module\n" ++
             " (-- n)\n (3)\n 'generated def\n" ++
-            " )\n" ++
-            "'m\n@defm\n",
+            " ) 'm @defm\n",
     );
     try expectParseEquivalent(nested_synthesized);
 
@@ -344,7 +362,7 @@ test "formatter synthesizes and normalizes module navigation headers" {
     // A registration earns a header on the same terms a definition does, and
     // the body keeps the definition headers it already earns inside.
     const registration = "((1) 'x def) 'stats @defm\n";
-    const headed = "### module stats\n(\n ### def x\n (1) 'x def)\n'stats\n@defm\n";
+    const headed = "### module stats\n(\n ### def x\n (1) 'x def) 'stats @defm\n";
     try expectFormat(registration, headed);
     // A stale header is rewritten from the registration itself, never trusted.
     try expectFormat("### module wrong\n" ++ registration, headed);
@@ -353,8 +371,8 @@ test "formatter synthesizes and normalizes module navigation headers" {
     const seeded = "# a seeded counter\n[[0]] ((1 +) 'tick def) with 'counter @defm\n";
     try expectFormat(
         seeded,
-        "### module counter\n# a seeded counter\n[[0]]\n(\n ### def tick\n (1 +) 'tick def)\n" ++
-            "with\n'counter\n@defm\n",
+        "### module counter\n# a seeded counter\n[[0]]\n(\n ### def tick\n" ++
+            " (1 +) 'tick def) with 'counter @defm\n",
     );
     // A computed name gets no header, matching def's rule.
     try expectFormat(

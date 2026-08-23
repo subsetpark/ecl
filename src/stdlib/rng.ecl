@@ -73,7 +73,4 @@
  (dup len dup deal at)
  'shuffle def
 
- )
-with
-'rng
-@defm
+ ) with 'rng @defm

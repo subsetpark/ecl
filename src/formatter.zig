@@ -415,97 +415,121 @@ const Formatter = struct {
         var have_content = false;
         var previous_comment = false;
         var pending_definition: ?usize = null;
+        var skip_through: ?usize = null;
         var newlines: usize = 0;
-        for (sequence.parts, 0..) |part, part_index| switch (part) {
-            .trivia => |trivia| switch (trivia.kind) {
-                .space => newlines += lineBreakCount(trivia.bytes),
-                .comment => {
-                    if (existingDefinitionHeader(sequence, part_index, trivia.bytes)) |header| {
-                        if (pending_definition == header.part) {
-                            newlines = 0;
-                            continue;
-                        }
-                        if (have_content) try self.rootBreak(&output, &line, 2);
-                        try line.append(self.allocator(), try self.definitionHeader(header.name, header.private));
-                        have_content = true;
-                        previous_comment = true;
-                        pending_definition = header.part;
-                        newlines = 0;
-                        continue;
-                    }
-                    if (existingModuleHeader(sequence, part_index, trivia.bytes)) |header| {
-                        if (have_content) try self.rootBreak(&output, &line, 2);
-                        try line.append(self.allocator(), try self.moduleHeader(header.name));
-                        have_content = true;
-                        previous_comment = true;
-                        pending_definition = header.part;
-                        newlines = 0;
-                        continue;
-                    }
-                    if (attachedDefinitionAfterComment(sequence, part_index)) |header| {
-                        if (pending_definition != header.part) {
+        parts: for (sequence.parts, 0..) |part, part_index| {
+            if (skip_through) |end| {
+                if (part_index <= end) continue :parts;
+                skip_through = null;
+            }
+            switch (part) {
+                .trivia => |trivia| switch (trivia.kind) {
+                    .space => newlines += lineBreakCount(trivia.bytes),
+                    .comment => {
+                        if (existingDefinitionHeader(sequence, part_index, trivia.bytes)) |header| {
+                            if (pending_definition == header.part) {
+                                newlines = 0;
+                                continue;
+                            }
                             if (have_content) try self.rootBreak(&output, &line, 2);
-                            try line.append(self.allocator(), if (header.module)
-                                try self.moduleHeader(header.name)
-                            else
-                                try self.definitionHeader(header.name, header.private));
+                            try line.append(self.allocator(), try self.definitionHeader(header.name, header.private));
                             have_content = true;
                             previous_comment = true;
                             pending_definition = header.part;
                             newlines = 0;
+                            continue;
                         }
-                    }
-                    if (have_content) {
+                        if (existingModuleHeader(sequence, part_index, trivia.bytes)) |header| {
+                            if (have_content) try self.rootBreak(&output, &line, 2);
+                            try line.append(self.allocator(), try self.moduleHeader(header.name));
+                            have_content = true;
+                            previous_comment = true;
+                            pending_definition = header.part;
+                            newlines = 0;
+                            continue;
+                        }
+                        if (attachedDefinitionAfterComment(sequence, part_index)) |header| {
+                            if (pending_definition != header.part) {
+                                if (have_content) try self.rootBreak(&output, &line, 2);
+                                try line.append(self.allocator(), if (header.module)
+                                    try self.moduleHeader(header.name)
+                                else
+                                    try self.definitionHeader(header.name, header.private));
+                                have_content = true;
+                                previous_comment = true;
+                                pending_definition = header.part;
+                                newlines = 0;
+                            }
+                        }
+                        if (have_content) {
+                            if (previous_comment or newlines > 0) {
+                                try self.rootBreak(&output, &line, @min(@max(newlines, 1), 2));
+                            } else try line.append(self.allocator(), try self.docs.text(" "));
+                        }
+                        try line.append(self.allocator(), try self.docs.text(trivia.bytes));
+                        have_content = true;
+                        previous_comment = true;
+                        newlines = 0;
+                    },
+                },
+                .form => {
+                    var fill_pair = false;
+                    const skip_header = pending_definition == part_index;
+                    const name = if (skip_header) null else definitionName(sequence, part_index);
+                    const registration = if (name != null)
+                        null
+                    else
+                        moduleRegistrationInfo(sequence, part_index);
+                    const module_name = if (skip_header)
+                        null
+                    else if (registration) |info|
+                        info.name
+                    else
+                        null;
+                    if (name orelse module_name) |header_name| {
+                        if (have_content) try self.rootBreak(&output, &line, 2);
+                        try line.append(self.allocator(), if (name != null)
+                            try self.definitionHeader(header_name, definitionPrivate(sequence, part_index))
+                        else
+                            try self.moduleHeader(header_name));
+                        try self.rootBreak(&output, &line, 1);
+                    } else if (have_content) {
                         if (previous_comment or newlines > 0) {
                             try self.rootBreak(&output, &line, @min(@max(newlines, 1), 2));
-                        } else try line.append(self.allocator(), try self.docs.text(" "));
+                        } else {
+                            try line.append(self.allocator(), try self.docs.softline());
+                            fill_pair = true;
+                        }
                     }
-                    try line.append(self.allocator(), try self.docs.text(trivia.bytes));
+                    const packed_registration: ?*const Doc = if (registration) |info|
+                        if (moduleRegistrationTailIsPackable(sequence, info))
+                            try self.formatModuleRegistration(sequence, part_index, info)
+                        else
+                            null
+                    else
+                        null;
+                    try line.append(
+                        self.allocator(),
+                        packed_registration orelse try self.form(sequence, part_index),
+                    );
+                    if (packed_registration != null) skip_through = registration.?.terminator;
+                    if (fill_pair) {
+                        const start = line.items.len - 3;
+                        const pair = try self.docs.group(try self.docs.concat(line.items[start..]));
+                        line.shrinkRetainingCapacity(start);
+                        try line.append(self.allocator(), pair);
+                    }
                     have_content = true;
-                    previous_comment = true;
+                    previous_comment = false;
+                    if (!(skip_header and isAnnotationCandidate(sequence.parts[part_index].form) and
+                        definitionInfo(sequence, part_index) != null))
+                    {
+                        pending_definition = null;
+                    }
                     newlines = 0;
                 },
-            },
-            .form => {
-                var fill_pair = false;
-                const skip_header = pending_definition == part_index;
-                const name = if (skip_header) null else definitionName(sequence, part_index);
-                const module_name = if (skip_header or name != null)
-                    null
-                else
-                    moduleRegistrationName(sequence, part_index);
-                if (name orelse module_name) |header_name| {
-                    if (have_content) try self.rootBreak(&output, &line, 2);
-                    try line.append(self.allocator(), if (name != null)
-                        try self.definitionHeader(header_name, definitionPrivate(sequence, part_index))
-                    else
-                        try self.moduleHeader(header_name));
-                    try self.rootBreak(&output, &line, 1);
-                } else if (have_content) {
-                    if (previous_comment or newlines > 0) {
-                        try self.rootBreak(&output, &line, @min(@max(newlines, 1), 2));
-                    } else {
-                        try line.append(self.allocator(), try self.docs.softline());
-                        fill_pair = true;
-                    }
-                }
-                try line.append(self.allocator(), try self.form(sequence, part_index));
-                if (fill_pair) {
-                    const start = line.items.len - 3;
-                    const pair = try self.docs.group(try self.docs.concat(line.items[start..]));
-                    line.shrinkRetainingCapacity(start);
-                    try line.append(self.allocator(), pair);
-                }
-                have_content = true;
-                previous_comment = false;
-                if (!(skip_header and isAnnotationCandidate(sequence.parts[part_index].form) and
-                    definitionInfo(sequence, part_index) != null))
-                {
-                    pending_definition = null;
-                }
-                newlines = 0;
-            },
-        };
+            }
+        }
         try self.flushRootLine(&output, &line);
         if (have_content) try output.append(self.allocator(), try self.docs.hardline());
         return self.docs.concat(output.items);
@@ -577,6 +601,45 @@ const Formatter = struct {
             .trailing_comment = false,
             .force_break = nested_doc.force_break,
         };
+    }
+    fn formatModuleRegistration(
+        self: *Formatter,
+        sequence: Sequence,
+        start: usize,
+        registration: ModuleRegistration,
+    ) Error!*const Doc {
+        const body_form = sequence.parts[registration.body].form;
+        const delimited = body_form.kind.delimited;
+        const nested_doc = try self.nested(delimited.contents);
+
+        var closing: std.ArrayList(*const Doc) = .empty;
+        defer closing.deinit(self.allocator());
+        try closing.append(self.allocator(), try self.docs.text(delimited.close));
+        for (sequence.parts[registration.body + 1 .. registration.terminator + 1], registration.body + 1..) |part, index| {
+            switch (part) {
+                .trivia => continue,
+                .form => {},
+            }
+            const suffix = try self.docs.localGroup(try self.docs.concat(&.{
+                try self.docs.softline(),
+                try self.form(sequence, index),
+            }));
+            try closing.append(self.allocator(), suffix);
+        }
+
+        var body: std.ArrayList(*const Doc) = .empty;
+        defer body.deinit(self.allocator());
+        try body.append(self.allocator(), try self.docs.text(delimited.open));
+        try body.append(self.allocator(), try self.docs.aligned(nested_doc.doc));
+        if (nested_doc.trailing_comment) try body.append(self.allocator(), try self.docs.hardline());
+        try body.append(self.allocator(), try self.docs.concat(closing.items));
+        const registered_body = try self.docs.group(try self.docs.aligned(try self.docs.concat(body.items)));
+        if (start == registration.body) return registered_body;
+        return self.docs.group(try self.docs.concat(&.{
+            try self.form(sequence, start),
+            try self.docs.softline(),
+            registered_body,
+        }));
     }
     fn nested(self: *Formatter, sequence: Sequence) Error!NestedDoc {
         var output: std.ArrayList(*const Doc) = .empty;
@@ -963,14 +1026,23 @@ fn isLiteralValueForm(form_item: *const Form) bool {
 /// A bare `@module` is an ordinary value-producing expression: it names
 /// nothing, so there is no header to write.
 fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
+    return (moduleRegistrationInfo(sequence, start) orelse return null).name;
+}
+const ModuleRegistration = struct {
+    name: []const u8,
+    body: usize,
+    terminator: usize,
+};
+fn moduleRegistrationInfo(sequence: Sequence, start: usize) ?ModuleRegistration {
     if (!sequence.definitions) return null;
     const head = sequence.parts[start].form;
     if (!isListForm(head) or isAnnotationCandidate(head)) return null;
     // The header belongs to the whole phrase, so a seeded registration is
     // claimed by its values list rather than by the body that follows it.
     var body_seen = false;
+    var body = start;
     var named: ?[]const u8 = null;
-    for (sequence.parts[start + 1 ..]) |part| switch (part) {
+    for (sequence.parts[start + 1 ..], start + 1..) |part, part_index| switch (part) {
         .trivia => {},
         .form => |form_item| {
             const bytes = switch (form_item.kind) {
@@ -978,10 +1050,15 @@ fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
                 else => {
                     if (body_seen or named != null or !isListForm(form_item)) return null;
                     body_seen = true;
+                    body = part_index;
                     continue;
                 },
             };
-            if (named) |name| return if (std.mem.eql(u8, bytes, "@defm")) name else null;
+            if (named) |name| return if (std.mem.eql(u8, bytes, "@defm")) .{
+                .name = name,
+                .body = body,
+                .terminator = part_index,
+            } else null;
             if (std.mem.eql(u8, bytes, "with")) {
                 // `head with` means `head` is the body of a phrase whose seed
                 // list, if any, already owns the header.
@@ -993,6 +1070,14 @@ fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
         },
     };
     return null;
+}
+fn moduleRegistrationTailIsPackable(sequence: Sequence, registration: ModuleRegistration) bool {
+    if (sequence.parts[registration.body].form.kind != .delimited) return false;
+    for (sequence.parts[registration.body + 1 .. registration.terminator + 1]) |part| switch (part) {
+        .trivia => |trivia| if (trivia.kind == .comment) return false,
+        .form => {},
+    };
+    return true;
 }
 fn precedingSeedList(sequence: Sequence, start: usize) bool {
     var index = start;

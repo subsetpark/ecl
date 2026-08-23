@@ -150,6 +150,4 @@
   swap ('err has?) filter ('err at) each)
  'partition def
 
- )
-'result
-@defm
+ ) 'result @defm

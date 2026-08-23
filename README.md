@@ -15,19 +15,24 @@ extension compatibility may change between prereleases.
 ## Build
 
 Building requires Zig 0.16.0, as pinned by `build.zig.zon` and CI.
+The default install prefix is the repository's `zig-out` directory:
 
 ```sh
 git clone https://git.sr.ht/~subsetpark/ecl
 cd ecl
-zig build -Doptimize=ReleaseSafe
+zig build install -Doptimize=ReleaseSafe
 ./zig-out/bin/ecl --version
 ```
 
-To install the binary in a directory on your `PATH`:
+To install under `~/.local` instead:
 
 ```sh
-install -m 0755 zig-out/bin/ecl ~/.local/bin/ecl
+zig build install -Doptimize=ReleaseSafe --prefix ~/.local
+~/.local/bin/ecl --version
 ```
+
+Add `~/.local/bin` to `PATH` to invoke the executable as `ecl`. The matching
+removal command is `zig build uninstall --prefix ~/.local`.
 
 ## The language model
 
@@ -137,9 +142,9 @@ ecl -h | --help            Show command help
 ecl -V | --version         Show the version
 ```
 
-A script file prints only when it calls `io.pp`, `io.print`, or `io.prin`.
-Calculator input, `-e`, and non-TTY stdin print the final stack. Trailing
-arguments are available through `args`.
+A script file prints only when it calls `io.pp`, `io.print`, `io.prin`,
+`io.inspect`, or `io.debug`. Calculator input, `-e`, and non-TTY stdin print
+the final stack. Trailing arguments are available through `args`.
 
 Running `ecl` on a terminal starts the built-in editor:
 

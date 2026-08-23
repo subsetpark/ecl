@@ -122,6 +122,4 @@
   infra
   "{{'format 1\n 'root {}\n 'packages\n {}\n 'requires\n {}}}\n" format)
  'render-validated defp
- )
-'pkg.lock
-@defm
+ ) 'pkg.lock @defm
