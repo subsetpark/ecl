@@ -77,7 +77,7 @@ test "pkg store: atomically installs one valid source package" {
         .unlimited,
     );
     defer allocator.free(seal);
-    const expected_seal = try decodeFixtureBytes(archive_fixtures.package_valid);
+    const expected_seal = try decodeFixtureBytes(fixture.bad_archive_hex);
     defer allocator.free(expected_seal);
     try std.testing.expectEqualSlices(u8, expected_seal, seal);
     const present_source = try onePathSource(destination, " pkg.store.present?");
@@ -256,6 +256,7 @@ const HttpsFixture = struct {
     child: std.process.Child,
     port: u16,
     root_manifest: []u8,
+    bad_archive_hex: []u8,
     hash_mismatch_actual_hash: []u8,
     hash_mismatch_manifest: []u8,
     prefix_violation_manifest: []u8,
@@ -285,6 +286,8 @@ const HttpsFixture = struct {
         if (port_value != .integer) return error.FixtureHandshakeFailed;
         const root_manifest = try announcementString(announcement.value, "root_manifest");
         errdefer allocator.free(root_manifest);
+        const bad_archive_hex = try announcementString(announcement.value, "bad_archive_hex");
+        errdefer allocator.free(bad_archive_hex);
         const hash_mismatch_actual_hash = try announcementString(announcement.value, "hash_mismatch_actual_hash");
         errdefer allocator.free(hash_mismatch_actual_hash);
         const hash_mismatch_manifest = try announcementString(announcement.value, "hash_mismatch_manifest");
@@ -299,6 +302,7 @@ const HttpsFixture = struct {
             .child = child,
             .port = std.math.cast(u16, port_value.integer) orelse return error.FixtureHandshakeFailed,
             .root_manifest = root_manifest,
+            .bad_archive_hex = bad_archive_hex,
             .hash_mismatch_actual_hash = hash_mismatch_actual_hash,
             .hash_mismatch_manifest = hash_mismatch_manifest,
             .prefix_violation_manifest = prefix_violation_manifest,
@@ -310,6 +314,7 @@ const HttpsFixture = struct {
     fn stop(self: *HttpsFixture) void {
         self.child.kill(std.testing.io);
         allocator.free(self.root_manifest);
+        allocator.free(self.bad_archive_hex);
         allocator.free(self.hash_mismatch_actual_hash);
         allocator.free(self.hash_mismatch_manifest);
         allocator.free(self.prefix_violation_manifest);

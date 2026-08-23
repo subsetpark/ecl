@@ -143,6 +143,7 @@ def build_graph(port: int) -> tuple[dict[str, bytes], dict[str, str]]:
     )
     variants = {
         "root_manifest": root,
+        "bad_archive_hex": artifacts[bad_path].hex(),
         "hash_mismatch_actual_hash": digest(artifacts[bad_path]),
         "hash_mismatch_manifest": manifest(
             "root",
