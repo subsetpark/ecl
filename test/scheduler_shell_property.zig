@@ -5,6 +5,13 @@ const build_options = @import("build_options");
 const cli = @import("cli_test_support.zig");
 
 const allocator = std.testing.allocator;
+const scenario_timeout_seconds: u64 = switch (build_options.optimize) {
+    // The installed Debug binary uses the tracing DebugAllocator. Its
+    // allocator-heavy task-tree teardown can exceed the release liveness
+    // deadline without being stuck, especially after many subprocess cases.
+    .Debug => 30,
+    .ReleaseSafe, .ReleaseFast, .ReleaseSmall => 5,
+};
 
 const Operation = enum(u5) {
     par_each,
@@ -215,10 +222,10 @@ fn runShellScenario(encoded: u16) !void {
         .timeout = .{
             .duration = .{
                 .clock = .awake,
-                // ReleaseSafe's allocator-heavy unit suite runs beside these
-                // subprocesses, so leave headroom for CI contention while still
-                // converting a scheduler deadlock into a shrinkable failure.
-                .raw = .fromSeconds(5),
+                // Release builds retain the strict deadlock detector. Debug's
+                // separate budget is selected above rather than weakening the
+                // production liveness contract.
+                .raw = .fromSeconds(scenario_timeout_seconds),
             },
         },
     }) catch |err| switch (err) {

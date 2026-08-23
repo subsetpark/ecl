@@ -436,6 +436,7 @@ pub fn build(b: *std.Build) void {
 
     const e2e_options = b.addOptions();
     e2e_options.addOptionPath("ecl_exe", exe.getEmittedBin());
+    e2e_options.addOption(std.builtin.OptimizeMode, "optimize", optimize);
     e2e_options.addOptionPath(
         "native_fixture_dir",
         fixture_files.getDirectory(),
