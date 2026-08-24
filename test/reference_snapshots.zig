@@ -759,21 +759,21 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `or-raise`" 'word 'or-raise 'trace ['or-raise] 'data {'name 'or-raise 'source "<command>" 'line 1 'col 18}}
+        \\{'kind 'undefined-word 'msg "undefined word `or-raise`" 'word 'or-raise 'trace ['or-raise] 'data {'name 'or-raise 'scope 'session 'source "<command>" 'line 1 'col 18}}
         \\=== bare ok? ===
         \\source: (2 3 +) @attempt ok?
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `ok?`" 'word 'ok? 'trace ['ok?] 'data {'name 'ok? 'source "<command>" 'line 1 'col 18}}
+        \\{'kind 'undefined-word 'msg "undefined word `ok?`" 'word 'ok? 'trace ['ok?] 'data {'name 'ok? 'scope 'session 'source "<command>" 'line 1 'col 18}}
         \\=== gone result.case ===
         \\source: [7] result.ok (first) (pop 0) result.case
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `result.case`" 'word 'result.case 'trace ['result.case] 'data {'name 'result.case 'source "<command>" 'line 1 'col 31}}
+        \\{'kind 'undefined-word 'msg "undefined word `result.case`" 'word 'result.case 'trace ['result.case] 'data {'name 'result.case 'scope 'qualified 'source "<command>" 'line 1 'col 31}}
         \\=== set ===
         \\source: 3 'x set x
         \\exit: 0
@@ -882,14 +882,14 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `nowhere`" 'word 'nowhere 'trace ['nowhere] 'data {'name 'nowhere 'source "<command>" 'line 1 'col 10}}
+        \\{'kind 'undefined-word 'msg "undefined word `nowhere`" 'word 'nowhere 'trace ['nowhere] 'data {'name 'nowhere 'scope 'qualified 'source "<command>" 'line 1 'col 10}}
         \\=== unmodule then resolve ===
         \\source: ((1) 'x def) 'gone @defm 'gone unmodule gone.x
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'source "<command>" 'line 1 'col 41}}
+        \\{'kind 'undefined-word 'msg "undefined word `gone.x`" 'word 'gone.x 'trace ['gone.x] 'data {'name 'gone.x 'scope 'qualified 'source "<command>" 'line 1 'col 41}}
         \\=== doc unmodule ===
         \\source: 'unmodule doc
         \\exit: 0
@@ -1194,7 +1194,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'undefined-word 'msg "undefined word `attempt`" 'word 'attempt 'trace ['attempt] 'data {'name 'attempt 'source "<command>" 'line 1 'col 5}}
+        \\{'kind 'undefined-word 'msg "undefined word `attempt`" 'word 'attempt 'trace ['attempt] 'data {'name 'attempt 'scope 'session 'source "<command>" 'line 1 'col 5}}
         \\=== row annotation ===
         \\source: (a -- ...) (dup) 'f def 'f see
         \\exit: 0
