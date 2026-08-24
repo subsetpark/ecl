@@ -105,9 +105,10 @@ const UnmoduleDriver = struct {
             };
             switch (self.cursor.?.borrowMut().advance() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.MissingModule => return evaluator.undefinedName(intern.moduleId(
-                    self.cursor.?.borrow().requested,
-                )),
+                error.MissingModule => return evaluator.undefinedNameIn(
+                    intern.moduleId(self.cursor.?.borrow().requested),
+                    .qualified,
+                ),
                 error.StateApplicationActive => return evaluator.fail(
                     .domain,
                     "a module cannot be removed from inside a state application",
@@ -243,7 +244,7 @@ const ImportDriver = struct {
                         self.resolution = null;
                         continue;
                     },
-                    .unresolved => return evaluator.undefinedName(self.original),
+                    .unresolved => |chain| return evaluator.undefinedNameIn(self.original, chain),
                     .unknown_module_prefix, .unregistered_module => {
                         const binding = self.binding_id;
                         const original = self.original;

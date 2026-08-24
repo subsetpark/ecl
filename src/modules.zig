@@ -1,5 +1,6 @@
 //! Per-session module registry with typed names and atomic generation publication.
 const std = @import("std");
+const builtin = @import("builtin");
 const env = @import("env.zig");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
@@ -207,20 +208,11 @@ const Registration = struct {
         return true;
     }
 
-    pub fn resolve(
-        self: *const Registration,
-        id: u32,
-        public_only: bool,
-    ) ?env.BindingLease {
-        var cursor = self.resolveCursor(id, public_only);
-        defer cursor.deinit();
-        return poll.drive(?env.BindingLease, &cursor, .{});
-    }
-
     pub const ResolveProgress = poll.Progress(?env.BindingLease);
+    /// Export lookup is always public-only: a private is absent from a
+    /// module's public face, and no caller has ever wanted otherwise.
     pub const ResolveCursor = struct {
         allocator: std.mem.Allocator,
-        public_only: bool,
         lookup: env.DirectLookupCursor,
         pin: GenerationPin,
 
@@ -234,7 +226,7 @@ const Registration = struct {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
                     var lease = maybe_lease orelse break :result .{ .complete = null };
-                    if (self.public_only and lease.visibility == .private) {
+                    if (lease.visibility == .private) {
                         lease.deinit();
                         break :result .{ .complete = null };
                     }
@@ -243,39 +235,8 @@ const Registration = struct {
             };
         }
     };
-    pub fn resolveCursor(
-        self: *const Registration,
-        id: u32,
-        public_only: bool,
-    ) ResolveCursor {
-        const home = ModuleHome.init(&@constCast(self).home);
-        return .{
-            .allocator = self.allocator,
-            .public_only = public_only,
-            .lookup = self.image.environment.directLookupCursor(id),
-            .pin = home.pinInternal(),
-        };
-    }
-
-    pub fn publicNamesOwned(
-        self: *const Registration,
-        allocator: std.mem.Allocator,
-    ) error{OutOfMemory}![]u32 {
-        var visible = poll.ChunkList(u32).init(allocator);
-        defer visible.retire(self.image.environment.releases);
-        var cursor = self.publicNameCursor();
-        defer cursor.deinit();
-        while (true) switch (cursor.advance()) {
-            .pending => {},
-            .complete => break,
-            .item => |id| try visible.append(id),
-        };
-        const result = try allocator.alloc(u32, visible.count);
-        errdefer allocator.free(result);
-        var iterator = visible.iterator();
-        var index: usize = 0;
-        while (iterator.next()) |id| : (index += 1) result[index] = id.*;
-        return result;
+    pub fn resolveCursor(self: *const Registration, id: u32) ResolveCursor {
+        return resolveCursorFor(self.image, ModuleHome.init(&@constCast(self).home), id);
     }
 
     pub const PublicNameProgress = poll.StreamProgress(u32);
@@ -805,8 +766,8 @@ pub const GenerationLease = enum(usize) {
     pub fn name(self: GenerationLease) intern.ModuleName {
         return self.registration().name;
     }
-    pub fn resolveCursor(self: GenerationLease, id: u32, public_only: bool) ModuleResolveCursor {
-        return self.registration().resolveCursor(id, public_only);
+    pub fn resolveCursor(self: GenerationLease, id: u32) ModuleResolveCursor {
+        return self.registration().resolveCursor(id);
     }
     pub fn publicNameCursor(self: GenerationLease) ModulePublicNameCursor {
         return self.registration().publicNameCursor();
@@ -859,6 +820,18 @@ pub const ExecutionGeneration = enum(usize) {
 /// registration record itself private to this file.
 pub const ModuleResolveCursor = Registration.ResolveCursor;
 
+/// The one export lookup, whether the image was reached through a registered
+/// name or as a value. The registry contributes nothing to finding an export;
+/// what the home supplies is the pin that keeps the image alive across a
+/// resumable cursor, and which privacy and durable-state authority apply.
+fn resolveCursorFor(image: *ModuleImage, home: *ModuleHome, id: u32) ModuleResolveCursor {
+    return .{
+        .allocator = image.allocator,
+        .lookup = image.environment.directLookupCursor(id),
+        .pin = home.pinInternal(),
+    };
+}
+
 /// Resolve one public export from an image reached as a *value* rather than
 /// through a registered name.
 ///
@@ -871,13 +844,7 @@ pub const ModuleResolveCursor = Registration.ResolveCursor;
 /// slot to open and no supersession to be current with.
 pub fn handleResolveCursor(handle: ImageRef, id: u32) ModuleResolveCursor {
     const image = handle.image();
-    const home = ModuleHome.init(&image.construction_home);
-    return .{
-        .allocator = image.allocator,
-        .public_only = true,
-        .lookup = image.environment.directLookupCursor(id),
-        .pin = home.pinInternal(),
-    };
+    return resolveCursorFor(image, ModuleHome.init(&image.construction_home), id);
 }
 
 /// The home a value-reached image executes against. Its registration is null,
@@ -950,15 +917,6 @@ pub const OwnedImage = enum(usize) {
     ) *ModuleHome {
         return .init(&self.borrow().construction_home);
     }
-    pub fn executionScope(
-        self: *const OwnedImage,
-        _: *const ExecutionAccess,
-    ) *env.Scope {
-        return &self.borrow().scope;
-    }
-    /// Opens the construction-time capture of `source` into this image. The
-    /// body may not run until it completes, so the capture is part of the
-    /// image before any definition is published into it.
     pub fn publishDefinition(
         self: *const OwnedImage,
         name: intern.BindingName,
@@ -2722,18 +2680,6 @@ pub const Registry = enum(usize) {
         return poll.driveFallible(u64, &cursor, .{});
     }
 
-    pub fn canonical(self: *const Registry, name: intern.ModuleName) ?u32 {
-        var cursor = self.canonicalCursor(name);
-        defer cursor.deinit();
-        return poll.drive(?u32, &cursor, .{});
-    }
-
-    pub fn acquire(self: *const Registry, name: intern.ModuleName) ?GenerationLease {
-        var cursor = self.acquireCursor(name);
-        defer cursor.deinit();
-        return poll.drive(?GenerationLease, &cursor, .{});
-    }
-
     pub fn alias(
         self: *Registry,
         short: intern.BindingName,
@@ -2742,16 +2688,6 @@ pub const Registry = enum(usize) {
         var cursor = self.aliasCursor(short, target);
         defer cursor.deinit();
         return poll.driveVoidFallible(&cursor, .{});
-    }
-
-    pub fn beginLoading(
-        self: *Registry,
-        name: intern.ModuleName,
-        owner: LoadingOwner,
-    ) error{OutOfMemory}!LoadingOutcome {
-        var cursor = self.beginLoadingCursor(name, owner);
-        defer cursor.deinit();
-        return poll.driveFallible(LoadingOutcome, &cursor, .{});
     }
 
     pub const BeginLoadingProgress = poll.Progress(LoadingOutcome);
@@ -2846,3 +2782,15 @@ pub const Registry = enum(usize) {
 comptime {
     heap.requireOpaqueHostRoot(Registry, RegistryState);
 }
+
+/// Blocking drives for tests. Production acquires a generation through the
+/// resumable cursor, so a blocking wrapper in the production surface would be
+/// an operation nothing calls — and one that lets a test skip the very
+/// resumability it should be exercising.
+pub const testing = if (builtin.is_test) struct {
+    pub fn acquire(registry: *const Registry, name: intern.ModuleName) ?GenerationLease {
+        var cursor = registry.acquireCursor(name);
+        defer cursor.deinit();
+        return poll.drive(?GenerationLease, &cursor, .{});
+    }
+} else struct {};

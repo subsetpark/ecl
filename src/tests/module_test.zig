@@ -831,7 +831,7 @@ fn registryWorker(context: RegistryThreadContext, worker_id: u32) void {
             context.failed.store(true, .release);
             return;
         }
-        var lease = context.registry.acquire(context.shared) orelse {
+        var lease = modules.testing.acquire(context.registry, context.shared) orelse {
             context.failed.store(true, .release);
             return;
         };
@@ -863,11 +863,11 @@ test "registry: concurrent commits are linearized without lost names" {
     }
     for (threads) |thread| thread.join();
     try std.testing.expect(!failed.load(.acquire));
-    var lease = registry.acquire(context.shared).?;
+    var lease = modules.testing.acquire(&registry, context.shared).?;
     defer lease.deinit();
     try std.testing.expectEqual(@as(u64, 200), lease.generationNumber());
     for (0..4) |index| {
-        var disjoint = registry.acquire(context.disjoint[index]).?;
+        var disjoint = modules.testing.acquire(&registry, context.disjoint[index]).?;
         defer disjoint.deinit();
         try std.testing.expectEqual(@as(u64, 50), disjoint.generationNumber());
     }
@@ -895,7 +895,7 @@ test "registry: old generation leases survive reload and reclaim after release" 
     var first_sealed = first.seal();
     defer first_sealed.deinit();
     _ = try registry.register(first_sealed.ref(), module_name);
-    var old = registry.acquire(module_name).?;
+    var old = modules.testing.acquire(&registry, module_name).?;
     var second = try registry.createImage();
     defer second.deinit();
     var second_sealed = second.seal();
@@ -931,8 +931,8 @@ test "registry: generation cursors independently pin their snapshot" {
     defer first_sealed.deinit();
     _ = try registry.register(first_sealed.ref(), module_name);
 
-    var lease = registry.acquire(module_name).?;
-    var lookup = lease.resolveCursor(intern.namespaceId(value_name), true);
+    var lease = modules.testing.acquire(&registry, module_name).?;
+    var lookup = lease.resolveCursor(intern.namespaceId(value_name));
     var names = lease.publicNameCursor();
     lease.deinit();
     var second = try registry.createImage();
@@ -1060,7 +1060,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     defer first_sealed.deinit();
     _ = try registry.register(first_sealed.ref(), first_name);
     try registry.alias(alias_name, first_name);
-    var lease = registry.acquire(try intern.internModuleName("allocation-alias")).?;
+    var lease = modules.testing.acquire(&registry, try intern.internModuleName("allocation-alias")).?;
     defer lease.deinit();
     var second = try registry.createImage();
     defer second.deinit();

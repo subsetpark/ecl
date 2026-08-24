@@ -171,6 +171,7 @@ const ErrorDataKey = enum {
     left,
     right,
     @"destination-exists",
+    scope,
 };
 const ErrorData = struct {
     key: ErrorDataKey,
@@ -1150,10 +1151,12 @@ pub const ExecutionSite = struct {
     /// A quotation resolves where its invoker runs, so both scopes are the one
     /// it was handed.
     pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
-        return .{ .scope = scope, .resolution_scope = scope, .home = invoker.home() };
+        return .resumed(scope, invoker.home());
     }
 
-    /// An application resuming in `scope` under its launch home.
+    /// An application resuming in `scope` under its launch home. The only
+    /// construction where the home does not come from a running activation,
+    /// because an application's scope is decided when it launches.
     pub fn resumed(scope: *env.Scope, home: ?*modules.ModuleHome) ExecutionSite {
         return .{ .scope = scope, .resolution_scope = scope, .home = home };
     }
@@ -2628,14 +2631,14 @@ pub const Machine = struct {
         outcome: ResolutionOutcome,
     ) MachineError!WorkProgress {
         if (self.unit.current == null or self.unit.inherited.registry == null)
-            return self.undefinedName(requested);
+            return self.undefinedNameIn(requested, .qualified);
         const name = switch (outcome) {
             .unknown_module_prefix => |prefix| intern.internModuleName(prefix) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidName => return self.undefinedName(requested),
+                error.InvalidName => return self.undefinedNameIn(requested, .qualified),
             },
             .unregistered_module => |name| name,
-            .unresolved => return self.undefinedName(requested),
+            .unresolved => |chain| return self.undefinedNameIn(requested, chain),
             .resolved => unreachable,
         };
         try self.pushBorrowed(.{ .symbol = requested });
@@ -2656,14 +2659,14 @@ pub const Machine = struct {
         outcome: ResolutionOutcome,
     ) MachineError!WorkProgress {
         if (self.unit.current == null or self.unit.inherited.registry == null)
-            return self.undefinedName(original);
+            return self.undefinedNameIn(original, .qualified);
         const name = switch (outcome) {
             .unknown_module_prefix => |prefix| intern.internModuleName(prefix) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidName => return self.undefinedName(original),
+                error.InvalidName => return self.undefinedNameIn(original, .qualified),
             },
             .unregistered_module => |name| name,
-            .unresolved => return self.undefinedName(original),
+            .unresolved => |chain| return self.undefinedNameIn(original, chain),
             .resolved => unreachable,
         };
         try self.pushBorrowed(.{ .symbol = original });
@@ -2809,7 +2812,7 @@ pub const Machine = struct {
             return continueQualifiedRequest(evaluator, self, self.request);
         }
         fn notFound(self: *AutoLoadDriver, evaluator: *Machine) MachineError {
-            return evaluator.undefinedWord(self.request.qualified);
+            return evaluator.undefinedWordIn(self.request.qualified, .qualified);
         }
         fn sourceCompletion(self: *AutoLoadDriver) SourceCompletion {
             return .{ .register = .{
@@ -3919,18 +3922,44 @@ pub const Machine = struct {
     /// program actually wrote, including a dotted one whose module never
     /// loaded.
     pub fn undefinedWord(self: *Machine, word: u32) MachineError {
+        return self.undefinedWordIn(word, self.currentLookupChain());
+    }
+    /// The same failure, for the two callers that know the search happened
+    /// somewhere other than the running activation's own chain.
+    pub fn undefinedWordIn(self: *Machine, word: u32, chain: LookupChain) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(word)});
         self.unit.pending.?.addData(.name, .{ .symbol = word });
+        self.addLookupChain(chain) catch return error.OutOfMemory;
         return failure;
     }
     pub fn undefinedActiveWord(self: *Machine) MachineError {
         return self.undefinedWord(self.unit.active_word.atom());
     }
     pub fn undefinedName(self: *Machine, name: u32) MachineError {
+        return self.undefinedNameIn(name, self.currentLookupChain());
+    }
+    pub fn undefinedNameIn(self: *Machine, name: u32, chain: LookupChain) MachineError {
         self.unit.active_word = .plain(name);
         const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(name)});
         self.unit.pending.?.addData(.name, .{ .symbol = name });
+        self.addLookupChain(chain) catch return error.OutOfMemory;
         return failure;
+    }
+    fn addLookupChain(self: *Machine, chain: LookupChain) error{OutOfMemory}!void {
+        const named = try intern.intern(chain.spelling());
+        self.unit.pending.?.addData(.scope, .{ .symbol = named });
+    }
+    /// What the running activation would have searched. A session name is
+    /// invisible to a module and to a prelude word for different reasons, and
+    /// saying which one applied is the difference between a puzzling failure
+    /// and an obvious one.
+    fn currentLookupChain(self: *const Machine) LookupChain {
+        const current = self.unit.current orelse return .session;
+        // Core alone is spelled by an absent chain, and it is checked first
+        // because a prelude word called from module code carries the caller's
+        // home while resolving against core.
+        if (current.site.resolution_scope == null) return .core;
+        return if (current.home() != null) .module else .session;
     }
     pub fn available(self: *const Machine) usize {
         return self.unit.stack.items.len - self.unit.stack_base;
@@ -5364,7 +5393,7 @@ const DispatchDriver = struct {
                         return continueDispatchAfterLoad(self_machine, name, request);
                     },
                     .unregistered_module => |name| return continueDispatchAfterLoad(self_machine, name, request),
-                    .unresolved => return self_machine.undefinedWord(request.qualified),
+                    .unresolved => |chain| return self_machine.undefinedWordIn(request.qualified, chain),
                 }
             },
         };
@@ -5406,7 +5435,7 @@ const HandleDispatchDriver = struct {
                 self.module.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 evaluator.retireDriver(self);
                 const lease = maybe_lease orelse
-                    return evaluator.undefinedWord(intern.bindingId(binding));
+                    return evaluator.undefinedWordIn(intern.bindingId(binding), .@"module-value");
                 var resolved: Resolution = .{
                     .lease = lease,
                     // No generation: there is no registration to be a
@@ -5437,7 +5466,8 @@ fn continueDispatchAfterLoad(
     name: intern.ModuleName,
     request: QualifiedLoadRequest,
 ) MachineError!WorkProgress {
-    if (self.unit.inherited.registry == null) return self.undefinedWord(request.qualified);
+    if (self.unit.inherited.registry == null)
+        return self.undefinedWordIn(request.qualified, .qualified);
     try self.autoLoadModule(name, request);
     return .detached;
 }
@@ -5559,7 +5589,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 body_header,
                 resolved.trace_word,
                 resolved.home,
-                resolved.origin,
+                resolved.defining_scope,
                 cross_home_effect,
             );
         },
@@ -5589,9 +5619,9 @@ const DirectWordFallback = struct {
     body: heap.Owned(*Header),
     word: intern.TraceWord,
     pub fn run(evaluator: *Machine, self: *DirectWordFallback) MachineError!void {
-        // Only a core-origin word reaches idiom recognition, so this fallback
-        // is always resuming one.
-        return scheduleWord(evaluator, self.body.borrow(), self.word, null, .core, null);
+        // Only a core-origin word reaches idiom recognition, and core alone is
+        // its chain, so this fallback resumes one with no scope.
+        return scheduleWord(evaluator, self.body.borrow(), self.word, null, null, null);
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
@@ -5605,12 +5635,46 @@ fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) int
     const name = home.name() orelse return .plain(intern.bindingId(local));
     return .moduleLocal(name, local);
 }
+/// Which chain a failed lookup searched, reported as `'scope` in an
+/// undefined-word error.
+pub const LookupChain = enum {
+    /// The activation's own lexical chain over core.
+    session,
+    /// A module image's own definitions over core.
+    module,
+    /// Core alone, which is what a primitive or embedded prelude definition
+    /// resolves against.
+    core,
+    /// A registered module's exports, reached through a dotted name.
+    qualified,
+    /// The public exports of a module reached as a value. Not a scope miss at
+    /// all: the name is simply not exported by that image.
+    @"module-value",
+
+    fn spelling(self: LookupChain) []const u8 {
+        return switch (self) {
+            .session => "session",
+            .module => "module",
+            .core => "core",
+            .qualified => "qualified",
+            .@"module-value" => "module-value",
+        };
+    }
+};
+
 pub const Resolution = struct {
     lease: env.BindingLease,
     execution_generation: ?modules.ExecutionGeneration,
     home: ?*modules.ModuleHome,
     trace_word: intern.TraceWord,
     origin: ResolutionOrigin,
+    /// The scope this binding was found in, which is therefore the chain its
+    /// own references resolve against. Null for a core-origin binding, whose
+    /// chain is core alone, and for a module-origin one, whose chain is its
+    /// image. Recording it is what makes "resolves where it was defined" hold
+    /// without exception: reading the unit's root instead was wrong for
+    /// anything defined in a child scope, such as inside one `@attempt`.
+    defining_scope: ?*env.Scope = null,
     pub fn deinit(self: *Resolution, _: std.mem.Allocator) void {
         self.lease.deinit();
         if (self.execution_generation) |*generation| generation.deinit();
@@ -5621,8 +5685,10 @@ pub const Resolution = struct {
 /// Why resolution finished. Distinguishing an unregistered module from an
 /// unknown name lets every qualified-name consumer auto-load exactly once.
 pub const ResolutionOutcome = union(enum) {
-    /// Nothing by that name is visible.
-    unresolved,
+    /// Nothing by that name is visible, and this is the chain that was
+    /// searched. The cursor knows which of its phases ran out, so it says so
+    /// rather than leaving the caller to guess from the spelling.
+    unresolved: LookupChain,
     /// The reference is dotted and its module prefix has never been interned,
     /// so nothing can be registered under it yet. The slice borrows the
     /// interned spelling, which outlives every cursor.
@@ -5700,6 +5766,14 @@ pub const ResolutionCursor = struct {
     prefix: ?intern.ModuleName = null,
     export_name: ?intern.BindingName = null,
     scope: ?*env.Scope,
+    /// The chain to report when the plain walk runs out. The qualified phases
+    /// report `.qualified` instead, because a dotted name never searched the
+    /// activation's own chain at all.
+    plain_chain: LookupChain,
+    /// The scope whose environment the in-flight `.direct` lookup is reading.
+    /// `scope` has already advanced to its parent by then, so the searched
+    /// scope has to be kept separately to be reported.
+    searched_scope: ?*env.Scope = null,
     generation: ?modules.GenerationLease = null,
 
     pub fn init(evaluator: *Machine, word: u32) ResolutionCursor {
@@ -5714,6 +5788,7 @@ pub const ResolutionCursor = struct {
             .spelling = spelling,
             .work = .{ .dot = intern.lastDotCursor(spelling) },
             .scope = evaluator.unit.current.?.resolutionScope(),
+            .plain_chain = evaluator.currentLookupChain(),
         };
     }
 
@@ -5742,6 +5817,10 @@ pub const ResolutionCursor = struct {
             .home = home,
             .trace_word = if (home) |resolved| homeTraceWord(resolved, local.?) else .plain(self.word),
             .origin = if (home != null) .module else .direct,
+            // A module-local hit resolves against its image, which the home
+            // supplies; anything else resolves against the scope it was found
+            // in.
+            .defining_scope = if (home != null) null else self.searched_scope,
         };
     }
 
@@ -5774,7 +5853,7 @@ pub const ResolutionCursor = struct {
                         if (dot_index == 0 or dot_index + 1 == self.spelling.len or self.registry == null) {
                             self.work.deinit();
                             self.phase = .complete;
-                            break :result .{ .complete = .unresolved };
+                            break :result .{ .complete = .{ .unresolved = .qualified } };
                         }
                         self.dot_index = dot_index;
                         self.work = .{ .atom = intern.lookupCursor(self.spelling[0..dot_index]) };
@@ -5811,7 +5890,7 @@ pub const ResolutionCursor = struct {
                     self.prefix = maybe_module orelse {
                         self.work.deinit();
                         self.phase = .complete;
-                        break :result .{ .complete = .unresolved };
+                        break :result .{ .complete = .{ .unresolved = .qualified } };
                     };
                     self.work = .{ .acquisition = self.registry.?.acquireCursor(self.prefix.?) };
                     self.phase = .qualified_acquire;
@@ -5839,7 +5918,7 @@ pub const ResolutionCursor = struct {
                         self.work.deinit();
                         self.releaseGeneration();
                         self.phase = .complete;
-                        break :result .{ .complete = .unresolved };
+                        break :result .{ .complete = .{ .unresolved = .qualified } };
                     };
                     self.work = .{ .binding_validation = .init(export_name) };
                     self.phase = .export_validate;
@@ -5853,12 +5932,11 @@ pub const ResolutionCursor = struct {
                         self.work.deinit();
                         self.releaseGeneration();
                         self.phase = .complete;
-                        break :result .{ .complete = .unresolved };
+                        break :result .{ .complete = .{ .unresolved = .qualified } };
                     };
                     self.qualified_name = intern.qualifiedName(self.prefix.?, self.export_name.?);
                     self.work = .{ .export_lookup = self.generation.?.resolveCursor(
                         intern.bindingId(intern.qualifiedBinding(self.qualified_name.?)),
-                        true,
                     ) };
                     self.phase = .qualified_export;
                     break :result .pending;
@@ -5871,7 +5949,7 @@ pub const ResolutionCursor = struct {
                     const lease = maybe_lease orelse {
                         self.releaseGeneration();
                         self.phase = .complete;
-                        break :result .{ .complete = .unresolved };
+                        break :result .{ .complete = .{ .unresolved = .qualified } };
                     };
                     self.phase = .complete;
                     break :result .{ .complete = .{ .resolved = self.generationResult(lease) } };
@@ -5885,6 +5963,7 @@ pub const ResolutionCursor = struct {
                 };
                 self.scope = current.parent;
                 if (current.environmentOrNull()) |environment| {
+                    self.searched_scope = current;
                     self.work = .{ .direct = environment.directLookupCursor(self.word) };
                     self.phase = .direct;
                 }
@@ -5898,6 +5977,7 @@ pub const ResolutionCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .resolved = self.directResult(lease) } };
                     }
+                    self.searched_scope = null;
                     self.phase = .scope;
                     break :result .pending;
                 },
@@ -5907,10 +5987,11 @@ pub const ResolutionCursor = struct {
                 .complete => |maybe_lease| result: {
                     self.work.deinit();
                     self.phase = .complete;
-                    var lease = maybe_lease orelse break :result .{ .complete = .unresolved };
+                    var lease = maybe_lease orelse
+                        break :result .{ .complete = .{ .unresolved = self.plain_chain } };
                     if (lease.visibility == .private) {
                         lease.deinit();
-                        break :result .{ .complete = .unresolved };
+                        break :result .{ .complete = .{ .unresolved = self.plain_chain } };
                     }
                     break :result .{ .complete = .{ .resolved = .{
                         .lease = lease,
@@ -6079,7 +6160,7 @@ fn scheduleWord(
     body: *Header,
     word: intern.TraceWord,
     resolved_home: ?*modules.ModuleHome,
-    origin: ResolutionOrigin,
+    defining_scope: ?*env.Scope,
     effect: ?env.Effect,
 ) MachineError!void {
     const scope = if (resolved_home) |home|
@@ -6087,19 +6168,18 @@ fn scheduleWord(
     else
         self.unit.current.?.scope();
     const home = resolved_home orelse self.unit.current.?.home();
-    // Each binding resolves against the chain it was defined in. A module word
-    // resolves against its home. A core or prelude definition was published
-    // against core alone — the prelude bootstraps with a core-only root scope
-    // — so core alone is its chain, and a session redefinition shadows a
-    // prelude word for session code without rewriting what already-evaluated
-    // definitions mean. A session binding keeps resolving against the session
-    // chain it was defined in.
+    // Each binding resolves against the chain it was defined in, with no
+    // exception. A module word resolves against its home. Anything else
+    // resolves against the scope resolution found it in, which is null for a
+    // core or prelude definition — those were published against core alone,
+    // so a session redefinition shadows one for session code without
+    // rewriting what already-evaluated definitions mean — and is the found
+    // scope itself otherwise, including a child scope such as one `@attempt`
+    // opens.
     const resolution_scope: ?*env.Scope = if (resolved_home) |generation|
         generation.scope(self.unit.module_access)
-    else switch (origin) {
-        .core => null,
-        .direct, .module => self.unit.lexicalScope(),
-    };
+    else
+        defining_scope;
     if (resolved_home) |generation| try self.unit.pinGeneration(generation);
     var check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
     var effect_tail = self.replaceTailEffectCandidate(body);

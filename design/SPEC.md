@@ -574,8 +574,11 @@ anonymously, be passed as data, and be registered more than once.
   actually defined in. A primitive or an embedded prelude definition was
   published against core alone, so core alone is its chain: it never resolves
   against a session or a module environment, whichever happens to be
-  executing. A session binding resolves against the session chain it was
-  defined in. So a module exporting a word named like a core one shadows it
+  executing. Every other binding resolves against the scope resolution found
+  it in — the session root for a top-level definition, and the child scope
+  itself for one made inside an `@attempt`, so siblings defined in the same
+  child see each other. There is no case where a binding resolves against a
+  chain it was not defined in. So a module exporting a word named like a core one shadows it
   for that module's own callers, never inside the prelude words the module
   calls: `table.where` does not become the `where` that `filter` is written
   against. The same holds for the session, which is what makes shadowing
@@ -598,9 +601,20 @@ anonymously, be passed as data, and be registered more than once.
   because it resolves where its invoker runs rather than where the invoker was
   defined: `(pop pop 42) '+ def [1 2 3] 0 (+) fold` is 42, so a combinator
   still sees the definitions of the code that called it.
-- **A module value supports one operation: `invoke`.** `module 'name invoke`
-  calls one public export of an image reached as a value rather than through a
-  registered name. It is the same dispatch a qualified call performs — the
+- **An undefined-word failure says which chain it searched.** Its `'data`
+  carries `'scope` alongside `'name`: `'session` for the activation's own
+  lexical chain over core, `'module` for a module image's definitions over
+  core, `'core` for a primitive or prelude definition, whose chain is core
+  alone, `'qualified` for a dotted reference resolved through the registry,
+  and `'module-value` for a missing public export of a module reached as a
+  value — which is not a scope miss at all. A session name being invisible to
+  a module and to a prelude word are different failures, and the field is what
+  distinguishes them.
+- **`invoke` is the only operation that runs a module value's code.**
+  `module 'name invoke` calls one public export of an image reached as a value
+  rather than through a registered name. A module value is otherwise an
+  ordinary opaque value: `register` consumes one and `type` reports `'module`,
+  and those are the only other things that accept it. It is the same dispatch a qualified call performs — the
   home is the image, so a public reaches its own privates, and lookup is
   public-only, so a private is as absent as a missing name. What it cannot do
   is open state: an image owns no slot, so `within` inside a handle-called word
@@ -666,9 +680,10 @@ anonymously, be passed as data, and be registered more than once.
   the ambient caller stack. It is legal only while executing a published
   word whose definition-site home is a live module: session top level, a
   construction root (an image being built has no registration, and its body
-  operates on its construction stack directly),
-  and a body extracted and redefined elsewhere are all `'domain`. There is
-  no module-handle-targeted form. Inputs cross the boundary only because
+  operates on its construction stack directly), a word reached through
+  `invoke` (an image reached as a value has no registration either, so it owns
+  no slot), and a body extracted and redefined elsewhere are all `'domain`.
+  There is no module-handle-targeted form. Inputs cross the boundary only because
   the word body captures them explicitly with `partial` or `with`.
   Semantically `within` is the module-scoped transactional counterpart of
   `infra`: `infra` takes a supplied list as its temporary stack, `within`
@@ -749,7 +764,9 @@ anonymously, be passed as data, and be registered more than once.
   `.eclmod` word can neither observe an internal module home nor reach a durable
   stack.
 - **Surface**: `import` consumes a qualified original and a bare binding name,
-  then publishes exactly that one binding in the current environment. The
+  then publishes exactly that one binding in the current environment — which
+  inside a module body means the image, publicly, on the same terms `def`
+  binds there. The
   binding is a late-bound forwarding definition whose effect and documentation
   are copied from the original. Naming a binding that already exists replaces
   only that binding; importing never splices an entire module or emits shadow

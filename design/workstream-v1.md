@@ -4258,3 +4258,31 @@ script in CI.
   - **Traces to**: the fourth standalone patch
     (`gameplans/result-consolidation.json`) — the move, the `checked`
     routing, and the `map-err`/`either` renames.
+
+23. **No audit check for public functions with no production caller**
+   (observed 2026-08-24 while reviewing the scoping work). Six were found by
+   hand in `env.zig` and `modules.zig`: `Environment.view` and
+   `OwnedImage.executionScope`, both orphaned by that work, plus four blocking
+   wrappers over cursors — `Registration.resolve`, `publicNamesOwned`,
+   `Registry.canonical`, and `beginLoading` — that no caller ever had.
+   `Registry.acquire` was a fifth, reached only from tests, and moved into
+   `modules.testing`. Zig analyses lazily, so such a function is not merely
+   dead: its body may never be checked, which is the same hazard AGENTS.md
+   names when it says a declaration compiling without a caller is not proof
+   its surface works.
+   - **Constraint**: grep cannot do this. Attribution needs the receiver's
+     type, and generic method names — `deinit`, `init`, `advance`, `acquire` —
+     appear on dozens of unrelated types; two grep-based sweeps during that
+     review produced wrong answers before a receiver-qualified check settled
+     it. The check therefore belongs in `src/tools/source_audit.zig`, which is
+     already AST-aware and already enumerates every classified production
+     file.
+   - **Constraint**: a test-only caller must not count as a caller. The
+     blocking wrappers are exactly the shape that hides behind one, and a
+     blocking wrapper also lets a test skip the resumability the production
+     path has to prove.
+   - **Verify by** `cmd`: `zig build precommit` on a tree with a deliberately
+     uncalled `pub fn` added to a classified production file.
+   - **Expected**: the audit names the file and the function and fails.
+   - **Traces to**: the scoping review that produced `invoke`, the
+     parameterization rule, and core-only prelude resolution.

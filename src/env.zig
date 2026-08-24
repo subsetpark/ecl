@@ -895,10 +895,6 @@ pub const Environment = struct {
     pub fn modulePublisher(self: *Environment) ModulePublisher {
         return .init(self);
     }
-    /// The observation handle for an environment its holder already owns.
-    pub fn view(self: *const Environment) EnvironmentView {
-        return .init(self);
-    }
     pub fn shapeGeneration(self: *const Environment) u64 {
         return self.shape_generation.load(.acquire);
     }

@@ -700,6 +700,39 @@ test "module: import inside a module body binds module-locally" {
     try expectErrorContains(&runtime, "y", &.{ "'kind 'undefined-word", "'word 'y" });
 }
 
+test "scope: a binding resolves in the scope it was defined in, child scopes included" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+    // Both definitions land in the `@attempt` child, so the second resolves
+    // the first. Reading the unit root instead left siblings invisible to each
+    // other, which was the last exception to "resolves where it was defined".
+    try expectOk(&runtime, "((1) 'helper def (helper) 'caller def caller) @attempt 'ok at first");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    // A child definition is still dynamic: it does not outlive its boundary.
+    try expectErrorContains(&runtime, "helper", &.{ "'kind 'undefined-word", "'word 'helper" });
+}
+
+test "scope: an undefined word names the chain it searched" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+    try expectErrorContains(&runtime, "nope", &.{"'scope 'session"});
+    // A module cannot see the session, and says so rather than leaving the
+    // reader to work out why a name they just defined is missing.
+    try expectErrorContains(&runtime, "(1) 'base def ((base) 'r def) 'm @defm m.r", &.{
+        "'scope 'module",
+        "'word 'base",
+    });
+    // A dotted reference searched the registry, not any lexical chain.
+    try expectErrorContains(&runtime, "((7) 'answer def) 'named @defm named.nope", &.{"'scope 'qualified"});
+    try expectErrorContains(&runtime, "no.such.word", &.{"'scope 'qualified"});
+    // A missing export of a module *value* is not a scope miss at all.
+    try expectErrorContains(&runtime, "((7) 'answer def) @module 'nope invoke", &.{"'scope 'module-value"});
+}
+
 test "module: a construction sees only its parameters its own definitions and core" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);

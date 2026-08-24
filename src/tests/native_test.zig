@@ -523,10 +523,10 @@ test "native: the static transport publishes a linked descriptor through the sam
     var candidate_sealed = candidate.seal();
     defer candidate_sealed.deinit();
     _ = try registry.register(candidate_sealed.ref(), requested);
-    var generation = registry.acquire(requested).?;
+    var generation = modules.testing.acquire(&registry, requested).?;
     defer generation.deinit();
     const increment = try intern.internNamespace("increment");
-    var resolver = generation.resolveCursor(intern.namespaceId(increment), true);
+    var resolver = generation.resolveCursor(intern.namespaceId(increment));
     defer resolver.deinit();
     var binding = while (true) switch (resolver.advance()) {
         .pending => {},

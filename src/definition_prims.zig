@@ -326,7 +326,7 @@ fn resolveForReflection(
 ) MachineError!ReflectionResolution {
     return switch (outcome) {
         .resolved => |resolved| .{ .resolved = resolved },
-        .unresolved => evaluator.undefinedName(requested),
+        .unresolved => |chain| evaluator.undefinedNameIn(requested, chain),
         .unknown_module_prefix, .unregistered_module => {
             evaluator.retireDriver(driver);
             return .{ .retry = try evaluator.retryQualifiedOperandAfterLoad(requested, outcome) };
