@@ -277,6 +277,15 @@
   " -> " join)
  'render-path defp
 
+ ### defp longer-owner
+ (left right -- owner : "Return the longer of two candidate package-prefix owners.")
+ (|left right|
+  left len right len <
+  right () partial
+  left () partial
+  if)
+ 'longer-owner defp
+
  ### def why
  (lock module -- text : "Render one deterministic root-to-owner explanation for a module name.")
  (|lock module|
@@ -284,11 +293,11 @@
   module pkg.name.valid?
   'domain error.new "pkg why expects a canonical module name" error.with-message assert
   lock 'packages at keys module (pkg.name.owns?) partial filter
-  dup len 1 =
+  dup empty? not
   'domain error.new "no locked package owns the requested module" error.with-message
   'data 'module module pair dict-of put
   assert
-  first
+  "" (longer-owner) fold
   lock swap [] lock 'root at paths-from
   dup empty? not
   'domain error.new "the locked package is not reachable from the project root" error.with-message

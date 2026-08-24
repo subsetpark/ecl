@@ -264,7 +264,7 @@ const darwin = struct {
     ) c_int;
 };
 
-fn renameDirectoryPreserve(
+pub fn renamePreserve(
     parent: std.Io.Dir,
     old_name: []const u8,
     new_name: []const u8,
@@ -835,7 +835,7 @@ const UnpackDriver = struct {
             },
             else => return self.failIo(evaluator, "cannot inspect archive destination", err),
         };
-        return self.failIoName(evaluator, "archive destination already exists");
+        return self.failDestinationExists(evaluator, "archive destination already exists");
     }
 
     fn createStage(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
@@ -947,12 +947,18 @@ const UnpackDriver = struct {
         var parent = std.Io.Dir.cwd().openDir(io, parent_path, .{}) catch |err|
             return self.failIo(evaluator, "cannot open archive destination parent", err);
         defer parent.close(io);
-        renameDirectoryPreserve(
+        renamePreserve(
             parent,
             std.fs.path.basename(self.stage_path.?.borrow()),
             std.fs.path.basename(destination),
             io,
-        ) catch |err| return self.failIo(evaluator, "cannot publish archive destination", err);
+        ) catch |err| switch (err) {
+            error.PathAlreadyExists => return self.failDestinationExists(
+                evaluator,
+                "archive destination already exists",
+            ),
+            else => return self.failIo(evaluator, "cannot publish archive destination", err),
+        };
         self.committed = true;
         self.stage_created = false;
         const result = self.result.?;
@@ -987,6 +993,16 @@ const UnpackDriver = struct {
     fn failIoName(self: *UnpackDriver, evaluator: *Machine, message: []const u8) MachineError {
         const failure = evaluator.fail(.io, message);
         evaluator.addErrorPath(self.destination_value.?.borrow());
+        return failure;
+    }
+
+    fn failDestinationExists(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        message: []const u8,
+    ) MachineError {
+        const failure = self.failIoName(evaluator, message);
+        evaluator.addErrorDestinationExists();
         return failure;
     }
 

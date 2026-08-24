@@ -1315,6 +1315,8 @@ Runtime lock-resolution diagnostics have exact stable message templates:
 
 - absent selected entry: “locked package `<package>` is missing from the
   package store; run `ecl pkg sync`”;
+- cache store unavailable: “locked package `<package>` has no package store;
+  set ECL_CACHE, XDG_CACHE_HOME, or HOME before running `ecl pkg sync`”;
 - failed selected-entry probe: “cannot inspect locked package `<package>` in
   the package store: `<host-error>`; run `ecl pkg sync`”;
 - selected path is not a real directory: “locked package `<package>` is not a
@@ -1323,7 +1325,7 @@ Runtime lock-resolution diagnostics have exact stable message templates:
   absent from package `<package>`”.
 
 The package and module placeholders are the canonical names from the validated
-lock and the original qualified request. The first three are `'io`; the last
+lock and the original qualified request. The first four are `'io`; the last
 is `'undefined-word`. Invalid lock discovery is also `'io` and prefixes its
 owned detail with “invalid project lock `<path>`:”. None falls through to
 `ECL_PATH`.
@@ -1420,8 +1422,9 @@ archive and package-policy validation at the mutation sink, then extracts to a
 unique sibling staging directory and publishes only by an absent-destination
 rename. It returns normalized regular-file paths only after commit. The
 destination is never overwritten or merged. Concurrent installers may both
-stage, but at most one publishes; after a destination-exists result, a caller
-may re-run `present?` and accept the immutable winner. Cancellation,
+stage, but at most one publishes. Both the pre-flight and commit conflict
+return `'io` with `'destination-exists 1` in error data; a caller may re-run
+`present?` and accept the immutable winner only for that condition. Cancellation,
 allocation failure, malformed input, and filesystem failure remove private
 staging and expose no partial destination.
 
@@ -1441,7 +1444,14 @@ existing lock remains byte-for-byte unchanged; when no lock existed, none is
 published. A symlink or non-regular existing target is refused rather than
 followed.
 
-The seven `pkg.store` words documented below are the complete package
+`pkg.store.write-new` `( text path -- )` uses the same bounded temporary-file
+protocol but publishes with a non-replacing same-parent rename. It is the
+manifest-creation boundary: a destination created after the initial probe wins
+the race, the temporary is retired, and the existing bytes are untouched. Its
+diagnostics name the supplied project-file path rather than assuming a
+particular filename.
+
+The eight `pkg.store` words documented here are the complete package
 filesystem authority. ECL receives no generic recursive-delete, copy, rename,
 or caller-rooted garbage-collection word as a side effect of package support.
 
@@ -1488,6 +1498,13 @@ but an absent reachable candidate that remains unselected may be fetched again
 because its manifest can still contribute graph edges. Fully offline
 resolution is the separate `sync --offline` contract.
 
+Before discovery, sync reads only `<project-root>/ecl.lock`, where
+`project-root` is its explicit argument. A valid vendored lock selects that
+same project's fixed `vendor` store and retains `'store 'vendor` on the
+resolved lock. An absent or invalid current lock selects cache mode, preserving
+sync as the supported way to regenerate corrupt lock bytes. Ambient Session
+project discovery never selects the synchronization target or its mode.
+
 Only after every selected entry is present does sync render the lock once with
 `pkg.lock.write` and call `pkg.store.write-lock` for
 `<project-root>/ecl.lock`. It then returns the validated lock value. Deleting
@@ -1505,8 +1522,11 @@ Every command other than `init` uses the same upward `ecl.pkg` discovery seam
 as Session startup. `init` acts only on the working directory and refuses to
 replace an existing manifest.
 
-- `init` derives a canonical package name from the working-directory basename
-  and creates a format-1 manifest at version `0.1.0`.
+- `init [name]` derives the package name from the working-directory basename
+  when omitted, accepts an explicit canonical override, and atomically creates
+  a format-1 manifest at version `0.1.0` without replacing a racing file. An
+  invalid name diagnostic carries both the attempted name and project path and
+  explains the override form.
 - `add <name> <version> <url>` downloads and validates that exact package,
   derives its `sha256-` declaration, and raises the root minimum to the given
   version through an atomic manifest replacement. The manifest dictionary's

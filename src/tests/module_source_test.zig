@@ -147,7 +147,70 @@ test "loader: malformed lock is authoritative after embedded resolution" {
     });
     defer runtime.deinit();
     try expectOk(&runtime, "[1] result.ok pop");
-    try expectErrorContains(&runtime, "local.answer", &.{ "'kind 'domain", "invalid project lock" });
+    try expectErrorContains(&runtime, "local.answer", &.{ "'kind 'io", "invalid project lock" });
+}
+
+test "loader: invalid project marker is reported as invalid project lock discovery" {
+    var fixture = try LockFixture.initWithoutMarker();
+    defer fixture.deinit();
+    try fixture.directory.dir.createDir(std.testing.io, "project/ecl.pkg", .default_dir);
+    try fixture.writePathModule("local", 7);
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    const lock_path = try std.fs.path.join(
+        std.testing.allocator,
+        &.{ fixture.root, "project", "ecl.lock" },
+    );
+    defer std.testing.allocator.free(lock_path);
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+        .ecl_path = fixture.search,
+    });
+    defer runtime.deinit();
+    try expectErrorContains(&runtime, "local.answer", &.{
+        "'kind 'io",
+        "invalid project lock",
+        lock_path,
+        "project marker",
+    });
+}
+
+test "loader: a cache lock without cache environment gives actionable store selection" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeOnePackageLock("missing", "1.0.0", hash_a);
+    try fixture.writePathModule("missing", 7);
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+        .ecl_path = fixture.search,
+        .environ = &.{},
+    });
+    defer runtime.deinit();
+    try expectErrorContains(&runtime, "missing.answer", &.{
+        "'kind 'io",
+        "missing",
+        "ECL_CACHE",
+        "XDG_CACHE_HOME",
+        "HOME",
+    });
 }
 
 test "loader: missing locked store entry names package and pkg sync without path fallback" {

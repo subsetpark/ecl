@@ -40,6 +40,7 @@ fn packageStoreSource(
     allocator: std.mem.Allocator,
     destination: []const u8,
     lock_path: []const u8,
+    manifest_path: []const u8,
 ) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
@@ -51,6 +52,9 @@ fn packageStoreSource(
     try source.writer.writeAll(" pkg.store.install pop \"lock\\n\" ");
     try appendQuoted(&source.writer, lock_path);
     try source.writer.writeAll(" pkg.store.write-lock ");
+    try source.writer.writeAll("\"manifest\\n\" ");
+    try appendQuoted(&source.writer, manifest_path);
+    try source.writer.writeAll(" pkg.store.write-new ");
     try appendQuoted(&source.writer, destination);
     try source.writer.writeAll(" pkg.store.present? pop ");
     try appendQuoted(&source.writer, destination);
@@ -519,10 +523,17 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         .{ scratch_path, std.fs.path.sep },
     );
     defer thread_safe_allocator.free(lock_path);
+    const manifest_path = try std.fmt.allocPrint(
+        thread_safe_allocator,
+        "{s}{c}ecl.pkg",
+        .{ scratch_path, std.fs.path.sep },
+    );
+    defer thread_safe_allocator.free(manifest_path);
     const package_source = try packageStoreSource(
         thread_safe_allocator,
         package_destination,
         lock_path,
+        manifest_path,
     );
     defer thread_safe_allocator.free(package_source);
     try runOk(&runtime, "oom-pkg-store.ecl", package_source);

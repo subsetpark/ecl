@@ -175,7 +175,7 @@ project-local `vendor/` store, and garbage-collect the shared cache against an
 explicit set of lock files:
 
 ```sh
-ecl pkg init
+ecl pkg init [name]
 ecl pkg add smoke 1.0.0 https://example.com/smoke-1.0.0.tgz
 ecl pkg sync
 ecl pkg tree
@@ -187,7 +187,10 @@ ecl pkg gc ../one/ecl.lock ../two/ecl.lock
 
 `vendor` verifies each retained archive before reinstalling it beneath the
 project and rewrites `ecl.lock` with the closed `'store 'vendor` mode. Locked
-execution and `verify` then need no shared cache or network. `gc` requires at
+execution, synchronization, and `verify` then remain on that project-local
+store and need no shared cache or network. `init` accepts an explicit canonical
+name when the working-directory basename is unsuitable and creates `ecl.pkg`
+without replacing a racing file. `gc` requires at
 least one named lock and removes only canonical package-store directories not
 selected by any of them; unknown cache nodes are preserved.
 

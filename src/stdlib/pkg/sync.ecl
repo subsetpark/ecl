@@ -344,6 +344,33 @@
   'catalog at)
  'discover defp
 
+ ### defp finish-install
+ (result destination -- : "Accept a racing immutable publication or re-raise its install failure.")
+ (|result destination|
+  result 'err at
+  dup 'data at 'destination-exists 0 at-or
+  destination wrap (pkg.store.present?) with @attempt
+  dup 'ok has?
+  ('ok at first)
+  (pop 0)
+  if
+  and
+  (pop)
+  (raise)
+  if)
+ 'finish-install defp
+
+ ### def install-immutable
+ (bytes package destination -- :
+  "Install one immutable package, treating a concurrently published real directory as success.")
+ (|bytes package destination|
+  bytes package destination 3 pack (pkg.store.install pop) with @attempt
+  dup 'ok has?
+  (pop)
+  destination (finish-install) partial
+  if)
+ 'install-immutable def
+
  ### defp install-selection
  (pair store -- : "Install one missing selected package after repeating every verification.")
  (|pair store|
@@ -359,7 +386,7 @@
     package requirement fetch-body
     dup package inspect-checked pkg.manifest.read
     package requirement 'version at matching-manifest pop
-    package destination pkg.store.install pop)
+    package destination install-immutable)
    with
    if)
   with
@@ -410,23 +437,49 @@
  (|root project| root project 1 run-mode)
  'run-offline def
 
+ ### defp lock-mode
+ (lock -- mode : "Return the closed store mode of one validated project lock.")
+ (dup 'store has?
+  ('store at)
+  (pop 'cache)
+  if)
+ 'lock-mode defp
+
+ ### defp mode-result
+ (result -- mode : "Return an explicit project's lock mode or cache when it can be regenerated.")
+ (dup 'ok has?
+  ('ok at first lock-mode)
+  (pop 'cache)
+  if)
+ 'mode-result defp
+
+ ### defp project-mode
+ (project-root -- mode : "Read store mode only from the explicit project being synchronized.")
+ ("/ecl.lock" cat wrap (io.slurp pkg.lock.read) with @attempt mode-result)
+ 'project-mode defp
+
  ### defp run-mode
  (root-manifest project-root offline -- lock : "Validate explicit sync inputs and select its mode.")
  (|root project offline|
   project str.str?
   {'kind 'type 'msg "pkg.sync expects a string project root"} assert
   root pkg.manifest.validate
-  cache-root
-  project
-  offline
-  run-validated)
+  project project-mode
+  dup 'vendor match?
+  project ("/vendor" cat) partial
+  (cache-root)
+  if
+  project offline 5 pack
+  (|root mode store project offline| root store project offline mode run-validated)
+  with call)
  'run-mode defp
 
  ### defp run-validated
- (root store project-root offline -- lock : "Run synchronization after validating its inputs.")
- (|root store project offline|
+ (root store project-root offline mode -- lock : "Run synchronization after validating its inputs.")
+ (|root store project offline mode|
   root store offline discover
   root swap pkg.mvs.resolve
+  mode 'vendor match? (pkg.lock.vendor) when
   dup store install-selected
   dup pkg.lock.write
   project "/ecl.lock" cat

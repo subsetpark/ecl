@@ -51,6 +51,11 @@ pub const words = [_]env.BuiltinWord{
         .primitive = writeLock,
     },
     .{
+        .name = "write-new",
+        .doc = "( text path -- ) Atomically create a project data file without replacing a racing destination.",
+        .primitive = writeNew,
+    },
+    .{
         .name = "gc",
         .doc = "( retained-store-keys -- removed-count ) Remove canonical shared-cache entries absent from every retained key.",
         .primitive = collectGarbage,
@@ -608,6 +613,9 @@ const GcDriver = struct {
         self.root_dir.?.rename(self.candidate_source.?, self.root_dir.?, trash_name, self.io) catch |err| {
             self.allocator.free(trash_name);
             switch (err) {
+                // Keep the candidate phase: the next bounded advance mints a
+                // new monotonic identity, so a stale trash-name collision
+                // cannot repeat the same rename indefinitely.
                 error.DirNotEmpty => return .yielded,
                 error.FileNotFound => {
                     self.allocator.free(self.candidate_source.?);
@@ -798,21 +806,32 @@ fn validStoreKey(key: []const u8) bool {
 }
 
 fn writeLock(evaluator: *Machine) MachineError!void {
+    return startWriteDriver(evaluator, .replace);
+}
+
+fn writeNew(evaluator: *Machine) MachineError!void {
+    return startWriteDriver(evaluator, .create);
+}
+
+const PublicationMode = enum { replace, create };
+
+fn startWriteDriver(evaluator: *Machine, mode: PublicationMode) MachineError!void {
     try evaluator.require(2);
     var path_value = try evaluator.popValue();
     errdefer path_value.deinit();
-    if (!path_value.borrow().isString()) return evaluator.typeError("a string lock path");
+    if (!path_value.borrow().isString()) return evaluator.typeError("a string project file path");
     var text_value = try evaluator.popValue();
     errdefer text_value.deinit();
-    if (!text_value.borrow().isString()) return evaluator.typeError("lock text");
+    if (!text_value.borrow().isString()) return evaluator.typeError("project file text");
     const io = evaluator.unit.inherited.host_io orelse {
-        const failure = evaluator.fail(.io, "lock publication is unavailable");
+        const failure = evaluator.fail(.io, "project file publication is unavailable");
         evaluator.addErrorPath(path_value.borrow());
         return failure;
     };
     const text_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), text_value.borrow());
     const path_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), path_value.borrow());
     try evaluator.startDriver(WriteLockDriver{
+        .mode = mode,
         .allocator = evaluator.allocator(),
         .io = io,
         .text_value = .init(text_value.take()),
@@ -828,6 +847,7 @@ const WriteLockDriver = struct {
     pub const ownership: heap.DriverOwnership = .bounded_retirement;
 
     retirement: heap.ReleaseDomain.Retirement = .{},
+    mode: PublicationMode,
     allocator: std.mem.Allocator,
     io: std.Io,
     text_value: heap.Owned(Value),
@@ -860,7 +880,7 @@ const WriteLockDriver = struct {
     fn encodeText(self: *WriteLockDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
         switch (self.text_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return self.failDomain(evaluator, "lock text contains an invalid Unicode scalar"),
+            error.InvalidCodepoint => return self.failDomain(evaluator, "project file text contains an invalid Unicode scalar"),
         }) {
             .pending => return .yielded,
             .complete => |text| {
@@ -874,13 +894,13 @@ const WriteLockDriver = struct {
     fn encodePath(self: *WriteLockDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
         switch (self.path_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return self.failDomain(evaluator, "lock path contains an invalid Unicode scalar"),
+            error.InvalidCodepoint => return self.failDomain(evaluator, "project file path contains an invalid Unicode scalar"),
         }) {
             .pending => return .yielded,
             .complete => |path| {
                 if (path.len == 0) {
                     self.allocator.free(path);
-                    return self.failDomain(evaluator, "lock path is empty");
+                    return self.failDomain(evaluator, "project file path is empty");
                 }
                 self.path = .init(path);
                 self.phase = .inspect;
@@ -903,9 +923,10 @@ const WriteLockDriver = struct {
                 self.phase = next;
                 return .yielded;
             },
-            else => return self.failIo(evaluator, "cannot inspect lock target", err),
+            else => return self.failIo(evaluator, "cannot inspect project file target", err),
         };
-        if (info.kind != .file) return self.failIoName(evaluator, "lock target is not a regular file");
+        if (info.kind != .file) return self.failNotRegular(evaluator);
+        if (self.mode == .create) return self.failAlreadyExists(evaluator);
         self.phase = next;
         return .yielded;
     }
@@ -927,7 +948,7 @@ const WriteLockDriver = struct {
                 self.temp_path = null;
                 return .yielded;
             },
-            else => return self.failIo(evaluator, "cannot create lock temporary file", err),
+            else => return self.failIo(evaluator, "cannot create project temporary file", err),
         };
         self.temp_created = true;
         self.phase = .write;
@@ -939,7 +960,7 @@ const WriteLockDriver = struct {
         if (self.offset != text.len) {
             const end = @min(self.offset + work_quantum, text.len);
             self.file.?.writePositionalAll(self.io, text[self.offset..end], self.offset) catch |err|
-                return self.failIo(evaluator, "cannot write lock temporary file", err);
+                return self.failIo(evaluator, "cannot write project temporary file", err);
             self.offset = end;
             return .yielded;
         }
@@ -949,7 +970,7 @@ const WriteLockDriver = struct {
 
     fn syncClose(self: *WriteLockDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
         self.file.?.sync(self.io) catch |err|
-            return self.failIo(evaluator, "cannot synchronize lock temporary file", err);
+            return self.failIo(evaluator, "cannot synchronize project temporary file", err);
         self.file.?.close(self.io);
         self.file = null;
         self.phase = .recheck;
@@ -960,14 +981,18 @@ const WriteLockDriver = struct {
         const path = self.path.?.borrow();
         const parent_path = std.fs.path.dirname(path) orelse ".";
         var parent = std.Io.Dir.cwd().openDir(self.io, parent_path, .{ .follow_symlinks = false }) catch |err|
-            return self.failIo(evaluator, "cannot open lock parent", err);
+            return self.failIo(evaluator, "cannot open project file parent", err);
         defer parent.close(self.io);
-        parent.rename(
-            std.fs.path.basename(self.temp_path.?.borrow()),
-            parent,
-            std.fs.path.basename(path),
-            self.io,
-        ) catch |err| return self.failIo(evaluator, "cannot publish lock", err);
+        const old_name = std.fs.path.basename(self.temp_path.?.borrow());
+        const new_name = std.fs.path.basename(path);
+        switch (self.mode) {
+            .replace => parent.rename(old_name, parent, new_name, self.io) catch |err|
+                return self.failIo(evaluator, "cannot publish project file", err),
+            .create => archive.renamePreserve(parent, old_name, new_name, self.io) catch |err| switch (err) {
+                error.PathAlreadyExists => return self.failAlreadyExists(evaluator),
+                else => return self.failIo(evaluator, "cannot publish project file", err),
+            },
+        }
         self.published = true;
         self.temp_created = false;
         return .completed;
@@ -984,8 +1009,22 @@ const WriteLockDriver = struct {
         return failure;
     }
 
-    fn failIoName(self: *WriteLockDriver, evaluator: *Machine, message: []const u8) MachineError {
-        const failure = evaluator.fail(.io, message);
+    fn failAlreadyExists(self: *WriteLockDriver, evaluator: *Machine) MachineError {
+        const failure = evaluator.failFmt(
+            .io,
+            "project file `{s}` already exists",
+            .{self.path.?.borrow()},
+        );
+        evaluator.addErrorPath(self.path_value.borrow());
+        return failure;
+    }
+
+    fn failNotRegular(self: *WriteLockDriver, evaluator: *Machine) MachineError {
+        const failure = evaluator.failFmt(
+            .io,
+            "project file `{s}` is not a regular file",
+            .{self.path.?.borrow()},
+        );
         evaluator.addErrorPath(self.path_value.borrow());
         return failure;
     }
@@ -1000,7 +1039,7 @@ const WriteLockDriver = struct {
         if (!self.published and self.temp_created) {
             std.Io.Dir.cwd().deleteFile(self.io, self.temp_path.?.borrow()) catch |err| switch (err) {
                 error.FileNotFound => {},
-                else => std.log.err("package lock rollback could not remove its temporary file: {s}", .{@errorName(err)}),
+                else => std.log.err("project file rollback could not remove its temporary file: {s}", .{@errorName(err)}),
             };
             self.temp_created = false;
             return false;

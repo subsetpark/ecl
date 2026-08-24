@@ -164,6 +164,7 @@ test "pkg: every module export carries a body and nonempty documentation" {
         "pkg.sync.store-keys",
         "pkg.sync.store-root",
         "pkg.sync.requirement",
+        "pkg.sync.install-immutable",
         "pkg.sync.run",
         "pkg.sync.run-offline",
         "pkg.sync.verify",
@@ -650,6 +651,18 @@ test "pkg: tree and why expose deterministic locked dependency paths" {
             .expected = "\"bar.worker: my.proj -> foo 1.2.0 -> bar 0.3.0\\n\"",
         },
     });
+}
+
+test "pkg: why uses the runtime's longest owning package prefix" {
+    const overlapping_lock =
+        "{'format 1 'root \"root\" 'packages " ++
+        "{\"foo\" {'version \"1.0.0\" 'url \"https://e.com/foo.tgz\" 'hash \"" ++ hash_a ++ "\"} " ++
+        "\"foo.bar\" {'version \"1.0.0\" 'url \"https://e.com/foo-bar.tgz\" 'hash \"" ++ hash_b ++ "\"}} " ++
+        "'requires {\"root\" {\"foo.bar\" \"1.0.0\"}}} ";
+    try support.expectStack(
+        overlapping_lock ++ "pkg.lock.validate \"foo.bar.worker\" pkg.lock.why",
+        "\"foo.bar.worker: root -> foo.bar 1.0.0\\n\"",
+    );
 }
 
 test "pkg: owns-prefix? admits a package's own name and its dotted children only" {

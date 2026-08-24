@@ -64,8 +64,11 @@ test "stdlib: every pkg.store capability is documented and reflectable" {
             "'pkg.store.install doc len 0 > " ++
             "'pkg.store.present? doc len 0 > " ++
             "'pkg.store.verify doc len 0 > " ++
-            "'pkg.store.write-lock doc len 0 >",
-        "1 1 1 1 1",
+            "'pkg.store.read-seal doc len 0 > " ++
+            "'pkg.store.write-lock doc len 0 > " ++
+            "'pkg.store.write-new doc len 0 > " ++
+            "'pkg.store.gc doc len 0 >",
+        "1 1 1 1 1 1 1 1",
     );
 }
 

@@ -13,7 +13,8 @@ const pkg_runtime_lock =
     " 'packages\n" ++
     " {\"a\" {'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
     " 'requires\n" ++
-    " {\"root\" {\"a\" \"1.0.0\"}}}\n";
+    " {\"a\" {}\n" ++
+    "  \"root\" {\"a\" \"1.0.0\"}}}\n";
 const pkg_runtime_vendor_lock =
     "{'format 1\n" ++
     " 'root \"root\"\n" ++
@@ -21,7 +22,8 @@ const pkg_runtime_vendor_lock =
     " 'packages\n" ++
     " {\"a\" {'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
     " 'requires\n" ++
-    " {\"root\" {\"a\" \"1.0.0\"}}}\n";
+    " {\"a\" {}\n" ++
+    "  \"root\" {\"a\" \"1.0.0\"}}}\n";
 
 test "e2e: package lock resolves import by name with ECL PATH unset" {
     var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, true);
@@ -113,7 +115,31 @@ test "e2e: pkg init derives a canonical root manifest without overwriting" {
     try repeated.expect(.{
         .exit_code = 1,
         .stdout = "",
-        .stderr_contains = &.{"ecl.pkg already exists"},
+        .stderr_contains = &.{ "ecl.pkg", "already exists" },
+    });
+
+    try scratch.dir.createDir(io, "Bad_Name", .default_dir);
+    var invalid_project = try scratch.dir.openDir(io, "Bad_Name", .{});
+    defer invalid_project.close(io);
+    var invalid_derived = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "init" },
+        .cwd = .{ .dir = invalid_project },
+    });
+    defer invalid_derived.deinit();
+    try invalid_derived.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{ "Bad_Name", "ecl pkg init <name>" },
+    });
+    var named = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "init", "valid.name" },
+        .cwd = .{ .dir = invalid_project },
+    });
+    defer named.deinit();
+    try named.expect(.{
+        .exit_code = 0,
+        .stdout = "initialized ecl.pkg for valid.name\n",
+        .stderr = "",
     });
 }
 
@@ -203,6 +229,44 @@ test "e2e: pkg offline sync and verify use sealed immutable store entries" {
         .stdout = "",
         .stderr_contains = &.{"package `smoke` archive seal does not match lock hash"},
     });
+}
+
+test "e2e: pkg sync regenerates a corrupt lock from the explicit project" {
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    try scratch.dir.createDir(io, "project", .default_dir);
+    try scratch.dir.createDir(io, "cache", .default_dir);
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "project/ecl.pkg",
+        .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {}}\n",
+    });
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "project/ecl.lock",
+        .data = "not a lock\n",
+    });
+    var project = try scratch.dir.openDir(io, "project", .{});
+    defer project.close(io);
+    const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
+    defer allocator.free(cache);
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_CACHE", cache);
+
+    var synced = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "sync", "--offline" },
+        .cwd = .{ .dir = project },
+        .environ_map = &environment,
+    });
+    defer synced.deinit();
+    try synced.expect(.{ .exit_code = 0, .stdout = "synced 0 packages\n", .stderr = "" });
+    const lock = try project.readFileAlloc(io, "ecl.lock", allocator, .unlimited);
+    defer allocator.free(lock);
+    try std.testing.expectEqualStrings(
+        "{'format 1\n 'root \"root\"\n 'packages\n {}\n 'requires\n {\"root\" {}}}\n",
+        lock,
+    );
 }
 
 test "e2e: pkg offline sync names an absent immutable store entry without fetching" {
@@ -379,6 +443,17 @@ test "e2e: pkg vendor makes locked execution and verification cache-independent"
     defer verified.deinit();
     try verified.expect(.{ .exit_code = 0, .stdout = "verified 1 packages\n", .stderr = "" });
 
+    var synced = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "sync", "--offline" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer synced.deinit();
+    try synced.expect(.{ .exit_code = 0, .stdout = "synced 1 packages\n", .stderr = "" });
+    const preserved = try scratch.dir.readFileAlloc(io, "project/ecl.lock", allocator, .unlimited);
+    defer allocator.free(preserved);
+    try std.testing.expectEqualStrings(pkg_runtime_vendor_lock, preserved);
+
     var repeated = try cli.runOptions(.{
         .argv = &.{ exe, "pkg", "vendor" },
         .cwd = .{ .dir = nested },
@@ -423,6 +498,11 @@ test "e2e: pkg gc retains the union of named locks and preserves unknown cache n
         .sub_path = "cache/.ecl-gc-interrupted/payload",
         .data = "stale\n",
     });
+    try scratch.dir.createDir(io, "cache/.ecl-gc-1-" ++ key_c, .default_dir);
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/.ecl-gc-1-" ++ key_c ++ "/payload",
+        .data = "collision\n",
+    });
     try scratch.dir.createDir(io, "cache/operator-notes", .default_dir);
     try scratch.dir.writeFile(io, .{ .sub_path = "cache/" ++ key_d, .data = "not a directory\n" });
     try scratch.dir.symLink(io, "operator-notes", "cache/" ++ key_e, .{});
@@ -452,6 +532,10 @@ test "e2e: pkg gc retains the union of named locks and preserves unknown cache n
     try std.testing.expectError(
         error.FileNotFound,
         scratch.dir.statFile(io, "cache/.ecl-gc-interrupted", .{ .follow_symlinks = false }),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        scratch.dir.statFile(io, "cache/.ecl-gc-1-" ++ key_c, .{ .follow_symlinks = false }),
     );
     _ = try scratch.dir.statFile(io, "cache/operator-notes", .{ .follow_symlinks = false });
     const preserved_file = try scratch.dir.statFile(io, "cache/" ++ key_d, .{ .follow_symlinks = false });

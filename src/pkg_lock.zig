@@ -61,9 +61,18 @@ pub const ProjectLock = opaque {
         const allocator = host.allocator();
         return switch (try project.Root.discover(allocator, io, start)) {
             .absent => null,
-            .invalid => |message| result: {
-                defer allocator.free(message);
-                break :result try invalidSnapshot(host, "{s}", .{message});
+            .invalid => |failure| result: {
+                defer failure.deinit();
+                const lock_path = std.fs.path.join(
+                    allocator,
+                    &.{ failure.projectRoot(), "ecl.lock" },
+                ) catch return error.OutOfMemory;
+                defer allocator.free(lock_path);
+                break :result try invalidSnapshot(
+                    host,
+                    "invalid project lock `{s}`: {s}",
+                    .{ lock_path, failure.message() },
+                );
             },
             .found => |root| result: {
                 defer root.deinit();
@@ -242,7 +251,7 @@ fn discoverLock(
                 "invalid project lock `{s}`: expected exactly one form",
                 .{lock_path},
             );
-            const entries = validateLock(host, parsed.values()[0], project_root, cache) catch |err| switch (err) {
+            const valid = validateLock(host, parsed.values()[0], project_root, cache) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Invalid => break :result try invalidSnapshot(
                     host,
@@ -250,9 +259,9 @@ fn discoverLock(
                     .{lock_path},
                 ),
             };
-            errdefer deinitEntries(allocator, entries);
+            errdefer deinitEntries(allocator, valid);
             const owned = try allocator.create(Backing);
-            owned.* = .{ .host = host, .state = .{ .valid = entries } };
+            owned.* = .{ .host = host, .state = .{ .valid = valid } };
             break :result projectLock(owned);
         },
     };

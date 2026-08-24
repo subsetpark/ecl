@@ -10,10 +10,37 @@ const Backing = struct {
     path: []u8,
 };
 
+const InvalidBacking = struct {
+    allocator: std.mem.Allocator,
+    project_root: []u8,
+    message: []u8,
+};
+
 pub const Discovery = union(enum) {
     absent,
     found: *Root,
-    invalid: []u8,
+    invalid: *InvalidDiscovery,
+};
+
+/// Owned description of a failed candidate project root. Consumers derive
+/// their own sibling paths from `projectRoot`; discovery does not guess which
+/// project artifact they intended to open.
+pub const InvalidDiscovery = opaque {
+    pub fn projectRoot(self: *const InvalidDiscovery) []const u8 {
+        return invalidBackingConst(self).project_root;
+    }
+
+    pub fn message(self: *const InvalidDiscovery) []const u8 {
+        return invalidBackingConst(self).message;
+    }
+
+    pub fn deinit(self: *InvalidDiscovery) void {
+        const owned = invalidBacking(self);
+        const allocator = owned.allocator;
+        allocator.free(owned.message);
+        allocator.free(owned.project_root);
+        allocator.destroy(owned);
+    }
 };
 
 pub const Root = opaque {
@@ -25,6 +52,7 @@ pub const Root = opaque {
         const absolute = std.Io.Dir.cwd().realPathFileAlloc(io, start, allocator) catch |err|
             return invalid(
                 allocator,
+                start,
                 "cannot resolve project start `{s}`: {s}",
                 .{ start, @errorName(err) },
             );
@@ -43,6 +71,7 @@ pub const Root = opaque {
                 error.FileNotFound => null,
                 else => return invalid(
                     allocator,
+                    current,
                     "cannot inspect project marker `{s}`: {s}",
                     .{ manifest_path, @errorName(err) },
                 ),
@@ -50,6 +79,7 @@ pub const Root = opaque {
             if (manifest_info) |info| {
                 if (info.kind != .file) return invalid(
                     allocator,
+                    current,
                     "project marker `{s}` is not a regular file",
                     .{manifest_path},
                 );
@@ -92,10 +122,33 @@ fn root(owned: *Backing) *Root {
     return @ptrCast(@alignCast(owned));
 }
 
+fn invalidBacking(self: *InvalidDiscovery) *InvalidBacking {
+    return @ptrCast(@alignCast(self));
+}
+
+fn invalidBackingConst(self: *const InvalidDiscovery) *const InvalidBacking {
+    return @ptrCast(@alignCast(self));
+}
+
+fn invalidDiscovery(owned: *InvalidBacking) *InvalidDiscovery {
+    return @ptrCast(@alignCast(owned));
+}
+
 fn invalid(
     allocator: std.mem.Allocator,
+    project_root: []const u8,
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!Discovery {
-    return .{ .invalid = std.fmt.allocPrint(allocator, format, args) catch return error.OutOfMemory };
+    const owned = try allocator.create(InvalidBacking);
+    errdefer allocator.destroy(owned);
+    const root_path = try allocator.dupe(u8, project_root);
+    errdefer allocator.free(root_path);
+    const message = std.fmt.allocPrint(allocator, format, args) catch return error.OutOfMemory;
+    owned.* = .{
+        .allocator = allocator,
+        .project_root = root_path,
+        .message = message,
+    };
+    return .{ .invalid = invalidDiscovery(owned) };
 }

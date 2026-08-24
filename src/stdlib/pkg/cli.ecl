@@ -17,13 +17,23 @@
   arguments first
   arguments 1 at
   (|root name|
+   name pkg.name.valid?
+   'domain error.new
+   "pkg init needs a canonical package name; pass one as `ecl pkg init <name>`"
+   error.with-message
+   name root 2 pack
+   (|name root| 'name name 'path root)
+   infra
+   dict-of
+   error.with-data
+   assert
    name wrap
    (|name| 'format 1 'name name 'version "0.1.0" 'requires {})
    infra
    dict-of
    pkg.manifest.write
    root manifest-path
-   io.spit
+   pkg.store.write-new
    name wrap "initialized ecl.pkg for {}" format io.print)
   call)
  'init def
@@ -104,7 +114,7 @@
  (context -- : "Read, verify, and install one absent project vendor entry.")
  ((|source destination package requirement|
    source package requirement 'hash at pkg.store.read-seal
-   package destination pkg.store.install pop)
+   package destination pkg.sync.install-immutable)
   with call)
  'install-vendor-context defp
 

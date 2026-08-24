@@ -170,6 +170,7 @@ const ErrorDataKey = enum {
     index,
     left,
     right,
+    @"destination-exists",
 };
 const ErrorData = struct {
     key: ErrorDataKey,
@@ -2837,7 +2838,7 @@ pub const Machine = struct {
                         );
                         self.lock_lookup = null;
                         switch (outcome) {
-                            .invalid => |message| return evaluator.fail(.domain, message),
+                            .invalid => |message| return evaluator.fail(.io, message),
                             .unmatched => {
                                 if (evaluator.unit.inherited.host_io == null or
                                     evaluator.unit.inherited.ecl_path == null)
@@ -2851,7 +2852,7 @@ pub const Machine = struct {
                                 self.locked_store = match.store_dir;
                                 if (match.store_dir == null) return evaluator.failFmt(
                                     .io,
-                                    "locked package `{s}` is missing from the package store; run `ecl pkg sync`",
+                                    "locked package `{s}` has no package store; set ECL_CACHE, XDG_CACHE_HOME, or HOME before running `ecl pkg sync`",
                                     .{match.package},
                                 );
                                 self.phase = .locked_store;
@@ -3830,6 +3831,11 @@ pub const Machine = struct {
     /// while letting a builtin module attach the one datum it owns.
     pub fn addErrorPath(self: *Machine, path: Value) void {
         self.unit.pending.?.addData(.path, path);
+    }
+    /// Tags the one absent-only publication conflict that an immutable
+    /// package caller may recover after independently confirming the winner.
+    pub fn addErrorDestinationExists(self: *Machine) void {
+        self.unit.pending.?.addData(.@"destination-exists", .{ .int = 1 });
     }
     /// The one absence-is-absence failure for `getenv`: an unset variable is
     /// an error carrying the requested name, never an empty string.

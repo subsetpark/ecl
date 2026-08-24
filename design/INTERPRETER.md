@@ -954,7 +954,8 @@ operand shape, and rows that still run boxed say so.
 - **Package filesystem authority is closed and transactional.** The builtin
   `pkg.store` module exposes only inspection, absent immutable installation,
   no-follow presence checks, seal verification/materialization, lock
-  replacement, and cache-root-derived collection. Installation creates a
+  replacement, absent-only project-file creation, and cache-root-derived
+  collection. Installation creates a
   unique sibling stage and inherits archive rollback; a concurrent loser
   cannot merge with or replace the winner. Seal materialization accepts only
   an entry destination plus package and hash, always reads the reserved seal,
@@ -964,13 +965,20 @@ operand shape, and rows that still run boxed say so.
   links, and becomes visible by one same-parent rename. Cancellation and every
   pre-publication failure retire the private temporary while preserving the
   previous lock bytes.
+  Manifest creation uses the same driver with a distinct nominal publication
+  mode and the archive layer's cross-platform non-replacing rename; the mode
+  makes replacing and absent-only publication exhaustive rather than a
+  caller-maintained probe convention.
 - **Vendoring reuses validation rather than copying mutable trees.** Ordinary
   `pkg.cli.vendor` derives the source root from the validated lock and the
   destination as the fixed `<project-root>/vendor`; no lock field or ECL word
   supplies an arbitrary path. It reads each verified seal through
   `pkg.store.read-seal` and sends those exact bytes through
-  `pkg.store.install`, so the archive scanner and absent immutable publication
-  remain the only package-copy sink. The canonical lock gains the tagged
+  `pkg.sync.install-immutable`, so the archive scanner and absent immutable
+  publication remain the only package-copy sink and a losing
+  structured `'destination-exists` conflict succeeds only after a no-follow
+  presence check. The
+  canonical lock gains the tagged
   `'store 'vendor` state only after every entry is present.
 - **Cache collection owns its deletion root and bounds every traversal.**
   `pkg.store.gc` accepts canonical retained keys, not a directory. It derives
@@ -988,12 +996,19 @@ operand shape, and rows that still run boxed say so.
   checked manifests from present entries or hash-verified HTTPS archives,
   retaining only the manifest catalog. It then resolves through
   `pkg.mvs.resolve`, re-fetches and revalidates only selected absent entries,
-  and invokes the narrow store publisher. The canonical lock is rendered and
-  atomically replaced only after every selected entry is present, so transport,
-  hash, archive-policy, identity, resolution, cancellation, and allocation
-  failures cannot publish a new lock. Cache selection reads only the Session's
+  and invokes `pkg.sync.install-immutable`, which alone converts a losing
+  structured `'destination-exists` conflict to success after a no-follow
+  presence check. The
+  canonical lock is rendered and atomically replaced only after every selected
+  entry is present, so transport, hash, archive-policy, identity, resolution,
+  cancellation, and allocation failures cannot publish a new lock. Cache
+  selection reads only the Session's
   immutable environment snapshot in `ECL_CACHE`, `XDG_CACHE_HOME`, `HOME`
   precedence; no process-global environment is consulted during the run.
+  Synchronization reads mode only from the explicit project's `ecl.lock`
+  through ordinary bounded `io.slurp` plus inert `pkg.lock.read`; absent or
+  invalid bytes mean cache regeneration. Thus the ambient Session snapshot
+  cannot retarget synchronization, and a corrupt lock cannot block its repair.
 
 ## Idiom recognition
 
@@ -1212,7 +1227,11 @@ honest source with no public dual representation.
   owns the upward walk to the first regular `ecl.pkg`; both Session startup
   and `ecl pkg` consume that same opaque handle. Its only observation is the
   borrowed absolute root path, so sharing the rule grants neither file nor
-  mutation authority and prevents the two callers from drifting. The source
+  mutation authority and prevents the two callers from drifting. An invalid
+  candidate is likewise an owned opaque result carrying its candidate root
+  and diagnostic separately. Each consumer derives the sibling artifact it
+  owns from that root, so an invalid-lock diagnostic names the prospective
+  `ecl.lock` rather than the directory where discovery happened. The source
   audit classifies `project.zig` with the snapshot and Session publication
   boundary that owns `pkg_lock.zig`.
 - **`ProjectLock` is one opaque Session-owned snapshot.** Library Sessions
@@ -1225,14 +1244,20 @@ honest source with no public dual representation.
   `HostCleanup`, so no separately correlated allocator/domain/host tuple can
   be forged. Absent marker/lock/capability is represented by no handle; a
   malformed lock is an owned tagged state whose error is materialized only
-  after embedded lookup.
+  after embedded lookup. Project-marker discovery failures enter the same
+  invalid state with the stable invalid-lock prefix. Validation accepts only
+  the closed cache or vendor lock forms, derives every entry's immutable store
+  path while that distinction is live, and retains only the resulting entry
+  slice. There is no redundant runtime mode tag for consumers to ignore or
+  drift from the already-derived roots.
 - **The store selection is a closed lock variant.** A four-key lock derives
   entry roots from the captured cache inputs. The only five-key form adds the
   symbol `'store 'vendor`, which derives `<discovered-project-root>/vendor`.
   Validation rejects every string or alternate symbol, so a parsed lock cannot
   smuggle an absolute path, traversal, or environment retargeting into the
   loader. Both variants still collapse to immutable `Entry.store_dir` values
-  owned by the opaque snapshot; Units cannot observe or change the mode.
+  owned by the opaque snapshot. Units cannot observe or change the mode, and
+  synchronization does not consult this ambient runtime capability.
 - **Lock observation is bounded and read-only.** `LookupCursor` compares at
   most one package-name byte per advance and returns borrowed immutable match
   metadata. The driver owns it with `heap.Owned` across scheduler yields,

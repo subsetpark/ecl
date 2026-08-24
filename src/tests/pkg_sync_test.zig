@@ -113,6 +113,76 @@ test "pkg store: existing immutable entry wins concurrent install" {
     try expectHostStack(present_source, "1", false);
 }
 
+test "pkg sync: concurrent immutable publication treats the installed destination as success" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const destination = try scratch.pathFor("cache/pkg/racing-sync-entry");
+    defer allocator.free(destination);
+    const source = try fixtureSyncInstallSource(destination);
+    defer allocator.free(source);
+    var successes: std.atomic.Value(u32) = .init(0);
+    var io_failures: std.atomic.Value(u32) = .init(0);
+    var unexpected: std.atomic.Value(bool) = .init(false);
+    var result = ConcurrentResult{
+        .source = source,
+        .successes = &successes,
+        .io_failures = &io_failures,
+        .unexpected = &unexpected,
+    };
+    const first = try std.Thread.spawn(.{}, concurrentInstall, .{&result});
+    const second = try std.Thread.spawn(.{}, concurrentInstall, .{&result});
+    first.join();
+    second.join();
+    try std.testing.expect(!unexpected.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 2), successes.load(.acquire));
+    try std.testing.expectEqual(@as(u32, 0), io_failures.load(.acquire));
+    const present_source = try onePathSource(destination, " pkg.store.present?");
+    defer allocator.free(present_source);
+    try expectHostStack(present_source, "1", false);
+}
+
+test "pkg sync: immutable publication accepts preflight winners but no other install failure" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const destination = try scratch.pathFor("cache/pkg/existing-sync-entry");
+    defer allocator.free(destination);
+    const installed = try fixtureInstallSource(destination);
+    defer allocator.free(installed);
+    try expectHostStack(installed, "(\"a.ecl\" \"ecl.pkg\")", false);
+
+    const confirmed = try fixtureSyncInstallSource(destination);
+    defer allocator.free(confirmed);
+    try expectHostStack(confirmed, "", false);
+
+    try scratch.directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "cache/pkg/not-a-directory",
+        .data = "occupied",
+    });
+    const occupied_destination = try scratch.pathFor("cache/pkg/not-a-directory");
+    defer allocator.free(occupied_destination);
+    const occupied = try fixtureSyncInstallSource(occupied_destination);
+    defer allocator.free(occupied);
+    try expectHostError(occupied, .{
+        .name = "non-directory destination",
+        .source = occupied,
+        .kind = "io",
+        .word = "pkg.store.install",
+        .message_contains = "archive destination already exists",
+    }, false);
+
+    var malformed = std.Io.Writer.Allocating.init(allocator);
+    defer malformed.deinit();
+    try malformed.writer.writeAll("[1] \"a\" ");
+    try appendString(&malformed.writer, destination);
+    try malformed.writer.writeAll(" pkg.sync.install-immutable");
+    try expectHostError(malformed.written(), .{
+        .name = "non-racing install error",
+        .source = malformed.written(),
+        .kind = "domain",
+        .word = "pkg.store.install",
+    }, false);
+}
+
 fn fixtureInstallSource(destination: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
@@ -120,6 +190,16 @@ fn fixtureInstallSource(destination: []const u8) ![]u8 {
     try source.writer.writeAll(" \"a\" ");
     try appendString(&source.writer, destination);
     try source.writer.writeAll(" pkg.store.install");
+    return allocator.dupe(u8, source.written());
+}
+
+fn fixtureSyncInstallSource(destination: []const u8) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try appendFixtureBytes(&source.writer, archive_fixtures.package_valid);
+    try source.writer.writeAll(" \"a\" ");
+    try appendString(&source.writer, destination);
+    try source.writer.writeAll(" pkg.sync.install-immutable");
     return allocator.dupe(u8, source.written());
 }
 
@@ -236,6 +316,83 @@ test "pkg store: atomic lock replacement preserves prior bytes on failure" {
     const preserved = try scratch.directory.dir.readFileAlloc(std.testing.io, "ecl.lock", allocator, .unlimited);
     defer allocator.free(preserved);
     try std.testing.expectEqualStrings("replacement\n", preserved);
+}
+
+test "pkg store: atomic new-file publication names and preserves its actual target" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const manifest_path = try scratch.pathFor("custom.data");
+    defer allocator.free(manifest_path);
+    const initial = try newFileSource("first\n", manifest_path);
+    defer allocator.free(initial);
+    try expectHostStack(initial, "", false);
+
+    const racing = try newFileSource("second\n", manifest_path);
+    defer allocator.free(racing);
+    try expectHostError(racing, .{
+        .name = "existing manifest wins atomic create",
+        .source = racing,
+        .kind = "io",
+        .word = "pkg.store.write-new",
+        .message_contains = "custom.data",
+    }, false);
+    const preserved = try scratch.directory.dir.readFileAlloc(
+        std.testing.io,
+        "custom.data",
+        allocator,
+        .unlimited,
+    );
+    defer allocator.free(preserved);
+    try std.testing.expectEqualStrings("first\n", preserved);
+
+    try scratch.directory.dir.createDir(std.testing.io, "other.data", .default_dir);
+    const directory_path = try scratch.pathFor("other.data");
+    defer allocator.free(directory_path);
+    const non_regular = try newFileSource("unused\n", directory_path);
+    defer allocator.free(non_regular);
+    try expectHostError(non_regular, .{
+        .name = "non-regular target names the supplied project file",
+        .source = non_regular,
+        .kind = "io",
+        .word = "pkg.store.write-new",
+        .message_contains = "other.data",
+    }, false);
+}
+
+test "pkg sync: explicit project root, not ambient discovery, selects store mode" {
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    try scratch.directory.dir.createDir(std.testing.io, "ambient", .default_dir);
+    try scratch.directory.dir.createDir(std.testing.io, "target", .default_dir);
+    try scratch.directory.dir.createDir(std.testing.io, "cache", .default_dir);
+    const ambient_manifest = "{'format 1 'name \"ambient\" 'version \"0.1.0\" 'requires {}}\n";
+    const target_manifest = "{'format 1 'name \"target\" 'version \"0.1.0\" 'requires {}}\n";
+    try scratch.directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "ambient/ecl.pkg",
+        .data = ambient_manifest,
+    });
+    try scratch.directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "ambient/ecl.lock",
+        .data = "{'format 1 'root \"ambient\" 'store 'vendor 'packages {} 'requires {\"ambient\" {}}}\n",
+    });
+    try scratch.directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "target/ecl.pkg",
+        .data = target_manifest,
+    });
+    try scratch.directory.dir.writeFile(std.testing.io, .{
+        .sub_path = "target/ecl.lock",
+        .data = "{'format 1 'root \"target\" 'packages {} 'requires {\"target\" {}}}\n",
+    });
+    const ambient = try scratch.pathFor("ambient");
+    defer allocator.free(ambient);
+    const target = try scratch.pathFor("target");
+    defer allocator.free(target);
+    const cache = try scratch.pathFor("cache");
+    defer allocator.free(cache);
+    const source = try syncSource(target_manifest, target, " 'store has?");
+    defer allocator.free(source);
+    const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = cache }};
+    try expectHostStackEnvironProject(source, "0", false, environ, ambient);
 }
 
 test "pkg sync: requirement derives the exact archive hash after identity validation" {
@@ -394,6 +551,16 @@ fn lockSource(text: []const u8, path: []const u8) ![]u8 {
     return allocator.dupe(u8, source.written());
 }
 
+fn newFileSource(text: []const u8, path: []const u8) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try appendString(&source.writer, text);
+    try source.writer.writeByte(' ');
+    try appendString(&source.writer, path);
+    try source.writer.writeAll(" pkg.store.write-new");
+    return allocator.dupe(u8, source.written());
+}
+
 fn appendString(writer: *std.Io.Writer, text: []const u8) !void {
     try writer.writeByte('"');
     for (text) |byte| switch (byte) {
@@ -419,6 +586,16 @@ fn expectHostStackEnviron(
     tls: bool,
     environ: []const machine.Environ.Entry,
 ) !void {
+    return expectHostStackEnvironProject(source, expected, tls, environ, null);
+}
+
+fn expectHostStackEnvironProject(
+    source: []const u8,
+    expected: []const u8,
+    tls: bool,
+    environ: []const machine.Environ.Entry,
+    project_start: ?[]const u8,
+) !void {
     var heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&heap);
     var output_buffer: [256]u8 = undefined;
@@ -431,6 +608,7 @@ fn expectHostStackEnviron(
         .diagnostics = &diagnostics.writer,
         .tls_trust = if (tls) .{ .ca_file = pkg_fixture.ca_file, .now = valid_cert_time } else null,
         .environ = environ,
+        .project_start = project_start,
     }, .cooperative);
     defer runtime.deinit();
     switch (try runtime.runUnit("<pkg-store-test>", source)) {

@@ -26,7 +26,10 @@ workstream terminal).
   M6 added `ecl pkg` mutation, offline synchronization, graph inspection, and
   sealed-archive verification; M7 added closed project-local vendoring,
   bounded shared-cache collection against named locks, and the complete public
-  vocabulary/error contract. Native packages and target selection remain a
+  vocabulary/error contract. Review hardening made vendored sync mode-aware,
+  centralized racing immutable installs, added atomic absent-only manifest
+  creation plus an explicit init-name override, and aligned diagnostics and
+  `why` ownership with the runtime. Native packages and target selection remain a
   separate future workstream.
 - **Module resolution today is embedded manifest, locked package store, then
   `ECL_PATH`.** `AutoLoadDriver` retains its loading lease and racing-winner
@@ -553,6 +556,17 @@ dogfood baselines found no package-resolution error missing its responsible
 package or requirement, so the catalogue needed documentation but no message
 repair. SPEC.md, INTERPRETER.md, README.md, and v1 follow-up 12 record the final
 surface and the native/target-selection deferrals.
+Post-implementation review additionally closed concurrent install recovery,
+vendored-sync preservation, longest-prefix `why`, atomic init publication,
+and exact runtime error-classification and missing-cache guidance gaps. The
+opaque lock snapshot validates the closed cache/vendor form, derives immutable
+entry roots while the mode is live, and retains no unread mode tag. Invalid
+project discovery carries the candidate root separately so lock diagnostics
+name its prospective `ecl.lock`. Sync derives mode only from its explicit
+project's lock and treats an invalid lock as cache regeneration; archive
+publication exposes a structured destination-exists condition shared by both
+losing race paths, and a failed winner-presence probe preserves the original
+install error.
 
 **Definition of Done**:
 - SPEC.md documents the complete `pkg` and `archive` vocabularies, the tier

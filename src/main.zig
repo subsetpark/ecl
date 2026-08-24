@@ -99,7 +99,7 @@ fn entry(init: std.process.Init) AppError!u8 {
 const package_help =
     \\USAGE:
     \\    ecl pkg <init|add|sync|tree|why|verify|vendor|gc>
-    \\    ecl pkg init
+    \\    ecl pkg init [name]
     \\    ecl pkg add <name> <version> <https-url>
     \\    ecl pkg sync [--offline]
     \\    ecl pkg tree
@@ -133,17 +133,12 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
     const worker_count = try configuredWorkers(init) orelse return 2;
 
     if (std.mem.eql(u8, command, "init")) {
-        if (arguments.len != 1) return packageUsage(init);
+        if (arguments.len != 1 and arguments.len != 2) return packageUsage(init);
         const cwd = std.Io.Dir.cwd().realPathFileAlloc(init.io, ".", init.gpa) catch |err|
             return emitIoError(init, "cannot resolve package project directory", err);
         defer init.gpa.free(cwd);
-        if (std.Io.Dir.cwd().statFile(init.io, "ecl.pkg", .{ .follow_symlinks = false })) |_| {
-            return emitSyntheticError(init, .io, "ecl.pkg already exists", null);
-        } else |err| switch (err) {
-            error.FileNotFound => {},
-            else => return emitIoError(init, "cannot inspect ecl.pkg", err),
-        }
-        const cli_args = try packageArguments(init, cwd, &.{std.fs.path.basename(cwd)});
+        const name = if (arguments.len == 2) arguments[1] else std.fs.path.basename(cwd);
+        const cli_args = try packageArguments(init, cwd, &.{name});
         return executeSource(
             init,
             "<pkg:init>",
@@ -191,9 +186,9 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
             "no ecl.pkg found from the working directory to the filesystem root",
             null,
         ),
-        .invalid => |message| {
-            defer init.gpa.free(message);
-            return emitSyntheticError(init, .io, message, null);
+        .invalid => |failure| {
+            defer failure.deinit();
+            return emitSyntheticError(init, .io, failure.message(), null);
         },
         .found => |root| root,
     };
