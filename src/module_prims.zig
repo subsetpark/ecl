@@ -260,11 +260,24 @@ const ImportDriver = struct {
             }
             if (self.publisher == null) {
                 const lease = &self.resolved.?.borrow().lease;
-                self.publisher = .init(try self.scope.publishTopCursor(self.binding.?, .{ .word = .{
-                    .body = env.quotation(self.forwarding_body.?.borrow().list) orelse unreachable,
-                    .effect = lease.effect,
-                    .doc = lease.doc,
-                } }));
+                const body = env.quotation(self.forwarding_body.?.borrow().list) orelse unreachable;
+                // `import` inside a module body binds module-locally, the same
+                // way `def` does there. Reaching for top publication on a
+                // module root used to abort on an `unreachable`, which one
+                // line of ordinary source could trigger.
+                self.publisher = .init(switch (self.scope.publisher()) {
+                    .module => |module| try module.cursor(self.binding.?, .{ .word = .{
+                        .body = body,
+                        .visibility = .public,
+                        .effect = lease.effect,
+                        .doc = lease.doc,
+                    } }),
+                    .top => |top| try top.cursor(self.binding.?, .{ .word = .{
+                        .body = body,
+                        .effect = lease.effect,
+                        .doc = lease.doc,
+                    } }),
+                });
                 self.resolved.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.resolved = null;
                 continue;
@@ -412,7 +425,6 @@ const WordsDriver = struct {
             .visible = .init(reflection.VisibleNameCursor.init(
                 .{ .scope = evaluator.currentScope() },
                 evaluator.currentEnv().coreView(),
-                evaluator.unit.inherited.registry,
             )),
             .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator())),
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),

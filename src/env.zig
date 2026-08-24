@@ -272,6 +272,21 @@ const BindingSpec = struct {
         self.retire(releases);
     }
 };
+/// A retained lease describes exactly one published specification. Copying a
+/// binding — the only thing capture does — needs that direction, and keeping
+/// it in one function stops a second field list from drifting out of step with
+/// `BindingLease.deinit`.
+fn specOf(lease: BindingLease) BindingSpec {
+    return .{
+        .binding = lease.binding,
+        .visibility = lease.visibility,
+        .origin = lease.origin,
+        .effect = lease.effect,
+        .doc = lease.doc,
+        .compiled = lease.compiled,
+        .source = lease.source,
+    };
+}
 const BindingSnapshot = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     spec: BindingSpec,
@@ -435,7 +450,6 @@ pub const BindingCell = struct {
 const Shape = struct {
     const NameMap = poll.FixedMap(intern.NamespaceName, *BindingCell);
     names: NameMap,
-    uses: []intern.ModuleName = &.{},
     previous: ?*Shape = null,
     retirement: heap.ReleaseDomain.Retirement = .{},
     pub fn advanceRetirement(
@@ -445,7 +459,6 @@ const Shape = struct {
     ) bool {
         const previous = self.previous;
         self.names.deinit();
-        if (self.uses.len > 0) allocator.free(self.uses);
         allocator.destroy(self);
         if (previous) |next| releases.retire(next, &next.retirement);
         return true;
@@ -455,7 +468,6 @@ const Shape = struct {
         while (cursor) |shape| {
             cursor = shape.previous;
             shape.names.deinit();
-            if (shape.uses.len > 0) allocator.free(shape.uses);
             allocator.destroy(shape);
         }
     }
@@ -494,8 +506,17 @@ pub const EnvironmentView = enum(usize) {
         return self.target().resolveDirect(id);
     }
 
-    pub fn generation(self: EnvironmentView) u64 {
-        return self.target().generation();
+    /// How many times this environment published a new *shape* — a name
+    /// created. Rebinding an existing name replaces its cell in place and
+    /// deliberately does not bump this, so it is not a mutation counter and
+    /// must not be read as one.
+    pub fn shapeGeneration(self: EnvironmentView) u64 {
+        return self.target().shapeGeneration();
+    }
+
+    /// Counts every accepted publication, name creation and rebinding alike.
+    pub fn mutationEpoch(self: EnvironmentView) u64 {
+        return self.target().mutationEpoch();
     }
 
     pub fn namesOwned(
@@ -513,10 +534,6 @@ pub const ShapeLease = struct {
     environment: EnvironmentView,
     lease: ShapePublisher.Lease,
     shape: ?*const Shape,
-
-    pub fn useOrder(self: *const ShapeLease) []const intern.ModuleName {
-        return if (self.shape) |shape| shape.uses else &.{};
-    }
 
     fn nameCount(self: *const ShapeLease) usize {
         return if (self.shape) |shape| shape.names.count() else 0;
@@ -594,6 +611,11 @@ pub const Environment = struct {
     shapes: ShapePublisher,
     cells: poll.ChunkList(*BindingCell),
     shape_generation: std.atomic.Value(u64) = .init(0),
+    /// Every publication this environment accepts — a name created *and* a
+    /// name rebound — bumps this under the writer lock. Unlike
+    /// `shape_generation` it is a true mutation counter, which is what lets a
+    /// capture validate that it observed one complete generation.
+    mutation_epoch: std.atomic.Value(u64) = .init(0),
     frozen: std.atomic.Value(bool) = .init(false),
 
     pub const TeardownCursor = struct {
@@ -700,16 +722,12 @@ pub const Environment = struct {
                 }
             }
         };
-        const Built = struct { shape: ShapeLease, names: Shape.NameMap, uses: []intern.ModuleName };
+        const Built = struct { shape: ShapeLease, names: Shape.NameMap };
         const State = union(enum) {
             snapshot,
             lookup: struct { shape: ShapeLease, cursor: ?Shape.NameMap.RawLookupCursor },
             build: struct { shape: ShapeLease, builder: Builder },
-            allocate_uses: struct { shape: ShapeLease, names: Shape.NameMap },
-            copy_uses: struct {
-                built: Built,
-                index: usize = 0,
-            },
+            stage: struct { shape: ShapeLease, names: Shape.NameMap },
             insert: struct { built: *Built, cursor: Shape.NameMap.PutCursor },
             commit: *Built,
             complete,
@@ -744,11 +762,10 @@ pub const Environment = struct {
                     state.builder.deinit();
                     state.shape.deinit();
                 },
-                .allocate_uses => |*state| {
+                .stage => |*state| {
                     state.names.deinit();
                     state.shape.deinit();
                 },
-                .copy_uses => |*state| self.deinitBuilt(&state.built),
                 .insert => |state| self.destroyBuilt(state.built),
                 .commit => |built| self.destroyBuilt(built),
                 .snapshot, .complete => {},
@@ -756,13 +773,9 @@ pub const Environment = struct {
             if (self.candidate_cell) |candidate| candidate.retire();
             self.* = undefined;
         }
-        fn deinitBuilt(self: *BindCursor, built: *Built) void {
-            built.names.deinit();
-            self.environment.allocator.free(built.uses);
-            built.shape.deinit();
-        }
         fn destroyBuilt(self: *BindCursor, built: *Built) void {
-            self.deinitBuilt(built);
+            built.names.deinit();
+            built.shape.deinit();
             self.environment.allocator.destroy(built);
         }
         pub fn advance(self: *BindCursor) BindError!BindProgress {
@@ -789,6 +802,7 @@ pub const Environment = struct {
                                 self.environment.unlock();
                                 return err;
                             };
+                            _ = self.environment.mutation_epoch.fetchAdd(1, .release);
                             self.environment.unlock();
                             self.candidate_cell.?.retire();
                             self.candidate_cell = null;
@@ -817,7 +831,7 @@ pub const Environment = struct {
                         .pending => .pending,
                         .complete => |names| result: {
                             builder.deinit();
-                            self.state = .{ .allocate_uses = .{
+                            self.state = .{ .stage = .{
                                 .shape = state.shape,
                                 .names = names,
                             } };
@@ -825,28 +839,13 @@ pub const Environment = struct {
                         },
                     },
                 },
-                .allocate_uses => |*state| result: {
-                    const uses = try self.environment.allocator.alloc(intern.ModuleName, state.shape.useOrder().len);
-                    self.state = .{ .copy_uses = .{ .built = .{
-                        .shape = state.shape,
-                        .names = state.names,
-                        .uses = uses,
-                    } } };
-                    break :result .pending;
-                },
-                .copy_uses => |*state| result: {
-                    const prior_uses = state.built.shape.useOrder();
-                    if (state.index != prior_uses.len) {
-                        state.built.uses[state.index] = prior_uses[state.index];
-                        state.index += 1;
-                    } else {
-                        const built = try self.environment.allocator.create(Built);
-                        built.* = state.built;
-                        self.state = .{ .insert = .{
-                            .built = built,
-                            .cursor = built.names.putCursor(self.id, self.candidate_cell.?),
-                        } };
-                    }
+                .stage => |*state| result: {
+                    const built = try self.environment.allocator.create(Built);
+                    built.* = .{ .shape = state.shape, .names = state.names };
+                    self.state = .{ .insert = .{
+                        .built = built,
+                        .cursor = built.names.putCursor(self.id, self.candidate_cell.?),
+                    } };
                     break :result .pending;
                 },
                 .insert => |*state| switch (state.cursor.advance()) {
@@ -879,12 +878,12 @@ pub const Environment = struct {
                     };
                     next.* = .{
                         .names = state.names,
-                        .uses = state.uses,
                         .previous = self.environment.shapes.currentOwned(),
                     };
                     self.candidate_cell = null;
                     self.environment.shapes.publish(next);
                     _ = self.environment.shape_generation.fetchAdd(1, .release);
+                    _ = self.environment.mutation_epoch.fetchAdd(1, .release);
                     self.environment.unlock();
                     state.shape.deinit();
                     self.environment.allocator.destroy(state);
@@ -917,153 +916,22 @@ pub const Environment = struct {
         defer cursor.deinit();
         return poll.drive(?BindingLease, &cursor, .{});
     }
-    pub fn generation(self: *const Environment) u64 {
+    /// The mutation authority for a module image's own environment. An image
+    /// owns this environment outright, so it publishes and freezes directly
+    /// rather than routing through the scope it also owns.
+    pub fn modulePublisher(self: *Environment) ModulePublisher {
+        return .init(self);
+    }
+    /// The observation handle for an environment its holder already owns.
+    pub fn view(self: *const Environment) EnvironmentView {
+        return .init(self);
+    }
+    pub fn shapeGeneration(self: *const Environment) u64 {
         return self.shape_generation.load(.acquire);
     }
-    fn moveUseToTop(self: *Environment, canonical: intern.ModuleName) BindError!void {
-        var cursor = MoveUseCursor.init(self, canonical);
-        defer cursor.deinit();
-        return poll.driveVoidFallible(&cursor, .{});
+    pub fn mutationEpoch(self: *const Environment) u64 {
+        return self.mutation_epoch.load(.acquire);
     }
-    pub const MoveUseProgress = poll.Progress(void);
-    pub const MoveUseCursor = struct {
-        environment: *Environment,
-        canonical: intern.ModuleName,
-        shape: ?ShapeLease = null,
-        scan_index: usize = 0,
-        found: bool = false,
-        uses: ?[]intern.ModuleName = null,
-        copy_index: usize = 0,
-        output_index: usize = 0,
-        cloner: ?Shape.NameMap.CloneCursor = null,
-        initializer: ?Shape.NameMap.InitCursor = null,
-        names: ?Shape.NameMap = null,
-        phase: enum { snapshot, scan, copy, names, commit, complete } = .snapshot,
-
-        pub fn init(environment: *Environment, canonical: intern.ModuleName) MoveUseCursor {
-            return .{ .environment = environment, .canonical = canonical };
-        }
-        pub fn deinit(self: *MoveUseCursor) void {
-            if (self.shape) |*shape| shape.deinit();
-            if (self.cloner) |*cloner| cloner.deinit();
-            if (self.initializer) |*initializer| initializer.deinit();
-            if (self.names) |*names| names.deinit();
-            if (self.uses) |uses| self.environment.allocator.free(uses);
-            self.* = undefined;
-        }
-        fn reset(self: *MoveUseCursor) void {
-            if (self.shape) |*shape| shape.deinit();
-            self.shape = null;
-            if (self.cloner) |*cloner| cloner.deinit();
-            self.cloner = null;
-            if (self.initializer) |*initializer| initializer.deinit();
-            self.initializer = null;
-            if (self.names) |*names| names.deinit();
-            self.names = null;
-            if (self.uses) |uses| self.environment.allocator.free(uses);
-            self.uses = null;
-            self.scan_index = 0;
-            self.copy_index = 0;
-            self.output_index = 0;
-            self.found = false;
-            self.phase = .snapshot;
-        }
-        pub fn advance(self: *MoveUseCursor) BindError!MoveUseProgress {
-            return switch (self.phase) {
-                .snapshot => result: {
-                    if (self.environment.frozen.load(.acquire)) return error.Frozen;
-                    self.shape = self.environment.acquireShape();
-                    const prior = self.shape.?.useOrder();
-                    if (prior.len != 0 and prior[prior.len - 1] == self.canonical) {
-                        self.phase = .complete;
-                        break :result .complete;
-                    }
-                    self.phase = .scan;
-                    break :result .pending;
-                },
-                .scan => result: {
-                    const prior = self.shape.?.useOrder();
-                    if (self.scan_index != prior.len) {
-                        self.found = self.found or prior[self.scan_index] == self.canonical;
-                        self.scan_index += 1;
-                    } else {
-                        self.uses = try self.environment.allocator.alloc(
-                            intern.ModuleName,
-                            prior.len + @as(usize, @intFromBool(!self.found)),
-                        );
-                        self.phase = .copy;
-                    }
-                    break :result .pending;
-                },
-                .copy => result: {
-                    const prior = self.shape.?.useOrder();
-                    if (self.copy_index != prior.len) {
-                        const name = prior[self.copy_index];
-                        self.copy_index += 1;
-                        if (name != self.canonical) {
-                            self.uses.?[self.output_index] = name;
-                            self.output_index += 1;
-                        }
-                    } else {
-                        self.uses.?[self.output_index] = self.canonical;
-                        if (self.shape.?.shape) |shape|
-                            self.cloner = shape.names.cloneCursor(0)
-                        else
-                            self.initializer = Shape.NameMap.initCursor(self.environment.allocator, 0);
-                        self.phase = .names;
-                    }
-                    break :result .pending;
-                },
-                .names => if (self.cloner) |*cloner| switch (try cloner.advance()) {
-                    .pending => .pending,
-                    .complete => |names| result: {
-                        cloner.deinit();
-                        self.cloner = null;
-                        self.names = names;
-                        self.phase = .commit;
-                        break :result .pending;
-                    },
-                } else switch (try self.initializer.?.advance()) {
-                    .pending => .pending,
-                    .complete => |names| result: {
-                        self.initializer.?.deinit();
-                        self.initializer = null;
-                        self.names = names;
-                        self.phase = .commit;
-                        break :result .pending;
-                    },
-                },
-                .commit => result: {
-                    const next = try self.environment.allocator.create(Shape);
-                    self.environment.lockBlocking();
-                    if (self.environment.frozen.load(.acquire)) {
-                        self.environment.unlock();
-                        self.environment.allocator.destroy(next);
-                        return error.Frozen;
-                    }
-                    if (!self.environment.shapes.isCurrent(self.shape.?.shape)) {
-                        self.environment.unlock();
-                        self.environment.allocator.destroy(next);
-                        self.reset();
-                        break :result .pending;
-                    }
-                    next.* = .{
-                        .names = self.names.?,
-                        .uses = self.uses.?,
-                        .previous = self.environment.shapes.currentOwned(),
-                    };
-                    self.names = null;
-                    self.uses = null;
-                    self.environment.shapes.publish(next);
-                    _ = self.environment.shape_generation.fetchAdd(1, .release);
-                    self.environment.unlock();
-                    self.phase = .complete;
-                    break :result .complete;
-                },
-                .complete => unreachable,
-            };
-        }
-    };
     pub fn namesOwned(
         self: *const Environment,
         allocator: std.mem.Allocator,
@@ -1092,7 +960,6 @@ pub const Environment = struct {
         self.frozen.store(true, .release);
     }
 };
-pub const ScopeKind = enum { session, isolated, module_root };
 const ScopeAllocation = enum { embedded, heap };
 const ScopeStorage = union(enum) {
     session: *Environment,
@@ -1100,6 +967,184 @@ const ScopeStorage = union(enum) {
     module_root: *Environment,
     isolated,
 };
+/// Whether the code running here was written against this session.
+///
+/// It decides what a construction begun here captures, and it propagates
+/// through the images such code constructs: a module defined inside a loaded
+/// module is as foreign as its parent. Without it, an embedded standard
+/// module would capture whatever the user happened to have defined before the
+/// module was first referenced, making library behavior depend on load order.
+pub const TextOrigin = enum {
+    /// The unit's own program text. A construction here captures the Session.
+    program,
+    /// Module text the loader is executing — embedded standard library, a file
+    /// on `ECL_PATH`, or a locked package entry. Constructions here capture
+    /// nothing, which is exactly the module-then-core chain such text was
+    /// written against.
+    foreign,
+};
+
+/// One resumable optimistic snapshot of an environment's direct bindings.
+///
+/// Capture cannot hold the source's publication lock: the source is a live
+/// Session environment and the pass is user-sized. It instead reads the
+/// source's mutation epoch, copies under ordinary reader leases, and commits
+/// only if the epoch is unchanged. A publication that lands mid-pass therefore
+/// produces a complete before-or-after snapshot and never a mixed one; the
+/// partial copy is torn down through the ordinary bounded teardown and the
+/// pass restarts.
+///
+/// The destination is unreachable until the image that owns it is published,
+/// which is why one shape is published at the end rather than one per name:
+/// a per-name publication would make capture quadratic in the session's name
+/// count for no observer's benefit.
+pub const CaptureProgress = poll.Progress(void);
+pub const CaptureCursor = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .deinit;
+
+    destination: *Environment,
+    /// Absent when the construction's text was not written against this
+    /// session, in which case there is nothing to capture and the image
+    /// resolves its own definitions then core.
+    source: ?EnvironmentView,
+    state: State = .begin,
+
+    const Copy = struct {
+        epoch: u64,
+        names: NameCursor,
+        map: Shape.NameMap,
+        insertion: ?Shape.NameMap.PutCursor = null,
+    };
+
+    const State = union(enum) {
+        begin,
+        size: struct { epoch: u64, names: NameCursor, builder: Shape.NameMap.InitCursor },
+        copy: Copy,
+        restart: struct { teardown: Environment.TeardownCursor },
+        complete,
+    };
+
+    pub fn init(destination: *Environment, source: ?EnvironmentView) CaptureCursor {
+        return .{ .destination = destination, .source = source };
+    }
+
+    pub fn deinit(self: *CaptureCursor) void {
+        switch (self.state) {
+            .begin, .complete => {},
+            .size => |*state| {
+                state.builder.deinit();
+                state.names.deinit();
+            },
+            .copy => |*state| {
+                state.map.deinit();
+                state.names.deinit();
+            },
+            .restart => |*state| while (!state.teardown.advance()) {},
+        }
+        self.* = undefined;
+    }
+
+    /// Publishing nothing is the honest representation of an empty capture: a
+    /// null shape already answers every lookup with "absent".
+    fn finish(self: *CaptureCursor) CaptureProgress {
+        self.destination.freeze();
+        self.state = .complete;
+        return .complete;
+    }
+
+    pub fn advance(self: *CaptureCursor) error{OutOfMemory}!CaptureProgress {
+        return switch (self.state) {
+            .begin => result: {
+                const source = self.source orelse break :result self.finish();
+                // The epoch is read before the shape lease, so any publication
+                // this pass could miss is one that also moves the epoch.
+                const epoch = source.mutationEpoch();
+                var names = source.nameCursor();
+                const count = names.shape.nameCount();
+                if (count == 0) {
+                    names.deinit();
+                    break :result self.finish();
+                }
+                self.state = .{ .size = .{
+                    .epoch = epoch,
+                    .names = names,
+                    .builder = Shape.NameMap.initCursor(self.destination.allocator, count),
+                } };
+                break :result .pending;
+            },
+            .size => |*state| switch (try state.builder.advance()) {
+                .pending => .pending,
+                .complete => |map| result: {
+                    state.builder.deinit();
+                    self.state = .{ .copy = .{
+                        .epoch = state.epoch,
+                        .names = state.names,
+                        .map = map,
+                    } };
+                    break :result .pending;
+                },
+            },
+            .copy => |*state| result: {
+                if (state.insertion) |*insertion| {
+                    switch (insertion.advance()) {
+                        .pending => break :result .pending,
+                        .complete => state.insertion = null,
+                    }
+                    break :result .pending;
+                }
+                switch (state.names.advance()) {
+                    .pending => break :result .pending,
+                    .item => |entry| {
+                        var lease = entry.lease;
+                        defer lease.deinit();
+                        const cell = try BindingCell.create(
+                            self.destination.allocator,
+                            self.destination.releases,
+                            specOf(lease),
+                        );
+                        // The destination's teardown list owns the cell from
+                        // here, so an interfering epoch or a later allocation
+                        // failure retires it exactly once.
+                        self.destination.cells.append(cell) catch {
+                            cell.retire();
+                            return error.OutOfMemory;
+                        };
+                        state.insertion = state.map.putCursor(
+                            @enumFromInt(entry.name),
+                            cell,
+                        );
+                        break :result .pending;
+                    },
+                    .complete => {},
+                }
+                if (self.source.?.mutationEpoch() != state.epoch) {
+                    state.map.deinit();
+                    state.names.deinit();
+                    self.state = .{ .restart = .{ .teardown = .init(self.destination) } };
+                    break :result .pending;
+                }
+                const shape = try self.destination.allocator.create(Shape);
+                shape.* = .{ .names = state.map, .previous = null };
+                state.names.deinit();
+                self.destination.shapes.publish(shape);
+                _ = self.destination.shape_generation.fetchAdd(1, .release);
+                self.state = .complete;
+                break :result self.finish();
+            },
+            .restart => |*state| result: {
+                if (!state.teardown.advance()) break :result .pending;
+                self.destination.* = Environment.init(
+                    self.destination.allocator,
+                    self.destination.releases,
+                );
+                self.state = .begin;
+                break :result .pending;
+            },
+            .complete => unreachable,
+        };
+    }
+};
+
 pub const Scope = struct {
     allocator: std.mem.Allocator,
     parent: ?*Scope,
@@ -1246,14 +1291,6 @@ pub const Scope = struct {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
     }
-    pub fn kind(self: *const Scope) ScopeKind {
-        return switch (self.storage) {
-            .session => .session,
-            .module_root => .module_root,
-            .core_build => .session,
-            .isolated => .isolated,
-        };
-    }
     pub fn environmentOrNull(self: *const Scope) ?EnvironmentView {
         return switch (self.storage) {
             .session => |target| .init(target),
@@ -1315,65 +1352,94 @@ pub const Scope = struct {
             },
         };
     }
-    pub fn publishTop(
-        self: *Scope,
-        name: intern.NamespaceName,
-        publication: TopPublication,
-    ) BindError!*BindingCell {
+    /// The one publication this scope accepts. Every scope has exactly one,
+    /// so a definition sink is chosen by switching on a capability rather
+    /// than by asking a kind enum and trusting the answer; neither arm can be
+    /// applied to the wrong storage, which is what the two `unreachable`
+    /// bodies here used to be for.
+    pub fn publisher(self: *Scope) ScopePublisher {
         return switch (self.storage) {
-            .session, .core_build, .isolated => (try self.writableEnvironment()).bind(name, BindingSpec.fromTop(publication)),
-            .module_root => unreachable,
+            .session, .core_build, .isolated => .{ .top = .{ .scope = self } },
+            .module_root => |target| .{ .module = .init(target) },
         };
-    }
-    pub fn publishTopCursor(
-        self: *Scope,
-        name: intern.NamespaceName,
-        publication: TopPublication,
-    ) error{OutOfMemory}!Environment.BindCursor {
-        return switch (self.storage) {
-            .session, .core_build, .isolated => (try self.writableEnvironment()).bindCursor(
-                name,
-                BindingSpec.fromTop(publication),
-            ),
-            .module_root => unreachable,
-        };
-    }
-    pub fn publishModule(
-        self: *Scope,
-        name: intern.NamespaceName,
-        publication: ModulePublication,
-    ) BindError!*BindingCell {
-        return switch (self.storage) {
-            .module_root => |target| target.bind(name, BindingSpec.fromModule(name, publication)),
-            else => unreachable,
-        };
-    }
-    pub fn publishModuleCursor(
-        self: *Scope,
-        name: intern.NamespaceName,
-        publication: ModulePublication,
-    ) error{OutOfMemory}!Environment.BindCursor {
-        return switch (self.storage) {
-            .module_root => |target| target.bindCursor(
-                name,
-                BindingSpec.fromModule(name, publication),
-            ),
-            else => unreachable,
-        };
-    }
-    pub fn moveUseToTop(self: *Scope, canonical: intern.ModuleName) BindError!void {
-        return (try self.writableEnvironment()).moveUseToTop(canonical);
-    }
-    pub fn moveUseCursor(self: *Scope, canonical: intern.ModuleName) error{OutOfMemory}!Environment.MoveUseCursor {
-        return .init(try self.writableEnvironment(), canonical);
-    }
-    pub fn freezeModule(self: *Scope) void {
-        switch (self.storage) {
-            .module_root => |target| target.freeze(),
-            else => unreachable,
-        }
     }
 };
+/// Authority to publish top-level bindings into one scope. It materializes an
+/// isolated scope's environment on first publication, so issuing one allocates
+/// nothing.
+pub const TopPublisher = struct {
+    scope: *Scope,
+
+    pub fn publish(
+        self: TopPublisher,
+        name: intern.NamespaceName,
+        publication: TopPublication,
+    ) BindError!*BindingCell {
+        return (try self.scope.writableEnvironment()).bind(name, BindingSpec.fromTop(publication));
+    }
+
+    pub fn cursor(
+        self: TopPublisher,
+        name: intern.NamespaceName,
+        publication: TopPublication,
+    ) error{OutOfMemory}!Environment.BindCursor {
+        return (try self.scope.writableEnvironment()).bindCursor(
+            name,
+            BindingSpec.fromTop(publication),
+        );
+    }
+};
+
+/// Authority to publish definitions into one module image's environment and to
+/// end its construction. The backing pointer is unavailable, so a holder can
+/// define and freeze but cannot retarget the environment or reach its
+/// allocator and retirement ownership.
+pub const ModulePublisher = enum(usize) {
+    invalid = 0,
+    _,
+
+    fn init(environment: *Environment) ModulePublisher {
+        return @enumFromInt(@intFromPtr(environment));
+    }
+
+    fn target(self: ModulePublisher) *Environment {
+        std.debug.assert(self != .invalid);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+
+    pub fn publish(
+        self: ModulePublisher,
+        name: intern.NamespaceName,
+        publication: ModulePublication,
+    ) BindError!*BindingCell {
+        return self.target().bind(name, BindingSpec.fromModule(name, publication));
+    }
+
+    pub fn cursor(
+        self: ModulePublisher,
+        name: intern.NamespaceName,
+        publication: ModulePublication,
+    ) error{OutOfMemory}!Environment.BindCursor {
+        return self.target().bindCursor(name, BindingSpec.fromModule(name, publication));
+    }
+
+    /// Ends construction. A sealed image has no publisher, so this is the one
+    /// transition that makes late definition impossible rather than merely
+    /// refused.
+    pub fn freeze(self: ModulePublisher) void {
+        self.target().freeze();
+    }
+};
+
+/// Which publication one scope accepts. Exactly one arm exists per scope.
+pub const ScopePublisher = union(enum) {
+    top: TopPublisher,
+    module: ModulePublisher,
+};
+comptime {
+    heap.requireOpaqueMutation(ModulePublisher);
+}
+
 const EnvState = struct {
     host: *const heap.HostCleanup,
     core: Environment,

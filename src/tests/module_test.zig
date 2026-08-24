@@ -163,7 +163,7 @@ test "module names: branded factories enforce the reader symbol grammar" {
     _ = try intern.internModuleName("valid.module-name");
 }
 
-test "env: new names and use edits bump shape and deep lookup is ordered" {
+test "env: new names bump the shape generation and rebinding does not" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
@@ -177,33 +177,26 @@ test "env: new names and use edits bump shape and deep lookup is ordered" {
     defer binding.release(releases);
     const effect = try TestEffect.init(std.testing.allocator);
     defer effect.release(releases);
-    _ = try scope.publishModule(first, binding.module(effect.effect, .public));
-    try std.testing.expectEqual(@as(u64, 1), environment.generation());
-    _ = try scope.publishModule(second, binding.module(effect.effect, .public));
-    try std.testing.expectEqual(@as(u64, 2), environment.generation());
-    try scope.moveUseToTop(@enumFromInt(8));
-    try std.testing.expectEqual(@as(u64, 3), environment.generation());
-    try scope.moveUseToTop(@enumFromInt(8));
-    try std.testing.expectEqual(@as(u64, 3), environment.generation());
-    try scope.moveUseToTop(@enumFromInt(9));
-    try scope.moveUseToTop(@enumFromInt(8));
-    var shape = environment.acquireShape();
-    defer shape.deinit();
-    try std.testing.expectEqualSlices(
-        intern.ModuleName,
-        &.{ @enumFromInt(9), @enumFromInt(8) },
-        shape.useOrder(),
-    );
+    _ = try scope.publisher().module.publish(first, binding.module(effect.effect, .public));
+    try std.testing.expectEqual(@as(u64, 1), environment.shapeGeneration());
+    _ = try scope.publisher().module.publish(second, binding.module(effect.effect, .public));
+    try std.testing.expectEqual(@as(u64, 2), environment.shapeGeneration());
+    // Creating a name publishes a shape; rebinding one replaces its cell in
+    // place and publishes none. That asymmetry is why this counter is named
+    // for shapes rather than for mutation: it is not a "did anything change"
+    // signal and nothing may read it as one.
+    _ = try scope.publisher().module.publish(first, binding.module(effect.effect, .public));
+    try std.testing.expectEqual(@as(u64, 2), environment.shapeGeneration());
     const names = try environment.namesOwned(std.testing.allocator);
     defer std.testing.allocator.free(names);
     std.mem.sort(u32, names, {}, std.sort.asc(u32));
     var expected = [_]u32{ intern.namespaceId(first), intern.namespaceId(second) };
     std.mem.sort(u32, &expected, {}, std.sort.asc(u32));
     try std.testing.expectEqualSlices(u32, &expected, names);
-    scope.freezeModule();
+    scope.publisher().module.freeze();
     try std.testing.expectError(
         error.Frozen,
-        scope.publishModule(first, binding.module(effect.effect, .public)),
+        scope.publisher().module.publish(first, binding.module(effect.effect, .public)),
     );
 }
 
@@ -357,7 +350,7 @@ const EnvThreadContext = struct {
 
 fn envWorker(context: EnvThreadContext) void {
     for (0..100) |_| {
-        _ = context.scope.publishTop(
+        _ = context.scope.publisher().top.publish(
             context.name,
             context.publication,
         ) catch {
@@ -374,11 +367,43 @@ fn envWorker(context: EnvThreadContext) void {
     }
 }
 
+/// Distinct interned names for shape-history churn. Creating a name is the
+/// only production path that publishes a new environment shape — rebinding an
+/// existing name replaces its cell in place — so a shape-history property has
+/// to walk a pool of fresh names. That is why the churn counts here are
+/// smaller than the retired `use`-order edits they replace: each new name
+/// republishes a cloned name map, making the pass quadratic in publications
+/// where a use edit was linear.
+const NamePool = struct {
+    allocator: std.mem.Allocator,
+    names: []intern.NamespaceName,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        prefix: []const u8,
+        count: usize,
+    ) !NamePool {
+        const names = try allocator.alloc(intern.NamespaceName, count);
+        errdefer allocator.free(names);
+        var buffer: [96]u8 = undefined;
+        for (names, 0..) |*slot, index| {
+            const spelling = try std.fmt.bufPrint(&buffer, "{s}-{d}", .{ prefix, index });
+            slot.* = try intern.internNamespace(spelling);
+        }
+        return .{ .allocator = allocator, .names = names };
+    }
+
+    fn deinit(self: NamePool) void {
+        self.allocator.free(self.names);
+    }
+};
+
 const ReclamationRaceContext = struct {
     scope: *env.Scope,
     environment: env.EnvironmentView,
     releases: *heap.ReleaseDomain,
     name: intern.NamespaceName,
+    churn: []const intern.NamespaceName,
     publication: env.TopPublication,
     phase: *std.atomic.Value(u8),
     writer_done: *std.atomic.Value(bool),
@@ -465,8 +490,12 @@ fn reclamationReader(context: ReclamationRaceContext) void {
 }
 
 fn reclamationWriter(context: ReclamationRaceContext) void {
+    const first_batch = context.churn.len / 2;
     yieldUntilPhase(context.phase, 1);
-    for (0..512) |index| context.scope.moveUseToTop(@enumFromInt(@as(u32, if (index & 1 == 0) 8 else 9))) catch {
+    for (context.churn[0..first_batch]) |name| _ = context.scope.publisher().top.publish(
+        name,
+        context.publication,
+    ) catch {
         context.failed.store(true, .release);
         context.phase.store(2, .release);
         context.writer_done.store(true, .release);
@@ -475,7 +504,10 @@ fn reclamationWriter(context: ReclamationRaceContext) void {
     context.phase.store(2, .release);
     yieldUntilPhase(context.phase, 3);
     yieldUntilPhase(context.phase, 4);
-    context.scope.moveUseToTop(@enumFromInt(8)) catch {
+    _ = context.scope.publisher().top.publish(
+        context.churn[first_batch],
+        context.publication,
+    ) catch {
         context.failed.store(true, .release);
         context.writer_done.store(true, .release);
         return;
@@ -483,7 +515,10 @@ fn reclamationWriter(context: ReclamationRaceContext) void {
     context.phase.store(5, .release);
     while (!context.reader_loop_started.load(.acquire))
         std.Thread.yield() catch @panic("snapshot writer yield failed");
-    for (513..4096) |index| context.scope.moveUseToTop(@enumFromInt(@as(u32, if (index & 1 == 0) 8 else 9))) catch {
+    for (context.churn[first_batch + 1 ..]) |name| _ = context.scope.publisher().top.publish(
+        name,
+        context.publication,
+    ) catch {
         context.failed.store(true, .release);
         context.writer_done.store(true, .release);
         return;
@@ -526,7 +561,9 @@ test "env: concurrent cell publication is lease-safe and TSan-clean" {
     for (&threads) |*thread| thread.* = try std.Thread.spawn(.{}, envWorker, .{context});
     for (threads) |thread| thread.join();
     try std.testing.expect(!failed.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), container.sessionView().generation());
+    // Four threads race to bind the same name: exactly one creates it, and
+    // the three that lose rebind the cell without publishing a shape.
+    try std.testing.expectEqual(@as(u64, 1), container.sessionView().shapeGeneration());
 }
 
 test "env: concurrent readers writers and retirement reclaim production snapshots" {
@@ -540,9 +577,9 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
     const name = try intern.internNamespace("concurrent-reclamation");
     const binding = try TestBinding.init(std.testing.allocator);
     defer binding.release(releases);
-    _ = try scope.publishTop(name, binding.top());
-    try scope.moveUseToTop(@enumFromInt(8));
-    try scope.moveUseToTop(@enumFromInt(9));
+    _ = try scope.publisher().top.publish(name, binding.top());
+    const churn = try NamePool.init(std.testing.allocator, "reclamation-churn", 256);
+    defer churn.deinit();
     host.cleanup().drain();
     var phase: std.atomic.Value(u8) = .init(0);
     var writer_done: std.atomic.Value(bool) = .init(false);
@@ -554,6 +591,7 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
         .environment = container.sessionView(),
         .releases = releases,
         .name = name,
+        .churn = churn.names,
         .publication = binding.top(),
         .phase = &phase,
         .writer_done = &writer_done,
@@ -571,6 +609,209 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
     var current = container.sessionView().resolveDirect(intern.namespaceId(name)).?;
     defer current.deinit();
     try std.testing.expectEqual(env.quotation(binding.body.list).?, current.binding.word);
+}
+
+/// A pool of distinguishable bodies. Each writer sweep rebinds every name to
+/// one of them, so a captured payload identifies the generation it came from
+/// and a snapshot that spans two sweeps is visible as such.
+const BodyPool = struct {
+    allocator: std.mem.Allocator,
+    bodies: []value.Value,
+
+    fn init(allocator: std.mem.Allocator, count: usize) !BodyPool {
+        const bodies = try allocator.alloc(value.Value, count);
+        errdefer allocator.free(bodies);
+        for (bodies, 0..) |*slot, index|
+            slot.* = try list.fromValuesGeneric(allocator, &.{.{ .int = @intCast(index) }});
+        return .{ .allocator = allocator, .bodies = bodies };
+    }
+
+    fn release(self: BodyPool, releases: *heap.ReleaseDomain) void {
+        for (self.bodies) |item| releases.releaseValue(item);
+        self.allocator.free(self.bodies);
+    }
+
+    fn publication(self: BodyPool, index: usize) env.TopPublication {
+        return .{ .word = .{ .body = env.quotation(self.bodies[index].list).? } };
+    }
+
+    /// Which sweep published this body, or null if it is not one of ours.
+    fn generationOf(self: BodyPool, body: *env.Quotation) ?usize {
+        for (self.bodies, 0..) |item, index|
+            if (env.quotation(item.list).? == body) return index;
+        return null;
+    }
+};
+
+const CaptureRaceContext = struct {
+    scope: *env.Scope,
+    source: env.EnvironmentView,
+    releases: *heap.ReleaseDomain,
+    allocator: std.mem.Allocator,
+    names: []const intern.NamespaceName,
+    bodies: BodyPool,
+    writer_done: *std.atomic.Value(bool),
+    captures: *std.atomic.Value(usize),
+    spans: *std.atomic.Value(usize),
+    failed: *std.atomic.Value(bool),
+};
+
+/// Every capture the readers abandon retires through the shared domain, so the
+/// domain is serviced concurrently rather than accumulating for the whole race.
+/// Without this the backlog grows with reader throughput, which is invisible
+/// natively and enormous under a sanitizer.
+fn captureRaceReclaimer(context: CaptureRaceContext) void {
+    while (!context.writer_done.load(.acquire) or context.releases.hasPending()) {
+        _ = context.releases.advance(64);
+        std.Thread.yield() catch @panic("capture race reclaim yield failed");
+    }
+}
+
+/// Each sweep rebinds every name, in one fixed order, to that sweep's body.
+/// At any single instant the environment therefore holds at most two
+/// generations, and they are adjacent.
+fn captureRaceWriter(context: CaptureRaceContext) void {
+    for (context.bodies.bodies, 0..) |_, generation| {
+        for (context.names) |name| {
+            _ = context.scope.publisher().top.publish(
+                name,
+                context.bodies.publication(generation),
+            ) catch {
+                context.failed.store(true, .release);
+                context.writer_done.store(true, .release);
+                return;
+            };
+        }
+    }
+    context.writer_done.store(true, .release);
+}
+
+fn captureRaceReader(context: CaptureRaceContext) void {
+    while (!context.writer_done.load(.acquire)) {
+        var destination = env.Environment.init(context.allocator, context.releases);
+        var cursor = env.CaptureCursor.init(&destination, context.source);
+        while (true) switch (cursor.advance() catch {
+            context.failed.store(true, .release);
+            break;
+        }) {
+            .pending => {},
+            .complete => break,
+        };
+        cursor.deinit();
+
+        var lowest: ?usize = null;
+        var highest: ?usize = null;
+        for (context.names) |name| {
+            var lease = destination.view().resolveDirect(intern.namespaceId(name)) orelse continue;
+            defer lease.deinit();
+            if (lease.binding != .word) {
+                context.failed.store(true, .release);
+                continue;
+            }
+            const generation = context.bodies.generationOf(lease.binding.word) orelse {
+                // Not a payload this writer ever published.
+                context.failed.store(true, .release);
+                continue;
+            };
+            lowest = if (lowest) |current| @min(current, generation) else generation;
+            highest = if (highest) |current| @max(current, generation) else generation;
+        }
+        if (lowest) |low| {
+            const high = highest.?;
+            // One instant spans at most two adjacent sweeps. Anything wider is
+            // a snapshot that no single instant of the source ever had.
+            if (high - low > 1) context.failed.store(true, .release);
+            if (high != low) _ = context.spans.fetchAdd(1, .monotonic);
+        }
+        _ = context.captures.fetchAdd(1, .monotonic);
+        env.testing.deinitEnvironment(&destination);
+        std.Thread.yield() catch @panic("capture race yield failed");
+    }
+}
+
+test "concurrency: module capture and top-level publication never mix environment generations" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+    var container = try env.Env.init(host.cleanup());
+    defer container.deinit();
+    var scope = container.sessionRoot(std.testing.allocator);
+    defer env.testing.deinitScope(&scope, releases);
+    const pool = try NamePool.init(std.testing.allocator, "capture-race", 64);
+    defer pool.deinit();
+    const bodies = try BodyPool.init(std.testing.allocator, 48);
+    defer bodies.release(releases);
+
+    // Every name exists before the race, so the shape is settled and the only
+    // concurrent mutation under test is rebinding.
+    for (pool.names) |name| _ = try scope.publisher().top.publish(name, bodies.publication(0));
+
+    var writer_done: std.atomic.Value(bool) = .init(false);
+    var captures: std.atomic.Value(usize) = .init(0);
+    var spans: std.atomic.Value(usize) = .init(0);
+    var failed: std.atomic.Value(bool) = .init(false);
+    const context = CaptureRaceContext{
+        .scope = &scope,
+        .source = container.sessionView(),
+        .releases = releases,
+        .allocator = std.testing.allocator,
+        .names = pool.names,
+        .bodies = bodies,
+        .writer_done = &writer_done,
+        .captures = &captures,
+        .spans = &spans,
+        .failed = &failed,
+    };
+    const writer = try std.Thread.spawn(.{}, captureRaceWriter, .{context});
+    var readers: [2]std.Thread = undefined;
+    for (&readers) |*reader| reader.* = try std.Thread.spawn(.{}, captureRaceReader, .{context});
+    const reclaimer = try std.Thread.spawn(.{}, captureRaceReclaimer, .{context});
+    writer.join();
+    for (readers) |reader| reader.join();
+    reclaimer.join();
+    while (releases.hasPending()) _ = releases.advance(256);
+    try std.testing.expect(!failed.load(.acquire));
+    try std.testing.expect(captures.load(.acquire) >= 1);
+    // Measured: disabling the capture's epoch validation fails this test in
+    // roughly two runs out of three. The sweep and pool sizes set that window,
+    // so shrinking them weakens the detector rather than just saving time.
+}
+
+test "acceptance: module environment snapshots reclaim boundedly after delayed images retire" {
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
+        defer runtime.deinit();
+        // A session environment worth capturing, so each construction copies a
+        // real payload set rather than an empty one.
+        try expectOk(&runtime, "(1) 'captured-a def (2) 'captured-b def (3) 'captured-c def");
+
+        // Each cycle captures the session environment into a fresh image,
+        // registers it twice, reloads it while a spawned call still holds the
+        // superseded generation, then removes both names. Residual memory must
+        // track live state, not the number of captures taken.
+        const cycle = "((captured-a) 'read def) @module " ++
+            "dup 'capture-left register " ++
+            "dup 'capture-right register " ++
+            "(capture-left.read) @spawn " ++
+            "swap 'capture-left register " ++
+            "await pop capture-right.read pop " ++
+            "'capture-left unmodule 'capture-right unmodule";
+        const small = "[1] 20 take (pop " ++ cycle ++ ") for";
+        const large = "[1] 200 take (pop " ++ cycle ++ ") for";
+        try expectOk(&runtime, small);
+        const before_small = counting.total_requested_bytes;
+        try expectOk(&runtime, small);
+        const after_small = counting.total_requested_bytes;
+        try expectOk(&runtime, large);
+        const after_large = counting.total_requested_bytes;
+        const small_growth = after_small -| before_small;
+        const large_growth = after_large -| after_small;
+        try std.testing.expect(large_growth <= small_growth * 2 + 4096);
+        try std.testing.expectEqual(@as(usize, 0), runtime.schedulerWorkerThreadCount());
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
 }
 
 test "environment and registry retirement stays bounded after a delayed reader drains" {
@@ -593,15 +834,17 @@ test "environment and registry retirement stays bounded after a delayed reader d
         const alias_name = try intern.internNamespace("bounded-module-alias");
         const binding = try TestBinding.init(allocator);
         defer binding.release(releases);
-        _ = try scope.publishTop(binding_name, binding.top());
-        try scope.moveUseToTop(@enumFromInt(8));
+        _ = try scope.publisher().top.publish(binding_name, binding.top());
 
         // One public shape lease deliberately delays reclamation while a long
-        // publication history accumulates. Releasing it must transfer the
-        // whole history to bounded retirement work rather than freeing it on
-        // the reader's stack.
+        // shape history accumulates. Releasing it must transfer the whole
+        // history to bounded retirement work rather than freeing it on the
+        // reader's stack. The names are distinct because that is the only
+        // production path that publishes a shape.
+        const shape_churn = try NamePool.init(allocator, "bounded-shape-churn", 256);
+        defer shape_churn.deinit();
         var delayed = environment.sessionView().acquireShape();
-        for (0..512) |index| try scope.moveUseToTop(@enumFromInt(@as(u32, if (index & 1 == 0) 9 else 8)));
+        for (shape_churn.names) |churn_name| _ = try scope.publisher().top.publish(churn_name, binding.top());
         delayed.deinit();
         host.cleanup().drain();
 
@@ -630,8 +873,7 @@ test "environment and registry retirement stays bounded after a delayed reader d
         host.cleanup().drain();
 
         for (0..128) |index| {
-            _ = try scope.publishTop(binding_name, binding.top());
-            try scope.moveUseToTop(@enumFromInt(@as(u32, if (index & 1 == 0) 9 else 8)));
+            _ = try scope.publisher().top.publish(binding_name, binding.top());
             try commitEmptyModule(&registry, module_name);
             try registry.alias(
                 alias_name,
@@ -642,9 +884,10 @@ test "environment and registry retirement stays bounded after a delayed reader d
         host.cleanup().drain();
         const warmed_live_bytes = counting.total_requested_bytes;
 
+        // Rebinding, re-registration, and alias replacement only: this batch
+        // states a bound, and creating names would grow live state instead.
         for (0..2048) |index| {
-            _ = try scope.publishTop(binding_name, binding.top());
-            try scope.moveUseToTop(@enumFromInt(@as(u32, if (index & 1 == 0) 9 else 8)));
+            _ = try scope.publisher().top.publish(binding_name, binding.top());
             try commitEmptyModule(&registry, module_name);
             try registry.alias(
                 alias_name,
@@ -749,7 +992,7 @@ test "env: a replaced interior remains valid only through its binding lease" {
     defer releases.releaseValue(document);
     const effect = (env.ValidatedEffect.parse(body.list, separator)).?;
     const name = try intern.internNamespace("leased-metadata");
-    _ = try scope.publishTop(name, .{ .word = .{
+    _ = try scope.publisher().top.publish(name, .{ .word = .{
         .body = env.quotation(body.list).?,
         .effect = effect,
         .doc = env.documentation(document.list).?,
@@ -759,7 +1002,7 @@ test "env: a replaced interior remains valid only through its binding lease" {
     // the old lease is the only thing still holding it.
     const replacement = try TestBinding.init(std.testing.allocator);
     defer replacement.release(releases);
-    _ = try scope.publishTop(name, replacement.top());
+    _ = try scope.publisher().top.publish(name, replacement.top());
     _ = releases.advance(1);
     try std.testing.expectEqual(@as(u32, 3), heap.refCount(body.list));
     old.deinit();
@@ -975,17 +1218,15 @@ fn environmentAllocationProbe(allocator: std.mem.Allocator) !void {
     defer releases.releaseValue(body);
     const first = try intern.internNamespace("allocation-first");
     const second = try intern.internNamespace("allocation-second");
-    const after_uses = try intern.internNamespace("allocation-after-uses");
-    _ = try scope.publishTop(first, .{ .word = .{
+    const third = try intern.internNamespace("allocation-third");
+    _ = try scope.publisher().top.publish(first, .{ .word = .{
         .body = env.quotation(body.list).?,
     } });
     var lease = (environment.sessionView().resolveDirect(intern.namespaceId(first))).?;
     defer lease.deinit();
-    _ = try scope.publishTop(first, .{ .word = .{ .body = env.quotation(body.list).? } });
-    _ = try scope.publishTop(second, .{ .word = .{ .body = env.quotation(body.list).? } });
-    try scope.moveUseToTop(@enumFromInt(8));
-    try scope.moveUseToTop(@enumFromInt(9));
-    _ = try scope.publishTop(after_uses, .{ .word = .{ .body = env.quotation(body.list).? } });
+    _ = try scope.publisher().top.publish(first, .{ .word = .{ .body = env.quotation(body.list).? } });
+    _ = try scope.publisher().top.publish(second, .{ .word = .{ .body = env.quotation(body.list).? } });
+    _ = try scope.publisher().top.publish(third, .{ .word = .{ .body = env.quotation(body.list).? } });
     const names = try environment.sessionView().namesOwned(allocator);
     allocator.free(names);
 }

@@ -1287,12 +1287,24 @@ pub fn requireOpaqueWorkerFacade(comptime Handle: type, comptime State: type) vo
 }
 
 pub fn requireOpaqueObservation(comptime Handle: type) void {
+    requireOpaqueHandle(Handle, "observation");
+}
+
+/// A mutation authority is structurally the same shape as an observation
+/// handle — pointer-sized, opaque, owning nothing — and differs only in the
+/// operations it grants. It gets its own spelling so a capability that
+/// publishes is never documented as one that merely observes.
+pub fn requireOpaqueMutation(comptime Handle: type) void {
+    requireOpaqueHandle(Handle, "mutation");
+}
+
+fn requireOpaqueHandle(comptime Handle: type, comptime role: []const u8) void {
     const handle_info = switch (@typeInfo(Handle)) {
         .@"enum" => |info| info,
-        else => @compileError(@typeName(Handle) ++ " must be an opaque pointer-sized observation handle"),
+        else => @compileError(@typeName(Handle) ++ " must be an opaque pointer-sized " ++ role ++ " handle"),
     };
     if (handle_info.tag_type != usize or @sizeOf(Handle) != @sizeOf(usize))
-        @compileError(@typeName(Handle) ++ " must be an opaque pointer-sized observation handle");
+        @compileError(@typeName(Handle) ++ " must be an opaque pointer-sized " ++ role ++ " handle");
     if (handle_info.is_exhaustive or
         handle_info.fields.len != 1 or
         !std.mem.eql(u8, handle_info.fields[0].name, "invalid") or
@@ -1301,7 +1313,7 @@ pub fn requireOpaqueObservation(comptime Handle: type) void {
         @compileError(@typeName(Handle) ++ " must expose only its invalid state");
     }
     if (@hasDecl(Handle, "deinit"))
-        @compileError(@typeName(Handle) ++ " must not own or retire its observed target");
+        @compileError(@typeName(Handle) ++ " must not own or retire its target");
 }
 
 /// A session domain stores only its owner. Allocator and retirement access

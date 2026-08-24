@@ -77,6 +77,8 @@ fn whileWord(evaluator: *Machine) MachineError!void {
             } },
             .parent = evaluator.currentScope(),
             .home = evaluator.currentHome(),
+            .captured = evaluator.currentCapture(),
+            .origin = evaluator.currentTextOrigin(),
             .word = evaluator.activeWordId(),
             .provenance_target = try evaluator.applicationProvenanceTarget(),
         }),
@@ -88,11 +90,13 @@ const TimesState = struct {
     quotation: heap.Owned(*Header),
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
+    captured: ?env.EnvironmentView,
+    origin: env.TextOrigin,
     remaining: usize,
     word: intern.TraceWord,
 
     fn application(self: *TimesState) Application {
-        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, 0);
+        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, self.captured, self.origin, 0);
     }
     fn step(self: *TimesState) ApplicationStep {
         return .{ .quotation = self.quotation.borrow(), .seeded = 0 };
@@ -129,6 +133,8 @@ fn times(evaluator: *Machine) MachineError!void {
         .quotation = .init(quotation.take().list),
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
+        .captured = evaluator.currentCapture(),
+        .origin = evaluator.currentTextOrigin(),
         .remaining = @intCast(count_value.borrow().int),
         .word = evaluator.activeWordId(),
     };
@@ -151,6 +157,8 @@ pub fn dipForIdiom(evaluator: *Machine) MachineError!void {
         .protected = .init(protected.take()),
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
+        .captured = evaluator.currentCapture(),
+        .origin = evaluator.currentTextOrigin(),
         .word = evaluator.activeWordId(),
     };
     const word = state.word;
@@ -163,10 +171,12 @@ const DipState = struct {
     protected: heap.Owned(Value),
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
+    captured: ?env.EnvironmentView,
+    origin: env.TextOrigin,
     word: intern.TraceWord,
 
     fn application(self: *DipState) Application {
-        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, 0);
+        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, self.captured, self.origin, 0);
     }
 
     /// The protected value returns exactly once, after the quotation's own
@@ -274,6 +284,8 @@ const GuardControl = struct {
     },
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
+    captured: ?env.EnvironmentView,
+    origin: env.TextOrigin,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
 
@@ -383,7 +395,7 @@ const GuardPredicateState = struct {
 
     fn application(self: *GuardPredicateState, quotation: *Header) Application {
         const control = self.control.borrow();
-        return machine.typedApplication(self, quotation, control.parent, control.home, 0);
+        return machine.typedApplication(self, quotation, control.parent, control.home, control.captured, control.origin, 0);
     }
     pub fn resumeApplication(
         evaluator: *Machine,
@@ -410,7 +422,7 @@ const GuardActionState = struct {
 
     fn application(self: *GuardActionState, quotation: *Header) Application {
         const control = self.control.borrow();
-        var launched = machine.typedApplication(self, quotation, control.parent, control.home, 0);
+        var launched = machine.typedApplication(self, quotation, control.parent, control.home, control.captured, control.origin, 0);
         launched.provenance = if (control.provenance_target) |target|
             .{ .selected_target = target }
         else
@@ -451,6 +463,8 @@ fn cond(evaluator: *Machine) MachineError!void {
         .clauses = .init(clauses.take()),
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
+        .captured = evaluator.currentCapture(),
+        .origin = evaluator.currentTextOrigin(),
         .word = evaluator.activeWordId(),
         .provenance_target = try evaluator.applicationProvenanceTarget(),
     });
@@ -460,6 +474,8 @@ const CondDriver = struct {
     clauses: heap.Owned(Value),
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
+    captured: ?env.EnvironmentView,
+    origin: env.TextOrigin,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
     index: usize = 0,
@@ -484,6 +500,8 @@ const CondDriver = struct {
             .selector = .{ .cond = .{ .clauses = .init(self.clauses.take()) } },
             .parent = self.parent,
             .home = self.home,
+            .captured = self.captured,
+            .origin = self.origin,
             .word = self.word,
             .provenance_target = self.provenance_target,
         };
@@ -508,12 +526,14 @@ const IterationState = struct {
     results: ?heap.Owned(heap.OwnedValueBuffer) = null,
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
+    captured: ?env.EnvironmentView,
+    origin: env.TextOrigin,
     index: usize = 0,
     count: usize,
     word: intern.TraceWord,
 
     fn application(self: *IterationState, seeded: u32) Application {
-        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, seeded);
+        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, self.captured, self.origin, seeded);
     }
     fn step(self: *IterationState, seeded: u32) ApplicationStep {
         return .{ .quotation = self.quotation.borrow(), .seeded = seeded };
@@ -694,6 +714,8 @@ const StencilControl = struct {
     results: heap.OwnedValueBuffer,
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
+    captured: ?env.EnvironmentView,
+    origin: env.TextOrigin,
     index: usize = 0,
     count: usize,
     width: usize,
@@ -775,6 +797,8 @@ const StencilApplication = struct {
             control.quotation.borrow(),
             control.parent,
             control.home,
+            control.captured,
+            control.origin,
             1,
         );
     }
@@ -870,6 +894,8 @@ fn stencil(evaluator: *Machine) MachineError!void {
         .results = results.take(),
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
+        .captured = evaluator.currentCapture(),
+        .origin = evaluator.currentTextOrigin(),
         .count = count,
         .width = width,
         .word = evaluator.activeWordId(),
@@ -894,6 +920,8 @@ const UnfoldState = struct {
     items: heap.Owned(UnfoldItems),
     parent: *env.Scope,
     home: ?*modules.ModuleHome,
+    captured: ?env.EnvironmentView,
+    origin: env.TextOrigin,
     index: usize = 0,
     word: intern.TraceWord,
 
@@ -903,6 +931,8 @@ const UnfoldState = struct {
             self.predicate.borrow(),
             self.parent,
             self.home,
+            self.captured,
+            self.origin,
             1,
         );
     }
@@ -1079,6 +1109,8 @@ fn unfold(evaluator: *Machine) MachineError!void {
         .items = .init(.init(evaluator.allocator())),
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
+        .captured = evaluator.currentCapture(),
+        .origin = evaluator.currentTextOrigin(),
         .word = evaluator.activeWordId(),
     };
     try evaluator.pushBorrowed(state.current.borrow());
@@ -1347,6 +1379,8 @@ fn createIteration(
         .expected = if (expected) |item| .init(item.take()) else null,
         .parent = evaluator.currentScope(),
         .home = evaluator.currentHome(),
+        .captured = evaluator.currentCapture(),
+        .origin = evaluator.currentTextOrigin(),
         .count = count,
         .word = evaluator.activeWordId(),
     };

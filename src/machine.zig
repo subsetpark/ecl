@@ -854,16 +854,11 @@ pub fn stringValue(
 const Eval = struct {
     code: *Header,
     ip: u32,
-    /// Where this body's own definitions land, and the chain it hands to any
-    /// quotation it invokes on a caller's behalf.
-    scope: *env.Scope,
-    /// Where this body's *word references* resolve. For a module word that is
-    /// its home; for a core or prelude word it is the lexical chain that word
-    /// was defined against, never whatever environment happens to be
-    /// executing. Separating the two is what stops a module's exports from
-    /// reaching inside the prelude words it calls.
-    resolution_scope: *env.Scope,
-    home: ?*modules.ModuleHome,
+    /// Where this body's definitions land, where its references resolve, and
+    /// whose privacy and durable state it runs against. One value rather than
+    /// three fields, so a construction site cannot set two of them and leave
+    /// the third describing different code.
+    site: ExecutionSite,
     traced_word: intern.TraceWord,
     /// Nominal authority to replace one source effect check's completion
     /// provenance. A non-tail call and every application quotation receive
@@ -878,6 +873,20 @@ const Eval = struct {
     /// application. If it completes or transfers tail control, its existing
     /// code-header ownership becomes the application's selected quotation.
     application_selection: ?ApplicationFrameIndex = null,
+
+    /// Where this body's own definitions land, and the chain it hands to any
+    /// quotation it invokes on a caller's behalf.
+    pub fn scope(self: Eval) *env.Scope {
+        return self.site.scope;
+    }
+    /// Where this body's *word references* resolve.
+    pub fn resolution(self: Eval) ResolutionContext {
+        return self.site.resolution;
+    }
+    /// Whose privacy and durable state this body runs against.
+    pub fn home(self: Eval) ?*modules.ModuleHome {
+        return self.site.home;
+    }
 };
 /// One tagged owner of everything a `within` transaction needs: the private
 /// draft of the home slot's durable stack (the unit window above
@@ -1103,6 +1112,169 @@ fn encodeApplicationProvenanceTarget(
     return @ptrFromInt(raw);
 }
 
+/// Where an activation's word references resolve. Separating this from
+/// `Activation.scope` — where its definitions land — is what stops a module's
+/// exports from reaching inside the prelude words it calls, and what carries a
+/// module's captured construction environment through the calls it makes.
+pub const ResolutionContext = union(enum) {
+    /// Session code: the live lexical chain, then core. Session-level
+    /// redefinition therefore still reaches prelude bodies.
+    session: *env.Scope,
+    /// Module code: the image's own definitions, then the Session environment
+    /// its construction captured, then core.
+    image: struct { scope: *env.Scope, captured: env.EnvironmentView },
+    /// A homeless binding — a primitive or an embedded prelude definition —
+    /// reached from module or captured code. It resolves in that image's
+    /// capture over core, which is what makes a module's behavior stable
+    /// through the calls it makes without attaching an environment to any
+    /// quotation.
+    captured: env.EnvironmentView,
+
+    /// The context a nested activation inherits when it runs in `scope`: the
+    /// same capture, if any, over a possibly different chain. Every site that
+    /// inherits wants exactly this, so the rule lives here rather than being
+    /// open-coded seven times.
+    pub fn inherit(self: ResolutionContext, scope: *env.Scope) ResolutionContext {
+        return switch (self) {
+            .session => .{ .session = scope },
+            .image => |image| .{ .image = .{ .scope = scope, .captured = image.captured } },
+            .captured => |captured| .{ .image = .{ .scope = scope, .captured = captured } },
+        };
+    }
+
+    /// The capture in force, if any. An application stores this one value
+    /// rather than a whole context, because its scope is decided when it
+    /// launches and the capture is the only part it cannot re-derive.
+    pub fn capture(self: ResolutionContext) ?env.EnvironmentView {
+        return switch (self) {
+            .session => null,
+            .image => |image| image.captured,
+            .captured => |captured| captured,
+        };
+    }
+
+    /// The lexical chain this context walks before its capture, if any.
+    pub fn chain(self: ResolutionContext) ?*env.Scope {
+        return switch (self) {
+            .session => |scope| scope,
+            .image => |image| image.scope,
+            .captured => null,
+        };
+    }
+
+    /// The context for code running in `scope` under `capture`.
+    pub fn restore(scope: *env.Scope, captured: ?env.EnvironmentView) ResolutionContext {
+        return if (captured) |view|
+            .{ .image = .{ .scope = scope, .captured = view } }
+        else
+            .{ .session = scope };
+    }
+};
+
+/// The three correlated facts every activation needs: where its definitions
+/// land, where its references resolve, and whose privacy and durable state it
+/// runs against.
+///
+/// They are correlated, not redundant. A homeless word — a primitive or a
+/// prelude definition — called from module code inherits the caller's home,
+/// because that is whose privates and durable state it may still reach, while
+/// resolving in that image's *capture*, because that is where its own
+/// references belong. Collapsing the two would break `within` and private
+/// lookup inside prelude words a module calls.
+///
+/// Eight sites used to restate the correlation by hand. They now name a
+/// constructor, so the triple travels as one value and no site can set two of
+/// three.
+pub const TextOrigin = env.TextOrigin;
+
+pub const ExecutionSite = struct {
+    scope: *env.Scope,
+    resolution: ResolutionContext,
+    home: ?*modules.ModuleHome,
+    origin: TextOrigin,
+
+    /// The environment a construction begun here captures.
+    pub fn constructionSource(self: ExecutionSite, environment: *env.Env) ?env.EnvironmentView {
+        return switch (self.origin) {
+            .program => environment.sessionView(),
+            .foreign => null,
+        };
+    }
+
+    /// The base case: a unit's root activation, built from nothing.
+    pub fn root(unit: *Unit) ExecutionSite {
+        const scope = unit.lexicalScope();
+        return .{
+            .scope = scope,
+            .resolution = .{ .session = scope },
+            .home = null,
+            .origin = .program,
+        };
+    }
+
+    /// Code running as one module image: the image's own definitions, then the
+    /// environment its construction captured, then core.
+    pub fn image(
+        home: *modules.ModuleHome,
+        access: *const modules.ExecutionAccess,
+    ) ExecutionSite {
+        const scope = home.scope(access);
+        return .{
+            .scope = scope,
+            .resolution = .{ .image = .{
+                .scope = scope,
+                .captured = home.capturedEnvironment(access),
+            } },
+            .home = home,
+            // The image recorded where its own text came from, so a nested
+            // construction inherits it rather than re-deciding.
+            .origin = home.textOrigin(access),
+        };
+    }
+
+    /// A nested activation continuing the same logical execution in `scope`.
+    /// It derives from the invoker's resolution *context*, never from its
+    /// scope, which is what keeps a module's capture reachable inside `call`,
+    /// `@attempt`, and a resumed qualified load.
+    pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
+        return .{
+            .scope = scope,
+            .resolution = invoker.resolution().inherit(scope),
+            .home = invoker.home(),
+            .origin = invoker.site.origin,
+        };
+    }
+
+    /// Module source the loader is executing. It keeps the caller's chain and
+    /// home for lookup, and marks the text as not written against this
+    /// session, so a construction inside it captures nothing.
+    pub fn foreignSource(scope: *env.Scope, home: ?*modules.ModuleHome) ExecutionSite {
+        return .{
+            .scope = scope,
+            .resolution = .{ .session = scope },
+            .home = home,
+            .origin = .foreign,
+        };
+    }
+
+    /// An application resuming in `scope`. Its scope is only decided when it
+    /// launches, so it stores the home and capture in force at that point
+    /// rather than re-deriving them from whatever is running now.
+    pub fn resumed(
+        scope: *env.Scope,
+        home: ?*modules.ModuleHome,
+        captured: ?env.EnvironmentView,
+        origin: TextOrigin,
+    ) ExecutionSite {
+        return .{
+            .scope = scope,
+            .resolution = .restore(scope, captured),
+            .home = home,
+            .origin = origin,
+        };
+    }
+};
+
 pub const ApplicationProvenance = union(enum) {
     boundary,
     selected_target: *const ApplicationProvenanceTarget,
@@ -1114,6 +1286,14 @@ pub const IsolatedApplication = struct {
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
+    /// The capture in force where this application was launched. Its scope is
+    /// decided at launch, so this is the only part of the resolution context
+    /// it cannot re-derive.
+    captured: ?env.EnvironmentView,
+    /// Where the text that launched this application came from, for the same
+    /// reason: a construction inside the applied quotation constructs the way
+    /// its launching text does.
+    origin: TextOrigin,
     seeded: u32,
     provenance: ApplicationProvenance,
 };
@@ -1146,6 +1326,8 @@ pub fn typedApplication(
     quotation: *Header,
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
+    captured: ?env.EnvironmentView,
+    origin: TextOrigin,
     seeded: u32,
 ) IsolatedApplication {
     const Context = @TypeOf(driver);
@@ -1163,6 +1345,8 @@ pub fn typedApplication(
         .deinit_fn = adapters.deinit,
         .parent_scope = parent_scope,
         .home = home,
+        .captured = captured,
+        .origin = origin,
         .seeded = seeded,
         .provenance = .boundary,
     };
@@ -1180,6 +1364,8 @@ const ApplicationFrame = struct {
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
+    captured: ?env.EnvironmentView,
+    origin: TextOrigin,
     mode: ApplicationMode,
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
@@ -1273,7 +1459,13 @@ comptime {
     // across nested source execution. Keeping that tagged state in the frame
     // makes replay-vs-dispatch ownership unrepresentable rather than relying
     // on correlated Unit fields.
-    if (@sizeOf(Frame) > 104) @compileError("machine frames must remain at most 104 bytes");
+    // The resolution context is a tagged union rather than the second
+    // `*env.Scope` it replaced, and an application frame carries the capture in
+    // force where it launched. Both widen the frame, and both buy the same
+    // thing: a scope and a resolution context can no longer be transposed at a
+    // construction site, and an application cannot resume having silently lost
+    // the capture its quotation resolves against.
+    if (@sizeOf(Frame) > 128) @compileError("machine frames must remain at most 128 bytes");
 }
 pub const IdiomRequest = union(enum) {
     direct: struct { body: *Header, word: u32 },
@@ -2410,13 +2602,23 @@ pub const Machine = struct {
         return self.unit.environment;
     }
     pub fn currentScope(self: *const Machine) *env.Scope {
-        return self.unit.current.?.scope;
+        return self.unit.current.?.scope();
     }
     pub fn sourceCursor(self: *const Machine, header: *Header) spans.SpanArchive.SourceCursor {
         return self.unit.archive.sourceCursor(header);
     }
+    /// The capture in force for the running activation, for the one consumer
+    /// that stores a launch context rather than inheriting one.
+    pub fn currentCapture(self: *const Machine) ?env.EnvironmentView {
+        return self.unit.current.?.resolution().capture();
+    }
+    /// Where the running activation's text came from, for the one consumer
+    /// that stores a launch site rather than inheriting one.
+    pub fn currentTextOrigin(self: *const Machine) TextOrigin {
+        return self.unit.current.?.site.origin;
+    }
     pub fn currentHome(self: *const Machine) ?*modules.ModuleHome {
-        return self.unit.current.?.home;
+        return self.unit.current.?.home();
     }
     fn installDriver(self: *Machine, context: anytype) void {
         const Context = @TypeOf(context);
@@ -3389,8 +3591,13 @@ pub const Machine = struct {
                             try evaluator.callOwned(self.root_header.?);
                         },
                         .register => |*register| {
-                            const scope = evaluator.unit.current.?.scope;
-                            const home = evaluator.unit.current.?.home;
+                            // Loaded module text looks names up like session
+                            // code but constructs like a library: a `@defm`
+                            // inside it captures nothing.
+                            const site = ExecutionSite.foreignSource(
+                                evaluator.unit.current.?.scope(),
+                                evaluator.unit.current.?.home(),
+                            );
                             heap.incRef(self.root_header.?);
                             const preserves_caller = switch (register.request.continuation) {
                                 .replay, .dispatch => true,
@@ -3419,9 +3626,7 @@ pub const Machine = struct {
                             evaluator.unit.current = .{
                                 .code = self.root_header.?,
                                 .ip = 0,
-                                .scope = scope,
-                                .resolution_scope = scope,
-                                .home = home,
+                                .site = site,
                                 .traced_word = no_word,
                             };
                         },
@@ -4308,8 +4513,7 @@ pub const Machine = struct {
             std.debug.assert(frame.* == .application);
             frame.application.selection.selectBorrowed(quotation);
         }
-        const scope = self.unit.current.?.scope;
-        const home = self.unit.current.?.home;
+        const site = ExecutionSite.inheriting(self.unit.current.?, self.unit.current.?.scope());
         const inherited_trace = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
@@ -4317,9 +4521,7 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = quotation,
             .ip = 0,
-            .scope = scope,
-            .resolution_scope = scope,
-            .home = home,
+            .site = site,
             .traced_word = inherited_trace,
             .effect_tail = effect_tail,
             .application_tail = application_tail,
@@ -4503,6 +4705,8 @@ pub const Machine = struct {
             .deinit_fn = application.deinit_fn,
             .parent_scope = application.parent_scope,
             .home = application.home,
+            .captured = application.captured,
+            .origin = application.origin,
             .mode = switch (launch) {
                 .in_place => .{ .in_place = base },
                 .isolated => .{ .isolated = .{
@@ -4526,9 +4730,12 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = application.quotation,
             .ip = 0,
-            .scope = child orelse application.parent_scope,
-            .resolution_scope = child orelse application.parent_scope,
-            .home = application.home,
+            .site = .resumed(
+                child orelse application.parent_scope,
+                application.home,
+                application.captured,
+                application.origin,
+            ),
             .traced_word = inherited_trace,
             .application_tail = provenance_target orelse application_index,
             .application_selection = if (select_initial) provenance_target else null,
@@ -4582,7 +4789,15 @@ pub const Machine = struct {
         };
         errdefer candidate.deinit();
         const home = candidate.executionHome(self.unit.module_access);
-        const generation_scope = candidate.executionScope(self.unit.module_access);
+        // The Session root, never the enclosing chain: a nested construction
+        // captures the same environment a top-level one does, so a registered
+        // inner image cannot retain its enclosing module's private authority.
+        // Loaded module source captures nothing at all, which is what keeps a
+        // library's behavior independent of the session that loaded it.
+        var capture = candidate.captureCursor(
+            self.unit.current.?.site.constructionSource(self.unit.environment),
+        );
+        errdefer capture.deinit();
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
@@ -4600,11 +4815,10 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = quotation,
             .ip = 0,
-            .scope = generation_scope,
-            .resolution_scope = generation_scope,
-            .home = home,
+            .site = .image(home, self.unit.module_access),
             .traced_word = no_word,
         };
+        return self.startDriver(ModuleCaptureDriver{ .cursor = .init(capture) });
     }
     pub fn executeWord(self: *Machine, word: u32) MachineError!void {
         self.unit.active_word = .plain(word);
@@ -4710,8 +4924,7 @@ pub const Machine = struct {
         var owned = owned_application;
         const application = owned.borrow();
         const word = self.unit.active_word;
-        const home = self.currentHome().?;
-        const scope = home.scope(self.unit.module_access);
+        const site = ExecutionSite.image(self.currentHome().?, self.unit.module_access);
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(quotation);
             owned.retire(self.releaseDomain(), self.unit.allocator);
@@ -4732,9 +4945,7 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = quotation,
             .ip = 0,
-            .scope = scope,
-            .resolution_scope = scope,
-            .home = home,
+            .site = site,
             .traced_word = no_word,
         };
     }
@@ -4750,8 +4961,8 @@ pub const Machine = struct {
         self: *Machine,
         quotation: *Header,
     ) error{OutOfMemory}!void {
-        const parent_scope = self.unit.current.?.scope;
-        const home = self.unit.current.?.home;
+        const parent_scope = self.unit.current.?.scope();
+        const invoker = self.unit.current.?;
         const word = self.unit.active_word;
         const child = env.Scope.createLazy(self.unit.allocator, parent_scope) catch {
             self.releaseDomain().releaseHeader(quotation);
@@ -4776,9 +4987,7 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = quotation,
             .ip = 0,
-            .scope = child,
-            .resolution_scope = child,
-            .home = home,
+            .site = .inheriting(invoker, child),
             .traced_word = no_word,
         };
     }
@@ -4872,9 +5081,7 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
     unit.current = .{
         .code = code,
         .ip = 0,
-        .scope = unit.lexicalScope(),
-        .resolution_scope = unit.lexicalScope(),
-        .home = null,
+        .site = .root(unit),
         .traced_word = no_word,
     };
 }
@@ -5405,7 +5612,7 @@ const QualifiedRegistrationDriver = struct {
 
 fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     self.unit.active_word = resolved.trace_word;
-    const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home;
+    const cross_home = resolved.home != null and resolved.home != self.unit.current.?.home();
     const cross_home_effect = if (cross_home) resolved.lease.effect else null;
     var check: ?EffectCheck = if (cross_home) switch (resolved.lease.binding) {
         // A native module word always carries a declared effect, so a missing
@@ -5534,21 +5741,18 @@ pub const ResolutionCursor = struct {
         qualified_export,
         scope,
         direct,
-        uses,
-        used_acquire,
-        used_export,
+        captured,
         core,
         complete,
     };
-    /// The phases are sequential and all but two of their cursors are
-    /// mutually exclusive, so they share one payload instead of each holding a
-    /// permanently reserved field. Resolving a plain word used to cost the
-    /// width of every resolution path at once — dotted-name splitting,
-    /// registry acquisition, use-order walking, and qualified export lookup —
-    /// though it touches two of them. `use_shape` and `generation` stay
-    /// outside the payload because they deliberately outlive the cursor that
-    /// produced them: a shape lease spans the whole `uses` scan, and a
-    /// generation lease is handed to the completed resolution.
+    /// The phases are sequential and their cursors are mutually exclusive, so
+    /// they share one payload instead of each holding a permanently reserved
+    /// field. Resolving a plain word used to cost the width of every
+    /// resolution path at once — dotted-name splitting, registry acquisition,
+    /// and qualified export lookup — though it touches two of them.
+    /// `generation` stays outside the payload because it deliberately
+    /// outlives the cursor that produced it: the lease is handed to the
+    /// completed resolution.
     const Work = union(enum) {
         none,
         dot: intern.LastDotCursor,
@@ -5585,8 +5789,10 @@ pub const ResolutionCursor = struct {
     prefix: ?intern.ModuleName = null,
     export_name: ?intern.BindingName = null,
     scope: ?*env.Scope,
-    use_shape: ?env.ShapeLease = null,
-    use_ordinal: usize = 0,
+    /// The construction environment of the image this activation belongs to,
+    /// consulted once after its chain and before core. Cleared when consulted
+    /// so the walk cannot revisit it.
+    captured: ?env.EnvironmentView,
     generation: ?modules.GenerationLease = null,
 
     pub fn init(evaluator: *Machine, word: u32) ResolutionCursor {
@@ -5596,17 +5802,17 @@ pub const ResolutionCursor = struct {
             .registry = evaluator.unit.inherited.registry,
             .module_access = evaluator.unit.module_access,
             .core = evaluator.unit.environment.coreView(),
-            .current_home = evaluator.unit.current.?.home,
+            .current_home = evaluator.unit.current.?.home(),
             .word = word,
             .spelling = spelling,
             .work = .{ .dot = intern.lastDotCursor(spelling) },
-            .scope = evaluator.unit.current.?.resolution_scope,
+            .scope = evaluator.unit.current.?.resolution().chain(),
+            .captured = evaluator.unit.current.?.resolution().capture(),
         };
     }
 
     pub fn deinit(self: *ResolutionCursor) void {
         self.work.deinit();
-        if (self.use_shape) |*shape| shape.deinit();
         if (self.generation) |*lease| lease.deinit();
         self.* = undefined;
     }
@@ -5633,10 +5839,12 @@ pub const ResolutionCursor = struct {
         };
     }
 
+    /// A qualified reference resolved through a registered generation. It is
+    /// the only path that hands a generation lease to its resolution, so the
+    /// origin is always the module it named.
     fn generationResult(
         self: *ResolutionCursor,
         lease: env.BindingLease,
-        origin: ResolutionOrigin,
     ) Resolution {
         var generation_lease = self.generation.?;
         self.generation = null;
@@ -5647,7 +5855,7 @@ pub const ResolutionCursor = struct {
             .execution_generation = execution_generation,
             .home = home,
             .trace_word = homeTraceWord(home, lease.traceWord().?),
-            .origin = origin,
+            .origin = .module,
         };
     }
 
@@ -5760,13 +5968,19 @@ pub const ResolutionCursor = struct {
                         break :result .{ .complete = .unresolved };
                     };
                     self.phase = .complete;
-                    break :result .{ .complete = .{ .resolved = self.generationResult(lease, .module) } };
+                    break :result .{ .complete = .{ .resolved = self.generationResult(lease) } };
                 },
             },
             .scope => result: {
                 const current = self.scope orelse {
-                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
-                    self.phase = .core;
+                    if (self.captured) |captured| {
+                        self.captured = null;
+                        self.work = .{ .direct = captured.directLookupCursor(self.word) };
+                        self.phase = .captured;
+                    } else {
+                        self.work = .{ .direct = self.core.directLookupCursor(self.word) };
+                        self.phase = .core;
+                    }
                     break :result .pending;
                 };
                 self.scope = current.parent;
@@ -5779,56 +5993,35 @@ pub const ResolutionCursor = struct {
             .direct => switch (self.work.direct.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
-                    const environment = self.work.direct.shape.environment;
                     self.work.deinit();
                     if (maybe_lease) |lease| {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .resolved = self.directResult(lease) } };
                     }
-                    if (self.registry != null) {
-                        self.use_shape = environment.acquireShape();
-                        self.use_ordinal = 0;
-                        self.phase = .uses;
-                    } else self.phase = .scope;
-                    break :result .pending;
-                },
-            },
-            .uses => result: {
-                const uses = self.use_shape.?.useOrder();
-                const index = resolution_core.usedIndex(uses.len, self.use_ordinal) orelse {
-                    self.use_shape.?.deinit();
-                    self.use_shape = null;
                     self.phase = .scope;
                     break :result .pending;
-                };
-                self.use_ordinal += 1;
-                self.work = .{ .acquisition = self.registry.?.acquireCursor(uses[index]) };
-                self.phase = .used_acquire;
-                break :result .pending;
-            },
-            .used_acquire => switch (self.work.acquisition.advance()) {
-                .pending => .pending,
-                .complete => |maybe_generation| result: {
-                    self.work.deinit();
-                    self.generation = maybe_generation;
-                    if (self.generation) |generation| {
-                        self.work = .{ .export_lookup = generation.resolveCursor(self.word, true) };
-                        self.phase = .used_export;
-                    } else self.phase = .uses;
-                    break :result .pending;
                 },
             },
-            .used_export => switch (self.work.export_lookup.advance()) {
+            .captured => switch (self.work.direct.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
                     self.work.deinit();
                     if (maybe_lease) |lease| {
                         self.phase = .complete;
-                        break :result .{ .complete = .{ .resolved = self.generationResult(lease, .used) } };
+                        // A captured binding is a copy of a top-level one, so
+                        // it has no module home and is spelled plainly. Only
+                        // the origin distinguishes it, which is what lets
+                        // `which` name the tier a winner came from.
+                        break :result .{ .complete = .{ .resolved = .{
+                            .lease = lease,
+                            .execution_generation = null,
+                            .home = null,
+                            .trace_word = .plain(self.word),
+                            .origin = .captured,
+                        } } };
                     }
-                    self.generation.?.deinit();
-                    self.generation = null;
-                    self.phase = .uses;
+                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
+                    self.phase = .core;
                     break :result .pending;
                 },
             },
@@ -5858,25 +6051,19 @@ pub const ResolutionCursor = struct {
 
 pub const ShadowProgress = poll_api.Progress([]intern.TraceWord);
 pub const ShadowCursor = struct {
-    const Phase = enum { dot, scope, direct, uses, acquire, export_name, core, materialize, complete };
+    const Phase = enum { dot, scope, direct, captured, core, materialize, complete };
     /// The same reservation `ResolutionCursor.Work` removes, for the same
-    /// reason: these phase cursors are mutually exclusive, and `use_shape` and
-    /// `generation` are the two that deliberately outlive the phase that
-    /// opened them. The walk itself is not shared with that cursor — this one
-    /// records every hit and keeps going, where resolution stops at the first
-    /// and takes ownership of it.
+    /// reason: these phase cursors are mutually exclusive. The walk itself is
+    /// not shared with that cursor — this one records every hit and keeps
+    /// going, where resolution stops at the first and takes ownership of it.
     const Work = union(enum) {
         none,
         dot: intern.DotCursor,
         direct: env.DirectLookupCursor,
-        acquisition: modules.Registry.AcquireCursor,
-        export_lookup: modules.ModuleResolveCursor,
 
         fn deinit(self: *Work) void {
             switch (self.*) {
-                .acquisition => |*cursor| cursor.deinit(),
                 .direct => |*cursor| cursor.deinit(),
-                .export_lookup => |*cursor| cursor.deinit(),
                 .none, .dot => {},
             }
             self.* = .none;
@@ -5884,15 +6071,12 @@ pub const ShadowCursor = struct {
     };
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
-    registry: ?*modules.Registry,
     core: env.EnvironmentView,
     word: u32,
     phase: Phase = .dot,
     work: Work,
     scope: ?*env.Scope,
-    use_shape: ?env.ShapeLease = null,
-    use_ordinal: usize = 0,
-    generation: ?modules.GenerationLease = null,
+    captured: ?env.EnvironmentView,
     current_home: ?*modules.ModuleHome,
     search: resolution_core.Search = .searching,
     found: poll_api.ChunkList(intern.TraceWord),
@@ -5904,19 +6088,17 @@ pub const ShadowCursor = struct {
         return .{
             .allocator = evaluator.unit.allocator,
             .releases = evaluator.releaseDomain(),
-            .registry = evaluator.unit.inherited.registry,
             .core = evaluator.unit.environment.coreView(),
-            .current_home = evaluator.unit.current.?.home,
+            .current_home = evaluator.unit.current.?.home(),
             .word = word,
             .work = .{ .dot = intern.dotCursor(intern.get(word)) },
-            .scope = evaluator.unit.current.?.resolution_scope,
+            .scope = evaluator.unit.current.?.resolution().chain(),
+            .captured = evaluator.unit.current.?.resolution().capture(),
             .found = .init(evaluator.unit.allocator),
         };
     }
     pub fn deinit(self: *ShadowCursor) void {
         self.work.deinit();
-        if (self.use_shape) |*shape| shape.deinit();
-        if (self.generation) |*lease| lease.deinit();
         if (self.output) |output| self.allocator.free(output);
         self.found.retire(self.releases);
         self.* = undefined;
@@ -5950,8 +6132,14 @@ pub const ShadowCursor = struct {
             },
             .scope => result: {
                 const current = self.scope orelse {
-                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
-                    self.phase = .core;
+                    if (self.captured) |captured| {
+                        self.captured = null;
+                        self.work = .{ .direct = captured.directLookupCursor(self.word) };
+                        self.phase = .captured;
+                    } else {
+                        self.work = .{ .direct = self.core.directLookupCursor(self.word) };
+                        self.phase = .core;
+                    }
                     break :result .pending;
                 };
                 self.scope = current.parent;
@@ -5964,7 +6152,6 @@ pub const ShadowCursor = struct {
             .direct => switch (self.work.direct.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
-                    const environment = self.work.direct.shape.environment;
                     self.work.deinit();
                     if (maybe_lease) |loaded| {
                         var lease = loaded;
@@ -5981,54 +6168,21 @@ pub const ShadowCursor = struct {
                         else
                             try self.record(.plain(self.word), .direct);
                     }
-                    if (self.registry != null) {
-                        self.use_shape = environment.acquireShape();
-                        self.use_ordinal = 0;
-                        self.phase = .uses;
-                    } else self.phase = .scope;
-                    break :result .pending;
-                },
-            },
-            .uses => result: {
-                const uses = self.use_shape.?.useOrder();
-                const index = resolution_core.usedIndex(uses.len, self.use_ordinal) orelse {
-                    self.use_shape.?.deinit();
-                    self.use_shape = null;
                     self.phase = .scope;
                     break :result .pending;
-                };
-                self.use_ordinal += 1;
-                self.work = .{ .acquisition = self.registry.?.acquireCursor(uses[index]) };
-                self.phase = .acquire;
-                break :result .pending;
-            },
-            .acquire => switch (self.work.acquisition.advance()) {
-                .pending => .pending,
-                .complete => |maybe_generation| result: {
-                    self.work.deinit();
-                    self.generation = maybe_generation;
-                    if (self.generation) |generation| {
-                        self.work = .{ .export_lookup = generation.resolveCursor(self.word, true) };
-                        self.phase = .export_name;
-                    } else self.phase = .uses;
-                    break :result .pending;
                 },
             },
-            .export_name => switch (self.work.export_lookup.advance()) {
+            .captured => switch (self.work.direct.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
                     self.work.deinit();
                     if (maybe_lease) |loaded| {
                         var lease = loaded;
                         defer lease.deinit();
-                        try self.record(
-                            .moduleLocal(self.generation.?.name(), lease.traceWord().?),
-                            .used,
-                        );
+                        try self.record(.plain(self.word), .captured);
                     }
-                    self.generation.?.deinit();
-                    self.generation = null;
-                    self.phase = .uses;
+                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
+                    self.phase = .core;
                     break :result .pending;
                 },
             },
@@ -6072,16 +6226,26 @@ fn scheduleWord(
     resolved_home: ?*modules.ModuleHome,
     effect: ?env.Effect,
 ) MachineError!void {
-    const scope = if (resolved_home) |home| home.scope(self.unit.module_access) else self.unit.current.?.scope;
-    const home = resolved_home orelse self.unit.current.?.home;
-    // A module word resolves against its home. A core or prelude word
-    // resolves against the lexical chain it was defined in — not the module
-    // body that happens to be calling it, which is what let a module export
-    // named like a core word reach inside the prelude.
-    const resolution_scope = if (resolved_home) |generation|
-        generation.scope(self.unit.module_access)
+    const scope = if (resolved_home) |home|
+        home.scope(self.unit.module_access)
     else
-        self.unit.lexicalScope();
+        self.unit.current.?.scope();
+    const home = resolved_home orelse self.unit.current.?.home();
+    // A module word resolves against its home and that image's captured
+    // construction environment. A core or prelude word resolves against the
+    // lexical chain it was defined in — not the module body that happens to be
+    // calling it, which is what let a module export named like a core word
+    // reach inside the prelude. Reached *from* module or captured code it
+    // resolves in that same capture, so a module's behavior is fixed however
+    // deep the call goes and no quotation has to carry an environment.
+    const resolution: ResolutionContext = if (resolved_home) |generation| .{ .image = .{
+        .scope = generation.scope(self.unit.module_access),
+        .captured = generation.capturedEnvironment(self.unit.module_access),
+    } } else switch (self.unit.current.?.resolution()) {
+        .session => .{ .session = self.unit.lexicalScope() },
+        .image => |image| .{ .captured = image.captured },
+        .captured => |captured| .{ .captured = captured },
+    };
     if (resolved_home) |generation| try self.unit.pinGeneration(generation);
     var check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
     var effect_tail = self.replaceTailEffectCandidate(body);
@@ -6100,9 +6264,17 @@ fn scheduleWord(
     self.unit.current = .{
         .code = body,
         .ip = 0,
-        .scope = scope,
-        .resolution_scope = resolution_scope,
-        .home = home,
+        .site = .{
+            .scope = scope,
+            .resolution = resolution,
+            .home = home,
+            // A word's body constructs the way its own text does: a module
+            // word's from its image, anything homeless from its caller.
+            .origin = if (resolved_home) |generation|
+                generation.textOrigin(self.unit.module_access)
+            else
+                self.unit.current.?.site.origin,
+        },
         .traced_word = word,
         .effect_tail = effect_tail,
         .application_tail = application_tail,
@@ -6181,6 +6353,8 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                     .deinit_fn = continuation.deinit_fn,
                     .parent_scope = continuation.parent_scope,
                     .home = continuation.home,
+                    .captured = continuation.captured,
+                    .origin = continuation.origin,
                     .seeded = step.seeded,
                     .provenance = .boundary,
                 }, launch, continuation.traced_word);
@@ -6364,7 +6538,7 @@ const StateAcquireDriver = struct {
             // currency of the invoking generation is re-established here as
             // well: old code never publishes over a newer representation.
             self.checked = true;
-            const home = evaluator.unit.current.?.home.?;
+            const home = evaluator.unit.current.?.home().?;
             if (!modules.homeIsCurrent(home, evaluator.unit.module_access))
                 return evaluator.fail(.domain, "a replaced module generation cannot publish state");
         }
@@ -6534,6 +6708,28 @@ fn advanceRegistration(
     }
     return .yielded;
 }
+
+/// Drives one construction-time environment capture. The boundary is already
+/// open and the body activation already installed when this starts, so the
+/// driver runs to completion before the body's first instruction: the image
+/// owns a complete snapshot before any definition can resolve against it. A
+/// failure or cancellation here unwinds the construction boundary exactly as a
+/// failing body does, leaving no image, no registration, and every prior
+/// top-level definition unchanged.
+const ModuleCaptureDriver = struct {
+    pub const address_stable_driver = {};
+    cursor: heap.Owned(env.CaptureCursor),
+    pub fn advance(evaluator: *Machine, self: *ModuleCaptureDriver) MachineError!WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (try self.cursor.borrowMut().advance()) {
+            .pending => {},
+            .complete => return .completed,
+        };
+        return .yielded;
+    }
+    pub const ownership: heap.DriverOwnership = .fields;
+};
 
 const ModuleRegisterDriver = struct {
     pub const address_stable_driver = {};

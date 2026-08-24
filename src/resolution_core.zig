@@ -1,12 +1,12 @@
 //! Pure name-resolution precedence decisions.
 //!
 //! The shell materializes binding and generation leases. This core classifies
-//! the first candidate as the winner, every later candidate as a shadow, and
-//! defines the single reverse-use traversal used by all resolution surfaces.
+//! the first candidate as the winner and every later candidate as a shadow,
+//! which is the one precedence decision every resolution surface shares.
 
 const intern = @import("intern.zig");
 
-pub const Origin = enum { direct, used, module, core };
+pub const Origin = enum { direct, module, captured, core };
 
 pub const Candidate = struct {
     trace_word: intern.TraceWord,
@@ -39,9 +39,4 @@ pub fn consider(before: Search, candidate: Candidate) Decision {
             .command = .{ .shadow = candidate },
         },
     };
-}
-
-pub fn usedIndex(count: usize, ordinal: usize) ?usize {
-    if (ordinal >= count) return null;
-    return count - ordinal - 1;
 }

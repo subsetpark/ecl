@@ -697,7 +697,6 @@ pub const Session = enum(usize) {
         var visible = reflection.VisibleNameCursor.init(
             root,
             core.environment.coreView(),
-            &core.registry,
         );
         defer visible.deinit();
         while (true) switch (visible.advance()) {

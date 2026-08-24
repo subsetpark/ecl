@@ -3,10 +3,8 @@ const std = @import("std");
 const heap = @import("heap.zig");
 const env = @import("env.zig");
 const intern = @import("intern.zig");
-const modules = @import("modules.zig");
 const poll = @import("poll.zig");
 const printer = @import("print.zig");
-const resolution_core = @import("resolution_core.zig");
 const value = @import("value.zig");
 
 pub const Action = union(enum) {
@@ -34,43 +32,20 @@ pub const VisibleNameCursor = struct {
         cursor: env.NameCursor,
         after: AfterEnvironment,
     };
-    const UsesState = struct {
-        shape: env.ShapeLease,
-        ordinal: usize,
-        after: AfterEnvironment,
-    };
-    const AcquireState = struct {
-        shape: env.ShapeLease,
-        ordinal: usize,
-        after: AfterEnvironment,
-        cursor: modules.Registry.AcquireCursor,
-    };
-    const ExportState = struct {
-        shape: env.ShapeLease,
-        ordinal: usize,
-        after: AfterEnvironment,
-        generation: modules.GenerationLease,
-        cursor: modules.ModulePublicNameCursor,
-    };
     const Phase = union(enum) {
         scopes: struct { current: ?*env.Scope },
         direct: DirectState,
-        uses: UsesState,
-        acquire: AcquireState,
-        exports: ExportState,
         core: env.NameCursor,
         complete,
     };
 
     retained_scope: ?*env.Scope,
     core: env.EnvironmentView,
-    registry: ?*const modules.Registry,
     phase: Phase,
 
     pub fn init(
         root: VisibleNameRoot,
         core: env.EnvironmentView,
-        registry: ?*const modules.Registry,
     ) VisibleNameCursor {
         return switch (root) {
             .scope => |scope| result: {
@@ -78,14 +53,12 @@ pub const VisibleNameCursor = struct {
                 break :result .{
                     .retained_scope = scope,
                     .core = core,
-                    .registry = registry,
                     .phase = .{ .scopes = .{ .current = scope } },
                 };
             },
             .environment => |environment| .{
                 .retained_scope = null,
                 .core = core,
-                .registry = registry,
                 .phase = .{ .direct = .{
                     .cursor = environment.nameCursor(),
                     .after = .core,
@@ -98,16 +71,6 @@ pub const VisibleNameCursor = struct {
         switch (self.phase) {
             .scopes, .complete => {},
             .direct => |*state| state.cursor.deinit(),
-            .uses => |*state| state.shape.deinit(),
-            .acquire => |*state| {
-                state.cursor.deinit();
-                state.shape.deinit();
-            },
-            .exports => |*state| {
-                state.cursor.deinit();
-                state.generation.deinit();
-                state.shape.deinit();
-            },
             .core => |*cursor| cursor.deinit(),
         }
         if (self.retained_scope) |scope| scope.retire();
@@ -125,18 +88,9 @@ pub const VisibleNameCursor = struct {
         self: *VisibleNameCursor,
         state: *DirectState,
     ) void {
-        const current = state.cursor.shape.environment;
         const after = state.after;
         state.cursor.deinit();
-        if (self.registry == null) {
-            self.continueAfter(after);
-            return;
-        }
-        self.phase = .{ .uses = .{
-            .shape = current.acquireShape(),
-            .ordinal = 0,
-            .after = after,
-        } };
+        self.continueAfter(after);
     }
 
     fn publicEntry(entry: env.NameEntry) VisibleNameProgress {
@@ -168,57 +122,6 @@ pub const VisibleNameCursor = struct {
                 .item => |entry| publicEntry(entry),
                 .complete => result: {
                     self.finishEnvironment(state);
-                    break :result .pending;
-                },
-            },
-            .uses => |*state| result: {
-                const uses = state.shape.useOrder();
-                const index = resolution_core.usedIndex(uses.len, state.ordinal) orelse {
-                    const after = state.after;
-                    state.shape.deinit();
-                    self.continueAfter(after);
-                    break :result .pending;
-                };
-                self.phase = .{ .acquire = .{
-                    .shape = state.shape,
-                    .ordinal = state.ordinal + 1,
-                    .after = state.after,
-                    .cursor = self.registry.?.acquireCursor(uses[index]),
-                } };
-                break :result .pending;
-            },
-            .acquire => |*state| switch (state.cursor.advance()) {
-                .pending => .pending,
-                .complete => |maybe_generation| result: {
-                    state.cursor.deinit();
-                    if (maybe_generation) |lease| {
-                        var generation = lease;
-                        self.phase = .{ .exports = .{
-                            .shape = state.shape,
-                            .ordinal = state.ordinal,
-                            .after = state.after,
-                            .cursor = generation.publicNameCursor(),
-                            .generation = generation,
-                        } };
-                    } else self.phase = .{ .uses = .{
-                        .shape = state.shape,
-                        .ordinal = state.ordinal,
-                        .after = state.after,
-                    } };
-                    break :result .pending;
-                },
-            },
-            .exports => |*state| switch (state.cursor.advance()) {
-                .pending => .pending,
-                .item => |name| .{ .item = name },
-                .complete => result: {
-                    state.cursor.deinit();
-                    state.generation.deinit();
-                    self.phase = .{ .uses = .{
-                        .shape = state.shape,
-                        .ordinal = state.ordinal,
-                        .after = state.after,
-                    } };
                     break :result .pending;
                 },
             },

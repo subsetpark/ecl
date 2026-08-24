@@ -333,7 +333,12 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-module.ecl",
-        "(1 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm " ++
+        // One top-level binding before any construction, so every `@defm`
+        // below captures a non-empty Session environment: an empty capture
+        // takes an early exit and never allocates its name map, its copied
+        // cell, or its published shape.
+        "(7) 'captured def " ++
+            "(1 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm " ++
             "'allocation-module.get 'get import get pop 'short 'allocation-module alias short.get pop " ++
             "(2 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm get pop " ++
             "(((dup) 'f def) 'bad @defm) @attempt pop " ++

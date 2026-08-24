@@ -56,8 +56,8 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
     try evaluator.require(2);
     const private = mode == .defp;
     const scope = evaluator.currentScope();
-    const module_root = scope.kind() == .module_root;
-    if (private and !module_root) return evaluator.fail(.domain, "defp/setp are legal only in a module root");
+    if (private and scope.publisher() != .module)
+        return evaluator.fail(.domain, "defp/setp are legal only in a module root");
     const name = try evaluator.popSymbol();
     var item = try evaluator.popValue();
     defer item.deinit();
@@ -262,26 +262,25 @@ const DefineDriver = struct {
             },
             .publish => {
                 const private = self.mode == .defp;
-                const module_root = self.scope.kind() == .module_root;
                 const name = self.binding_name.?;
                 const visibility: env.Visibility = if (private) .private else .public;
-                if (self.publisher == null) self.publisher = .init(if (module_root)
-                    try self.scope.publishModuleCursor(name, .{ .word = .{
+                if (self.publisher == null) self.publisher = .init(switch (self.scope.publisher()) {
+                    .module => |module| try module.cursor(name, .{ .word = .{
                         .body = env.quotation(self.item.?.borrow().list) orelse
                             return evaluator.fail(.domain, "definition body has an invalid heap representation"),
                         .source = if (self.source) |*source| source.borrow() else null,
                         .visibility = visibility,
                         .effect = self.annotation.borrow().effect,
                         .doc = self.annotation.borrow().doc_value,
-                    } })
-                else
-                    try self.scope.publishTopCursor(name, .{ .word = .{
+                    } }),
+                    .top => |top| try top.cursor(name, .{ .word = .{
                         .body = env.quotation(self.item.?.borrow().list) orelse
                             return evaluator.fail(.domain, "definition body has an invalid heap representation"),
                         .source = if (self.source) |*source| source.borrow() else null,
                         .effect = self.annotation.borrow().effect,
                         .doc = self.annotation.borrow().doc_value,
-                    } }));
+                    } }),
+                });
                 switch (self.publisher.?.borrowMut().advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Frozen => return evaluator.fail(

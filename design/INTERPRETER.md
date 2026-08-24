@@ -164,14 +164,36 @@ primitives, operationalized as two rules:
 
 ## Environments and late binding
 
-- **Deep binding** (chain search: child → session → core; module → its
-  uses → core). Chains are structurally short because quotations capture
-  nothing.
+- **Deep binding** (chain search: child → session → core; module → core).
+  Chains are structurally short because quotations capture nothing. There is
+  no `use`/import-order tier: the environment carried a per-shape use list and
+  three resolution phases for one, but no production path ever published an
+  entry, so every plain-word lookup walked a permanently empty slice and every
+  shape clone copied it. The representation, its resumable publisher, and the
+  matching phases in `ResolutionCursor`, `ShadowCursor`, and
+  `reflection.VisibleNameCursor` are gone; qualified lookup and `import` are
+  unaffected, because neither ever used that tier.
 - **A binding resolves in the chain it was defined against, with no
-  exceptions.** An `Eval` frame carries two scopes, not one. `scope` is where
-  the body's own definitions land and what it hands to any quotation it
-  invokes on a caller's behalf; `resolution_scope` is where the body's *word
-  references* resolve. `scheduleWord` sets the second to the module home for a
+  exceptions.** An `Eval` frame carries a scope and a *resolution context*,
+  and they are deliberately different types: `scope` is where the body's own
+  definitions land and what it hands to any quotation it invokes on a caller's
+  behalf, while `ResolutionContext` is where the body's *word references*
+  resolve. Both live in one `ExecutionSite` alongside `home`, so the
+  correlated triple travels as a single value and no construction site can set
+  two of the three. Eight sites used to restate the correlation by hand with
+  two same-typed `*env.Scope` pointers, so nothing stopped one from being
+  written where the other belonged; each now names `ExecutionSite.root`,
+  `.image`, `.inheriting`, or `.resumed`. `home` and `resolution` are
+  correlated but not redundant: a homeless word called from module code
+  inherits the caller's home, because that is whose privates and durable state
+  it may still reach, while resolving in that image's capture — collapsing them
+  would break `within` and private lookup inside prelude words a module calls.
+  The context is exhaustive:
+  `session` walks the live lexical chain then core, `image` walks a module's
+  own definitions then the environment its construction captured then core,
+  and `captured` walks that capture then core. `ResolutionContext.inherit` is
+  the single rule every nested activation uses, and `scheduleWord` sets the
+  context to the module home for a
   homed binding and to the unit's lexical scope — the session root over core —
   for a primitive or embedded prelude definition. Before that split, a
   homeless binding inherited whichever environment happened to be executing,
@@ -227,10 +249,42 @@ primitives, operationalized as two rules:
   and compiled form. Omitting metadata clears it in the new
   snapshot; extant leases retain the old snapshot's body and metadata
   until release. Every future resolution heals by construction, so late
-  binding needs zero invalidation. Shape changes (name create/delete,
-  `uses` edits) bump a per-env generation. **The iron law for any future
-  cache: hold the cell, re-read its interior every execution; never cache
-  a resolution.**
+  binding needs zero invalidation. Creating a name publishes a new immutable
+  shape and bumps `shapeGeneration`; rebinding an existing name replaces its
+  cell in place and deliberately does not, which is why that counter is named
+  for shapes and is not a "has anything changed" signal. **The iron law for
+  any future cache: hold the cell, re-read its interior every execution;
+  never cache a resolution.**
+- **A module image owns its construction environment, and a quotation owns
+  nothing.** `ModuleImage` holds a second `Environment` beside its own: the
+  Session bindings copied once, before the body ran. Capture is an optimistic
+  resumable pass — read the source's `mutationEpoch`, copy under ordinary
+  reader leases, commit only if the epoch is unchanged — because holding a live
+  Session's publication lock across a user-sized copy is not available. A
+  publication landing mid-pass therefore yields a complete before-or-after
+  snapshot, and interference tears the partial destination down through the
+  ordinary `Environment.TeardownCursor` and restarts. One shape is published at
+  the end rather than one per name: the destination is unreachable until its
+  image is, so a per-name publication would make capture quadratic in the
+  session's name count for no observer's benefit. The image retires the capture
+  as its own bounded teardown phase, so a long session's binding history does
+  not outlive the images that copied it.
+  What captures is decided by `ExecutionSite.origin`, not by who is running:
+  `program` text captures the Session, `foreign` text — anything the loader
+  executes — captures nothing. The bit propagates through the images such text
+  constructs, because a module defined inside a loaded module is as foreign as
+  its parent, and it is recorded on `ModuleImage` rather than re-decided per
+  call. Without it an embedded standard module captured whatever the session
+  had defined before its first reference: shadowing one prelude-internal name
+  broke `table.from-rows` when `table` had not yet loaded and left it working
+  when it had.
+  The alternative — a closure environment on every quotation — was rejected:
+  it would put an environment on the most common value in the language, make
+  `'m.f body` something other than plain data, and turn the value heap's
+  module DAG into a graph. Capture belongs to the image, which is also why
+  every registration and alias of one image shares exactly one, and why
+  `ExecutionSite.inheriting` carries it through `call`, `@attempt`, and every
+  combinator application instead of any quotation carrying it.
 - **Registry:** name → atomically swapped `{env, generation}`;
   re-registration bumps the generation; commit happens only after the
   module body succeeds. The generation counter is the observable form of
