@@ -169,7 +169,7 @@ fn materializeValue(
         1 => .{ .float = @as(f64, @floatFromInt(signedInteger(cursor))) / 8.0 },
         2 => .{ .char = codepoint(cursor.next()) },
         3 => .{ .symbol = try internedId(cursor.next()) },
-        4 => .{ .word = try internedId(cursor.next()) },
+        4 => .{ .word = .{ .name = try internedId(cursor.next()) } },
         5 => materializeList(allocator, releases, cursor, depth - 1, dicts),
         6 => materializeDict(allocator, releases, cursor, depth - 1),
         else => unreachable,

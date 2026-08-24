@@ -150,10 +150,10 @@ const DefineDriver = struct {
                     continue;
                 }
                 const item = list.atUnchecked(self.annotation_candidate.?.borrow(), self.index);
-                if (item == .word and item.word == self.separator) {
+                if (item == .word and item.word.name == self.separator) {
                     if (self.separator_at != null) return malformed(evaluator);
                     self.separator_at = self.index;
-                } else if (item == .word and item.word == self.colon) {
+                } else if (item == .word and item.word.name == self.colon) {
                     if (self.colon_at != null) return malformed(evaluator);
                     self.colon_at = self.index;
                 }
@@ -169,7 +169,7 @@ const DefineDriver = struct {
                         // The after portion is all named slots or exactly the
                         // row token; the before portion never names a row.
                         if (slot == .word and
-                            std.mem.eql(u8, intern.get(slot.word), lexer.row_token) and
+                            std.mem.eql(u8, intern.get(slot.word.name), lexer.row_token) and
                             (self.index <= split or self.effect_end != split + 2))
                             return malformed(evaluator);
                         self.index += 1;
@@ -325,7 +325,7 @@ fn resolveForReflection(
 fn installLookup(evaluator: *Machine, requested: u32) MachineError!void {
     try evaluator.startDriver(LookupDriver{
         .requested = requested,
-        .resolution = .init(machine.ResolutionCursor.init(evaluator, requested)),
+        .resolution = .init(machine.ResolutionCursor.init(evaluator, requested, evaluator.unit.current.?.resolutionScope())),
     });
 }
 const LookupDriver = struct {
@@ -378,7 +378,7 @@ const WhichDriver = struct {
     fn init(evaluator: *Machine, requested: u32) WhichDriver {
         return .{
             .requested = requested,
-            .resolution = .init(machine.ResolutionCursor.init(evaluator, requested)),
+            .resolution = .init(machine.ResolutionCursor.init(evaluator, requested, evaluator.unit.current.?.resolutionScope())),
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
         };
     }
@@ -502,7 +502,7 @@ const SeeDriver = struct {
     fn init(evaluator: *Machine, requested: u32) SeeDriver {
         return .{
             .requested = requested,
-            .resolution = .init(machine.ResolutionCursor.init(evaluator, requested)),
+            .resolution = .init(machine.ResolutionCursor.init(evaluator, requested, evaluator.unit.current.?.resolutionScope())),
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
         };
     }
@@ -595,7 +595,7 @@ const SeeDriver = struct {
                 );
             }
             if (self.annotation_index != effect_count) return .yielded;
-            self.annotation_items.?.borrow()[effect_count] = .{ .word = try intern.intern(":") };
+            self.annotation_items.?.borrow()[effect_count] = .{ .word = .{ .name = try intern.intern(":") } };
             self.annotation_items.?.borrow()[effect_count + 1] = .{
                 .list = env.documentationHeader(document.?),
             };

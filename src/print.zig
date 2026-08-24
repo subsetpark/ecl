@@ -101,7 +101,7 @@ pub const RenderCursor = struct {
                     try self.writeByte(writer, '\'');
                     try self.pushBytes(intern.get(id));
                 },
-                .word => |id| try self.pushBytes(intern.get(id)),
+                .word => |id| try self.pushBytes(intern.get(id.name)),
                 .list => |header| switch (header.kind()) {
                     .leaf_char1, .leaf_char2, .leaf_char4 => {
                         if (self.style == .display and header.length() > display_list_limit) {
@@ -869,12 +869,12 @@ test "canonical printer renders the public value syntax" {
     try expectPrint("inf", .{ .float = std.math.inf(f64) });
     try expectPrint("-inf", .{ .float = -std.math.inf(f64) });
     try expectPrint("'sym", .{ .symbol = sym });
-    try expectPrint("sym", .{ .word = sym });
+    try expectPrint("sym", .{ .word = .{ .name = sym } });
 
     const integers = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
     defer cleanup.releaseValue(integers);
     try expectPrint("[1 2]", integers);
-    const quotation = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .word = plus } });
+    const quotation = try list.fromValues(allocator, &.{ .{ .int = 1 }, .{ .word = .{ .name = plus } } });
     defer cleanup.releaseValue(quotation);
     try expectPrint("(1 +)", quotation);
     const singleton = try list.fromValues(allocator, &.{.{ .int = 3 }});

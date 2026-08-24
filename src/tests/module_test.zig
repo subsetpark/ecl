@@ -115,7 +115,7 @@ const TestEffect = struct {
 
     fn init(allocator: std.mem.Allocator) !TestEffect {
         const marker = try intern.intern("--");
-        const source = try list.fromValuesGeneric(allocator, &.{.{ .word = marker }});
+        const source = try list.fromValuesGeneric(allocator, &.{.{ .word = .{ .name = marker } }});
         return .{ .source = source, .effect = env.ValidatedEffect.parse(source.list, marker).? };
     }
     fn release(self: TestEffect, releases: *heap.ReleaseDomain) void {
@@ -782,7 +782,7 @@ test "env: a replaced interior remains valid only through its binding lease" {
     var scope = environment.sessionRoot(std.testing.allocator);
     defer env.testing.deinitScope(&scope, releases);
     const separator = try intern.intern("--");
-    const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .word = separator }});
+    const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .word = .{ .name = separator } }});
     defer releases.releaseValue(body);
     const document = try list.fromCodepoints(std.testing.allocator, &.{ 'd', 'o', 'c' });
     defer releases.releaseValue(document);
@@ -1062,8 +1062,8 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     var registry = try modules.Registry.init(host.cleanup(), environment);
     defer registry.deinit();
     const effect_value = try list.fromValuesGeneric(allocator, &.{
-        .{ .word = try intern.intern("--") },
-        .{ .word = try intern.intern("n") },
+        .{ .word = .{ .name = try intern.intern("--") } },
+        .{ .word = .{ .name = try intern.intern("n") } },
     });
     defer releases.releaseValue(effect_value);
     const separator = try intern.intern("--");

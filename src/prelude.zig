@@ -47,7 +47,14 @@ pub fn installSource(
     const release_domain = heap.hostDomain(host);
     const environment = building.runtime();
     var diag: reader.Diag = .{};
-    const result = archive.read(source_name, source, &diag) catch |err| switch (err) {
+    // Core alone is the chain for a primitive or an embedded prelude
+    // definition, so every word this text contains carries the core scope.
+    const result = archive.read(
+        source_name,
+        source,
+        &diag,
+        @intFromEnum(environment.coreScopeId()),
+    ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Parse => return error.InvalidPrelude,
     };
@@ -59,9 +66,7 @@ pub fn installSource(
     var root = heap.OwnedValue.init(release_domain, try archive.codeRoot(parsed.values()));
     defer root.deinit();
     const root_header = root.borrow().list;
-    // Core alone is the chain for a primitive or an embedded prelude
-    // definition, so every literal this text contains is labelled against core.
-    archive.absorb(parsed.borrow(), root.borrow(), environment.coreCell().labeller()) catch |err| switch (err) {
+    archive.absorb(parsed.borrow(), root.borrow()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidProvenance => @panic("archive-bound prelude reader produced foreign provenance"),
     };

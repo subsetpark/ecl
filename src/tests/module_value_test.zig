@@ -583,14 +583,13 @@ test "module sources: formatter and standard modules use @defm" {
     try expectStack(&runtime, "\"1.2.0\" \"1.10.0\" pkg.version.less?", "1");
 }
 
-// PENDING: Patch 6 makes an applied quotation resolve at its scope label. A
-// label is a `ScopeId` the module slot owns and reuses
-// across generations, so a quotation that escaped a module follows that module
-// through a reload and errors only when the scope itself retires.
-const labels_pending = false;
+// PENDING: Patch 5 of `word-scope-identifiers` makes a word resolve at its own
+// scope. Flip this to false there; every assertion guarded by it is ticket
+// ecl#4's proof and fails today.
+const scopes_pending = false;
 
 test "module values: a pushed labelled quotation resolves in the image it was written in" {
-    if (labels_pending) return error.SkipZigTest;
+    if (scopes_pending) return error.SkipZigTest;
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     // `(k)` is written inside the module, so it resolves in that image's chain
@@ -601,7 +600,7 @@ test "module values: a pushed labelled quotation resolves in the image it was wr
 }
 
 test "module values: applying a quotation whose image is gone is a domain error" {
-    if (labels_pending) return error.SkipZigTest;
+    if (scopes_pending) return error.SkipZigTest;
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
     // The cell a label names belongs to the image, so a quotation means what it

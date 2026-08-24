@@ -273,8 +273,8 @@ test "long annotation traversal and reflection observe cancellation" {
     const name = try intern.intern("value");
     const items = try allocator.alloc(value.Value, 70_000);
     defer allocator.free(items);
-    @memset(items, .{ .word = name });
-    items[0] = .{ .word = marker };
+    @memset(items, .{ .word = .{ .name = name } });
+    items[0] = .{ .word = .{ .name = marker } };
     const annotation = try list.fromValuesGeneric(allocator, items);
     try runtime.pushOwned(annotation);
     const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
@@ -293,7 +293,7 @@ test "long annotation traversal and reflection observe cancellation" {
     const cancellable_doc = try list.fromCodepoints(allocator, doc_codepoints);
     defer cleanup.releaseValue(cancellable_doc);
     const doc_annotation = try list.fromValuesGeneric(allocator, &.{
-        .{ .word = try intern.intern(":") },
+        .{ .word = .{ .name = try intern.intern(":") } },
         cancellable_doc,
     });
     try doc_runtime.pushOwned(doc_annotation);

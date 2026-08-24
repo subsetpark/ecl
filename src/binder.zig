@@ -175,7 +175,7 @@ pub const LowerCursor = struct {
             .complete => |found| result: {
                 const kind = self.lookup_kind;
                 const matched_id = if (kind == .nested and found != null)
-                    self.walk.topPtr().?.item.word
+                    self.walk.topPtr().?.item.word.name
                 else
                     0;
                 self.lookup = null;
@@ -201,7 +201,7 @@ pub const LowerCursor = struct {
             return switch (frame.item) {
                 .word => |id| result: {
                     self.lookup_kind = .nested;
-                    self.lookup = self.locals.?.rawLookup(@enumFromInt(id));
+                    self.lookup = self.locals.?.rawLookup(@enumFromInt(id.name));
                     break :result .pending;
                 },
                 .list => result: {
@@ -259,7 +259,7 @@ pub const LowerCursor = struct {
         return switch (self.body[self.body_index].value) {
             .word => |id| result: {
                 self.lookup_kind = .top;
-                self.lookup = self.locals.?.rawLookup(@enumFromInt(id));
+                self.lookup = self.locals.?.rawLookup(@enumFromInt(id.name));
                 break :result .pending;
             },
             .list => |header| result: {
@@ -304,7 +304,7 @@ pub const LowerCursor = struct {
                     return .pending;
                 },
                 1 => {
-                    self.atom(.{ .word = self.words[2] });
+                    self.atom(.{ .word = .{ .name = self.words[2] } });
                     self.epilogue_step = 2;
                     return .pending;
                 },
@@ -323,7 +323,7 @@ pub const LowerCursor = struct {
                 self.emit_step = 1;
                 return .pending;
             }
-            self.atom(.{ .word = self.words[1] });
+            self.atom(.{ .word = .{ .name = self.words[1] } });
             self.emit_step = 0;
             self.emit_body_index += 1;
             return .pending;
@@ -393,7 +393,7 @@ pub const LowerCursor = struct {
                         break :result .pending;
                     },
                     1 => {
-                        self.atom(.{ .word = self.words[0] });
+                        self.atom(.{ .word = .{ .name = self.words[0] } });
                         self.name_index = 2;
                         break :result .pending;
                     },

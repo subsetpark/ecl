@@ -487,8 +487,8 @@ fn writeView(item: Value, output: *abi.ValueView) abi.HostStatus {
         },
         .word => |id| .{
             .kind = .word,
-            .bytes_ptr = intern.get(id).ptr,
-            .bytes_len = intern.get(id).len,
+            .bytes_ptr = intern.get(id.name).ptr,
+            .bytes_len = intern.get(id.name).len,
         },
         .list => |header| .{ .kind = .list, .aggregate_len = header.length() },
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
@@ -648,7 +648,7 @@ fn hostScalar(
                 abi.max_guest_scalar_bytes,
             ) catch return .invalid;
             const id = intern.intern(bytes) catch return .out_of_memory;
-            break :item if (scalar.kind == .symbol) .{ .symbol = id } else .{ .word = id };
+            break :item if (scalar.kind == .symbol) .{ .symbol = id } else .{ .word = .{ .name = id } };
         },
         .list, .dict => return .invalid,
         _ => return .invalid,

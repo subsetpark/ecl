@@ -78,16 +78,36 @@ pub const DictPayload = struct {
     hashes: *ListHandle,
 };
 
+/// A word occurrence: its interned name, and the scope its text was written
+/// in. The scope rides here rather than on the enclosing quotation because a
+/// word is the unit that resolves — which is what makes splicing work, since
+/// `cat` copies `Value`s and each token keeps the scope it was written in. It
+/// costs nothing: `Value` is pinned at 16 bytes and the `word` variant used
+/// four of its eight payload bytes.
+pub const WordRef = struct {
+    name: u32,
+    /// `env.ScopeId` as a bare integer, kept untyped here so `value.zig` stays
+    /// free of any dependency on the environment. Zero is "no written-in
+    /// scope", which resolves wherever the word is invoked.
+    scope: u32 = 0,
+};
+
 pub const Value = union(Tag) {
     int: i64,
     float: f64,
     char: u32,
     symbol: u32,
-    word: u32,
+    word: WordRef,
     list: *ListHandle,
     dict: *DictHandle,
     task: *TaskHandle,
     module: *ModuleHandle,
+
+    /// A word with no written-in scope, which is every word not produced by
+    /// the reader: host-built values, error traces, effect markers.
+    pub fn unscopedWord(name: u32) Value {
+        return .{ .word = .{ .name = name } };
+    }
 
     pub fn tag(self: Value) Tag {
         return std.meta.activeTag(self);

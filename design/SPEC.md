@@ -712,19 +712,27 @@ anonymously, be passed as data, and be registered more than once.
   one. The module still cannot reach the session, and everything still arrives
   as a parameter. A label decides one thing only: where a handed-in
   quotation's own words resolve once the module applies it.
-- **A quotation resolves in the scope its text was written in.** A module
-  word may hand `(private-helper)` to `each` and the private still resolves,
-  because the literal was written inside the module; and a module word may
-  accept `(bump)` from its caller and that `bump` resolves in the caller,
-  because the caller wrote it. Neither depends on which activation launched
-  the combinator. A quotation with no written-in scope — one built at run time
-  by `partial`, `cons`, or `compose` — resolves where it is invoked.
-  A label governs *application*, and the five `@` words are not applications:
-  `@attempt`, `@spawn`, `@each`, `@module`, and `@defm` run their quotation in
-  a fresh unit whose chain they establish themselves — a child scope, the
-  session root, or the image being built — and ignore any label the quotation
-  carries. That boundary is what keeps a module body a module body and an
-  `@attempt` body a child scope no matter where their text was written.
+- **A word resolves in the scope its text was written in.** The scope is
+  carried by the word itself, not by the quotation containing it, so it
+  survives every operation that moves code around: `cat` and `compose` splice
+  tokens from two sources into one list and each token keeps the scope it was
+  written in. A module word may hand `(private-helper)` to `each` and the
+  private still resolves, because the literal was written inside the module;
+  a module word may accept `(bump)` from its caller and that `bump` resolves in
+  the caller, because the caller wrote it; and both hold when the stdlib splices
+  the caller's quotation into a seeded one with `with`. Neither depends on which
+  activation launched the combinator. A word with no written-in scope — one a
+  host built, or one appearing in an error trace — resolves where it is invoked.
+  Reading is what assigns a scope, so `load` and `parse` both give the words
+  they produce the scope of the unit that asked for them: `"foo bar" parse call`
+  means what typing `(foo bar)` there would mean.
+  There is no exception for the `@` words. An `@attempt` child's parent is the
+  enclosing scope, so a word written outside still resolves through the chain
+  while one defined inside the child is found first. `@module` and `@defm`
+  differ only because an image's scope has no parent: they stamp the
+  construction body with the image's scope, which is why a bare session name
+  inside a construction body is undefined while a quotation handed in as a
+  *parameter* — a separate value, never inside the body — keeps the caller's.
   What a word *defines* — `def`, `set`, `setp` — still lands in the invoking
   context, which is how `setp` inside a module body binds a module private.
   `def`-ing a quotation therefore makes the *binding* local without re-siting

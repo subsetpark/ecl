@@ -1364,7 +1364,7 @@ fn pushGenericEmpty(evaluator: *Machine) error{OutOfMemory}!void {
 fn effectValue(allocator: std.mem.Allocator, names: []const []const u8) error{OutOfMemory}!Value {
     const forms = try allocator.alloc(Value, names.len);
     defer allocator.free(forms);
-    for (names, 0..) |name, index| forms[index] = .{ .word = try intern.intern(name) };
+    for (names, 0..) |name, index| forms[index] = .{ .word = .{ .name = try intern.intern(name) } };
     return list.fromValuesGeneric(allocator, forms);
 }
 

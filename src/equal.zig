@@ -68,7 +68,11 @@ pub fn matchWithoutStructure(a: Value, b: Value) ?bool {
         .int, .float => unreachable,
         .char => |codepoint| codepoint == b.char,
         .symbol => |id| id == b.symbol,
-        .word => |id| id == b.word,
+        // Two words match when they name the same thing. A word's scope is
+        // resolution metadata, not part of its identity as a value: `(dup)`
+        // written in a module and `(dup)` written at the session are the same
+        // datum, and `match?` has always said so.
+        .word => |reference| reference.name == b.word.name,
         .task => |header| header == b.task,
         // Image identity, never structural traversal: two references to one
         // image match and two constructions never do, and no comparison
@@ -558,7 +562,7 @@ pub fn scalarHash(item: Value) ?u64 {
         .float => |number| numericHash(number),
         .char => |codepoint| mix(0x4348_4152, codepoint),
         .symbol => |id| mix(0x5359_4d42, id),
-        .word => |id| mix(0x574f_5244, id),
+        .word => |id| mix(0x574f_5244, id.name),
         .task => |header| mix(0x5441_534b, @intFromPtr(header)),
         .module => |header| mix(0x4d4f_4455, @intFromPtr(header)),
         .list, .dict => null,
@@ -585,13 +589,13 @@ fn allocationFailureProbe(allocator: std.mem.Allocator) !void {
     const left = try list.fromValuesGeneric(allocator, &.{
         .{ .int = 1 },
         .{ .float = 2.0 },
-        .{ .word = 3 },
+        .{ .word = .{ .name = 3 } },
     });
     defer cleanup.releaseValue(left);
     const right = try list.fromValuesGeneric(allocator, &.{
         .{ .float = 1.0 },
         .{ .int = 2 },
-        .{ .word = 3 },
+        .{ .word = .{ .name = 3 } },
     });
     defer cleanup.releaseValue(right);
     _ = try matchWithAllocator(allocator, left, right);

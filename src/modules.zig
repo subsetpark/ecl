@@ -1593,7 +1593,7 @@ pub const Registry = enum(usize) {
             var iterator = std.mem.tokenizeAny(u8, source, " \t");
             while (iterator.next()) |token| {
                 if (count == tokens.len) return error.OutOfMemory;
-                tokens[count] = .{ .word = try intern.intern(token) };
+                tokens[count] = .{ .word = .{ .name = try intern.intern(token) } };
                 count += 1;
             }
             const owned = try list.fromValuesGeneric(self.allocator, tokens[0..count]);

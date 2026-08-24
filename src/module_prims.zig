@@ -231,7 +231,7 @@ const ImportDriver = struct {
                     if (index == 0 or index + 1 == bytes.len)
                         return evaluator.fail(.domain, "import original must be a qualified word");
                     self.qualified = true;
-                    self.resolution = .init(machine.ResolutionCursor.init(evaluator, self.original));
+                    self.resolution = .init(machine.ResolutionCursor.init(evaluator, self.original, evaluator.unit.current.?.resolutionScope()));
                     continue;
                 },
             };
@@ -256,7 +256,7 @@ const ImportDriver = struct {
             if (self.forwarding_body == null) {
                 self.forwarding_body = .init(try list.fromValuesGeneric(
                     evaluator.allocator(),
-                    &.{.{ .word = self.original }},
+                    &.{.{ .word = .{ .name = self.original } }},
                 ));
                 continue;
             }
@@ -401,7 +401,7 @@ const QualifyDriver = struct {
             ));
             switch (try self.cursor.?.borrowMut().advance()) {
                 .pending => {},
-                .complete => |word| return .{ .output = .{ .word = word } },
+                .complete => |word| return .{ .output = .{ .word = .{ .name = word } } },
             }
         }
         return .yielded;

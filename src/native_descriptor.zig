@@ -217,7 +217,7 @@ const EffectBuild = struct {
                 if (try self.advanceSlot(true)) self.phase = .separator;
             },
             .separator => {
-                self.tokens[self.definition.input_count] = .{ .word = try intern.intern("--") };
+                self.tokens[self.definition.input_count] = .{ .word = .{ .name = try intern.intern("--") } };
                 self.phase = .outputs;
             },
             .outputs => {
@@ -258,7 +258,7 @@ const EffectBuild = struct {
                     self.input_index
                 else
                     @as(usize, self.definition.input_count) + 1 + self.output_index;
-                self.tokens[token_index] = .{ .word = id };
+                self.tokens[token_index] = .{ .word = .{ .name = id } };
                 self.inserter = null;
                 if (input) self.input_index += 1 else self.output_index += 1;
                 break :complete false;

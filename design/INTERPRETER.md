@@ -131,8 +131,8 @@ primitives, operationalized as two rules:
 - **No cycle collector.** Immutable bottom-up construction, words
   resolving by name (never by heap pointer), and no value holding an owning
   pointer into the environment make the value heap a DAG. A quotation's
-  scope label is what that last clause is protecting: it is an
-  `env.ScopeId` into a table the `Env` owns, never a `*Scope`, because an
+  scope is what that last clause is protecting: a word carries an
+  `env.ScopeId` into a registry the `Env` owns, never a `*Scope`, because an
   owning pointer would close a cycle on the very first `def` — Scope →
   Environment → BindingCell → BindingSpec → binding.word → Scope. Perceus
   (PLDI 2021) is explicit that reference counting cannot release cyclic
@@ -201,40 +201,47 @@ primitives, operationalized as two rules:
   `@attempt`'s included. Reading the unit's root instead was the last
   exception to "resolves where it was defined", and switching on `Origin` was
   the approximation that stood in for the found scope before it was recorded.
-  The sealing extends to quotation literals, which is what makes it total. A
-  literal written inside a published body carries a *scope label*: an
-  `env.ScopeId` stamped once at publication and read when the quotation is
-  applied, so `beginApplication` takes the activation's resolution scope from
-  the label instead of from the launching activation. That is the separation a
-  closure would otherwise be needed for — `all?` hands `each` its caller's `q`
-  and `fold` its own `(and)` from one activation, and the two resolve in
-  different chains because the scope travels with the value rather than with
-  the activation. This is the syntactic-closure construction (Bawden & Rees,
-  LFP 1988) in the scope-label form Flatt uses (POPL 2016). A label carries a
-  single scope rather than a scope *set*: ECL's scopes are a chain rooted at
-  core and it has no macro expansion, so the composition of independent,
-  non-hierarchical scope introductions that a set exists to express cannot
-  arise. That reasoning expires if macros ever arrive.
-  A label is an `env.ScopeId`, never a `*Scope`. `Env` owns the registry
-  mapping an id to a nullable scope, because `Env` owns `Scope`; `ModuleSlot`
-  owns the id and reuses it across every published generation of its
-  canonical name, because `modules` owns lifecycle and `env.zig` holds no
-  reference to `modules` and must keep none. Slot-owned ids are why a
-  quotation that escaped a module follows that module through a reload,
-  exactly as `m.f` does — reload is late binding, and an escaped quotation is
-  not the one reference in the language that gets frozen. `ModuleSlot.retire`
-  clears the entry before the embedded `env.Scope` is torn down, so a reader
-  sees the old scope, the new scope, or a definite `retired`, never a dangling
-  pointer; applying a retired quotation is `'domain` rather than a silent
-  fallback to core or to the launcher, because a fallback would change what
-  the quotation's words mean.
-  Nothing extracts a published body, and that is what lets the rule stand
-  without an exception: a label cannot be re-sited if the labelled code cannot
-  be lifted out of its home, so no caller can reach a module private by
-  indexing the nested literals out of a public word's body. The
-  one-binding-kind invariant — a `set` constant is a word whose body is the
-  capture `((value) first)` — is now proven directly on the binding rather
-  than through a reflective word.
+  The sealing extends to every word, which is what makes it total. A word
+  occurrence carries the scope its text was written in — an `env.ScopeId` in
+  four payload bytes the 16-byte `Value` already wasted on the `word` variant —
+  and `dispatch` resolves in that scope's chain rather than in the running
+  activation's. That is the separation a closure would otherwise be needed for:
+  `all?` hands `each` its caller's `q` and `fold` its own `(and)` from one
+  activation, and the two resolve in different chains because the scope travels
+  with each token.
+  Putting the scope on the *identifier* rather than on the enclosing term is
+  Flatt's placement (POPL 2016), applied to Bawden and Rees's construction
+  (LFP 1988). It is the placement that carries the weight, and it is why
+  splicing needs no special case: `cat` copies `Value`s, so `compose` — and
+  every stdlib higher-order word built on `with` — propagates scope for free.
+  A per-quotation key cannot do this; the spliced list is a fresh value and its
+  tokens' origins are gone.
+  ECL takes the placement and not the *sets*. Flatt needs a set per identifier
+  because macro expansion layers scopes, so one identifier ends up carrying
+  several at once and resolution needs largest-subset disambiguation. ECL has
+  no macro expansion and its scopes form a parent chain, so a set of chained
+  scopes is exactly its innermost member and the chain supplies the rest. That
+  reasoning expires if macros ever arrive.
+  Scope ids are never recycled. A word token holds a bare `u32` and takes no
+  reference, so a reused id would let a stale token resolve into an unrelated
+  scope — a silent wrong answer. Ids are issued only for the two roots and for
+  module images, so the space is consumed by registrations and reloads rather
+  than by execution. `Env` owns the registry because it owns `Scope`; `modules`
+  owns the lifecycle, and `env.zig` holds no reference to it. A cell is cleared
+  before the scope's storage is torn down, so a reader sees the old scope, the
+  new one, or a definite retirement, and applying a word whose scope has retired
+  is `'domain` rather than a fallback that would change what it means.
+  Only two constructs stamp. Reading stamps the reading unit's scope, which is
+  the whole of the rule for ordinary code, `load`, and `parse`. `@module` and
+  `@defm` copy the construction body and stamp the copy with the image's scope,
+  because an image's scope has no parent and no chain walk can reach it. The
+  copy is not incidental: a body value is shared, and stamping it in place would
+  make a second `@defm` of the same body re-site the first image's words.
+  `@attempt` stamps nothing — its child's parent is the enclosing scope, so the
+  chain already does the work.
+  Nothing extracts a published body, which is what lets the rule stand without
+  an exception: code cannot be lifted out of its home and re-sited, so no caller
+  reaches a module private by indexing the literals out of a public word's body.
   Before that split, a homeless binding inherited whichever environment
   happened to be executing, so a module exporting a word named like a core one
   reached inside every prelude word that module called: a module defining

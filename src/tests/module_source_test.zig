@@ -1012,14 +1012,13 @@ test "modules: cross-home constant references cross unchecked while declared eff
     );
 }
 
-// ── Ticket ecl#4: quotation scope labels ─────────────────────────────────
-// A quotation resolves in the scope its text was written in. PENDING: Patch 6
-// makes `beginApplication` read the label; flip this to false there. Every
-// assertion below fails today, in both directions of the same defect.
-const labels_pending = false;
+// PENDING: Patch 5 of `word-scope-identifiers` makes a word resolve at its own
+// scope. Flip this to false there; every assertion guarded by it is ticket
+// ecl#4's proof and fails today.
+const scopes_pending = false;
 
 test "module: a module literal reaches its own private through a combinator" {
-    if (labels_pending) return error.SkipZigTest;
+    if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -1034,7 +1033,7 @@ test "module: a module literal reaches its own private through a combinator" {
 }
 
 test "module: a module word runs a caller's quotation in the caller's chain" {
-    if (labels_pending) return error.SkipZigTest;
+    if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -1048,18 +1047,8 @@ test "module: a module word runs a caller's quotation in the caller's chain" {
     try expectOk(&runtime, "[1] result.ok (bump) result.and-then pop");
 }
 
-// PENDING: a quotation `def`ed inside a construction keeps the caller's label
-// for its *references*, but a word body is scheduled by `scheduleWord` from the
-// binding's defining scope rather than from the body's label. Making
-// `scheduleWord` prefer the label needs module *file* source to be labelled
-// against its image first: a file module runs through the load driver's
-// `.register` continuation, not `moduleOwned`, so `relabelConstructionBody`
-// does not reach it and a label-preferring `scheduleWord` would resolve a file
-// module's word bodies in the loading scope. Tracked as part of ticket ecl#4.
-const parameter_labels_pending = true;
-
 test "module: a quotation parameter carries the caller's scope" {
-    if (parameter_labels_pending) return error.SkipZigTest;
+    if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -1073,7 +1062,7 @@ test "module: a quotation parameter carries the caller's scope" {
 }
 
 test "module: a session quotation still resolves in the session" {
-    if (labels_pending) return error.SkipZigTest;
+    if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});

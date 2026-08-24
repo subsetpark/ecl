@@ -348,7 +348,7 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.deinit();
     const child = try fromValues(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
     defer cleanup.releaseValue(child);
-    const parent = try fromValues(allocator, &.{ child, .{ .word = 7 } });
+    const parent = try fromValues(allocator, &.{ child, .{ .word = .{ .name = 7 } } });
     defer cleanup.releaseValue(parent);
     const generic = try fromValuesGeneric(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
     defer cleanup.releaseValue(generic);

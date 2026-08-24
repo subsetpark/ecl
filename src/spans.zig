@@ -189,6 +189,23 @@ const SpanArchiveState = struct {
         return self.index.get(identity, header);
     }
 
+    /// Registers `rewritten` under a fresh identity carrying `original`'s span
+    /// record, so a code value that was rebuilt keeps reporting the source it
+    /// was read from. The span entries are archive-owned and shared rather than
+    /// copied; only the identity is new, which keeps the index's one-header-per
+    /// -identity invariant intact.
+    fn aliasIndexed(
+        self: *SpanArchiveState,
+        identity: heap.CodeIdentity,
+        rewritten: *value.ListHandle,
+        existing: IndexedSpan,
+    ) void {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        if (heap.assignCodeIdentity(self.identity_issuer, rewritten, identity) != .assigned) return;
+        self.index.set(identity, rewritten, existing);
+    }
+
     /// Validation precedes identity reservation and every header/index write.
     /// Existing identities are accepted only when this exact archive already
     /// indexes the exact header under that identity.
@@ -274,8 +291,34 @@ pub const SpanArchive = enum(usize) {
         return heap.hostDomain(self.privateState().host);
     }
 
+    /// The construction namespace a rewritten code value must be built in so
+    /// it stays archive-bound: a stamped construction body is still this
+    /// archive's code, just re-scoped.
+    pub fn provenanceNamespaceOf(self: *const SpanArchive) heap.CodeProvenanceNamespace {
+        return self.privateState().identity_issuer.constructionNamespace();
+    }
+
     fn provenanceNamespace(self: *const SpanArchive) heap.CodeProvenanceNamespace {
         return self.privateState().identity_issuer.constructionNamespace();
+    }
+
+    /// Carries `original`'s source spans onto `rewritten`, a code value rebuilt
+    /// from it. Rewriting a body — which is how `@module` and `@defm` re-scope
+    /// a construction body's words — produces a new header, and the index is
+    /// keyed by header, so without this an error raised inside a module body
+    /// would report no source at all. A value with no spans to carry is a
+    /// no-op rather than an error.
+    pub fn aliasSpans(
+        self: *SpanArchive,
+        original: *value.ListHandle,
+        rewritten: *value.ListHandle,
+    ) error{OutOfMemory}!void {
+        const backing = self.privateState();
+        const existing = backing.indexed(original) orelse return;
+        const raw = try backing.reserveIdentities(1);
+        const identity: heap.CodeIdentity = @enumFromInt(raw);
+        try backing.ensureIndexSlot(self.allocator(), identity);
+        backing.aliasIndexed(identity, rewritten, existing);
     }
 
     /// The stable identity this archive assigned to one reader-built code
@@ -297,6 +340,7 @@ pub const SpanArchive = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
+        word_scope: u32,
     ) reader.Error!reader.ReadResult {
         const backing = self.privateState();
         return reader.readCode(
@@ -305,6 +349,7 @@ pub const SpanArchive = enum(usize) {
             source,
             diag,
             backing.identity_issuer.constructionNamespace(),
+            word_scope,
         );
     }
 
@@ -313,6 +358,7 @@ pub const SpanArchive = enum(usize) {
         source_name: []const u8,
         source: []const u8,
         diag: *reader.Diag,
+        word_scope: u32,
     ) reader.ReadCursor {
         return .initCode(
             self.allocator(),
@@ -321,6 +367,7 @@ pub const SpanArchive = enum(usize) {
             source,
             diag,
             self.provenanceNamespace(),
+            word_scope,
         );
     }
 
@@ -367,9 +414,8 @@ pub const SpanArchive = enum(usize) {
         self: *SpanArchive,
         parsed: *reader.Parsed,
         root: value.Value,
-        labeller: ?Labeller,
     ) AbsorbError!void {
-        var cursor = self.absorbCursor(parsed, root, labeller);
+        var cursor = self.absorbCursor(parsed, root);
         while (cursor.advance() catch |err| {
             std.debug.assert(cursor.deinit() == .caller_owned);
             return err;
@@ -378,19 +424,6 @@ pub const SpanArchive = enum(usize) {
     }
 
     pub const AbsorbProgress = poll.Progress(void);
-    /// An erased sink for the identities an absorption assigns. The archive
-    /// owns identity issuance but nothing else; a consumer that keys its own
-    /// table on identity — the scope-label table in `env` — receives each one
-    /// here rather than making the archive know about it.
-    pub const Labeller = struct {
-        context: *anyopaque,
-        record_fn: *const fn (*anyopaque, heap.CodeIdentity) error{OutOfMemory}!void,
-
-        fn record(self: Labeller, identity: heap.CodeIdentity) error{OutOfMemory}!void {
-            return self.record_fn(self.context, identity);
-        }
-    };
-
     pub const AbsorbCursor = struct {
         pub const ArtifactOwnership = enum { caller_owned, archive_owned };
         const Artifacts = union(enum) {
@@ -407,14 +440,12 @@ pub const SpanArchive = enum(usize) {
         writer: reader.SpanTable.PutCursor,
         index_entries: ?reader.SpanTable.EntryList.Iterator = null,
         next_identity: u32 = 0,
-        labeller: ?Labeller = null,
         phase: enum { spans, entry, validate, reserve, index, adopt, assign, complete } = .spans,
 
         pub fn init(
             archive: *SpanArchive,
             parsed: *reader.Parsed,
             root: value.Value,
-            labeller: ?Labeller,
         ) AbsorbCursor {
             std.debug.assert(root == .list);
             return .{
@@ -422,7 +453,6 @@ pub const SpanArchive = enum(usize) {
                 .parsed = parsed,
                 .artifacts = .{ .caller = .{ .root = root } },
                 .writer = .init(&parsed.spans, archive.allocator(), root.list, parsed.spans.top),
-                .labeller = labeller,
             };
         }
 
@@ -520,14 +550,7 @@ pub const SpanArchive = enum(usize) {
                         identity,
                         self.artifacts.archive,
                         span_entry,
-                    )) {
-                        // The unit that read this text is the scope its
-                        // quotations were written in, so the label is recorded
-                        // here rather than at publication: `def` cannot tell a
-                        // literal written inside a body from one handed in.
-                        if (self.labeller) |sink| try sink.record(identity);
-                        self.next_identity += 1;
-                    }
+                    )) self.next_identity += 1;
                     break :result .pending;
                 },
                 .complete => unreachable,
@@ -539,9 +562,8 @@ pub const SpanArchive = enum(usize) {
         self: *SpanArchive,
         parsed: *reader.Parsed,
         root: value.Value,
-        labeller: ?Labeller,
     ) AbsorbCursor {
-        return .init(self, parsed, root, labeller);
+        return .init(self, parsed, root);
     }
 
     pub fn locate(

@@ -294,8 +294,8 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.deinit();
     const releases = cleanup.domain();
     const dictionary = try fromPairs(allocator, releases, &.{
-        .{ .{ .int = 1 }, .{ .word = 10 } },
-        .{ .{ .float = 2.5 }, .{ .word = 20 } },
+        .{ .{ .int = 1 }, .{ .word = .{ .name = 10 } } },
+        .{ .{ .float = 2.5 }, .{ .word = .{ .name = 20 } } },
     });
     cleanup.releaseValue(dictionary);
 }
@@ -304,12 +304,12 @@ fn putFailureProbe(allocator: std.mem.Allocator) !void {
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
     const releases = cleanup.domain();
-    var dictionary = try fromPairs(allocator, releases, &.{.{ .{ .int = 1 }, .{ .word = 10 } }});
+    var dictionary = try fromPairs(allocator, releases, &.{.{ .{ .int = 1 }, .{ .word = .{ .name = 10 } } }});
     defer cleanup.releaseValue(dictionary);
     _ = try getWithAllocator(allocator, dictionary, .{ .int = 1 });
-    dictionary = (try put(allocator, releases, dictionary, .{ .int = 2 }, .{ .word = 20 })).value();
+    dictionary = (try put(allocator, releases, dictionary, .{ .int = 2 }, .{ .word = .{ .name = 20 } })).value();
     dictionary = (try del(allocator, releases, dictionary, .{ .int = 1 })).value();
-    const right = try fromPairs(allocator, releases, &.{.{ .{ .int = 2 }, .{ .word = 30 } }});
+    const right = try fromPairs(allocator, releases, &.{.{ .{ .int = 2 }, .{ .word = .{ .name = 30 } } }});
     defer cleanup.releaseValue(right);
     dictionary = (try merge(allocator, releases, dictionary, right)).value();
 }

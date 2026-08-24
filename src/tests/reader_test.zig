@@ -23,7 +23,7 @@ test "span archive rejects a substitutable provenance issuer" {
     defer archive.deinit();
 
     var diag: reader.Diag = .{};
-    var parsed = switch (try archive.read("issuer.ecl", "(1)", &diag)) {
+    var parsed = switch (try archive.read("issuer.ecl", "(1)", &diag, 0)) {
         .complete => |complete| complete,
         .incomplete => return error.UnexpectedIncomplete,
     };
@@ -39,7 +39,7 @@ test "span archive rejects a substitutable provenance issuer" {
 
     var root = heap.OwnedValue.init(host.domain(), try archive.codeRoot(parsed.values()));
     defer root.deinit();
-    try archive.absorb(parsed.borrow(), root.borrow(), null);
+    try archive.absorb(parsed.borrow(), root.borrow());
     _ = root.take();
 
     var location_cursor = archive.locateQuotationCursor(quotation);
@@ -71,7 +71,7 @@ test "span archive fails closed on unbound publication artifacts" {
     );
     defer root.deinit();
 
-    archive.absorb(parsed.borrow(), root.borrow(), null) catch |err| {
+    archive.absorb(parsed.borrow(), root.borrow()) catch |err| {
         try std.testing.expectEqual(error.InvalidProvenance, err);
         return;
     };
@@ -87,7 +87,7 @@ test "span archive cancellation keeps committed location storage alive" {
     defer archive.deinit();
 
     var diag: reader.Diag = .{};
-    var parsed = switch (try archive.read("cancelled-absorb.ecl", "(1)", &diag)) {
+    var parsed = switch (try archive.read("cancelled-absorb.ecl", "(1)", &diag, 0)) {
         .complete => |complete| complete,
         .incomplete => return error.UnexpectedIncomplete,
     };
@@ -98,7 +98,7 @@ test "span archive cancellation keeps committed location storage alive" {
     var root_live = true;
     defer if (root_live) root.deinit();
 
-    var absorption = archive.absorbCursor(parsed.borrow(), root.borrow(), null);
+    var absorption = archive.absorbCursor(parsed.borrow(), root.borrow());
     var absorption_live = true;
     defer {
         if (absorption_live and absorption.deinit() == .archive_owned) {

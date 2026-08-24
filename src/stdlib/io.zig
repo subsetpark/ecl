@@ -74,8 +74,8 @@ fn print(evaluator: *Machine) MachineError!void {
 
 fn inspect(evaluator: *Machine) MachineError!void {
     const quotation = try list.fromValues(evaluator.allocator(), &.{
-        .{ .word = try intern.intern("dup") },
-        .{ .word = try intern.intern("io.pp") },
+        .{ .word = .{ .name = try intern.intern("dup") } },
+        .{ .word = .{ .name = try intern.intern("io.pp") } },
     });
     try evaluator.callOwned(quotation.list);
 }
@@ -87,10 +87,10 @@ fn debug(evaluator: *Machine) MachineError!void {
     );
     defer separator.deinit();
     const quotation = try list.fromValues(evaluator.allocator(), &.{
-        .{ .word = try intern.intern("io.prin") },
+        .{ .word = .{ .name = try intern.intern("io.prin") } },
         separator.borrow(),
-        .{ .word = try intern.intern("io.prin") },
-        .{ .word = try intern.intern("io.inspect") },
+        .{ .word = .{ .name = try intern.intern("io.prin") } },
+        .{ .word = .{ .name = try intern.intern("io.inspect") } },
     });
     try evaluator.callOwned(quotation.list);
 }
@@ -113,9 +113,9 @@ fn callWithNewline(
     );
     defer newline.deinit();
     const quotation = try list.fromValues(evaluator.allocator(), &.{
-        .{ .word = try intern.intern(first) },
+        .{ .word = .{ .name = try intern.intern(first) } },
         newline.borrow(),
-        .{ .word = try intern.intern(last) },
+        .{ .word = .{ .name = try intern.intern(last) } },
     });
     try evaluator.callOwned(quotation.list);
 }

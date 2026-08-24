@@ -461,35 +461,35 @@ const IdiomDriver = struct {
                         self.rejectEntry();
                         continue;
                     };
-                    if (!std.mem.eql(u8, intern.get(word), entry.operation.spelling())) {
+                    if (!std.mem.eql(u8, intern.get(word.name), entry.operation.spelling())) {
                         self.rejectEntry();
                         continue;
                     }
-                    self.capture.active_word = word;
+                    self.capture.active_word = word.name;
                     self.capture.active_index = @intCast(self.atom_index);
                     self.expected_binding = operationBinding(entry.operation);
                     self.expected = if (self.expected_binding == .builtin)
                         operationPrimitive(entry.operation)
                     else
                         null;
-                    self.resolution = .init(.init(evaluator, word));
+                    self.resolution = .init(.init(evaluator, word.name, evaluator.unit.current.?.resolutionScope()));
                 },
                 .word => |expected_word| {
                     const word = if (actual == .word) actual.word else {
                         self.rejectEntry();
                         continue;
                     };
-                    if (!std.mem.eql(u8, intern.get(word), expected_word.spelling)) {
+                    if (!std.mem.eql(u8, intern.get(word.name), expected_word.spelling)) {
                         self.rejectEntry();
                         continue;
                     }
                     if (std.mem.eql(u8, expected_word.spelling, "grade")) {
-                        self.capture.active_word = word;
+                        self.capture.active_word = word.name;
                         self.capture.active_index = @intCast(self.atom_index);
                     }
                     self.expected_binding = expected_word.binding;
                     self.expected = null;
-                    self.resolution = .init(.init(evaluator, word));
+                    self.resolution = .init(.init(evaluator, word.name, evaluator.unit.current.?.resolutionScope()));
                 },
             }
         }

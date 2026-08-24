@@ -466,7 +466,14 @@ pub const Session = enum(usize) {
         if (core.root_scope == null)
             core.root_scope = try core.environment.createSessionRoot(core.allocator());
         var diag: reader.Diag = .{};
-        const read_result = core.archive.read(source_name, source, &diag) catch |err| switch (err) {
+        // The unit that read this text is the scope its words were written in.
+        const unit_scope = try core.environment.scopeIdFor(core.root_scope.?);
+        const read_result = core.archive.read(
+            source_name,
+            source,
+            &diag,
+            @intFromEnum(unit_scope),
+        ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Parse => {
                 var parse_error = machine.EclErr.init(.parse, diag.text());
@@ -504,10 +511,7 @@ pub const Session = enum(usize) {
         );
         defer root.deinit();
         const root_header = root.borrow().list;
-        // The unit that read this text is the scope its quotations were written
-        // in, so the session root labels everything this source contains.
-        const label_cell = try core.environment.scopeCell(core.root_scope.?);
-        core.archive.absorb(parsed, root.borrow(), label_cell.labeller()) catch |err| switch (err) {
+        core.archive.absorb(parsed, root.borrow()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidProvenance => @panic("archive-bound reader produced foreign provenance"),
         };

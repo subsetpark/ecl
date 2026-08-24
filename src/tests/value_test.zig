@@ -52,7 +52,7 @@ fn numericAndDictLaws(encoded: u64) !void {
     const pairs = [_]dict.Pair{
         .{ .{ .int = 1 }, .{ .char = testgen.codepoint(@truncate(encoded >> 32)) } },
         .{ .{ .int = 2 }, .{ .int = integer } },
-        .{ .{ .int = 3 }, .{ .word = try testgen.internedId(@truncate(encoded >> 40)) } },
+        .{ .{ .int = 3 }, .{ .word = .{ .name = try testgen.internedId(@truncate(encoded >> 40)) } } },
     };
     const reversed = [_]dict.Pair{ pairs[2], pairs[1], pairs[0] };
     const first = try dict.fromPairs(allocator, cleanup.domain(), &pairs);

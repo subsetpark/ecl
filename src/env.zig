@@ -12,7 +12,6 @@ const native_module = @import("native_module.zig");
 const primitive_docs = @import("primitive_docs.zig");
 const snapshot_api = @import("snapshot.zig");
 const reader_types = @import("reader_types.zig");
-const spans = @import("spans.zig");
 /// In-tree primitives use Machine's ergonomic error helpers. This binding
 /// kind is not part of the native-extension ABI.
 pub const PrimitiveImpl = *const fn (*machine.Machine) machine.MachineError!void;
@@ -117,7 +116,7 @@ pub const ValidatedEffect = struct {
         const count: usize = @intCast(effect_header.length());
         if (count != separator_index + 2) return false;
         const after = list.atUnchecked(.{ .list = effect_header }, separator_index + 1);
-        return after == .word and std.mem.eql(u8, intern.get(after.word), lexer.row_token);
+        return after == .word and std.mem.eql(u8, intern.get(after.word.name), lexer.row_token);
     }
     pub const ParseProgress = poll.Progress(?ValidatedEffect);
     pub const ParseCursor = struct {
@@ -139,7 +138,7 @@ pub const ValidatedEffect = struct {
             }
             const atom = list.atUnchecked(.{ .list = self.header }, self.index);
             if (atom != .word) return .{ .complete = null };
-            if (atom.word == self.separator) {
+            if (atom.word.name == self.separator) {
                 if (self.split != null) return .{ .complete = null };
                 self.split = self.index;
             }
@@ -950,12 +949,17 @@ pub const Scope = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: ?RetireCursor.State = null,
 
-    /// Whether `inner` is this scope or one nested inside it. A label names the
-    /// scope a quotation's text was written in; when the activation applying it
-    /// is already inside a more specific scope on that same chain — an
-    /// `@attempt` child of the writing unit — that child is the right chain,
-    /// and this is what says so. It is also why `@attempt` needs no relabelling
-    /// walk of its body.
+    /// Whether `inner` is this scope or one nested inside it. A word's scope
+    /// is a lower bound, not the whole answer: when the activation running it
+    /// is already inside a more specific scope on the same chain — an
+    /// `@attempt` child of the unit that wrote the word — that child is where
+    /// it should resolve, because a sibling defined in the same child must be
+    /// visible. Resolution walks parents, so without this a word written
+    /// outside the child could never see anything defined inside it.
+    ///
+    /// It only ever refines downward within one chain. A module image's scope
+    /// has no parent and core denotes no scope at all, so neither is ever an
+    /// ancestor of a session scope and neither case is affected.
     pub fn encloses(self: *Scope, inner: *Scope) bool {
         var current: ?*Scope = inner;
         while (current) |scope| : (current = scope.parent) {
@@ -1304,20 +1308,46 @@ comptime {
 /// The indirection that lets a quotation name the scope its text was written
 /// in without any value holding an owning pointer into the environment. Whoever
 /// owns a publishing scope's lifetime allocates one cell and retires it when
-/// that scope goes, and each label-table entry that names the cell holds a
-/// reference, so a cell outlives its scope exactly as long as some label still
-/// points at it. Reclamation goes through the release domain rather than
-/// happening on a reader's stack, which is what keeps a concurrent
-/// `resolveLabel` safe against a publisher overwriting the same entry.
+/// that scope goes, and each reference to the cell holds a count, so a cell
+/// outlives its scope exactly as long as something still names it. Reclamation
+/// goes through the release domain rather than happening on a reader's stack,
+/// which is what keeps a concurrent reader safe against a publisher clearing
+/// the same cell.
 ///
 /// Keeping the owning edge outside the value heap is what keeps the heap
 /// acyclic: an owning `*Scope` in a value would close a cycle on the first
 /// `def` — Scope -> Environment -> BindingCell -> BindingSpec -> binding.word ->
 /// Scope — and precise reference counting cannot release that.
+/// A scope's stable public name. A word occurrence carries one of these rather
+/// than a pointer, because it has four bytes to spend and not eight. Zero means
+/// "no written-in scope" and resolves wherever the word is invoked.
+///
+/// Ids are issued monotonically and never recycled. A word token holds a bare
+/// integer and takes no reference, so a reused id would let a stale token
+/// resolve into an unrelated scope — a silent wrong answer, which is worse than
+/// any failure this design can otherwise produce. Ids are consumed only by the
+/// two roots and by module images, so the space is spent on registrations and
+/// reloads rather than on execution.
+pub const ScopeId = enum(u32) { none = 0, _ };
+
+/// What a `ScopeId` names right now.
+pub const ScopeResolution = union(enum) {
+    /// Id zero: a word with no written-in scope.
+    unscoped,
+    /// An id that was issued and whose scope has since been torn down.
+    retired,
+    /// Core alone, which the machine spells as a null resolution scope. Core is
+    /// a terminal phase rather than a link in any chain, so no `Scope` denotes
+    /// it and a primitive or embedded-prelude word names this instead.
+    core,
+    scope: *Scope,
+};
+
 pub const ScopeCell = struct {
-    /// The `Env` whose label table this cell is recorded in, so the cell can be
-    /// its own erased sink without a second allocation to carry the pair.
+    /// The `Env` this cell is registered in, so the cell can retire itself
+    /// without the caller having to carry the pair.
     owner: Env,
+    id: ScopeId,
     releases: *heap.ReleaseDomain,
     refs: std.atomic.Value(u32) = .init(1),
     scope: std.atomic.Value(?*Scope) = .init(null),
@@ -1332,27 +1362,15 @@ pub const ScopeCell = struct {
         self.scope.store(scope, .release);
     }
 
-    /// Records that one code identity was read in this cell's scope.
-    pub fn recordIdentity(self: *ScopeCell, identity: heap.CodeIdentity) error{OutOfMemory}!void {
-        return self.owner.labelCode(identity, self);
-    }
-
-    fn recordErased(context: *anyopaque, identity: heap.CodeIdentity) error{OutOfMemory}!void {
-        const self: *ScopeCell = @ptrCast(@alignCast(context));
-        return self.recordIdentity(identity);
-    }
-
-    /// The absorption sink that labels every identity a read assigns with this
-    /// scope. `spans` never learns what a scope is; it only hands back ids.
-    pub fn labeller(self: *ScopeCell) spans.SpanArchive.Labeller {
-        return .{ .context = @ptrCast(self), .record_fn = recordErased };
-    }
-
     /// Clears the scope before its storage is torn down, so a reader sees the
     /// old scope, the new scope, or a definite `retired`, never freed memory.
     /// Then drops the owner's reference; surviving labels keep the cell alive.
     pub fn retire(self: *ScopeCell) void {
         self.scope.store(null, .release);
+        // Unregistering before the reference drops is what lets the cell be
+        // freed: the id stays unresolvable rather than pointing at a tombstone,
+        // and a nonzero id with no entry is exactly `retired`.
+        self.owner.unregisterScope(self.id);
         self.release();
     }
 
@@ -1381,37 +1399,38 @@ pub const ScopeCell = struct {
     }
 };
 
-/// What a quotation's scope label resolves to. `unlabelled` is a quotation with
-/// no written-in scope — one built at run time by `partial`, `cons`, or
-/// `compose` — which resolves where it is invoked.
-pub const LabelResolution = union(enum) {
-    unlabelled,
-    retired,
-    /// Core alone, which the machine spells as a null resolution scope.
-    core,
-    scope: *Scope,
-};
-
-/// A three-level direct directory keyed by the 24 identity bits in a heap
-/// header, the same shape and for the same reason as `spans.HeaderIndex`: a
-/// sibling consumer of `heap.CodeIdentity` rather than an extension of the span
-/// archive. Pages are installed once and live for the directory's lifetime, so
-/// a reader needs no lock and lookup is three atomic loads.
-const LabelIndex = struct {
+/// A three-level direct directory keyed by the 24 low bits of a `ScopeId`, the
+/// same shape as `spans.HeaderIndex` and for the same reason: pages are
+/// installed once and read without a lock, so a reader on a worker thread pays
+/// three atomic loads and never blocks behind a publisher.
+const ScopeIndex = struct {
     const radix = 256;
     const Leaf = struct {
         cells: [radix]std.atomic.Value(?*ScopeCell) = @splat(.init(null)),
+        retirement: heap.ReleaseDomain.Retirement = .{},
+
+        pub fn advanceRetirement(
+            _: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+            self: *Leaf,
+        ) bool {
+            allocator.destroy(self);
+            return true;
+        }
     };
     const Branch = struct {
         leaves: [radix]std.atomic.Value(?*Leaf) = @splat(.init(null)),
     };
 
     mutex: std.Io.Mutex = .init,
+    next: std.atomic.Value(u32) = .init(1),
     branches: [radix]std.atomic.Value(?*Branch) = @splat(.init(null)),
 
-    fn coordinates(identity: heap.CodeIdentity) struct { usize, usize, usize } {
-        const raw = @intFromEnum(identity);
-        std.debug.assert(raw != 0 and raw <= heap.max_code_identity);
+    const max_id: u32 = (1 << 24) - 1;
+
+    fn coordinates(id: ScopeId) struct { usize, usize, usize } {
+        const raw = @intFromEnum(id);
+        std.debug.assert(raw != 0 and raw <= max_id);
         return .{
             @intCast((raw >> 16) & 0xff),
             @intCast((raw >> 8) & 0xff),
@@ -1419,43 +1438,63 @@ const LabelIndex = struct {
         };
     }
 
-    fn get(self: *const LabelIndex, identity: heap.CodeIdentity) ?*ScopeCell {
-        const branch_index, const leaf_index, const entry_index = coordinates(identity);
+    fn get(self: *const ScopeIndex, id: ScopeId) ?*ScopeCell {
+        const branch_index, const leaf_index, const entry_index = coordinates(id);
         const branch = self.branches[branch_index].load(.acquire) orelse return null;
         const leaf = branch.leaves[leaf_index].load(.acquire) orelse return null;
         return leaf.cells[entry_index].load(.acquire);
     }
 
-    /// Last writer wins rather than at-most-once: re-executing the same source
-    /// builds a new image from the same code identities, and those literals
-    /// belong to the new image. The superseded cell loses one reference, so a
-    /// scope's cell is reclaimed once no label names it.
-    ///
-    /// Candidate pages are allocated before the lock is taken, so no allocation
-    /// happens while a publisher holds it; a racing publisher preparing the
-    /// same page loses and destroys its unused candidate.
-    fn set(
-        self: *LabelIndex,
+    /// Clears one entry, and reclaims the page once nothing lives on it. Ids
+    /// are never recycled, so without this the directory would grow with every
+    /// id ever issued rather than with the scopes currently live — which a
+    /// construct/reload soak turns into unbounded memory. Detachment is O(1)
+    /// under the lock and the page itself retires through the release domain,
+    /// never on a reader's stack.
+    fn clear(self: *ScopeIndex, releases: *heap.ReleaseDomain, id: ScopeId) void {
+        const branch_index, const leaf_index, const entry_index = coordinates(id);
+        const branch = self.branches[branch_index].load(.acquire) orelse return;
+        const leaf = branch.leaves[leaf_index].load(.acquire) orelse return;
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        leaf.cells[entry_index].store(null, .release);
+        // The page can only be reused by an id in its own range, and ids are
+        // monotonic, so a fully cleared page below the watermark is dead.
+        const watermark = self.next.load(.monotonic);
+        const page_base = @intFromEnum(id) & ~@as(u32, 0xff);
+        if (watermark <= page_base + radix) return;
+        for (&leaf.cells) |*slot| if (slot.load(.acquire) != null) return;
+        branch.leaves[leaf_index].store(null, .release);
+        releases.retire(leaf, &leaf.retirement);
+    }
+
+    /// Issues the next id and installs the entry. Candidate pages are allocated
+    /// before the lock is taken, so no allocation happens while a publisher
+    /// holds it; a racing publisher preparing the same page loses and destroys
+    /// its unused candidate.
+    fn register(
+        self: *ScopeIndex,
         allocator: std.mem.Allocator,
-        identity: heap.CodeIdentity,
         cell: *ScopeCell,
-    ) error{OutOfMemory}!void {
-        const branch_index, const leaf_index, const entry_index = coordinates(identity);
-        var branch_candidate: ?*Branch = null;
-        var leaf_candidate: ?*Leaf = null;
-        errdefer {
+    ) error{OutOfMemory}!ScopeId {
+        var branch_candidate: ?*Branch = try allocator.create(Branch);
+        branch_candidate.?.* = .{};
+        var leaf_candidate: ?*Leaf = allocator.create(Leaf) catch |err| {
+            allocator.destroy(branch_candidate.?);
+            return err;
+        };
+        leaf_candidate.?.* = .{};
+        defer {
             if (branch_candidate) |unused| allocator.destroy(unused);
             if (leaf_candidate) |unused| allocator.destroy(unused);
         }
-        if (self.branches[branch_index].load(.acquire) == null) {
-            branch_candidate = try allocator.create(Branch);
-            branch_candidate.?.* = .{};
-        }
-        leaf_candidate = try allocator.create(Leaf);
-        leaf_candidate.?.* = .{};
 
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        const raw = self.next.load(.monotonic);
+        if (raw > max_id) return error.OutOfMemory;
+        const id: ScopeId = @enumFromInt(raw);
+        const branch_index, const leaf_index, const entry_index = coordinates(id);
         const branch = self.branches[branch_index].load(.acquire) orelse installed: {
             const chosen = branch_candidate.?;
             branch_candidate = null;
@@ -1468,27 +1507,16 @@ const LabelIndex = struct {
             branch.leaves[leaf_index].store(chosen, .release);
             break :installed chosen;
         };
-        if (branch_candidate) |unused| {
-            allocator.destroy(unused);
-            branch_candidate = null;
-        }
-        if (leaf_candidate) |unused| {
-            allocator.destroy(unused);
-            leaf_candidate = null;
-        }
-        const previous = leaf.cells[entry_index].load(.acquire);
-        if (previous == cell) return;
-        cell.retain();
+        std.debug.assert(leaf.cells[entry_index].load(.acquire) == null);
         leaf.cells[entry_index].store(cell, .release);
-        if (previous) |superseded| superseded.release();
+        self.next.store(raw + 1, .monotonic);
+        return id;
     }
 
-    fn deinit(self: *LabelIndex, allocator: std.mem.Allocator) void {
+    fn deinit(self: *ScopeIndex, allocator: std.mem.Allocator) void {
         for (&self.branches) |*slot| if (slot.load(.acquire)) |branch| {
-            for (&branch.leaves) |*leaf_slot| if (leaf_slot.load(.acquire)) |leaf| {
-                for (&leaf.cells) |*entry| if (entry.load(.acquire)) |cell| cell.release();
+            for (&branch.leaves) |*leaf_slot| if (leaf_slot.load(.acquire)) |leaf|
                 allocator.destroy(leaf);
-            };
             allocator.destroy(branch);
         };
         self.* = .{};
@@ -1499,8 +1527,8 @@ const EnvState = struct {
     host: *const heap.HostCleanup,
     core: Environment,
     session: Environment,
-    labels: LabelIndex = .{},
     core_cell: ScopeCell,
+    scopes: ScopeIndex = .{},
 };
 
 pub const Env = enum(usize) {
@@ -1523,7 +1551,20 @@ pub const Env = enum(usize) {
             .core_cell = undefined,
         };
         const result: Env = @enumFromInt(@intFromPtr(backing));
-        backing.core_cell = .{ .owner = result, .releases = releases, .core = true };
+        backing.core_cell = .{ .owner = result, .id = .none, .releases = releases, .core = true };
+        // Core needs a real id: a prelude word's tokens name it, and id zero
+        // would mean "unscoped" and resolve them wherever they were invoked,
+        // which is the leak this whole change closes. The core cell is embedded
+        // and never retires, so its entry stands for the Env's lifetime.
+        backing.core_cell.id = backing.scopes.register(allocator, &backing.core_cell) catch |err| {
+            var session_cursor = Environment.TeardownCursor.init(&backing.session);
+            while (!session_cursor.advance()) {}
+            var core_cursor = Environment.TeardownCursor.init(&backing.core);
+            while (!core_cursor.advance()) {}
+            backing.scopes.deinit(allocator);
+            allocator.destroy(backing);
+            return err;
+        };
         return result;
     }
     pub fn deinit(self: *Env) void {
@@ -1533,11 +1574,22 @@ pub const Env = enum(usize) {
         while (!session_cursor.advance()) {}
         var core_cursor = Environment.TeardownCursor.init(&backing.core);
         while (!core_cursor.advance()) {}
-        backing.labels.deinit(allocator);
+        backing.scopes.deinit(allocator);
         backing.host.drain();
         allocator.destroy(backing);
         self.* = .consumed;
     }
+    /// The id a primitive or embedded-prelude definition's words carry, so
+    /// core alone is their chain.
+    pub fn coreScopeId(self: *Env) ScopeId {
+        return self.privateState().core_cell.id;
+    }
+
+    /// The id the words of source read in this scope carry.
+    pub fn scopeIdFor(self: *Env, scope: *Scope) error{OutOfMemory}!ScopeId {
+        return (try self.scopeCell(scope)).id;
+    }
+
     /// The cell a primitive or embedded-prelude definition labels against.
     /// It never retires: core lives for the `Env`'s lifetime.
     pub fn coreCell(self: *Env) *ScopeCell {
@@ -1564,28 +1616,33 @@ pub const Env = enum(usize) {
     /// is torn down.
     pub fn newScopeCell(self: *Env) error{OutOfMemory}!*ScopeCell {
         const backing = self.privateState();
-        const cell = try backing.host.allocator().create(ScopeCell);
-        cell.* = .{ .owner = self.*, .releases = heap.hostDomain(backing.host) };
+        const allocator = backing.host.allocator();
+        const cell = try allocator.create(ScopeCell);
+        cell.* = .{
+            .owner = self.*,
+            .id = .none,
+            .releases = heap.hostDomain(backing.host),
+        };
+        cell.id = backing.scopes.register(allocator, cell) catch |err| {
+            allocator.destroy(cell);
+            return err;
+        };
         return cell;
     }
 
-    /// Records that the code value with this identity was written in the scope
-    /// the cell points at. Called once per identity, at publication.
-    pub fn labelCode(
-        self: *Env,
-        identity: heap.CodeIdentity,
-        cell: *ScopeCell,
-    ) error{OutOfMemory}!void {
+    fn unregisterScope(self: Env, id: ScopeId) void {
+        if (id == .none) return;
         const backing = self.privateState();
-        try backing.labels.set(backing.host.allocator(), identity, cell);
+        backing.scopes.clear(heap.hostDomain(backing.host), id);
     }
 
-    /// The resolution scope for an applied quotation. `unlabelled` keeps
-    /// today's meaning — resolve where the invoker runs — which is what a
-    /// quotation built at run time by `partial`, `cons`, or `compose` gets.
-    pub fn resolveLabel(self: *const Env, identity: ?heap.CodeIdentity) LabelResolution {
-        const raw = identity orelse return .unlabelled;
-        const cell = self.privateState().labels.get(raw) orelse return .unlabelled;
+    /// What a word's scope id names right now. Zero is a word with no
+    /// written-in scope and resolves where it is invoked; a nonzero id with no
+    /// entry was issued and has since retired, which is a definite failure
+    /// rather than a fallback that would change what the word means.
+    pub fn scopeOf(self: *const Env, id: ScopeId) ScopeResolution {
+        if (id == .none) return .unscoped;
+        const cell = self.privateState().scopes.get(id) orelse return .retired;
         if (cell.core) return .core;
         return if (cell.scope.load(.acquire)) |scope| .{ .scope = scope } else .retired;
     }
@@ -1653,7 +1710,7 @@ pub const BuildingEnv = struct {
         var separator_index: ?usize = null;
         while (iterator.next()) |token| : (index += 1) {
             const id = try intern.intern(token);
-            tokens[index] = .{ .word = id };
+            tokens[index] = .{ .word = .{ .name = id } };
             if (std.mem.eql(u8, token, "--")) separator_index = index;
         }
         std.debug.assert(index == token_count and separator_index != null);
