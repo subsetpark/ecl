@@ -931,12 +931,6 @@ test "e2e: module privacy acceptance" {
     });
 }
 
-test "e2e: extracted body acceptance" {
-    var extracted = try run(&.{ build_options.ecl_exe, "test/acceptance/body-extraction.ecl" });
-    defer extracted.deinit();
-    try extracted.expect(.{ .exit_code = 1, .stderr_contains = &.{"'word 's"} });
-}
-
 test "e2e: hot reload all access paths acceptance" {
     var result = try run(&.{ build_options.ecl_exe, "test/acceptance/hot-reload.ecl" });
     defer result.deinit();
@@ -1069,7 +1063,7 @@ test "e2e: optional module annotation acceptance" {
             "### def answer\n(: \"The answer.\") ([42] first) 'answer def\n" ++
             "### def spelled\n([42] first) 'spelled def\n" ++
             "'contract\n'domain\n'domain\n" ++
-            "(dup)\n(a b)\n",
+            "### def positional.f\n(dup) 'positional.f def\n(a b)\n",
         .stderr = "",
     });
 }
@@ -1152,12 +1146,12 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     var constant = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "((-- value) 40 literal 'k def) 'm @defm m.k 'm.k body 'm.k which",
+        "((-- value) 40 literal 'k def) 'm @defm m.k 'm.k which",
     });
     defer constant.deinit();
     try constant.expect(.{
         .exit_code = 0,
-        .stdout = "m.k -> m.k def public generation 1 (-- value)\n40 ([40] first)\n",
+        .stdout = "m.k -> m.k def public generation 1 (-- value)\n40\n",
         .stderr = "",
     });
 
@@ -1318,7 +1312,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
         .argv = &.{
             "./ecl",
             "-e",
-            "'wrap body 'pair body 'sort body 'pack body 1 2 3 4 4 pack \"42\" parse first",
+            "1 2 3 4 4 pack \"42\" parse first",
         },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
@@ -1326,7 +1320,7 @@ test "e2e: embedded prelude is independent of cwd and ECL_PATH" {
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
-        .stdout = "(() cons) (() cons cons) (dup grade at) (() swap (cons) times) [1 2 3 4] 42\n",
+        .stdout = "[1 2 3 4] 42\n",
         .stderr = "",
     });
 

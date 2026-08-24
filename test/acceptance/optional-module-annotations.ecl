@@ -57,7 +57,7 @@
 (: "The answer.")
 42 'answer set
 42 literal 'spelled def
-'answer body 'spelled body match? io.pp
+answer spelled match? io.pp
 'answer see
 'spelled see
 
@@ -100,5 +100,5 @@ io.pp
 
  ### def f
  (dup) 'f def) 'positional @defm
-'positional.f body io.pp
+'positional.f see
 positional.peek io.pp

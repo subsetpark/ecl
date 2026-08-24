@@ -336,7 +336,6 @@ test "reflection failures are total" {
     var no_output = try session.Session.init(std.testing.allocator, &.{});
     defer no_output.deinit();
     try expectErrorContains(&no_output, "words", &.{"'kind 'io"});
-    try expectErrorContains(&no_output, "'dup body", &.{"'kind 'type"});
     try expectErrorContains(&no_output, "'missing which", &.{"'kind 'undefined-word"});
 }
 
@@ -622,7 +621,7 @@ test "environment and registry retirement stays bounded after a delayed reader d
         defer environment.deinit();
         var scope = environment.sessionRoot(allocator);
         defer env.testing.deinitScope(&scope, releases);
-        var registry = try modules.Registry.init(host.cleanup());
+        var registry = try modules.Registry.init(host.cleanup(), environment);
         defer registry.deinit();
 
         const binding_name = try intern.internNamespace("bounded-binding");
@@ -843,7 +842,14 @@ fn registryWorker(context: RegistryThreadContext, worker_id: u32) void {
 test "registry: concurrent commits are linearized without lost names" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    var registry = try modules.Registry.init(host.cleanup());
+    var environment = try env.Env.init(host.cleanup());
+    defer {
+        // Images clear their Env-owned scope-label cell as they
+        // retire, so that work must drain before the Env frees them.
+        host.cleanup().drain();
+        environment.deinit();
+    }
+    var registry = try modules.Registry.init(host.cleanup(), environment);
     defer registry.deinit();
     var failed = std.atomic.Value(bool).init(false);
     const context = RegistryThreadContext{
@@ -877,7 +883,14 @@ test "registry: old generation leases survive reload and reclaim after release" 
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
-    var registry = try modules.Registry.init(host.cleanup());
+    var environment = try env.Env.init(host.cleanup());
+    defer {
+        // Images clear their Env-owned scope-label cell as they
+        // retire, so that work must drain before the Env frees them.
+        host.cleanup().drain();
+        environment.deinit();
+    }
+    var registry = try modules.Registry.init(host.cleanup(), environment);
     defer registry.deinit();
     const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 7 }});
     defer releases.releaseValue(body);
@@ -916,7 +929,14 @@ test "registry: generation cursors independently pin their snapshot" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
-    var registry = try modules.Registry.init(host.cleanup());
+    var environment = try env.Env.init(host.cleanup());
+    defer {
+        // Images clear their Env-owned scope-label cell as they
+        // retire, so that work must drain before the Env frees them.
+        host.cleanup().drain();
+        environment.deinit();
+    }
+    var registry = try modules.Registry.init(host.cleanup(), environment);
     defer registry.deinit();
     const module_name = try intern.internModuleName("cursor-pinned-generation");
     const value_name = try intern.internNamespace("cursor-pinned-value");
@@ -1032,7 +1052,14 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     var host = heap.HostOwner.init(allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
-    var registry = try modules.Registry.init(host.cleanup());
+    var environment = try env.Env.init(host.cleanup());
+    defer {
+        // Images clear their Env-owned scope-label cell as they
+        // retire, so that work must drain before the Env frees them.
+        host.cleanup().drain();
+        environment.deinit();
+    }
+    var registry = try modules.Registry.init(host.cleanup(), environment);
     defer registry.deinit();
     const effect_value = try list.fromValuesGeneric(allocator, &.{
         .{ .word = try intern.intern("--") },

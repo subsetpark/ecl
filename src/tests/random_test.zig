@@ -215,10 +215,10 @@ test "random: every rng word carries documentation" {
     for (names) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'rng.{s} body type 'rng.{s} doc len 0 >",
-            .{ name, name },
+            "'rng.{s} doc len 0 >",
+            .{name},
         );
         defer std.testing.allocator.free(source);
-        try support.expectStack(source, "'list 1");
+        try support.expectStack(source, "1");
     }
 }

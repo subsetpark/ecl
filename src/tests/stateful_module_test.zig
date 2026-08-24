@@ -192,7 +192,7 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     // spellings reflect as the same unannotated public def.
     try expectStack(
         &runtime,
-        "42 'answer set 42 literal 'spelled def 'answer body 'spelled body match?",
+        "42 'answer set 42 literal 'spelled def answer spelled match?",
         "1",
     );
     try expectOk(&runtime, "'answer see 'spelled see 'answer which");

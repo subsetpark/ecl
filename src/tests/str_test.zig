@@ -241,10 +241,10 @@ test "str: every exported word has nonempty documentation" {
     for (names) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'str.{s} body type 'str.{s} doc len 0 >",
-            .{ name, name },
+            "'str.{s} doc len 0 >",
+            .{name},
         );
         defer std.testing.allocator.free(source);
-        try support.expectStack(source, "'list 1");
+        try support.expectStack(source, "1");
     }
 }

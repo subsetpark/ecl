@@ -336,7 +336,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-reflection.ecl",
         "(( -- n ) (1) 'f def) 'reflection-module @defm " ++
-            "'reflection-module.f 'f import 'reflection-module.f body pop words " ++
+            "'reflection-module.f 'f import words " ++
             "'f which 'reflection-module.f see",
     );
     try runOk(&runtime, "oom-loader.ecl", "'stats.answer 'answer import answer pop");

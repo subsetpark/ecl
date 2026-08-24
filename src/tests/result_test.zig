@@ -310,10 +310,10 @@ test "result: every exported word carries documentation" {
     for (names) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'result.{s} body type 'result.{s} doc len 0 >",
-            .{ name, name },
+            "'result.{s} doc len 0 >",
+            .{name},
         );
         defer std.testing.allocator.free(source);
-        try support.expectStack(source, "'list 1");
+        try support.expectStack(source, "1");
     }
 }

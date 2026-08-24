@@ -57,9 +57,9 @@ const HeaderIndex = struct {
     branches: [radix]?*Branch = @splat(null),
     next_identity: u32 = 1,
 
-    fn coordinates(identity: heap.CodeProvenanceId) struct { usize, usize, usize } {
+    fn coordinates(identity: heap.CodeIdentity) struct { usize, usize, usize } {
         const raw = @intFromEnum(identity);
-        std.debug.assert(raw != 0 and raw <= heap.max_code_provenance_id);
+        std.debug.assert(raw != 0 and raw <= heap.max_code_identity);
         return .{
             @intCast((raw >> 16) & 0xff),
             @intCast((raw >> 8) & 0xff),
@@ -69,7 +69,7 @@ const HeaderIndex = struct {
 
     fn reserve(self: *HeaderIndex, count: usize) error{OutOfMemory}!u32 {
         const end = @as(u64, self.next_identity) + count;
-        if (end > @as(u64, heap.max_code_provenance_id) + 1) return error.OutOfMemory;
+        if (end > @as(u64, heap.max_code_identity) + 1) return error.OutOfMemory;
         const first = self.next_identity;
         self.next_identity = @intCast(end);
         return first;
@@ -77,7 +77,7 @@ const HeaderIndex = struct {
 
     fn set(
         self: *HeaderIndex,
-        identity: heap.CodeProvenanceId,
+        identity: heap.CodeIdentity,
         header: *value.ListHandle,
         indexed: IndexedSpan,
     ) void {
@@ -90,7 +90,7 @@ const HeaderIndex = struct {
 
     fn get(
         self: *const HeaderIndex,
-        identity: heap.CodeProvenanceId,
+        identity: heap.CodeIdentity,
         header: *value.ListHandle,
     ) ?IndexedSpan {
         const branch_index, const leaf_index, const entry_index = coordinates(identity);
@@ -111,11 +111,11 @@ const HeaderIndex = struct {
 };
 
 /// Span tables retain their source code roots. Besides keeping definitions'
-/// provenance alive, this keeps every header's direct identity valid for the
+/// identity alive, this keeps every header's direct identity valid for the
 /// complete lifetime of its directory entry.
 const SpanArchiveState = struct {
     host: *const heap.HostCleanup,
-    provenance_issuer: *heap.CodeProvenanceIssuer,
+    identity_issuer: *heap.CodeIdentityIssuer,
     mutex: std.Io.Mutex = .init,
     first: ?*Entry = null,
     last: ?*Entry = null,
@@ -133,7 +133,7 @@ const SpanArchiveState = struct {
     fn ensureIndexSlot(
         self: *SpanArchiveState,
         allocator: std.mem.Allocator,
-        identity: heap.CodeProvenanceId,
+        identity: heap.CodeIdentity,
     ) error{OutOfMemory}!void {
         const branch_index, const leaf_index, _ = HeaderIndex.coordinates(identity);
         var need_branch = false;
@@ -185,7 +185,7 @@ const SpanArchiveState = struct {
     fn indexed(self: *SpanArchiveState, header: *value.ListHandle) ?IndexedSpan {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        const identity = heap.codeProvenance(self.provenance_issuer, header) orelse return null;
+        const identity = heap.codeIdentity(self.identity_issuer, header) orelse return null;
         return self.index.get(identity, header);
     }
 
@@ -198,7 +198,7 @@ const SpanArchiveState = struct {
     ) bool {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        return switch (heap.inspectCodeProvenance(self.provenance_issuer, header)) {
+        return switch (heap.inspectCodeIdentity(self.identity_issuer, header)) {
             .unassigned => true,
             .assigned => |identity| self.index.get(identity, header) != null,
             .foreign_namespace => false,
@@ -210,13 +210,13 @@ const SpanArchiveState = struct {
     /// other absorbers and diagnostic readers.
     fn commitSpan(
         self: *SpanArchiveState,
-        identity: heap.CodeProvenanceId,
+        identity: heap.CodeIdentity,
         archive_entry: *const Entry,
         span_entry: *const reader.SpanTable.Entry,
     ) bool {
         std.Io.Threaded.mutexLock(&self.mutex);
         defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        switch (heap.inspectCodeProvenance(self.provenance_issuer, span_entry.header)) {
+        switch (heap.inspectCodeIdentity(self.identity_issuer, span_entry.header)) {
             .foreign_namespace => @panic("validated provenance namespace changed before commit"),
             .assigned => |existing_identity| {
                 const existing = self.index.get(existing_identity, span_entry.header) orelse
@@ -231,8 +231,8 @@ const SpanArchiveState = struct {
             },
             .unassigned => {},
         }
-        if (heap.assignCodeProvenance(
-            self.provenance_issuer,
+        if (heap.assignCodeIdentity(
+            self.identity_issuer,
             span_entry.header,
             identity,
         ) != .assigned) @panic("validated provenance assignment changed before commit");
@@ -261,7 +261,7 @@ pub const SpanArchive = enum(usize) {
         errdefer owner_allocator.destroy(backing);
         backing.* = .{
             .host = host,
-            .provenance_issuer = try .init(owner_allocator),
+            .identity_issuer = try .init(owner_allocator),
         };
         return @enumFromInt(@intFromPtr(backing));
     }
@@ -275,7 +275,18 @@ pub const SpanArchive = enum(usize) {
     }
 
     fn provenanceNamespace(self: *const SpanArchive) heap.CodeProvenanceNamespace {
-        return self.privateState().provenance_issuer.constructionNamespace();
+        return self.privateState().identity_issuer.constructionNamespace();
+    }
+
+    /// The stable identity this archive assigned to one reader-built code
+    /// value, or null for a value built at run time or read elsewhere. The
+    /// opaque issuer never leaves the archive; only the identity does, so a
+    /// sibling consumer can key its own table on it.
+    pub fn identityOf(
+        self: *const SpanArchive,
+        header: *value.ListHandle,
+    ) ?heap.CodeIdentity {
+        return heap.codeIdentity(self.privateState().identity_issuer, header);
     }
 
     /// Reader-built lists receive this archive's namespace while still under
@@ -293,7 +304,7 @@ pub const SpanArchive = enum(usize) {
             source_name,
             source,
             diag,
-            backing.provenance_issuer.constructionNamespace(),
+            backing.identity_issuer.constructionNamespace(),
         );
     }
 
@@ -344,7 +355,7 @@ pub const SpanArchive = enum(usize) {
         }
         index.deinit(owner_allocator);
         backing.host.drain();
-        backing.provenance_issuer.deinit();
+        backing.identity_issuer.deinit();
         owner_allocator.destroy(backing);
         self.* = .consumed;
     }
@@ -356,8 +367,9 @@ pub const SpanArchive = enum(usize) {
         self: *SpanArchive,
         parsed: *reader.Parsed,
         root: value.Value,
+        labeller: ?Labeller,
     ) AbsorbError!void {
-        var cursor = self.absorbCursor(parsed, root);
+        var cursor = self.absorbCursor(parsed, root, labeller);
         while (cursor.advance() catch |err| {
             std.debug.assert(cursor.deinit() == .caller_owned);
             return err;
@@ -366,6 +378,19 @@ pub const SpanArchive = enum(usize) {
     }
 
     pub const AbsorbProgress = poll.Progress(void);
+    /// An erased sink for the identities an absorption assigns. The archive
+    /// owns identity issuance but nothing else; a consumer that keys its own
+    /// table on identity — the scope-label table in `env` — receives each one
+    /// here rather than making the archive know about it.
+    pub const Labeller = struct {
+        context: *anyopaque,
+        record_fn: *const fn (*anyopaque, heap.CodeIdentity) error{OutOfMemory}!void,
+
+        fn record(self: Labeller, identity: heap.CodeIdentity) error{OutOfMemory}!void {
+            return self.record_fn(self.context, identity);
+        }
+    };
+
     pub const AbsorbCursor = struct {
         pub const ArtifactOwnership = enum { caller_owned, archive_owned };
         const Artifacts = union(enum) {
@@ -382,15 +407,22 @@ pub const SpanArchive = enum(usize) {
         writer: reader.SpanTable.PutCursor,
         index_entries: ?reader.SpanTable.EntryList.Iterator = null,
         next_identity: u32 = 0,
+        labeller: ?Labeller = null,
         phase: enum { spans, entry, validate, reserve, index, adopt, assign, complete } = .spans,
 
-        pub fn init(archive: *SpanArchive, parsed: *reader.Parsed, root: value.Value) AbsorbCursor {
+        pub fn init(
+            archive: *SpanArchive,
+            parsed: *reader.Parsed,
+            root: value.Value,
+            labeller: ?Labeller,
+        ) AbsorbCursor {
             std.debug.assert(root == .list);
             return .{
                 .archive = archive,
                 .parsed = parsed,
                 .artifacts = .{ .caller = .{ .root = root } },
                 .writer = .init(&parsed.spans, archive.allocator(), root.list, parsed.spans.top),
+                .labeller = labeller,
             };
         }
 
@@ -462,7 +494,7 @@ pub const SpanArchive = enum(usize) {
                         break :result .pending;
                     };
                     _ = span_entry;
-                    const identity: heap.CodeProvenanceId = @enumFromInt(self.next_identity);
+                    const identity: heap.CodeIdentity = @enumFromInt(self.next_identity);
                     try self.archive.privateState().ensureIndexSlot(self.archive.allocator(), identity);
                     self.next_identity += 1;
                     break :result .pending;
@@ -483,12 +515,19 @@ pub const SpanArchive = enum(usize) {
                         break :result .complete;
                     };
                     const backing = self.archive.privateState();
-                    const identity: heap.CodeProvenanceId = @enumFromInt(self.next_identity);
+                    const identity: heap.CodeIdentity = @enumFromInt(self.next_identity);
                     if (backing.commitSpan(
                         identity,
                         self.artifacts.archive,
                         span_entry,
-                    )) self.next_identity += 1;
+                    )) {
+                        // The unit that read this text is the scope its
+                        // quotations were written in, so the label is recorded
+                        // here rather than at publication: `def` cannot tell a
+                        // literal written inside a body from one handed in.
+                        if (self.labeller) |sink| try sink.record(identity);
+                        self.next_identity += 1;
+                    }
                     break :result .pending;
                 },
                 .complete => unreachable,
@@ -500,8 +539,9 @@ pub const SpanArchive = enum(usize) {
         self: *SpanArchive,
         parsed: *reader.Parsed,
         root: value.Value,
+        labeller: ?Labeller,
     ) AbsorbCursor {
-        return .init(self, parsed, root);
+        return .init(self, parsed, root, labeller);
     }
 
     pub fn locate(

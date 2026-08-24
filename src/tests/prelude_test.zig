@@ -11,11 +11,11 @@ const list = @import("../list.zig");
 
 test "embedded prelude exposes source bodies and derived dataflow" {
     try support.expectStacks(&.{
-        .{
-            .name = "source bodies",
-            .source = "'wrap body 'literal body 'partial body 'pair body 'sort body 'pack body",
-            .expected = "(() cons) (wrap (first) cons) (swap literal swap compose) (() cons cons) (dup grade at) (() swap (cons) times)",
-        },
+        // The prelude's source bodies were asserted here by extracting them
+        // with `body`. Nothing extracts a published body now, and the claim was
+        // redundant: each definition is pinned behaviorally (`sort` against
+        // `dup grade at` in kernel_order_test) and `see` renders the stored
+        // body wherever a rendering is asserted.
         .{ .name = "pack", .source = "1 2 3 4 4 pack", .expected = "[1 2 3 4]" },
         .{
             .name = "migrated stack and quotation words",
@@ -146,7 +146,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
     });
 }
 
-test "all embedded vocabulary entries expose bodies and nonempty documentation" {
+test "all embedded vocabulary entries expose nonempty documentation" {
     const names = [_][]const u8{
         "compose",      "first",     "wrap",          "literal", "dip",      "over",
         "partial",      "with",      "mod",           "neg",     "abs",      "<>",
@@ -164,11 +164,11 @@ test "all embedded vocabulary entries expose bodies and nonempty documentation" 
     for (names) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'{s} body type '{s} doc len 0 >",
-            .{ name, name },
+            "'{s} doc len 0 >",
+            .{name},
         );
         defer std.testing.allocator.free(source);
-        try support.expectStack(source, "'list 1");
+        try support.expectStack(source, "1");
     }
 }
 
@@ -180,7 +180,7 @@ fn expectInvalidPrelude(source: []const u8) !void {
     defer environment.deinit();
     var building = environment.beginCoreBuild();
     try prims.install(&building);
-    var registry = try modules.Registry.init(host.cleanup());
+    var registry = try modules.Registry.init(host.cleanup(), environment);
     defer registry.deinit();
     var archive = try spans.SpanArchive.init(host.cleanup());
     defer archive.deinit();
@@ -265,4 +265,23 @@ test "embedded definitions resolve against core, not the session" {
     // the definitions of whoever called it rather than core's.
     try support.expectStack("(pop pop 42) '+ def [1 2 3] 0 (+) fold", "42");
     try support.expectStack("(7) 'mine def [1 2] (pop mine) each", "[7 7]");
+}
+
+// PENDING: Patch 6. A quotation literal inside a prelude body is published
+// against core, so core alone is its chain. Flip this to false there.
+const labels_pending = false;
+
+test "embedded quotation literals resolve against core, not the session" {
+    if (labels_pending) return error.SkipZigTest;
+    // `all?` is `(|l q| l q each 1 (and) fold)`. Its own `(and)` was written
+    // in the prelude, so a session `and` cannot reach it.
+    try support.expectStack("(pop pop 42) 'and def [1 1] (1 =) all?", "1");
+    // `over` is `(swap dup (swap) dip)`, so a session `swap` cannot either.
+    try support.expectStack("(pop pop 99) 'swap def 1 2 over", "1 2 1");
+    // The caller's half of the same activation is untouched: `all?` hands
+    // `each` the predicate the session wrote, which still resolves there.
+    try support.expectStack("(1 =) 'one? def [1 1] (one?) all?", "1");
+    // Redefining the prelude word is still how new behavior is adopted: the
+    // replacement is a session definition and resolves in the session.
+    try support.expectStack("(pop pop 42) 'and def (|l q| l q each 1 (and) fold) 'all? def [1 1] (1 =) all?", "42");
 }

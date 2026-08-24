@@ -460,12 +460,19 @@ test "module loader: observation and dispatch require the requested registration
         "'path \"test/acceptance/modules/image-only.ecl\"",
     });
 
-    // Observation is registration-driven because it is *symbol*-driven: `body`,
+    // Observation is registration-driven because it is *symbol*-driven:
     // `which`, `see`, and `doc` all consume a name, and a name is exactly what
     // a registration is. Invocation also accepts a module value — see
     // `module values: invoke calls a public export of a nameless image` — and
-    // that path has no name for these words to take.
-    try expectStack(&runtime, "'register-style.answer body", "([7] first)");
+    // that path has no name for these words to take. `see` renders the stored
+    // body, which is how one binding kind stays observable without any
+    // operation that lifts a body out of its home.
+    output.clearRetainingCapacity();
+    try expectOk(&runtime, "'register-style.answer see");
+    try std.testing.expectEqualStrings(
+        "### def register-style.answer\n([7] first) 'register-style.answer def\n",
+        output.written(),
+    );
 }
 
 test "module registration: reuse reload removal and delayed calls reclaim boundedly" {
@@ -574,4 +581,44 @@ test "module sources: formatter and standard modules use @defm" {
         "1 1 1 1 1",
     );
     try expectStack(&runtime, "\"1.2.0\" \"1.10.0\" pkg.version.less?", "1");
+}
+
+// PENDING: Patch 6 makes an applied quotation resolve at its scope label. A
+// label is a `ScopeId` the module slot owns and reuses
+// across generations, so a quotation that escaped a module follows that module
+// through a reload and errors only when the scope itself retires.
+const labels_pending = false;
+
+test "module values: a pushed labelled quotation resolves in the image it was written in" {
+    if (labels_pending) return error.SkipZigTest;
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    // `(k)` is written inside the module, so it resolves in that image's chain
+    // rather than wherever the caller applies it. The session has no `k` at
+    // all, which is what makes the label load-bearing here.
+    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'holding @defm holding.q 'held set");
+    try expectStack(&runtime, "held call", "1");
+}
+
+test "module values: applying a quotation whose image is gone is a domain error" {
+    if (labels_pending) return error.SkipZigTest;
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    // The cell a label names belongs to the image, so a quotation means what it
+    // meant where it was written and stops meaning anything once that image is
+    // gone. Both removal and supersession by a reload retire the image, and
+    // both are a definite `'domain` rather than a silent fallback to core or to
+    // the launcher — a fallback would change what the quotation's words mean.
+    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'going @defm going.q 'held set");
+    try expectStack(&runtime, "held call", "1");
+    try expectOk(&runtime, "'going unmodule");
+    try expectErrorContains(&runtime, "held call", &.{ "'kind 'domain", "retired" });
+
+    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'reloaded @defm reloaded.q 'kept set");
+    try expectStack(&runtime, "kept call", "1");
+    try expectOk(&runtime, "((2) 'k def ((k)) 'q def) 'reloaded @defm");
+    try expectErrorContains(&runtime, "kept call", &.{ "'kind 'domain", "retired" });
+    // The name still works: it is the escaped value that stopped resolving, not
+    // the module.
+    try expectStack(&runtime, "reloaded.q call", "2");
 }

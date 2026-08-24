@@ -59,7 +59,6 @@ const entries = [_]Metadata{
 
     .{ .name = "def", .effect = null, .text = "Bind a quotation to a public word, with optional effect and documentation metadata." },
     .{ .name = "defp", .effect = null, .text = "Bind a quotation to a private module word, with optional effect and documentation metadata." },
-    .{ .name = "body", .effect = "name -- quotation", .text = "Return the stored quotation body of a resolved word." },
     .{ .name = "doc", .effect = "name -- string", .text = "Return the canonical documentation string of a resolved binding." },
     .{ .name = "which", .effect = "name --", .text = "Print where a word resolves and any bindings it shadows." },
     .{ .name = "see", .effect = "name --", .text = "Print a standard-formatted, re-readable representation of a binding." },

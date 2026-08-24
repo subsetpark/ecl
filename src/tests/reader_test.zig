@@ -30,16 +30,16 @@ test "span archive rejects a substitutable provenance issuer" {
     defer parsed.deinit();
     const quotation = parsed.values()[0].list;
 
-    const unrelated = try heap.CodeProvenanceIssuer.init(allocator);
+    const unrelated = try heap.CodeIdentityIssuer.init(allocator);
     defer unrelated.deinit();
     try std.testing.expectEqual(
-        heap.CodeProvenanceAssignment.foreign_namespace,
-        heap.assignCodeProvenance(unrelated, quotation, @enumFromInt(1)),
+        heap.CodeIdentityAssignment.foreign_namespace,
+        heap.assignCodeIdentity(unrelated, quotation, @enumFromInt(1)),
     );
 
     var root = heap.OwnedValue.init(host.domain(), try archive.codeRoot(parsed.values()));
     defer root.deinit();
-    try archive.absorb(parsed.borrow(), root.borrow());
+    try archive.absorb(parsed.borrow(), root.borrow(), null);
     _ = root.take();
 
     var location_cursor = archive.locateQuotationCursor(quotation);
@@ -71,7 +71,7 @@ test "span archive fails closed on unbound publication artifacts" {
     );
     defer root.deinit();
 
-    archive.absorb(parsed.borrow(), root.borrow()) catch |err| {
+    archive.absorb(parsed.borrow(), root.borrow(), null) catch |err| {
         try std.testing.expectEqual(error.InvalidProvenance, err);
         return;
     };
@@ -98,7 +98,7 @@ test "span archive cancellation keeps committed location storage alive" {
     var root_live = true;
     defer if (root_live) root.deinit();
 
-    var absorption = archive.absorbCursor(parsed.borrow(), root.borrow());
+    var absorption = archive.absorbCursor(parsed.borrow(), root.borrow(), null);
     var absorption_live = true;
     defer {
         if (absorption_live and absorption.deinit() == .archive_owned) {

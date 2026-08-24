@@ -97,7 +97,6 @@ const cases = [_]Case{
     .{ .name = "gone result.case", .source = "[7] result.ok (first) (pop 0) result.case" },
     .{ .name = "set", .source = "3 'x set x" },
     .{ .name = "set quotation", .source = "(dup *) 'q set q" },
-    .{ .name = "body", .source = "3 'x set 'x body" },
     .{ .name = "which", .source = "3 'x set 'x which" },
     .{ .name = "see", .source = "3 'x set 'x see" },
     .{ .name = "see set", .source = "'set see" },
@@ -787,13 +786,6 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\(dup *)
-        \\stderr:
-        \\<empty>
-        \\=== body ===
-        \\source: 3 'x set 'x body
-        \\exit: 0
-        \\stdout:
-        \\([3] first)
         \\stderr:
         \\<empty>
         \\=== which ===

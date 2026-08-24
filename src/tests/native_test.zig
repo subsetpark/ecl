@@ -485,12 +485,16 @@ test "native: only exact completion mutates the operand stack" {
 
 test "native: the static transport publishes a linked descriptor through the same path" {
     var host = heap.HostOwner.init(std.testing.allocator);
-    var registry = try modules.Registry.init(host.cleanup());
+    var environment = try env.Env.init(host.cleanup());
+    var registry = try modules.Registry.init(host.cleanup(), environment);
     const owner = try native_module.Owner.init(host.cleanup());
     defer {
         const closing = owner.closeCalls();
         registry.deinit();
+        // Images clear their Env-owned scope-label cell as they retire, so this
+        // drain must finish before the Env releases the cells.
         host.cleanup().drain();
+        environment.deinit();
         const settled = closing.settle();
         host.cleanup().drain();
         settled.deinit();

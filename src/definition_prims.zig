@@ -31,7 +31,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]Definition{
         .{ .name = "def", .primitive = bind(.def) },
         .{ .name = "defp", .primitive = bind(.defp) },
-        .{ .name = "body", .primitive = body },
         .{ .name = "doc", .primitive = doc },
         .{ .name = "which", .primitive = which },
         .{ .name = "see", .primitive = see },
@@ -290,17 +289,11 @@ const DefineDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
-fn body(evaluator: *Machine) MachineError!void {
-    const requested = try evaluator.popSymbol();
-    return installLookup(evaluator, requested, .body);
-}
-
 fn doc(evaluator: *Machine) MachineError!void {
     const requested = try evaluator.popSymbol();
-    return installLookup(evaluator, requested, .doc);
+    return installLookup(evaluator, requested);
 }
 
-const LookupMode = enum { body, doc };
 const ReflectionResolution = union(enum) {
     resolved: machine.Resolution,
     retry: machine.WorkProgress,
@@ -325,17 +318,19 @@ fn resolveForReflection(
     };
 }
 
-fn installLookup(evaluator: *Machine, requested: u32, mode: LookupMode) MachineError!void {
+/// Documentation is the only reflection that yields a value. There is no
+/// counterpart for a binding's stored body: nothing lifts a published body out
+/// of the home it resolves against, which is what keeps a quotation's scope
+/// label impossible to re-site.
+fn installLookup(evaluator: *Machine, requested: u32) MachineError!void {
     try evaluator.startDriver(LookupDriver{
         .requested = requested,
-        .mode = mode,
         .resolution = .init(machine.ResolutionCursor.init(evaluator, requested)),
     });
 }
 const LookupDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     requested: u32,
-    mode: LookupMode,
     resolution: heap.Owned(machine.ResolutionCursor),
     pub fn advance(evaluator: *Machine, self: *LookupDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -353,18 +348,9 @@ const LookupDriver = struct {
                     .resolved => |resolution| resolution,
                 };
                 defer resolved.deinit(evaluator.allocator());
-                switch (self.mode) {
-                    .body => {
-                        const source = switch (resolved.lease.binding) {
-                            .word => |source| env.quotationHeader(source),
-                            else => return evaluator.typeError("a source-defined word"),
-                        };
-                        try evaluator.pushBorrowed(.{ .list = source });
-                    },
-                    .doc => try evaluator.pushBorrowed(.{ .list = env.documentationHeader(
-                        resolved.lease.doc orelse return evaluator.fail(.domain, "binding has no documentation"),
-                    ) }),
-                }
+                try evaluator.pushBorrowed(.{ .list = env.documentationHeader(
+                    resolved.lease.doc orelse return evaluator.fail(.domain, "binding has no documentation"),
+                ) });
                 return .completed;
             },
         };

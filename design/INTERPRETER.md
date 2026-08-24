@@ -129,8 +129,15 @@ primitives, operationalized as two rules:
   `env.bind()`, and registry swaps — the only points where one unit's
   writes become visible to another.
 - **No cycle collector.** Immutable bottom-up construction, words
-  resolving by name (never by heap pointer), and the absence of closures
-  make the value heap a DAG. Sole exception: a task returning its own
+  resolving by name (never by heap pointer), and no value holding an owning
+  pointer into the environment make the value heap a DAG. A quotation's
+  scope label is what that last clause is protecting: it is an
+  `env.ScopeId` into a table the `Env` owns, never a `*Scope`, because an
+  owning pointer would close a cycle on the very first `def` — Scope →
+  Environment → BindingCell → BindingSpec → binding.word → Scope. Perceus
+  (PLDI 2021) is explicit that reference counting cannot release cyclic
+  data, so keeping the owning edge outside the value heap is what keeps
+  precise RC sufficient here. Sole exception: a task returning its own
   handle into its result cell — a documented bounded leak, not machinery.
 
 ## Code representation and dispatch
@@ -194,12 +201,40 @@ primitives, operationalized as two rules:
   `@attempt`'s included. Reading the unit's root instead was the last
   exception to "resolves where it was defined", and switching on `Origin` was
   the approximation that stood in for the found scope before it was recorded.
-  The sealing stops at quotation literals: one written inside a core word's
-  body is plain data, so handing it to a combinator resolves it in the
-  invoking chain. `all?` and `over` both do this, and no rule separates a
-  word's own literal from a caller-supplied quotation reaching the same
-  combinator from the same activation — that separation is what a closure
-  would buy, and SPEC.md records the consequence.
+  The sealing extends to quotation literals, which is what makes it total. A
+  literal written inside a published body carries a *scope label*: an
+  `env.ScopeId` stamped once at publication and read when the quotation is
+  applied, so `beginApplication` takes the activation's resolution scope from
+  the label instead of from the launching activation. That is the separation a
+  closure would otherwise be needed for — `all?` hands `each` its caller's `q`
+  and `fold` its own `(and)` from one activation, and the two resolve in
+  different chains because the scope travels with the value rather than with
+  the activation. This is the syntactic-closure construction (Bawden & Rees,
+  LFP 1988) in the scope-label form Flatt uses (POPL 2016). A label carries a
+  single scope rather than a scope *set*: ECL's scopes are a chain rooted at
+  core and it has no macro expansion, so the composition of independent,
+  non-hierarchical scope introductions that a set exists to express cannot
+  arise. That reasoning expires if macros ever arrive.
+  A label is an `env.ScopeId`, never a `*Scope`. `Env` owns the registry
+  mapping an id to a nullable scope, because `Env` owns `Scope`; `ModuleSlot`
+  owns the id and reuses it across every published generation of its
+  canonical name, because `modules` owns lifecycle and `env.zig` holds no
+  reference to `modules` and must keep none. Slot-owned ids are why a
+  quotation that escaped a module follows that module through a reload,
+  exactly as `m.f` does — reload is late binding, and an escaped quotation is
+  not the one reference in the language that gets frozen. `ModuleSlot.retire`
+  clears the entry before the embedded `env.Scope` is torn down, so a reader
+  sees the old scope, the new scope, or a definite `retired`, never a dangling
+  pointer; applying a retired quotation is `'domain` rather than a silent
+  fallback to core or to the launcher, because a fallback would change what
+  the quotation's words mean.
+  Nothing extracts a published body, and that is what lets the rule stand
+  without an exception: a label cannot be re-sited if the labelled code cannot
+  be lifted out of its home, so no caller can reach a module private by
+  indexing the nested literals out of a public word's body. The
+  one-binding-kind invariant — a `set` constant is a word whose body is the
+  capture `((value) first)` — is now proven directly on the binding rather
+  than through a reflective word.
   Before that split, a homeless binding inherited whichever environment
   happened to be executing, so a module exporting a word named like a core one
   reached inside every prelude word that module called: a module defining

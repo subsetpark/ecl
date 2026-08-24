@@ -123,7 +123,7 @@ test "stdlib: dynamic qualified execution auto-loads every embedded transport" {
 }
 
 test "stdlib: qualified reflection auto-loads every module transport" {
-    try support.expectStack("'str.upper body type 'io.pp doc len 0 >", "'list 1");
+    try support.expectStack("'str.upper doc len 0 > 'io.pp doc len 0 >", "1 1");
 
     var output = std.Io.Writer.Allocating.init(allocator);
     defer output.deinit();

@@ -179,7 +179,9 @@ Applying a quotation evaluates its forms on some stack; a quotation
 containing only data therefore pushes its elements. All binding is late:
 an unqualified reference resolves when it executes, so words observe
 re-`def`s and re-`set`s of their dependencies immediately. There are no
-closures: a quotation is a plain inspectable list that captures nothing.
+closures: a quotation captures no values. It carries one thing — the scope
+its text was written in, which is where its words resolve — and that is
+resolution context, not a captured environment.
 
 Tail calls are guaranteed: through word calls, `if`, and every
 combinator's tail position, iteration and tail recursion run in constant
@@ -390,9 +392,13 @@ remain legal.
 
 There is no macro system. Runtime quotation construction — `literal`,
 `compose`, `cons`, and the list words — plus `def` is the metaprogramming
-system: `'word body` fetches a word's list, list surgery builds a new one,
-`def` rebinds. `parse` turns source text into a quotation. Parse-time
-transforms are capped at the binder desugaring and the literal readers.
+system: a quotation you wrote or `parse` produced is a list, list surgery
+builds a new one, `def` rebinds. `parse` turns source text into a quotation.
+Parse-time transforms are capped at the binder desugaring and the literal
+readers. The material is code you hold, never code a binding holds: no
+operation extracts a published body, so metaprogramming cannot reach inside
+an existing definition. A quotation built this way has no written-in scope
+and so resolves where it is invoked.
 
 ## Pervasion and conformability
 
@@ -568,8 +574,9 @@ anonymously, be passed as data, and be registered more than once.
   exported word's body resolves against its module's internal environment and
   then core — never the caller's environment. Publics therefore reach
   privates, and callers cannot perturb a module's behavior by shadowing.
-  A module word's body is still a plain list: `'stats.stdev body` is data,
-  and re-`def`ing that list elsewhere loses the private context.
+  A module word's body is not reachable as a value: no operation extracts a
+  published body, so a module's code cannot be lifted out of the home it
+  resolves against.
   The rule has no exceptions, and the chain is the one each binding was
   actually defined in. A primitive or an embedded prelude definition was
   published against core alone, so core alone is its chain: it never resolves
@@ -597,28 +604,34 @@ anonymously, be passed as data, and be registered more than once.
   Reaching further in is deliberately not available — changing what `filter`'s
   own `where` means requires redefining `filter`.
   Late binding is unaffected. The lookup still happens at call time; what is
-  fixed is which chain it happens in. And a quotation is unaffected too,
-  because it resolves where its invoker runs rather than where the invoker was
-  defined: `(pop pop 42) '+ def [1 2 3] 0 (+) fold` is 42, so a combinator
-  still sees the definitions of the code that called it.
-  **That is also the limit of the sealing, and it is a consequence of having no
-  closures rather than an oversight.** A core word's *direct* references
-  resolve against core, but a quotation *literal* written inside its body is
-  data like any other, so when the word hands that literal to a combinator it
-  resolves where the combinator runs — the invoking chain. `all?` is
-  `(|l q| l q each 1 (and) fold)`, so a session `and` reaches it; `over` is
-  `(swap dup (swap) dip)`, so a session `swap` reaches it:
+  fixed is which chain it happens in. **The sealing extends to quotation
+  literals, and it has to.** A quotation literal written inside a body is
+  sealed the way the body's own references are: it resolves in the scope its
+  text was written in, whoever ends up applying it. `all?` is
+  `(|l q| l q each 1 (and) fold)` and `over` is `(swap dup (swap) dip)`, so a
+  session `and` or `swap` leaves both alone:
 
-      (pop pop 42) 'and def   [1 1] (1 =) all?      -- 42
-      (pop pop 99) 'swap def  1 2 over              -- 99 1
+      (pop pop 42) 'and def   [1 1] (1 =) all?      -- 1
+      (pop pop 99) 'swap def  1 2 over              -- 1 2 1
 
-  No rule can separate the two cases. `all?` hands its caller's `q` and its
-  own `(and)` to combinators from the same activation, so resolving one in
-  core resolves the other there too and breaks the caller's predicate. A plain
-  list carries no record of the scope it was written in, and giving it one is
-  exactly the closure this language does not have. Shadowing a name that
-  appears in a quotation literal inside a prelude body therefore still changes
-  that prelude word.
+  A quotation the session wrote is still session code, so a combinator does
+  see the definitions of whoever *wrote* the quotation it was handed:
+  `(pop pop 42) '+ def [1 2 3] 0 (+) fold` is 42. The two cases separate
+  because the scope travels with the quotation rather than with the
+  activation. `all?` hands `each` its caller's `q`, written in the session,
+  and hands `fold` its own `(and)`, written in the prelude; each resolves
+  where it was written, from the same activation. This is the
+  syntactic-closure construction — code paired with the scope its identifiers
+  resolve in — and it is why the no-closures rule is stated as *captures no
+  values*. Nothing is captured, the lookup still happens at call time, and a
+  quotation built at run time by `partial`, `cons`, or `compose` has no
+  written-in scope, so it resolves where it is invoked exactly as a plain list
+  always has.
+  A quotation's scope is the *current* image of the module whose body
+  published it, so reloading that module changes what the quotation means
+  exactly as it changes what `m.f` means. If the scope has retired — the
+  module was removed, a child unit closed, the Session is ending — applying
+  the quotation is `'domain`.
 - **An undefined-word failure says which chain it searched.** Its `'data`
   carries `'scope` alongside `'name`: `'session` for the activation's own
   lexical chain over core, `'module` for a module image's definitions over
@@ -642,7 +655,7 @@ anonymously, be passed as data, and be registered more than once.
   it; durable state and `within` remain the province of a registration, which
   is what a canonical name buys.
   The observation words take a *symbol*, so they remain registration-driven:
-  `body`, `which`, `see`, and `doc` look a name up, and a name is what a
+  `which`, `see`, and `doc` look a name up, and a name is what a
   registration is. A value has none to offer them.
   A nameless image has no canonical spelling either, so a failure inside a
   handle-called word traces its bare local name — `['missing 'boom]` where a
@@ -653,20 +666,26 @@ anonymously, be passed as data, and be registered more than once.
   A stateless module is formally a record of functions, so it is worth saying
   why it is not a dict of quotations. A dict would lose both halves of what a
   module carries: its privates, which are absent from its public face but
-  reachable from it, and the home its bodies resolve against. `'m.f body`
-  already shows the loss — an extracted body cannot reach the private it was
-  written against. The module kind exists to carry that environment, and
-  `invoke` is the operation that enters it.
+  reachable from it, and the home its bodies resolve against. A dict of
+  quotations hands out the code and keeps neither: the quotations would be
+  values a caller can index, reorder, and re-`def`, and a private would be
+  reachable by dissecting a public. The module kind exists to carry that
+  environment, and `invoke` is the operation that enters it.
 - **Capture is parameterization, and parameterization is the only capture.**
   A construction receives everything it needs on its stack, seeded by the
   ordinary composition of `with` — `values (body) with @module`,
   `values (body) with 'name @defm` — and nothing else crosses the boundary.
   There is no ambient environment between a module's own definitions and core,
   and no construction-time snapshot of one.
-  To depend on a session value, pass the value. To depend on a session word,
-  pass its body and bind it inside the body. Both are ordinary values on an
-  ordinary stack, which is why this needs no construction-specific mechanism
-  and no new vocabulary.
+  To depend on a session value, pass the value. To depend on behavior, pass a
+  quotation you write at the call site — `[(2 *)] ('scale def …) with 'm @defm`
+  — which is the functor discipline: the caller writes the structure it hands
+  in. To share a *word* between a session and a module, or between two
+  modules, make it a module both parties call. No operation lifts a published
+  body out of the home it resolves against, so a word is never the currency; a
+  quotation you wrote, or a module you both call, is. Both are ordinary values
+  on an ordinary stack, which is why this needs no construction-specific
+  mechanism and no new vocabulary.
   Every consequence follows from having nothing to stale. A later top-level
   definition cannot change an existing image, because the image never referred
   to the session. Nested construction needs no special rule, because it
@@ -680,19 +699,37 @@ anonymously, be passed as data, and be registered more than once.
   of implementation with the caller instead of making it a fact about the
   global registry, which is what makes a test double local and two versions of
   one package able to coexist.
-  Transitivity is explicit rather than implied: a body passed in resolves its
-  own references against the image, so anything *it* needs is a parameter too.
-  That is more to write than an ambient environment would be, and it is the
-  point — the parameter list is the module's dependency list, readable without
-  knowing what the session happened to contain.
-- **A quotation resolves where its invoker runs, because a quotation is
-  plain data.** Passing a quotation into a combinator therefore keeps the
-  caller's chain: a module word may hand `(private-helper)` to `each` and
-  the private still resolves. A quotation carries no environment, so nothing
-  is attached to a list and `'m.f body` remains an ordinary inspectable value
-  that loses its module context when it is re-`def`ed elsewhere.
-  What a word *defines* — `def`, `set`, `setp` — also lands in the invoking context, which is how `setp` inside a module
-  body binds a module private. Only a word's own references are lexical.
+  A quotation parameter carries the scope it was written in, so its own
+  references are the caller's rather than the module's. With `10 'k set` in
+  scope, `[(k *)] ('scale def ( -- n ) (4 scale) 'go def) with 'm @defm` makes
+  `m.scale` multiply by ten, and the module needs no parameter for `k`. That is
+  what a functor argument should do: the caller supplies the behavior, and the
+  behavior means what it meant where it was written.
+  Purity comes from the unit-constructor boundary, not from transitivity. The
+  *construction body* is not an ordinary application — `@module` and `@defm`
+  run it in the image's own chain whatever scope its text was written in, so a
+  bare `k` inside the body is undefined however recently the session defined
+  one. The module still cannot reach the session, and everything still arrives
+  as a parameter. A label decides one thing only: where a handed-in
+  quotation's own words resolve once the module applies it.
+- **A quotation resolves in the scope its text was written in.** A module
+  word may hand `(private-helper)` to `each` and the private still resolves,
+  because the literal was written inside the module; and a module word may
+  accept `(bump)` from its caller and that `bump` resolves in the caller,
+  because the caller wrote it. Neither depends on which activation launched
+  the combinator. A quotation with no written-in scope — one built at run time
+  by `partial`, `cons`, or `compose` — resolves where it is invoked.
+  A label governs *application*, and the five `@` words are not applications:
+  `@attempt`, `@spawn`, `@each`, `@module`, and `@defm` run their quotation in
+  a fresh unit whose chain they establish themselves — a child scope, the
+  session root, or the image being built — and ignore any label the quotation
+  carries. That boundary is what keeps a module body a module body and an
+  `@attempt` body a child scope no matter where their text was written.
+  What a word *defines* — `def`, `set`, `setp` — still lands in the invoking
+  context, which is how `setp` inside a module body binds a module private.
+  `def`-ing a quotation therefore makes the *binding* local without re-siting
+  the quotation's *references*: they stay where the text was written.
+  Resolution moved; definition placement did not.
 - **`within` is the explicit stack boundary.** `within` runs a quotation
   against a private draft of the home module's durable stack rather than
   the ambient caller stack. It is legal only while executing a published
@@ -810,7 +847,7 @@ anonymously, be passed as data, and be registered more than once.
   module is addressable by qualified name with no ceremony; an explicit
   `import` supplies a chosen bare spelling for one word.
   Every qualified-name operation triggers the same load when needed:
-  execution, `body`, `doc`, `see`, `which`, and qualified completion do not
+  execution, `doc`, `see`, `which`, and qualified completion do not
   depend on whether an earlier operation happened to register the module.
   Completion loads only the module; it neither executes an export nor imports
   one into session scope. A misspelled dotted word costs one bounded search
@@ -1908,7 +1945,7 @@ Conventions:
 
 - Words marked **pervasive** follow the Pervasion section.
 - "Equivalent to `…`" names a word defined in ecl itself; the definition
-  is normative and `body` returns it.
+  is normative and `see` renders it.
 - Words applying quotations are marked *inline* or *unit constructor*
   (see Application contexts); a unit constructor states the contract
   required of its quotation, enforced at each application.
@@ -2016,8 +2053,8 @@ self-contained quotation concurrently in a child task. Seed it with
 `values (q) with @spawn`. See Concurrency.
 
 ### abs
-`( x -- y )` — **Pervasive.** Absolute value. Defined in ecl (see
-`'abs body`).
+`( x -- y )` — **Pervasive.** Absolute value. Defined in ecl; `'abs see`
+renders the definition.
 
 ### alias
 `( 'short 'module-name -- )` — Register an unqualified short registry name
@@ -2104,12 +2141,6 @@ quotations to the same pair of inputs. Equivalent to
 `( x -- y )` — **Pervasive.** Invert every bit. `bnot bnot` is identity;
 `0 bnot` is `-1`.
 
-### body
-`( 'name -- quotation )` — Return the stored body of a resolved word, as
-a plain list. Total over everything defined in ecl, constants included: a
-name bound by `set` returns its capture body `((value) first)`. Host
-builtins and native words have no ecl body and are `'type`.
-
 ### bor
 `( x y -- z )` — **Pervasive.** Bitwise or. See `band`.
 
@@ -2147,7 +2178,7 @@ odd: `[key action … else]`. Keys are inert data — any value, never
 executed, duplicates legal with the first `match?` result of 1 winning;
 every action and the else must be a quotation, validated before any
 comparison. The first key for which `match?` returns 1 selects its action.
-Defined in ecl (see `'case body`).
+Defined in ecl; `'case see` renders the definition.
 
 ### cat
 `( left right -- list )` — Concatenate two lists.
@@ -2375,7 +2406,7 @@ binding dispatches through the module, so an imported word resolves against its
 own home exactly as the qualified spelling does. Shadowing an existing binding
 is allowed — it is the documented way to patch one — but it takes naming the
 word, so it cannot happen by accident. The new binding preserves the
-original's effect and documentation; `body` reflects its one-word forwarding
+original's effect and documentation; `see` renders its one-word forwarding
 quotation. An unqualified original or a qualified binding is `'domain`.
 
 ### infra

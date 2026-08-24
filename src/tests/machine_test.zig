@@ -446,11 +446,11 @@ test "early prelude installs source-defined wrap and pair" {
     defer runtime.deinit();
     try std.testing.expect((try runtime.runUnit(
         "<test>",
-        "1 wrap 2 3 pair 'wrap body 'pair body",
+        "1 wrap 2 3 pair",
     )) == .ok);
     var display = try runtime.stackDisplay();
     defer display.deinit();
-    try std.testing.expectEqualStrings("[1] [2 3] (() cons) (() cons cons)", display.bytes());
+    try std.testing.expectEqualStrings("[1] [2 3]", display.bytes());
 }
 
 test "provisional scalar primitives enforce the non-finite regime" {

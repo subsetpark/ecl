@@ -1160,6 +1160,20 @@ pub const ExecutionSite = struct {
     pub fn resumed(scope: *env.Scope, home: ?*modules.ModuleHome) ExecutionSite {
         return .{ .scope = scope, .resolution_scope = scope, .home = home };
     }
+
+    /// An applied quotation. Definitions still land in the launcher's scope —
+    /// `def`, `set`, and `setp` are unchanged — while *resolution* comes from
+    /// the quotation's scope label, the scope its text was written in. That
+    /// split is the whole of ticket ecl#4: a prelude word's own literal reaches
+    /// core while the caller's predicate handed to the same combinator from the
+    /// same activation reaches the caller.
+    pub fn applied(
+        launcher: *env.Scope,
+        resolution: ?*env.Scope,
+        home: ?*modules.ModuleHome,
+    ) ExecutionSite {
+        return .{ .scope = launcher, .resolution_scope = resolution, .home = home };
+    }
 };
 
 pub const ApplicationProvenance = union(enum) {
@@ -3424,7 +3438,14 @@ pub const Machine = struct {
                         self.materializer = null;
                         self.root = root;
                         self.root_header = root.list;
-                        self.absorber = evaluator.unit.archive.absorbCursor(&self.parsed.?, root);
+                        const label_cell = try evaluator.unit.environment.scopeCell(
+                            evaluator.unit.lexicalScope(),
+                        );
+                        self.absorber = evaluator.unit.archive.absorbCursor(
+                            &self.parsed.?,
+                            root,
+                            label_cell.labeller(),
+                        );
                         self.phase = .absorb;
                     },
                 },
@@ -4384,8 +4405,10 @@ pub const Machine = struct {
         self.unit.kernel_fuel -= @intCast(amount);
         return reached_boundary;
     }
-    /// Consumes a quotation header and applies it inline.
-    pub fn callOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
+    /// Consumes a quotation header and applies it inline. It can now fail with
+    /// an ECL error as well as OOM: applying a quotation whose written-in scope
+    /// has retired is `'domain`.
+    pub fn callOwned(self: *Machine, quotation: *Header) MachineError!void {
         const effect_tail = self.replaceTailEffectCandidate(quotation);
         const application_tail = self.tailApplicationIndex();
         if (application_tail) |application_index| {
@@ -4393,7 +4416,15 @@ pub const Machine = struct {
             std.debug.assert(frame.* == .application);
             frame.application.selection.selectBorrowed(quotation);
         }
-        const site = ExecutionSite.inheriting(self.unit.current.?, self.unit.current.?.scope());
+        // Inline application is an application: `call`, `dip`, and `if` consult
+        // the quotation's scope label exactly as an isolated combinator does.
+        // Only the five `@` words establish a chain of their own and ignore it.
+        const launcher = self.unit.current.?.scope();
+        const resolution = self.appliedResolution(quotation, launcher) catch |err| {
+            self.releaseDomain().releaseHeader(quotation);
+            return err;
+        };
+        const site = ExecutionSite.applied(launcher, resolution, self.unit.current.?.home());
         const inherited_trace = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
@@ -4541,6 +4572,30 @@ pub const Machine = struct {
         return env.Scope.createLazy(self.unit.allocator, parent);
     }
 
+    /// The chain an applied quotation's words resolve in. A labelled quotation
+    /// resolves in the scope its text was written in, refined to the most
+    /// specific scope on that same chain the activation is actually inside. An
+    /// unlabelled one — built at run time by `partial`, `cons`, or `compose`,
+    /// which assigns no identity and therefore no label — resolves where it is
+    /// invoked, which is what a plain list has always done.
+    fn appliedResolution(
+        self: *Machine,
+        quotation: *Header,
+        launcher: *env.Scope,
+    ) MachineError!?*env.Scope {
+        return switch (self.unit.environment.resolveLabel(
+            self.unit.archive.identityOf(quotation),
+        )) {
+            .unlabelled => launcher,
+            .core => null,
+            .retired => self.fail(
+                .domain,
+                "the scope this quotation was written in has retired",
+            ),
+            .scope => |written| if (written.encloses(launcher)) launcher else written,
+        };
+    }
+
     fn beginApplication(
         self: *Machine,
         application: IsolatedApplication,
@@ -4567,6 +4622,14 @@ pub const Machine = struct {
                 return error.OutOfMemory;
             };
         }
+        const resolution = self.appliedResolution(
+            application.quotation,
+            child orelse application.parent_scope,
+        ) catch |err| {
+            if (child) |scope| scope.retire();
+            application.deinit_fn(self.releaseDomain(), self.unit.allocator, application.context);
+            return err;
+        };
         var inherited_trace = inherited orelse no_word;
         if (self.unit.current != null) {
             std.debug.assert(inherited == null);
@@ -4608,13 +4671,13 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = application.quotation,
             .ip = 0,
-            .site = .resumed(child orelse application.parent_scope, application.home),
+            .site = .applied(child orelse application.parent_scope, resolution, application.home),
             .traced_word = inherited_trace,
             .application_tail = provenance_target orelse application_index,
             .application_selection = if (select_initial) provenance_target else null,
         };
     }
-    pub fn attemptOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
+    pub fn attemptOwned(self: *Machine, quotation: *Header) MachineError!void {
         return self.beginAttemptOwned(quotation);
     }
     /// Publishes an already-constructed image under a validated name. The
@@ -4643,6 +4706,42 @@ pub const Machine = struct {
             )),
         });
     }
+    /// Relabels a construction body, and every quotation nested inside it,
+    /// with the image's scope. Read-time labelling attributes a literal to the
+    /// unit that read its text, which cannot know that a quotation will become
+    /// a module body; `@module` and `@defm` are where that becomes knowable, so
+    /// this is the one place the enclosing-construct rule is applied.
+    ///
+    /// A body handed in as a *parameter* is a separate value and keeps the
+    /// caller's label. That is exactly what separates
+    /// `[(k *)] ('scale def ...) with 'm @defm`, where `k` resolves in the
+    /// caller, from `((k *) 'scale def) 'm @defm`, where it is undefined.
+    ///
+    /// The walk is bounded by the body, and module construction already
+    /// allocates a fresh unit, environment, and scope, so it is not on any hot
+    /// path. `@attempt` deliberately does not walk: a label names the scope the
+    /// text was written in, and resolution refines that to the most specific
+    /// scope on the same chain the activation is actually inside, which covers
+    /// an isolated child for free.
+    fn relabelConstructionBody(
+        self: *Machine,
+        root: *Header,
+        cell: *env.ScopeCell,
+    ) error{OutOfMemory}!void {
+        const scratch = self.unit.allocator;
+        var pending: std.ArrayList(*Header) = .empty;
+        defer pending.deinit(scratch);
+        try pending.append(scratch, root);
+        while (pending.pop()) |header| {
+            if (self.unit.archive.identityOf(header)) |identity|
+                try self.unit.environment.labelCode(identity, cell);
+            if (header.kind() != .generic_spine) continue;
+            for (heap.valuesConst(header)) |item| {
+                if (item == .list) try pending.append(scratch, item.list);
+            }
+        }
+    }
+
     /// Opens a construction boundary. The body evaluates against a fresh
     /// anonymous image; `registration`, when present, is the name that image
     /// is published under the instant the body succeeds.
@@ -4662,6 +4761,12 @@ pub const Machine = struct {
         };
         errdefer candidate.deinit();
         const home = candidate.executionHome(self.unit.module_access);
+        if (home.scope(self.unit.module_access).labelCell()) |cell| {
+            self.relabelConstructionBody(quotation, cell) catch {
+                self.releaseDomain().releaseHeader(quotation);
+                return error.OutOfMemory;
+            };
+        }
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
@@ -4841,9 +4946,35 @@ pub const Machine = struct {
     fn beginAttemptOwned(
         self: *Machine,
         quotation: *Header,
-    ) error{OutOfMemory}!void {
-        const parent_scope = self.unit.current.?.scope();
+    ) MachineError!void {
+        // A child unit exists for stack and failure isolation, not to re-site
+        // names, so the child is parented on the quotation's written-in scope
+        // rather than on whoever invoked `@attempt`. That is what lets a module
+        // word run a caller's quotation under `@attempt` — which is exactly how
+        // the stdlib's higher-order words are written: `result.and-then` is
+        // `(swap 'ok at swap with @attempt)`. Definitions still land in the
+        // child, and the chain rule in `appliedResolution` then lets a literal
+        // written alongside them reach them.
+        //
+        // `@module` and `@defm` are the constructors that genuinely do
+        // establish a chain of their own; they build an image instead of a
+        // child and are unaffected.
         const invoker = self.unit.current.?;
+        const parent_scope = switch (self.unit.environment.resolveLabel(
+            self.unit.archive.identityOf(quotation),
+        )) {
+            .scope => |written| written,
+            // Core denotes no scope, so a prelude-written body keeps the
+            // invoking chain, which is what it has always had.
+            .unlabelled, .core => invoker.scope(),
+            .retired => {
+                self.releaseDomain().releaseHeader(quotation);
+                return self.fail(
+                    .domain,
+                    "the scope this quotation was written in has retired",
+                );
+            },
+        };
         const word = self.unit.active_word;
         const child = env.Scope.createLazy(self.unit.allocator, parent_scope) catch {
             self.releaseDomain().releaseHeader(quotation);

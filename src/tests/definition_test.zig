@@ -41,8 +41,8 @@ test "definition annotations support all top-level forms and dynamic data" {
             "(: \"Built as data.\") 'annotation set " ++
             "annotation (5) 'dynamic def " ++
             "plain effect-only doc-only 4 square dynamic " ++
-            "'doc-only doc 'square doc 'dynamic doc 'square body",
-        "1 2 3 16 5 \"Documented.\" \"Square a numeric value.\" \"Built as data.\" (dup *)",
+            "'doc-only doc 'square doc 'dynamic doc",
+        "1 2 3 16 5 \"Documented.\" \"Square a numeric value.\" \"Built as data.\"",
     );
     try support.expectErrors(&.{
         .{ .name = "no documentation", .source = "(-- x) (1) 'x def 'x doc", .kind = "domain", .word = "doc" },
@@ -56,27 +56,26 @@ test "definition annotations support all top-level forms and dynamic data" {
 
 test "every primitive exposes meaningful reflective documentation" {
     const names = [_][]const u8{
-        "dup",      "swap",      "pop",       "over",      "cons",        "compose",
-        "match?",   "type",      "parse",     "parse-int", "parse-float", "dict-of",
-        "@attempt", "raise",     "args",      "exit",      "dip",         "call",
-        "if",       "while",     "times",     "cond",      "each",        "zip-with",
-        "for",      "fold",      "scan",      "stencil",   "unfold",      "infra",
-        "def",      "set",       "defp",      "setp",      "body",        "doc",
-        "which",    "see",       "@module",   "@defm",     "register",    "import",
-        "alias",    "words",     "load",      "@spawn",    "await",       "cancel",
-        "tasks",    "await-any", "await-for", "@each",     "+",           "-",
-        "*",        "/",         "div",       "mod",       "pow",         "atan2",
-        "min",      "max",       "=",         "<>",        "<",           ">",
-        "<=",       ">=",        "and",       "or",        "neg",         "abs",
-        "sqrt",     "floor",     "ceil",      "round",     "exp",         "log",
-        "sin",      "cos",       "not",       "at",        "where",       "in?",
-        "raze",     "cat",       "take",      "drop",      "reverse",     "first",
-        "rest",     "range",     "shape",     "len",       "flip",        "reshape",
-        "cmp",      "grade",     "distinct",  "group",     "keys",        "vals",
-        "put",      "to-dict",   "del",       "merge",     "has?",        "split",
-        "join",     "str",       "format",    "band",      "bor",         "bxor",
-        "bsl",      "bsr",       "bnot",      "rand-int",  "rand-ints",   "rand-float",
-        "entropy",
+        "dup",       "swap",      "pop",      "over",      "cons",        "compose",
+        "match?",    "type",      "parse",    "parse-int", "parse-float", "dict-of",
+        "@attempt",  "raise",     "args",     "exit",      "dip",         "call",
+        "if",        "while",     "times",    "cond",      "each",        "zip-with",
+        "for",       "fold",      "scan",     "stencil",   "unfold",      "infra",
+        "def",       "set",       "defp",     "setp",      "doc",         "which",
+        "see",       "@module",   "@defm",    "register",  "import",      "alias",
+        "words",     "load",      "@spawn",   "await",     "cancel",      "tasks",
+        "await-any", "await-for", "@each",    "+",         "-",           "*",
+        "/",         "div",       "mod",      "pow",       "atan2",       "min",
+        "max",       "=",         "<>",       "<",         ">",           "<=",
+        ">=",        "and",       "or",       "neg",       "abs",         "sqrt",
+        "floor",     "ceil",      "round",    "exp",       "log",         "sin",
+        "cos",       "not",       "at",       "where",     "in?",         "raze",
+        "cat",       "take",      "drop",     "reverse",   "first",       "rest",
+        "range",     "shape",     "len",      "flip",      "reshape",     "cmp",
+        "grade",     "distinct",  "group",    "keys",      "vals",        "put",
+        "to-dict",   "del",       "merge",    "has?",      "split",       "join",
+        "str",       "format",    "band",     "bor",       "bxor",        "bsl",
+        "bsr",       "bnot",      "rand-int", "rand-ints", "rand-float",  "entropy",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
@@ -341,7 +340,7 @@ test "long annotation traversal and reflection observe cancellation" {
     try expectErrorContains(&name_runtime, "def", "unit cancelled");
     try std.testing.expect(name_runtime.lastPolls() >= 1);
     name_runtime.clearCancellation();
-    const lookup_source = try std.fmt.allocPrint(allocator, "'{s} body", .{name_bytes});
+    const lookup_source = try std.fmt.allocPrint(allocator, "'{s} doc", .{name_bytes});
     defer allocator.free(lookup_source);
     try expectErrorContains(&name_runtime, lookup_source, "'kind 'undefined-word");
 }
@@ -358,28 +357,12 @@ test "definitions: set publishes a literal-capture word with no synthesized meta
     // it applies that body and pushes exactly the captured value. The capture
     // is inert for every kind of value: a quotation is pushed rather than run,
     // and a bare word stays data rather than resolving.
-    try support.expectStack("3 'x set x 'x body", "3 ([3] first)");
+    try support.expectStack("3 'x set x", "3");
     try support.expectStack("(dup *) 'q set q", "(dup *)");
     try support.expectStack("(dup) first 'w set w", "dup");
     try support.expectStack("{'a 1} 'd set d", "{'a 1}");
     // Rebinding replaces the whole snapshot, capture and all.
     try support.expectStack("3 'x set 4 'x set x", "4");
-}
-
-test "definitions: body returns the capture body for set-bound names" {
-    // One binding kind makes `body` total over everything published from
-    // ecl: a constant has a stored body just as a definition does, and the
-    // capture round-trips as ordinary data.
-    try support.expectStack("3 'x set 'x body", "([3] first)");
-    try support.expectStack("3 'x set 'x body call", "3");
-    // Two unwrappings reach the captured value itself: the capture wrapper,
-    // then the quotation that was captured.
-    try support.expectStack("(swap) 'q set 'q body first first", "(swap)");
-    // Host bindings still have no ecl body to return.
-    try support.expectErrors(&.{
-        .{ .name = "builtin", .source = "'def body", .kind = "type", .word = "body" },
-        .{ .name = "missing", .source = "'absent body", .kind = "undefined-word", .word = "absent" },
-    });
 }
 
 test "definitions: which and see render set bindings as public defs" {
@@ -401,10 +384,10 @@ test "definitions: which and see render set bindings as public defs" {
     // The rendering is source: reading it back reproduces the binding.
     var reread = try session.Session.init(std.testing.allocator, &.{});
     defer reread.deinit();
-    try expectOk(&reread, "([3] first) 'x def x 'x body");
+    try expectOk(&reread, "([3] first) 'x def x");
     var display = try reread.stackDisplay();
     defer display.deinit();
-    try std.testing.expectEqualStrings("3 ([3] first)", display.bytes());
+    try std.testing.expectEqualStrings("3", display.bytes());
 }
 
 test "definitions: set distinguishes binding annotations from captured data" {
@@ -413,7 +396,7 @@ test "definitions: set distinguishes binding annotations from captured data" {
     // always nested one level down, and nested markers are inert.
     try support.expectStack("(-- :) 'markers set markers", "(-- :)");
     try support.expectStack("(: \"doc\") 'ann set ann", "(: \"doc\")");
-    try support.expectStack("(a -- b) 'eff set eff 'eff body", "(a -- b) (((a -- b)) first)");
+    try support.expectStack("(a -- b) 'eff set eff", "(a -- b)");
     try support.expectStack(
         "(: \"Documented constant.\") 7 'answer set answer 'answer doc",
         "7 \"Documented constant.\"",
@@ -484,4 +467,30 @@ test "definitions: def inside a word body writes the caller's scope" {
             .word = "scoped",
         },
     });
+}
+
+test "definitions: body is not a word and one binding kind needs no extraction" {
+    // Nothing lifts a published body out of the home it resolves against, so
+    // a label can never be re-sited and a private cannot be reached by
+    // dissecting a public.
+    try support.expectErrors(&.{
+        .{ .name = "set-bound", .source = "3 'x set 'x body", .kind = "undefined-word", .word = "body" },
+        .{ .name = "def-bound", .source = "(1) 'f def 'f body", .kind = "undefined-word", .word = "body" },
+        .{ .name = "builtin", .source = "'def body", .kind = "undefined-word", .word = "body" },
+    });
+    // The invariant `body` used to observe is unchanged and still observable.
+    // `see` renders the stored body verbatim, so a constant is visibly a word
+    // whose body is the literal capture, and a definition visibly is not.
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
+    defer runtime.deinit();
+    try expectOk(&runtime, "3 'x set 'x see (dup *) 'sq def 'sq see");
+    try std.testing.expectEqualStrings(
+        "### def x\n" ++
+            "([3] first) 'x def\n" ++
+            "### def sq\n" ++
+            "(dup *) 'sq def\n",
+        output.written(),
+    );
 }

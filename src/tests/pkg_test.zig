@@ -132,7 +132,7 @@ const insertion_order_manifest_text =
     "{\"z\" " ++ insertion_z_requirement ++ " \"b\" " ++ insertion_b_requirement ++ "}}\n";
 const insertion_order_manifest_text_source = eclLiteral(insertion_order_manifest_text);
 
-test "pkg: every module export carries a body and nonempty documentation" {
+test "pkg: every module export carries nonempty documentation" {
     // Cross-module helpers are public because ordinary ECL modules have no
     // privileged friendship relation. Each remains documented and callable.
     const exports = [_][]const u8{
@@ -180,8 +180,8 @@ test "pkg: every module export carries a body and nonempty documentation" {
     };
     inline for (exports) |qualified| {
         try support.expectStack(
-            "'" ++ qualified ++ " body type '" ++ qualified ++ " doc len 0 >",
-            "'list 1",
+            "'" ++ qualified ++ " doc len 0 >",
+            "1",
         );
     }
     // Private implementation words stay absent from each module's public face.

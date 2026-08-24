@@ -64,7 +64,12 @@ const ModuleImage = struct {
     fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
+        environment: *env.Env,
     ) error{OutOfMemory}!*ModuleImage {
+        const cell = try environment.newScopeCell();
+        // Never published to the label table, so dropping the owner reference
+        // reclaims it outright.
+        errdefer cell.retire();
         const result = try allocator.create(ModuleImage);
         result.allocator = allocator;
         result.refs = .init(1);
@@ -72,6 +77,8 @@ const ModuleImage = struct {
         result.scope = env.Scope.moduleRoot(allocator, &result.environment);
         result.initial_state = &.{};
         result.construction_home = .{ .image = result, .registration = null };
+        cell.publish(&result.scope);
+        result.scope.label_cell = .init(cell);
         result.retirement = .{};
         result.retirement_state = .live;
         return result;
@@ -87,6 +94,11 @@ const ModuleImage = struct {
         std.debug.assert(old != 0);
         if (old != 1) return;
         _ = self.refs.load(.acquire);
+        // Before any teardown step, so a quotation labelled with this image
+        // reads a definite `retired` and never a scope under teardown. The
+        // embedded scope's own teardown takes the cell with the same swap, so
+        // exactly one of the two paths drops the owner reference.
+        if (self.scope.label_cell.swap(null, .acq_rel)) |cell| cell.retire();
         self.retirement_state = if (self.initial_state.len == 0)
             .{ .scope = .init(&self.scope) }
         else
@@ -1115,6 +1127,9 @@ const RetiredGeneration = struct {
 
 const RegistryState = struct {
     host: *const heap.HostCleanup,
+    /// Images allocate their label cell here. The registry holds the handle
+    /// rather than reaching for a global, and never tears it down.
+    environment: env.Env,
     writer: std.Io.Mutex = .init,
     directories: DirectoryPublisher,
     inventory: ?*SlotEntry = null,
@@ -1137,11 +1152,15 @@ pub const Registry = enum(usize) {
         return @ptrFromInt(@intFromEnum(self.*));
     }
 
-    pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!Registry {
+    pub fn init(
+        host: *const heap.HostCleanup,
+        environment: env.Env,
+    ) error{OutOfMemory}!Registry {
         const owner_allocator = host.allocator();
         const backing = try owner_allocator.create(RegistryState);
         backing.* = .{
             .host = host,
+            .environment = environment,
             .directories = .init(null),
         };
         return @enumFromInt(@intFromPtr(backing));
@@ -1430,7 +1449,11 @@ pub const Registry = enum(usize) {
     /// A fresh anonymous image. Naming it is a separate, later decision, so
     /// nothing here validates or reserves a registry name.
     pub fn createImage(self: *Registry) error{OutOfMemory}!OwnedImage {
-        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain()));
+        return .init(try ModuleImage.create(
+            self.allocator(),
+            self.releaseDomain(),
+            &self.privateState().environment,
+        ));
     }
 
     pub const NativeCandidateProgress = poll.Progress(OwnedImage);

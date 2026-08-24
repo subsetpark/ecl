@@ -145,10 +145,6 @@ test "order: sort agrees with grade then at including representation" {
     );
 }
 
-test "order: stored sort body remains source honest" {
-    try helper.expectStack("'sort body", "(dup grade at)");
-}
-
 test "order: distinct keeps first values across hash collisions" {
     try helper.expectStack(
         "[9007199254740993 9007199254740992.0 9007199254740993] distinct",

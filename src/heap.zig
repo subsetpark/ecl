@@ -388,8 +388,8 @@ const HeaderImpl = extern struct {
     len: u64,
 
     const kind_mask: u32 = 0xff;
-    const provenance_shift = 8;
-    const provenance_max = std.math.maxInt(u24);
+    const identity_shift = 8;
+    const identity_max = std.math.maxInt(u24);
 
     fn init(kind_value: HeapKind, len_value: u64) HeaderImpl {
         return .{
@@ -407,16 +407,16 @@ const HeaderImpl = extern struct {
         self.meta = (self.meta & ~kind_mask) | @intFromEnum(new_kind);
     }
 
-    fn provenance(self: *const HeaderImpl) ?CodeProvenanceId {
-        const raw = self.meta >> provenance_shift;
+    fn identity(self: *const HeaderImpl) ?CodeIdentity {
+        const raw = self.meta >> identity_shift;
         return if (raw == 0) null else @enumFromInt(raw);
     }
 
-    fn assignProvenance(self: *HeaderImpl, identity: CodeProvenanceId) void {
-        std.debug.assert(self.provenance() == null);
-        const raw = @intFromEnum(identity);
-        std.debug.assert(raw != 0 and raw <= provenance_max);
-        self.meta |= raw << provenance_shift;
+    fn assignIdentity(self: *HeaderImpl, assigned: CodeIdentity) void {
+        std.debug.assert(self.identity() == null);
+        const raw = @intFromEnum(assigned);
+        std.debug.assert(raw != 0 and raw <= identity_max);
+        self.meta |= raw << identity_shift;
     }
 };
 
@@ -502,14 +502,19 @@ pub fn kind(header: *const Header) HeapKind {
     return headerImplConst(header).kind();
 }
 
-/// Session-local identity for reader-built code provenance. Zero is reserved
-/// for runtime-built and copy-on-write headers, so those remain naturally
-/// absent from the source archive.
-pub const CodeProvenanceId = enum(u32) { _ };
-pub const max_code_provenance_id: u32 = std.math.maxInt(u24);
+/// Session-local identity for one reader-built code value, stable for that
+/// value's lifetime. It is a shared key rather than a private field of any one
+/// consumer: `spans.SpanArchive` keys source spans on it, and `env`'s scope
+/// labels key the scope a quotation's text was written in on it. Zero is
+/// reserved for runtime-built and copy-on-write headers, so those remain
+/// naturally absent from the source archive — and a quotation built at run
+/// time by `partial`, `cons`, or `compose` has no identity, hence no span and
+/// no label, hence resolves where it is invoked.
+pub const CodeIdentity = enum(u32) { _ };
+pub const max_code_identity: u32 = std.math.maxInt(u24);
 pub const CodeProvenanceNamespace = enum(u64) { none = 0, _ };
 
-const CodeProvenanceIssuerState = struct {
+const CodeIdentityIssuerState = struct {
     allocator: std.mem.Allocator,
     namespace: CodeProvenanceNamespace,
 };
@@ -517,8 +522,8 @@ var next_code_provenance_namespace: std.atomic.Value(u64) = .init(1);
 
 /// Archive-owned issuer for one provenance namespace. Construction receives
 /// only its numeric namespace; assignment requires the still-opaque issuer.
-pub const CodeProvenanceIssuer = opaque {
-    pub fn init(allocator: std.mem.Allocator) error{OutOfMemory}!*CodeProvenanceIssuer {
+pub const CodeIdentityIssuer = opaque {
+    pub fn init(allocator: std.mem.Allocator) error{OutOfMemory}!*CodeIdentityIssuer {
         var next = next_code_provenance_namespace.load(.monotonic);
         while (next != 0) {
             if (next_code_provenance_namespace.cmpxchgWeak(
@@ -529,7 +534,7 @@ pub const CodeProvenanceIssuer = opaque {
             )) |observed| {
                 next = observed;
             } else {
-                const state = try allocator.create(CodeProvenanceIssuerState);
+                const state = try allocator.create(CodeIdentityIssuerState);
                 state.* = .{ .allocator = allocator, .namespace = @enumFromInt(next) };
                 return @ptrCast(state);
             }
@@ -537,75 +542,75 @@ pub const CodeProvenanceIssuer = opaque {
         return error.OutOfMemory;
     }
 
-    pub fn deinit(self: *CodeProvenanceIssuer) void {
-        const state = codeProvenanceIssuerState(self);
+    pub fn deinit(self: *CodeIdentityIssuer) void {
+        const state = codeIdentityIssuerState(self);
         const allocator = state.allocator;
         allocator.destroy(state);
     }
 
-    pub fn constructionNamespace(self: *const CodeProvenanceIssuer) CodeProvenanceNamespace {
-        return codeProvenanceIssuerStateConst(self).namespace;
+    pub fn constructionNamespace(self: *const CodeIdentityIssuer) CodeProvenanceNamespace {
+        return codeIdentityIssuerStateConst(self).namespace;
     }
 };
 
-fn codeProvenanceIssuerState(issuer: *CodeProvenanceIssuer) *CodeProvenanceIssuerState {
+fn codeIdentityIssuerState(issuer: *CodeIdentityIssuer) *CodeIdentityIssuerState {
     return @ptrCast(@alignCast(issuer));
 }
 
-fn codeProvenanceIssuerStateConst(issuer: *const CodeProvenanceIssuer) *const CodeProvenanceIssuerState {
+fn codeIdentityIssuerStateConst(issuer: *const CodeIdentityIssuer) *const CodeIdentityIssuerState {
     return @ptrCast(@alignCast(issuer));
 }
 
-pub const CodeProvenanceInspection = union(enum) {
+pub const CodeIdentityInspection = union(enum) {
     unassigned,
-    assigned: CodeProvenanceId,
+    assigned: CodeIdentity,
     foreign_namespace,
 };
 
-pub fn inspectCodeProvenance(
-    issuer: *const CodeProvenanceIssuer,
+pub fn inspectCodeIdentity(
+    issuer: *const CodeIdentityIssuer,
     handle: *ListHandle,
-) CodeProvenanceInspection {
+) CodeIdentityInspection {
     const header = headerFromList(handle);
     if (objectConst(header).provenance_namespace != issuer.constructionNamespace())
         return .foreign_namespace;
-    return if (headerImplConst(header).provenance()) |identity|
+    return if (headerImplConst(header).identity()) |identity|
         .{ .assigned = identity }
     else
         .unassigned;
 }
 
-pub fn codeProvenance(
-    issuer: *const CodeProvenanceIssuer,
+pub fn codeIdentity(
+    issuer: *const CodeIdentityIssuer,
     handle: *ListHandle,
-) ?CodeProvenanceId {
-    return switch (inspectCodeProvenance(issuer, handle)) {
+) ?CodeIdentity {
+    return switch (inspectCodeIdentity(issuer, handle)) {
         .assigned => |identity| identity,
         .unassigned, .foreign_namespace => null,
     };
 }
 
-pub const CodeProvenanceAssignment = enum {
+pub const CodeIdentityAssignment = enum {
     assigned,
     already_assigned,
     foreign_namespace,
     invalid_identity,
 };
 
-pub fn assignCodeProvenance(
-    issuer: *const CodeProvenanceIssuer,
+pub fn assignCodeIdentity(
+    issuer: *const CodeIdentityIssuer,
     handle: *ListHandle,
-    identity: CodeProvenanceId,
-) CodeProvenanceAssignment {
+    identity: CodeIdentity,
+) CodeIdentityAssignment {
     const raw_identity = @intFromEnum(identity);
-    if (raw_identity == 0 or raw_identity > max_code_provenance_id)
+    if (raw_identity == 0 or raw_identity > max_code_identity)
         return .invalid_identity;
     const header = headerFromList(handle);
     if (objectConst(header).provenance_namespace != issuer.constructionNamespace())
         return .foreign_namespace;
     const implementation = headerImpl(header);
-    if (implementation.provenance() != null) return .already_assigned;
-    implementation.assignProvenance(identity);
+    if (implementation.identity() != null) return .already_assigned;
+    implementation.assignIdentity(identity);
     return .assigned;
 }
 

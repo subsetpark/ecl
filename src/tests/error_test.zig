@@ -77,10 +77,10 @@ test "error: every exported word carries documentation" {
     for (names) |name| {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
-            "'error.{s} body type 'error.{s} doc len 0 >",
-            .{ name, name },
+            "'error.{s} doc len 0 >",
+            .{name},
         );
         defer std.testing.allocator.free(source);
-        try support.expectStack(source, "'list 1");
+        try support.expectStack(source, "1");
     }
 }

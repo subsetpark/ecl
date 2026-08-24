@@ -59,7 +59,9 @@ pub fn installSource(
     var root = heap.OwnedValue.init(release_domain, try archive.codeRoot(parsed.values()));
     defer root.deinit();
     const root_header = root.borrow().list;
-    archive.absorb(parsed.borrow(), root.borrow()) catch |err| switch (err) {
+    // Core alone is the chain for a primitive or an embedded prelude
+    // definition, so every literal this text contains is labelled against core.
+    archive.absorb(parsed.borrow(), root.borrow(), environment.coreCell().labeller()) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.InvalidProvenance => @panic("archive-bound prelude reader produced foreign provenance"),
     };

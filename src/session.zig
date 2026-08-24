@@ -339,7 +339,7 @@ pub const Session = enum(usize) {
         errdefer environment.deinit();
         var building = environment.beginCoreBuild();
         try prims.install(&building);
-        var registry = try modules.Registry.init(host_owner.cleanup());
+        var registry = try modules.Registry.init(host_owner.cleanup(), environment);
         errdefer registry.deinit();
         const native_owner = try native_module.Owner.init(host_owner.cleanup());
         errdefer native_owner.closeCalls().settle().deinit();
@@ -438,8 +438,12 @@ pub const Session = enum(usize) {
         };
         snapshot.deinit(core.allocator());
         core.registry.deinit();
-        core.environment.deinit();
         core.archive.deinit();
+        // Registry teardown retires images, and an image clears its Env-owned
+        // scope-label cell as it goes. Drain that work before the Env releases
+        // the cells, so no deferred image release ever touches freed memory.
+        host.drain();
+        core.environment.deinit();
         // Environment and registry retirement own native image pins. Drain
         // them while the issuing Owner is still alive, then let that host-only
         // authority tear down descriptors/images and drain their ECL values.
@@ -500,7 +504,10 @@ pub const Session = enum(usize) {
         );
         defer root.deinit();
         const root_header = root.borrow().list;
-        core.archive.absorb(parsed, root.borrow()) catch |err| switch (err) {
+        // The unit that read this text is the scope its quotations were written
+        // in, so the session root labels everything this source contains.
+        const label_cell = try core.environment.scopeCell(core.root_scope.?);
+        core.archive.absorb(parsed, root.borrow(), label_cell.labeller()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidProvenance => @panic("archive-bound reader produced foreign provenance"),
         };

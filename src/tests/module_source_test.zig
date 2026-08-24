@@ -665,13 +665,12 @@ test "module: import explicitly replaces one binding and preserves metadata" {
     defer runtime.deinit();
     try expectOk(&runtime, "(3 'mean set ( -- n : \"Count.\") (4) 'count def 5 'other set) 'stats @defm " ++
         "1 'mean set 'stats.mean 'mean import mean 'stats.count 'count import count " ++
-        "'count doc \"Count.\" match? 'count body (stats.count) match? 'count see");
+        "'count doc \"Count.\" match? 'count see");
     try std.testing.expectEqualStrings("", diagnostics.written());
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- n : \"Count.\") (stats.count) 'count def") != null);
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 4), runtime.stackItems()[1].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[3].int);
     try expectErrorContains(&runtime, "'count 'stats.count import", &.{
         "'kind 'domain",
         "import binding must be unqualified",
@@ -754,34 +753,33 @@ test "module: a construction sees only its parameters its own definitions and co
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[1].int);
     // This is about the module's own chain only. A homeless word the module
     // calls — a primitive or an embedded prelude definition — still resolves
-    // against the lexical chain it was defined in, which is the live session
-    // root over core. `reflection: body extraction loses home context` and the
-    // `cons`/`wrap` rule in SPEC.md cover that separately.
+    // against the lexical chain it was defined in.
 }
 
-test "module: a parameterized word dependency is fixed and its own deps are explicit" {
+test "module: a parameterized behavior dependency is a quotation the caller wrote" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
     defer runtime.deinit();
-    // A word is passed as its body and bound inside the construction.
-    try expectOk(&runtime, "(dup +) 'double def " ++
-        "'double body wrap ('double def ( -- n ) (4 double) 'go def) with 'w @defm w.go");
+    // Behavior arrives as a quotation the caller writes, which is the functor
+    // discipline: the caller writes the structure it hands in. There is no way
+    // to hand over an existing word, because nothing extracts a published
+    // body — to share a word, both parties call a module.
+    try expectOk(&runtime, "[(dup +)] ('double def ( -- n ) (4 double) 'go def) with 'w @defm w.go");
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[0].int);
-    // Nothing later can reach it: the image holds the body it was handed.
+    // Nothing later can reach it: the image holds the quotation it was handed,
+    // and a session name of the same spelling is not in its chain.
     try expectOk(&runtime, "(99) 'double def w.go");
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[1].int);
-    // Transitivity is explicit rather than implied. A passed body resolves its
-    // own references in the image, so its dependencies are parameters too.
-    try expectOk(&runtime, "(2) 'k def (k *) 'scale def " ++
-        "'scale body wrap ('scale def ( -- n ) (4 scale) 'go def) with 'partial-dep @defm");
-    try expectErrorContains(&runtime, "partial-dep.go", &.{
+    // Purity is the unit-constructor boundary, not transitivity: `@defm` runs
+    // the construction body in the image's chain whatever scope its text was
+    // written in, so a bare `k` inside the body is undefined however recently
+    // the session defined one.
+    try expectOk(&runtime, "((k *) 'scale def) 'body-dep @defm");
+    try expectErrorContains(&runtime, "body-dep.scale", &.{
         "'kind 'undefined-word",
         "'word 'k",
     });
-    try expectOk(&runtime, "'k body 'scale body 2 pack " ++
-        "('scale def 'k def ( -- n ) (4 scale) 'go def) with 'full-dep @defm full-dep.go");
-    try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[2].int);
 }
 
 test "reflection: which and see expose home shadow and effect" {
@@ -813,16 +811,6 @@ test "reflection: which and see expose home shadow and effect" {
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "([9] first) 'f def") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " f ") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " s ") == null);
-    try expectErrorContains(&runtime, "'m.f body call", &.{ "'kind 'undefined-word", "'word 's" });
-}
-
-test "reflection: body extraction loses home context" {
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
-    defer runtime.deinit();
-    try expectOk(&runtime, "(40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm");
-    try expectErrorContains(&runtime, "'m.f body call", &.{ "'kind 'undefined-word", "'word 's" });
 }
 
 test "session completion: core names are available before the first unit" {
@@ -1022,4 +1010,78 @@ test "modules: cross-home constant references cross unchecked while declared eff
         // do not depend on what this session left on the stack.
         &.{ "'kind 'contract", "'word 'liar.two", "declared (0 -- 1)" },
     );
+}
+
+// ── Ticket ecl#4: quotation scope labels ─────────────────────────────────
+// A quotation resolves in the scope its text was written in. PENDING: Patch 6
+// makes `beginApplication` read the label; flip this to false there. Every
+// assertion below fails today, in both directions of the same defect.
+const labels_pending = false;
+
+test "module: a module literal reaches its own private through a combinator" {
+    if (labels_pending) return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+    // `(pop secret)` is written inside the module body, so it resolves in the
+    // image whichever activation hands it to `each`.
+    try expectOk(&runtime, "((41) 'secret defp ([1] (pop secret) each first) 'go def) 'm @defm m.go");
+    try std.testing.expectEqual(@as(i64, 41), runtime.stackItems()[0].int);
+    // A session name of the same spelling does not perturb it.
+    try expectOk(&runtime, "(99) 'secret def m.go");
+    try std.testing.expectEqual(@as(i64, 41), runtime.stackItems()[1].int);
+}
+
+test "module: a module word runs a caller's quotation in the caller's chain" {
+    if (labels_pending) return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+    // The caller wrote `(bump)`, so `bump` resolves in the caller even though
+    // the activation applying it belongs to the module.
+    try expectOk(&runtime, "((|q| 2 q call) 'apply def) 'm @defm (1 +) 'bump def (bump) m.apply");
+    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
+    // The stdlib higher-order words are the same case, and the second of
+    // ticket ecl#4's two reproductions.
+    try expectOk(&runtime, "[1] result.ok (bump) result.and-then pop");
+}
+
+// PENDING: a quotation `def`ed inside a construction keeps the caller's label
+// for its *references*, but a word body is scheduled by `scheduleWord` from the
+// binding's defining scope rather than from the body's label. Making
+// `scheduleWord` prefer the label needs module *file* source to be labelled
+// against its image first: a file module runs through the load driver's
+// `.register` continuation, not `moduleOwned`, so `relabelConstructionBody`
+// does not reach it and a label-preferring `scheduleWord` would resolve a file
+// module's word bodies in the loading scope. Tracked as part of ticket ecl#4.
+const parameter_labels_pending = true;
+
+test "module: a quotation parameter carries the caller's scope" {
+    if (parameter_labels_pending) return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+    // The caller wrote `(k *)`, so its own references are the caller's and the
+    // module needs no parameter for them. `def`-ing it makes the binding
+    // module-local without re-siting what it refers to.
+    try expectOk(&runtime, "(10) 'k def " ++
+        "[(k *)] ('scale def ( -- n ) (4 scale) 'go def) with 'caller-dep @defm caller-dep.go");
+    try std.testing.expectEqual(@as(i64, 40), runtime.stackItems()[0].int);
+}
+
+test "module: a session quotation still resolves in the session" {
+    if (labels_pending) return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+    // Unchanged by the label rule: the session wrote these, so the session is
+    // where they resolve.
+    try expectOk(&runtime, "(7) 'mine def [1 2] (pop mine) each first");
+    try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
+    try expectOk(&runtime, "(pop pop 42) '+ def [1 2 3] 0 (+) fold");
+    try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
 }
