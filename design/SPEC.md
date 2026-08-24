@@ -570,15 +570,34 @@ anonymously, be passed as data, and be registered more than once.
   privates, and callers cannot perturb a module's behavior by shadowing.
   A module word's body is still a plain list: `'stats.stdev body` is data,
   and re-`def`ing that list elsewhere loses the private context.
-  The rule has no exceptions. A binding with no module home — a primitive
-  or an embedded prelude definition — resolves against the lexical chain it
-  was defined in, the session root over core, and not against whatever
-  environment happens to be executing. So a module exporting a word named
-  like a core one shadows it for that module's own callers, never inside the
-  prelude words the module calls: `table.where` does not become the `where`
-  that `filter` is written against. Late binding is unaffected — the lookup
-  still happens at call time, which is why redefining `cons` at the session
-  level still changes `wrap`.
+  The rule has no exceptions, and the chain is the one each binding was
+  actually defined in. A primitive or an embedded prelude definition was
+  published against core alone, so core alone is its chain: it never resolves
+  against a session or a module environment, whichever happens to be
+  executing. A session binding resolves against the session chain it was
+  defined in. So a module exporting a word named like a core one shadows it
+  for that module's own callers, never inside the prelude words the module
+  calls: `table.where` does not become the `where` that `filter` is written
+  against. The same holds for the session, which is what makes shadowing
+  predictable rather than retroactive:
+
+      1 wrap                                  -- [1], reaching core's `cons`
+      (pop pop 42) 'cons def   1 wrap          -- still [1]
+      (pop pop 42) 'cons def   1 [] cons       -- 42, the session's own `cons`
+      (pop pop 42) 'cons def   (() cons) 'wrap def   1 wrap    -- 42
+
+  A session `def` shadows a name *for session code*. It does not rewrite what
+  an already-evaluated definition means, because that definition's references
+  resolve where they were written. Adopting new behavior inside a prelude word
+  is redefining that word: the replacement is a session definition, so it
+  resolves in the session and shadows the prelude one for session callers.
+  Reaching further in is deliberately not available — changing what `filter`'s
+  own `where` means requires redefining `filter`.
+  Late binding is unaffected. The lookup still happens at call time; what is
+  fixed is which chain it happens in. And a quotation is unaffected too,
+  because it resolves where its invoker runs rather than where the invoker was
+  defined: `(pop pop 42) '+ def [1 2 3] 0 (+) fold` is 42, so a combinator
+  still sees the definitions of the code that called it.
 - **Capture is parameterization, and parameterization is the only capture.**
   A construction receives everything it needs on its stack, seeded by the
   ordinary composition of `with` — `values (body) with @module`,

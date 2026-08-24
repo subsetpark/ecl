@@ -880,7 +880,7 @@ const Eval = struct {
         return self.site.scope;
     }
     /// Where this body's *word references* resolve.
-    pub fn resolutionScope(self: Eval) *env.Scope {
+    pub fn resolutionScope(self: Eval) ?*env.Scope {
         return self.site.resolution_scope;
     }
     /// Whose privacy and durable state this body runs against.
@@ -1116,11 +1116,13 @@ pub const ExecutionSite = struct {
     /// Where this body's own definitions land, and the chain it hands to any
     /// quotation it invokes on a caller's behalf.
     scope: *env.Scope,
-    /// Where this body's *word references* resolve. For a module word that is
-    /// its image; for a core or prelude word it is the lexical chain that word
-    /// was defined against, never whatever environment happens to be
-    /// executing.
-    resolution_scope: *env.Scope,
+    /// Where this body's *word references* resolve: the chain the binding was
+    /// defined against, never whatever environment happens to be executing.
+    /// For a module word that is its image. For a core or prelude definition
+    /// it is core alone, which no scope denotes — core is a terminal phase
+    /// rather than a link in any chain — so `null` means "go straight to
+    /// core".
+    resolution_scope: ?*env.Scope,
     /// Whose privacy and durable state this body runs against. Correlated
     /// with the scopes but not derivable from them: a homeless word called
     /// from module code inherits the caller's home while resolving against its
@@ -5482,6 +5484,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 body_header,
                 resolved.trace_word,
                 resolved.home,
+                resolved.origin,
                 cross_home_effect,
             );
         },
@@ -5511,7 +5514,9 @@ const DirectWordFallback = struct {
     body: heap.Owned(*Header),
     word: intern.TraceWord,
     pub fn run(evaluator: *Machine, self: *DirectWordFallback) MachineError!void {
-        return scheduleWord(evaluator, self.body.borrow(), self.word, null, null);
+        // Only a core-origin word reaches idiom recognition, so this fallback
+        // is always resuming one.
+        return scheduleWord(evaluator, self.body.borrow(), self.word, null, .core, null);
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
@@ -5999,6 +6004,7 @@ fn scheduleWord(
     body: *Header,
     word: intern.TraceWord,
     resolved_home: ?*modules.ModuleHome,
+    origin: ResolutionOrigin,
     effect: ?env.Effect,
 ) MachineError!void {
     const scope = if (resolved_home) |home|
@@ -6006,14 +6012,19 @@ fn scheduleWord(
     else
         self.unit.current.?.scope();
     const home = resolved_home orelse self.unit.current.?.home();
-    // A module word resolves against its home. A core or prelude word
-    // resolves against the lexical chain it was defined in — not the module
-    // body that happens to be calling it, which is what let a module export
-    // named like a core word reach inside the prelude.
-    const resolution_scope = if (resolved_home) |generation|
+    // Each binding resolves against the chain it was defined in. A module word
+    // resolves against its home. A core or prelude definition was published
+    // against core alone — the prelude bootstraps with a core-only root scope
+    // — so core alone is its chain, and a session redefinition shadows a
+    // prelude word for session code without rewriting what already-evaluated
+    // definitions mean. A session binding keeps resolving against the session
+    // chain it was defined in.
+    const resolution_scope: ?*env.Scope = if (resolved_home) |generation|
         generation.scope(self.unit.module_access)
-    else
-        self.unit.lexicalScope();
+    else switch (origin) {
+        .core => null,
+        .direct, .module => self.unit.lexicalScope(),
+    };
     if (resolved_home) |generation| try self.unit.pinGeneration(generation);
     var check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
     var effect_tail = self.replaceTailEffectCandidate(body);

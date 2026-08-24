@@ -384,7 +384,21 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     try std.testing.expectEqual(@as(u64, 0), executable_form.lastIdiomHits());
 }
 
-test "idioms: late binding defeats recognition" {
+// Two separate reasons recognition must not fire, kept together because both
+// are about a rebound name and only one is about late binding.
+//
+// The first two cases are late binding proper: the rebound word is reached
+// through a quotation, which resolves where its invoker runs, so the session
+// definition really is what executes and a recognizer that assumed the core
+// body would be wrong.
+//
+// The last three rebind a prelude word's *dependency* — `neg`'s `*`, `sort`'s
+// `grade` — and are now the opposite lesson. A prelude definition resolves
+// against core alone, so the session rebinding cannot reach inside it and the
+// prelude behavior is what executes. Recognition stays off in these cases too,
+// which is why the hit counts are unchanged, but it is no longer *late
+// binding* that keeps it off.
+test "idioms: a rebound name keeps recognition off" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);
     var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
@@ -403,14 +417,16 @@ test "idioms: late binding defeats recognition" {
     defer test_heap.retire(&rebound_dependency_heap);
     var rebound_dependency = try session.Session.init(rebound_dependency_heap.allocator(), &.{});
     defer rebound_dependency.deinit();
-    try expectStack(&rebound_dependency, "(pop pop 42) '* def 2 neg", "42");
+    // `neg` is `(-1 *)` in the prelude, so its `*` is core's, not this one.
+    try expectStack(&rebound_dependency, "(pop pop 42) '* def 2 neg", "-2");
     try std.testing.expectEqual(@as(u64, 0), rebound_dependency.lastIdiomHits());
 
     var direct_sort_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&direct_sort_heap);
     var direct_sort = try session.Session.init(direct_sort_heap.allocator(), &.{});
     defer direct_sort.deinit();
-    try expectStack(&direct_sort, "(pop [0]) 'grade def [3 1 2] sort", "[3]");
+    // Likewise `sort` reaches the prelude `grade`, session or module alike.
+    try expectStack(&direct_sort, "(pop [0]) 'grade def [3 1 2] sort", "[1 2 3]");
     try std.testing.expectEqual(@as(u64, 0), direct_sort.lastIdiomHits());
 
     var used_sort_heap: test_heap.SessionHeap = .init;
@@ -420,7 +436,7 @@ test "idioms: late binding defeats recognition" {
     try expectStack(
         &used_sort,
         "((a -- b) (pop [0]) 'grade def) 'm @defm 'm.grade 'grade import [3 1 2] sort",
-        "[3]",
+        "[1 2 3]",
     );
     try std.testing.expectEqual(@as(u64, 0), used_sort.lastIdiomHits());
 

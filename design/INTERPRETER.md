@@ -185,16 +185,24 @@ primitives, operationalized as two rules:
   `home` and `resolution_scope` are correlated but not derivable from one
   another: a homeless word called from module code inherits the caller's home,
   because that is whose privates and durable state it may still reach, while
-  resolving against its own defining chain. `scheduleWord` sets the resolution
-  scope to the module home for a homed binding and to the unit's lexical scope
-  — the session root over core — for a primitive or embedded prelude
-  definition. Before that split, a
-  homeless binding inherited whichever environment happened to be executing,
-  so a module exporting a word named like a core one reached inside every
-  prelude word that module called: a module defining `where` broke `filter`,
-  whose body is `over swap each where at`. Late binding is untouched — lookup
-  is still performed at call time, which is why redefining `cons` at the
-  session level still changes `wrap`. What went away is dynamic scope.
+  resolving against its own defining chain. `scheduleWord` owns that rule and
+  reads `Origin` to apply it: a homed binding resolves against its image, a
+  `core`-origin binding against core alone, and a `direct`-origin binding
+  against the unit's lexical scope. Core alone is spelled `null`, because core
+  is a terminal resolution phase rather than a link in any chain.
+  Before that split, a homeless binding inherited whichever environment
+  happened to be executing, so a module exporting a word named like a core one
+  reached inside every prelude word that module called: a module defining
+  `where` broke `filter`, whose body is `over swap each where at`. The session
+  half of the same defect outlived the fix — `lexicalScope()` is a core-only
+  scope while the prelude bootstraps and becomes session-over-core the moment a
+  Session exists, so all 69 prelude definitions were written and validated
+  under core-only resolution and then silently acquired session visibility.
+  That transition was an artifact of the two phases using different scope
+  storage, not a design, and `(999) 'len def` breaking `table.from-rows`
+  through `all?` was its observable form.
+  Late binding is untouched — lookup is still performed at call time. What is
+  fixed is which chain it happens in, and what went away is dynamic scope.
 - **A quotation resolves where its invoker runs.** Quotations are plain lists
   that capture nothing, so `call`, `each`, `@attempt`, `@module`, `@defm`, and
   `within` all set the new frame's `resolution_scope` from the invoking frame's

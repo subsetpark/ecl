@@ -248,6 +248,21 @@ test "embedded definitions retain provenance and deferred words stay absent" {
     });
 }
 
-test "embedded definitions resolve their dependencies late" {
-    try support.expectStack("(pop pop 42) 'cons def 1 wrap", "42");
+test "embedded definitions resolve against core, not the session" {
+    // `wrap` is `(() cons)`. It was published against core alone, so a session
+    // redefinition of `cons` shadows the name for session code without
+    // rewriting what an already-evaluated definition mentioning `wrap` means.
+    try support.expectStack("(pop pop 42) 'cons def 1 wrap", "[1]");
+    try support.expectStack("(1 wrap) 'first-defined def (pop pop 42) 'cons def first-defined", "[1]");
+    // The session's own reference to the same name does see its redefinition:
+    // late binding is untouched, only the chain each binding resolves in.
+    try support.expectStack("(pop pop 42) 'cons def 1 [] cons", "42");
+    // Adopting the new behavior is redefining the prelude word itself. The new
+    // body is a session definition, so it resolves in the session and shadows
+    // the prelude one for session callers.
+    try support.expectStack("(pop pop 42) 'cons def (() cons) 'wrap def 1 wrap", "42");
+    // A quotation still resolves where its invoker runs, so a combinator sees
+    // the definitions of whoever called it rather than core's.
+    try support.expectStack("(pop pop 42) '+ def [1 2 3] 0 (+) fold", "42");
+    try support.expectStack("(7) 'mine def [1 2] (pop mine) each", "[7 7]");
 }
