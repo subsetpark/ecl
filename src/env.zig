@@ -1140,6 +1140,47 @@ pub const Scope = struct {
             },
         };
     }
+    /// One word definition, in the shape both publication kinds accept.
+    pub const WordDefinition = struct {
+        body: *Quotation,
+        source: ?reader_types.SourceSlice = null,
+        visibility: Visibility = .public,
+        effect: ?ValidatedEffect = null,
+        doc: ?*DocumentationString = null,
+    };
+
+    /// Publishes one word definition, whichever publication this scope
+    /// accepts. Callers were switching on `publisher()` themselves and
+    /// restating the payload in both arms to differ in one field, so the
+    /// narrowing lives here instead: a `TopPublication` has no place for a
+    /// visibility, and dropping it is sound because privacy is only offered
+    /// where it means something — `defp`/`setp` are refused outside a module
+    /// root, so a caller reaching a top scope has already established that
+    /// its definition is public. Taking the word fields rather than a whole
+    /// `ModulePublication` is what keeps this total: there is no native or
+    /// builtin case to reject, because neither can be spelled here.
+    pub fn publishWordCursor(
+        self: *Scope,
+        name: intern.NamespaceName,
+        definition: WordDefinition,
+    ) error{OutOfMemory}!Environment.BindCursor {
+        return switch (self.publisher()) {
+            .module => |module| module.cursor(name, .{ .word = .{
+                .body = definition.body,
+                .source = definition.source,
+                .visibility = definition.visibility,
+                .effect = definition.effect,
+                .doc = definition.doc,
+            } }),
+            .top => |top| top.cursor(name, .{ .word = .{
+                .body = definition.body,
+                .source = definition.source,
+                .effect = definition.effect,
+                .doc = definition.doc,
+            } }),
+        };
+    }
+
     /// The one publication this scope accepts. Every scope has exactly one,
     /// so a definition sink is chosen by switching on a capability rather
     /// than by asking a kind enum and trusting the answer; neither arm can be

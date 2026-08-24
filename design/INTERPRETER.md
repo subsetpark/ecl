@@ -185,11 +185,21 @@ primitives, operationalized as two rules:
   `home` and `resolution_scope` are correlated but not derivable from one
   another: a homeless word called from module code inherits the caller's home,
   because that is whose privates and durable state it may still reach, while
-  resolving against its own defining chain. `scheduleWord` owns that rule and
-  reads `Origin` to apply it: a homed binding resolves against its image, a
-  `core`-origin binding against core alone, and a `direct`-origin binding
-  against the unit's lexical scope. Core alone is spelled `null`, because core
-  is a terminal resolution phase rather than a link in any chain.
+  resolving against its own defining chain. `scheduleWord` owns that rule, and
+  applies it from the scope resolution actually found the binding in, carried
+  on `Resolution.defining_scope`: a homed binding resolves against its image,
+  and anything else against that found scope — `null` for a core or prelude
+  definition, because core is a terminal resolution phase rather than a link
+  in any chain, and the found scope itself otherwise, child scopes such as an
+  `@attempt`'s included. Reading the unit's root instead was the last
+  exception to "resolves where it was defined", and switching on `Origin` was
+  the approximation that stood in for the found scope before it was recorded.
+  The sealing stops at quotation literals: one written inside a core word's
+  body is plain data, so handing it to a combinator resolves it in the
+  invoking chain. `all?` and `over` both do this, and no rule separates a
+  word's own literal from a caller-supplied quotation reaching the same
+  combinator from the same activation — that separation is what a closure
+  would buy, and SPEC.md records the consequence.
   Before that split, a homeless binding inherited whichever environment
   happened to be executing, so a module exporting a word named like a core one
   reached inside every prelude word that module called: a module defining

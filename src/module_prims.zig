@@ -267,19 +267,12 @@ const ImportDriver = struct {
                 // way `def` does there. Reaching for top publication on a
                 // module root used to abort on an `unreachable`, which one
                 // line of ordinary source could trigger.
-                self.publisher = .init(switch (self.scope.publisher()) {
-                    .module => |module| try module.cursor(self.binding.?, .{ .word = .{
-                        .body = body,
-                        .visibility = .public,
-                        .effect = lease.effect,
-                        .doc = lease.doc,
-                    } }),
-                    .top => |top| try top.cursor(self.binding.?, .{ .word = .{
-                        .body = body,
-                        .effect = lease.effect,
-                        .doc = lease.doc,
-                    } }),
-                });
+                self.publisher = .init(try self.scope.publishWordCursor(self.binding.?, .{
+                    .body = body,
+                    .visibility = .public,
+                    .effect = lease.effect,
+                    .doc = lease.doc,
+                }));
                 self.resolved.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.resolved = null;
                 continue;
@@ -349,45 +342,16 @@ const AliasDriver = struct {
 /// Calls one public export of a module value. A handle carries no name, so
 /// there is nothing to `qualify` and nothing for the symbol-keyed observation
 /// words to look up; this is the one operation a nameless module supports.
+/// The image is taken here, where the value has to be inspected anyway, so
+/// nothing downstream re-checks the type.
 fn invoke(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     const binding = try evaluator.popSymbol();
     var item = try evaluator.popValue();
     errdefer item.deinit();
-    if (item.borrow() != .module) return evaluator.typeError("a module");
-    try evaluator.startDriver(InvokeDriver{
-        .module = .init(item.take()),
-        .validation = .init(binding),
-    });
+    const image = modules.imageRef(item.borrow()) orelse return evaluator.typeError("a module");
+    return evaluator.invokeModuleOwned(item.take(), image, binding);
 }
-
-/// The binding name is validated before the image is consulted, so an
-/// unqualifiable spelling fails the same way it does everywhere else rather
-/// than reporting a missing export.
-const InvokeDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    module: heap.Owned(value.Value),
-    validation: intern.NamespaceCursor,
-
-    pub fn advance(evaluator: *Machine, self: *InvokeDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.validation.advance()) {
-            .pending => {},
-            .complete => |maybe_name| {
-                const name = maybe_name orelse return evaluator.fail(
-                    .domain,
-                    "invoke requires an unqualified binding name",
-                );
-                const module = self.module.take();
-                evaluator.retireDriver(self);
-                try evaluator.invokeModuleOwned(module, name);
-                return .detached;
-            },
-        };
-        return .yielded;
-    }
-};
 
 fn qualify(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);

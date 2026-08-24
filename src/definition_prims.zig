@@ -264,23 +264,14 @@ const DefineDriver = struct {
                 const private = self.mode == .defp;
                 const name = self.binding_name.?;
                 const visibility: env.Visibility = if (private) .private else .public;
-                if (self.publisher == null) self.publisher = .init(switch (self.scope.publisher()) {
-                    .module => |module| try module.cursor(name, .{ .word = .{
-                        .body = env.quotation(self.item.?.borrow().list) orelse
-                            return evaluator.fail(.domain, "definition body has an invalid heap representation"),
-                        .source = if (self.source) |*source| source.borrow() else null,
-                        .visibility = visibility,
-                        .effect = self.annotation.borrow().effect,
-                        .doc = self.annotation.borrow().doc_value,
-                    } }),
-                    .top => |top| try top.cursor(name, .{ .word = .{
-                        .body = env.quotation(self.item.?.borrow().list) orelse
-                            return evaluator.fail(.domain, "definition body has an invalid heap representation"),
-                        .source = if (self.source) |*source| source.borrow() else null,
-                        .effect = self.annotation.borrow().effect,
-                        .doc = self.annotation.borrow().doc_value,
-                    } }),
-                });
+                if (self.publisher == null) self.publisher = .init(try self.scope.publishWordCursor(name, .{
+                    .body = env.quotation(self.item.?.borrow().list) orelse
+                        return evaluator.fail(.domain, "definition body has an invalid heap representation"),
+                    .source = if (self.source) |*source| source.borrow() else null,
+                    .visibility = visibility,
+                    .effect = self.annotation.borrow().effect,
+                    .doc = self.annotation.borrow().doc_value,
+                }));
                 switch (self.publisher.?.borrowMut().advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Frozen => return evaluator.fail(

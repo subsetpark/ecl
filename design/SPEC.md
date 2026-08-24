@@ -601,6 +601,24 @@ anonymously, be passed as data, and be registered more than once.
   because it resolves where its invoker runs rather than where the invoker was
   defined: `(pop pop 42) '+ def [1 2 3] 0 (+) fold` is 42, so a combinator
   still sees the definitions of the code that called it.
+  **That is also the limit of the sealing, and it is a consequence of having no
+  closures rather than an oversight.** A core word's *direct* references
+  resolve against core, but a quotation *literal* written inside its body is
+  data like any other, so when the word hands that literal to a combinator it
+  resolves where the combinator runs — the invoking chain. `all?` is
+  `(|l q| l q each 1 (and) fold)`, so a session `and` reaches it; `over` is
+  `(swap dup (swap) dip)`, so a session `swap` reaches it:
+
+      (pop pop 42) 'and def   [1 1] (1 =) all?      -- 42
+      (pop pop 99) 'swap def  1 2 over              -- 99 1
+
+  No rule can separate the two cases. `all?` hands its caller's `q` and its
+  own `(and)` to combinators from the same activation, so resolving one in
+  core resolves the other there too and breaks the caller's predicate. A plain
+  list carries no record of the scope it was written in, and giving it one is
+  exactly the closure this language does not have. Shadowing a name that
+  appears in a quotation literal inside a prelude body therefore still changes
+  that prelude word.
 - **An undefined-word failure says which chain it searched.** Its `'data`
   carries `'scope` alongside `'name`: `'session` for the activation's own
   lexical chain over core, `'module` for a module image's definitions over

@@ -3938,12 +3938,12 @@ pub const Machine = struct {
     pub fn undefinedName(self: *Machine, name: u32) MachineError {
         return self.undefinedNameIn(name, self.currentLookupChain());
     }
+    /// The same failure as `undefinedWordIn`, for a name that is not the word
+    /// currently being traced: the active word becomes the requested name so
+    /// the diagnostic reports what was asked for.
     pub fn undefinedNameIn(self: *Machine, name: u32, chain: LookupChain) MachineError {
         self.unit.active_word = .plain(name);
-        const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(name)});
-        self.unit.pending.?.addData(.name, .{ .symbol = name });
-        self.addLookupChain(chain) catch return error.OutOfMemory;
-        return failure;
+        return self.undefinedWordIn(name, chain);
     }
     fn addLookupChain(self: *Machine, chain: LookupChain) error{OutOfMemory}!void {
         const named = try intern.intern(chain.spelling());
@@ -4646,26 +4646,6 @@ pub const Machine = struct {
     /// Opens a construction boundary. The body evaluates against a fresh
     /// anonymous image; `registration`, when present, is the name that image
     /// is published under the instant the body succeeds.
-    /// Invokes one public export of a module value. The module reference is
-    /// consumed: the driver retains it for its whole life and releases it on
-    /// every exit.
-    pub fn invokeModuleOwned(
-        self: *Machine,
-        module: Value,
-        binding: intern.BindingName,
-    ) MachineError!void {
-        const image = modules.imageRef(module) orelse {
-            self.releaseDomain().releaseValue(module);
-            return self.typeError("a module");
-        };
-        self.setActiveWord(.plain(intern.bindingId(binding)));
-        return self.startDriver(HandleDispatchDriver{
-            .module = .init(module),
-            .binding = binding,
-            .home = modules.handleHome(image, self.unit.module_access),
-            .cursor = .init(modules.handleResolveCursor(image, intern.bindingId(binding))),
-        });
-    }
     pub fn moduleOwned(
         self: *Machine,
         registration: ?u32,
@@ -4702,6 +4682,24 @@ pub const Machine = struct {
             .site = .image(home, self.unit.module_access),
             .traced_word = no_word,
         };
+    }
+    /// Invokes one public export of a module value. The module reference is
+    /// consumed: the driver retains it for its whole life — which is also what
+    /// keeps `image` valid, since an `ImageRef` is only a borrow — and
+    /// releases it on every exit. The binding symbol arrives unvalidated and
+    /// the driver validates it before consulting the image, so an
+    /// unqualifiable spelling fails as one rather than as a missing export.
+    pub fn invokeModuleOwned(
+        self: *Machine,
+        module: Value,
+        image: modules.ImageRef,
+        binding: u32,
+    ) MachineError!void {
+        return self.startDriver(HandleDispatchDriver{
+            .module = .init(module),
+            .image = image,
+            .validation = .init(binding),
+        });
     }
     pub fn executeWord(self: *Machine, word: u32) MachineError!void {
         self.unit.active_word = .plain(word);
@@ -5414,46 +5412,82 @@ const DispatchDriver = struct {
 /// a loss.
 const HandleDispatchDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    /// Retained for the driver's whole life. The resolve cursor's pin already
-    /// retains the image, but the value is what the program handed us and it
-    /// is released on every exit.
+    /// Retained for the driver's whole life, which is also what keeps `image`
+    /// usable: an `ImageRef` is a borrow valid at the call that produced it,
+    /// and this value is the retention behind it.
     module: heap.Owned(Value),
-    binding: intern.BindingName,
-    home: *modules.ModuleHome,
-    cursor: heap.Owned(modules.ModuleResolveCursor),
+    image: modules.ImageRef,
+    validation: intern.NamespaceCursor,
+    binding: ?intern.BindingName = null,
+    home: ?*modules.ModuleHome = null,
+    cursor: ?heap.Owned(modules.ModuleResolveCursor) = null,
 
     pub fn advance(evaluator: *Machine, self: *HandleDispatchDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.cursor.borrowMut().advance()) {
-            .pending => {},
-            .complete => |maybe_lease| {
-                const home = self.home;
-                const binding = self.binding;
-                const allocator = evaluator.unit.allocator;
-                self.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.module.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                evaluator.retireDriver(self);
-                const lease = maybe_lease orelse
-                    return evaluator.undefinedWordIn(intern.bindingId(binding), .@"module-value");
-                var resolved: Resolution = .{
-                    .lease = lease,
-                    // No generation: there is no registration to be a
-                    // generation of.
-                    .execution_generation = null,
-                    .home = home,
-                    // The image has no canonical name, so the trace spells the
-                    // local name alone. That is what an anonymous image
-                    // honestly is; borrowing the parameter's local name would
-                    // read better and claim more than is true.
-                    .trace_word = homeTraceWord(home, lease.traceWord() orelse binding),
-                    .origin = .module,
-                };
-                defer resolved.deinit(allocator);
-                try executeResolved(evaluator, &resolved);
-                return .detached;
-            },
-        };
+        while (budget != 0) : (budget -= 1) {
+            if (self.binding == null) {
+                switch (self.validation.advance()) {
+                    .pending => continue,
+                    .complete => |maybe_name| {
+                        const name = maybe_name orelse return evaluator.fail(
+                            .domain,
+                            "invoke requires an unqualified binding name",
+                        );
+                        self.binding = name;
+                        self.home = modules.handleHome(self.image, evaluator.unit.module_access);
+                        self.cursor = .init(modules.handleResolveCursor(
+                            self.image,
+                            intern.bindingId(name),
+                        ));
+                        evaluator.setActiveWord(.plain(intern.bindingId(name)));
+                        continue;
+                    },
+                }
+            }
+            switch (self.cursor.?.borrowMut().advance()) {
+                .pending => continue,
+                .complete => |maybe_lease| {
+                    const home = self.home.?;
+                    const binding = self.binding.?;
+                    const allocator = evaluator.unit.allocator;
+                    // Both retentions this driver holds — the resolve cursor's
+                    // pin and the module value — are released just below, and
+                    // `scheduleWord` does not re-pin until it runs. Without a
+                    // pin across that gap the image's refcount can reach zero
+                    // in between and a concurrent domain drain can retire it
+                    // while `home` and its scope are still in use. The
+                    // registered path is safe for the same reason in different
+                    // clothing: its resolution owns a generation lease. This
+                    // also covers the synchronous `builtin` and `native` arms
+                    // of `executeResolved`, which never reach `scheduleWord`.
+                    var image_pin = home.pin(evaluator.unit.module_access);
+                    defer image_pin.deinit();
+                    self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.cursor = null;
+                    self.module.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    evaluator.retireDriver(self);
+                    const lease = maybe_lease orelse
+                        return evaluator.undefinedWordIn(intern.bindingId(binding), .@"module-value");
+                    var resolved: Resolution = .{
+                        .lease = lease,
+                        // No generation: there is no registration to be a
+                        // generation of.
+                        .execution_generation = null,
+                        .home = home,
+                        // The image has no canonical name, so the trace spells
+                        // the local name alone. That is what an anonymous
+                        // image honestly is; borrowing the parameter's local
+                        // name would read better and claim more than is true.
+                        .trace_word = homeTraceWord(home, lease.traceWord() orelse binding),
+                        .origin = .module,
+                    };
+                    defer resolved.deinit(allocator);
+                    try executeResolved(evaluator, &resolved);
+                    return .detached;
+                },
+            }
+        }
         return .yielded;
     }
 };

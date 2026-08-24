@@ -73,7 +73,7 @@ const entries = [_]Metadata{
     .{ .name = "import", .effect = "original binding --", .text = "Bind one qualified module word under a bare local name while preserving its effect and documentation." },
     .{ .name = "alias", .effect = "short name --", .text = "Register a short alias for a qualified module name." },
     .{ .name = "qualify", .effect = "module-name binding-name -- qualified-word", .text = "Construct an executable qualified word without reparsing source text." },
-    .{ .name = "invoke", .effect = null, .text = "Call one public export of a module value, which carries no name to qualify." },
+    .{ .name = "invoke", .effect = "module binding-name -- ...", .text = "Call one public export of a module value, which carries no name to qualify." },
     .{ .name = "words", .effect = "--", .text = "Print the visible dictionary in sorted order." },
     .{ .name = "load", .effect = "path --", .text = "Read and evaluate a source file as one transactional unit." },
 
