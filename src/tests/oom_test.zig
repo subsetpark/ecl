@@ -523,9 +523,12 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         .{ scratch_path, std.fs.path.sep },
     );
     defer thread_safe_allocator.free(lock_path);
+    // `pkg.store.write-new` refuses an existing destination, so its probe
+    // needs a path this scaffolding has not already written. The scratch
+    // directory's own `ecl.pkg` belongs to the lock-tier snippet above.
     const manifest_path = try std.fmt.allocPrint(
         thread_safe_allocator,
-        "{s}{c}ecl.pkg",
+        "{s}{c}created.pkg",
         .{ scratch_path, std.fs.path.sep },
     );
     defer thread_safe_allocator.free(manifest_path);
