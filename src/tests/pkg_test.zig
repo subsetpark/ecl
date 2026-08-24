@@ -67,6 +67,17 @@ fn eclLiteral(comptime text: []const u8) []const u8 {
 }
 
 const canonical_lock_source = eclLiteral(canonical_lock) ++ " ";
+const canonical_vendor_lock =
+    "{'format 1\n" ++
+    " 'root \"my.proj\"\n" ++
+    " 'store 'vendor\n" ++
+    " 'packages\n" ++
+    " {\"bar\" {'version \"0.3.0\" 'url \"https://e.com/b.tgz\" 'hash \"" ++ hash_b ++ "\"}\n" ++
+    "  \"foo\" {'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"" ++ hash_a ++ "\"}}\n" ++
+    " 'requires\n" ++
+    " {\"foo\" {\"bar\" \"0.3.0\"}\n" ++
+    "  \"my.proj\" {\"foo\" \"1.2.0\"}}}\n";
+const canonical_vendor_lock_source = eclLiteral(canonical_vendor_lock) ++ " ";
 
 /// The same lock as ecl source, with its entries deliberately out of order so
 /// only the emitted text can catch a missing sort.
@@ -143,11 +154,15 @@ test "pkg: every module export carries a body and nonempty documentation" {
         "pkg.lock.validate",
         "pkg.lock.read",
         "pkg.lock.write",
+        "pkg.lock.vendor",
         "pkg.lock.tree",
         "pkg.lock.why",
         "pkg.mvs.resolve",
         "pkg.sync.cache-root",
+        "pkg.sync.store-key",
         "pkg.sync.store-path",
+        "pkg.sync.store-keys",
+        "pkg.sync.store-root",
         "pkg.sync.requirement",
         "pkg.sync.run",
         "pkg.sync.run-offline",
@@ -159,6 +174,8 @@ test "pkg: every module export carries a body and nonempty documentation" {
         "pkg.cli.tree",
         "pkg.cli.why",
         "pkg.cli.verify",
+        "pkg.cli.vendor",
+        "pkg.cli.gc",
     };
     inline for (exports) |qualified| {
         try support.expectStack(
@@ -567,6 +584,31 @@ test "pkg: read-lock and write-lock round-trip a canonical lock byte for byte" {
             .name = "the text ends with a newline, because a lock is a file",
             .source = unsorted_lock_source ++ "pkg.lock.write \"\\n\" str.ends?",
             .expected = "1",
+        },
+    });
+}
+
+test "pkg: a vendored lock is a closed canonical store mode" {
+    try support.expectStacks(&.{
+        .{
+            .name = "marking a cache lock vendored renders the one project-local store mode",
+            .source = canonical_lock_source ++ "pkg.lock.read pkg.lock.vendor pkg.lock.write " ++
+                canonical_vendor_lock_source ++ "match?",
+            .expected = "1",
+        },
+        .{
+            .name = "a vendored lock round-trips byte for byte",
+            .source = canonical_vendor_lock_source ++ "dup pkg.lock.read pkg.lock.write match?",
+            .expected = "1",
+        },
+    });
+    try support.expectErrors(&.{
+        .{
+            .name = "an arbitrary store path is not lock authority",
+            .source = canonical_lock_source ++
+                "pkg.lock.read 'store \"../../elsewhere\" put pkg.lock.write",
+            .kind = "domain",
+            .message_contains = "store mode is 'vendor",
         },
     });
 }

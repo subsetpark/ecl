@@ -1,6 +1,27 @@
 const std = @import("std");
 const pkg_lock_fixture = @import("pkg_lock_fixture.zig");
 const pkg_example_hash = "315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745";
+const pkg_runtime_hash = "3b8bb1fa8f07cbf836cc7a9963261b49b6a01841b94d2e8d9bde6c740fad8227";
+const pkg_runtime_key = "a-1.0.0-" ++ pkg_runtime_hash;
+const pkg_runtime_manifest =
+    "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires " ++
+    "{\"a\" {'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" " ++
+    "'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}}\n";
+const pkg_runtime_lock =
+    "{'format 1\n" ++
+    " 'root \"root\"\n" ++
+    " 'packages\n" ++
+    " {\"a\" {'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
+    " 'requires\n" ++
+    " {\"root\" {\"a\" \"1.0.0\"}}}\n";
+const pkg_runtime_vendor_lock =
+    "{'format 1\n" ++
+    " 'root \"root\"\n" ++
+    " 'store 'vendor\n" ++
+    " 'packages\n" ++
+    " {\"a\" {'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
+    " 'requires\n" ++
+    " {\"root\" {\"a\" \"1.0.0\"}}}\n";
 
 test "e2e: package lock resolves import by name with ECL PATH unset" {
     var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, true);
@@ -52,7 +73,7 @@ test "e2e: pkg CLI reports usage without a subcommand" {
         .exit_code = 1,
         .stdout = "",
         .stderr_contains = &.{
-            "ecl pkg <init|add|sync|tree|why|verify>",
+            "ecl pkg <init|add|sync|tree|why|verify|vendor|gc>",
             "sync [--offline]",
         },
     });
@@ -273,6 +294,179 @@ test "e2e: checked-in package consumer executes and remains byte-stable offline"
         .stderr = "",
     });
 }
+
+test "e2e: pkg vendor makes locked execution and verification cache-independent" {
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    try scratch.dir.createDir(io, "project", .default_dir);
+    try scratch.dir.createDir(io, "project/nested", .default_dir);
+    try scratch.dir.createDir(io, "cache", .default_dir);
+    try scratch.dir.createDir(io, "cache/" ++ pkg_runtime_key, .default_dir);
+    try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.pkg", .data = pkg_runtime_manifest });
+    try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.lock", .data = pkg_runtime_lock });
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/" ++ pkg_runtime_key ++ "/ecl.pkg",
+        .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'requires {}}\n",
+    });
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/" ++ pkg_runtime_key ++ "/a.ecl",
+        .data = "((42) 'answer def) 'a @defm\n",
+    });
+    const archive = try decodeHex(build_options.pkg_runtime_archive);
+    defer allocator.free(archive);
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/" ++ pkg_runtime_key ++ "/.ecl-package.tgz",
+        .data = archive[0 .. archive.len - 1],
+    });
+    const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
+    defer allocator.free(cache);
+    var nested = try scratch.dir.openDir(io, "project/nested", .{});
+    defer nested.close(io);
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_CACHE", cache);
+
+    var rejected = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "vendor" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer rejected.deinit();
+    try rejected.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{"archive seal does not match lock hash"},
+    });
+    const unchanged = try scratch.dir.readFileAlloc(io, "project/ecl.lock", allocator, .unlimited);
+    defer allocator.free(unchanged);
+    try std.testing.expectEqualStrings(pkg_runtime_lock, unchanged);
+    try std.testing.expectError(
+        error.FileNotFound,
+        scratch.dir.statFile(io, "project/vendor/" ++ pkg_runtime_key, .{ .follow_symlinks = false }),
+    );
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/" ++ pkg_runtime_key ++ "/.ecl-package.tgz",
+        .data = archive,
+    });
+
+    var vendored = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "vendor" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer vendored.deinit();
+    try vendored.expect(.{ .exit_code = 0, .stdout = "vendored 1 packages\n", .stderr = "" });
+    const rewritten = try scratch.dir.readFileAlloc(io, "project/ecl.lock", allocator, .unlimited);
+    defer allocator.free(rewritten);
+    try std.testing.expectEqualStrings(pkg_runtime_vendor_lock, rewritten);
+
+    try scratch.dir.deleteTree(io, "cache");
+    var execution = try cli.runOptions(.{
+        .argv = &.{ exe, "-e", "a.answer io.pp" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer execution.deinit();
+    try execution.expect(.{ .exit_code = 0, .stdout = "42\n", .stderr = "" });
+
+    var verified = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "verify" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer verified.deinit();
+    try verified.expect(.{ .exit_code = 0, .stdout = "verified 1 packages\n", .stderr = "" });
+
+    var repeated = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "vendor" },
+        .cwd = .{ .dir = nested },
+        .environ_map = &environment,
+    });
+    defer repeated.deinit();
+    try repeated.expect(.{ .exit_code = 0, .stdout = "vendored 1 packages\n", .stderr = "" });
+}
+
+test "e2e: pkg gc retains the union of named locks and preserves unknown cache nodes" {
+    const hash_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const hash_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const hash_c = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const hash_d = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const hash_e = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const key_a = "a-1.0.0-" ++ hash_a;
+    const key_b = "b-2.0.0-" ++ hash_b;
+    const key_c = "c-3.0.0-" ++ hash_c;
+    const key_d = "d-4.0.0-" ++ hash_d;
+    const key_e = "e-5.0.0-" ++ hash_e;
+    const lock_a = "{'format 1 'root \"one\" 'packages {\"a\" {'version \"1.0.0\" " ++
+        "'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ hash_a ++
+        "\"}} 'requires {\"one\" {\"a\" \"1.0.0\"}}}\n";
+    const lock_b = "{'format 1 'root \"two\" 'packages {\"b\" {'version \"2.0.0\" " ++
+        "'url \"https://example.invalid/b.tgz\" 'hash \"sha256-" ++ hash_b ++
+        "\"}} 'requires {\"two\" {\"b\" \"2.0.0\"}}}\n";
+
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    try scratch.dir.createDir(io, "cache", .default_dir);
+    try scratch.dir.createDir(io, "cache/" ++ key_a, .default_dir);
+    try scratch.dir.createDir(io, "cache/" ++ key_b, .default_dir);
+    try scratch.dir.createDir(io, "cache/" ++ key_c, .default_dir);
+    try scratch.dir.createDir(io, "cache/" ++ key_c ++ "/nested", .default_dir);
+    try scratch.dir.createDir(io, "cache/" ++ key_c ++ "/nested/deep", .default_dir);
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/" ++ key_c ++ "/nested/deep/payload",
+        .data = "garbage\n",
+    });
+    try scratch.dir.createDir(io, "cache/.ecl-gc-interrupted", .default_dir);
+    try scratch.dir.writeFile(io, .{
+        .sub_path = "cache/.ecl-gc-interrupted/payload",
+        .data = "stale\n",
+    });
+    try scratch.dir.createDir(io, "cache/operator-notes", .default_dir);
+    try scratch.dir.writeFile(io, .{ .sub_path = "cache/" ++ key_d, .data = "not a directory\n" });
+    try scratch.dir.symLink(io, "operator-notes", "cache/" ++ key_e, .{});
+    try scratch.dir.writeFile(io, .{ .sub_path = "one.lock", .data = lock_a });
+    try scratch.dir.writeFile(io, .{ .sub_path = "two.lock", .data = lock_b });
+    const cache = try scratch.dir.realPathFileAlloc(io, "cache", allocator);
+    defer allocator.free(cache);
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("ECL_CACHE", cache);
+
+    var collected = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "gc", "one.lock", "two.lock" },
+        .cwd = .{ .dir = scratch.dir },
+        .environ_map = &environment,
+    });
+    defer collected.deinit();
+    try collected.expect(.{ .exit_code = 0, .stdout = "removed 1 packages\n", .stderr = "" });
+    _ = try scratch.dir.statFile(io, "cache/" ++ key_a, .{ .follow_symlinks = false });
+    _ = try scratch.dir.statFile(io, "cache/" ++ key_b, .{ .follow_symlinks = false });
+    try std.testing.expectError(
+        error.FileNotFound,
+        scratch.dir.statFile(io, "cache/" ++ key_c, .{ .follow_symlinks = false }),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        scratch.dir.statFile(io, "cache/.ecl-gc-interrupted", .{ .follow_symlinks = false }),
+    );
+    _ = try scratch.dir.statFile(io, "cache/operator-notes", .{ .follow_symlinks = false });
+    const preserved_file = try scratch.dir.statFile(io, "cache/" ++ key_d, .{ .follow_symlinks = false });
+    try std.testing.expectEqual(std.Io.File.Kind.file, preserved_file.kind);
+    const preserved_link = try scratch.dir.statFile(io, "cache/" ++ key_e, .{ .follow_symlinks = false });
+    try std.testing.expectEqual(std.Io.File.Kind.sym_link, preserved_link.kind);
+
+    var repeated = try cli.runOptions(.{
+        .argv = &.{ exe, "pkg", "gc", "one.lock", "two.lock" },
+        .cwd = .{ .dir = scratch.dir },
+        .environ_map = &environment,
+    });
+    defer repeated.deinit();
+    try repeated.expect(.{ .exit_code = 0, .stdout = "removed 0 packages\n", .stderr = "" });
+}
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const cli = @import("cli_test_support.zig");
@@ -308,6 +502,22 @@ fn absoluteExe() ![:0]u8 {
         build_options.ecl_exe,
         allocator,
     );
+}
+
+fn decodeHex(encoded: []const u8) ![]u8 {
+    var bytes = std.Io.Writer.Allocating.init(allocator);
+    defer bytes.deinit();
+    var high: ?u8 = null;
+    for (encoded) |byte| {
+        if (std.ascii.isWhitespace(byte)) continue;
+        const nibble = try std.fmt.charToDigit(byte, 16);
+        if (high) |first| {
+            try bytes.writer.writeByte(first << 4 | nibble);
+            high = null;
+        } else high = nibble;
+    }
+    if (high != null) return error.InvalidFixture;
+    return allocator.dupe(u8, bytes.written());
 }
 
 fn runWithInput(arguments: []const []const u8, input: []const u8) !cli.Result {

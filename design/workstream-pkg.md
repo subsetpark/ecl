@@ -17,14 +17,17 @@ second tool to install.
 Verified in the checkout (2026-08-23, `0.1.0` tagged 2026-08-19, the v1
 workstream terminal).
 
-- **The format, resolution, binary archive, package-sync, runtime lock, and
-  user-facing CLI layers now exist.** M1 added inert manifest/lock values and
+- **The complete source-package workstream now exists through its terminal
+  integrity/documentation milestone.** M1 added inert manifest/lock values and
   version ordering; M2 added the pure MVS resolver; M3 added exact byte lists,
   SHA-256, and hostile-input-safe atomic tgz extraction; M4 added exact-byte
   HTTPS fetching, immutable package-store publication, and canonical atomic
   lock writes; M5 added project discovery and locked runtime module lookup;
   M6 added `ecl pkg` mutation, offline synchronization, graph inspection, and
-  sealed-archive verification. Integrity hardening and documentation remain.
+  sealed-archive verification; M7 added closed project-local vendoring,
+  bounded shared-cache collection against named locks, and the complete public
+  vocabulary/error contract. Native packages and target selection remain a
+  separate future workstream.
 - **Module resolution today is embedded manifest, locked package store, then
   `ECL_PATH`.** `AutoLoadDriver` retains its loading lease and racing-winner
   recheck while advancing an optional `ProjectLock` cursor between
@@ -539,6 +542,18 @@ byte-identical. No error omitted package provenance during this run.
 
 ### Milestone 7: pkg-integrity-and-documentation
 
+**Status**: Implemented, 2026-08-23. Vendored locks add only the closed
+`'store 'vendor` mode and derive `<project-root>/vendor`; they cannot carry a
+path. `ecl pkg vendor` re-verifies retained seals and reuses the existing
+hostile-archive installer before atomically marking the lock. `ecl pkg gc`
+derives the shared cache root from the captured environment, unions explicitly
+named locks, preserves unknown nodes, and detaches then deletes unreferenced
+canonical entries through bounded scheduler phases. The M6 hermetic and public
+dogfood baselines found no package-resolution error missing its responsible
+package or requirement, so the catalogue needed documentation but no message
+repair. SPEC.md, INTERPRETER.md, README.md, and v1 follow-up 12 record the final
+surface and the native/target-selection deferrals.
+
 **Definition of Done**:
 - SPEC.md documents the complete `pkg` and `archive` vocabularies, the tier
   order, and every resolution error with its exact spelling.
@@ -576,10 +591,10 @@ fetcher. M6 is the join.
 
 ## Open Questions
 
-- **Store sharing and lifetime across projects.** The store is a shared cache
-  keyed by content, so two projects on one machine share entries. Whether `gc`
-  needs a reference-tracking file, or whether pointing it at a set of lock
-  files is sufficient, is unresolved and deferred to M7.
+None for the source-package workstream. Store collection was resolved in M7:
+the operator supplies the complete named lock set for the projects whose
+shared-cache entries must remain. No ambient reference database or filesystem
+project scan is maintained.
 
 ## Decisions Made
 

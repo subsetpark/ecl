@@ -2,9 +2,14 @@
 # Validate, read, and canonically render package locks.
 (
  ### defp lock-keys
- # Required lock keys.
+ # Required cache-lock keys.
  ['format 'root 'packages 'requires]
  'lock-keys setp
+
+ ### defp vendor-lock-keys
+ # Required project-vendor lock keys.
+ ['format 'root 'store 'packages 'requires]
+ 'vendor-lock-keys setp
 
  ### defp minimums-checked
  (minimums -- minimums : "Validate and return one package's minimum-version requirements.")
@@ -38,13 +43,21 @@
   'type error.new "a lock is a dict" error.with-message assert
   candidate pairs (pkg.data.assert-inert-entry) for
   candidate lock-keys keys-exactly?
-  'domain error.new "a lock has exactly the keys 'format 'root 'packages 'requires"
+  candidate vendor-lock-keys keys-exactly?
+  or
+  'domain error.new "a lock has exactly the keys 'format 'root 'packages 'requires, or adds 'store"
   error.with-message
   assert
   candidate 'format at 1 match?
   'domain error.new "the only lock format is 1" error.with-message assert
   candidate 'root at pkg.name.valid?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
+  candidate
+  candidate 'store has?
+  ('store at 'vendor match?
+   'domain error.new "a lock's only project-local store mode is 'vendor" error.with-message assert)
+  (pop)
+  if
   candidate 'packages at type 'dict match?
   'type error.new "a lock's packages are a dict from package name to selection" error.with-message
   assert
@@ -73,6 +86,11 @@
  (text -- lock : "Parse and validate a lock without evaluating it.")
  (pkg.data.read-one pkg.lock.validate)
  'read def
+
+ ### def vendor
+ (lock -- lock : "Return a validated lock selecting the fixed project-local vendor store.")
+ (pkg.lock.validate 'store 'vendor put pkg.lock.validate)
+ 'vendor def
 
  ### defp render-requirement
  (requirement -- text : "Render one selection in the canonical field order.")
@@ -119,13 +137,13 @@
 
  ### defp render-validated
  (lock -- text : "Render an already validated lock in canonical layout.")
- (wrap
-  (('root at str)
-   ('packages at (render-selection) render-block)
-   ('requires at (render-requirer) render-block)
-   tri)
-  infra
-  "{{'format 1\n 'root {}\n 'packages\n {}\n 'requires\n {}}}\n" format)
+ (|lock|
+  lock 'root at str
+  lock 'store has? ("\n 'store 'vendor") ("") if
+  lock 'packages at (render-selection) render-block
+  lock 'requires at (render-requirer) render-block
+  4 pack
+  "{{'format 1\n 'root {}{}\n 'packages\n {}\n 'requires\n {}}}\n" format)
  'render-validated defp
 
  ### defp append-tree-line

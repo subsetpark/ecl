@@ -2457,11 +2457,20 @@ INTERPRETER.md and its entry here is retired.
     name, so no mangling or keyed dispatch is built, and carrying the
     structure now is the retrofit door for a later decision to admit two
     versions of a name without a breaking change to resolution. `.eclmod`
-    stays portable naming, never a portable binary. Planned in full in
-    `design/workstream-pkg.md` (2026-08-21), which additionally settles an
-    ECL-hosted resolver shipped as an embedded module, prefix-owning
-    packages, tarball-only transport, and source-only packages for its first
-    version — target selection stays deferred.
+    stays portable naming, never a portable binary. Implemented through its
+    terminal milestone on `zax--pkg-fetch-and-store` (2026-08-23; full record
+    in `design/workstream-pkg.md`). What shipped is the ECL-hosted MVS
+    resolver, inert manifests and canonical locks, exact-byte HTTPS/tarball
+    transport, hostile-input-safe immutable source-package installation,
+    embedded → lock → `ECL_PATH` resolution, the `ecl pkg` CLI, sealed
+    verification, a closed project-local vendor lock mode, and bounded shared-
+    cache collection against explicitly named locks. Source packages own
+    dotted module prefixes and execute no install scripts. Still deferred:
+    native package artifacts and assets, target triples/selection, build
+    programs, registries or version enumeration, multi-version loading, and
+    any portable meaning for `.eclmod` bytes. Target selection therefore
+    remains the responsibility of a future native-package workstream rather
+    than the runtime loader or the shipped source-package resolver.
 
 13. **Reserved doors.** `;` is a reserved token (parse error; currently
     means nothing). Word aliases for `fold` and friends can come later —

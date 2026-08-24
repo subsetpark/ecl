@@ -953,13 +953,36 @@ operand shape, and rows that still run boxed say so.
   and then substitute different bytes at the mutation sink.
 - **Package filesystem authority is closed and transactional.** The builtin
   `pkg.store` module exposes only inspection, absent immutable installation,
-  no-follow presence checks, and lock replacement. Installation creates a
+  no-follow presence checks, seal verification/materialization, lock
+  replacement, and cache-root-derived collection. Installation creates a
   unique sibling stage and inherits archive rollback; a concurrent loser
-  cannot merge with or replace the winner. Lock output is encoded and written
-  in bounded chunks to a unique sibling file, synchronized, rechecks that an
-  existing target is regular without following links, and becomes visible by
-  one same-parent rename. Cancellation and every pre-publication failure
-  retire the private temporary while preserving the previous lock bytes.
+  cannot merge with or replace the winner. Seal materialization accepts only
+  an entry destination plus package and hash, always reads the reserved seal,
+  and produces bytes only after streamed hash verification. Lock output is
+  encoded and written in bounded chunks to a unique sibling file,
+  synchronized, rechecks that an existing target is regular without following
+  links, and becomes visible by one same-parent rename. Cancellation and every
+  pre-publication failure retire the private temporary while preserving the
+  previous lock bytes.
+- **Vendoring reuses validation rather than copying mutable trees.** Ordinary
+  `pkg.cli.vendor` derives the source root from the validated lock and the
+  destination as the fixed `<project-root>/vendor`; no lock field or ECL word
+  supplies an arbitrary path. It reads each verified seal through
+  `pkg.store.read-seal` and sends those exact bytes through
+  `pkg.store.install`, so the archive scanner and absent immutable publication
+  remain the only package-copy sink. The canonical lock gains the tagged
+  `'store 'vendor` state only after every entry is present.
+- **Cache collection owns its deletion root and bounds every traversal.**
+  `pkg.store.gc` accepts canonical retained keys, not a directory. It derives
+  the same shared cache root from the Session environment snapshot, enumerates
+  one child per turn, and preserves unknown names, links, and non-directories.
+  An unreferenced canonical real directory is detached by one same-parent
+  rename, walked without following links, and deleted one entry per scheduler
+  advance. Its driver owns all cursor/path state across yields; retirement
+  releases at most one user-sized traversal frame or retained key per turn.
+  Interrupted `.ecl-gc-*` detachments are completed by the next run; no
+  worker-visible value can obtain generic recursive-delete or
+  caller-selected-root authority.
 - **Package synchronization separates observation from mutation.** The
   ordinary-ECL `pkg.sync.run` first walks exact reachable requirements using
   checked manifests from present entries or hash-verified HTTPS archives,
@@ -1203,6 +1226,13 @@ honest source with no public dual representation.
   be forged. Absent marker/lock/capability is represented by no handle; a
   malformed lock is an owned tagged state whose error is materialized only
   after embedded lookup.
+- **The store selection is a closed lock variant.** A four-key lock derives
+  entry roots from the captured cache inputs. The only five-key form adds the
+  symbol `'store 'vendor`, which derives `<discovered-project-root>/vendor`.
+  Validation rejects every string or alternate symbol, so a parsed lock cannot
+  smuggle an absolute path, traversal, or environment retargeting into the
+  loader. Both variants still collapse to immutable `Entry.store_dir` values
+  owned by the opaque snapshot; Units cannot observe or change the mode.
 - **Lock observation is bounded and read-only.** `LookupCursor` compares at
   most one package-name byte per advance and returns borrowed immutable match
   metadata. The driver owns it with `heap.Owned` across scheduler yields,

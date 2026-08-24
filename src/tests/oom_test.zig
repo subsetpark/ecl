@@ -55,7 +55,11 @@ fn packageStoreSource(
     try source.writer.writeAll(" pkg.store.present? pop ");
     try appendQuoted(&source.writer, destination);
     try source.writer.writeAll(
-        " \"a\" \"sha256-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\" pkg.store.verify",
+        " \"a\" \"sha256-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\" pkg.store.verify ",
+    );
+    try appendQuoted(&source.writer, destination);
+    try source.writer.writeAll(
+        " \"a\" \"sha256-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\" pkg.store.read-seal pop",
     );
     return allocator.dupe(u8, source.written());
 }
@@ -522,6 +526,11 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     );
     defer thread_safe_allocator.free(package_source);
     try runOk(&runtime, "oom-pkg-store.ecl", package_source);
+    try runOk(
+        &runtime,
+        "oom-pkg-gc.ecl",
+        "[\"a-1.0.0-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\"] pkg.store.gc pop",
+    );
     // The present one-package graph reaches sync discovery, MVS, the
     // selected-entry skip, canonical rendering, and lock replacement without
     // introducing an ambient network read into the allocation sweep.

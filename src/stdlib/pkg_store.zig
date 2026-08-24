@@ -7,8 +7,10 @@
 const std = @import("std");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
+const list = @import("../list.zig");
 const env = @import("../env.zig");
 const machine = @import("../machine.zig");
+const pkg_lock = @import("../pkg_lock.zig");
 const storage = @import("../kernel_storage.zig");
 const archive = @import("archive.zig");
 
@@ -39,13 +41,33 @@ pub const words = [_]env.BuiltinWord{
         .primitive = verify,
     },
     .{
+        .name = "read-seal",
+        .doc = "( destination package-name hash -- bytes ) Verify and return an installed package's exact sealed archive bytes.",
+        .primitive = readSeal,
+    },
+    .{
         .name = "write-lock",
         .doc = "( text path -- ) Atomically replace a regular project data file while preserving it on failure.",
         .primitive = writeLock,
     },
+    .{
+        .name = "gc",
+        .doc = "( retained-store-keys -- removed-count ) Remove canonical shared-cache entries absent from every retained key.",
+        .primitive = collectGarbage,
+    },
 };
 
 fn verify(evaluator: *Machine) MachineError!void {
+    return startSealDriver(evaluator, .verify);
+}
+
+fn readSeal(evaluator: *Machine) MachineError!void {
+    return startSealDriver(evaluator, .read);
+}
+
+const SealMode = enum { verify, read };
+
+fn startSealDriver(evaluator: *Machine, mode: SealMode) MachineError!void {
     try evaluator.require(3);
     var hash_value = try evaluator.popValue();
     errdefer hash_value.deinit();
@@ -65,6 +87,7 @@ fn verify(evaluator: *Machine) MachineError!void {
     const package_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), package_value.borrow());
     const hash_encoder = storage.ToUtf8Cursor.init(evaluator.allocator(), hash_value.borrow());
     try evaluator.startDriver(VerifyDriver{
+        .mode = mode,
         .allocator = evaluator.allocator(),
         .io = io,
         .destination_value = .init(destination_value.take()),
@@ -82,6 +105,7 @@ const VerifyDriver = struct {
     pub const ownership: heap.DriverOwnership = .bounded_retirement;
 
     retirement: heap.ReleaseDomain.Retirement = .{},
+    mode: SealMode,
     allocator: std.mem.Allocator,
     io: std.Io,
     destination_value: heap.Owned(Value),
@@ -97,11 +121,13 @@ const VerifyDriver = struct {
     file: ?std.Io.File = null,
     size: u64 = 0,
     offset: u64 = 0,
+    contents: ?heap.Owned([]u8) = null,
+    materializer: ?heap.Owned(storage.ByteListMaterializer) = null,
     buffer: [work_quantum]u8,
     hasher: std.crypto.hash.sha2.Sha256 = .init(.{}),
     digest: [32]u8 = @splat(0),
     rendered: [64]u8 = @splat(0),
-    phase: enum { encode_destination, encode_package, encode_hash, open, stat, read, compare } = .encode_destination,
+    phase: enum { encode_destination, encode_package, encode_hash, open, stat, read, compare, materialize } = .encode_destination,
 
     pub fn advance(evaluator: *Machine, self: *VerifyDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -113,6 +139,7 @@ const VerifyDriver = struct {
             .stat => self.stat(evaluator),
             .read => self.read(evaluator),
             .compare => self.compare(evaluator),
+            .materialize => self.materialize(evaluator),
         };
     }
 
@@ -185,6 +212,11 @@ const VerifyDriver = struct {
         const info = self.file.?.stat(self.io) catch |err|
             return self.failIo(evaluator, "cannot inspect installed package archive seal", err);
         self.size = info.size;
+        if (self.mode == .read) {
+            const length = std.math.cast(usize, info.size) orelse
+                return self.failIoName(evaluator, "installed package archive seal is too large to materialize");
+            self.contents = .init(try self.allocator.alloc(u8, length));
+        }
         self.phase = .read;
         return .yielded;
     }
@@ -199,11 +231,15 @@ const VerifyDriver = struct {
             return .yielded;
         }
         const amount: usize = @intCast(@min(@as(u64, work_quantum), self.size - self.offset));
-        const read_amount = self.file.?.readPositionalAll(self.io, self.buffer[0..amount], self.offset) catch |err|
+        const target = if (self.contents) |contents|
+            contents.borrow()[@intCast(self.offset)..][0..amount]
+        else
+            self.buffer[0..amount];
+        const read_amount = self.file.?.readPositionalAll(self.io, target, self.offset) catch |err|
             return self.failIo(evaluator, "cannot read installed package archive seal", err);
         if (read_amount != amount)
             return self.failIoName(evaluator, "installed package archive seal changed while being read");
-        self.hasher.update(self.buffer[0..amount]);
+        self.hasher.update(target);
         self.offset += amount;
         return .yielded;
     }
@@ -215,7 +251,17 @@ const VerifyDriver = struct {
                 "package `{s}` archive seal does not match lock hash",
                 .{self.package.?.borrow()},
             );
-        return .completed;
+        if (self.mode == .verify) return .completed;
+        self.materializer = .init(.init(self.allocator, self.contents.?.borrow()));
+        self.phase = .materialize;
+        return .yielded;
+    }
+
+    fn materialize(self: *VerifyDriver, _: *Machine) MachineError!machine.WorkProgress {
+        return switch (try self.materializer.?.borrowMut().advance(work_quantum)) {
+            .pending => .yielded,
+            .complete => |result| .{ .output = result },
+        };
     }
 
     fn failDomain(self: *VerifyDriver, evaluator: *Machine, message: []const u8) MachineError {
@@ -245,6 +291,8 @@ const VerifyDriver = struct {
         self: *VerifyDriver,
     ) bool {
         if (self.file) |file| file.close(self.io);
+        if (self.materializer) |*materializer| materializer.deinit(releases, allocator);
+        if (self.contents) |*contents| contents.deinit(releases, allocator);
         if (self.seal_path) |*path| path.deinit(releases, allocator);
         if (self.hash) |*hash| hash.deinit(releases, allocator);
         if (self.package) |*package| package.deinit(releases, allocator);
@@ -342,6 +390,412 @@ const PresentDriver = struct {
         return failure;
     }
 };
+
+fn collectGarbage(evaluator: *Machine) MachineError!void {
+    var retained_value = try evaluator.popValue();
+    errdefer retained_value.deinit();
+    if (retained_value.borrow() != .list)
+        return evaluator.typeError("a list of retained package store keys");
+    try evaluator.startDriver(GcDriver{
+        .allocator = evaluator.allocator(),
+        .io = evaluator.unit.inherited.host_io orelse {
+            return evaluator.fail(.io, "package store garbage collection is unavailable");
+        },
+        .retained_value = .init(retained_value.take()),
+        .retained = std.StringHashMap(void).init(evaluator.allocator()),
+    });
+}
+
+var next_gc_identity: std.atomic.Value(u64) = .init(1);
+
+const GcDeleteFrame = struct {
+    parent: ?*GcDeleteFrame,
+    dir: ?std.Io.Dir,
+    iterator: std.Io.Dir.Iterator,
+    name: ?[]u8,
+};
+
+const GcDriver = struct {
+    pub const ownership: heap.DriverOwnership = .bounded_retirement;
+
+    retirement: heap.ReleaseDomain.Retirement = .{},
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    retained_value: heap.Owned(Value),
+    retained: std.StringHashMap(void),
+    retained_keys: std.ArrayList([]u8) = .empty,
+    retained_index: usize = 0,
+    retained_capacity_ready: bool = false,
+    key_cursor: ?storage.ToUtf8Cursor = null,
+    environ_cursor: ?machine.Environ.LookupCursor = null,
+    root_path: ?[]u8 = null,
+    root_dir: ?std.Io.Dir = null,
+    iterator: ?std.Io.Dir.Iterator = null,
+    candidate_source: ?[]u8 = null,
+    candidate_trash: ?[]u8 = null,
+    delete_frame: ?*GcDeleteFrame = null,
+    removed: usize = 0,
+    retire_index: usize = 0,
+    retire_phase: enum { resources, delete_frames, retained, finish } = .resources,
+    phase: enum {
+        keys,
+        env_ecl_cache,
+        env_xdg_cache,
+        env_home,
+        open_root,
+        scan,
+        detach_candidate,
+        open_candidate,
+        delete_tree,
+        delete_root,
+        finish,
+    } = .keys,
+
+    pub fn advance(evaluator: *Machine, self: *GcDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        return switch (self.phase) {
+            .keys => self.encodeKeys(evaluator),
+            .env_ecl_cache => self.lookupEnvironment(evaluator, "ECL_CACHE", .env_xdg_cache, .direct),
+            .env_xdg_cache => self.lookupEnvironment(evaluator, "XDG_CACHE_HOME", .env_home, .xdg),
+            .env_home => self.lookupEnvironment(evaluator, "HOME", .finish, .home),
+            .open_root => self.openRoot(evaluator),
+            .scan => self.scan(evaluator),
+            .detach_candidate => self.detachCandidate(evaluator),
+            .open_candidate => self.openCandidate(evaluator),
+            .delete_tree => self.deleteTree(evaluator),
+            .delete_root => self.deleteRoot(evaluator),
+            .finish => if (self.root_path == null)
+                evaluator.fail(
+                    .io,
+                    "pkg.store.gc needs ECL_CACHE, XDG_CACHE_HOME, or HOME to select a package store",
+                )
+            else
+                .{ .output = .{ .int = @intCast(self.removed) } },
+        };
+    }
+
+    fn encodeKeys(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const count: usize = @intCast(self.retained_value.borrow().list.length());
+        if (!self.retained_capacity_ready) {
+            try self.retained.ensureTotalCapacity(@intCast(count));
+            try self.retained_keys.ensureTotalCapacity(self.allocator, count);
+            self.retained_capacity_ready = true;
+            return .yielded;
+        }
+        if (self.retained_index == count) {
+            self.phase = .env_ecl_cache;
+            return .yielded;
+        }
+        if (self.key_cursor == null) {
+            const item = list.atUnchecked(self.retained_value.borrow(), self.retained_index);
+            if (!item.isString())
+                return evaluator.failAtIndex(
+                    .type,
+                    "pkg.store.gc expects string store keys",
+                    self.retained_index,
+                );
+            self.key_cursor = .init(self.allocator, item);
+        }
+        return switch (self.key_cursor.?.advance(work_quantum) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCodepoint => return evaluator.failAtIndex(
+                .domain,
+                "a retained package store key contains an invalid Unicode scalar",
+                self.retained_index,
+            ),
+        }) {
+            .pending => .yielded,
+            .complete => |key| complete: {
+                self.key_cursor.?.deinit();
+                self.key_cursor = null;
+                if (!validStoreKey(key)) {
+                    self.allocator.free(key);
+                    return evaluator.failAtIndex(
+                        .domain,
+                        "pkg.store.gc expects canonical name-version-hash store keys",
+                        self.retained_index,
+                    );
+                }
+                if (self.retained.contains(key)) {
+                    self.allocator.free(key);
+                } else {
+                    self.retained.putAssumeCapacityNoClobber(key, {});
+                    self.retained_keys.appendAssumeCapacity(key);
+                }
+                self.retained_index += 1;
+                break :complete .yielded;
+            },
+        };
+    }
+
+    const RootKind = enum { direct, xdg, home };
+
+    fn lookupEnvironment(
+        self: *GcDriver,
+        evaluator: *Machine,
+        name: []const u8,
+        missing: @TypeOf(self.phase),
+        kind: RootKind,
+    ) MachineError!machine.WorkProgress {
+        if (self.environ_cursor == null) self.environ_cursor = evaluator.environLookup(name);
+        return switch (self.environ_cursor.?.advance(work_quantum)) {
+            .pending => .yielded,
+            .complete => |raw| complete: {
+                self.environ_cursor = null;
+                const bytes = raw orelse "";
+                if (bytes.len == 0) {
+                    self.phase = missing;
+                    break :complete .yielded;
+                }
+                self.root_path = switch (kind) {
+                    .direct => try self.allocator.dupe(u8, bytes),
+                    .xdg => std.fs.path.join(self.allocator, &.{ bytes, "ecl", "pkg" }) catch
+                        return error.OutOfMemory,
+                    .home => std.fs.path.join(self.allocator, &.{ bytes, ".cache", "ecl", "pkg" }) catch
+                        return error.OutOfMemory,
+                };
+                self.phase = .open_root;
+                break :complete .yielded;
+            },
+        };
+    }
+
+    fn openRoot(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        self.root_dir = std.Io.Dir.cwd().openDir(self.io, self.root_path.?, .{
+            .follow_symlinks = false,
+            .iterate = true,
+        }) catch |err| switch (err) {
+            error.FileNotFound => {
+                self.phase = .finish;
+                return .yielded;
+            },
+            else => return self.failIo(evaluator, "cannot open package store for garbage collection", err),
+        };
+        self.iterator = self.root_dir.?.iterate();
+        self.phase = .scan;
+        return .yielded;
+    }
+
+    fn scan(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const entry = self.iterator.?.next(self.io) catch |err|
+            return self.failIo(evaluator, "cannot enumerate package store for garbage collection", err);
+        if (entry == null) {
+            self.iterator = null;
+            self.phase = .finish;
+            return .yielded;
+        }
+        if (entry.?.kind != .directory) return .yielded;
+        const stale = std.mem.startsWith(u8, entry.?.name, ".ecl-gc-");
+        if (!stale and (!validStoreKey(entry.?.name) or self.retained.contains(entry.?.name)))
+            return .yielded;
+        if (stale) {
+            self.candidate_trash = try self.allocator.dupe(u8, entry.?.name);
+            self.phase = .open_candidate;
+        } else {
+            self.candidate_source = try self.allocator.dupe(u8, entry.?.name);
+            self.phase = .detach_candidate;
+        }
+        return .yielded;
+    }
+
+    fn detachCandidate(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const identity = next_gc_identity.fetchAdd(1, .monotonic);
+        const trash_name = try std.fmt.allocPrint(
+            self.allocator,
+            ".ecl-gc-{x}-{s}",
+            .{ identity, self.candidate_source.? },
+        );
+        self.root_dir.?.rename(self.candidate_source.?, self.root_dir.?, trash_name, self.io) catch |err| {
+            self.allocator.free(trash_name);
+            switch (err) {
+                error.DirNotEmpty => return .yielded,
+                error.FileNotFound => {
+                    self.allocator.free(self.candidate_source.?);
+                    self.candidate_source = null;
+                    self.phase = .scan;
+                    return .yielded;
+                },
+                else => {
+                    return self.failIo(evaluator, "cannot detach unreferenced package store entry", err);
+                },
+            }
+        };
+        self.allocator.free(self.candidate_source.?);
+        self.candidate_source = null;
+        self.candidate_trash = trash_name;
+        self.removed += 1;
+        self.phase = .open_candidate;
+        return .yielded;
+    }
+
+    fn openCandidate(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const directory = self.root_dir.?.openDir(self.io, self.candidate_trash.?, .{
+            .follow_symlinks = false,
+            .iterate = true,
+        }) catch |err| switch (err) {
+            error.FileNotFound => {
+                self.finishCandidate();
+                return .yielded;
+            },
+            else => return self.failIo(evaluator, "cannot open detached package store entry", err),
+        };
+        const frame = self.allocator.create(GcDeleteFrame) catch |err| {
+            directory.close(self.io);
+            return err;
+        };
+        frame.* = .{
+            .parent = null,
+            .dir = directory,
+            .iterator = directory.iterate(),
+            .name = null,
+        };
+        self.delete_frame = frame;
+        self.phase = .delete_tree;
+        return .yielded;
+    }
+
+    fn deleteTree(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        const frame = self.delete_frame.?;
+        const entry = frame.iterator.next(self.io) catch |err|
+            return self.failIo(evaluator, "cannot enumerate detached package store entry", err);
+        if (entry) |item| {
+            if (item.kind != .directory) {
+                frame.dir.?.deleteFile(self.io, item.name) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => return self.failIo(evaluator, "cannot remove detached package file", err),
+                };
+                return .yielded;
+            }
+            const name = try self.allocator.dupe(u8, item.name);
+            const directory = frame.dir.?.openDir(self.io, name, .{
+                .follow_symlinks = false,
+                .iterate = true,
+            }) catch |err| {
+                self.allocator.free(name);
+                return self.failIo(evaluator, "cannot open detached package directory", err);
+            };
+            const child = self.allocator.create(GcDeleteFrame) catch |err| {
+                directory.close(self.io);
+                self.allocator.free(name);
+                return err;
+            };
+            child.* = .{
+                .parent = frame,
+                .dir = directory,
+                .iterator = directory.iterate(),
+                .name = name,
+            };
+            self.delete_frame = child;
+            return .yielded;
+        }
+
+        frame.dir.?.close(self.io);
+        frame.dir = null;
+        if (frame.parent) |parent| {
+            parent.dir.?.deleteDir(self.io, frame.name.?) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return self.failIo(evaluator, "cannot remove detached package directory", err),
+            };
+            self.allocator.free(frame.name.?);
+            self.delete_frame = parent;
+            self.allocator.destroy(frame);
+            return .yielded;
+        }
+        self.delete_frame = null;
+        self.allocator.destroy(frame);
+        self.phase = .delete_root;
+        return .yielded;
+    }
+
+    fn deleteRoot(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+        self.root_dir.?.deleteDir(self.io, self.candidate_trash.?) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return self.failIo(evaluator, "cannot remove detached package store entry", err),
+        };
+        self.finishCandidate();
+        return .yielded;
+    }
+
+    fn finishCandidate(self: *GcDriver) void {
+        if (self.candidate_trash) |name| self.allocator.free(name);
+        self.candidate_trash = null;
+        self.iterator = self.root_dir.?.iterate();
+        self.phase = .scan;
+    }
+
+    fn failIo(self: *GcDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
+        return evaluator.failFmt(.io, "{s} `{s}`: {s}", .{ message, self.root_path orelse "", @errorName(err) });
+    }
+
+    pub fn advanceRetirement(
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        self: *GcDriver,
+    ) bool {
+        switch (self.retire_phase) {
+            .resources => {
+                if (self.root_dir) |directory| directory.close(self.io);
+                self.root_dir = null;
+                if (self.key_cursor) |*cursor| cursor.deinit();
+                self.key_cursor = null;
+                if (self.root_path) |path| allocator.free(path);
+                self.root_path = null;
+                if (self.candidate_source) |name| allocator.free(name);
+                self.candidate_source = null;
+                if (self.candidate_trash) |name| allocator.free(name);
+                self.candidate_trash = null;
+                self.retained.deinit();
+                self.retire_phase = .delete_frames;
+                self.retire_index = 0;
+                return false;
+            },
+            .delete_frames => {
+                if (self.delete_frame) |frame| {
+                    self.delete_frame = frame.parent;
+                    if (frame.dir) |directory| directory.close(self.io);
+                    if (frame.name) |name| allocator.free(name);
+                    allocator.destroy(frame);
+                    return false;
+                }
+                self.retire_phase = .retained;
+                self.retire_index = 0;
+                return false;
+            },
+            .retained => {
+                if (self.retire_index != self.retained_keys.items.len) {
+                    allocator.free(self.retained_keys.items[self.retire_index]);
+                    self.retire_index += 1;
+                    return false;
+                }
+                self.retained_keys.deinit(allocator);
+                self.retained_value.deinit(releases, allocator);
+                self.retire_phase = .finish;
+                return false;
+            },
+            .finish => {
+                allocator.destroy(self);
+                return true;
+            },
+        }
+    }
+};
+
+fn validStoreKey(key: []const u8) bool {
+    if (key.len < 67) return false;
+    const hash_start = key.len - 64;
+    if (key[hash_start - 1] != '-') return false;
+    for (key[hash_start..]) |byte| switch (byte) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    const prefix = key[0 .. hash_start - 1];
+    for (prefix, 0..) |byte, index| {
+        if (byte != '-' or index == 0 or index + 1 == prefix.len) continue;
+        if (pkg_lock.validPackageName(prefix[0..index]) and
+            pkg_lock.validVersion(prefix[index + 1 ..])) return true;
+    }
+    return false;
+}
 
 fn writeLock(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);

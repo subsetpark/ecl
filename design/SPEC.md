@@ -1006,18 +1006,31 @@ capability. `pkg.cli` is the line-oriented command adapter invoked by `ecl pkg`.
   `( manifest -- text )`
 - lock: `pkg.lock.read` `( text -- lock )`, `pkg.lock.write`
   `( lock -- text )`, `pkg.lock.tree` `( lock -- text )`, and `pkg.lock.why`
-  `( lock module -- text )`
+  `( lock module -- text )`; `pkg.lock.vendor` `( lock -- lock )` selects the
+  one project-local store mode
 - resolution: `pkg.mvs.resolve` `( root-manifest manifests -- lock )`
 - names: `pkg.name.owns?` `( package-name module-name -- bool )`
-- synchronization: `pkg.sync.run`
+- store derivation: `pkg.sync.cache-root` `( -- store-root )`,
+  `pkg.sync.store-key` `( package requirement -- key )`,
+  `pkg.sync.store-path` `( store package requirement -- path )`,
+  `pkg.sync.store-keys` `( lock -- keys )`, and `pkg.sync.store-root`
+  `( lock project-root -- store-root )`
+- synchronization: `pkg.sync.requirement`
+  `( package version url -- requirement )`, `pkg.sync.run`
   `( root-manifest project-root -- lock )`, `pkg.sync.run-offline`
   `( root-manifest project-root -- lock )`, and `pkg.sync.verify`
-  `( lock -- count )`
+  `( lock project-root -- count )`
+- CLI adapters: `pkg.cli.init`, `add`, `sync`, `sync-offline`, `tree`, `why`,
+  `verify`, `vendor`, and `gc`; `src/main.zig` supplies their validated argv
+  shapes and the nominal project root where required
 
 The builtin `pkg.store` module exposes only the package mutations ordinary ECL
-cannot express safely: `inspect`, `install`, `present?`, `verify`, and
-`write-lock`. It
-does not expose raw directories, handles, generic rename, or recursive delete.
+cannot express safely: `inspect`, `install`, `present?`, `verify`, `read-seal`,
+`write-lock`, and `gc`. `read-seal` returns bytes only after package-and-hash
+verification. `gc` derives the shared cache root from the Session environment
+and accepts store keys rather than a path. The module does not expose raw
+directories, handles, generic rename, recursive delete, or a caller-selected
+garbage-collection root.
 
 `pkg.manifest.validate` returns its argument unchanged or raises; it is not a
 `valid?`-style predicate. Failures follow the frozen kinds and introduce no
@@ -1186,12 +1199,23 @@ least edge in canonical order is reported.
 
 Resolver errors use the frozen kinds and carry the following `'data` fields:
 
-- hash conflict: `'package`, `'version`, `'left-package`, `'left-hash`,
+- malformed reachable version: exact message `a reachable package version is
+  malformed`; fields `'package`, `'required-package`, `'version`
+- missing manifest: exact message `pkg.mvs.resolve is missing a declared
+  manifest`; fields `'package`, `'required-package`, `'version`
+- hash conflict: exact message `one package version has conflicting hashes`;
+  fields `'package`, `'version`, `'left-package`, `'left-hash`,
   `'right-package`, `'right-hash`
-- selected-prefix collision: `'left-package`, `'right-package`
-- requirement cycle: `'packages`
-- malformed version or missing manifest: `'package`, `'required-package`,
-  `'version`
+- selected-prefix collision: exact message `selected packages have overlapping
+  prefixes`; fields `'left-package`, `'right-package`
+- requirement cycle: exact message `the package requirement graph has a
+  cycle`; field `'packages`
+
+Wrong root or catalog containers retain their exact type diagnostics: `a
+manifest is a dict` and `pkg.mvs.resolve expects a manifest catalog dict`.
+Catalog identity mismatch is `a catalog manifest must match its name and
+version keys`. Every graph diagnostic names the responsible package and, where
+an edge is responsible, the requiring package and conflicting requirement.
 
 Adding a requirement whose exact node is already reachable and whose minimum
 is already met does not change `'packages`. It does change `'requires`, which
@@ -1214,6 +1238,12 @@ deleting it and resolving again reproduces it.
   "my.proj" {"foo" "1.2.0"}}}
 ```
 
+A cache-backed lock has exactly those four keys. A vendored lock adds exactly
+`'store 'vendor` between `'root` and `'packages` in canonical output. No other
+store value is legal, and the value is a symbol rather than a path: the mode
+derives the fixed `<project-root>/vendor` directory, so lock data cannot grant
+filesystem authority or escape the discovered project root.
+
 - `'packages` is the selection: one entry per canonical name, carrying the
   selected version and the URL and hash it was declared with.
 - `'requires` is keyed by the **requiring** package — the root under its own
@@ -1226,6 +1256,9 @@ deleting it and resolving again reproduces it.
   name. A lock that violates this is malformed.
 - Entries in `'packages`, in `'requires`, and in each inner requirement map
   stand in ascending `cmp` order of their name keys.
+- Optional `'store` is exactly the symbol `'vendor`. Absence selects the shared
+  cache. No URL, absolute path, relative path, or environment variable may
+  appear in this field.
 
 The lock is machine-owned, so comments in it are not preserved and its layout
 is canonical rather than free: a newline precedes each top-level key and each
@@ -1261,12 +1294,14 @@ Cold module resolution has exactly three tiers:
    requested dotted module name;
 3. `ECL_PATH`, only when no locked package owns the name.
 
-A locked selection names the immutable store directory derived with the cache
-precedence and `<name>-<version>-<hex>` key below. The source candidate inside
-that directory is the requested module's **full canonical name** plus `.ecl`:
-package `foo` resolves module `foo.bar` at `foo.bar.ecl`, never `bar.ecl`.
-This is the same root-level layout accepted by package inspection and
-installation.
+A locked selection names the immutable `<name>-<version>-<hex>` directory
+below. A cache lock prefixes that key with the environment-selected shared
+cache. A vendored lock prefixes it with the fixed `<project-root>/vendor`
+directory and does not consult `ECL_CACHE`, `XDG_CACHE_HOME`, or `HOME`. The
+source candidate inside that directory is the requested module's **full
+canonical name** plus `.ecl`: package `foo` resolves module `foo.bar` at
+`foo.bar.ecl`, never `bar.ecl`. This is the same root-level layout accepted by
+package inspection and installation.
 
 Package ownership is authoritative. Once a lock prefix matches, a missing
 store directory reports the package and tells the user to run `ecl pkg sync`;
@@ -1275,6 +1310,23 @@ package. Neither failure falls through to `ECL_PATH`. Runtime resolution never
 calls HTTP or TLS, fetches or installs an artifact, writes the lock, or admits
 an `.eclmod` package candidate. Synchronization remains the only network and
 package-mutation boundary.
+
+Runtime lock-resolution diagnostics have exact stable message templates:
+
+- absent selected entry: “locked package `<package>` is missing from the
+  package store; run `ecl pkg sync`”;
+- failed selected-entry probe: “cannot inspect locked package `<package>` in
+  the package store: `<host-error>`; run `ecl pkg sync`”;
+- selected path is not a real directory: “locked package `<package>` is not a
+  real package-store directory; run `ecl pkg sync`”;
+- source absent within a present selected entry: “locked module `<module>` is
+  absent from package `<package>`”.
+
+The package and module placeholders are the canonical names from the validated
+lock and the original qualified request. The first three are `'io`; the last
+is `'undefined-word`. Invalid lock discovery is also `'io` and prefixes its
+owned detail with “invalid project lock `<path>`:”. None falls through to
+`ECL_PATH`.
 
 The lock snapshot is immutable across concurrent Units. `AutoLoadDriver`
 acquires the existing loading lease and rechecks for a racing winner before it
@@ -1310,6 +1362,32 @@ Each canonical store-key path is immutable. `pkg.store.present?`
 for a real directory. A symlink, non-directory node, access denial, or other
 probe failure is `'io` carrying `'path`. A present entry is read locally and
 is never re-fetched or overwritten by sync.
+
+### Vendoring and cache collection
+
+`ecl pkg vendor` requires a discovered project and a valid lock. For each
+selection it derives the source root from that lock, streams and rehashes the
+entry's reserved `.ecl-package.tgz`, and passes the resulting exact byte list
+through the ordinary package installer at
+`<project-root>/vendor/<store-key>`. An already-present vendor entry is
+verified and never overwritten. Only after every selected vendor entry is
+present does the command atomically rewrite the lock with `'store 'vendor`.
+Failure preserves the prior lock; a partially completed run may leave valid
+immutable vendor entries for the next run to reuse. Repeating the command is
+idempotent. A vendored lock makes ordinary resolution and `ecl pkg verify`
+independent of the network and shared cache.
+
+`ecl pkg gc <lock-file> [lock-file ...]` requires at least one explicitly
+named lock. It parses every file without evaluation, unions their canonical
+selected store keys, and invokes `pkg.store.gc` with keys rather than a path.
+The builtin derives the shared cache root from the same captured environment
+precedence above. It preserves every retained key, symlink, non-directory, and
+unknown child name. A real directory whose basename is a canonical store key
+and is absent from the union is renamed within the cache to a private
+`.ecl-gc-*` name, then walked and deleted one entry per bounded scheduler
+advance without following links. Interrupted private names are recognized and
+finished by the next collection. The reported count is the number of live
+store entries detached during this invocation, not recovered private names.
 
 ### Package archives
 
@@ -1347,6 +1425,14 @@ may re-run `present?` and accept the immutable winner. Cancellation,
 allocation failure, malformed input, and filesystem failure remove private
 staging and expose no partial destination.
 
+`pkg.store.verify` `( destination package-name hash -- )` streams the reserved
+archive seal and requires its SHA-256 to equal the lock hash.
+`pkg.store.read-seal` `( destination package-name hash -- bytes )` performs
+the identical package-named verification and then materializes the exact seal
+as an ordinary integer byte list. It is the only filesystem-to-archive-byte
+bridge and exists so vendoring can reuse `pkg.store.install`; it cannot read an
+arbitrary file beneath the entry.
+
 `pkg.store.write-lock` `( text path -- )` writes through a unique sibling
 temporary file and replaces the named regular file with one same-parent atomic
 rename. Encoding and writes are bounded scheduler work. On cancellation,
@@ -1355,9 +1441,9 @@ existing lock remains byte-for-byte unchanged; when no lock existed, none is
 published. A symlink or non-regular existing target is refused rather than
 followed.
 
-These four words are the complete package filesystem authority. ECL receives
-no generic recursive-delete or rename word as a side effect of package
-support.
+The seven `pkg.store` words documented below are the complete package
+filesystem authority. ECL receives no generic recursive-delete, copy, rename,
+or caller-rooted garbage-collection word as a side effect of package support.
 
 ### Synchronization
 
@@ -2794,6 +2880,11 @@ is `'domain`.
 `( text -- manifest )` — Parse one form with `pkg.data.read-one`, validate it,
 and never evaluate it.
 
+### write
+`( manifest -- text )` — Validate a manifest and render its stable one-line
+form with a terminal newline, preserving requirement dictionary insertion
+order.
+
 ## pkg.lock
 
 ### validate
@@ -2803,9 +2894,22 @@ root provenance, selected packages, recorded minimums, and satisfaction.
 ### read
 `( text -- lock )` — Parse one form without evaluation and validate it.
 
+### vendor
+`( lock -- lock )` — Validate a lock and return it with the closed
+`'store 'vendor` mode. No path is accepted or produced.
+
 ### write
 `( lock -- text )` — Validate a lock and render its canonical sorted layout,
 including the terminal newline.
+
+### tree
+`( lock -- text )` — Render the root and one canonical line per recorded
+dependency edge, ordered by requiring package and required package.
+
+### why
+`( lock module -- text )` — Render one deterministic root-to-owner path for a
+canonical qualified module. An unowned or unreachable module is `'domain`
+carrying the requested module where applicable.
 
 ## pkg.mvs
 
@@ -2839,11 +2943,57 @@ never exposes a partial destination.
 directory. A symlink, non-directory, inaccessible path, or unavailable host
 I/O is `'io`.
 
+### verify
+`( destination package-name hash -- )` — Stream the installed package's
+reserved archive seal and require its SHA-256 to equal `hash`. Failures name
+the package and carry the destination path for host-I/O errors.
+
+### read-seal
+`( destination package-name hash -- bytes )` — Perform the same streamed seal
+verification as `verify`, then return its exact octets as an ordinary integer
+byte list. It never reads a caller-selected child filename.
+
 ### write-lock
 `( text path -- )` — Atomically replace a regular lock file through a unique
 sibling temporary. Failure preserves the prior file or absence.
 
+### gc
+`( retained-store-keys -- removed-count )` — Derive the shared cache root from
+the captured environment, preserve the supplied canonical keys and every
+unknown cache node, and remove other canonical real-directory entries through
+bounded detach/walk/delete phases. A non-list, non-string key, or malformed
+store key is `'type` or `'domain`; unavailable cache selection and filesystem
+failures are `'io`.
+
 ## pkg.sync
+
+### cache-root
+`( -- store-root )` — Select the shared package cache from captured
+`ECL_CACHE`, `XDG_CACHE_HOME`, then `HOME`, treating empty values as absent.
+
+### store-key
+`( package requirement -- key )` — Derive the canonical
+`<name>-<version>-<hex>` basename from a validated selection.
+
+### store-path
+`( store package requirement -- path )` — Join a store root and canonical key.
+
+### store-keys
+`( lock -- keys )` — Validate a lock and return its selected canonical keys in
+package-name order.
+
+### store-root
+`( lock project-root -- store-root )` — Return `<project-root>/vendor` for a
+vendored lock; otherwise return `cache-root`.
+
+### requirement
+`( package version url -- requirement )` — Fetch and inspect one exact HTTPS
+package archive and return its validated version, URL, and computed hash
+declaration.
+
+### verify
+`( lock project-root -- count )` — Verify every selected seal at the lock's
+cache or vendor root and return the selection count.
 
 ### run
 `( root-manifest project-root -- lock )` — Discover and hash-check the complete
@@ -2852,6 +3002,32 @@ atomically install only selected missing store entries, then atomically write
 the canonical `ecl.lock` beneath `project-root`. Return the validated lock.
 See Packages / Synchronization for cache selection, two-pass fetch, error, and
 partial-success contracts.
+
+### run-offline
+`( root-manifest project-root -- lock )` — Perform the same discovery,
+resolution, installation check, and atomic lock write using only present
+shared-cache entries. An absent exact entry is `'io` naming its package and
+destination; no request is opened.
+
+## pkg.cli
+
+The CLI module is an ordinary line-oriented adapter. `src/main.zig` validates
+argv shapes and supplies an absolute nominal project root to every command
+except `gc`; these words return no stack output and print one stable line on
+success.
+
+- `init ( arguments -- )` creates `ecl.pkg` and prints `initialized ecl.pkg for
+  <name>`.
+- `add ( arguments -- )` records one exact fetched requirement and prints
+  `added <name> <version>`.
+- `sync` and `sync-offline` `( arguments -- )` print `synced <count> packages`.
+- `tree` and `why` `( arguments -- )` print `pkg.lock.tree` and
+  `pkg.lock.why` output unchanged.
+- `verify ( arguments -- )` prints `verified <count> packages`.
+- `vendor ( arguments -- )` populates the fixed vendor store, atomically marks
+  the lock vendored, and prints `vendored <count> packages`.
+- `gc ( lock-paths -- )` unions at least one named lock and prints `removed
+  <count> packages`.
 
 ## result
 

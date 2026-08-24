@@ -242,7 +242,7 @@ fn discoverLock(
                 "invalid project lock `{s}`: expected exactly one form",
                 .{lock_path},
             );
-            const entries = validateLock(host, parsed.values()[0], cache) catch |err| switch (err) {
+            const entries = validateLock(host, parsed.values()[0], project_root, cache) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Invalid => break :result try invalidSnapshot(
                     host,
@@ -281,10 +281,26 @@ const ValidationError = error{ Invalid, OutOfMemory };
 fn validateLock(
     host: *const heap.HostCleanup,
     item: Value,
+    project_root: []const u8,
     cache: CacheInputs,
 ) ValidationError![]Entry {
     const allocator = host.allocator();
-    const top = try exactFields(item, &.{ "format", "root", "packages", "requires" });
+    const header = try asDict(item);
+    const vendored = switch (header.length()) {
+        4 => cache_lock: {
+            _ = try exactFields(item, &.{ "format", "root", "packages", "requires" });
+            break :cache_lock false;
+        },
+        5 => vendor_lock: {
+            const top = try exactFields(item, &.{ "format", "root", "store", "packages", "requires" });
+            const store = try field(top, "store");
+            if (store != .symbol or !std.mem.eql(u8, intern.get(store.symbol), "vendor"))
+                return error.Invalid;
+            break :vendor_lock true;
+        },
+        else => return error.Invalid,
+    };
+    const top = header;
     const format = try field(top, "format");
     if (format != .int or format.int != 1) return error.Invalid;
     const root_value = try field(top, "root");
@@ -299,8 +315,11 @@ fn validateLock(
         for (entries.items) |*entry| entry.deinit(allocator);
         entries.deinit(allocator);
     }
-    const cache_root = try cacheRoot(allocator, cache);
-    defer if (cache_root) |path| allocator.free(path);
+    const store_root = if (vendored)
+        @as(?[]u8, std.fs.path.join(allocator, &.{ project_root, "vendor" }) catch return error.OutOfMemory)
+    else
+        try cacheRoot(allocator, cache);
+    defer if (store_root) |path| allocator.free(path);
 
     const package_count: usize = @intCast(packages.length());
     try entries.ensureTotalCapacity(allocator, package_count);
@@ -321,7 +340,7 @@ fn validateLock(
         const hash = try ownedUtf8(allocator, try field(selection, "hash"));
         defer allocator.free(hash);
         if (!validHash(hash)) return error.Invalid;
-        const store_dir = if (cache_root) |root_path|
+        const store_dir = if (store_root) |root_path|
             std.fmt.allocPrint(
                 allocator,
                 "{s}{c}{s}-{s}-{s}",
@@ -430,7 +449,7 @@ fn findEntry(entries: []const Entry, name: []const u8) ?*const Entry {
     return null;
 }
 
-fn validPackageName(name: []const u8) bool {
+pub fn validPackageName(name: []const u8) bool {
     if (name.len == 0) return false;
     var segment_start: usize = 0;
     for (name, 0..) |byte, index| {
@@ -460,7 +479,7 @@ fn validUrl(url: []const u8) bool {
     return url.len > "https://".len and std.mem.startsWith(u8, url, "https://");
 }
 
-fn validVersion(version: []const u8) bool {
+pub fn validVersion(version: []const u8) bool {
     if (version.len == 0 or std.mem.indexOfScalar(u8, version, '+') != null) return false;
     const hyphen = std.mem.indexOfScalar(u8, version, '-');
     const core = if (hyphen) |index| version[0..index] else version;

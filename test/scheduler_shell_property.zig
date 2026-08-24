@@ -12,6 +12,13 @@ const scenario_timeout_seconds: u64 = switch (build_options.optimize) {
     .Debug => 30,
     .ReleaseSafe, .ReleaseFast, .ReleaseSmall => 5,
 };
+const cancel_tree_width: usize = switch (build_options.optimize) {
+    // At eight workers the tracing DebugAllocator serializes every child
+    // allocation and release on one mutex. Sixty-four children still exercise
+    // the real cancellation tree while the release gates retain the full load.
+    .Debug => 64,
+    .ReleaseSafe, .ReleaseFast, .ReleaseSmall => 300,
+};
 
 const Operation = enum(u5) {
     par_each,
@@ -162,9 +169,10 @@ fn runShellScenario(encoded: u16) !void {
             try expected_buffer.writer.writeAll("1\n");
         },
         .cancel_tree => {
-            try source_buffer.writer.writeAll(
-                "([1] 300 take (((1) () while) @spawn pop) each " ++
+            try source_buffer.writer.print(
+                "([1] {d} take (((1) () while) @spawn pop) each " ++
                     "(1) () while) @spawn dup 20 await-for pop dup cancel await pop",
+                .{cancel_tree_width},
             );
         },
         .tasks_mutation => {

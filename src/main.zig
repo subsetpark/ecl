@@ -98,13 +98,15 @@ fn entry(init: std.process.Init) AppError!u8 {
 
 const package_help =
     \\USAGE:
-    \\    ecl pkg <init|add|sync|tree|why|verify>
+    \\    ecl pkg <init|add|sync|tree|why|verify|vendor|gc>
     \\    ecl pkg init
     \\    ecl pkg add <name> <version> <https-url>
     \\    ecl pkg sync [--offline]
     \\    ecl pkg tree
     \\    ecl pkg why <module>
     \\    ecl pkg verify
+    \\    ecl pkg vendor
+    \\    ecl pkg gc <lock-file> [lock-file ...]
     \\
 ;
 
@@ -153,12 +155,27 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
         );
     }
 
+    if (std.mem.eql(u8, command, "gc")) {
+        if (arguments.len < 2) return packageUsage(init);
+        return executeSource(
+            init,
+            "<pkg:gc>",
+            "args pkg.cli.gc",
+            arguments[1..],
+            false,
+            .program_source,
+            worker_count,
+        );
+    }
+
     const valid_shape = if (std.mem.eql(u8, command, "add"))
         arguments.len == 4
     else if (std.mem.eql(u8, command, "sync"))
         arguments.len == 1 or
             (arguments.len == 2 and std.mem.eql(u8, arguments[1], "--offline"))
-    else if (std.mem.eql(u8, command, "tree") or std.mem.eql(u8, command, "verify"))
+    else if (std.mem.eql(u8, command, "tree") or
+        std.mem.eql(u8, command, "verify") or
+        std.mem.eql(u8, command, "vendor"))
         arguments.len == 1
     else if (std.mem.eql(u8, command, "why"))
         arguments.len == 2
@@ -190,6 +207,8 @@ fn packageCommand(init: std.process.Init, arguments: []const []const u8) AppErro
         "args pkg.cli.tree"
     else if (std.mem.eql(u8, command, "why"))
         "args pkg.cli.why"
+    else if (std.mem.eql(u8, command, "vendor"))
+        "args pkg.cli.vendor"
     else
         "args pkg.cli.verify";
     return executeSource(

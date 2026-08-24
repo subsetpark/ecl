@@ -43,19 +43,37 @@
   if)
  'cache-root def
 
- ### defp store-key
+ ### def store-key
  (package requirement -- key : "Derive the immutable name-version-hash store key.")
  (|package requirement|
   package "-" cat
   requirement 'version at cat
   "-" cat
   requirement 'hash at 7 drop cat)
- 'store-key defp
+ 'store-key def
 
  ### def store-path
  (store package requirement -- path : "Derive one immutable package destination.")
  (|store package requirement| store "/" cat package requirement store-key cat)
  'store-path def
+
+ ### def store-keys
+ (lock -- keys : "Return the canonical immutable store keys selected by a lock.")
+ (pkg.lock.validate 'packages at pkg.data.sorted-entries
+  (|pair| pair first pair 1 at pkg.sync.store-key) each)
+ 'store-keys def
+
+ ### def store-root
+ (lock project-root -- store-root :
+  "Select the shared cache or the fixed project-local vendor store named by a lock.")
+ (|lock project|
+  lock pkg.lock.validate pop
+  project
+  lock 'store has?
+  ("/vendor" cat)
+  (pop pkg.sync.cache-root)
+  if)
+ 'store-root def
 
  ### defp success-response
  (response package url -- response : "Require a successful HTTP status with package provenance.")
@@ -366,10 +384,13 @@
  'verify-selection defp
 
  ### def verify
- (lock -- count : "Verify every immutable package selected by a lock and return its count.")
- (pkg.lock.validate 'packages at pkg.data.sorted-entries
+ (lock project-root -- count :
+  "Verify every immutable package selected by a lock at its cache or vendor root.")
+ (|lock project|
+  lock pkg.lock.validate pop
+  lock 'packages at pkg.data.sorted-entries
   dup len swap
-  cache-root (verify-selection) partial
+  lock project pkg.sync.store-root (verify-selection) partial
   for)
  'verify def
 

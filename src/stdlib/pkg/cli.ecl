@@ -86,7 +86,68 @@
 
  ### def verify
  (arguments -- : "Verify every sealed package archive selected by the project lock.")
- (first lock-path io.slurp pkg.lock.read pkg.sync.verify
-  wrap "verified {} packages" format io.print)
+ (first
+  (|root| root lock-path io.slurp pkg.lock.read root pkg.sync.verify
+   wrap "verified {} packages" format io.print)
+  call)
  'verify def
+
+ ### defp verify-vendor-context
+ (context -- : "Verify one already-present project vendor entry.")
+ ((|source destination package requirement|
+   source pop
+   destination package requirement 'hash at pkg.store.verify)
+  with call)
+ 'verify-vendor-context defp
+
+ ### defp install-vendor-context
+ (context -- : "Read, verify, and install one absent project vendor entry.")
+ ((|source destination package requirement|
+   source package requirement 'hash at pkg.store.read-seal
+   package destination pkg.store.install pop)
+  with call)
+ 'install-vendor-context defp
+
+ ### defp vendor-selection
+ (pair roots -- : "Copy or verify one selected immutable package in the project vendor store.")
+ (|pair roots|
+  pair first
+  pair 1 at
+  roots first
+  roots 1 at
+  4 pack
+  (|package requirement source-root destination-root|
+   source-root package requirement pkg.sync.store-path
+   destination-root package requirement pkg.sync.store-path
+   package requirement 4 pack
+   dup 1 at pkg.store.present?
+   (verify-vendor-context)
+   (install-vendor-context)
+   if)
+  with call)
+ 'vendor-selection defp
+
+ ### def vendor
+ (arguments -- : "Copy every locked package into the fixed project-local vendor store.")
+ (first dup lock-path io.slurp pkg.lock.read pair
+  (|root lock|
+   lock root pkg.sync.store-root
+   root "/vendor" cat
+   pair
+   lock 'packages at pkg.data.sorted-entries
+   swap (vendor-selection) partial
+   for
+   lock pkg.lock.vendor
+   dup pkg.lock.write root lock-path pkg.store.write-lock
+   'packages at keys len
+   wrap "vendored {} packages" format io.print)
+  with call)
+ 'vendor def
+
+ ### def gc
+ (lock-paths -- : "Remove shared-cache entries absent from every named lock file.")
+ ((io.slurp pkg.lock.read pkg.sync.store-keys) each raze distinct
+  pkg.store.gc
+  wrap "removed {} packages" format io.print)
+ 'gc def
  ) 'pkg.cli @defm

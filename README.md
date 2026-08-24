@@ -170,7 +170,26 @@ large values.
 `ecl pkg` manages inert `ecl.pkg` manifests, reproducible `ecl.lock` files,
 and immutable source-package store entries. Its commands initialize projects,
 add exact HTTPS requirements, synchronize online or offline, inspect the
-locked graph, and verify retained archive hashes.
+locked graph, verify retained archive hashes, vendor a lock into the fixed
+project-local `vendor/` store, and garbage-collect the shared cache against an
+explicit set of lock files:
+
+```sh
+ecl pkg init
+ecl pkg add smoke 1.0.0 https://example.com/smoke-1.0.0.tgz
+ecl pkg sync
+ecl pkg tree
+ecl pkg why smoke.answer
+ecl pkg verify
+ecl pkg vendor
+ecl pkg gc ../one/ecl.lock ../two/ecl.lock
+```
+
+`vendor` verifies each retained archive before reinstalling it beneath the
+project and rewrites `ecl.lock` with the closed `'store 'vendor` mode. Locked
+execution and `verify` then need no shared cache or network. `gc` requires at
+least one named lock and removes only canonical package-store directories not
+selected by any of them; unknown cache nodes are preserved.
 
 [`examples/pkg-smoke`](examples/pkg-smoke) is a checked-in consumer of the
 public source-only smoke package. Its walkthrough covers `add`, `sync`, locked

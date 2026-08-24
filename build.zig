@@ -445,6 +445,7 @@ pub fn build(b: *std.Build) void {
     e2e_options.addOption([]const u8, "pkg_example_manifest", @embedFile("examples/pkg-smoke/ecl.pkg"));
     e2e_options.addOption([]const u8, "pkg_example_lock", @embedFile("examples/pkg-smoke/ecl.lock"));
     e2e_options.addOption([]const u8, "pkg_example_program", @embedFile("examples/pkg-smoke/main.ecl"));
+    e2e_options.addOption([]const u8, "pkg_runtime_archive", @embedFile("test/fixtures/pkg/runtime-valid.tgz.hex"));
     const e2e_mod = b.createModule(.{
         .root_source_file = b.path("test/e2e.zig"),
         .target = target,
