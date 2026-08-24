@@ -181,15 +181,35 @@ const LockedAllocator = struct {
     }
 };
 
+/// Logs the failure before discarding it, and consumes it either way.
+///
+/// The sweep replays a probe once per allocation point, so a bare "produced an
+/// unexpected language error" leaves nothing to act on: the only way forward is
+/// to bisect the probe by hand. The dict names the word and the message
+/// directly. Rendering allocates from the same injected allocator, so it can
+/// legitimately fail mid-sweep — but a deterministic bug shows up on the first,
+/// uninjected replay, which is exactly where rendering succeeds.
+fn reportUnexpectedFailure(
+    runtime: *session.Session,
+    name: []const u8,
+    failure: session.Value,
+) error{UnexpectedLanguageError} {
+    if (runtime.renderValue(failure)) |rendered| {
+        var owned = rendered;
+        defer owned.deinit();
+        std.log.err("OOM probe `{s}` failed: {s}", .{ name, owned.bytes() });
+    } else |_| {
+        std.log.err("OOM probe `{s}` failed, and rendering it also ran out", .{name});
+    }
+    runtime.release(failure);
+    return error.UnexpectedLanguageError;
+}
+
 fn runOk(runtime: *session.Session, name: []const u8, source: []const u8) !void {
     switch (try runtime.runUnit(name, source)) {
         .ok => {},
         .incomplete => return error.UnexpectedIncomplete,
-        .err => |failure| {
-            runtime.release(failure);
-            std.log.err("OOM probe `{s}` produced an unexpected language error", .{name});
-            return error.UnexpectedLanguageError;
-        },
+        .err => |failure| return reportUnexpectedFailure(runtime, name, failure),
     }
 }
 
@@ -393,10 +413,11 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     switch (outcome) {
         .ok => {},
         .incomplete => return error.UnexpectedIncomplete,
-        .err => |failure| {
-            runtime.release(failure);
-            return error.UnexpectedLanguageError;
-        },
+        .err => |failure| return reportUnexpectedFailure(
+            &runtime,
+            "oom-definition-preserved.ecl",
+            failure,
+        ),
     }
 }
 
