@@ -700,137 +700,55 @@ test "module: import inside a module body binds module-locally" {
     try expectErrorContains(&runtime, "y", &.{ "'kind 'undefined-word", "'word 'y" });
 }
 
-test "module: loaded module source captures nothing and stays load-order independent" {
+test "module: a construction sees only its parameters its own definitions and core" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
     defer runtime.deinit();
-    // `table` is an embedded standard module, auto-loaded on first reference.
-    // Its text was written against core, so a name the session happens to have
-    // shadowed before that first reference must not reach inside it — and the
-    // shadow here is one its internals really use, reached transitively through
-    // a prelude word, which is the case that broke.
-    try expectOk(&runtime, "(999) 'len def [\"n\"] [[1] [2]] table.from-rows table.height");
-    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
-    try expectOk(&runtime, "(999) 'each def \"ab\" str.upper");
-    // Load order cannot matter, so the same shadow after the module is already
-    // resident behaves identically.
-    try expectOk(&runtime, "[\"n\"] [[1] [2]] table.from-rows table.height");
-    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[2].int);
-}
-
-test "module: construction captures prior top-level definitions transitively" {
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
-    defer runtime.deinit();
-    // `through` reaches `base` only if a top-level word called by module code
-    // keeps resolving in the capture rather than the live session root.
-    try expectOk(&runtime, "(1) 'base def (base 1 +) 'helper def " ++
-        "((base) 'direct def (helper) 'through def) 'm @defm m.direct m.through");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
-    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
-    // A quotation is still plain data carrying no environment: extracted and
-    // called at the session level, the same body resolves against the live
-    // session while the module keeps what it captured.
-    try expectOk(&runtime, "(9) 'base def m.direct 'm.direct body call");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
-    try std.testing.expectEqual(@as(i64, 9), runtime.stackItems()[3].int);
-}
-
-test "module: construction snapshot ignores later top-level redefinition and additions" {
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
-    defer runtime.deinit();
-    try expectOk(&runtime, "(1) 'base def ((base) 'read def (added) 'read-added def) 'first @defm first.read");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
-    // Replacing a captured name leaves the existing image alone and is visible
-    // to the next construction.
-    try expectOk(&runtime, "(2) 'base def first.read");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
-    try expectOk(&runtime, "((base) 'read def) 'second @defm second.read");
-    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[2].int);
-    // Adding a name absent at construction does not reach the earlier image.
-    try expectOk(&runtime, "(3) 'added def");
-    try expectErrorContains(&runtime, "first.read-added", &.{
+    // A module body's chain is its own definitions then core. A session name
+    // is not in it, however recently it was defined.
+    try expectOk(&runtime, "(1) 'base def");
+    try expectErrorContains(&runtime, "((base) 'read def) 'unparameterized @defm unparameterized.read", &.{
         "'kind 'undefined-word",
-        "'word 'added",
+        "'word 'base",
     });
-    try expectOk(&runtime, "((added) 'read-added def) 'third @defm third.read-added");
-    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[3].int);
+    // Parameterization is the way in, and it is the ordinary seeding
+    // composition rather than a construction-specific mechanism.
+    try expectOk(&runtime, "[41] ('base set ( -- n ) (base 1 +) 'go def) with 'seeded @defm seeded.go");
+    try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
+    // Core stays reachable, so a module needs no parameter for `+`.
+    try expectOk(&runtime, "((2 3 +) 'go def) 'core-only @defm core-only.go");
+    try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[1].int);
+    // This is about the module's own chain only. A homeless word the module
+    // calls — a primitive or an embedded prelude definition — still resolves
+    // against the lexical chain it was defined in, which is the live session
+    // root over core. `reflection: body extraction loses home context` and the
+    // `cons`/`wrap` rule in SPEC.md cover that separately.
 }
 
-test "module: captured top-level bindings and imports preserve precedence" {
+test "module: a parameterized word dependency is fixed and its own deps are explicit" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
     defer runtime.deinit();
-    // Core is reachable while nothing captured shadows it.
-    try expectOk(&runtime, "((4 sqrt) 'read def) 'core-only @defm core-only.read 2 =");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
-    // A captured top-level definition shadows core for that image only. The
-    // image constructed before the redefinition still reaches core.
-    try expectOk(&runtime, "(99) 'sqrt def ((sqrt) 'read def) 'over-core @defm over-core.read");
-    try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[1].int);
-    try expectOk(&runtime, "core-only.read 2 =");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
-    // A module-local definition wins over the captured one, and an `import`ed
-    // top-level binding is captured like any other direct binding — including
-    // the forwarding it does, which still reaches the current generation of
-    // the module it names.
-    try expectOk(&runtime, "((7) 'pick def) 'source @defm 'source.pick 'pick import " ++
-        "((3) 'pick defp (pick) 'local def) 'shadowing @defm shadowing.local " ++
-        "((pick) 'read def) 'imported @defm imported.read");
-    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[3].int);
-    try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[4].int);
-}
-
-test "module: nested construction captures session root without enclosing privates" {
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var runtime = try session.Session.init(backing.allocator(), &.{});
-    defer runtime.deinit();
-    try expectOk(&runtime, "(7) 'top def " ++
-        "(41 'secret setp ((secret) 'read def) 'nested @defm " ++
-        "((top) 'read-top def) 'nested-top @defm) 'outer @defm");
-    // The nested image captured the Session root, so the enclosing module's
-    // private is not in its chain at all.
-    try expectErrorContains(&runtime, "nested.read", &.{
+    // A word is passed as its body and bound inside the construction.
+    try expectOk(&runtime, "(dup +) 'double def " ++
+        "'double body wrap ('double def ( -- n ) (4 double) 'go def) with 'w @defm w.go");
+    try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[0].int);
+    // Nothing later can reach it: the image holds the body it was handed.
+    try expectOk(&runtime, "(99) 'double def w.go");
+    try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[1].int);
+    // Transitivity is explicit rather than implied. A passed body resolves its
+    // own references in the image, so its dependencies are parameters too.
+    try expectOk(&runtime, "(2) 'k def (k *) 'scale def " ++
+        "'scale body wrap ('scale def ( -- n ) (4 scale) 'go def) with 'partial-dep @defm");
+    try expectErrorContains(&runtime, "partial-dep.go", &.{
         "'kind 'undefined-word",
-        "'word 'secret",
+        "'word 'k",
     });
-    try expectOk(&runtime, "nested-top.read-top");
-    try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
-}
-
-test "reflection: captured construction shadows match execution" {
-    var backing: test_heap.SessionHeap = .init;
-    defer test_heap.retire(&backing);
-    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer output.deinit();
-    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer diagnostics.deinit();
-    var runtime = try session.Session.initWithHost(
-        backing.allocator(),
-        &.{},
-        .{
-            .io = std.testing.io,
-            .output = &output.writer,
-            .diagnostics = &diagnostics.writer,
-            .ecl_path = null,
-        },
-    );
-    defer runtime.deinit();
-    try expectOk(&runtime, "(1) 'pick def " ++
-        "((3) 'pick defp (pick) 'local def ('pick which) 'report def) 'shadow @defm " ++
-        "shadow.local shadow.report");
-    try std.testing.expectEqualStrings("", diagnostics.written());
-    // Execution took the module-local binding; `which` names that same winner
-    // first and reports the captured session binding as the shadow behind it.
-    try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "pick -> shadow.pick") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "shadows pick") != null);
+    try expectOk(&runtime, "'k body 'scale body 2 pack " ++
+        "('scale def 'k def ( -- n ) (4 scale) 'go def) with 'full-dep @defm full-dep.go");
+    try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[2].int);
 }
 
 test "reflection: which and see expose home shadow and effect" {

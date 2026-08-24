@@ -174,28 +174,21 @@ primitives, operationalized as two rules:
   `reflection.VisibleNameCursor` are gone; qualified lookup and `import` are
   unaffected, because neither ever used that tier.
 - **A binding resolves in the chain it was defined against, with no
-  exceptions.** An `Eval` frame carries a scope and a *resolution context*,
-  and they are deliberately different types: `scope` is where the body's own
-  definitions land and what it hands to any quotation it invokes on a caller's
-  behalf, while `ResolutionContext` is where the body's *word references*
+  exceptions.** An `Eval` frame carries two scopes: `scope`, where the body's
+  own definitions land and what it hands to any quotation it invokes on a
+  caller's behalf, and `resolution_scope`, where the body's *word references*
   resolve. Both live in one `ExecutionSite` alongside `home`, so the
   correlated triple travels as a single value and no construction site can set
-  two of the three. Eight sites used to restate the correlation by hand with
-  two same-typed `*env.Scope` pointers, so nothing stopped one from being
-  written where the other belonged; each now names `ExecutionSite.root`,
-  `.image`, `.inheriting`, or `.resumed`. `home` and `resolution` are
-  correlated but not redundant: a homeless word called from module code
-  inherits the caller's home, because that is whose privates and durable state
-  it may still reach, while resolving in that image's capture — collapsing them
-  would break `within` and private lookup inside prelude words a module calls.
-  The context is exhaustive:
-  `session` walks the live lexical chain then core, `image` walks a module's
-  own definitions then the environment its construction captured then core,
-  and `captured` walks that capture then core. `ResolutionContext.inherit` is
-  the single rule every nested activation uses, and `scheduleWord` sets the
-  context to the module home for a
-  homed binding and to the unit's lexical scope — the session root over core —
-  for a primitive or embedded prelude definition. Before that split, a
+  two of the three. Eight sites used to restate the correlation by hand, so
+  nothing stopped one scope from being written where the other belonged; each
+  now names `ExecutionSite.root`, `.image`, `.inheriting`, or `.resumed`.
+  `home` and `resolution_scope` are correlated but not derivable from one
+  another: a homeless word called from module code inherits the caller's home,
+  because that is whose privates and durable state it may still reach, while
+  resolving against its own defining chain. `scheduleWord` sets the resolution
+  scope to the module home for a homed binding and to the unit's lexical scope
+  — the session root over core — for a primitive or embedded prelude
+  definition. Before that split, a
   homeless binding inherited whichever environment happened to be executing,
   so a module exporting a word named like a core one reached inside every
   prelude word that module called: a module defining `where` broke `filter`,
@@ -255,36 +248,26 @@ primitives, operationalized as two rules:
   for shapes and is not a "has anything changed" signal. **The iron law for
   any future cache: hold the cell, re-read its interior every execution;
   never cache a resolution.**
-- **A module image owns its construction environment, and a quotation owns
-  nothing.** `ModuleImage` holds a second `Environment` beside its own: the
-  Session bindings copied once, before the body ran. Capture is an optimistic
-  resumable pass — read the source's `mutationEpoch`, copy under ordinary
-  reader leases, commit only if the epoch is unchanged — because holding a live
-  Session's publication lock across a user-sized copy is not available. A
-  publication landing mid-pass therefore yields a complete before-or-after
-  snapshot, and interference tears the partial destination down through the
-  ordinary `Environment.TeardownCursor` and restarts. One shape is published at
-  the end rather than one per name: the destination is unreachable until its
-  image is, so a per-name publication would make capture quadratic in the
-  session's name count for no observer's benefit. The image retires the capture
-  as its own bounded teardown phase, so a long session's binding history does
-  not outlive the images that copied it.
-  What captures is decided by `ExecutionSite.origin`, not by who is running:
-  `program` text captures the Session, `foreign` text — anything the loader
-  executes — captures nothing. The bit propagates through the images such text
-  constructs, because a module defined inside a loaded module is as foreign as
-  its parent, and it is recorded on `ModuleImage` rather than re-decided per
-  call. Without it an embedded standard module captured whatever the session
-  had defined before its first reference: shadowing one prelude-internal name
-  broke `table.from-rows` when `table` had not yet loaded and left it working
-  when it had.
-  The alternative — a closure environment on every quotation — was rejected:
-  it would put an environment on the most common value in the language, make
-  `'m.f body` something other than plain data, and turn the value heap's
-  module DAG into a graph. Capture belongs to the image, which is also why
-  every registration and alias of one image shares exactly one, and why
-  `ExecutionSite.inheriting` carries it through `call`, `@attempt`, and every
-  combinator application instead of any quotation carrying it.
+- **A module's construction boundary passes values, never environments.** An
+  image holds one `Environment` — its own definitions — and resolution goes
+  module then core. Nothing is snapshotted at construction, so there is no
+  mutation epoch to validate, no resumable copy pass to bound, no second
+  environment to retire, and no context to propagate through calls,
+  applications, or images. A construction receives what it needs through the
+  ordinary `with` seeding composition, and those values are inert data on the
+  construction stack like any other.
+  Two designs were tried and removed. A closure environment on every quotation
+  was rejected outright: it would put an environment on the most common value
+  in the language, make `'m.f body` something other than plain data, and turn
+  the value heap's module DAG into a graph. An implicit snapshot owned by the
+  image was implemented and then removed: it worked, but it needed four
+  independent sub-rules to answer "which names, from where, at what instant"
+  — freeze payloads but not registry generations, validate one mutation epoch,
+  capture the Session root rather than the enclosing image, and exempt loaded
+  text — and the last of those existed only because embedded standard modules
+  load lazily, so a session name defined before a module's first reference
+  reached inside it and load order became observable. Parameterization answers
+  all four questions by not raising them.
 - **Registry:** name → atomically swapped `{env, generation}`;
   re-registration bumps the generation; commit happens only after the
   module body succeeds. The generation counter is the observable form of

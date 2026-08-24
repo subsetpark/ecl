@@ -40,15 +40,6 @@ const ModuleImage = struct {
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(u32) = .init(1),
     environment: env.Environment,
-    /// The Session environment this image's construction captured, copied once
-    /// before the body ran. Every registration and alias of this image shares
-    /// it, because it belongs to the image and not to any name.
-    captured: env.Environment,
-    /// Whether this image's own text was written against the session. Loaded
-    /// module text captures nothing, and a module it constructs in turn is as
-    /// foreign as it is, so the fact has to live with the image rather than
-    /// being re-decided by whoever calls into it.
-    text_origin: env.TextOrigin = .program,
     scope: env.Scope,
     /// The construction body's final operand stack, bottom first. A first
     /// registration copies it into that slot's durable stack and a
@@ -66,7 +57,6 @@ const ModuleImage = struct {
         template: usize,
         scope: env.Scope.EmbeddedTeardownCursor,
         environment: env.Environment.TeardownCursor,
-        captured: env.Environment.TeardownCursor,
     } = .live,
 
     fn create(
@@ -77,8 +67,6 @@ const ModuleImage = struct {
         result.allocator = allocator;
         result.refs = .init(1);
         result.environment = env.Environment.init(allocator, releases);
-        result.captured = env.Environment.init(allocator, releases);
-        result.text_origin = .program;
         result.scope = env.Scope.moduleRoot(allocator, &result.environment);
         result.initial_state = &.{};
         result.construction_home = .{ .image = result, .registration = null };
@@ -133,13 +121,8 @@ const ModuleImage = struct {
                 self.retirement_state = .{ .environment = .init(&self.environment) };
                 break :result false;
             },
-            .environment => |*environment| result: {
-                if (!environment.advance()) break :result false;
-                self.retirement_state = .{ .captured = .init(&self.captured) };
-                break :result false;
-            },
-            .captured => |*captured| {
-                if (!captured.advance()) return false;
+            .environment => |*environment| {
+                if (!environment.advance()) return false;
                 allocator.destroy(self);
                 return true;
             },
@@ -756,20 +739,6 @@ pub const ModuleHome = opaque {
     pub fn scope(self: *const ModuleHome, _: *const ExecutionAccess) *env.Scope {
         return &self.state().image.scope;
     }
-    /// The Session environment this image captured at construction. It is the
-    /// tier between the image's own definitions and core, and it is the same
-    /// view for every registration of the image.
-    pub fn capturedEnvironment(
-        self: *const ModuleHome,
-        _: *const ExecutionAccess,
-    ) env.EnvironmentView {
-        return self.state().image.captured.view();
-    }
-    /// Where this image's own text came from, so a construction inside it
-    /// inherits the decision rather than re-making it.
-    pub fn textOrigin(self: *const ModuleHome, _: *const ExecutionAccess) env.TextOrigin {
-        return self.state().image.text_origin;
-    }
     /// The canonical name this activation was reached through, or null while a
     /// construction body is still building an anonymous image.
     pub fn name(self: *const ModuleHome) ?intern.ModuleName {
@@ -960,17 +929,6 @@ pub const OwnedImage = enum(usize) {
     /// Opens the construction-time capture of `source` into this image. The
     /// body may not run until it completes, so the capture is part of the
     /// image before any definition is published into it.
-    /// Records where the construction's text came from and opens its capture.
-    /// The two are one step: an image whose text is foreign has nothing to
-    /// capture, and one that captured has program text by construction.
-    pub fn captureCursor(
-        self: *const OwnedImage,
-        source: ?env.EnvironmentView,
-    ) env.CaptureCursor {
-        const image = self.borrow();
-        image.text_origin = if (source == null) .foreign else .program;
-        return .init(&image.captured, source);
-    }
     pub fn publishDefinition(
         self: *const OwnedImage,
         name: intern.BindingName,

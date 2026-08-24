@@ -880,8 +880,8 @@ const Eval = struct {
         return self.site.scope;
     }
     /// Where this body's *word references* resolve.
-    pub fn resolution(self: Eval) ResolutionContext {
-        return self.site.resolution;
+    pub fn resolutionScope(self: Eval) *env.Scope {
+        return self.site.resolution_scope;
     }
     /// Whose privacy and durable state this body runs against.
     pub fn home(self: Eval) ?*modules.ModuleHome {
@@ -1112,166 +1112,48 @@ fn encodeApplicationProvenanceTarget(
     return @ptrFromInt(raw);
 }
 
-/// Where an activation's word references resolve. Separating this from
-/// `Activation.scope` — where its definitions land — is what stops a module's
-/// exports from reaching inside the prelude words it calls, and what carries a
-/// module's captured construction environment through the calls it makes.
-pub const ResolutionContext = union(enum) {
-    /// Session code: the live lexical chain, then core. Session-level
-    /// redefinition therefore still reaches prelude bodies.
-    session: *env.Scope,
-    /// Module code: the image's own definitions, then the Session environment
-    /// its construction captured, then core.
-    image: struct { scope: *env.Scope, captured: env.EnvironmentView },
-    /// A homeless binding — a primitive or an embedded prelude definition —
-    /// reached from module or captured code. It resolves in that image's
-    /// capture over core, which is what makes a module's behavior stable
-    /// through the calls it makes without attaching an environment to any
-    /// quotation.
-    captured: env.EnvironmentView,
-
-    /// The context a nested activation inherits when it runs in `scope`: the
-    /// same capture, if any, over a possibly different chain. Every site that
-    /// inherits wants exactly this, so the rule lives here rather than being
-    /// open-coded seven times.
-    pub fn inherit(self: ResolutionContext, scope: *env.Scope) ResolutionContext {
-        return switch (self) {
-            .session => .{ .session = scope },
-            .image => |image| .{ .image = .{ .scope = scope, .captured = image.captured } },
-            .captured => |captured| .{ .image = .{ .scope = scope, .captured = captured } },
-        };
-    }
-
-    /// The capture in force, if any. An application stores this one value
-    /// rather than a whole context, because its scope is decided when it
-    /// launches and the capture is the only part it cannot re-derive.
-    pub fn capture(self: ResolutionContext) ?env.EnvironmentView {
-        return switch (self) {
-            .session => null,
-            .image => |image| image.captured,
-            .captured => |captured| captured,
-        };
-    }
-
-    /// The lexical chain this context walks before its capture, if any.
-    pub fn chain(self: ResolutionContext) ?*env.Scope {
-        return switch (self) {
-            .session => |scope| scope,
-            .image => |image| image.scope,
-            .captured => null,
-        };
-    }
-
-    /// The context for code running in `scope` under `capture`.
-    pub fn restore(scope: *env.Scope, captured: ?env.EnvironmentView) ResolutionContext {
-        return if (captured) |view|
-            .{ .image = .{ .scope = scope, .captured = view } }
-        else
-            .{ .session = scope };
-    }
-};
-
-/// The three correlated facts every activation needs: where its definitions
-/// land, where its references resolve, and whose privacy and durable state it
-/// runs against.
-///
-/// They are correlated, not redundant. A homeless word — a primitive or a
-/// prelude definition — called from module code inherits the caller's home,
-/// because that is whose privates and durable state it may still reach, while
-/// resolving in that image's *capture*, because that is where its own
-/// references belong. Collapsing the two would break `within` and private
-/// lookup inside prelude words a module calls.
-///
-/// Eight sites used to restate the correlation by hand. They now name a
-/// constructor, so the triple travels as one value and no site can set two of
-/// three.
-pub const TextOrigin = env.TextOrigin;
-
 pub const ExecutionSite = struct {
+    /// Where this body's own definitions land, and the chain it hands to any
+    /// quotation it invokes on a caller's behalf.
     scope: *env.Scope,
-    resolution: ResolutionContext,
+    /// Where this body's *word references* resolve. For a module word that is
+    /// its image; for a core or prelude word it is the lexical chain that word
+    /// was defined against, never whatever environment happens to be
+    /// executing.
+    resolution_scope: *env.Scope,
+    /// Whose privacy and durable state this body runs against. Correlated
+    /// with the scopes but not derivable from them: a homeless word called
+    /// from module code inherits the caller's home while resolving against its
+    /// own lexical chain.
     home: ?*modules.ModuleHome,
-    origin: TextOrigin,
-
-    /// The environment a construction begun here captures.
-    pub fn constructionSource(self: ExecutionSite, environment: *env.Env) ?env.EnvironmentView {
-        return switch (self.origin) {
-            .program => environment.sessionView(),
-            .foreign => null,
-        };
-    }
 
     /// The base case: a unit's root activation, built from nothing.
     pub fn root(unit: *Unit) ExecutionSite {
         const scope = unit.lexicalScope();
-        return .{
-            .scope = scope,
-            .resolution = .{ .session = scope },
-            .home = null,
-            .origin = .program,
-        };
+        return .{ .scope = scope, .resolution_scope = scope, .home = null };
     }
 
-    /// Code running as one module image: the image's own definitions, then the
-    /// environment its construction captured, then core.
+    /// Code running as one module image: the image's own definitions, then
+    /// core.
     pub fn image(
         home: *modules.ModuleHome,
         access: *const modules.ExecutionAccess,
     ) ExecutionSite {
         const scope = home.scope(access);
-        return .{
-            .scope = scope,
-            .resolution = .{ .image = .{
-                .scope = scope,
-                .captured = home.capturedEnvironment(access),
-            } },
-            .home = home,
-            // The image recorded where its own text came from, so a nested
-            // construction inherits it rather than re-deciding.
-            .origin = home.textOrigin(access),
-        };
+        return .{ .scope = scope, .resolution_scope = scope, .home = home };
     }
 
-    /// A nested activation continuing the same logical execution in `scope`.
-    /// It derives from the invoker's resolution *context*, never from its
-    /// scope, which is what keeps a module's capture reachable inside `call`,
-    /// `@attempt`, and a resumed qualified load.
+    /// A nested activation continuing the same logical execution in `scope`:
+    /// a dynamic `call`, an `@attempt` child, or a resumed qualified load.
+    /// A quotation resolves where its invoker runs, so both scopes are the one
+    /// it was handed.
     pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
-        return .{
-            .scope = scope,
-            .resolution = invoker.resolution().inherit(scope),
-            .home = invoker.home(),
-            .origin = invoker.site.origin,
-        };
+        return .{ .scope = scope, .resolution_scope = scope, .home = invoker.home() };
     }
 
-    /// Module source the loader is executing. It keeps the caller's chain and
-    /// home for lookup, and marks the text as not written against this
-    /// session, so a construction inside it captures nothing.
-    pub fn foreignSource(scope: *env.Scope, home: ?*modules.ModuleHome) ExecutionSite {
-        return .{
-            .scope = scope,
-            .resolution = .{ .session = scope },
-            .home = home,
-            .origin = .foreign,
-        };
-    }
-
-    /// An application resuming in `scope`. Its scope is only decided when it
-    /// launches, so it stores the home and capture in force at that point
-    /// rather than re-deriving them from whatever is running now.
-    pub fn resumed(
-        scope: *env.Scope,
-        home: ?*modules.ModuleHome,
-        captured: ?env.EnvironmentView,
-        origin: TextOrigin,
-    ) ExecutionSite {
-        return .{
-            .scope = scope,
-            .resolution = .restore(scope, captured),
-            .home = home,
-            .origin = origin,
-        };
+    /// An application resuming in `scope` under its launch home.
+    pub fn resumed(scope: *env.Scope, home: ?*modules.ModuleHome) ExecutionSite {
+        return .{ .scope = scope, .resolution_scope = scope, .home = home };
     }
 };
 
@@ -1286,14 +1168,6 @@ pub const IsolatedApplication = struct {
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
-    /// The capture in force where this application was launched. Its scope is
-    /// decided at launch, so this is the only part of the resolution context
-    /// it cannot re-derive.
-    captured: ?env.EnvironmentView,
-    /// Where the text that launched this application came from, for the same
-    /// reason: a construction inside the applied quotation constructs the way
-    /// its launching text does.
-    origin: TextOrigin,
     seeded: u32,
     provenance: ApplicationProvenance,
 };
@@ -1326,8 +1200,6 @@ pub fn typedApplication(
     quotation: *Header,
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
-    captured: ?env.EnvironmentView,
-    origin: TextOrigin,
     seeded: u32,
 ) IsolatedApplication {
     const Context = @TypeOf(driver);
@@ -1345,8 +1217,6 @@ pub fn typedApplication(
         .deinit_fn = adapters.deinit,
         .parent_scope = parent_scope,
         .home = home,
-        .captured = captured,
-        .origin = origin,
         .seeded = seeded,
         .provenance = .boundary,
     };
@@ -1364,8 +1234,6 @@ const ApplicationFrame = struct {
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
     parent_scope: *env.Scope,
     home: ?*modules.ModuleHome,
-    captured: ?env.EnvironmentView,
-    origin: TextOrigin,
     mode: ApplicationMode,
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
@@ -1459,13 +1327,7 @@ comptime {
     // across nested source execution. Keeping that tagged state in the frame
     // makes replay-vs-dispatch ownership unrepresentable rather than relying
     // on correlated Unit fields.
-    // The resolution context is a tagged union rather than the second
-    // `*env.Scope` it replaced, and an application frame carries the capture in
-    // force where it launched. Both widen the frame, and both buy the same
-    // thing: a scope and a resolution context can no longer be transposed at a
-    // construction site, and an application cannot resume having silently lost
-    // the capture its quotation resolves against.
-    if (@sizeOf(Frame) > 128) @compileError("machine frames must remain at most 128 bytes");
+    if (@sizeOf(Frame) > 104) @compileError("machine frames must remain at most 104 bytes");
 }
 pub const IdiomRequest = union(enum) {
     direct: struct { body: *Header, word: u32 },
@@ -2607,16 +2469,6 @@ pub const Machine = struct {
     pub fn sourceCursor(self: *const Machine, header: *Header) spans.SpanArchive.SourceCursor {
         return self.unit.archive.sourceCursor(header);
     }
-    /// The capture in force for the running activation, for the one consumer
-    /// that stores a launch context rather than inheriting one.
-    pub fn currentCapture(self: *const Machine) ?env.EnvironmentView {
-        return self.unit.current.?.resolution().capture();
-    }
-    /// Where the running activation's text came from, for the one consumer
-    /// that stores a launch site rather than inheriting one.
-    pub fn currentTextOrigin(self: *const Machine) TextOrigin {
-        return self.unit.current.?.site.origin;
-    }
     pub fn currentHome(self: *const Machine) ?*modules.ModuleHome {
         return self.unit.current.?.home();
     }
@@ -3591,12 +3443,9 @@ pub const Machine = struct {
                             try evaluator.callOwned(self.root_header.?);
                         },
                         .register => |*register| {
-                            // Loaded module text looks names up like session
-                            // code but constructs like a library: a `@defm`
-                            // inside it captures nothing.
-                            const site = ExecutionSite.foreignSource(
+                            const site = ExecutionSite.inheriting(
+                                evaluator.unit.current.?,
                                 evaluator.unit.current.?.scope(),
-                                evaluator.unit.current.?.home(),
                             );
                             heap.incRef(self.root_header.?);
                             const preserves_caller = switch (register.request.continuation) {
@@ -4705,8 +4554,6 @@ pub const Machine = struct {
             .deinit_fn = application.deinit_fn,
             .parent_scope = application.parent_scope,
             .home = application.home,
-            .captured = application.captured,
-            .origin = application.origin,
             .mode = switch (launch) {
                 .in_place => .{ .in_place = base },
                 .isolated => .{ .isolated = .{
@@ -4730,12 +4577,7 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = application.quotation,
             .ip = 0,
-            .site = .resumed(
-                child orelse application.parent_scope,
-                application.home,
-                application.captured,
-                application.origin,
-            ),
+            .site = .resumed(child orelse application.parent_scope, application.home),
             .traced_word = inherited_trace,
             .application_tail = provenance_target orelse application_index,
             .application_selection = if (select_initial) provenance_target else null,
@@ -4789,15 +4631,6 @@ pub const Machine = struct {
         };
         errdefer candidate.deinit();
         const home = candidate.executionHome(self.unit.module_access);
-        // The Session root, never the enclosing chain: a nested construction
-        // captures the same environment a top-level one does, so a registered
-        // inner image cannot retain its enclosing module's private authority.
-        // Loaded module source captures nothing at all, which is what keeps a
-        // library's behavior independent of the session that loaded it.
-        var capture = candidate.captureCursor(
-            self.unit.current.?.site.constructionSource(self.unit.environment),
-        );
-        errdefer capture.deinit();
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
@@ -4818,7 +4651,6 @@ pub const Machine = struct {
             .site = .image(home, self.unit.module_access),
             .traced_word = no_word,
         };
-        return self.startDriver(ModuleCaptureDriver{ .cursor = .init(capture) });
     }
     pub fn executeWord(self: *Machine, word: u32) MachineError!void {
         self.unit.active_word = .plain(word);
@@ -5741,7 +5573,6 @@ pub const ResolutionCursor = struct {
         qualified_export,
         scope,
         direct,
-        captured,
         core,
         complete,
     };
@@ -5789,10 +5620,6 @@ pub const ResolutionCursor = struct {
     prefix: ?intern.ModuleName = null,
     export_name: ?intern.BindingName = null,
     scope: ?*env.Scope,
-    /// The construction environment of the image this activation belongs to,
-    /// consulted once after its chain and before core. Cleared when consulted
-    /// so the walk cannot revisit it.
-    captured: ?env.EnvironmentView,
     generation: ?modules.GenerationLease = null,
 
     pub fn init(evaluator: *Machine, word: u32) ResolutionCursor {
@@ -5806,8 +5633,7 @@ pub const ResolutionCursor = struct {
             .word = word,
             .spelling = spelling,
             .work = .{ .dot = intern.lastDotCursor(spelling) },
-            .scope = evaluator.unit.current.?.resolution().chain(),
-            .captured = evaluator.unit.current.?.resolution().capture(),
+            .scope = evaluator.unit.current.?.resolutionScope(),
         };
     }
 
@@ -5973,14 +5799,8 @@ pub const ResolutionCursor = struct {
             },
             .scope => result: {
                 const current = self.scope orelse {
-                    if (self.captured) |captured| {
-                        self.captured = null;
-                        self.work = .{ .direct = captured.directLookupCursor(self.word) };
-                        self.phase = .captured;
-                    } else {
-                        self.work = .{ .direct = self.core.directLookupCursor(self.word) };
-                        self.phase = .core;
-                    }
+                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
+                    self.phase = .core;
                     break :result .pending;
                 };
                 self.scope = current.parent;
@@ -5999,29 +5819,6 @@ pub const ResolutionCursor = struct {
                         break :result .{ .complete = .{ .resolved = self.directResult(lease) } };
                     }
                     self.phase = .scope;
-                    break :result .pending;
-                },
-            },
-            .captured => switch (self.work.direct.advance()) {
-                .pending => .pending,
-                .complete => |maybe_lease| result: {
-                    self.work.deinit();
-                    if (maybe_lease) |lease| {
-                        self.phase = .complete;
-                        // A captured binding is a copy of a top-level one, so
-                        // it has no module home and is spelled plainly. Only
-                        // the origin distinguishes it, which is what lets
-                        // `which` name the tier a winner came from.
-                        break :result .{ .complete = .{ .resolved = .{
-                            .lease = lease,
-                            .execution_generation = null,
-                            .home = null,
-                            .trace_word = .plain(self.word),
-                            .origin = .captured,
-                        } } };
-                    }
-                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
-                    self.phase = .core;
                     break :result .pending;
                 },
             },
@@ -6051,7 +5848,7 @@ pub const ResolutionCursor = struct {
 
 pub const ShadowProgress = poll_api.Progress([]intern.TraceWord);
 pub const ShadowCursor = struct {
-    const Phase = enum { dot, scope, direct, captured, core, materialize, complete };
+    const Phase = enum { dot, scope, direct, core, materialize, complete };
     /// The same reservation `ResolutionCursor.Work` removes, for the same
     /// reason: these phase cursors are mutually exclusive. The walk itself is
     /// not shared with that cursor — this one records every hit and keeps
@@ -6076,7 +5873,6 @@ pub const ShadowCursor = struct {
     phase: Phase = .dot,
     work: Work,
     scope: ?*env.Scope,
-    captured: ?env.EnvironmentView,
     current_home: ?*modules.ModuleHome,
     search: resolution_core.Search = .searching,
     found: poll_api.ChunkList(intern.TraceWord),
@@ -6092,8 +5888,7 @@ pub const ShadowCursor = struct {
             .current_home = evaluator.unit.current.?.home(),
             .word = word,
             .work = .{ .dot = intern.dotCursor(intern.get(word)) },
-            .scope = evaluator.unit.current.?.resolution().chain(),
-            .captured = evaluator.unit.current.?.resolution().capture(),
+            .scope = evaluator.unit.current.?.resolutionScope(),
             .found = .init(evaluator.unit.allocator),
         };
     }
@@ -6132,14 +5927,8 @@ pub const ShadowCursor = struct {
             },
             .scope => result: {
                 const current = self.scope orelse {
-                    if (self.captured) |captured| {
-                        self.captured = null;
-                        self.work = .{ .direct = captured.directLookupCursor(self.word) };
-                        self.phase = .captured;
-                    } else {
-                        self.work = .{ .direct = self.core.directLookupCursor(self.word) };
-                        self.phase = .core;
-                    }
+                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
+                    self.phase = .core;
                     break :result .pending;
                 };
                 self.scope = current.parent;
@@ -6169,20 +5958,6 @@ pub const ShadowCursor = struct {
                             try self.record(.plain(self.word), .direct);
                     }
                     self.phase = .scope;
-                    break :result .pending;
-                },
-            },
-            .captured => switch (self.work.direct.advance()) {
-                .pending => .pending,
-                .complete => |maybe_lease| result: {
-                    self.work.deinit();
-                    if (maybe_lease) |loaded| {
-                        var lease = loaded;
-                        defer lease.deinit();
-                        try self.record(.plain(self.word), .captured);
-                    }
-                    self.work = .{ .direct = self.core.directLookupCursor(self.word) };
-                    self.phase = .core;
                     break :result .pending;
                 },
             },
@@ -6231,21 +6006,14 @@ fn scheduleWord(
     else
         self.unit.current.?.scope();
     const home = resolved_home orelse self.unit.current.?.home();
-    // A module word resolves against its home and that image's captured
-    // construction environment. A core or prelude word resolves against the
-    // lexical chain it was defined in — not the module body that happens to be
-    // calling it, which is what let a module export named like a core word
-    // reach inside the prelude. Reached *from* module or captured code it
-    // resolves in that same capture, so a module's behavior is fixed however
-    // deep the call goes and no quotation has to carry an environment.
-    const resolution: ResolutionContext = if (resolved_home) |generation| .{ .image = .{
-        .scope = generation.scope(self.unit.module_access),
-        .captured = generation.capturedEnvironment(self.unit.module_access),
-    } } else switch (self.unit.current.?.resolution()) {
-        .session => .{ .session = self.unit.lexicalScope() },
-        .image => |image| .{ .captured = image.captured },
-        .captured => |captured| .{ .captured = captured },
-    };
+    // A module word resolves against its home. A core or prelude word
+    // resolves against the lexical chain it was defined in — not the module
+    // body that happens to be calling it, which is what let a module export
+    // named like a core word reach inside the prelude.
+    const resolution_scope = if (resolved_home) |generation|
+        generation.scope(self.unit.module_access)
+    else
+        self.unit.lexicalScope();
     if (resolved_home) |generation| try self.unit.pinGeneration(generation);
     var check = if (effect != null) try prepareEffectCheck(self, effect, word) else null;
     var effect_tail = self.replaceTailEffectCandidate(body);
@@ -6264,17 +6032,7 @@ fn scheduleWord(
     self.unit.current = .{
         .code = body,
         .ip = 0,
-        .site = .{
-            .scope = scope,
-            .resolution = resolution,
-            .home = home,
-            // A word's body constructs the way its own text does: a module
-            // word's from its image, anything homeless from its caller.
-            .origin = if (resolved_home) |generation|
-                generation.textOrigin(self.unit.module_access)
-            else
-                self.unit.current.?.site.origin,
-        },
+        .site = .{ .scope = scope, .resolution_scope = resolution_scope, .home = home },
         .traced_word = word,
         .effect_tail = effect_tail,
         .application_tail = application_tail,
@@ -6353,8 +6111,6 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                     .deinit_fn = continuation.deinit_fn,
                     .parent_scope = continuation.parent_scope,
                     .home = continuation.home,
-                    .captured = continuation.captured,
-                    .origin = continuation.origin,
                     .seeded = step.seeded,
                     .provenance = .boundary,
                 }, launch, continuation.traced_word);
@@ -6708,28 +6464,6 @@ fn advanceRegistration(
     }
     return .yielded;
 }
-
-/// Drives one construction-time environment capture. The boundary is already
-/// open and the body activation already installed when this starts, so the
-/// driver runs to completion before the body's first instruction: the image
-/// owns a complete snapshot before any definition can resolve against it. A
-/// failure or cancellation here unwinds the construction boundary exactly as a
-/// failing body does, leaving no image, no registration, and every prior
-/// top-level definition unchanged.
-const ModuleCaptureDriver = struct {
-    pub const address_stable_driver = {};
-    cursor: heap.Owned(env.CaptureCursor),
-    pub fn advance(evaluator: *Machine, self: *ModuleCaptureDriver) MachineError!WorkProgress {
-        try evaluator.pollKernel();
-        var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (try self.cursor.borrowMut().advance()) {
-            .pending => {},
-            .complete => return .completed,
-        };
-        return .yielded;
-    }
-    pub const ownership: heap.DriverOwnership = .fields;
-};
 
 const ModuleRegisterDriver = struct {
     pub const address_stable_driver = {};

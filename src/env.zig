@@ -272,21 +272,6 @@ const BindingSpec = struct {
         self.retire(releases);
     }
 };
-/// A retained lease describes exactly one published specification. Copying a
-/// binding — the only thing capture does — needs that direction, and keeping
-/// it in one function stops a second field list from drifting out of step with
-/// `BindingLease.deinit`.
-fn specOf(lease: BindingLease) BindingSpec {
-    return .{
-        .binding = lease.binding,
-        .visibility = lease.visibility,
-        .origin = lease.origin,
-        .effect = lease.effect,
-        .doc = lease.doc,
-        .compiled = lease.compiled,
-        .source = lease.source,
-    };
-}
 const BindingSnapshot = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     spec: BindingSpec,
@@ -514,11 +499,6 @@ pub const EnvironmentView = enum(usize) {
         return self.target().shapeGeneration();
     }
 
-    /// Counts every accepted publication, name creation and rebinding alike.
-    pub fn mutationEpoch(self: EnvironmentView) u64 {
-        return self.target().mutationEpoch();
-    }
-
     pub fn namesOwned(
         self: EnvironmentView,
         allocator: std.mem.Allocator,
@@ -611,11 +591,6 @@ pub const Environment = struct {
     shapes: ShapePublisher,
     cells: poll.ChunkList(*BindingCell),
     shape_generation: std.atomic.Value(u64) = .init(0),
-    /// Every publication this environment accepts — a name created *and* a
-    /// name rebound — bumps this under the writer lock. Unlike
-    /// `shape_generation` it is a true mutation counter, which is what lets a
-    /// capture validate that it observed one complete generation.
-    mutation_epoch: std.atomic.Value(u64) = .init(0),
     frozen: std.atomic.Value(bool) = .init(false),
 
     pub const TeardownCursor = struct {
@@ -802,7 +777,6 @@ pub const Environment = struct {
                                 self.environment.unlock();
                                 return err;
                             };
-                            _ = self.environment.mutation_epoch.fetchAdd(1, .release);
                             self.environment.unlock();
                             self.candidate_cell.?.retire();
                             self.candidate_cell = null;
@@ -883,7 +857,6 @@ pub const Environment = struct {
                     self.candidate_cell = null;
                     self.environment.shapes.publish(next);
                     _ = self.environment.shape_generation.fetchAdd(1, .release);
-                    _ = self.environment.mutation_epoch.fetchAdd(1, .release);
                     self.environment.unlock();
                     state.shape.deinit();
                     self.environment.allocator.destroy(state);
@@ -929,9 +902,6 @@ pub const Environment = struct {
     pub fn shapeGeneration(self: *const Environment) u64 {
         return self.shape_generation.load(.acquire);
     }
-    pub fn mutationEpoch(self: *const Environment) u64 {
-        return self.mutation_epoch.load(.acquire);
-    }
     pub fn namesOwned(
         self: *const Environment,
         allocator: std.mem.Allocator,
@@ -967,184 +937,6 @@ const ScopeStorage = union(enum) {
     module_root: *Environment,
     isolated,
 };
-/// Whether the code running here was written against this session.
-///
-/// It decides what a construction begun here captures, and it propagates
-/// through the images such code constructs: a module defined inside a loaded
-/// module is as foreign as its parent. Without it, an embedded standard
-/// module would capture whatever the user happened to have defined before the
-/// module was first referenced, making library behavior depend on load order.
-pub const TextOrigin = enum {
-    /// The unit's own program text. A construction here captures the Session.
-    program,
-    /// Module text the loader is executing — embedded standard library, a file
-    /// on `ECL_PATH`, or a locked package entry. Constructions here capture
-    /// nothing, which is exactly the module-then-core chain such text was
-    /// written against.
-    foreign,
-};
-
-/// One resumable optimistic snapshot of an environment's direct bindings.
-///
-/// Capture cannot hold the source's publication lock: the source is a live
-/// Session environment and the pass is user-sized. It instead reads the
-/// source's mutation epoch, copies under ordinary reader leases, and commits
-/// only if the epoch is unchanged. A publication that lands mid-pass therefore
-/// produces a complete before-or-after snapshot and never a mixed one; the
-/// partial copy is torn down through the ordinary bounded teardown and the
-/// pass restarts.
-///
-/// The destination is unreachable until the image that owns it is published,
-/// which is why one shape is published at the end rather than one per name:
-/// a per-name publication would make capture quadratic in the session's name
-/// count for no observer's benefit.
-pub const CaptureProgress = poll.Progress(void);
-pub const CaptureCursor = struct {
-    pub const owned_disposal: heap.OwnedDisposal = .deinit;
-
-    destination: *Environment,
-    /// Absent when the construction's text was not written against this
-    /// session, in which case there is nothing to capture and the image
-    /// resolves its own definitions then core.
-    source: ?EnvironmentView,
-    state: State = .begin,
-
-    const Copy = struct {
-        epoch: u64,
-        names: NameCursor,
-        map: Shape.NameMap,
-        insertion: ?Shape.NameMap.PutCursor = null,
-    };
-
-    const State = union(enum) {
-        begin,
-        size: struct { epoch: u64, names: NameCursor, builder: Shape.NameMap.InitCursor },
-        copy: Copy,
-        restart: struct { teardown: Environment.TeardownCursor },
-        complete,
-    };
-
-    pub fn init(destination: *Environment, source: ?EnvironmentView) CaptureCursor {
-        return .{ .destination = destination, .source = source };
-    }
-
-    pub fn deinit(self: *CaptureCursor) void {
-        switch (self.state) {
-            .begin, .complete => {},
-            .size => |*state| {
-                state.builder.deinit();
-                state.names.deinit();
-            },
-            .copy => |*state| {
-                state.map.deinit();
-                state.names.deinit();
-            },
-            .restart => |*state| while (!state.teardown.advance()) {},
-        }
-        self.* = undefined;
-    }
-
-    /// Publishing nothing is the honest representation of an empty capture: a
-    /// null shape already answers every lookup with "absent".
-    fn finish(self: *CaptureCursor) CaptureProgress {
-        self.destination.freeze();
-        self.state = .complete;
-        return .complete;
-    }
-
-    pub fn advance(self: *CaptureCursor) error{OutOfMemory}!CaptureProgress {
-        return switch (self.state) {
-            .begin => result: {
-                const source = self.source orelse break :result self.finish();
-                // The epoch is read before the shape lease, so any publication
-                // this pass could miss is one that also moves the epoch.
-                const epoch = source.mutationEpoch();
-                var names = source.nameCursor();
-                const count = names.shape.nameCount();
-                if (count == 0) {
-                    names.deinit();
-                    break :result self.finish();
-                }
-                self.state = .{ .size = .{
-                    .epoch = epoch,
-                    .names = names,
-                    .builder = Shape.NameMap.initCursor(self.destination.allocator, count),
-                } };
-                break :result .pending;
-            },
-            .size => |*state| switch (try state.builder.advance()) {
-                .pending => .pending,
-                .complete => |map| result: {
-                    state.builder.deinit();
-                    self.state = .{ .copy = .{
-                        .epoch = state.epoch,
-                        .names = state.names,
-                        .map = map,
-                    } };
-                    break :result .pending;
-                },
-            },
-            .copy => |*state| result: {
-                if (state.insertion) |*insertion| {
-                    switch (insertion.advance()) {
-                        .pending => break :result .pending,
-                        .complete => state.insertion = null,
-                    }
-                    break :result .pending;
-                }
-                switch (state.names.advance()) {
-                    .pending => break :result .pending,
-                    .item => |entry| {
-                        var lease = entry.lease;
-                        defer lease.deinit();
-                        const cell = try BindingCell.create(
-                            self.destination.allocator,
-                            self.destination.releases,
-                            specOf(lease),
-                        );
-                        // The destination's teardown list owns the cell from
-                        // here, so an interfering epoch or a later allocation
-                        // failure retires it exactly once.
-                        self.destination.cells.append(cell) catch {
-                            cell.retire();
-                            return error.OutOfMemory;
-                        };
-                        state.insertion = state.map.putCursor(
-                            @enumFromInt(entry.name),
-                            cell,
-                        );
-                        break :result .pending;
-                    },
-                    .complete => {},
-                }
-                if (self.source.?.mutationEpoch() != state.epoch) {
-                    state.map.deinit();
-                    state.names.deinit();
-                    self.state = .{ .restart = .{ .teardown = .init(self.destination) } };
-                    break :result .pending;
-                }
-                const shape = try self.destination.allocator.create(Shape);
-                shape.* = .{ .names = state.map, .previous = null };
-                state.names.deinit();
-                self.destination.shapes.publish(shape);
-                _ = self.destination.shape_generation.fetchAdd(1, .release);
-                self.state = .complete;
-                break :result self.finish();
-            },
-            .restart => |*state| result: {
-                if (!state.teardown.advance()) break :result .pending;
-                self.destination.* = Environment.init(
-                    self.destination.allocator,
-                    self.destination.releases,
-                );
-                self.state = .begin;
-                break :result .pending;
-            },
-            .complete => unreachable,
-        };
-    }
-};
-
 pub const Scope = struct {
     allocator: std.mem.Allocator,
     parent: ?*Scope,

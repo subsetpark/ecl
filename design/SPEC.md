@@ -565,65 +565,49 @@ anonymously, be passed as data, and be registered more than once.
   image registered as both `left` and `right` executes against whichever name
   the call named — private lookup, same-home dispatch, `within`'s slot,
   diagnostic spelling, and `which` all follow the invoking registration. An
-  exported word's body resolves against its module's internal environment, the
-  Session environment its construction captured, and then core — never the
-  caller's environment. Publics therefore reach privates, and callers cannot
-  perturb a module's behavior by shadowing.
+  exported word's body resolves against its module's internal environment and
+  then core — never the caller's environment. Publics therefore reach
+  privates, and callers cannot perturb a module's behavior by shadowing.
   A module word's body is still a plain list: `'stats.stdev body` is data,
   and re-`def`ing that list elsewhere loses the private context.
   The rule has no exceptions. A binding with no module home — a primitive
   or an embedded prelude definition — resolves against the lexical chain it
-  was defined in, and not against whatever environment happens to be
-  executing. Reached from the session that chain is the live session root over
-  core; reached from module code it is the calling image's captured Session
-  environment over core, so a module's own behavior stays fixed however deep
-  the call goes. So a module exporting a word named like a core one shadows it
-  for that module's own callers, never inside the prelude words the module
-  calls: `table.where` does not become the `where` that `filter` is written
-  against. Late binding is unaffected within one resolution context — the
-  lookup still happens at call time, which is why redefining `cons` at the
-  session level still changes `wrap` for session code. A module constructed
-  before that redefinition keeps the `cons` it captured.
-- **A module captures its construction environment.** Before an `@module` or
-  `@defm` body executes, construction copies the Session environment it was
-  begun in: every direct top-level binding, as its exact payload. The copy is
-  immutable, is owned once by the module image, and is therefore identical for
-  every registration and alias of that image — registering an anonymous module
-  under a second name never recaptures or retargets it. A top-level definition
-  made after construction, whether it replaces a captured name or adds an
-  absent one, does not change the existing image; the next construction
-  captures the new environment.
-  Capture freezes payloads, not the registry. A captured binding that forwards
-  to a module word — what `import` publishes — still reaches whichever
-  generation of that module is registered when the call happens, exactly as an
-  uncaptured one does.
-  Capture observes one complete Environment mutation epoch: it reads the epoch,
-  copies, and commits only if the epoch is unchanged, so a top-level
-  publication racing construction yields a complete before-or-after snapshot
-  and never a mixed one. Interference retires the partial copy and restarts.
-  The pass is bounded and cancellable, and allocation failure, cancellation, or
-  a failed body leaves no image, no registration, and every prior top-level
-  definition unchanged; the body cannot run and `@defm` cannot publish until
-  capture completes.
-  Nested construction captures the Session root directly. A `@defm` inside a
-  module body sees the Session environment current at that nested
-  construction, never the enclosing image's private definitions or authority,
-  which is what keeps the registry flat and the value graph acyclic.
-  Only the session's own program text captures. Module text the loader
-  executes — an embedded standard module, a file found on `ECL_PATH`, or a
-  locked package entry — captures nothing, and so resolves its own definitions
-  then core. That text was written without knowledge of any session, so
-  capturing would make a library's behavior depend on which names the session
-  had defined before the module happened to be first referenced, and therefore
-  on load order. The distinction travels with the image, so a module a loaded
-  module constructs captures nothing either.
+  was defined in, the session root over core, and not against whatever
+  environment happens to be executing. So a module exporting a word named
+  like a core one shadows it for that module's own callers, never inside the
+  prelude words the module calls: `table.where` does not become the `where`
+  that `filter` is written against. Late binding is unaffected — the lookup
+  still happens at call time, which is why redefining `cons` at the session
+  level still changes `wrap`.
+- **Capture is parameterization, and parameterization is the only capture.**
+  A construction receives everything it needs on its stack, seeded by the
+  ordinary composition of `with` — `values (body) with @module`,
+  `values (body) with 'name @defm` — and nothing else crosses the boundary.
+  There is no ambient environment between a module's own definitions and core,
+  and no construction-time snapshot of one.
+  To depend on a session value, pass the value. To depend on a session word,
+  pass its body and bind it inside the body. Both are ordinary values on an
+  ordinary stack, which is why this needs no construction-specific mechanism
+  and no new vocabulary.
+  Every consequence follows from having nothing to stale. A later top-level
+  definition cannot change an existing image, because the image never referred
+  to the session. Nested construction needs no special rule, because it
+  receives its parameters the same way. Registrations and aliases of one image
+  share its definitions, because that is all there is to share. Module text the
+  loader executes — an embedded standard module, a file found on `ECL_PATH`, a
+  locked package entry — behaves identically to text typed at the session,
+  because neither can see a session, so load order is not observable.
+  Transitivity is explicit rather than implied: a body passed in resolves its
+  own references against the image, so anything *it* needs is a parameter too.
+  That is more to write than an ambient environment would be, and it is the
+  point — the parameter list is the module's dependency list, readable without
+  knowing what the session happened to contain.
 - **A quotation resolves where its invoker runs, because a quotation is
   plain data.** Passing a quotation into a combinator therefore keeps the
   caller's chain: a module word may hand `(private-helper)` to `each` and
-  the private still resolves. Construction capture does not change this: a
-  quotation carries no environment, so nothing is attached to a list and
-  `'m.f body` remains an ordinary inspectable value that loses every module
-  and captured context when it is re-`def`ed elsewhere.
+  the private still resolves. A quotation carries no environment, so nothing
+  is attached to a list and `'m.f body` remains an ordinary inspectable value
+  that loses its module context when it is re-`def`ed elsewhere.
   What a word *defines* — `def`, `set`, `setp` — also lands in the invoking context, which is how `setp` inside a module
   body binds a module private. Only a word's own references are lexical.
 - **`within` is the explicit stack boundary.** `within` runs a quotation

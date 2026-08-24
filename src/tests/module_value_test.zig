@@ -397,23 +397,6 @@ test "module loader: observation and dispatch require the requested registration
     try expectStack(&runtime, "'register-style.answer body", "([7] first)");
 }
 
-test "module values: registrations preserve the image captured session environment" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
-    defer runtime.deinit();
-    // One image, two registrations plus an alias. The capture belongs to the
-    // image, so naming it again neither recaptures nor retargets it.
-    try expectOk(&runtime, "(1) 'base def ((base) 'read def) @module " ++
-        "dup 'capture-left register 'capture-right register " ++
-        "'capture-alias 'capture-left alias");
-    try expectOk(&runtime, "(2) 'base def");
-    try expectStack(&runtime, "capture-left.read capture-right.read capture-alias.read", "1 1 1");
-    // A second construction after the redefinition sees the new environment,
-    // which is what makes the first image's stability a capture rather than a
-    // stale lookup.
-    try expectOk(&runtime, "((base) 'read def) @module 'capture-later register");
-    try expectStack(&runtime, "capture-later.read", "2");
-}
-
 test "module registration: reuse reload removal and delayed calls reclaim boundedly" {
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
