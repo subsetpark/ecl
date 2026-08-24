@@ -31,6 +31,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "import", .primitive = importWord },
         .{ .name = "alias", .primitive = aliasModule },
         .{ .name = "qualify", .primitive = qualify },
+        .{ .name = "invoke", .primitive = invoke },
         .{ .name = "words", .primitive = words },
         .{ .name = "load", .primitive = load },
     };
@@ -340,6 +341,49 @@ const AliasDriver = struct {
                 .complete => return .completed,
             }
         }
+        return .yielded;
+    }
+};
+
+/// Calls one public export of a module value. A handle carries no name, so
+/// there is nothing to `qualify` and nothing for the symbol-keyed observation
+/// words to look up; this is the one operation a nameless module supports.
+fn invoke(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    const binding = try evaluator.popSymbol();
+    var item = try evaluator.popValue();
+    errdefer item.deinit();
+    if (item.borrow() != .module) return evaluator.typeError("a module");
+    try evaluator.startDriver(InvokeDriver{
+        .module = .init(item.take()),
+        .validation = .init(binding),
+    });
+}
+
+/// The binding name is validated before the image is consulted, so an
+/// unqualifiable spelling fails the same way it does everywhere else rather
+/// than reporting a missing export.
+const InvokeDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    module: heap.Owned(value.Value),
+    validation: intern.NamespaceCursor,
+
+    pub fn advance(evaluator: *Machine, self: *InvokeDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (self.validation.advance()) {
+            .pending => {},
+            .complete => |maybe_name| {
+                const name = maybe_name orelse return evaluator.fail(
+                    .domain,
+                    "invoke requires an unqualified binding name",
+                );
+                const module = self.module.take();
+                evaluator.retireDriver(self);
+                try evaluator.invokeModuleOwned(module, name);
+                return .detached;
+            },
+        };
         return .yielded;
     }
 };

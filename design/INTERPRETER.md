@@ -281,13 +281,33 @@ primitives, operationalized as two rules:
   module body succeeds. The generation counter is the observable form of
   binding writes. **Module words pin one generation for a whole body** —
   no mixed-generation execution mid-word.
-- **Dynamic qualification reuses ordinary dispatch.** `qualify` drives the
-  validated module-name and binding-name cursors and materializes their
-  `QualifiedName` as a word value without reparsing source. `execute` consumes
-  only a word and enters the same resumable `DispatchDriver` used by an
-  executable source form; there is no second lookup/application path and no
-  loss of home, private visibility, annotation checks, trace metadata,
-  builtin/native behavior, cancellation, or state authority.
+- **One dispatch tail, several resolution sources.** `executeResolved` is the
+  tail: cross-home detection, the annotation check with its native/builtin/word
+  distinctions, core-origin idiom recognition, and the handoff to
+  `scheduleWord`. Every property worth protecting — home, private visibility,
+  annotation checks, trace metadata, builtin/native behavior, cancellation,
+  state authority — lives there, so the invariant is that no *source* may reach
+  it having lost one, not that there be only one source.
+  `qualify` drives the validated module-name and binding-name cursors and
+  materializes their `QualifiedName` as a word value without reparsing source;
+  `execute` consumes only a word and enters the same resumable
+  `DispatchDriver` an executable source form uses. `invoke` is the second
+  source: `HandleDispatchDriver` resolves a public export straight out of an
+  image's own environment — the lookup a registration performs, since the
+  registry contributes nothing to finding an export — and pins the image
+  through the registration-free `ExecutionHome` a construction body already
+  runs against. It reaches the tail with six of the seven properties intact.
+  The seventh, state authority, is absent by construction: `retainHomeSlot`
+  returns null without a registration, so `within` is refused. That is the
+  same line the value heap draws — a stateful heap-owned instance could hold
+  another and close a cycle, and there is no collector — so a nameless module
+  is stateless rather than statefully anonymous. Racket units and Newspeak
+  module declarations are the same shape, and both permit the mutual recursion
+  this cannot, because both are traced rather than refcounted.
+  A stateless module is a record of functions in the sense F-ing modules and
+  1ML make precise, which is why the module kind has to be more than a dict of
+  quotations: the dict would carry the exports and drop the privates and the
+  home they resolve against.
 - **Single-writer rule:** only the session thread writes session-visible
   environments; unit bodies write only their disposable child scopes. The
   registry is the one multi-writer table and takes an explicit

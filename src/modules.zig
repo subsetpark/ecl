@@ -46,10 +46,11 @@ const ModuleImage = struct {
     /// re-registration discards it for that slot; entries are scalars until
     /// the capture fills them, so every element is releasable at any point.
     initial_state: []value.Value = &.{},
-    /// The construction-root home. Its registration is null, so no state
-    /// application can open against a module that is still being built. It
-    /// embeds a pointer to its own owner, so `create` fills it in after the
-    /// allocation rather than defaulting it.
+    /// The registration-free home. Its registration is null, so no state
+    /// application can open against it — which is what a module still being
+    /// built needs, and equally what an image reached as a value needs, since
+    /// neither owns a slot. It embeds a pointer to its own owner, so `create`
+    /// fills it in after the allocation rather than defaulting it.
     construction_home: ExecutionHome,
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: union(enum) {
@@ -857,6 +858,35 @@ pub const ExecutionGeneration = enum(usize) {
 /// The cursor types an observation lease hands out. Naming them here keeps the
 /// registration record itself private to this file.
 pub const ModuleResolveCursor = Registration.ResolveCursor;
+
+/// Resolve one public export from an image reached as a *value* rather than
+/// through a registered name.
+///
+/// This is the same lookup a registration performs, because an image's own
+/// environment is where its exports live and the registry contributes nothing
+/// to finding one. What differs is what is pinned: an image reached this way
+/// has no registration, so the `ExecutionHome` a construction body already
+/// runs against serves here too, and retaining it retains the image. That is
+/// also why such a call has no durable state and no generation — there is no
+/// slot to open and no supersession to be current with.
+pub fn handleResolveCursor(handle: ImageRef, id: u32) ModuleResolveCursor {
+    const image = handle.image();
+    const home = ModuleHome.init(&image.construction_home);
+    return .{
+        .allocator = image.allocator,
+        .public_only = true,
+        .lookup = image.environment.directLookupCursor(id),
+        .pin = home.pinInternal(),
+    };
+}
+
+/// The home a value-reached image executes against. Its registration is null,
+/// so privacy is by public-only lookup, `within` is refused exactly as it is
+/// for a construction root, and the trace spells the bare local name because
+/// the image has no canonical one to qualify with.
+pub fn handleHome(handle: ImageRef, _: *const ExecutionAccess) *ModuleHome {
+    return .init(&handle.image().construction_home);
+}
 pub const ModulePublicNameCursor = Registration.PublicNameCursor;
 
 /// A borrowed reference to one immutable image, valid for the call it is passed

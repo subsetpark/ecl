@@ -598,6 +598,33 @@ anonymously, be passed as data, and be registered more than once.
   because it resolves where its invoker runs rather than where the invoker was
   defined: `(pop pop 42) '+ def [1 2 3] 0 (+) fold` is 42, so a combinator
   still sees the definitions of the code that called it.
+- **A module value supports one operation: `invoke`.** `module 'name invoke`
+  calls one public export of an image reached as a value rather than through a
+  registered name. It is the same dispatch a qualified call performs — the
+  home is the image, so a public reaches its own privates, and lookup is
+  public-only, so a private is as absent as a missing name. What it cannot do
+  is open state: an image owns no slot, so `within` inside a handle-called word
+  is `'domain` exactly as it is in a construction root. **A nameless module is
+  stateless.** A module that needs state returns it — a `new` word handing back
+  a value the caller threads through later calls — rather than encapsulating
+  it; durable state and `within` remain the province of a registration, which
+  is what a canonical name buys.
+  The observation words take a *symbol*, so they remain registration-driven:
+  `body`, `which`, `see`, and `doc` look a name up, and a name is what a
+  registration is. A value has none to offer them.
+  A nameless image has no canonical spelling either, so a failure inside a
+  handle-called word traces its bare local name — `['missing 'boom]` where a
+  registered call would say `['missing 'named.boom]`. Borrowing the caller's
+  parameter name would read better and claim more than is true.
+  Two images exporting the same name may be held and invoked at once, which a
+  registry keyed by name cannot represent.
+  A stateless module is formally a record of functions, so it is worth saying
+  why it is not a dict of quotations. A dict would lose both halves of what a
+  module carries: its privates, which are absent from its public face but
+  reachable from it, and the home its bodies resolve against. `'m.f body`
+  already shows the loss — an extracted body cannot reach the private it was
+  written against. The module kind exists to carry that environment, and
+  `invoke` is the operation that enters it.
 - **Capture is parameterization, and parameterization is the only capture.**
   A construction receives everything it needs on its stack, seeded by the
   ordinary composition of `with` — `values (body) with @module`,
@@ -616,6 +643,11 @@ anonymously, be passed as data, and be registered more than once.
   loader executes — an embedded standard module, a file found on `ECL_PATH`, a
   locked package entry — behaves identically to text typed at the session,
   because neither can see a session, so load order is not observable.
+  A whole module may be a parameter, which is how a substitutable dependency
+  is expressed: pass the image and call it with `invoke`. That keeps the choice
+  of implementation with the caller instead of making it a fact about the
+  global registry, which is what makes a test double local and two versions of
+  one package able to coexist.
   Transitivity is explicit rather than implied: a body passed in resolves its
   own references against the image, so anything *it* needs is a parameter too.
   That is more to write than an ambient environment would be, and it is the

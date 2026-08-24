@@ -4617,6 +4617,26 @@ pub const Machine = struct {
     /// Opens a construction boundary. The body evaluates against a fresh
     /// anonymous image; `registration`, when present, is the name that image
     /// is published under the instant the body succeeds.
+    /// Invokes one public export of a module value. The module reference is
+    /// consumed: the driver retains it for its whole life and releases it on
+    /// every exit.
+    pub fn invokeModuleOwned(
+        self: *Machine,
+        module: Value,
+        binding: intern.BindingName,
+    ) MachineError!void {
+        const image = modules.imageRef(module) orelse {
+            self.releaseDomain().releaseValue(module);
+            return self.typeError("a module");
+        };
+        self.setActiveWord(.plain(intern.bindingId(binding)));
+        return self.startDriver(HandleDispatchDriver{
+            .module = .init(module),
+            .binding = binding,
+            .home = modules.handleHome(image, self.unit.module_access),
+            .cursor = .init(modules.handleResolveCursor(image, intern.bindingId(binding))),
+        });
+    }
     pub fn moduleOwned(
         self: *Machine,
         registration: ?u32,
@@ -5352,6 +5372,61 @@ const DispatchDriver = struct {
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
+};
+
+/// Dispatches one export of an image reached as a value.
+///
+/// It is a second *resolution source*, not a second dispatch path: the
+/// resolved binding goes through the same `executeResolved` tail as a name-
+/// dispatched word, so home, privacy, annotation checks, trace metadata,
+/// builtin/native behavior, and cancellation are the tail's business exactly
+/// as they always were. The one property it cannot carry is state authority,
+/// because a value-reached image has no slot — an intended absence rather than
+/// a loss.
+const HandleDispatchDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    /// Retained for the driver's whole life. The resolve cursor's pin already
+    /// retains the image, but the value is what the program handed us and it
+    /// is released on every exit.
+    module: heap.Owned(Value),
+    binding: intern.BindingName,
+    home: *modules.ModuleHome,
+    cursor: heap.Owned(modules.ModuleResolveCursor),
+
+    pub fn advance(evaluator: *Machine, self: *HandleDispatchDriver) MachineError!WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (self.cursor.borrowMut().advance()) {
+            .pending => {},
+            .complete => |maybe_lease| {
+                const home = self.home;
+                const binding = self.binding;
+                const allocator = evaluator.unit.allocator;
+                self.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.module.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                evaluator.retireDriver(self);
+                const lease = maybe_lease orelse
+                    return evaluator.undefinedWord(intern.bindingId(binding));
+                var resolved: Resolution = .{
+                    .lease = lease,
+                    // No generation: there is no registration to be a
+                    // generation of.
+                    .execution_generation = null,
+                    .home = home,
+                    // The image has no canonical name, so the trace spells the
+                    // local name alone. That is what an anonymous image
+                    // honestly is; borrowing the parameter's local name would
+                    // read better and claim more than is true.
+                    .trace_word = homeTraceWord(home, lease.traceWord() orelse binding),
+                    .origin = .module,
+                };
+                defer resolved.deinit(allocator);
+                try executeResolved(evaluator, &resolved);
+                return .detached;
+            },
+        };
+        return .yielded;
+    }
 };
 
 /// Carries the exact dispatch request through module loading. The caller has

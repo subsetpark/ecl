@@ -358,6 +358,73 @@ test "module registration: failures leave prior registrations atomic and ownersh
     try expectErrorContains(&runtime, "rejected.v", &.{"'kind 'undefined-word"});
 }
 
+test "module values: invoke calls a public export of a nameless image" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    // An image reached as a value supports exactly one operation, because it
+    // has no name for anything else to key on.
+    try expectStack(&runtime, "((7) 'answer def) @module 'answer invoke", "7");
+    // A public reaches its own privates, on the same terms as a registered
+    // call: the home is the image either way.
+    try expectStack(&runtime, "((41) 'secret defp (secret 1 +) 'go def) @module 'go invoke", "42");
+    // Lookup is public-only, so a private is as absent as a missing name.
+    try expectErrorContains(&runtime, "((7) 'hidden defp) @module 'hidden invoke", &.{
+        "'kind 'undefined-word",
+        "'word 'hidden",
+    });
+    try expectErrorContains(&runtime, "((7) 'answer def) @module 'nope invoke", &.{
+        "'kind 'undefined-word",
+        "'word 'nope",
+    });
+    try expectErrorContains(&runtime, "1 'answer invoke", &.{ "'kind 'type", "'word 'invoke" });
+    try expectErrorContains(&runtime, "((7) 'answer def) @module 'not.unqualified invoke", &.{
+        "'kind 'domain",
+        "unqualified binding name",
+    });
+}
+
+test "module values: a nameless image is stateless and traces its bare local" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    // No registration means no slot, so `within` is refused exactly as it is
+    // for a construction root. State belongs to a registration.
+    try expectErrorContains(&runtime, "(0 ((1 + dup without) within) 'bump def) @module 'bump invoke", &.{
+        "'kind 'domain",
+        "within is legal only in a published module word",
+    });
+    // The same image registered has a slot and the same word works.
+    try expectStack(&runtime, "(0 ((1 + dup without) within) 'bump def) @module 'counter register counter.bump", "1");
+    // A nameless image has no canonical spelling, so a failure inside it
+    // traces the bare local name rather than borrowing one it does not have.
+    try expectErrorContains(&runtime, "((missing) 'boom def) @module 'boom invoke", &.{
+        "'trace ['missing 'boom]",
+    });
+    try expectErrorContains(&runtime, "((missing) 'boom def) 'named @defm named.boom", &.{
+        "'trace ['missing 'named.boom]",
+    });
+}
+
+test "module values: a construction can be parameterized by another module" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    // The dependency crosses the boundary as an ordinary seeded value and is
+    // called through its handle, so which implementation is used is the
+    // caller's decision rather than a global registry fact.
+    try expectStack(
+        &runtime,
+        "((2 *) 'scale def) @module wrap ('dep set (4 dep 'scale invoke) 'go def) with 'doubling @defm doubling.go",
+        "8",
+    );
+    try expectStack(
+        &runtime,
+        "((10 *) 'scale def) @module wrap ('dep set (4 dep 'scale invoke) 'go def) with 'tenfold @defm tenfold.go",
+        "40",
+    );
+    // Two images exporting the same name coexist, which a registry keyed by
+    // name cannot represent.
+    try expectStack(&runtime, "doubling.go tenfold.go", "8 40");
+}
+
 test "module loader: observation and dispatch require the requested registration" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
@@ -393,7 +460,11 @@ test "module loader: observation and dispatch require the requested registration
         "'path \"test/acceptance/modules/image-only.ecl\"",
     });
 
-    // Observation is registration-driven on the same terms as invocation.
+    // Observation is registration-driven because it is *symbol*-driven: `body`,
+    // `which`, `see`, and `doc` all consume a name, and a name is exactly what
+    // a registration is. Invocation also accepts a module value — see
+    // `module values: invoke calls a public export of a nameless image` — and
+    // that path has no name for these words to take.
     try expectStack(&runtime, "'register-style.answer body", "([7] first)");
 }
 
