@@ -981,6 +981,17 @@ pub const Scope = struct {
         return false;
     }
 
+    /// The id of this scope's cell, or `.none` if it has never minted one.
+    ///
+    /// One atomic load and no allocation, so an activation can record it on
+    /// entry and later compare a word's stamp against it with a single integer
+    /// compare. A scope with no cell can name no word, so `.none` is not a
+    /// missing answer -- it correctly fails every stamp comparison.
+    pub fn cellId(self: *const Scope) ScopeId {
+        const cell = self.label_cell.load(.acquire) orelse return .none;
+        return cell.id;
+    }
+
     /// Whether this scope is a module image's root, so a diagnostic can name
     /// the chain a word actually searched rather than the one the running
     /// activation would have.

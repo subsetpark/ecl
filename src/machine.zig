@@ -1129,11 +1129,29 @@ pub const ExecutionSite = struct {
     /// from module code inherits the caller's home while resolving against its
     /// own lexical chain.
     home: ?*modules.ModuleHome,
+    /// The cell id of `resolution_scope`, recorded once on entry.
+    ///
+    /// This is the whole of the same-scope fast path: a word stamped with this
+    /// id resolves in the chain this activation is already running, so it needs
+    /// no directory walk, no cell, no owner, and no liveness proof -- the
+    /// activation itself is the proof. `.none` when the scope has no cell or
+    /// there is no resolution scope, either of which fails the compare, which
+    /// is the conservative direction.
+    resolution_scope_id: env.ScopeId = .none,
+
+    fn idOf(scope: ?*env.Scope) env.ScopeId {
+        return if (scope) |resolved| resolved.cellId() else .none;
+    }
 
     /// The base case: a unit's root activation, built from nothing.
     pub fn root(unit: *Unit) ExecutionSite {
         const scope = unit.lexicalScope();
-        return .{ .scope = scope, .resolution_scope = scope, .home = null };
+        return .{
+            .scope = scope,
+            .resolution_scope = scope,
+            .home = null,
+            .resolution_scope_id = idOf(scope),
+        };
     }
 
     /// Code running as one module image: the image's own definitions, then
@@ -1143,7 +1161,12 @@ pub const ExecutionSite = struct {
         access: *const modules.ExecutionAccess,
     ) ExecutionSite {
         const scope = home.scope(access);
-        return .{ .scope = scope, .resolution_scope = scope, .home = home };
+        return .{
+            .scope = scope,
+            .resolution_scope = scope,
+            .home = home,
+            .resolution_scope_id = idOf(scope),
+        };
     }
 
     /// A nested activation continuing the same logical execution in `scope`:
@@ -1158,7 +1181,12 @@ pub const ExecutionSite = struct {
     /// construction where the home does not come from a running activation,
     /// because an application's scope is decided when it launches.
     pub fn resumed(scope: *env.Scope, home: ?*modules.ModuleHome) ExecutionSite {
-        return .{ .scope = scope, .resolution_scope = scope, .home = home };
+        return .{
+            .scope = scope,
+            .resolution_scope = scope,
+            .home = home,
+            .resolution_scope_id = idOf(scope),
+        };
     }
 };
 
@@ -4866,6 +4894,33 @@ pub const Machine = struct {
         var borrow_pin: ?modules.GenerationPin = null;
         errdefer if (borrow_pin) |*owned| owned.deinit();
 
+        // Is this occurrence stamped with the activation's own scope? One
+        // integer compare, ahead of everything else, because straight-line code
+        // resolving in its own chain is the overwhelming common case and it
+        // needs no proof beyond the activation that is already running it.
+        //
+        // This generalizes the activation-held arm from anchors to scope ids:
+        // where that compare covered a foreign word in the same image, this
+        // covers the word's scope being the running one outright, so the
+        // directory walk, the cell, the owner load, and `encloses` are all
+        // skipped rather than merely cheapened.
+        const running_site = self.unit.current.?.site;
+        if (word.scope != 0 and
+            @intFromEnum(running_site.resolution_scope_id) == word.scope)
+        {
+            self.unit.active_word = .plain(word.name);
+            try self.startDriver(DispatchDriver{
+                .word = word.name,
+                .resolution = .init(.init(
+                    self,
+                    word.name,
+                    running_site.resolution_scope,
+                    null,
+                )),
+            });
+            return;
+        }
+
         const written: ?*env.Scope = switch (self.unit.environment.scopeOf(@enumFromInt(word.scope))) {
             .unscoped => self.unit.current.?.resolutionScope(),
             // Core is a terminal phase that no scope denotes.
@@ -6534,7 +6589,12 @@ fn scheduleWord(
     self.unit.current = .{
         .code = body,
         .ip = 0,
-        .site = .{ .scope = scope, .resolution_scope = resolution_scope, .home = home },
+        .site = .{
+            .scope = scope,
+            .resolution_scope = resolution_scope,
+            .home = home,
+            .resolution_scope_id = ExecutionSite.idOf(resolution_scope),
+        },
         .traced_word = word,
         .effect_tail = effect_tail,
         .application_tail = application_tail,
