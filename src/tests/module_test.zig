@@ -610,28 +610,7 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
     try std.testing.expectEqual(env.quotation(binding.body.list).?, current.binding.word);
 }
 
-// PENDING: scope cells are keyed to the *image* that published a generation,
-// and a name-keyed cell is the fix. Two consequences are asserted below and
-// fail today; neither is a coding slip, and neither is fixed by weakening what
-// they assert:
-//
-//   * Boundedness. Every published generation adds a cell, and those cells must
-//     outlive their images because a word carries a bare id and takes no
-//     reference, so nothing can tell when a generation's cell has no surviving
-//     words. Thousands of re-registrations therefore grow live memory. One cell
-//     per *name*, re-pointed on each generation, removes the growth entirely.
-//
-//   * Double registration. One image registered under two names has one cell,
-//     and whichever registration commits first claims it; retiring that name
-//     strands the other. A name-keyed cell gives each name its own, and an
-//     image that was never registered keeps its own.
-//
-// Tracked as the `name-keyed-scope-cells` follow-up. Do not relax the bounds
-// below to make these pass: they encode the guarantee the follow-up must meet.
-const name_keyed_cells_pending = true;
-
 test "environment and registry retirement stays bounded after a delayed reader drains" {
-    if (name_keyed_cells_pending) return error.SkipZigTest;
     var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
     const allocator = counting.allocator();
     {
@@ -642,7 +621,7 @@ test "environment and registry retirement stays bounded after a delayed reader d
         defer environment.deinit();
         var scope = environment.sessionRoot(allocator);
         defer env.testing.deinitScope(&scope, releases);
-        var registry = try modules.Registry.init(host.cleanup(), environment);
+        var registry = try modules.Registry.init(host.cleanup());
         defer registry.deinit();
 
         const binding_name = try intern.internNamespace("bounded-binding");
@@ -870,7 +849,7 @@ test "registry: concurrent commits are linearized without lost names" {
         host.cleanup().drain();
         environment.deinit();
     }
-    var registry = try modules.Registry.init(host.cleanup(), environment);
+    var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
     var failed = std.atomic.Value(bool).init(false);
     const context = RegistryThreadContext{
@@ -911,7 +890,7 @@ test "registry: old generation leases survive reload and reclaim after release" 
         host.cleanup().drain();
         environment.deinit();
     }
-    var registry = try modules.Registry.init(host.cleanup(), environment);
+    var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
     const body = try list.fromValuesGeneric(std.testing.allocator, &.{.{ .int = 7 }});
     defer releases.releaseValue(body);
@@ -957,7 +936,7 @@ test "registry: generation cursors independently pin their snapshot" {
         host.cleanup().drain();
         environment.deinit();
     }
-    var registry = try modules.Registry.init(host.cleanup(), environment);
+    var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
     const module_name = try intern.internModuleName("cursor-pinned-generation");
     const value_name = try intern.internNamespace("cursor-pinned-value");
@@ -1080,7 +1059,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
         host.cleanup().drain();
         environment.deinit();
     }
-    var registry = try modules.Registry.init(host.cleanup(), environment);
+    var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
     const effect_value = try list.fromValuesGeneric(allocator, &.{
         .{ .word = .{ .name = try intern.intern("--") } },

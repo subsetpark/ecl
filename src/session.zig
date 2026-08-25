@@ -339,7 +339,7 @@ pub const Session = enum(usize) {
         errdefer environment.deinit();
         var building = environment.beginCoreBuild();
         try prims.install(&building);
-        var registry = try modules.Registry.init(host_owner.cleanup(), environment);
+        var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
         const native_owner = try native_module.Owner.init(host_owner.cleanup());
         errdefer native_owner.closeCalls().settle().deinit();

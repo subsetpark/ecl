@@ -659,6 +659,12 @@ anonymously, be passed as data, and be registered more than once.
   chain, because a fallback would silently change what its words mean. An
   *anonymous* image — one built by `@module` and never registered — has no name
   to track, so its words name that image alone and retire with it.
+  A name keeps one scope for all its generations, so a word written under it
+  anchors to the *innermost enclosing activation of that name*. A quotation that
+  escaped generation 1 and is applied inside a generation-2 activation resolves
+  against generation 2, not against the generation it was written in: the
+  activation you are inside is the one that answers, which is the same rule that
+  keeps a body from being re-pointed under itself, read from the other side.
   A generation an activation entered is kept alive for that activation, so an
   old generation outlives its supersession for as long as something is still
   running it. ECL does not bound that the way Erlang does — Erlang keeps two

@@ -180,7 +180,7 @@ fn expectInvalidPrelude(source: []const u8) !void {
     defer environment.deinit();
     var building = environment.beginCoreBuild();
     try prims.install(&building);
-    var registry = try modules.Registry.init(host.cleanup(), environment);
+    var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
     var archive = try spans.SpanArchive.init(host.cleanup());
     defer archive.deinit();

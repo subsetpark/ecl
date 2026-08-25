@@ -632,3 +632,21 @@ test "module values: an escaped quotation applied inside another module follows 
     try expectOk(&runtime, "((2) 'k def ((k)) 'q def) 'source @defm");
     try expectStack(&runtime, "held other.apply", "2");
 }
+
+test "module values: a generation-crossing quotation anchors to the executing generation" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    // A name keeps one scope cell across its generations, so a quotation that
+    // escaped generation 1 and is applied *inside* a generation-2 activation of
+    // the same name anchors to generation 2 -- the innermost enclosing
+    // activation wins, which is the same rule that keeps a body from being
+    // re-pointed under itself.
+    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'gen @defm gen.q 'held set");
+    try expectStack(&runtime, "held call", "1");
+    // The escaped quotation is handed to generation 2 as a parameter -- a
+    // module body cannot see a session name -- and applied from inside a
+    // generation-2 activation.
+    try expectOk(&runtime, "held wrap ('esc def (2) 'k def " ++
+        "( -- n ) (esc) 'inside def) with 'gen @defm");
+    try expectStack(&runtime, "gen.inside", "2");
+}

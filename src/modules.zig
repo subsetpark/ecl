@@ -64,12 +64,12 @@ const ModuleImage = struct {
     fn create(
         allocator: std.mem.Allocator,
         releases: *heap.ReleaseDomain,
-        environment: *env.Env,
     ) error{OutOfMemory}!*ModuleImage {
-        const cell = try environment.newScopeCell();
-        // Never published to the label table, so dropping the owner reference
-        // reclaims it outright.
-        errdefer cell.retire();
+        // No scope cell is minted here. An image needs one only if ECL source
+        // is stamped against it, which `moduleOwned` arranges lazily; a registry
+        // -level registration publishes definitions directly and stamps
+        // nothing, so minting here would grow live memory with every
+        // re-registration for a cell no word ever names.
         const result = try allocator.create(ModuleImage);
         result.allocator = allocator;
         result.refs = .init(1);
@@ -77,8 +77,6 @@ const ModuleImage = struct {
         result.scope = env.Scope.moduleRoot(allocator, &result.environment);
         result.initial_state = &.{};
         result.construction_home = .{ .image = result, .registration = null };
-        cell.publish(&result.scope);
-        result.scope.label_cell = .init(cell);
         result.retirement = .{};
         result.retirement_state = .live;
         return result;
@@ -546,6 +544,10 @@ const ModuleSlot = struct {
     /// is the point -- so the slot owns them and retires them with itself.
     /// One per published generation of this name.
     followers: std.ArrayList(*env.ScopeCell) = .empty,
+    /// The one cell this *name* has ever used. Fixed at first adoption and
+    /// re-pointed by every later generation, so hot reload mints no cell per
+    /// generation and repeated re-registration does not grow live memory.
+    canonical_cell: ?*env.ScopeCell = null,
     inventory: InventoryEntry,
     /// Owned witnesses held by published generations, cursors, and
     /// arbiter turns. The registry owns the allocation itself; recycling is
@@ -596,15 +598,19 @@ const ModuleSlot = struct {
         // cell identity, so taking the cell off the scope would make every
         // module-written word unanchorable and send it to the name's current
         // generation even from inside its own body.
-        if (image.scope.label_cell.load(.acquire)) |cell| {
-            // A cell already following a slot belongs to that slot; a second
-            // registration of one image adopts nothing, so retiring either name
-            // cannot strand the other's words.
-            if (cell.follows.load(.acquire) == null) {
-                self.followers.appendAssumeCapacity(cell);
-                cell.follow(&self.current_scope, @ptrCast(self));
+        if (self.canonical_cell == null) {
+            if (image.scope.label_cell.load(.acquire)) |cell| {
+                // A cell already following a slot belongs to that slot; a second
+                // registration of one image adopts nothing, so retiring either
+                // name cannot strand the other's words.
+                if (cell.follows.load(.acquire) == null) {
+                    self.followers.appendAssumeCapacity(cell);
+                    cell.follow(&self.current_scope, @ptrCast(self));
+                    self.canonical_cell = cell;
+                }
             }
         }
+        // A reload re-points the name's one cell rather than adopting another.
         self.current_scope.store(&image.scope, .release);
     }
 
@@ -1217,9 +1223,6 @@ const RetiredGeneration = struct {
 
 const RegistryState = struct {
     host: *const heap.HostCleanup,
-    /// Images allocate their label cell here. The registry holds the handle
-    /// rather than reaching for a global, and never tears it down.
-    environment: env.Env,
     writer: std.Io.Mutex = .init,
     directories: DirectoryPublisher,
     inventory: ?*SlotEntry = null,
@@ -1242,15 +1245,11 @@ pub const Registry = enum(usize) {
         return @ptrFromInt(@intFromEnum(self.*));
     }
 
-    pub fn init(
-        host: *const heap.HostCleanup,
-        environment: env.Env,
-    ) error{OutOfMemory}!Registry {
+    pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!Registry {
         const owner_allocator = host.allocator();
         const backing = try owner_allocator.create(RegistryState);
         backing.* = .{
             .host = host,
-            .environment = environment,
             .directories = .init(null),
         };
         return @enumFromInt(@intFromPtr(backing));
@@ -1542,11 +1541,7 @@ pub const Registry = enum(usize) {
     /// A fresh anonymous image. Naming it is a separate, later decision, so
     /// nothing here validates or reserves a registry name.
     pub fn createImage(self: *Registry) error{OutOfMemory}!OwnedImage {
-        return .init(try ModuleImage.create(
-            self.allocator(),
-            self.releaseDomain(),
-            &self.privateState().environment,
-        ));
+        return .init(try ModuleImage.create(self.allocator(), self.releaseDomain()));
     }
 
     pub const NativeCandidateProgress = poll.Progress(OwnedImage);
@@ -2924,6 +2919,21 @@ pub const testing = if (builtin.is_test) struct {
 /// scope is touched, so the borrow either completes against that generation or
 /// fails at acquisition. The pin confers no home -- `within` stays `'domain`
 /// for an escaped-quotation call, and privacy and diagnostics are unchanged.
+/// The scope cell a live registration of `symbol` already uses, if any. A
+/// `@defm` that will replace an existing generation stamps its construction
+/// against this cell rather than minting one, which is what keeps repeated hot
+/// reload from growing live memory. Read from the current directory snapshot
+/// without the writer lock; null covers an invalid name, an unregistered one,
+/// a retired slot, and a slot that never adopted a cell.
+pub fn peekNameCell(registry: *const Registry, symbol: u32) ?*env.ScopeCell {
+    const name = intern.moduleName(symbol) catch return null;
+    const current = registry.privateState().directories.currentOwned() orelse return null;
+    var lookup = current.modules.rawLookup(name);
+    const slot = poll.drive(?*ModuleSlot, &lookup, .{}) orelse return null;
+    if (slot.phase.load(.acquire) != .live) return null;
+    return slot.canonical_cell;
+}
+
 /// The erased owner a followed cell carries is always a slot: `ScopeCell.follow`
 /// is only ever called with one. Kept separate from the capability-taking entry
 /// below so no production function both accepts an `ExecutionAccess` and casts

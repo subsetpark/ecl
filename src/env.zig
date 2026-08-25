@@ -975,6 +975,13 @@ pub const Scope = struct {
         return false;
     }
 
+    /// Installs an existing cell on this scope, so a construction body anchors
+    /// to the image being built while the cell it names still follows the
+    /// previous generation until commit.
+    pub fn adoptLabelCell(self: *Scope, cell: *ScopeCell) void {
+        self.label_cell.store(cell, .release);
+    }
+
     /// The label cell for this scope, if anything has needed one yet. The
     /// anchor check compares these by identity and never dereferences the
     /// scope a word was stamped with: a superseded generation's scope dies with

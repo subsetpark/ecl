@@ -4762,13 +4762,23 @@ pub const Machine = struct {
         };
         errdefer candidate.deinit();
         const home = candidate.executionHome(self.unit.module_access);
-        const image_scope = self.unit.environment.scopeIdFor(
-            home.scope(self.unit.module_access),
+        const construction_scope = home.scope(self.unit.module_access);
+        // A `@defm` replacing a live generation stamps against the name's one
+        // cell rather than minting one per generation, and installs it on the
+        // candidate so the construction body anchors to the image being built
+        // while the cell still follows the previous generation until commit.
+        const image_scope = if (registration) |symbol| reused: {
+            const existing = modules.peekNameCell(registry, symbol) orelse break :reused null;
+            construction_scope.adoptLabelCell(existing);
+            break :reused existing.id;
+        } else null;
+        const stamp_scope = image_scope orelse self.unit.environment.scopeIdFor(
+            construction_scope,
         ) catch {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
         };
-        const stamped = self.stampConstructionBody(quotation, image_scope) catch {
+        const stamped = self.stampConstructionBody(quotation, stamp_scope) catch {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
         };
