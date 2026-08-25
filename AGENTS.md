@@ -131,10 +131,24 @@
   `test-oom`; it fired only once a module auto-load inside racing children widened the
   window. When TSan does crash, isolate with a counterfactual run — remove the suspected
   trigger with the fix still absent — before claiming a cause.
-- On macOS, run the TSan gate in the same Linux/x86_64 Alpine environment used by CI;
-  Zig 0.16's native arm64 macOS sanitizer runtime may segfault before tests start, and
-  its Linux/arm64 runtime may fail while unmapping shadow memory under Docker Desktop.
-  Keep the checkout read-only and caches container-local:
+- **Never run `zig build test-tsan` directly on macOS. It is Docker-only, without
+  exception.** Zig 0.16's native arm64 macOS sanitizer runtime segfaults *before `main`*:
+  `libclang_rt.tsan_osx_dynamic.dylib` faults in `__tsan::InitializePlatform` →
+  `get_dyld_hdr` → `dyld_shared_cache_iterate_text_swift` with `EXC_BAD_ACCESS`, during
+  dyld's initializer phase. Confirmed on Darwin 25.6.0, 2026-08-25.
+
+  This produces a uniquely misleading failure, so treat any native-macOS TSan result as
+  **no information at all**, never as evidence: the tier exits 139 with no output, every
+  `--test-filter` fails identically, and the exit code is independent of what the working
+  tree contains. Two false conclusions were drawn from it in one session — "the pin-only
+  variant SEGVs, so the tier discriminates" and "the real implementation SEGVs, so patch 5
+  regressed" — before anyone checked. The 30-second refutation, worth running before
+  interpreting *any* TSan crash: pass a filter that matches no test. If it still SEGVs, the
+  binary is dying in startup and no test is involved.
+
+  Run it in the same Linux/x86_64 Alpine environment used by CI; the Linux/arm64 runtime
+  may in turn fail while unmapping shadow memory under Docker Desktop. Keep the checkout
+  read-only and caches container-local:
 
   Copy the checkout to a writable directory inside the container rather than
   building in the read-only mount: suites that call `std.testing.tmpDir` create
