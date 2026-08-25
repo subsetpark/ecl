@@ -1637,8 +1637,21 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
 }
 
 test "e2e: escaped quotation authority acceptance" {
-    // Patch 6 implements this against test/acceptance/escaped-quotation-authority.ecl,
-    // which must be confirmed to reproduce the pre-change leak before the fixed
-    // behavior is asserted. See gameplans/stamped-word-image-home.json.
-    return error.SkipZigTest;
+    // Confirmed to discriminate against a pre-change reference binary built in a
+    // worktree at f2c5cf5: there this fixture printed 'contract / 'other.run and
+    // left other's stack at 1000, because the escaped quotation's `within` wrote
+    // the caller's slot. Now it is 'domain / 'within with other's stack at 999.
+    var result = try run(&.{
+        build_options.ecl_exe,
+        "test/acceptance/escaped-quotation-authority.ecl",
+    });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 0,
+        // A foreign private still reaches its own privates (99); `within`
+        // through it is 'domain, spelled by its unqualified local name; and
+        // neither durable stack moved (10, 999).
+        .stdout = "99\n'domain\n'within\n10\n999\n",
+        .stderr = "",
+    });
 }

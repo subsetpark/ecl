@@ -103,6 +103,17 @@ comptime {
         @compileError("RefAnchor exceeds the parked-anchor budget the retention soaks impose");
 }
 
+/// Whether two homes execute the same image, compared by anchor. Used to decide
+/// whether a module-local hit came out of the image the activation is running or
+/// out of a foreign one.
+pub fn sameImage(
+    left: *const ModuleHome,
+    right: *const ModuleHome,
+    _: *const ExecutionAccess,
+) bool {
+    return anchorHandleInternal(left) == anchorHandleInternal(right);
+}
+
 /// The opaque handle a scope cell stores to name this image's anchor.
 ///
 /// The cell must name the *anchor* and not the home: a home is embedded in the

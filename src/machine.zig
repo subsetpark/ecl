@@ -6105,14 +6105,40 @@ pub const ResolutionCursor = struct {
         self.generation = null;
     }
 
-    /// A module-local binding found by direct lookup came out of the image the
-    /// activation is already running, because a module body's resolution scope
-    /// is rooted at that image and nothing else. Its home is therefore the
-    /// invoking home — the registration this activation entered through — and
-    /// never a name recorded at definition time.
+    /// The home a module-local hit executes against.
+    ///
+    /// It used to be the invoking home unconditionally, on the premise that such
+    /// a hit "came out of the image the activation is already running, because a
+    /// module body's resolution scope is rooted at that image and nothing else".
+    /// Moving scope onto the word falsified that: a quotation that escaped its
+    /// module carries its own image's scope, so the hit can come out of an image
+    /// this activation is not running — and taking the caller's home there gave
+    /// the caller's `within` slot to someone else's private code.
+    ///
+    /// So a *foreign* hit executes against its own image's registration-less
+    /// home. No acquire happens here: the borrow in `executeWord` already proved
+    /// that image live, either by holding a fresh pin or by matching the
+    /// activation's own. Re-pinning would be a second reference for one
+    /// dispatch, and the unconditional `pin`/`retain` must never appear here —
+    /// it is a `fetchAdd` that asserts on a zero refcount and resurrects a
+    /// destroyed object in ReleaseFast.
+    fn homeForLocalHit(self: *ResolutionCursor) ?*modules.ModuleHome {
+        const searched = self.searched_scope orelse return self.current_home;
+        const image_home = modules.homeForModuleRootScope(searched) orelse
+            return self.current_home;
+        // A double-registered image entered through either name stays
+        // non-foreign, so `within` keeps targeting the registration the call
+        // actually came through.
+        if (self.current_home) |running| {
+            if (modules.sameImage(running, image_home, self.module_access))
+                return running;
+        }
+        return image_home;
+    }
+
     fn directResult(self: *ResolutionCursor, lease: env.BindingLease) Resolution {
         const local = lease.traceWord();
-        const home = if (local == null) null else self.current_home;
+        const home = if (local == null) null else self.homeForLocalHit();
         return .{
             .lease = lease,
             .execution_generation = null,

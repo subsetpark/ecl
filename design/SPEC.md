@@ -570,7 +570,11 @@ anonymously, be passed as data, and be registered more than once.
   registration, and the activation carries it for its whole lifetime. So an
   image registered as both `left` and `right` executes against whichever name
   the call named — private lookup, same-home dispatch, `within`'s slot,
-  diagnostic spelling, and `which` all follow the invoking registration. An
+  diagnostic spelling, and `which` all follow the invoking registration.
+  A word reached through a quotation that escaped its module has no invoking
+  registration at all: it resolves against the image its words were written
+  in, so private lookup and same-home dispatch still hold, while `within` is
+  `'domain` and diagnostic spelling is the unqualified local name. An
   exported word's body resolves against its module's internal environment and
   then core — never the caller's environment. Publics therefore reach
   privates, and callers cannot perturb a module's behavior by shadowing.
@@ -637,8 +641,12 @@ anonymously, be passed as data, and be registered more than once.
   ECL has no such need. Redefining at a prompt happens between units, with
   nothing on the stack, so the cases that separate the two designs do not arise
   in the workflow the feature is for.
-  An image lives as long as something holds it — a running activation, or a
-  registration. Once nothing does, applying a quotation written in it is
+  An image lives as long as something holds it — a running activation, a
+  registration, or a unit that has dispatched a word written in it. That last
+  holder is what makes a quotation which escaped its module safe to apply: the
+  dispatch retains the image for the rest of the unit, so the scope its words
+  resolve against cannot be freed under them by a concurrent reload or
+  `unmodule`. Once nothing holds it, applying a quotation written in it is
   `'domain`, never a fallback to core or to the invoking chain, because a
   fallback would silently change what its words mean. Failing at the point of
   use is the point: you learn that the code you are holding belongs to a
@@ -766,7 +774,14 @@ anonymously, be passed as data, and be registered more than once.
   construction root (an image being built has no registration, and its body
   operates on its construction stack directly), a word reached through
   `invoke` (an image reached as a value has no registration either, so it owns
-  no slot), and a body extracted and redefined elsewhere are all `'domain`.
+  no slot), a word reached through a quotation that escaped its module (the
+  quotation carries the image its words were written in, not a registration a
+  call was resolved through, so there is no slot to target — and for an image
+  registered under several names there is no fact of the matter about which
+  slot it would be), and a body extracted and redefined elsewhere are all
+  `'domain`. Such a word never targets the *caller's* slot: `within`'s
+  authority comes from the definition-site home, so a module that hands out a
+  quotation over its own privates hands out no write at all.
   There is no module-handle-targeted form. Inputs cross the boundary only because
   the word body captures them explicitly with `partial` or `with`.
   Semantically `within` is the module-scoped transactional counterpart of

@@ -838,7 +838,44 @@ test "concurrency: a resolver racing environment teardown resolves without a der
 }
 
 test "concurrency: within through a foreign word is domain and writes no slot" {
-    // Patch 6 implements this, plus the cross-home effect case that a foreign
-    // word's declared effect is now checked.
-    return error.SkipZigTest;
+    var runtime = try session.Session.initWithConfig(
+        std.testing.allocator,
+        &.{},
+        .{ .worker_pool = 2 },
+    );
+    defer runtime.deinit();
+
+    // A module hands out a quotation over a private that uses `within`. Reached
+    // through that quotation the word owns no slot, so the application is
+    // 'domain -- and in particular does not write the caller's, which is what it
+    // did before: other's stack went to 1000 while counter's stayed at 10.
+    try expectOk(
+        &runtime,
+        "[10] (((1 +) within) 'bump def ((bump)) 'leak def " ++
+            "((dup without) within) 'peek def) with 'counter @defm",
+    );
+    try expectOk(
+        &runtime,
+        "[999] ((call) 'run def ((dup without) within) 'peek def) with 'other @defm",
+    );
+    try expectErrorContains(
+        &runtime,
+        "counter.leak other.run",
+        &.{ "'kind 'domain", "'word 'within" },
+    );
+    try expectStack(&runtime, "counter.peek", "10");
+    try expectStack(&runtime, "other.peek", "999");
+
+    // Newly reached behavior: the call crosses into another image, so the
+    // foreign word's declared effect is checked where it previously was not.
+    try expectStack(
+        &runtime,
+        "(( -- n ) (1) 'k def ((k)) 'q def) 'honest @defm honest.q call",
+        "1",
+    );
+    try expectErrorContains(
+        &runtime,
+        "(( -- n c ) (1) 'k def ((k)) 'q def) 'lying @defm lying.q call",
+        &.{ "'kind 'contract", "'word 'k" },
+    );
 }
