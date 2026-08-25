@@ -627,18 +627,44 @@ anonymously, be passed as data, and be registered more than once.
   quotation built at run time by `partial`, `cons`, or `compose` has no
   written-in scope, so it resolves where it is invoked exactly as a plain list
   always has.
-  A word written in a module body names the *module*, not the image that
-  happened to publish it. Reloading re-points it: `m.f` picks up the new code,
-  and so does a quotation you were already holding, which is the same late
-  binding every other reference in the language has. Pinning to the publishing
-  image was considered and rejected — it would make a reload silently
+  A word written in a module body resolves in one of two places, and which one
+  depends on whether an activation of that module is running it.
+  **Inside such an activation, it resolves against the generation that
+  activation entered with, for the activation's whole lifetime.** A body that
+  re-registers its own name mid-call goes on reading its entry generation; the
+  code on the stack is never re-pointed underneath itself. An image registered
+  under several names resolves its body's words through whichever registration
+  the activation was entered by, which is the same rule the bullet above states
+  for privacy, `within`, and diagnostics — so retiring or reloading one name
+  neither strands nor re-sites another's.
+  **Outside one, it names the *module* and follows it.** An escaped quotation —
+  one a module word pushed onto the stack, applied later from the session or
+  from another module — resolves against the name's current generation, so a
+  reload re-points it exactly as it re-points `m.f`. Pinning that case to the
+  publishing image was considered and rejected: it would make a reload silently
   invalidate every quotation that had escaped the module, which is the opposite
   of what hot reload is for.
+  The split is Erlang's, and deliberately so: resolving inside an activation is
+  its local call, which stays in the version the process is executing, and
+  entering from outside is its fully-qualified call, which goes to the current
+  version. The dynamic-software-updating literature names the hazard the first
+  half avoids — an update must not rebind code that is on the activation stack
+  — though its own remedy is to refuse or defer the update until no such code
+  is running, where ECL, like Erlang, lets both generations coexist instead.
+  ECL departs from Forth here, which pins absolutely: a Forth redefinition
+  never reaches code already compiled, whereas a fresh entry here does follow
+  the name.
   Removing the module is what ends it. Once the name is gone, applying an
   escaped quotation is `'domain`, never a fallback to core or to the invoking
   chain, because a fallback would silently change what its words mean. An
   *anonymous* image — one built by `@module` and never registered — has no name
   to track, so its words name that image alone and retire with it.
+  A generation an activation entered is kept alive for that activation, so an
+  old generation outlives its supersession for as long as something is still
+  running it. ECL does not bound that the way Erlang does — Erlang keeps two
+  versions and purges the third, killing whatever still runs it — so a
+  long-lived activation may retain an arbitrarily old generation, and such a
+  pinned generation is exempt from the ordinary retirement bound.
   **Which text is the module's is decided by what the reader produced.** A
   construction body's words name the image, and so do the words of everything
   the reader built inside it, whatever container they sit in — a quotation, a

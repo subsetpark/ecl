@@ -975,8 +975,11 @@ pub const Scope = struct {
         return false;
     }
 
-    /// The label cell for this scope, if anything has needed one yet.
-    pub fn labelCell(self: *Scope) ?*ScopeCell {
+    /// The label cell for this scope, if anything has needed one yet. The
+    /// anchor check compares these by identity and never dereferences the
+    /// scope a word was stamped with: a superseded generation's scope dies with
+    /// its image, while its cell and id outlive it.
+    pub fn labelCell(self: *const Scope) ?*const ScopeCell {
         return self.label_cell.load(.acquire);
     }
 
@@ -1343,6 +1346,16 @@ pub const ScopeResolution = union(enum) {
     unscoped,
     /// An id that was issued and whose scope has since been torn down.
     retired,
+    /// A cell a module slot has taken over. `cell` is the identity the anchor
+    /// check compares against the executing activation's chain; `current` is
+    /// the name's present generation, consulted only when nothing on that
+    /// chain matches. Keeping the two apart is the whole of the two-case rule:
+    /// resolving inside an activation of the module must not consult
+    /// `current`, or a body would be re-pointed under itself.
+    /// `current` is null once the followed name is gone, which is *not* by
+    /// itself a failure: an activation of that image may still be on the stack
+    /// under another registration, and the anchor check has to run first.
+    followed: struct { cell: *const ScopeCell, current: ?*Scope },
     /// Core alone, which the machine spells as a null resolution scope. Core is
     /// a terminal phase rather than a link in any chain, so no `Scope` denotes
     /// it and a primitive or embedded-prelude word names this instead.
@@ -1615,6 +1628,8 @@ pub const Env = enum(usize) {
         if (id == .none) return .unscoped;
         const cell = self.privateState().scopes.get(id) orelse return .retired;
         if (cell.core) return .core;
+        if (cell.follows.load(.acquire) != null)
+            return .{ .followed = .{ .cell = cell, .current = cell.resolve() } };
         return if (cell.resolve()) |scope| .{ .scope = scope } else .retired;
     }
 

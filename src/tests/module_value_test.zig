@@ -135,13 +135,7 @@ test "module values: type display identity and capability boundaries are opaque"
     // `src/tests/native_test.zig`, which owns the fixture.
 }
 
-// PENDING: see `name_keyed_cells_pending` in module_test.zig. One image
-// registered under two names shares a single scope cell, so retiring either
-// name strands words written in the shared image.
-const name_keyed_cells_pending = true;
-
 test "module registration: one image registered twice owns independent durable state" {
-    if (name_keyed_cells_pending) return error.SkipZigTest;
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
 
@@ -619,4 +613,22 @@ test "module values: an escaped quotation tracks its module across reload and en
     try expectStack(&runtime, "held call", "1");
     try expectOk(&runtime, "'going unmodule");
     try expectErrorContains(&runtime, "held call", &.{ "'kind 'domain", "retired" });
+}
+
+// PENDING: Patch 2 anchors a module-written word to the generation its
+// activation entered. Flip to false there.
+const anchor_pending = false;
+
+test "module values: an escaped quotation applied inside another module follows the name" {
+    if (anchor_pending) return error.SkipZigTest;
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    // Nothing on the applying activation's chain was written in `source`, so
+    // the word falls through to the name's current generation -- Erlang's
+    // fully-qualified call rather than its local one.
+    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'source @defm source.q 'held set");
+    try expectOk(&runtime, "((|q| q call) 'apply def) 'other @defm");
+    try expectStack(&runtime, "held other.apply", "1");
+    try expectOk(&runtime, "((2) 'k def ((k)) 'q def) 'source @defm");
+    try expectStack(&runtime, "held other.apply", "2");
 }

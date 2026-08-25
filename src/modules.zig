@@ -587,9 +587,19 @@ const ModuleSlot = struct {
     /// writer lock, where nothing may fail: the caller reserves follower
     /// capacity with `reserveFollower` before taking the lock.
     fn adoptScope(self: *ModuleSlot, image: *ModuleImage) void {
-        if (image.scope.label_cell.swap(null, .acq_rel)) |cell| {
-            self.followers.appendAssumeCapacity(cell);
-            cell.follow(&self.current_scope);
+        // The cell stays on the image scope. The anchor check finds a word's
+        // written scope by walking the activation's live chain and comparing
+        // cell identity, so taking the cell off the scope would make every
+        // module-written word unanchorable and send it to the name's current
+        // generation even from inside its own body.
+        if (image.scope.label_cell.load(.acquire)) |cell| {
+            // A cell already following a slot belongs to that slot; a second
+            // registration of one image adopts nothing, so retiring either name
+            // cannot strand the other's words.
+            if (cell.follows.load(.acquire) == null) {
+                self.followers.appendAssumeCapacity(cell);
+                cell.follow(&self.current_scope);
+            }
         }
         self.current_scope.store(&image.scope, .release);
     }

@@ -4832,6 +4832,35 @@ pub const Machine = struct {
                 else
                     written_scope;
             },
+            // A word written in a module body. If an activation of that module
+            // is on the stack, the word belongs to the generation that
+            // activation entered and resolves there, whatever the name now
+            // points at -- code on the stack is never re-pointed under itself.
+            // Only with no such activation does it follow the name, which is
+            // the escaped-quotation case.
+            .followed => |followed| anchored: {
+                var chain: ?*env.Scope = self.unit.current.?.resolutionScope();
+                while (chain) |scope| : (chain = scope.parent) {
+                    if (scope.labelCell() != followed.cell) continue;
+                    // Same refinement as above: an activation already inside a
+                    // descendant of the anchor resolves at the descendant.
+                    const running = self.unit.current.?.resolutionScope();
+                    break :anchored if (running != null and scope.encloses(running.?))
+                        running
+                    else
+                        scope;
+                }
+                // Nothing on the chain: this is the escaped-quotation case,
+                // and only here does a gone name mean the word resolves to
+                // nothing at all.
+                break :anchored followed.current orelse {
+                    self.unit.active_word = .plain(word.name);
+                    return self.fail(
+                        .domain,
+                        "the scope this word was written in has retired",
+                    );
+                };
+            },
             // A fallback here would change what the word means, so the failure
             // is definite instead. The traced word is set first: this failure
             // belongs to the word being dispatched, not to whichever word was

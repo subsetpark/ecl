@@ -605,7 +605,7 @@ test "module: provisional tasks keep rollback generations alive until quiescence
     try expectOk(&runtime, "((((1) () while) @spawn pop missing) 'bad @defm) @attempt pop");
 }
 
-test "module: hot reload commit failure and late-bound module words" {
+test "module: hot reload commit failure and whole-body pinning" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -613,12 +613,12 @@ test "module: hot reload commit failure and late-bound module words" {
     try expectOk(&runtime, "(1 'x setp " ++
         "( -- n ) ((2 'x setp ( -- n ) (x) 'get def) 'm @defm x) 'probe def " ++
         "( -- n ) (x) 'get def) 'm @defm m.probe m.get");
-    // `probe` reloads its own module and then reads `x`. A word written in a
-    // module body names the *module*, so the read lands in the generation
-    // current at that moment — the inner one — rather than the image `probe`
-    // itself was written in. This is the visible edge of late binding: a body
-    // that reloads itself mid-call sees its own privates change under it.
-    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
+    // `probe` reloads its own module and then reads `x`. A module-written word
+    // anchors to the generation its activation entered, so the read lands in
+    // the image `probe` itself was written in; code on the stack is never
+    // re-pointed under itself. The fresh `m.get` afterwards follows the name to
+    // the generation that replaced it.
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
     try expectErrorContains(&runtime, "(3 'x setp missing) 'm @defm", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "m.get");
@@ -1109,4 +1109,25 @@ test "module: a session quotation still resolves in the session" {
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     try expectOk(&runtime, "(pop pop 42) '+ def [1 2 3] 0 (+) fold");
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
+}
+
+// PENDING: Patch 2 anchors a module-written word to the generation its
+// activation entered. Flip to false there.
+const anchor_pending = false;
+
+test "module: a body that reloads its own name keeps its entry generation" {
+    if (anchor_pending) return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+    // `probe` re-registers its own name and then reads its private `x`. Code on
+    // the activation stack is never re-pointed under itself, so the read lands
+    // in the generation `probe` was entered with; a fresh entry afterwards
+    // follows the name to the generation that replaced it.
+    try expectOk(&runtime, "(1 'x setp " ++
+        "( -- n ) ((2 'x setp ( -- n ) (x) 'get def) 'm @defm x) 'probe def " ++
+        "( -- n ) (x) 'get def) 'm @defm m.probe m.get");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
 }
