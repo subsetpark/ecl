@@ -627,11 +627,26 @@ anonymously, be passed as data, and be registered more than once.
   quotation built at run time by `partial`, `cons`, or `compose` has no
   written-in scope, so it resolves where it is invoked exactly as a plain list
   always has.
-  A quotation's scope is the *current* image of the module whose body
-  published it, so reloading that module changes what the quotation means
-  exactly as it changes what `m.f` means. If the scope has retired — the
-  module was removed, a child unit closed, the Session is ending — applying
-  the quotation is `'domain`.
+  A word written in a module body names the image that published it, and
+  keeps naming that image. Reloading the module does not re-point an escaped
+  quotation: `m.f` picks up the new code, and a quotation you were already
+  holding goes on meaning what it meant where it was written. That is the
+  reading a *value* deserves — a list you hold does not change because
+  someone reloaded a module — and it is the one the implementation makes.
+  Once no live registration names that image any more, applying the escaped
+  quotation is `'domain`, never a fallback to core or to the invoking chain,
+  because a fallback would silently change what its words mean. The transition
+  follows the image's own reclamation rather than the `unmodule` that started
+  it, so it is observed at a unit boundary: within the unit that removed the
+  module, a quotation that escaped it may still resolve.
+  **Which text is the module's is decided by what the reader produced.** A
+  construction body's words name the image, and so do the words of everything
+  the reader built inside it, whatever container they sit in — a quotation, a
+  list literal, a dict literal. A value assembled at run time is not the
+  module's text: its parts already name the scopes they were written in, and
+  `@module` and `@defm` leave them alone. That is what makes a quotation
+  handed in as a parameter keep the caller's scope, since `with` captures each
+  seed with `literal` and a capture is built at run time.
 - **An undefined-word failure says which chain it searched.** Its `'data`
   carries `'scope` alongside `'name`: `'session` for the activation's own
   lexical chain over core, `'module` for a module image's definitions over

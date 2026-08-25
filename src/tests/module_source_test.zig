@@ -1061,6 +1061,48 @@ test "module: a quotation parameter carries the caller's scope" {
     try std.testing.expectEqual(@as(i64, 40), runtime.stackItems()[0].int);
 }
 
+test "module: every container the reader built inside a body is the module's text" {
+    if (scopes_pending) return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+    // Three spellings of one thing. A quotation the reader built inside the
+    // body names the image whatever container holds it, so all three reach the
+    // module's own private rather than the session's binding. The dict literal
+    // is the one that used to disagree, because the restamp stopped at dicts.
+    try expectOk(&runtime, "(10) 'k def");
+    try expectOk(&runtime, "((99) 'k defp [(k)] 'd setp ( -- n ) (d first call) 'go def) 'l @defm l.go");
+    try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[0].int);
+    try expectOk(&runtime, "((99) 'k defp {'a (k)} 'd setp ( -- n ) (d 'a at call) 'go def) 'dl @defm dl.go");
+    try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[1].int);
+    try expectOk(&runtime, "((99) 'k defp ('a) ((k)) to-dict 'd setp ( -- n ) (d 'a at call) 'go def) 'td @defm td.go");
+    try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[2].int);
+    // And with no private to find, the session binding is still not reachable.
+    try expectErrorContains(
+        &runtime,
+        "({'a (k)} 'd setp ( -- n ) (d 'a at call) 'go def) 'leak @defm leak.go",
+        &.{ "'kind 'undefined-word", "'word 'k" },
+    );
+}
+
+test "module: an undefined word names the chain its own scope searched" {
+    if (scopes_pending) return error.SkipZigTest;
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+    // The reported chain comes from the word's scope, not from the running
+    // activation. A caller's quotation applied by a module word searched the
+    // caller, and saying `'module` there would name the one place it did not
+    // look.
+    try expectOk(&runtime, "((|q| q call) 'apply def) 'm @defm");
+    try expectErrorContains(&runtime, "(nope) m.apply", &.{ "'word 'nope", "'scope 'session" });
+    try expectOk(&runtime, "((missing) 'f def) 'own @defm");
+    try expectErrorContains(&runtime, "own.f", &.{ "'word 'missing", "'scope 'module" });
+    try expectErrorContains(&runtime, "nope", &.{ "'word 'nope", "'scope 'session" });
+}
+
 test "module: a session quotation still resolves in the session" {
     if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;

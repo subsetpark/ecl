@@ -3952,10 +3952,9 @@ pub const Machine = struct {
         const named = try intern.intern(chain.spelling());
         self.unit.pending.?.addData(.scope, .{ .symbol = named });
     }
-    /// What the running activation would have searched. A session name is
-    /// invisible to a module and to a prelude word for different reasons, and
-    /// saying which one applied is the difference between a puzzling failure
-    /// and an obvious one.
+    /// What the running activation would have searched, for the callers that
+    /// have no word in hand — reflection, and a miss reported before a word's
+    /// scope is known.
     fn currentLookupChain(self: *const Machine) LookupChain {
         const current = self.unit.current orelse return .session;
         // Core alone is spelled by an absent chain, and it is checked first
@@ -4646,6 +4645,63 @@ pub const Machine = struct {
             )),
         });
     }
+    /// Restamps one element of a construction body. Everything structurally
+    /// inside a body the reader produced is that body's text, whatever
+    /// container it sits in, so this descends through dicts as readily as
+    /// through lists. Stopping at a dict is what let
+    /// `{'a (k)} 'd setp` reach a session binding while the identical
+    /// `[(k)] 'd setp` did not.
+    fn stampValue(self: *Machine, item: Value, scope: env.ScopeId) error{OutOfMemory}!Value {
+        switch (item) {
+            .word => |reference| return .{
+                .word = .{ .name = reference.name, .scope = @intFromEnum(scope) },
+            },
+            .list => |nested| {
+                // Descend only into code this archive read. A list with no
+                // reader identity was built at run time, so its parts already
+                // carry the scopes they were written in and none of them
+                // belongs to this body — which is exactly what `with` produces
+                // when it captures a seed with `literal`.
+                if (nested.kind() != .generic_spine or
+                    self.unit.archive.identityOf(nested) == null)
+                {
+                    heap.retainValue(item);
+                    return item;
+                }
+                return .{ .list = try self.stampConstructionBody(nested, scope) };
+            },
+            .dict => |nested| {
+                const pairs = try self.unit.allocator.alloc(dict.Pair, @intCast(nested.length()));
+                defer self.unit.allocator.free(pairs);
+                var built: usize = 0;
+                errdefer for (pairs[0..built]) |pair| {
+                    self.releaseDomain().releaseValue(pair[0]);
+                    self.releaseDomain().releaseValue(pair[1]);
+                };
+                while (built < pairs.len) : (built += 1) {
+                    const key = try self.stampValue(dict.keyAt(nested, built), scope);
+                    errdefer self.releaseDomain().releaseValue(key);
+                    pairs[built] = .{ key, try self.stampValue(dict.valueAt(nested, built), scope) };
+                }
+                const stamped = try dict.fromUniquePairs(
+                    self.unit.allocator,
+                    self.releaseDomain(),
+                    pairs,
+                );
+                for (pairs[0..built]) |pair| {
+                    self.releaseDomain().releaseValue(pair[0]);
+                    self.releaseDomain().releaseValue(pair[1]);
+                }
+                built = 0;
+                return stamped;
+            },
+            else => {
+                heap.retainValue(item);
+                return item;
+            },
+        }
+    }
+
     /// Rewrites a construction body so its words name the image's scope, and
     /// returns a fresh owned header. Reading stamps a word with the unit that
     /// read it, which cannot know that a quotation will become a module body;
@@ -4671,29 +4727,7 @@ pub const Machine = struct {
         var built: usize = 0;
         errdefer for (items[0..built]) |item| self.releaseDomain().releaseValue(item);
         while (built < length) : (built += 1) {
-            const item = list.atUnchecked(.{ .list = body }, built);
-            items[built] = switch (item) {
-                .word => |reference| .{ .word = .{ .name = reference.name, .scope = @intFromEnum(scope) } },
-                .list => |nested| nested: {
-                    // Recurse only into code this archive read. A nested list
-                    // with no reader identity was built at run time — which is
-                    // exactly what `with` produces when it captures a seed with
-                    // `literal` — so it is a *parameter* the caller handed in,
-                    // not part of the body's text, and its words keep the scope
-                    // they were written in.
-                    if (nested.kind() != .generic_spine or
-                        self.unit.archive.identityOf(nested) == null)
-                    {
-                        heap.retainValue(item);
-                        break :nested item;
-                    }
-                    break :nested .{ .list = try self.stampConstructionBody(nested, scope) };
-                },
-                else => copied: {
-                    heap.retainValue(item);
-                    break :copied item;
-                },
-            };
+            items[built] = try self.stampValue(list.atUnchecked(.{ .list = body }, built), scope);
         }
         const stamped = try list.fromValuesGenericCode(scratch, items[0..length], namespace);
         // The rewrite produces a new header, and the span index is keyed by
@@ -5772,6 +5806,21 @@ fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) int
 }
 /// Which chain a failed lookup searched, reported as `'scope` in an
 /// undefined-word error.
+/// The chain a word with `written` as its resolution scope searches. A
+/// session name is invisible to a module and to a prelude word for
+/// different reasons, and saying which one applied is the difference
+/// between a puzzling failure and an obvious one.
+///
+/// It is derived from the word's own scope, not from the running
+/// activation: since resolution moved onto the word, the two differ in
+/// exactly the interesting cases — a caller's quotation applied by a module
+/// word searches the caller, and reporting the activation's chain there
+/// would name the one place the lookup did not look.
+fn lookupChainFor(written: ?*env.Scope) LookupChain {
+    const scope = written orelse return .core;
+    return if (scope.isModuleRoot()) .module else .session;
+}
+
 pub const LookupChain = enum {
     /// The activation's own lexical chain over core.
     session,
@@ -5923,7 +5972,7 @@ pub const ResolutionCursor = struct {
             .spelling = spelling,
             .work = .{ .dot = intern.lastDotCursor(spelling) },
             .scope = written,
-            .plain_chain = evaluator.currentLookupChain(),
+            .plain_chain = lookupChainFor(written),
         };
     }
 

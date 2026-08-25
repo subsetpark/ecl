@@ -949,6 +949,13 @@ pub const Scope = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: ?RetireCursor.State = null,
 
+    /// Whether this scope is a module image's root, so a diagnostic can name
+    /// the chain a word actually searched rather than the one the running
+    /// activation would have.
+    pub fn isModuleRoot(self: *const Scope) bool {
+        return self.storage == .module_root;
+    }
+
     /// Whether `inner` is this scope or one nested inside it. A word's scope
     /// is a lower bound, not the whole answer: when the activation running it
     /// is already inside a more specific scope on the same chain — an
@@ -1349,6 +1356,10 @@ pub const ScopeCell = struct {
     owner: Env,
     id: ScopeId,
     releases: *heap.ReleaseDomain,
+    /// One reference for the scope that owns the cell, and one for the
+    /// registry entry that names its id. There is deliberately no `retain`: a
+    /// word carries the id as a bare integer and takes no reference, which is
+    /// also why ids are never recycled.
     refs: std.atomic.Value(u32) = .init(1),
     scope: std.atomic.Value(?*Scope) = .init(null),
     /// Core is a terminal resolution phase rather than a link in any chain, so
@@ -1372,12 +1383,6 @@ pub const ScopeCell = struct {
         // and a nonzero id with no entry is exactly `retired`.
         self.owner.unregisterScope(self.id);
         self.release();
-    }
-
-    fn retain(self: *ScopeCell) void {
-        if (self.core) return;
-        const old = self.refs.fetchAdd(1, .monotonic);
-        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
     }
 
     fn release(self: *ScopeCell) void {
@@ -1548,6 +1553,9 @@ pub const Env = enum(usize) {
             .host = host,
             .core = Environment.init(allocator, releases),
             .session = Environment.init(allocator, releases),
+            // SAFETY: the cell needs the Env handle that this very allocation
+            // becomes, so it is filled in on the next line, before `backing`
+            // escapes and before anything can read it.
             .core_cell = undefined,
         };
         const result: Env = @enumFromInt(@intFromPtr(backing));

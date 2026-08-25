@@ -153,7 +153,7 @@ fn terminalWord(
     if (forms.len == 0) return null;
     const last = forms[forms.len - 1];
     if (last != .word) return null;
-    return ecl.intern.get(last.word);
+    return ecl.intern.get(last.word.name);
 }
 
 fn isEclSource(entry: std.Io.Dir.Walker.Entry) bool {
