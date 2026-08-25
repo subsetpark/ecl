@@ -829,6 +829,54 @@ pub const GenerationPin = enum(usize) {
     }
 };
 
+/// The registration-less home of the image a module-root scope belongs to, or
+/// null for any other scope.
+///
+/// The cast is sound because `env.Scope.moduleRoot` has exactly one caller —
+/// `ModuleImage.create` — so every module-root scope is an image's own embedded
+/// `scope` field. Re-verified when this was written; a second caller would
+/// falsify it, which is why the check belongs in review and not only here.
+///
+/// The home is deliberately registration-less: see `construction_home`. A word
+/// reached through it therefore owns no slot, so `within` is `'domain` rather
+/// than a write to whichever slot the caller happened to be running.
+///
+/// Takes no `ExecutionAccess`: the token gates `ModuleHome`'s methods, not the
+/// pointer, and the audit rejects one function that both holds a token and
+/// casts a pointer.
+pub fn homeForModuleRootScope(scope: *env.Scope) ?*ModuleHome {
+    if (!scope.isModuleRoot()) return null;
+    const image: *ModuleImage = @fieldParentPtr("scope", scope);
+    return ModuleHome.init(&image.construction_home);
+}
+
+test "modules: an image's registration-less home is reachable from its own root scope" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    const releases = host.domain();
+    defer host.cleanup().drain();
+
+    var container = try env.Env.init(host.cleanup());
+    defer container.deinit();
+
+    const image = try ModuleImage.create(std.testing.allocator, releases);
+    defer image.release();
+
+    const recovered = homeForModuleRootScope(&image.scope) orelse
+        return error.ExpectedImageHome;
+    try std.testing.expectEqual(ModuleHome.init(&image.construction_home), recovered);
+    // Registration-less by construction. This is the whole reason the accessor
+    // exists: it is what makes `within` through an escaped quotation a domain
+    // error instead of a write to the caller's slot.
+    try std.testing.expectEqual(@as(?intern.ModuleName, null), recovered.name());
+
+    var session_scope = container.sessionRoot(std.testing.allocator);
+    defer env.testing.deinitScope(&session_scope, releases);
+    try std.testing.expectEqual(
+        @as(?*ModuleHome, null),
+        homeForModuleRootScope(&session_scope),
+    );
+}
+
 /// Opaque observation capability owning one registration reference.
 pub const GenerationLease = enum(usize) {
     consumed = 0,

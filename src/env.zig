@@ -1814,3 +1814,11 @@ test "environment definition propagates every allocation failure" {
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
 }
+
+test "env: issued scope ids leave their reserved high bits clear" {
+    // Patch 3 implements this: issue enough cells to cross a directory leaf
+    // boundary, then assert every id is nonzero, within `max_id`, and clear in
+    // the reserved byte. In-source because `ScopeIndex` and `max_id` are
+    // private. See gameplans/stamped-word-image-home.json.
+    return error.SkipZigTest;
+}

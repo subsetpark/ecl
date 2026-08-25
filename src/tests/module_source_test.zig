@@ -1126,20 +1126,3 @@ test "module: a body that reloads its own name keeps its entry generation" {
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
 }
-
-// Stubs. Implemented by the patch each one names; see
-// gameplans/stamped-word-image-home.json.
-
-test "module_source_test: homeForModuleRootScope round-trips an image root scope" {
-    // Patch 2 implements this: the accessor recovers an image's
-    // registration-less `construction_home` from its own module-root scope, and
-    // yields null for a session or child scope.
-    return error.SkipZigTest;
-}
-
-test "module_source_test: scope ids leave their reserved high bits clear" {
-    // Patch 3 implements this: issue enough cells to cross a directory leaf
-    // boundary, then assert every id is nonzero, within `max_id`, and clear in
-    // the reserved byte.
-    return error.SkipZigTest;
-}
