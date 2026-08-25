@@ -223,11 +223,27 @@ primitives, operationalized as two rules:
   scopes is exactly its innermost member and the chain supplies the rest. That
   reasoning expires if macros ever arrive.
   A module-written word resolves through its image's scope cell, and nothing
-  more elaborate. `scheduleWord` already pins the entered generation for the
-  activation's lifetime, so a running body cannot have its image reclaimed
-  under it — whole-body pinning is a consequence of that pin rather than a rule
-  dispatch has to enforce. An image's cell retires with its scope, so a word
-  from a replaced or removed image resolves to a definite `retired`.
+  more elaborate. An image's cell retires with its scope, so a word from a
+  replaced or removed image resolves to a definite `retired`.
+  **The lifetime story is incomplete, and this is the gap.** `scheduleWord`
+  pins the entered generation for the activation's lifetime, which covers a
+  word dispatched from a *homed* activation: a running module body cannot have
+  its image reclaimed under it. That pin is guarded on a resolved home, and an
+  escaped quotation applied from a prompt or a spawned task has none, so it
+  borrows the image's `Scope` with nothing retaining it — a concurrent reload
+  or `unmodule` can free the scope and its environment under the resolving
+  worker. Nothing in the current code closes that; an earlier revision pinned
+  at the borrow instead, and deleting that machinery removed the answer along
+  with its own hazards. The question a replacement has to settle first is what
+  keeps an image alive while code stamped against it still exists, and the
+  shape that survives it is probably an *immutable* cell per image carrying its
+  `ExecutionHome`, pinnable at dispatch and reclaimed through the release
+  domain — immutability being what the previous designs lacked, since a cell
+  re-pointed at whatever slot recycled into its id is exactly where the ABA
+  hazard came from.
+  A second consequence of the same deletion: every `@defm` mints a fresh cell
+  and id that live until `Env` teardown, so live memory grows with reload
+  history and the 24-bit id space is permanently consumed.
   There is deliberately no machinery for re-pointing a word at a newer
   generation. An earlier revision of this branch carried it — cells that
   followed a registry slot, a per-name canonical cell, a peek at commit time,

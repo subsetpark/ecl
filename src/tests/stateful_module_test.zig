@@ -744,17 +744,20 @@ test "concurrency: repeated construct remove cycles keep settled memory bounded"
     try std.testing.expect(counting.deinit() == .ok);
 }
 
-test "module registration: applying an escaped quotation races reload and removal" {
+test "concurrency: applying an escaped quotation races reload and removal" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    // A quotation that escaped `racer` resolves its words through the name, so
-    // every application borrows a generation that a concurrent `@defm` may be
-    // replacing. Each borrow pins the generation it acquired, so an application
-    // either completes against that generation or fails definitely at
-    // acquisition; neither outcome may read a scope whose image has retired.
+    // A quotation that escaped `racer` names the image it was written in, and
+    // an application from a spawned task has no home, so nothing pins that
+    // image while the words resolve. A concurrent `@defm` or `unmodule` can
+    // therefore free the scope under the resolving worker.
     //
-    // The TSan tier is the real assertion here — this asserts only that nothing
-    // wedges and that failures stay inside the envelope.
+    // This test exists to catch that. It is named into the `concurrency:` tier
+    // so it actually runs under ThreadSanitizer and at eight workers — it was
+    // previously in neither, which is why an earlier "TSan is green" claim on
+    // this branch was not evidence about this path at all. The assertions are
+    // deliberately weak (failures stay inside the envelope, nothing wedges);
+    // TSan and the allocator are what should speak here.
     try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'racer @defm racer.q 'held set");
     try expectOk(&runtime, "[1] 24 take (pop ((held call) @attempt) @spawn) each " ++
         "((2) 'k def ((k)) 'q def) 'racer @defm " ++

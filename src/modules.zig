@@ -1758,8 +1758,8 @@ pub const Registry = enum(usize) {
             if (build.state.len != 0) self.registry.allocator().free(build.state);
             switch (build.slot) {
                 .fresh => |slot| {
-                    // Never published: no followers were adopted, but capacity
-                    // may have been reserved for the commit that didn't happen.
+                    // Never published, so the slot owns nothing beyond its own
+                    // storage and its inventory node.
                     self.registry.allocator().destroy(slot.inventory.node());
                     self.registry.allocator().destroy(slot);
                 },

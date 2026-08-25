@@ -1111,12 +1111,7 @@ test "module: a session quotation still resolves in the session" {
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
 }
 
-// PENDING: Patch 2 anchors a module-written word to the generation its
-// activation entered. Flip to false there.
-const anchor_pending = false;
-
 test "module: a body that reloads its own name keeps its entry generation" {
-    if (anchor_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});

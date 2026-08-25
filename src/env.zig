@@ -975,14 +975,6 @@ pub const Scope = struct {
         return self.storage == .module_root;
     }
 
-    /// The label cell for this scope, if anything has needed one yet. The
-    /// anchor check compares these by identity and never dereferences the
-    /// scope a word was stamped with: a superseded generation's scope dies with
-    /// its image, while its cell and id outlive it.
-    pub fn labelCell(self: *const Scope) ?*const ScopeCell {
-        return self.label_cell.load(.acquire);
-    }
-
     pub const RetireCursor = struct {
         scope: *Scope,
         state: State,
@@ -1358,8 +1350,6 @@ pub const ScopeResolution = union(enum) {
 };
 
 pub const ScopeCell = struct {
-    /// The `Env` this cell is registered in.
-    owner: Env,
     id: ScopeId,
     scope: std.atomic.Value(?*Scope) = .init(null),
     /// Core is a terminal resolution phase rather than a link in any chain, so
@@ -1381,7 +1371,12 @@ pub const ScopeCell = struct {
     }
 };
 
-/// What a `ScopeId` names right now.
+/// A three-level direct directory keyed by the 24 low bits of a `ScopeId`, the
+/// same shape and for the same reason as `spans.HeaderIndex`: a sibling
+/// consumer of a small dense id space rather than an extension of it. Pages are
+/// installed once and live for the directory's lifetime, so a reader needs no
+/// lock and lookup is three atomic loads — which is what makes it usable on the
+/// dispatch path.
 const ScopeIndex = struct {
     const radix = 256;
     const Leaf = struct {
@@ -1505,7 +1500,7 @@ pub const Env = enum(usize) {
             .core_cell = undefined,
         };
         const result: Env = @enumFromInt(@intFromPtr(backing));
-        backing.core_cell = .{ .owner = result, .id = .none, .core = true };
+        backing.core_cell = .{ .id = .none, .core = true };
         // Core needs a real id: a prelude word's tokens name it, and id zero
         // would mean "unscoped" and resolve them wherever they were invoked,
         // which is the leak this whole change closes. The core cell is embedded
@@ -1559,8 +1554,9 @@ pub const Env = enum(usize) {
         const cell = try self.newScopeCell();
         cell.publish(scope);
         if (scope.label_cell.cmpxchgStrong(null, cell, .release, .acquire)) |raced| {
-            // The loser's cell was never published to the label table, so
-            // dropping the owner's reference reclaims it outright.
+            // The loser's cell is simply never named by anything. It stays
+            // owned by the `Env` like every other cell and is freed at
+            // teardown; retiring it here only marks it as naming nothing.
             cell.retire();
             return raced.?;
         }
@@ -1574,7 +1570,7 @@ pub const Env = enum(usize) {
         const backing = self.privateState();
         const allocator = backing.host.allocator();
         const cell = try allocator.create(ScopeCell);
-        cell.* = .{ .owner = self.*, .id = .none };
+        cell.* = .{ .id = .none };
         // The Env owns every cell for its whole lifetime. A cell is read
         // without a lock and without a reference on every word dispatch, so
         // there is no safe earlier point to free one. Taking ownership before
