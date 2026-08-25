@@ -12,6 +12,43 @@ const list = @import("list.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const poll_api = @import("poll.zig");
 
+/// Acquires one reference on a refcounted module owner, but only if a
+/// reference already exists.
+///
+/// A scope cell names its owner without holding it, so a borrow that has just
+/// read the cell may be racing that owner's last `release`. An unconditional
+/// `fetchAdd` there asserts in a safe build and resurrects a destroyed object
+/// in ReleaseFast. Failure leaves the count untouched, which is the load-
+/// bearing half: a `fetchAdd` followed by a correction would publish a
+/// transient nonzero value that a concurrent `release` could read as a live
+/// owner.
+fn tryAcquire(refs: *std.atomic.Value(u32)) bool {
+    var observed = refs.load(.acquire);
+    while (observed != 0) {
+        std.debug.assert(observed != std.math.maxInt(u32));
+        observed = refs.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire) orelse
+            return true;
+    }
+    return false;
+}
+
+test "modules: a conditional acquire refuses a dead owner and never disturbs its count" {
+    var live: std.atomic.Value(u32) = .init(1);
+    try std.testing.expect(tryAcquire(&live));
+    try std.testing.expectEqual(@as(u32, 2), live.load(.acquire));
+    try std.testing.expect(tryAcquire(&live));
+    try std.testing.expectEqual(@as(u32, 3), live.load(.acquire));
+
+    // Zero is the point of no return: `release` has already cleared the label
+    // cell and handed the owner to its release domain, so an acquire that
+    // succeeded here would resurrect it.
+    var dead: std.atomic.Value(u32) = .init(0);
+    try std.testing.expect(!tryAcquire(&dead));
+    try std.testing.expectEqual(@as(u32, 0), dead.load(.acquire));
+    try std.testing.expect(!tryAcquire(&dead));
+    try std.testing.expectEqual(@as(u32, 0), dead.load(.acquire));
+}
+
 /// The execution identity of module code: which image is running, and — when
 /// the code was reached through the registry — which registration owns its
 /// name, durable state, and lifetime. A construction root has no registration,
@@ -26,6 +63,16 @@ const ExecutionHome = struct {
     }
     fn release(self: *const ExecutionHome) void {
         if (self.registration) |registration| registration.release() else self.image.release();
+    }
+    /// The failable counterpart, for a caller that reached this home through a
+    /// scope cell rather than through a reference it already holds. An
+    /// anonymous image has no registration and is covered by the same call,
+    /// which is why the deleted publisher-lease protocol could not serve here.
+    fn tryRetain(self: *const ExecutionHome) bool {
+        return if (self.registration) |registration|
+            registration.tryRetain()
+        else
+            self.image.tryRetain();
     }
 };
 
@@ -85,6 +132,12 @@ const ModuleImage = struct {
     fn retain(self: *ModuleImage) void {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
+    }
+
+    /// Reading `refs` here is safe only because a stamped image's header
+    /// outlives its contents; see `tryAcquire`.
+    fn tryRetain(self: *ModuleImage) bool {
+        return tryAcquire(&self.refs);
     }
 
     fn release(self: *ModuleImage) void {
@@ -192,6 +245,12 @@ const Registration = struct {
     fn retain(self: *Registration) void {
         const old = self.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
+    }
+
+    /// Failable, for the same reason as `ModuleImage.tryRetain`: a home reached
+    /// through a scope cell is not yet held, so the count may already be zero.
+    fn tryRetain(self: *Registration) bool {
+        return tryAcquire(&self.refs);
     }
 
     fn release(self: *Registration) void {
@@ -727,6 +786,18 @@ pub const ModuleHome = opaque {
     }
     pub fn pin(self: *const ModuleHome, _: *const ExecutionAccess) GenerationPin {
         return self.pinInternal();
+    }
+    fn tryPinInternal(self: *const ModuleHome) ?GenerationPin {
+        if (!self.state().tryRetain()) return null;
+        return .initRetained(self.state());
+    }
+    /// The pin a borrow takes. Null means this home's owner has reached its
+    /// last release, which resolution reports as a retired scope rather than
+    /// falling back to another chain. Split from `tryPinInternal` for the same
+    /// reason `pin` is: the source audit rejects one function that both holds a
+    /// capability token and performs a pointer cast.
+    pub fn tryPin(self: *const ModuleHome, _: *const ExecutionAccess) ?GenerationPin {
+        return self.tryPinInternal();
     }
 };
 

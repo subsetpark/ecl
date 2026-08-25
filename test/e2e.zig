@@ -1635,3 +1635,10 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer registered_twice.deinit();
     try registered_twice.expect(.{ .exit_code = 0, .stdout = "1 2 1\n", .stderr = "" });
 }
+
+test "e2e: escaped quotation authority acceptance" {
+    // Patch 6 implements this against test/acceptance/escaped-quotation-authority.ecl,
+    // which must be confirmed to reproduce the pre-change leak before the fixed
+    // behavior is asserted. See gameplans/stamped-word-image-home.json.
+    return error.SkipZigTest;
+}

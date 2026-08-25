@@ -767,3 +767,32 @@ test "concurrency: applying an escaped quotation races reload and removal" {
     try expectOk(&runtime, "[1] 24 take (pop ((gone call) @attempt) @spawn) each " ++
         "'goner unmodule await-all pop");
 }
+
+// Stubs. Implemented by the patch each one names; see
+// gameplans/stamped-word-image-home.json. The `concurrency:` prefix is
+// load-bearing: the TSan and 8-worker tiers select on it.
+
+test "concurrency: a retired image header outlives its contents" {
+    // Patch 4 implements this, asserting both directions: a cell-minting
+    // image's contents are reclaimed while its header is not, and a cell-less
+    // image is fully reclaimed exactly as before that patch.
+    return error.SkipZigTest;
+}
+
+test "concurrency: a resolver racing an image's last release never dereferences its scope" {
+    // Patch 5 implements this. It must fail against an implementation that pins
+    // only at the end of resolution, not merely against one with no pin at all.
+    return error.SkipZigTest;
+}
+
+test "concurrency: a resolver racing environment teardown resolves without a dereference" {
+    // Patch 5 implements this, driving the release domain rather than calling
+    // `TeardownCursor.init` directly.
+    return error.SkipZigTest;
+}
+
+test "concurrency: within through a foreign word is domain and writes no slot" {
+    // Patch 6 implements this, plus the cross-home effect case that a foreign
+    // word's declared effect is now checked.
+    return error.SkipZigTest;
+}
