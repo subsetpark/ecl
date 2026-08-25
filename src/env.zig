@@ -1336,6 +1336,24 @@ comptime {
 /// reloads rather than on execution.
 pub const ScopeId = enum(u32) { none = 0, _ };
 
+/// A `ScopeId` is 24 bits of directory index plus a reserved high byte.
+///
+/// The byte is reserved for a generation tag, which is what reusing an index
+/// would require: a stale word token holds a bare id and takes no reference of
+/// its own, so without a tag a reused index would let it resolve into an
+/// unrelated scope. Reuse is deferred rather than impossible, and the tag is
+/// not the only thing it would need -- see design/INTERPRETER.md for why a weak
+/// image reference comes with it. Until then the byte stays clear, asserted on
+/// every issued id, so adding the tag later cannot collide with a live value.
+pub const id_bits: u5 = 24;
+pub const reserved_bits: u5 = 8;
+
+comptime {
+    const budget: u16 = @as(u16, id_bits) + @as(u16, reserved_bits);
+    if (budget != @bitSizeOf(@typeInfo(ScopeId).@"enum".tag_type))
+        @compileError("scope id bit budget does not cover its tag type");
+}
+
 /// What a `ScopeId` names right now.
 pub const ScopeResolution = union(enum) {
     /// Id zero: a word with no written-in scope.
@@ -1390,7 +1408,7 @@ const ScopeIndex = struct {
     next: std.atomic.Value(u32) = .init(1),
     branches: [radix]std.atomic.Value(?*Branch) = @splat(.init(null)),
 
-    const max_id: u32 = (1 << 24) - 1;
+    const max_id: u32 = (1 << id_bits) - 1;
 
     fn coordinates(id: ScopeId) struct { usize, usize, usize } {
         const raw = @intFromEnum(id);
@@ -1451,6 +1469,10 @@ const ScopeIndex = struct {
         std.debug.assert(leaf.cells[entry_index].load(.acquire) == null);
         leaf.cells[entry_index].store(cell, .release);
         self.next.store(raw + 1, .monotonic);
+        // Restates what the `max_id` refusal above already guarantees. It is
+        // here so that adding a generation tag to the reserved byte cannot
+        // silently start overlapping issued indices.
+        std.debug.assert(raw >> id_bits == 0);
         return id;
     }
 
@@ -1816,9 +1838,24 @@ test "environment definition propagates every allocation failure" {
 }
 
 test "env: issued scope ids leave their reserved high bits clear" {
-    // Patch 3 implements this: issue enough cells to cross a directory leaf
-    // boundary, then assert every id is nonzero, within `max_id`, and clear in
-    // the reserved byte. In-source because `ScopeIndex` and `max_id` are
-    // private. See gameplans/stamped-word-image-home.json.
-    return error.SkipZigTest;
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var container = try Env.init(host.cleanup());
+    defer container.deinit();
+
+    // More than one leaf's worth, so the assertion covers ids whose directory
+    // coordinates differ in the branch and leaf bytes and not only the entry.
+    const issued = ScopeIndex.radix + 3;
+    var previous: u32 = 0;
+    for (0..issued) |_| {
+        const cell = try container.newScopeCell();
+        const raw = @intFromEnum(cell.id);
+        try std.testing.expect(raw != 0);
+        try std.testing.expect(raw <= ScopeIndex.max_id);
+        try std.testing.expectEqual(@as(u32, 0), raw >> id_bits);
+        // Monotonic and never reused, which is the property the reserved byte
+        // exists to let us relax later.
+        try std.testing.expect(raw > previous);
+        previous = raw;
+    }
 }
