@@ -1355,52 +1355,47 @@ pub const ScopeCell = struct {
     /// without the caller having to carry the pair.
     owner: Env,
     id: ScopeId,
-    releases: *heap.ReleaseDomain,
-    /// One reference for the scope that owns the cell, and one for the
-    /// registry entry that names its id. There is deliberately no `retain`: a
-    /// word carries the id as a bare integer and takes no reference, which is
-    /// also why ids are never recycled.
-    refs: std.atomic.Value(u32) = .init(1),
     scope: std.atomic.Value(?*Scope) = .init(null),
     /// Core is a terminal resolution phase rather than a link in any chain, so
     /// it has no `Scope` to point at. One embedded cell carries this instead,
-    /// and a primitive or embedded-prelude literal labels against it. It is
-    /// never reference-counted or freed.
+    /// and a primitive or embedded-prelude literal labels against it.
     core: bool = false,
-    retirement: heap.ReleaseDomain.Retirement = .{},
+    /// When set, the cell resolves through this live pointer instead of its own
+    /// `scope`. A module slot publishes its current image's scope through one,
+    /// so a word that escaped generation N follows the *name* to generation
+    /// N+1 rather than pinning to the image it was written in, and reports
+    /// retired once the name is gone. Late binding to module identity, which is
+    /// what `m.f` already does and what a quotation that escaped a module
+    /// should do too.
+    follows: std.atomic.Value(?*std.atomic.Value(?*Scope)) = .init(null),
 
     pub fn publish(self: *ScopeCell, scope: *Scope) void {
         self.scope.store(scope, .release);
     }
 
-    /// Clears the scope before its storage is torn down, so a reader sees the
-    /// old scope, the new scope, or a definite `retired`, never freed memory.
-    /// Then drops the owner's reference; surviving labels keep the cell alive.
+    /// Hands the cell over to a module slot's published scope. From here the
+    /// cell tracks the name rather than the image.
+    pub fn follow(self: *ScopeCell, source: *std.atomic.Value(?*Scope)) void {
+        self.follows.store(source, .release);
+    }
+
+    /// The scope this cell names right now, or null if it has retired.
+    pub fn resolve(self: *const ScopeCell) ?*Scope {
+        if (self.follows.load(.acquire)) |source| return source.load(.acquire);
+        return self.scope.load(.acquire);
+    }
+
+    /// Marks the cell as naming nothing. It is deliberately *not* freed here.
+    ///
+    /// A cell is read without a lock and without a reference by every word
+    /// dispatch, so freeing one at retirement would race a reader that has
+    /// already loaded the pointer. Reclaiming through the release domain is
+    /// worse still: retirement runs under the registry's writer lock and, on
+    /// the removal path, inside a domain drain, and enqueuing from there
+    /// deadlocks. The `Env` owns every cell and frees them together at
+    /// teardown, which is the only point at which no reader exists.
     pub fn retire(self: *ScopeCell) void {
         self.scope.store(null, .release);
-        // Unregistering before the reference drops is what lets the cell be
-        // freed: the id stays unresolvable rather than pointing at a tombstone,
-        // and a nonzero id with no entry is exactly `retired`.
-        self.owner.unregisterScope(self.id);
-        self.release();
-    }
-
-    fn release(self: *ScopeCell) void {
-        if (self.core) return;
-        const old = self.refs.fetchSub(1, .release);
-        std.debug.assert(old != 0);
-        if (old != 1) return;
-        _ = self.refs.load(.acquire);
-        self.releases.retire(self, &self.retirement);
-    }
-
-    pub fn advanceRetirement(
-        _: *heap.ReleaseDomain,
-        allocator: std.mem.Allocator,
-        self: *ScopeCell,
-    ) bool {
-        allocator.destroy(self);
-        return true;
     }
 };
 
@@ -1412,16 +1407,6 @@ const ScopeIndex = struct {
     const radix = 256;
     const Leaf = struct {
         cells: [radix]std.atomic.Value(?*ScopeCell) = @splat(.init(null)),
-        retirement: heap.ReleaseDomain.Retirement = .{},
-
-        pub fn advanceRetirement(
-            _: *heap.ReleaseDomain,
-            allocator: std.mem.Allocator,
-            self: *Leaf,
-        ) bool {
-            allocator.destroy(self);
-            return true;
-        }
     };
     const Branch = struct {
         leaves: [radix]std.atomic.Value(?*Leaf) = @splat(.init(null)),
@@ -1448,29 +1433,6 @@ const ScopeIndex = struct {
         const branch = self.branches[branch_index].load(.acquire) orelse return null;
         const leaf = branch.leaves[leaf_index].load(.acquire) orelse return null;
         return leaf.cells[entry_index].load(.acquire);
-    }
-
-    /// Clears one entry, and reclaims the page once nothing lives on it. Ids
-    /// are never recycled, so without this the directory would grow with every
-    /// id ever issued rather than with the scopes currently live — which a
-    /// construct/reload soak turns into unbounded memory. Detachment is O(1)
-    /// under the lock and the page itself retires through the release domain,
-    /// never on a reader's stack.
-    fn clear(self: *ScopeIndex, releases: *heap.ReleaseDomain, id: ScopeId) void {
-        const branch_index, const leaf_index, const entry_index = coordinates(id);
-        const branch = self.branches[branch_index].load(.acquire) orelse return;
-        const leaf = branch.leaves[leaf_index].load(.acquire) orelse return;
-        std.Io.Threaded.mutexLock(&self.mutex);
-        defer std.Io.Threaded.mutexUnlock(&self.mutex);
-        leaf.cells[entry_index].store(null, .release);
-        // The page can only be reused by an id in its own range, and ids are
-        // monotonic, so a fully cleared page below the watermark is dead.
-        const watermark = self.next.load(.monotonic);
-        const page_base = @intFromEnum(id) & ~@as(u32, 0xff);
-        if (watermark <= page_base + radix) return;
-        for (&leaf.cells) |*slot| if (slot.load(.acquire) != null) return;
-        branch.leaves[leaf_index].store(null, .release);
-        releases.retire(leaf, &leaf.retirement);
     }
 
     /// Issues the next id and installs the entry. Candidate pages are allocated
@@ -1533,6 +1495,8 @@ const EnvState = struct {
     core: Environment,
     session: Environment,
     core_cell: ScopeCell,
+    /// Every cell this Env has issued, freed together at teardown.
+    cells: std.ArrayList(*ScopeCell) = .empty,
     scopes: ScopeIndex = .{},
 };
 
@@ -1559,7 +1523,7 @@ pub const Env = enum(usize) {
             .core_cell = undefined,
         };
         const result: Env = @enumFromInt(@intFromPtr(backing));
-        backing.core_cell = .{ .owner = result, .id = .none, .releases = releases, .core = true };
+        backing.core_cell = .{ .owner = result, .id = .none, .core = true };
         // Core needs a real id: a prelude word's tokens name it, and id zero
         // would mean "unscoped" and resolve them wherever they were invoked,
         // which is the leak this whole change closes. The core cell is embedded
@@ -1582,6 +1546,8 @@ pub const Env = enum(usize) {
         while (!session_cursor.advance()) {}
         var core_cursor = Environment.TeardownCursor.init(&backing.core);
         while (!core_cursor.advance()) {}
+        for (backing.cells.items) |cell| allocator.destroy(cell);
+        backing.cells.deinit(allocator);
         backing.scopes.deinit(allocator);
         backing.host.drain();
         allocator.destroy(backing);
@@ -1626,22 +1592,19 @@ pub const Env = enum(usize) {
         const backing = self.privateState();
         const allocator = backing.host.allocator();
         const cell = try allocator.create(ScopeCell);
-        cell.* = .{
-            .owner = self.*,
-            .id = .none,
-            .releases = heap.hostDomain(backing.host),
-        };
-        cell.id = backing.scopes.register(allocator, cell) catch |err| {
+        cell.* = .{ .owner = self.*, .id = .none };
+        // The Env owns every cell for its whole lifetime. A cell is read
+        // without a lock and without a reference on every word dispatch, so
+        // there is no safe earlier point to free one. Taking ownership before
+        // registering leaves the failure path with nothing to undo.
+        backing.cells.append(allocator, cell) catch |err| {
             allocator.destroy(cell);
             return err;
         };
+        // Owned by `cells` from here, so a failed registration leaves a cell
+        // that names nothing rather than one that leaks.
+        cell.id = try backing.scopes.register(allocator, cell);
         return cell;
-    }
-
-    fn unregisterScope(self: Env, id: ScopeId) void {
-        if (id == .none) return;
-        const backing = self.privateState();
-        backing.scopes.clear(heap.hostDomain(backing.host), id);
     }
 
     /// What a word's scope id names right now. Zero is a word with no
@@ -1652,7 +1615,7 @@ pub const Env = enum(usize) {
         if (id == .none) return .unscoped;
         const cell = self.privateState().scopes.get(id) orelse return .retired;
         if (cell.core) return .core;
-        return if (cell.scope.load(.acquire)) |scope| .{ .scope = scope } else .retired;
+        return if (cell.resolve()) |scope| .{ .scope = scope } else .retired;
     }
 
     pub fn coreView(self: *const Env) EnvironmentView {

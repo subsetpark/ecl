@@ -267,13 +267,7 @@ test "embedded definitions resolve against core, not the session" {
     try support.expectStack("(7) 'mine def [1 2] (pop mine) each", "[7 7]");
 }
 
-// PENDING: Patch 5 of `word-scope-identifiers` makes a word resolve at its own
-// scope. Flip this to false there; every assertion guarded by it is ticket
-// ecl#4's proof and fails today.
-const scopes_pending = false;
-
 test "embedded quotation literals resolve against core, not the session" {
-    if (scopes_pending) return error.SkipZigTest;
     // `all?` is `(|l q| l q each 1 (and) fold)`. Its own `(and)` was written
     // in the prelude, so a session `and` cannot reach it.
     try support.expectStack("(pop pop 42) 'and def [1 1] (1 =) all?", "1");

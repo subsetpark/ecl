@@ -103,12 +103,6 @@ pub const Value = union(Tag) {
     task: *TaskHandle,
     module: *ModuleHandle,
 
-    /// A word with no written-in scope, which is every word not produced by
-    /// the reader: host-built values, error traces, effect markers.
-    pub fn unscopedWord(name: u32) Value {
-        return .{ .word = .{ .name = name } };
-    }
-
     pub fn tag(self: Value) Tag {
         return std.meta.activeTag(self);
     }

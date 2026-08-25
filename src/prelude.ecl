@@ -91,7 +91,7 @@
 'nip def
 
 ### def keep
-(: "Apply a quotation while preserving its input beneath the quotation's results.")
+(: "Apply a quotation to the stack, restoring its top input above the quotation's results.")
 (over (call) dip)
 'keep def
 

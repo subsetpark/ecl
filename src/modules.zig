@@ -533,6 +533,15 @@ const InventoryEntry = enum(usize) {
 /// storage may represent a later registration only after every witness drains.
 const ModuleSlot = struct {
     publisher: GenerationPublisher = .init(null),
+    /// The scope of this name's current generation. Cells that a published
+    /// generation handed over read it directly, so a word that escaped an
+    /// older generation follows the name forward instead of pinning to the
+    /// image it was written in.
+    current_scope: std.atomic.Value(?*env.Scope) = .init(null),
+    /// The cells that follow this slot. They outlive their own images -- that
+    /// is the point -- so the slot owns them and retires them with itself.
+    /// One per published generation of this name.
+    followers: std.ArrayList(*env.ScopeCell) = .empty,
     inventory: InventoryEntry,
     /// Owned witnesses held by published generations, cursors, and
     /// arbiter turns. The registry owns the allocation itself; recycling is
@@ -561,10 +570,45 @@ const ModuleSlot = struct {
 
     const Phase = enum(u8) { live, closing, retired };
 
+    /// Drops this name's current scope and every cell that followed it. Both
+    /// retirement paths reach it, and it is idempotent because the list is
+    /// emptied.
+    fn retireFollowers(self: *ModuleSlot) void {
+        self.current_scope.store(null, .release);
+        for (self.followers.items) |cell| cell.retire();
+        self.followers.deinit(self.allocator);
+        self.followers = .empty;
+    }
+
+    /// Publishes `image`'s scope as this name's current one, and takes over the
+    /// cell the image stamped its words against. The image may now retire
+    /// without invalidating anything written in it: its cell reads the slot's
+    /// pointer, which the next generation replaces. Runs under the registry
+    /// writer lock, where nothing may fail: the caller reserves follower
+    /// capacity with `reserveFollower` before taking the lock.
+    fn adoptScope(self: *ModuleSlot, image: *ModuleImage) void {
+        if (image.scope.label_cell.swap(null, .acq_rel)) |cell| {
+            self.followers.appendAssumeCapacity(cell);
+            cell.follow(&self.current_scope);
+        }
+        self.current_scope.store(&image.scope, .release);
+    }
+
+    /// The fallible half of `adoptScope`, split out so the allocation happens
+    /// before the registry writer lock. An error escaping that lock region
+    /// would deadlock the cursor's own cleanup, which re-takes the lock.
+    fn reserveFollower(self: *ModuleSlot) error{OutOfMemory}!void {
+        try self.followers.ensureUnusedCapacity(self.allocator, 1);
+    }
+
     fn resetForReuse(self: *ModuleSlot) void {
         const inventory = self.inventory;
         const allocator = self.allocator;
-        self.* = .{ .inventory = inventory, .allocator = allocator };
+        // Reserved follower capacity survives reuse; the list itself is empty
+        // because retirement drained it before the slot was recycled.
+        const followers = self.followers;
+        std.debug.assert(followers.items.len == 0);
+        self.* = .{ .inventory = inventory, .allocator = allocator, .followers = followers };
         std.debug.assert(inventory.node().slot == self);
     }
 
@@ -573,6 +617,9 @@ const ModuleSlot = struct {
     fn retire(self: *ModuleSlot, releases: *heap.ReleaseDomain) void {
         if (self.phase.load(.acquire) == .retired) return;
         self.phase.store(.retired, .release);
+        // The name is gone, so every word that named it reports retired
+        // rather than following a scope with no registration behind it.
+        self.retireFollowers();
         if (self.publisher.currentOwned()) |generation| {
             self.publisher.publish(null);
             generation.release();
@@ -588,6 +635,9 @@ const ModuleSlot = struct {
         std.debug.assert(self.state.len == 0);
         if (self.phase.load(.acquire) == .retired) return;
         self.phase.store(.retired, .release);
+        // The name is gone, so every word that named it reports retired
+        // rather than following a scope with no registration behind it.
+        self.retireFollowers();
         if (self.publisher.currentOwned()) |generation| {
             self.publisher.publish(null);
             generation.release();
@@ -1205,6 +1255,9 @@ pub const Registry = enum(usize) {
             const next = entry.next;
             const owning = entry.slot;
             std.debug.assert(owning.lease_refs.load(.acquire) == 0);
+            // Retirement drained the followers, but a slot recycled before an
+            // aborted commit may still hold reserved follower capacity.
+            owning.followers.deinit(owning.allocator);
             self.allocator().destroy(owning);
             self.allocator().destroy(entry);
             inventory = next;
@@ -1771,6 +1824,9 @@ pub const Registry = enum(usize) {
             if (build.state.len != 0) self.registry.allocator().free(build.state);
             switch (build.slot) {
                 .fresh => |slot| {
+                    // Never published: no followers were adopted, but capacity
+                    // may have been reserved for the commit that didn't happen.
+                    slot.followers.deinit(slot.allocator);
                     self.registry.allocator().destroy(slot.inventory.node());
                     self.registry.allocator().destroy(slot);
                 },
@@ -2018,12 +2074,14 @@ pub const Registry = enum(usize) {
                     const slot = self.barrier_turn.?.lease.slot();
                     const retired = self.retired_reservation.?;
                     const registration = self.registration.?;
+                    try slot.reserveFollower();
                     self.registry.lockBlocking();
                     const prior = slot.publisher.currentOwned().?;
                     std.debug.assert(slot.phase.load(.acquire) == .live);
                     retired.* = .{ .generation = prior };
                     registration.generation = prior.generation + 1;
                     registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
+                    slot.adoptScope(registration.image);
                     slot.publisher.publish(self.takeRegistration());
                     const release_prior = slot.publisher.quiescent();
                     if (!release_prior) self.registry.enqueueRetiredGenerationLocked(retired);
@@ -2038,6 +2096,8 @@ pub const Registry = enum(usize) {
                     break :result .{ .complete = registration.generation };
                 },
                 .commit_new => |build| result: {
+                    const slot = build.slot.get();
+                    try slot.reserveFollower();
                     const next = try self.registry.allocator().create(Directory);
                     self.registry.lockBlocking();
                     if (!self.registry.privateState().directories.isCurrent(build.snapshot.old)) {
@@ -2047,7 +2107,6 @@ pub const Registry = enum(usize) {
                         self.state = .snapshot;
                         break :result .pending;
                     }
-                    const slot = build.slot.get();
                     switch (build.slot) {
                         .fresh => self.registry.recordFreshSlotLocked(slot),
                         .recycled => slot.resetForReuse(),
@@ -2060,6 +2119,7 @@ pub const Registry = enum(usize) {
                     const registration = self.registration.?;
                     registration.generation = 1;
                     registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
+                    slot.adoptScope(registration.image);
                     slot.state = build.state;
                     build.state = &.{};
                     slot.publisher.publish(self.takeRegistration());

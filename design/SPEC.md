@@ -627,18 +627,18 @@ anonymously, be passed as data, and be registered more than once.
   quotation built at run time by `partial`, `cons`, or `compose` has no
   written-in scope, so it resolves where it is invoked exactly as a plain list
   always has.
-  A word written in a module body names the image that published it, and
-  keeps naming that image. Reloading the module does not re-point an escaped
-  quotation: `m.f` picks up the new code, and a quotation you were already
-  holding goes on meaning what it meant where it was written. That is the
-  reading a *value* deserves — a list you hold does not change because
-  someone reloaded a module — and it is the one the implementation makes.
-  Once no live registration names that image any more, applying the escaped
-  quotation is `'domain`, never a fallback to core or to the invoking chain,
-  because a fallback would silently change what its words mean. The transition
-  follows the image's own reclamation rather than the `unmodule` that started
-  it, so it is observed at a unit boundary: within the unit that removed the
-  module, a quotation that escaped it may still resolve.
+  A word written in a module body names the *module*, not the image that
+  happened to publish it. Reloading re-points it: `m.f` picks up the new code,
+  and so does a quotation you were already holding, which is the same late
+  binding every other reference in the language has. Pinning to the publishing
+  image was considered and rejected — it would make a reload silently
+  invalidate every quotation that had escaped the module, which is the opposite
+  of what hot reload is for.
+  Removing the module is what ends it. Once the name is gone, applying an
+  escaped quotation is `'domain`, never a fallback to core or to the invoking
+  chain, because a fallback would silently change what its words mean. An
+  *anonymous* image — one built by `@module` and never registered — has no name
+  to track, so its words name that image alone and retire with it.
   **Which text is the module's is decided by what the reader produced.** A
   construction body's words name the image, and so do the words of everything
   the reader built inside it, whatever container they sit in — a quotation, a

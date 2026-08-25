@@ -605,7 +605,7 @@ test "module: provisional tasks keep rollback generations alive until quiescence
     try expectOk(&runtime, "((((1) () while) @spawn pop missing) 'bad @defm) @attempt pop");
 }
 
-test "module: hot reload commit failure and whole-body pinning" {
+test "module: hot reload commit failure and late-bound module words" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -613,7 +613,12 @@ test "module: hot reload commit failure and whole-body pinning" {
     try expectOk(&runtime, "(1 'x setp " ++
         "( -- n ) ((2 'x setp ( -- n ) (x) 'get def) 'm @defm x) 'probe def " ++
         "( -- n ) (x) 'get def) 'm @defm m.probe m.get");
-    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    // `probe` reloads its own module and then reads `x`. A word written in a
+    // module body names the *module*, so the read lands in the generation
+    // current at that moment — the inner one — rather than the image `probe`
+    // itself was written in. This is the visible edge of late binding: a body
+    // that reloads itself mid-call sees its own privates change under it.
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
     try expectErrorContains(&runtime, "(3 'x setp missing) 'm @defm", &.{"'kind 'undefined-word"});
     try expectOk(&runtime, "m.get");
@@ -1012,13 +1017,7 @@ test "modules: cross-home constant references cross unchecked while declared eff
     );
 }
 
-// PENDING: Patch 5 of `word-scope-identifiers` makes a word resolve at its own
-// scope. Flip this to false there; every assertion guarded by it is ticket
-// ecl#4's proof and fails today.
-const scopes_pending = false;
-
 test "module: a module literal reaches its own private through a combinator" {
-    if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -1033,7 +1032,6 @@ test "module: a module literal reaches its own private through a combinator" {
 }
 
 test "module: a module word runs a caller's quotation in the caller's chain" {
-    if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -1048,7 +1046,6 @@ test "module: a module word runs a caller's quotation in the caller's chain" {
 }
 
 test "module: a quotation parameter carries the caller's scope" {
-    if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -1062,7 +1059,6 @@ test "module: a quotation parameter carries the caller's scope" {
 }
 
 test "module: every container the reader built inside a body is the module's text" {
-    if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -1087,7 +1083,6 @@ test "module: every container the reader built inside a body is the module's tex
 }
 
 test "module: an undefined word names the chain its own scope searched" {
-    if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});
@@ -1104,7 +1099,6 @@ test "module: an undefined word names the chain its own scope searched" {
 }
 
 test "module: a session quotation still resolves in the session" {
-    if (scopes_pending) return error.SkipZigTest;
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var runtime = try session.Session.init(backing.allocator(), &.{});

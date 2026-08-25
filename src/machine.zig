@@ -4733,11 +4733,13 @@ pub const Machine = struct {
         // The rewrite produces a new header, and the span index is keyed by
         // header, so the source this body was read from has to be carried over
         // or every error raised inside the module would report no location.
+        // Aliasing allocates, and on failure the stamped header owns a retain
+        // on every element, so it has to go back rather than leak.
+        errdefer self.releaseDomain().releaseValue(stamped);
         try self.unit.archive.aliasSpans(body, stamped.list);
         // `fromValuesGenericCode` retains each element, so the local references
         // built above are handed off rather than duplicated.
         for (items[0..length]) |item| self.releaseDomain().releaseValue(item);
-        built = 0;
         return stamped.list;
     }
 
@@ -4831,11 +4833,16 @@ pub const Machine = struct {
                     written_scope;
             },
             // A fallback here would change what the word means, so the failure
-            // is definite instead.
-            .retired => return self.fail(
-                .domain,
-                "the scope this word was written in has retired",
-            ),
+            // is definite instead. The traced word is set first: this failure
+            // belongs to the word being dispatched, not to whichever word was
+            // traced before it.
+            .retired => {
+                self.unit.active_word = .plain(word.name);
+                return self.fail(
+                    .domain,
+                    "the scope this word was written in has retired",
+                );
+            },
         };
         self.unit.active_word = .plain(word.name);
         try self.startDriver(DispatchDriver{
