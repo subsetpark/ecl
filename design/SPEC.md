@@ -574,7 +574,12 @@ anonymously, be passed as data, and be registered more than once.
   A word reached through a quotation that escaped its module has no invoking
   registration at all: it resolves against the image its words were written
   in, so private lookup and same-home dispatch still hold, while `within` is
-  `'domain` and diagnostic spelling is the unqualified local name. An
+  `'domain` and diagnostic spelling is the unqualified local name. Such an
+  application *does* cross a module boundary, so a declared effect on that word
+  is checked like any other cross-boundary call. Crossing is decided by the home
+  the call resolves to differing from the caller's, not by whether the source
+  text spells a dotted name — which is why a bare word reached through an
+  escaped quotation crosses one and a module's own internal call does not. An
   exported word's body resolves against its module's internal environment and
   then core — never the caller's environment. Publics therefore reach
   privates, and callers cannot perturb a module's behavior by shadowing.
