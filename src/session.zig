@@ -451,6 +451,11 @@ pub const Session = enum(usize) {
         const settled_native_owner = closing_native_owner.settle();
         host.drain();
         settled_native_owner.deinit();
+        // Last, and only here. A parked anchor is named by a scope cell that
+        // holds no reference to it, so it stays valid until execution has
+        // provably stopped -- which `scheduler.deinit` at the top of this
+        // function guarantees, ahead of every teardown below it.
+        host.reclaimTombstones(modules.destroyParkedAnchor);
         allocator.destroy(core.host_owner);
         allocator.destroy(core);
         self.* = .consumed;

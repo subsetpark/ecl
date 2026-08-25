@@ -225,25 +225,70 @@ primitives, operationalized as two rules:
   A module-written word resolves through its image's scope cell, and nothing
   more elaborate. An image's cell retires with its scope, so a word from a
   replaced or removed image resolves to a definite `retired`.
-  **The lifetime story is incomplete, and this is the gap.** `scheduleWord`
-  pins the entered generation for the activation's lifetime, which covers a
-  word dispatched from a *homed* activation: a running module body cannot have
-  its image reclaimed under it. That pin is guarded on a resolved home, and an
-  escaped quotation applied from a prompt or a spawned task has none, so it
-  borrows the image's `Scope` with nothing retaining it — a concurrent reload
-  or `unmodule` can free the scope and its environment under the resolving
-  worker. Nothing in the current code closes that; an earlier revision pinned
-  at the borrow instead, and deleting that machinery removed the answer along
-  with its own hazards. The question a replacement has to settle first is what
-  keeps an image alive while code stamped against it still exists, and the
-  shape that survives it is probably an *immutable* cell per image carrying its
-  `ExecutionHome`, pinnable at dispatch and reclaimed through the release
-  domain — immutability being what the previous designs lacked, since a cell
-  re-pointed at whatever slot recycled into its id is exactly where the ABA
-  hazard came from.
-  A second consequence of the same deletion: every `@defm` mints a fresh cell
-  and id that live until `Env` teardown, so live memory grows with reload
-  history and the 24-bit id space is permanently consumed.
+  **What keeps a stamped word's image alive is the unit that dispatches
+  through it.** A cell names one `ModuleImage` for its whole life, and
+  resolution pins that image into the dispatching unit's existing generation-pin
+  set — the same `Unit.pinGeneration` path a homed call already uses, reached
+  through `&ModuleImage.construction_home`, whose registration is null and whose
+  `retain` therefore retains the image. Three properties follow. The pin is
+  released on exactly one path, unit teardown, which every cancellation, unwind,
+  and `@attempt` already funnels through, so there is no second release path to
+  get wrong. Retention is bounded by the distinct images one unit touches, and a
+  unit is one REPL line, one script, or one task. And the cell-to-image edge is
+  immutable, which is what the earlier revisions lacked: a cell re-pointed at
+  whatever slot recycled into its id is exactly where the ABA hazard came from.
+  **That pin is necessary and not yet sufficient, and this is the open gap.** It
+  is acquired at the end of resolution, while the borrow begins at `scopeOf`'s
+  bare load, leaving three windows in which nothing holds the image: between the
+  load and `DirectLookupCursor` acquiring its `ShapeLease`, during the walk
+  itself — `Environment.TeardownCursor.init` asserts `shapes.quiescent()` rather
+  than waiting, and `EmbeddedTeardownCursor` waits only on `scope.refs`, which a
+  shape lease is not — and at the retain, since `ModuleImage.retain` is an
+  unconditional `fetchAdd` that asserts on a zero refcount in safe builds and
+  resurrects a destroyed object in ReleaseFast. Closing them does not need an
+  epoch scheme: `ModuleImage.release` already clears the cell before any
+  teardown step, so a borrow that *conditionally* retains before dereferencing
+  the scope discards a stale pointer without ever reading it. What that requires
+  is for the image header to remain valid memory to compare-and-swap on, which
+  means retirement freeing an image's contents while the `Env` owns its header
+  until teardown — the same ownership rule scope cells already follow, and the
+  reason the cost below is stated per header rather than per cell. Until that
+  lands, no claim that dispatch keeps an image alive is warranted.
+  Because the home is `construction_home`, a stamped word runs with no
+  registration. That is the design and not a shortfall: an escaped quotation
+  owns no slot, and for an image registered under several names there is no fact
+  of the matter about which slot it would be, so `within` is `'domain` there
+  rather than silently targeting the caller's.
+  The common case costs no scan. `executeWord` already computes the running
+  activation's resolution scope in order to refine the word's own; when the
+  resolved image is the running activation's, a pin is necessarily already held
+  by whatever entered it, so the pin-set walk is skipped on a pointer compare
+  and runs only for genuinely cross-image stamps — escaped quotations and
+  spliced bodies.
+  **What a retired image leaves behind, and why it is that and nothing more.**
+  A cell is marked as naming nothing and freed only at `Env` teardown, its id is
+  never reused, and one 16-byte `RefAnchor` is parked with the host tier and
+  freed by the walk at the end of `Session.deinit`. An image no ECL source was
+  ever stamped against leaves nothing at all: it mints no cell, so its anchor is
+  destroyed with it. So the settled cost is one anchor plus one cell per
+  *stamped* retired image, and a session is bounded at 2^24 images.
+  The anchor exists because the count has to outlive the image a cell names, and
+  it is 16 bytes because that is what the retention soaks allow. Parking the
+  whole `ModuleImage` in place was implemented and measured against them first:
+  394 bytes per stamped reload, `large_growth` 629952 against a bound of 226876
+  — 25x over. The anchor costs 16384 across the same 1024 reloads and clears the
+  bound by 17532. Two shapes in between were rejected on that arithmetic: a node
+  carrying (ptr, len, alignment) costs 32 bytes and a per-node destructor 16, and
+  a 32-byte anchor would have cleared the bound by 636 bytes against ~111KB of
+  small-phase noise, which is how an invariant becomes a flaky test and then a
+  weakened one. Those two soaks are the boundedness oracle for this whole area;
+  neither is a place to adjust a constant.
+  Freeing the cell would need epoch protection of the reader's window between
+  finding a cell and acquiring its anchor; reusing the id would additionally need
+  a generation tag, because a stale token holds a bare id and takes no reference
+  of its own. Neither earns its complexity at cell-and-anchor scale, so the high
+  8 bits of a `ScopeId` are reserved and asserted zero: a generation tag can be
+  added the day a session is shown to exhaust the space.
   There is deliberately no machinery for re-pointing a word at a newer
   generation. An earlier revision of this branch carried it — cells that
   followed a registry slot, a per-name canonical cell, a peek at commit time,
@@ -258,8 +303,10 @@ primitives, operationalized as two rules:
   zero-refcount registration, and a check-then-act that leaked an unpinned
   scope.
   Scope ids are never recycled. A word token holds a bare `u32` and takes no
-  reference, so a reused id would let a stale token resolve into an unrelated
-  scope — a silent wrong answer. Ids are issued only for the two roots and for
+  reference of its own, so a reused id would let a stale token resolve into an
+  unrelated scope — a silent wrong answer, which is why reuse would have to be
+  guarded by the reserved generation bits described above rather than adopted on
+  its own. Ids are issued only for the two roots and for
   the images ECL source is stamped against, so the space is consumed by
   constructions rather than by execution. `Env` owns the registry because it owns `Scope`; `modules`
   owns the lifecycle, and `env.zig` holds no reference to it. A cell is cleared

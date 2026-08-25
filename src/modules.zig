@@ -49,6 +49,77 @@ test "modules: a conditional acquire refuses a dead owner and never disturbs its
     try std.testing.expectEqual(@as(u32, 0), dead.load(.acquire));
 }
 
+/// One image's authoritative reference count, allocated with the image and
+/// outliving it whenever a scope cell still names it.
+///
+/// Allocated at the image's birth, not at its first stamp: a refcount cannot
+/// migrate mid-life without briefly existing twice, and two counts have a
+/// window in which they disagree. One count, one retain/release path.
+///
+/// `image` dangles once the image has been destroyed. That is sound rather than
+/// merely tolerated: it is read only after a successful `tryAcquire`, which
+/// cannot succeed at zero, and zero is reached before the image is destroyed.
+///
+/// Only the anchor is parked at retirement, never the image. Parking the image
+/// struct in place was implemented and measured against the retention soaks:
+/// 394 bytes per stamped reload, large_growth=629952 against a bound of 226876
+/// — 25x over. An anchor is cell-order instead, which those soaks tolerate.
+const RefAnchor = struct {
+    refs: std.atomic.Value(u32) = .init(1),
+    park: Park,
+
+    /// The image pointer and the parked-list link share one word, because a
+    /// dead anchor's image pointer is never read again.
+    ///
+    /// That is a proof, not a hope. `image` is read only after a successful CAS
+    /// off a nonzero count; `refs == 0` is permanent once reached; and `next` is
+    /// stored on the release path strictly after zero. So a `tryRetain` racing
+    /// the overlay fails its CAS and touches nothing else.
+    ///
+    /// The overlay is what brings the anchor to 16 bytes. It was measured
+    /// against the retention soaks, which allow roughly 32 bytes per stamped
+    /// reload: parking the whole `ModuleImage` in place cost 394 bytes and
+    /// failed by 14212, and a 32-byte anchor would have cleared the bound by
+    /// only 636 bytes against ~111KB of small-phase noise, which is how an
+    /// invariant becomes a flaky test and then a weakened one.
+    /// `extern` so it carries no safety tag. A plain untagged union is 16
+    /// bytes in Debug and ReleaseSafe because Zig adds one, which alone would
+    /// blow the 16-byte anchor budget -- measured, not assumed. Both members are
+    /// plain pointers, so extern layout is exact and the link is the node: a
+    /// `TombstoneNode` is nothing but its `next`, so a pointer to this union
+    /// *is* a pointer to the node.
+    const Park = extern union {
+        image: *ModuleImage,
+        next: ?*heap.ReleaseDomain.TombstoneNode,
+    };
+
+    fn tryRetain(self: *RefAnchor) bool {
+        return tryAcquire(&self.refs);
+    }
+};
+
+comptime {
+    if (@sizeOf(RefAnchor) > 16)
+        @compileError("RefAnchor exceeds the parked-anchor budget the retention soaks impose");
+}
+
+/// The single destructor `ReleaseDomain.reclaimTombstones` is given.
+///
+/// A parked anchor is the only thing this module ever parks. A second parked
+/// type must take its own list head rather than turn the node into a
+/// discriminated one -- the node is a bare link precisely because the soak
+/// budget has no room for discrimination.
+pub fn destroyParkedAnchor(
+    allocator: std.mem.Allocator,
+    node: *heap.ReleaseDomain.TombstoneNode,
+) void {
+    // The link is the union's first and only field, so the union starts where
+    // the node does. Plain casts, no capability token.
+    const park: *RefAnchor.Park = @ptrCast(node);
+    const anchor: *RefAnchor = @fieldParentPtr("park", park);
+    allocator.destroy(anchor);
+}
+
 /// The execution identity of module code: which image is running, and — when
 /// the code was reached through the registry — which registration owns its
 /// name, durable state, and lifetime. A construction root has no registration,
@@ -100,6 +171,13 @@ const ModuleImage = struct {
     /// neither owns a slot. It embeds a pointer to its own owner, so `create`
     /// fills it in after the allocation rather than defaulting it.
     construction_home: ExecutionHome,
+    /// The authoritative count lives here, not inline, so it can outlive this
+    /// struct for the images a scope cell names.
+    anchor: *RefAnchor,
+    /// Whether ECL source was ever stamped against this image, recorded where
+    /// `release` takes the label cell. Only a stamped image is named by a cell
+    /// that holds no reference, so only a stamped image's anchor is parked.
+    minted_cell: bool = false,
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: union(enum) {
         live,
@@ -118,8 +196,14 @@ const ModuleImage = struct {
         // nothing, so minting here would grow live memory with every
         // re-registration for a cell no word ever names.
         const result = try allocator.create(ModuleImage);
+        const anchor = allocator.create(RefAnchor) catch |err| {
+            allocator.destroy(result);
+            return err;
+        };
+        anchor.* = .{ .park = .{ .image = result } };
         result.allocator = allocator;
-        result.refs = .init(1);
+        result.anchor = anchor;
+        result.minted_cell = false;
         result.environment = env.Environment.init(allocator, releases);
         result.scope = env.Scope.moduleRoot(allocator, &result.environment);
         result.initial_state = &.{};
@@ -130,26 +214,34 @@ const ModuleImage = struct {
     }
 
     fn retain(self: *ModuleImage) void {
-        const old = self.refs.fetchAdd(1, .monotonic);
+        const old = self.anchor.refs.fetchAdd(1, .monotonic);
         std.debug.assert(old != 0 and old != std.math.maxInt(u32));
     }
 
-    /// Reading `refs` here is safe only because a stamped image's header
-    /// outlives its contents; see `tryAcquire`.
+    /// Reachable only from a caller that already holds this image alive, since
+    /// the home it goes through is embedded in the image. A borrow that starts
+    /// from a scope cell must acquire the *anchor* directly instead: the cell
+    /// outlives the image, so routing through the image would dereference
+    /// freed memory to find the count.
     fn tryRetain(self: *ModuleImage) bool {
-        return tryAcquire(&self.refs);
+        return self.anchor.tryRetain();
     }
 
     fn release(self: *ModuleImage) void {
-        const old = self.refs.fetchSub(1, .release);
+        const old = self.anchor.refs.fetchSub(1, .release);
         std.debug.assert(old != 0);
         if (old != 1) return;
-        _ = self.refs.load(.acquire);
+        _ = self.anchor.refs.load(.acquire);
         // Before any teardown step, so a quotation labelled with this image
         // reads a definite `retired` and never a scope under teardown. The
         // embedded scope's own teardown takes the cell with the same swap, so
         // exactly one of the two paths drops the owner reference.
-        if (self.scope.label_cell.swap(null, .acq_rel)) |cell| cell.retire();
+        if (self.scope.label_cell.swap(null, .acq_rel)) |cell| {
+            cell.retire();
+            // A cell outlives this image and names its anchor without holding
+            // a reference, so the anchor must survive the image.
+            self.minted_cell = true;
+        }
         self.retirement_state = if (self.initial_state.len == 0)
             .{ .scope = .init(&self.scope) }
         else
@@ -188,7 +280,29 @@ const ModuleImage = struct {
             },
             .environment => |*environment| {
                 if (!environment.advance()) return false;
+                // The image is destroyed in full, exactly as before: contents,
+                // embedded Environment and Scope, and the allocation. Only the
+                // anchor's fate is conditional.
+                const anchor = self.anchor;
+                const stamped = self.minted_cell;
                 allocator.destroy(self);
+                if (!stamped) {
+                    // Nothing ever named this image, so nothing can observe the
+                    // anchor going away. This is the path every registry-level
+                    // registration takes.
+                    allocator.destroy(anchor);
+                    return true;
+                }
+                // `refs` stays readable and CAS-able at zero, so a borrow that
+                // reaches this anchor from a scope cell fails its acquire
+                // rather than faulting. Freed by the host walk at the end of
+                // `Session.deinit`: valid until the final host teardown walk,
+                // which runs after execution has provably stopped, because
+                // `scheduler.deinit` is the first thing that teardown does.
+                // The image is gone, so its pointer in the anchor is dead
+                // space; the parked link takes that word.
+                anchor.park = .{ .next = null };
+                releases.parkTombstone(@ptrCast(&anchor.park));
                 return true;
             },
         };
@@ -875,6 +989,59 @@ test "modules: an image's registration-less home is reachable from its own root 
         @as(?*ModuleHome, null),
         homeForModuleRootScope(&session_scope),
     );
+}
+
+test "modules: a stamped retired image leaves one anchor and an unstamped one leaves nothing" {
+    // Registry-level rather than Session-level, and every sample is taken after
+    // an explicit drain to quiescence. A Session-level version of this measured
+    // 52KB per cycle against an expected 40 bytes: it was sampling deferred
+    // retirement backlog, not settled memory. Absolute settled-memory bounds
+    // are only assertable where the drains are controllable.
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var host = heap.HostOwner.init(allocator);
+        const releases = host.domain();
+        var container = try env.Env.init(host.cleanup());
+
+        const rounds = 64;
+
+        // An image nothing ever stamped is destroyed in full, anchor included.
+        host.cleanup().drain();
+        const unstamped_base = counting.total_requested_bytes;
+        for (0..rounds) |_| {
+            const image = try ModuleImage.create(allocator, releases);
+            image.release();
+            host.cleanup().drain();
+        }
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            counting.total_requested_bytes -| unstamped_base,
+        );
+
+        // A stamped image mints its cell exactly as `moduleOwned` does, and
+        // leaves precisely that cell plus its parked anchor behind.
+        const stamped_base = counting.total_requested_bytes;
+        for (0..rounds) |_| {
+            const image = try ModuleImage.create(allocator, releases);
+            _ = try container.scopeIdFor(&image.scope);
+            image.release();
+            host.cleanup().drain();
+        }
+        const stamped_growth = counting.total_requested_bytes -| stamped_base;
+        const per_cycle = @sizeOf(RefAnchor) + @sizeOf(env.ScopeCell);
+        // Directory pages are installed in blocks, so they are slack above the
+        // per-cycle floor rather than part of it. The floor is the assertion
+        // that matters: reintroducing in-place header parking would put
+        // @sizeOf(ModuleImage) per cycle here instead of an anchor.
+        try std.testing.expect(stamped_growth >= rounds * per_cycle);
+        try std.testing.expect(stamped_growth <= rounds * per_cycle + 8192);
+
+        container.deinit();
+        host.cleanup().reclaimTombstones(destroyParkedAnchor);
+        host.cleanup().drain();
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
 }
 
 /// Opaque observation capability owning one registration reference.

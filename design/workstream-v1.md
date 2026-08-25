@@ -2687,9 +2687,16 @@ INTERPRETER.md and its entry here is retired.
       events. The very next call after any relevant publication must miss or
       heal before execution; an old frame that already owns its generation may
       finish, but no cache may dispatch a new call through superseded code.
-      Invalidation releases cached capabilities through bounded retirement and
-      settled memory is bounded by live execution views/call sites, not reload
-      history.
+      Invalidation releases cached capabilities through bounded retirement, and
+      settled cache memory is bounded by live execution views/call sites, not
+      reload history. Retired *stamped* images are the one deliberate exception:
+      each leaves one never-reclaimed scope cell and one parked 16-byte
+      `RefAnchor`, so that residue does grow with reload history, bounded at
+      2^24 images per session. An image no source was stamped against leaves
+      nothing. The two retention soaks are the oracle for this bound and their
+      constants are not adjustable: in-place header parking was measured at 394
+      bytes per stamped reload and failed one of them by 14212 bytes, while the
+      anchor clears it by 17532.
     - Measure only ReleaseSafe and the intended release mode, never Debug. The
       corpus compares cold and warm calls for a top-level trivial word,
       `module.word`, an unqualified word reached through `import`, and a local call
