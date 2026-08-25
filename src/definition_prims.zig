@@ -325,7 +325,7 @@ fn resolveForReflection(
 fn installLookup(evaluator: *Machine, requested: u32) MachineError!void {
     try evaluator.startDriver(LookupDriver{
         .requested = requested,
-        .resolution = .init(machine.ResolutionCursor.init(evaluator, requested, evaluator.unit.current.?.resolutionScope())),
+        .resolution = .init(machine.ResolutionCursor.init(evaluator, requested, evaluator.unit.current.?.resolutionScope(), null)),
     });
 }
 const LookupDriver = struct {
@@ -378,7 +378,7 @@ const WhichDriver = struct {
     fn init(evaluator: *Machine, requested: u32) WhichDriver {
         return .{
             .requested = requested,
-            .resolution = .init(machine.ResolutionCursor.init(evaluator, requested, evaluator.unit.current.?.resolutionScope())),
+            .resolution = .init(machine.ResolutionCursor.init(evaluator, requested, evaluator.unit.current.?.resolutionScope(), null)),
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
         };
     }
@@ -502,7 +502,7 @@ const SeeDriver = struct {
     fn init(evaluator: *Machine, requested: u32) SeeDriver {
         return .{
             .requested = requested,
-            .resolution = .init(machine.ResolutionCursor.init(evaluator, requested, evaluator.unit.current.?.resolutionScope())),
+            .resolution = .init(machine.ResolutionCursor.init(evaluator, requested, evaluator.unit.current.?.resolutionScope(), null)),
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
         };
     }

@@ -773,15 +773,68 @@ test "concurrency: applying an escaped quotation races reload and removal" {
 // load-bearing: the TSan and 8-worker tiers select on it.
 
 test "concurrency: a resolver racing an image's last release never dereferences its scope" {
-    // Patch 5 implements this. It must fail against an implementation that pins
-    // only at the end of resolution, not merely against one with no pin at all.
-    return error.SkipZigTest;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var runtime = try session.Session.initWithConfig(
+            allocator,
+            &.{},
+            .{ .worker_pool = 4 },
+        );
+        defer runtime.deinit();
+        // The quotation escapes its module, so its words are stamped against an
+        // image nothing holds. Tasks apply it while `unmodule` drives that image
+        // to its last release underneath them.
+        //
+        // This is the test that separates this design from the one it replaced.
+        // Pinning at the *end* of resolution leaves the window open: the borrow
+        // reads the cell's scope, the last release frees the environment, and
+        // the walk is already inside it. Pinning at the borrow closes it, so
+        // every task either runs the old code or fails `'domain` -- never both
+        // and never neither.
+        try expectOk(
+            &runtime,
+            "((1) 'k def ((k)) 'q def) 'goner @defm goner.q 'gone set",
+        );
+        try expectStack(
+            &runtime,
+            "[1] 64 take (pop ((gone call) @attempt) @spawn) each " ++
+                "'goner unmodule await-all pop",
+            "",
+        );
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
 }
 
 test "concurrency: a resolver racing environment teardown resolves without a dereference" {
-    // Patch 5 implements this, driving the release domain rather than calling
-    // `TeardownCursor.init` directly.
-    return error.SkipZigTest;
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var runtime = try session.Session.initWithConfig(
+            allocator,
+            &.{},
+            .{ .worker_pool = 4 },
+        );
+        defer runtime.deinit();
+        // Reload rather than removal, so the *old* image's environment tears
+        // down through the release domain while tasks are still applying a
+        // quotation stamped against it. Teardown is driven by the domain, not by
+        // a direct call, which is the only way the waiting state is reached.
+        try expectOk(
+            &runtime,
+            "((1) 'k def ((k)) 'q def) 'reloaded @defm reloaded.q 'held set",
+        );
+        try expectStack(
+            &runtime,
+            "[1] 64 take (pop ((held call) @attempt) @spawn) each " ++
+                "((2) 'k def) 'reloaded @defm await-all pop",
+            "",
+        );
+        // The replacement is what callers now reach; the escaped quotation went
+        // on meaning what it meant, for as long as anything held it.
+        try expectStack(&runtime, "reloaded.k", "2");
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
 }
 
 test "concurrency: within through a foreign word is domain and writes no slot" {

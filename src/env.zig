@@ -596,21 +596,34 @@ pub const Environment = struct {
     pub const TeardownCursor = struct {
         target: *Environment,
         state: union(enum) {
+            waiting_for_readers,
             shapes: ?*Shape,
             cells: poll.ChunkList(*BindingCell).Iterator,
             storage,
             complete,
         },
 
+        /// Starts in `waiting_for_readers` rather than asserting quiescence.
+        ///
+        /// The retain-before-dereference order should make a live shape reader
+        /// here unreachable: a borrow acquires the image before it touches the
+        /// scope, so an environment only reaches teardown once its image has no
+        /// references left. This wait is defence, not the argument. An assert
+        /// would be the worst of both -- it neither prevents the race nor
+        /// survives ReleaseFast, where it compiles away.
         pub fn init(target: *Environment) TeardownCursor {
-            std.debug.assert(target.shapes.quiescent());
-            const shapes = target.shapes.currentOwned();
-            target.shapes.publish(null);
-            return .{ .target = target, .state = .{ .shapes = shapes } };
+            return .{ .target = target, .state = .waiting_for_readers };
         }
 
         pub fn advance(self: *TeardownCursor) bool {
             return switch (self.state) {
+                .waiting_for_readers => result: {
+                    if (!self.target.shapes.quiescent()) break :result false;
+                    const shapes = self.target.shapes.currentOwned();
+                    self.target.shapes.publish(null);
+                    self.state = .{ .shapes = shapes };
+                    break :result false;
+                },
                 .shapes => |shapes| result: {
                     if (shapes) |first|
                         self.target.releases.retire(first, &first.retirement);
@@ -1071,6 +1084,14 @@ pub const Scope = struct {
 
         pub fn advance(self: *EmbeddedTeardownCursor) bool {
             return switch (self.state) {
+                // Waits on `scope.refs` alone, and that is sufficient rather
+                // than an oversight. A shape lease is not counted here, but a
+                // shape reader can only have reached this scope through a
+                // borrow that acquired the image first, and an image with a live
+                // reference never reaches retirement -- so by the time this runs,
+                // no shape reader on this scope can exist. The environment's own
+                // cursor waits on shape quiescence anyway, which is where a
+                // reader would be caught if that reasoning were ever falsified.
                 .waiting_for_children => result: {
                     if (self.scope.refs.load(.acquire) != 1) break :result false;
                     self.state = .{ .retiring = self.scope.retireCursor() };
@@ -1364,12 +1385,44 @@ pub const ScopeResolution = union(enum) {
     /// a terminal phase rather than a link in any chain, so no `Scope` denotes
     /// it and a primitive or embedded-prelude word names this instead.
     core,
-    scope: *Scope,
+    /// A live cell. The scope is deliberately not handed over here: reaching it
+    /// requires a `Liveness` proof, because a cell names its image without
+    /// holding it and the bare pointer was exactly the unsound borrow.
+    cell: *ScopeCell,
+};
+
+/// Proof that a borrowed scope stays alive for the duration of the borrow.
+///
+/// Three arms and no fourth. The type exists so that obtaining a `*Scope` from
+/// a cell is impossible without having decided which one applies -- the defect
+/// being fixed is precisely that `scopeOf` used to hand out a pointer nobody
+/// held.
+pub const Liveness = union(enum) {
+    /// The running activation already holds this image, proven by comparing its
+    /// anchor against the cell's. Zero atomic cost, and the common case: a
+    /// module body executing its own words.
+    activation_held,
+    /// A reference was acquired for this borrow and is held for at least as
+    /// long as the scope pointer is used.
+    fresh_pin,
+    /// The cell names no image. A session root or an `@attempt` child scope is
+    /// owned by the activation or session performing the read and cannot be
+    /// retired underneath it, so this arm is today's read, unchanged. Those
+    /// lifetimes are deliberately outside this design.
+    non_image,
 };
 
 pub const ScopeCell = struct {
     id: ScopeId,
     scope: std.atomic.Value(?*Scope) = .init(null),
+    /// The image owner this cell names, opaque here on purpose: `env` never
+    /// dereferences it and holds no dependency on `modules`. Null for every
+    /// cell that names no image -- the session root, an `@attempt` child scope,
+    /// and the embedded core cell -- which is what selects `Liveness.non_image`.
+    ///
+    /// It outlives the image, so it stays readable after retirement; that is the
+    /// whole reason the borrow tests the owner rather than the scope.
+    owner: std.atomic.Value(?*anyopaque) = .init(null),
     /// Core is a terminal resolution phase rather than a link in any chain, so
     /// it has no `Scope` to point at. One embedded cell carries this instead,
     /// and a primitive or embedded-prelude literal labels against it.
@@ -1377,6 +1430,27 @@ pub const ScopeCell = struct {
 
     pub fn publish(self: *ScopeCell, scope: *Scope) void {
         self.scope.store(scope, .release);
+    }
+
+    /// Publishes a cell that names an image owner. Ordered so the owner is
+    /// visible before the scope: a reader that sees the scope must already be
+    /// able to see what to acquire before touching it.
+    pub fn publishOwned(self: *ScopeCell, scope: *Scope, owner: *anyopaque) void {
+        self.owner.store(owner, .release);
+        self.scope.store(scope, .release);
+    }
+
+    /// The image owner, or null when this cell names none.
+    pub fn ownerHandle(self: *const ScopeCell) ?*anyopaque {
+        return self.owner.load(.acquire);
+    }
+
+    /// The borrowed scope, obtainable only against a liveness proof. The proof
+    /// is not inspected -- it cannot be, since `env` does not know what an
+    /// owner is -- so it documents and gates rather than validates. Its value is
+    /// that no caller reaches a scope without having stated why that is safe.
+    pub fn scopeUnder(self: *const ScopeCell, _: Liveness) ?*Scope {
+        return self.scope.load(.acquire);
     }
 
     /// Marks the cell as naming nothing, which is what a word written in a
@@ -1563,6 +1637,19 @@ pub const Env = enum(usize) {
         return (try self.scopeCell(scope)).id;
     }
 
+    /// The same, for a scope owned by a module image. `owner` is stored opaque
+    /// and never dereferenced here; it is what lets a borrow acquire the image
+    /// before reading the scope, and what stays readable once the image is gone.
+    pub fn scopeIdForOwned(
+        self: *Env,
+        scope: *Scope,
+        owner: *anyopaque,
+    ) error{OutOfMemory}!ScopeId {
+        const cell = try self.scopeCell(scope);
+        cell.owner.store(owner, .release);
+        return cell.id;
+    }
+
     /// The cell a primitive or embedded-prelude definition labels against.
     /// It never retires: core lives for the `Env`'s lifetime.
     pub fn coreCell(self: *Env) *ScopeCell {
@@ -1619,7 +1706,11 @@ pub const Env = enum(usize) {
         if (id == .none) return .unscoped;
         const cell = self.privateState().scopes.get(id) orelse return .retired;
         if (cell.core) return .core;
-        return if (cell.scope.load(.acquire)) |scope| .{ .scope = scope } else .retired;
+        // A cleared scope is a definite retirement. A live one is handed over as
+        // the cell, not as the pointer: the caller has to prove liveness before
+        // it can read the scope out.
+        if (cell.scope.load(.acquire) == null) return .retired;
+        return .{ .cell = cell };
     }
 
     pub fn coreView(self: *const Env) EnvironmentView {

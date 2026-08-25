@@ -237,23 +237,45 @@ primitives, operationalized as two rules:
   unit is one REPL line, one script, or one task. And the cell-to-image edge is
   immutable, which is what the earlier revisions lacked: a cell re-pointed at
   whatever slot recycled into its id is exactly where the ABA hazard came from.
-  **That pin is necessary and not yet sufficient, and this is the open gap.** It
-  is acquired at the end of resolution, while the borrow begins at `scopeOf`'s
-  bare load, leaving three windows in which nothing holds the image: between the
-  load and `DirectLookupCursor` acquiring its `ShapeLease`, during the walk
-  itself — `Environment.TeardownCursor.init` asserts `shapes.quiescent()` rather
-  than waiting, and `EmbeddedTeardownCursor` waits only on `scope.refs`, which a
-  shape lease is not — and at the retain, since `ModuleImage.retain` is an
-  unconditional `fetchAdd` that asserts on a zero refcount in safe builds and
-  resurrects a destroyed object in ReleaseFast. Closing them does not need an
-  epoch scheme: `ModuleImage.release` already clears the cell before any
-  teardown step, so a borrow that *conditionally* retains before dereferencing
-  the scope discards a stale pointer without ever reading it. What that requires
-  is for the image header to remain valid memory to compare-and-swap on, which
-  means retirement freeing an image's contents while the `Env` owns its header
-  until teardown — the same ownership rule scope cells already follow, and the
-  reason the cost below is stated per header rather than per cell. Until that
-  lands, no claim that dispatch keeps an image alive is warranted.
+  **The order is what makes the borrow safe: acquire, then dereference.** A
+  `ScopeCell` names its image's `RefAnchor` without holding it, so a resolver
+  that has just read the cell may be racing that image's last release. Because
+  `ModuleImage.release` clears the cell *before* any teardown step, a borrow that
+  conditionally acquires the anchor before touching the scope hands a loser a
+  failed compare-and-swap on a pointer it never read. No epoch scheme and no
+  lease protocol, and it works for an anonymous image, which has no publisher to
+  lease and therefore could not use the protocol an earlier revision deleted.
+  Reading a dead anchor's refcount at all is safe only because the anchor
+  outlives the image it counted.
+  `scopeOf` therefore hands back the cell rather than the scope, and the scope is
+  reachable only against a `Liveness` proof with exactly three arms.
+  *Activation-held* is a pointer compare of the cell's anchor against the running
+  activation's: the activation's own pin is what keeps that image alive, so this
+  costs no atomic and covers the common case of a module body executing its own
+  words. *Fresh pin* is the conditional acquire, whose failure is a definite
+  `'domain` and never a fallback. *Non-image* is a cell that names no image — a
+  session root or an `@attempt` child scope, owned by the activation or session
+  performing the read — which is today's read, deliberately untouched. The type
+  exists so that no caller can reach a scope without having stated which of the
+  three applies; the defect being fixed was precisely a pointer handed out with
+  nobody holding it.
+  One pin per dispatch, not two. The borrow's reference rides the resolution
+  cursor into the resolution and is *consumed* by `scheduleWord`'s existing pin
+  site rather than prompting a second acquire, so the count of pins per dispatch
+  is what it was before this change and only the instruction differs — a
+  compare-and-swap in place of a `fetchAdd`.
+  The necessity of all this is asserted deterministically rather than
+  stochastically, and that is a finding rather than a convenience. Racing a
+  resolver against a last release from ECL cannot discriminate a correct borrow
+  from a misplaced one, because four mechanisms already narrow the window to
+  instruction scale that no ECL-level yield can land inside: `unmodule` quiesces
+  the slot before retiring, a live module value legitimately holds its image, the
+  walk's `ShapeLease` together with the environment teardown wait covers the
+  lookup, and `scheduleWord`'s pin covers the frame. So a registry-level pair in
+  `modules.zig` states it as an API fact instead — borrow, drop the last external
+  reference, drain to quiescence, and the contents are still there; the identical
+  drop with no borrow reclaims them. The interleaving tests remain, demoted to a
+  TSan backstop.
   Because the home is `construction_home`, a stamped word runs with no
   registration. That is the design and not a shortfall: an escaped quotation
   owns no slot, and for an image registered under several names there is no fact

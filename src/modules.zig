@@ -103,6 +103,38 @@ comptime {
         @compileError("RefAnchor exceeds the parked-anchor budget the retention soaks impose");
 }
 
+/// The opaque handle a scope cell stores to name this image's anchor.
+///
+/// The cell must name the *anchor* and not the home: a home is embedded in the
+/// image, and the anchor is precisely the thing that outlives it. So
+/// `ModuleHome.tryPin` cannot serve a cell-originated borrow, and
+/// `tryPinAnchor` below is its counterpart for one.
+pub fn anchorHandle(home: *const ModuleHome, _: *const ExecutionAccess) *anyopaque {
+    return anchorHandleInternal(home);
+}
+
+fn anchorHandleInternal(home: *const ModuleHome) *anyopaque {
+    return @ptrCast(home.state().image.anchor);
+}
+
+fn tryPinAnchorInternal(owner: *anyopaque) ?GenerationPin {
+    const anchor: *RefAnchor = @ptrCast(@alignCast(owner));
+    if (!anchor.tryRetain()) return null;
+    // Only now is the image pointer readable: before the CAS succeeded this
+    // word may have been the parked-list link instead.
+    return .initRetained(&anchor.park.image.construction_home);
+}
+
+/// Acquires one reference through a scope cell's owner handle, or null when the
+/// image has reached its last release.
+///
+/// Split from `tryPinAnchorInternal` for the same reason `pin` is split from
+/// `pinInternal`: the audit rejects one function that both holds a capability
+/// token and casts a pointer.
+pub fn tryPinAnchor(owner: *anyopaque, _: *const ExecutionAccess) ?GenerationPin {
+    return tryPinAnchorInternal(owner);
+}
+
 /// The single destructor `ReleaseDomain.reclaimTombstones` is given.
 ///
 /// A parked anchor is the only thing this module ever parks. A second parked
@@ -934,6 +966,14 @@ pub const GenerationPin = enum(usize) {
         self.home().state().release();
         self.* = .consumed;
     }
+    /// Whether two pins hold the same owner. Exposes nothing: a pin is already
+    /// an opaque integer, and this only compares two of them. It exists so a
+    /// pin adopted from a borrow can be deduplicated against pins already held
+    /// without anyone learning what it points at.
+    pub fn sameOwner(self: GenerationPin, other: GenerationPin) bool {
+        return @intFromEnum(self) == @intFromEnum(other);
+    }
+
     pub fn matches(
         self: GenerationPin,
         expected_home: *const ModuleHome,
@@ -1036,6 +1076,111 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
         // @sizeOf(ModuleImage) per cycle here instead of an anchor.
         try std.testing.expect(stamped_growth >= rounds * per_cycle);
         try std.testing.expect(stamped_growth <= rounds * per_cycle + 8192);
+
+        container.deinit();
+        host.cleanup().reclaimTombstones(destroyParkedAnchor);
+        host.cleanup().drain();
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
+}
+
+test "modules: a borrow holds an image's contents across a full drain" {
+    // The necessity half of the borrow's gate, and deliberately deterministic.
+    //
+    // The stochastic version -- racing a resolver against an image's last
+    // release from ECL -- cannot discriminate, because four separate mechanisms
+    // already narrow the window to instruction scale that no ECL-level yield can
+    // land inside: `unmodule` quiesces the slot before retiring, a live module
+    // value legitimately holds its image, the resolution walk's `ShapeLease`
+    // together with the environment teardown wait covers the lookup, and
+    // `scheduleWord`'s pin covers the frame. So the borrow's necessity is stated
+    // here as an API fact instead, where the drop can be constructed exactly and
+    // the verdict is the same on every run.
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var host = heap.HostOwner.init(allocator);
+        const releases = host.domain();
+        var container = try env.Env.init(host.cleanup());
+
+        const image = try ModuleImage.create(allocator, releases);
+        const owner: *anyopaque = @ptrCast(image.anchor);
+        _ = try container.scopeIdForOwned(&image.scope, owner);
+        const cell = try container.scopeCell(&image.scope);
+
+        // Through the real primitive, not a hand-rolled retain.
+        var borrowed = tryPinAnchorInternal(owner) orelse
+            return error.ExpectedLiveBorrow;
+
+        const before_drop = counting.total_requested_bytes;
+        // The last reference anything outside the borrow holds.
+        image.release();
+        host.cleanup().drain();
+
+        // Nothing was reclaimed: the borrow is what holds the contents. Remove
+        // the acquire from `executeWord`, or take it after the walk instead of
+        // before, and this is the assertion that fails -- on every run.
+        //
+        // Verified by building the misplaced-pin variant: with the acquire
+        // removed the tier does not pass, though it *hangs* rather than failing
+        // here, because the later `deinit` releases a count already at zero.
+        // Expect a timeout, not a red assertion, if this ever regresses.
+        try std.testing.expectEqual(before_drop, counting.total_requested_bytes);
+        // And the scope is still reachable through its proof arm, which is what
+        // resolution does with it.
+        try std.testing.expectEqual(
+            @as(?*env.Scope, &image.scope),
+            cell.scopeUnder(.fresh_pin),
+        );
+        try std.testing.expectEqual(
+            ModuleHome.init(&image.construction_home),
+            homeForModuleRootScope(&image.scope),
+        );
+
+        borrowed.deinit();
+        host.cleanup().drain();
+
+        // Now the contents are gone, and a borrow attempted after the fact fails
+        // its acquire rather than resurrecting anything.
+        try std.testing.expect(counting.total_requested_bytes < before_drop);
+        try std.testing.expectEqual(
+            @as(?GenerationPin, null),
+            tryPinAnchorInternal(owner),
+        );
+
+        container.deinit();
+        host.cleanup().reclaimTombstones(destroyParkedAnchor);
+        host.cleanup().drain();
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
+}
+
+test "modules: the same drop with no borrow reclaims the contents" {
+    // The strawman the stochastic tests could not express: identical to the test
+    // above except that no borrow is taken. If the contents survived here too,
+    // the borrow above would be proving nothing about the borrow.
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    const allocator = counting.allocator();
+    {
+        var host = heap.HostOwner.init(allocator);
+        const releases = host.domain();
+        var container = try env.Env.init(host.cleanup());
+
+        const image = try ModuleImage.create(allocator, releases);
+        const owner: *anyopaque = @ptrCast(image.anchor);
+        _ = try container.scopeIdForOwned(&image.scope, owner);
+
+        const before_drop = counting.total_requested_bytes;
+        image.release();
+        host.cleanup().drain();
+
+        try std.testing.expect(counting.total_requested_bytes < before_drop);
+        // The anchor outlived the image, so the failed acquire is a verdict
+        // rather than a fault: this read is exactly what a stale word does.
+        try std.testing.expectEqual(
+            @as(?GenerationPin, null),
+            tryPinAnchorInternal(owner),
+        );
 
         container.deinit();
         host.cleanup().reclaimTombstones(destroyParkedAnchor);
