@@ -96,11 +96,7 @@ const ModuleImage = struct {
         // reads a definite `retired` and never a scope under teardown. The
         // embedded scope's own teardown takes the cell with the same swap, so
         // exactly one of the two paths drops the owner reference.
-        // Same rule as the scope teardown: a followed cell belongs to the name
-        // and the slot retires it, so a superseded generation must not.
-        if (self.scope.label_cell.swap(null, .acq_rel)) |cell| {
-            if (cell.follows.load(.acquire) == null) cell.retire();
-        }
+        if (self.scope.label_cell.swap(null, .acq_rel)) |cell| cell.retire();
         self.retirement_state = if (self.initial_state.len == 0)
             .{ .scope = .init(&self.scope) }
         else
@@ -535,19 +531,6 @@ const InventoryEntry = enum(usize) {
 /// storage may represent a later registration only after every witness drains.
 const ModuleSlot = struct {
     publisher: GenerationPublisher = .init(null),
-    /// The scope of this name's current generation. Cells that a published
-    /// generation handed over read it directly, so a word that escaped an
-    /// older generation follows the name forward instead of pinning to the
-    /// image it was written in.
-    current_scope: std.atomic.Value(?*env.Scope) = .init(null),
-    /// The cells that follow this slot. They outlive their own images -- that
-    /// is the point -- so the slot owns them and retires them with itself.
-    /// One per published generation of this name.
-    followers: std.ArrayList(*env.ScopeCell) = .empty,
-    /// The one cell this *name* has ever used. Fixed at first adoption and
-    /// re-pointed by every later generation, so hot reload mints no cell per
-    /// generation and repeated re-registration does not grow live memory.
-    canonical_cell: ?*env.ScopeCell = null,
     inventory: InventoryEntry,
     /// Owned witnesses held by published generations, cursors, and
     /// arbiter turns. The registry owns the allocation itself; recycling is
@@ -576,85 +559,10 @@ const ModuleSlot = struct {
 
     const Phase = enum(u8) { live, closing, retired };
 
-    /// Drops this name's current scope and every cell that followed it. Both
-    /// retirement paths reach it, and it is idempotent because the list is
-    /// emptied.
-    fn retireFollowers(self: *ModuleSlot) void {
-        self.current_scope.store(null, .release);
-        for (self.followers.items) |cell| cell.retire();
-        self.followers.deinit(self.allocator);
-        self.followers = .empty;
-    }
-
-    /// Publishes `image`'s scope as this name's current one, and takes over the
-    /// cell the image stamped its words against. The image may now retire
-    /// without invalidating anything written in it: its cell reads the slot's
-    /// pointer, which the next generation replaces. Runs under the registry
-    /// writer lock, where nothing may fail: the caller reserves follower
-    /// capacity with `reserveFollower` before taking the lock.
-    fn adoptScope(self: *ModuleSlot, image: *ModuleImage) void {
-        // The cell stays on the image scope. The anchor check finds a word's
-        // written scope by walking the activation's live chain and comparing
-        // cell identity, so taking the cell off the scope would make every
-        // module-written word unanchorable and send it to the name's current
-        // generation even from inside its own body.
-        if (self.canonical_cell == null) {
-            if (image.scope.label_cell.load(.acquire)) |cell| {
-                // A cell already following a slot belongs to that slot; a second
-                // registration of one image adopts nothing, so retiring either
-                // name cannot strand the other's words.
-                if (cell.follows.load(.acquire) == null) {
-                    self.followers.appendAssumeCapacity(cell);
-                    cell.follow(&self.current_scope, @ptrCast(self));
-                    self.canonical_cell = cell;
-                }
-            }
-        }
-        // A reload re-points the name's one cell rather than adopting another.
-        self.current_scope.store(&image.scope, .release);
-    }
-
-    /// The fallible half of `adoptScope`, split out so the allocation happens
-    /// before the registry writer lock. An error escaping that lock region
-    /// would deadlock the cursor's own cleanup, which re-takes the lock.
-    fn reserveFollower(self: *ModuleSlot) error{OutOfMemory}!void {
-        try self.followers.ensureUnusedCapacity(self.allocator, 1);
-    }
-
-    /// The scope an escaped quotation's word resolves against when nothing on
-    /// the executing chain anchors it, together with a pin on the generation it
-    /// came from.
-    pub const PinnedScope = struct { scope: *env.Scope, home: *ModuleHome, pin: GenerationPin };
-
-    /// Acquires the followed generation *and retains it* before the publisher
-    /// lease is released, so the scope cannot retire between the read and the
-    /// borrow. Returning null is a definite acquisition-time failure -- the name
-    /// is gone -- rather than a race the caller has to re-check.
-    fn pinFollowed(self: *ModuleSlot) ?PinnedScope {
-        if (self.phase.load(.acquire) != .live) return null;
-        var lease = self.publisher.acquire();
-        const registration = lease.snapshot orelse {
-            _ = lease.deinit();
-            return null;
-        };
-        const home = &@constCast(registration).home;
-        home.retain();
-        _ = lease.deinit();
-        return .{
-            .scope = &registration.image.scope,
-            .home = ModuleHome.init(home),
-            .pin = .initRetained(home),
-        };
-    }
-
     fn resetForReuse(self: *ModuleSlot) void {
         const inventory = self.inventory;
         const allocator = self.allocator;
-        // Reserved follower capacity survives reuse; the list itself is empty
-        // because retirement drained it before the slot was recycled.
-        const followers = self.followers;
-        std.debug.assert(followers.items.len == 0);
-        self.* = .{ .inventory = inventory, .allocator = allocator, .followers = followers };
+        self.* = .{ .inventory = inventory, .allocator = allocator };
         std.debug.assert(inventory.node().slot == self);
     }
 
@@ -663,9 +571,6 @@ const ModuleSlot = struct {
     fn retire(self: *ModuleSlot, releases: *heap.ReleaseDomain) void {
         if (self.phase.load(.acquire) == .retired) return;
         self.phase.store(.retired, .release);
-        // The name is gone, so every word that named it reports retired
-        // rather than following a scope with no registration behind it.
-        self.retireFollowers();
         if (self.publisher.currentOwned()) |generation| {
             self.publisher.publish(null);
             generation.release();
@@ -681,9 +586,6 @@ const ModuleSlot = struct {
         std.debug.assert(self.state.len == 0);
         if (self.phase.load(.acquire) == .retired) return;
         self.phase.store(.retired, .release);
-        // The name is gone, so every word that named it reports retired
-        // rather than following a scope with no registration behind it.
-        self.retireFollowers();
         if (self.publisher.currentOwned()) |generation| {
             self.publisher.publish(null);
             generation.release();
@@ -1294,9 +1196,6 @@ pub const Registry = enum(usize) {
             const next = entry.next;
             const owning = entry.slot;
             std.debug.assert(owning.lease_refs.load(.acquire) == 0);
-            // Retirement drained the followers, but a slot recycled before an
-            // aborted commit may still hold reserved follower capacity.
-            owning.followers.deinit(owning.allocator);
             self.allocator().destroy(owning);
             self.allocator().destroy(entry);
             inventory = next;
@@ -1861,7 +1760,6 @@ pub const Registry = enum(usize) {
                 .fresh => |slot| {
                     // Never published: no followers were adopted, but capacity
                     // may have been reserved for the commit that didn't happen.
-                    slot.followers.deinit(slot.allocator);
                     self.registry.allocator().destroy(slot.inventory.node());
                     self.registry.allocator().destroy(slot);
                 },
@@ -2109,14 +2007,12 @@ pub const Registry = enum(usize) {
                     const slot = self.barrier_turn.?.lease.slot();
                     const retired = self.retired_reservation.?;
                     const registration = self.registration.?;
-                    try slot.reserveFollower();
                     self.registry.lockBlocking();
                     const prior = slot.publisher.currentOwned().?;
                     std.debug.assert(slot.phase.load(.acquire) == .live);
                     retired.* = .{ .generation = prior };
                     registration.generation = prior.generation + 1;
                     registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
-                    slot.adoptScope(registration.image);
                     slot.publisher.publish(self.takeRegistration());
                     const release_prior = slot.publisher.quiescent();
                     if (!release_prior) self.registry.enqueueRetiredGenerationLocked(retired);
@@ -2132,7 +2028,6 @@ pub const Registry = enum(usize) {
                 },
                 .commit_new => |build| result: {
                     const slot = build.slot.get();
-                    try slot.reserveFollower();
                     const next = try self.registry.allocator().create(Directory);
                     self.registry.lockBlocking();
                     if (!self.registry.privateState().directories.isCurrent(build.snapshot.old)) {
@@ -2154,7 +2049,6 @@ pub const Registry = enum(usize) {
                     const registration = self.registration.?;
                     registration.generation = 1;
                     registration.slot_lifetime = .{ .published = SlotLease.retain(slot) };
-                    slot.adoptScope(registration.image);
                     slot.state = build.state;
                     build.state = &.{};
                     slot.publisher.publish(self.takeRegistration());
@@ -2912,40 +2806,3 @@ pub const testing = if (builtin.is_test) struct {
         return poll.drive(?GenerationLease, &cursor, .{});
     }
 } else struct {};
-
-/// The fallback resolution for a word written under a module name that no
-/// activation on the executing chain anchors. This is the only sanctioned way
-/// to read a followed cell's current scope: it pins the generation before the
-/// scope is touched, so the borrow either completes against that generation or
-/// fails at acquisition. The pin confers no home -- `within` stays `'domain`
-/// for an escaped-quotation call, and privacy and diagnostics are unchanged.
-/// The scope cell a live registration of `symbol` already uses, if any. A
-/// `@defm` that will replace an existing generation stamps its construction
-/// against this cell rather than minting one, which is what keeps repeated hot
-/// reload from growing live memory. Read from the current directory snapshot
-/// without the writer lock; null covers an invalid name, an unregistered one,
-/// a retired slot, and a slot that never adopted a cell.
-pub fn peekNameCell(registry: *const Registry, symbol: u32) ?*env.ScopeCell {
-    const name = intern.moduleName(symbol) catch return null;
-    const current = registry.privateState().directories.currentOwned() orelse return null;
-    var lookup = current.modules.rawLookup(name);
-    const slot = poll.drive(?*ModuleSlot, &lookup, .{}) orelse return null;
-    if (slot.phase.load(.acquire) != .live) return null;
-    return slot.canonical_cell;
-}
-
-/// The erased owner a followed cell carries is always a slot: `ScopeCell.follow`
-/// is only ever called with one. Kept separate from the capability-taking entry
-/// below so no production function both accepts an `ExecutionAccess` and casts
-/// a raw pointer.
-fn slotFromFollowOwner(owner: *anyopaque) *ModuleSlot {
-    return @ptrCast(@alignCast(owner));
-}
-
-pub fn pinFollowedScope(
-    cell: *const env.ScopeCell,
-    _: *const ExecutionAccess,
-) ?ModuleSlot.PinnedScope {
-    const owner = cell.followOwner() orelse return null;
-    return slotFromFollowOwner(owner).pinFollowed();
-}

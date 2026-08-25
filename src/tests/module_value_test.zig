@@ -593,60 +593,29 @@ test "module values: a pushed quotation resolves in the image it was written in"
     try expectStack(&runtime, "held call", "1");
 }
 
-test "module values: an escaped quotation tracks its module across reload and ends with it" {
+test "module values: an escaped quotation names the image it was written in" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    // A word written in a module body names the module, not the image that
-    // happened to publish it, so a reload re-points a quotation that escaped
-    // earlier exactly as it re-points `m.f`. Pinning would make a reload
-    // silently invalidate every escaped quotation, which is the opposite of
-    // what hot reload is for.
-    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'reloaded @defm reloaded.q 'kept set");
-    try expectStack(&runtime, "kept call", "1");
-    try expectOk(&runtime, "((2) 'k def ((k)) 'q def) 'reloaded @defm");
-    try expectStack(&runtime, "kept call", "2");
-
-    // Removing the name is what ends it, and the failure is definite rather
-    // than a fallback to core or to the launcher, which would change what the
-    // quotation's words mean.
-    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'going @defm going.q 'held set");
+    // A word written in a module body names that image. A quotation that
+    // escaped it goes on meaning what it meant, for as long as anything still
+    // holds the image -- redefinition reaches future calls, not code that
+    // already exists.
+    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'held-name @defm held-name.q 'held set");
     try expectStack(&runtime, "held call", "1");
-    try expectOk(&runtime, "'going unmodule");
+
+    // Replacing the name publishes a new image. Fresh calls through the name
+    // get the new code, which is the whole of what the REPL needs.
+    try expectOk(&runtime, "((2) 'k def ((k)) 'q def) 'held-name @defm");
+    try expectStack(&runtime, "held-name.q call", "2");
+
+    // The quotation held from the replaced generation is not re-pointed to the
+    // new image. Once nothing holds the old one, applying it says so rather
+    // than silently changing meaning.
     try expectErrorContains(&runtime, "held call", &.{ "'kind 'domain", "retired" });
-}
 
-// PENDING: Patch 2 anchors a module-written word to the generation its
-// activation entered. Flip to false there.
-const anchor_pending = false;
-
-test "module values: an escaped quotation applied inside another module follows the name" {
-    if (anchor_pending) return error.SkipZigTest;
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
-    defer runtime.deinit();
-    // Nothing on the applying activation's chain was written in `source`, so
-    // the word falls through to the name's current generation -- Erlang's
-    // fully-qualified call rather than its local one.
-    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'source @defm source.q 'held set");
-    try expectOk(&runtime, "((|q| q call) 'apply def) 'other @defm");
-    try expectStack(&runtime, "held other.apply", "1");
-    try expectOk(&runtime, "((2) 'k def ((k)) 'q def) 'source @defm");
-    try expectStack(&runtime, "held other.apply", "2");
-}
-
-test "module values: a generation-crossing quotation anchors to the executing generation" {
-    var runtime = try session.Session.init(std.testing.allocator, &.{});
-    defer runtime.deinit();
-    // A name keeps one scope cell across its generations, so a quotation that
-    // escaped generation 1 and is applied *inside* a generation-2 activation of
-    // the same name anchors to generation 2 -- the innermost enclosing
-    // activation wins, which is the same rule that keeps a body from being
-    // re-pointed under itself.
-    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'gen @defm gen.q 'held set");
-    try expectStack(&runtime, "held call", "1");
-    // The escaped quotation is handed to generation 2 as a parameter -- a
-    // module body cannot see a session name -- and applied from inside a
-    // generation-2 activation.
-    try expectOk(&runtime, "held wrap ('esc def (2) 'k def " ++
-        "( -- n ) (esc) 'inside def) with 'gen @defm");
-    try expectStack(&runtime, "gen.inside", "2");
+    // Removal ends it the same way.
+    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'going @defm going.q 'escaped set");
+    try expectStack(&runtime, "escaped call", "1");
+    try expectOk(&runtime, "'going unmodule");
+    try expectErrorContains(&runtime, "escaped call", &.{ "'kind 'domain", "retired" });
 }

@@ -205,8 +205,7 @@ primitives, operationalized as two rules:
   occurrence carries the scope its text was written in — an `env.ScopeId` in
   four payload bytes the 16-byte `Value` already wasted on the `word` variant —
   and `dispatch` resolves in that scope's chain rather than in the running
-  activation's — subject to the anchor rule below, which is what keeps a module
-  body from being re-pointed under itself. That is the separation a closure would otherwise be needed for:
+  activation's. That is the separation a closure would otherwise be needed for:
   `all?` hands `each` its caller's `q` and `fold` its own `(and)` from one
   activation, and the two resolve in different chains because the scope travels
   with each token.
@@ -223,32 +222,30 @@ primitives, operationalized as two rules:
   no macro expansion and its scopes form a parent chain, so a set of chained
   scopes is exactly its innermost member and the chain supplies the rest. That
   reasoning expires if macros ever arrive.
-  A module-written word is anchored, not merely resolved. Dispatch walks the
-  executing activation's own resolution chain and compares each scope's label
-  cell against the cell the word was stamped with; an identity match resolves
-  at that chain position, against the generation the activation entered. Only
-  when nothing on the chain matches does the word fall through to the cell's
-  followed scope — the name's current generation — which is the escaped-
-  quotation case. That is Erlang's split: resolving inside an activation is its
-  local call, entry from outside its fully-qualified one. The DSU literature
-  names the hazard the anchor avoids, rebinding code that is on the activation
-  stack, while taking the opposite remedy of refusing the update until nothing
-  is running it. Smalltalk reaches the same place structurally rather than by
-  policy, since a context holds the compiled method it was activated with.
-  The check compares *identities* and never dereferences the stamped scope. A
-  superseded generation's scope dies with its image, so reading it would be a
-  use-after-free; the cell and its id outlive it, which is what makes the
-  comparison safe. `scheduleWord` already pins the entered generation for the
-  activation's lifetime, so the chain scope the anchor lands on is live by
-  construction — the pin predates this rule and is what it rests on. A pinned
-  generation is therefore exempt from the ordinary retirement bound, which is
-  where ECL diverges from Erlang: Erlang keeps two versions and purges the
-  third, killing whatever still runs it, and ECL simply retains.
+  A module-written word resolves through its image's scope cell, and nothing
+  more elaborate. `scheduleWord` already pins the entered generation for the
+  activation's lifetime, so a running body cannot have its image reclaimed
+  under it — whole-body pinning is a consequence of that pin rather than a rule
+  dispatch has to enforce. An image's cell retires with its scope, so a word
+  from a replaced or removed image resolves to a definite `retired`.
+  There is deliberately no machinery for re-pointing a word at a newer
+  generation. An earlier revision of this branch carried it — cells that
+  followed a registry slot, a per-name canonical cell, a peek at commit time,
+  and an anchor walk over the activation's chain to decide which generation
+  answered — in order to give Erlang's local/qualified split. That split exists
+  to keep a live stateful system running across an in-place upgrade. ECL's
+  requirement is a REPL where redefinition is predictable, and redefinition at
+  a prompt happens between units with nothing suspended, so the cases the
+  machinery adjudicated could not arise in the workflow it served. It was
+  removed along with the four concurrency hazards it carried: an ABA window
+  across slot recycling, an unleased directory traversal, a retain against a
+  zero-refcount registration, and a check-then-act that leaked an unpinned
+  scope.
   Scope ids are never recycled. A word token holds a bare `u32` and takes no
   reference, so a reused id would let a stale token resolve into an unrelated
-  scope — a silent wrong answer, and it is also what makes the anchor check
-  ABA-safe. Ids are issued only for the two roots and for module names, so the
-  space is consumed by registrations rather than by execution. `Env` owns the registry because it owns `Scope`; `modules`
+  scope — a silent wrong answer. Ids are issued only for the two roots and for
+  the images ECL source is stamped against, so the space is consumed by
+  constructions rather than by execution. `Env` owns the registry because it owns `Scope`; `modules`
   owns the lifecycle, and `env.zig` holds no reference to it. A cell is cleared
   before the scope's storage is torn down, so a reader sees the old scope, the
   new one, or a definite retirement, and applying a word whose scope has retired

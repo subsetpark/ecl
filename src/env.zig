@@ -949,24 +949,17 @@ pub const Scope = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: ?RetireCursor.State = null,
 
-    /// Whether this scope is a module image's root, so a diagnostic can name
-    /// the chain a word actually searched rather than the one the running
-    /// activation would have.
-    pub fn isModuleRoot(self: *const Scope) bool {
-        return self.storage == .module_root;
-    }
-
-    /// Whether `inner` is this scope or one nested inside it. A word's scope
-    /// is a lower bound, not the whole answer: when the activation running it
-    /// is already inside a more specific scope on the same chain — an
-    /// `@attempt` child of the unit that wrote the word — that child is where
-    /// it should resolve, because a sibling defined in the same child must be
-    /// visible. Resolution walks parents, so without this a word written
-    /// outside the child could never see anything defined inside it.
+    /// Whether `inner` is this scope or one nested inside it. A word's scope is
+    /// a lower bound: when the activation running it is already inside a more
+    /// specific scope on the same chain -- an `@attempt` child of the unit that
+    /// wrote the word -- that child is where it should resolve, because a
+    /// sibling defined in the same child must be visible. Resolution walks
+    /// parents, so without this a word written outside the child could never
+    /// see anything defined inside it.
     ///
     /// It only ever refines downward within one chain. A module image's scope
     /// has no parent and core denotes no scope at all, so neither is ever an
-    /// ancestor of a session scope and neither case is affected.
+    /// ancestor of a session scope.
     pub fn encloses(self: *Scope, inner: *Scope) bool {
         var current: ?*Scope = inner;
         while (current) |scope| : (current = scope.parent) {
@@ -975,11 +968,11 @@ pub const Scope = struct {
         return false;
     }
 
-    /// Installs an existing cell on this scope, so a construction body anchors
-    /// to the image being built while the cell it names still follows the
-    /// previous generation until commit.
-    pub fn adoptLabelCell(self: *Scope, cell: *ScopeCell) void {
-        self.label_cell.store(cell, .release);
+    /// Whether this scope is a module image's root, so a diagnostic can name
+    /// the chain a word actually searched rather than the one the running
+    /// activation would have.
+    pub fn isModuleRoot(self: *const Scope) bool {
+        return self.storage == .module_root;
     }
 
     /// The label cell for this scope, if anything has needed one yet. The
@@ -1015,13 +1008,11 @@ pub const Scope = struct {
             // as the image's last reference drops, which is earlier than this;
             // whichever path arrives first is the one that drops the owner
             // reference.
-            // A cell that follows a module slot belongs to the *name*, not to
-            // this generation's scope: the slot outlives any one image and owns
-            // its retirement. Retiring it here would kill a live name the
-            // moment one of its superseded generations was reclaimed.
-            if (scope.label_cell.swap(null, .acq_rel)) |cell| {
-                if (cell.follows.load(.acquire) == null) cell.retire();
-            }
+            // The words written in this scope name it and nothing else, so its
+            // cell retires with it. That is what makes applying a quotation
+            // from a replaced image a definite failure rather than a silent
+            // change of meaning.
+            if (scope.label_cell.swap(null, .acq_rel)) |cell| cell.retire();
             const target = if (scope.storage == .isolated)
                 scope.isolated_environment.load(.acquire)
             else
@@ -1359,18 +1350,6 @@ pub const ScopeResolution = union(enum) {
     unscoped,
     /// An id that was issued and whose scope has since been torn down.
     retired,
-    /// A cell a module slot has taken over. `cell` is the identity the anchor
-    /// check compares against the executing activation's chain; `current` is
-    /// the name's present generation, consulted only when nothing on that
-    /// chain matches. Keeping the two apart is the whole of the two-case rule:
-    /// resolving inside an activation of the module must not consult
-    /// `current`, or a body would be re-pointed under itself.
-    /// A cell a module slot has taken over. Only the cell's *identity* is
-    /// handed out: the anchor check compares it against the executing
-    /// activation's chain, and the fallback must go through the module layer's
-    /// `pinFollowedScope`, which pins the generation before the scope is read.
-    /// There is deliberately no scope pointer here to borrow unpinned.
-    followed: *const ScopeCell,
     /// Core alone, which the machine spells as a null resolution scope. Core is
     /// a terminal phase rather than a link in any chain, so no `Scope` denotes
     /// it and a primitive or embedded-prelude word names this instead.
@@ -1379,8 +1358,7 @@ pub const ScopeResolution = union(enum) {
 };
 
 pub const ScopeCell = struct {
-    /// The `Env` this cell is registered in, so the cell can retire itself
-    /// without the caller having to carry the pair.
+    /// The `Env` this cell is registered in.
     owner: Env,
     id: ScopeId,
     scope: std.atomic.Value(?*Scope) = .init(null),
@@ -1388,68 +1366,22 @@ pub const ScopeCell = struct {
     /// it has no `Scope` to point at. One embedded cell carries this instead,
     /// and a primitive or embedded-prelude literal labels against it.
     core: bool = false,
-    /// When set, the cell resolves through this live pointer instead of its own
-    /// `scope`. A module slot publishes its current image's scope through one,
-    /// so a word that escaped generation N follows the *name* to generation
-    /// N+1 rather than pinning to the image it was written in, and reports
-    /// retired once the name is gone. Late binding to module identity, which is
-    /// what `m.f` already does and what a quotation that escaped a module
-    /// should do too.
-    follows: std.atomic.Value(?*std.atomic.Value(?*Scope)) = .init(null),
-    /// The owner that published `follows`, kept opaque so `env` holds no
-    /// reference to `modules`. It is what lets a reader reach the publisher and
-    /// take a generation pin *before* touching the scope; cleared at retirement
-    /// so acquisition afterwards fails definitely rather than racing.
-    follow_owner: std.atomic.Value(?*anyopaque) = .init(null),
 
     pub fn publish(self: *ScopeCell, scope: *Scope) void {
         self.scope.store(scope, .release);
     }
 
-    /// Hands the cell over to a module slot's published scope. From here the
-    /// cell tracks the name rather than the image.
-    pub fn follow(
-        self: *ScopeCell,
-        source: *std.atomic.Value(?*Scope),
-        owner: *anyopaque,
-    ) void {
-        self.follow_owner.store(owner, .release);
-        self.follows.store(source, .release);
-    }
-
-    /// The publisher behind a followed cell, or null once it has retired.
-    pub fn followOwner(self: *const ScopeCell) ?*anyopaque {
-        return self.follow_owner.load(.acquire);
-    }
-
-    /// The scope this cell names right now, or null if it has retired.
-    pub fn resolve(self: *const ScopeCell) ?*Scope {
-        if (self.follows.load(.acquire)) |source| return source.load(.acquire);
-        return self.scope.load(.acquire);
-    }
-
-    /// Marks the cell as naming nothing. It is deliberately *not* freed here.
-    ///
-    /// A cell is read without a lock and without a reference by every word
-    /// dispatch, so freeing one at retirement would race a reader that has
-    /// already loaded the pointer. Reclaiming through the release domain is
-    /// worse still: retirement runs under the registry's writer lock and, on
-    /// the removal path, inside a domain drain, and enqueuing from there
-    /// deadlocks. The `Env` owns every cell and frees them together at
-    /// teardown, which is the only point at which no reader exists.
+    /// Marks the cell as naming nothing, which is what a word written in a
+    /// replaced or removed image resolves to. Deliberately not freed here: a
+    /// cell is read without a lock and without a reference on every word
+    /// dispatch, so the `Env` owns them all and frees them together at
+    /// teardown, the one point at which no reader exists.
     pub fn retire(self: *ScopeCell) void {
-        // Owner first: a reader that gets past this has a live publisher to
-        // take its pin from, and one that does not fails definitely instead of
-        // reading a scope whose generation is going away.
-        self.follow_owner.store(null, .release);
         self.scope.store(null, .release);
     }
 };
 
-/// A three-level direct directory keyed by the 24 low bits of a `ScopeId`, the
-/// same shape as `spans.HeaderIndex` and for the same reason: pages are
-/// installed once and read without a lock, so a reader on a worker thread pays
-/// three atomic loads and never blocks behind a publisher.
+/// What a `ScopeId` names right now.
 const ScopeIndex = struct {
     const radix = 256;
     const Leaf = struct {
@@ -1669,8 +1601,7 @@ pub const Env = enum(usize) {
         if (id == .none) return .unscoped;
         const cell = self.privateState().scopes.get(id) orelse return .retired;
         if (cell.core) return .core;
-        if (cell.follows.load(.acquire) != null) return .{ .followed = cell };
-        return if (cell.resolve()) |scope| .{ .scope = scope } else .retired;
+        return if (cell.scope.load(.acquire)) |scope| .{ .scope = scope } else .retired;
     }
 
     pub fn coreView(self: *const Env) EnvironmentView {

@@ -627,50 +627,24 @@ anonymously, be passed as data, and be registered more than once.
   quotation built at run time by `partial`, `cons`, or `compose` has no
   written-in scope, so it resolves where it is invoked exactly as a plain list
   always has.
-  A word written in a module body resolves in one of two places, and which one
-  depends on whether an activation of that module is running it.
-  **Inside such an activation, it resolves against the generation that
-  activation entered with, for the activation's whole lifetime.** A body that
-  re-registers its own name mid-call goes on reading its entry generation; the
-  code on the stack is never re-pointed underneath itself. An image registered
-  under several names resolves its body's words through whichever registration
-  the activation was entered by, which is the same rule the bullet above states
-  for privacy, `within`, and diagnostics — so retiring or reloading one name
-  neither strands nor re-sites another's.
-  **Outside one, it names the *module* and follows it.** An escaped quotation —
-  one a module word pushed onto the stack, applied later from the session or
-  from another module — resolves against the name's current generation, so a
-  reload re-points it exactly as it re-points `m.f`. Pinning that case to the
-  publishing image was considered and rejected: it would make a reload silently
-  invalidate every quotation that had escaped the module, which is the opposite
-  of what hot reload is for.
-  The split is Erlang's, and deliberately so: resolving inside an activation is
-  its local call, which stays in the version the process is executing, and
-  entering from outside is its fully-qualified call, which goes to the current
-  version. The dynamic-software-updating literature names the hazard the first
-  half avoids — an update must not rebind code that is on the activation stack
-  — though its own remedy is to refuse or defer the update until no such code
-  is running, where ECL, like Erlang, lets both generations coexist instead.
-  ECL departs from Forth here, which pins absolutely: a Forth redefinition
-  never reaches code already compiled, whereas a fresh entry here does follow
-  the name.
-  Removing the module is what ends it. Once the name is gone, applying an
-  escaped quotation is `'domain`, never a fallback to core or to the invoking
-  chain, because a fallback would silently change what its words mean. An
-  *anonymous* image — one built by `@module` and never registered — has no name
-  to track, so its words name that image alone and retire with it.
-  A name keeps one scope for all its generations, so a word written under it
-  anchors to the *innermost enclosing activation of that name*. A quotation that
-  escaped generation 1 and is applied inside a generation-2 activation resolves
-  against generation 2, not against the generation it was written in: the
-  activation you are inside is the one that answers, which is the same rule that
-  keeps a body from being re-pointed under itself, read from the other side.
-  A generation an activation entered is kept alive for that activation, so an
-  old generation outlives its supersession for as long as something is still
-  running it. ECL does not bound that the way Erlang does — Erlang keeps two
-  versions and purges the third, killing whatever still runs it — so a
-  long-lived activation may retain an arbitrarily old generation, and such a
-  pinned generation is exempt from the ordinary retirement bound.
+  A word written in a module body names *that image*. Reloading publishes a new
+  image under the name, so a fresh call through the name runs the new code —
+  which is the whole of what redefinition needs to do. Code that already
+  exists is not re-pointed: a running body keeps the image it entered, and a
+  quotation that escaped one goes on meaning what it meant. This is Forth's
+  rule rather than Erlang's, and deliberately: Erlang's version coexistence
+  exists to upgrade a live stateful system in place without losing state, and
+  ECL has no such need. Redefining at a prompt happens between units, with
+  nothing on the stack, so the cases that separate the two designs do not arise
+  in the workflow the feature is for.
+  An image lives as long as something holds it — a running activation, or a
+  registration. Once nothing does, applying a quotation written in it is
+  `'domain`, never a fallback to core or to the invoking chain, because a
+  fallback would silently change what its words mean. Failing at the point of
+  use is the point: you learn that the code you are holding belongs to a
+  version that is gone, instead of watching it quietly acquire new behavior.
+  An *anonymous* image — one built by `@module` and never registered — is the
+  same rule with no name involved.
   **Which text is the module's is decided by what the reader produced.** A
   construction body's words name the image, and so do the words of everything
   the reader built inside it, whatever container they sit in — a quotation, a

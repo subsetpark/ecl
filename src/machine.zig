@@ -4762,18 +4762,13 @@ pub const Machine = struct {
         };
         errdefer candidate.deinit();
         const home = candidate.executionHome(self.unit.module_access);
-        const construction_scope = home.scope(self.unit.module_access);
-        // A `@defm` replacing a live generation stamps against the name's one
-        // cell rather than minting one per generation, and installs it on the
-        // candidate so the construction body anchors to the image being built
-        // while the cell still follows the previous generation until commit.
-        const image_scope = if (registration) |symbol| reused: {
-            const existing = modules.peekNameCell(registry, symbol) orelse break :reused null;
-            construction_scope.adoptLabelCell(existing);
-            break :reused existing.id;
-        } else null;
-        const stamp_scope = image_scope orelse self.unit.environment.scopeIdFor(
-            construction_scope,
+        // The construction body's words name this image and nothing else, so
+        // the image gets its own scope cell. A reload builds a new image and
+        // publishes it under the name; the words of the generation it replaced
+        // go on naming the image they were written in, for as long as anything
+        // still holds it.
+        const stamp_scope = self.unit.environment.scopeIdFor(
+            home.scope(self.unit.module_access),
         ) catch {
             self.releaseDomain().releaseHeader(quotation);
             return error.OutOfMemory;
@@ -4841,52 +4836,6 @@ pub const Machine = struct {
                     running
                 else
                     written_scope;
-            },
-            // A word written in a module body. If an activation of that module
-            // is on the stack, the word belongs to the generation that
-            // activation entered and resolves there, whatever the name now
-            // points at -- code on the stack is never re-pointed under itself.
-            // Only with no such activation does it follow the name, which is
-            // the escaped-quotation case.
-            .followed => |cell| anchored: {
-                var chain: ?*env.Scope = self.unit.current.?.resolutionScope();
-                while (chain) |scope| : (chain = scope.parent) {
-                    if (scope.labelCell() != cell) continue;
-                    // Same refinement as above: an activation already inside a
-                    // descendant of the anchor resolves at the descendant.
-                    const running = self.unit.current.?.resolutionScope();
-                    break :anchored if (running != null and scope.encloses(running.?))
-                        running
-                    else
-                        scope;
-                }
-                // Nothing on the chain: the escaped-quotation case. The
-                // generation is pinned before its scope is read, so the borrow
-                // -- the resumable resolution cursor, and the frame this scope
-                // is installed in -- either completes against that generation or
-                // fails here at acquisition. Reading the cell's scope directly
-                // would be a use-after-free against a concurrent reload.
-                const pinned = modules.pinFollowedScope(
-                    cell,
-                    self.unit.module_access,
-                ) orelse {
-                    self.unit.active_word = .plain(word.name);
-                    return self.fail(
-                        .domain,
-                        "the scope this word was written in has retired",
-                    );
-                };
-                var acquired = pinned.pin;
-                defer acquired.deinit();
-                // The unit's own pin outlives both borrowers, which is why one
-                // mechanism covers the cursor and the frame alike. It confers no
-                // home: `site.home` is untouched, so `within` stays `'domain`
-                // and privacy and diagnostics are unchanged.
-                self.unit.pinGeneration(pinned.home) catch {
-                    self.unit.active_word = .plain(word.name);
-                    return error.OutOfMemory;
-                };
-                break :anchored pinned.scope;
             },
             // A fallback here would change what the word means, so the failure
             // is definite instead. The traced word is set first: this failure
