@@ -4838,10 +4838,10 @@ pub const Machine = struct {
             // points at -- code on the stack is never re-pointed under itself.
             // Only with no such activation does it follow the name, which is
             // the escaped-quotation case.
-            .followed => |followed| anchored: {
+            .followed => |cell| anchored: {
                 var chain: ?*env.Scope = self.unit.current.?.resolutionScope();
                 while (chain) |scope| : (chain = scope.parent) {
-                    if (scope.labelCell() != followed.cell) continue;
+                    if (scope.labelCell() != cell) continue;
                     // Same refinement as above: an activation already inside a
                     // descendant of the anchor resolves at the descendant.
                     const running = self.unit.current.?.resolutionScope();
@@ -4850,16 +4850,33 @@ pub const Machine = struct {
                     else
                         scope;
                 }
-                // Nothing on the chain: this is the escaped-quotation case,
-                // and only here does a gone name mean the word resolves to
-                // nothing at all.
-                break :anchored followed.current orelse {
+                // Nothing on the chain: the escaped-quotation case. The
+                // generation is pinned before its scope is read, so the borrow
+                // -- the resumable resolution cursor, and the frame this scope
+                // is installed in -- either completes against that generation or
+                // fails here at acquisition. Reading the cell's scope directly
+                // would be a use-after-free against a concurrent reload.
+                const pinned = modules.pinFollowedScope(
+                    cell,
+                    self.unit.module_access,
+                ) orelse {
                     self.unit.active_word = .plain(word.name);
                     return self.fail(
                         .domain,
                         "the scope this word was written in has retired",
                     );
                 };
+                var acquired = pinned.pin;
+                defer acquired.deinit();
+                // The unit's own pin outlives both borrowers, which is why one
+                // mechanism covers the cursor and the frame alike. It confers no
+                // home: `site.home` is untouched, so `within` stays `'domain`
+                // and privacy and diagnostics are unchanged.
+                self.unit.pinGeneration(pinned.home) catch {
+                    self.unit.active_word = .plain(word.name);
+                    return error.OutOfMemory;
+                };
+                break :anchored pinned.scope;
             },
             // A fallback here would change what the word means, so the failure
             // is definite instead. The traced word is set first: this failure

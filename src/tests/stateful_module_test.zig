@@ -743,3 +743,24 @@ test "concurrency: repeated construct remove cycles keep settled memory bounded"
     }
     try std.testing.expect(counting.deinit() == .ok);
 }
+
+test "module registration: applying an escaped quotation races reload and removal" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+    // A quotation that escaped `racer` resolves its words through the name, so
+    // every application borrows a generation that a concurrent `@defm` may be
+    // replacing. Each borrow pins the generation it acquired, so an application
+    // either completes against that generation or fails definitely at
+    // acquisition; neither outcome may read a scope whose image has retired.
+    //
+    // The TSan tier is the real assertion here — this asserts only that nothing
+    // wedges and that failures stay inside the envelope.
+    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'racer @defm racer.q 'held set");
+    try expectOk(&runtime, "[1] 24 take (pop ((held call) @attempt) @spawn) each " ++
+        "((2) 'k def ((k)) 'q def) 'racer @defm " ++
+        "await-all pop");
+    // And against removal, where acquisition must fail rather than race.
+    try expectOk(&runtime, "((1) 'k def ((k)) 'q def) 'goner @defm goner.q 'gone set");
+    try expectOk(&runtime, "[1] 24 take (pop ((gone call) @attempt) @spawn) each " ++
+        "'goner unmodule await-all pop");
+}

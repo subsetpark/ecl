@@ -98,7 +98,11 @@ const ModuleImage = struct {
         // reads a definite `retired` and never a scope under teardown. The
         // embedded scope's own teardown takes the cell with the same swap, so
         // exactly one of the two paths drops the owner reference.
-        if (self.scope.label_cell.swap(null, .acq_rel)) |cell| cell.retire();
+        // Same rule as the scope teardown: a followed cell belongs to the name
+        // and the slot retires it, so a superseded generation must not.
+        if (self.scope.label_cell.swap(null, .acq_rel)) |cell| {
+            if (cell.follows.load(.acquire) == null) cell.retire();
+        }
         self.retirement_state = if (self.initial_state.len == 0)
             .{ .scope = .init(&self.scope) }
         else
@@ -598,7 +602,7 @@ const ModuleSlot = struct {
             // cannot strand the other's words.
             if (cell.follows.load(.acquire) == null) {
                 self.followers.appendAssumeCapacity(cell);
-                cell.follow(&self.current_scope);
+                cell.follow(&self.current_scope, @ptrCast(self));
             }
         }
         self.current_scope.store(&image.scope, .release);
@@ -609,6 +613,32 @@ const ModuleSlot = struct {
     /// would deadlock the cursor's own cleanup, which re-takes the lock.
     fn reserveFollower(self: *ModuleSlot) error{OutOfMemory}!void {
         try self.followers.ensureUnusedCapacity(self.allocator, 1);
+    }
+
+    /// The scope an escaped quotation's word resolves against when nothing on
+    /// the executing chain anchors it, together with a pin on the generation it
+    /// came from.
+    pub const PinnedScope = struct { scope: *env.Scope, home: *ModuleHome, pin: GenerationPin };
+
+    /// Acquires the followed generation *and retains it* before the publisher
+    /// lease is released, so the scope cannot retire between the read and the
+    /// borrow. Returning null is a definite acquisition-time failure -- the name
+    /// is gone -- rather than a race the caller has to re-check.
+    fn pinFollowed(self: *ModuleSlot) ?PinnedScope {
+        if (self.phase.load(.acquire) != .live) return null;
+        var lease = self.publisher.acquire();
+        const registration = lease.snapshot orelse {
+            _ = lease.deinit();
+            return null;
+        };
+        const home = &@constCast(registration).home;
+        home.retain();
+        _ = lease.deinit();
+        return .{
+            .scope = &registration.image.scope,
+            .home = ModuleHome.init(home),
+            .pin = .initRetained(home),
+        };
     }
 
     fn resetForReuse(self: *ModuleSlot) void {
@@ -2887,3 +2917,25 @@ pub const testing = if (builtin.is_test) struct {
         return poll.drive(?GenerationLease, &cursor, .{});
     }
 } else struct {};
+
+/// The fallback resolution for a word written under a module name that no
+/// activation on the executing chain anchors. This is the only sanctioned way
+/// to read a followed cell's current scope: it pins the generation before the
+/// scope is touched, so the borrow either completes against that generation or
+/// fails at acquisition. The pin confers no home -- `within` stays `'domain`
+/// for an escaped-quotation call, and privacy and diagnostics are unchanged.
+/// The erased owner a followed cell carries is always a slot: `ScopeCell.follow`
+/// is only ever called with one. Kept separate from the capability-taking entry
+/// below so no production function both accepts an `ExecutionAccess` and casts
+/// a raw pointer.
+fn slotFromFollowOwner(owner: *anyopaque) *ModuleSlot {
+    return @ptrCast(@alignCast(owner));
+}
+
+pub fn pinFollowedScope(
+    cell: *const env.ScopeCell,
+    _: *const ExecutionAccess,
+) ?ModuleSlot.PinnedScope {
+    const owner = cell.followOwner() orelse return null;
+    return slotFromFollowOwner(owner).pinFollowed();
+}

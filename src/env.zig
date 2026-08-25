@@ -1008,7 +1008,13 @@ pub const Scope = struct {
             // as the image's last reference drops, which is earlier than this;
             // whichever path arrives first is the one that drops the owner
             // reference.
-            if (scope.label_cell.swap(null, .acq_rel)) |cell| cell.retire();
+            // A cell that follows a module slot belongs to the *name*, not to
+            // this generation's scope: the slot outlives any one image and owns
+            // its retirement. Retiring it here would kill a live name the
+            // moment one of its superseded generations was reclaimed.
+            if (scope.label_cell.swap(null, .acq_rel)) |cell| {
+                if (cell.follows.load(.acquire) == null) cell.retire();
+            }
             const target = if (scope.storage == .isolated)
                 scope.isolated_environment.load(.acquire)
             else
@@ -1352,10 +1358,12 @@ pub const ScopeResolution = union(enum) {
     /// chain matches. Keeping the two apart is the whole of the two-case rule:
     /// resolving inside an activation of the module must not consult
     /// `current`, or a body would be re-pointed under itself.
-    /// `current` is null once the followed name is gone, which is *not* by
-    /// itself a failure: an activation of that image may still be on the stack
-    /// under another registration, and the anchor check has to run first.
-    followed: struct { cell: *const ScopeCell, current: ?*Scope },
+    /// A cell a module slot has taken over. Only the cell's *identity* is
+    /// handed out: the anchor check compares it against the executing
+    /// activation's chain, and the fallback must go through the module layer's
+    /// `pinFollowedScope`, which pins the generation before the scope is read.
+    /// There is deliberately no scope pointer here to borrow unpinned.
+    followed: *const ScopeCell,
     /// Core alone, which the machine spells as a null resolution scope. Core is
     /// a terminal phase rather than a link in any chain, so no `Scope` denotes
     /// it and a primitive or embedded-prelude word names this instead.
@@ -1381,6 +1389,11 @@ pub const ScopeCell = struct {
     /// what `m.f` already does and what a quotation that escaped a module
     /// should do too.
     follows: std.atomic.Value(?*std.atomic.Value(?*Scope)) = .init(null),
+    /// The owner that published `follows`, kept opaque so `env` holds no
+    /// reference to `modules`. It is what lets a reader reach the publisher and
+    /// take a generation pin *before* touching the scope; cleared at retirement
+    /// so acquisition afterwards fails definitely rather than racing.
+    follow_owner: std.atomic.Value(?*anyopaque) = .init(null),
 
     pub fn publish(self: *ScopeCell, scope: *Scope) void {
         self.scope.store(scope, .release);
@@ -1388,8 +1401,18 @@ pub const ScopeCell = struct {
 
     /// Hands the cell over to a module slot's published scope. From here the
     /// cell tracks the name rather than the image.
-    pub fn follow(self: *ScopeCell, source: *std.atomic.Value(?*Scope)) void {
+    pub fn follow(
+        self: *ScopeCell,
+        source: *std.atomic.Value(?*Scope),
+        owner: *anyopaque,
+    ) void {
+        self.follow_owner.store(owner, .release);
         self.follows.store(source, .release);
+    }
+
+    /// The publisher behind a followed cell, or null once it has retired.
+    pub fn followOwner(self: *const ScopeCell) ?*anyopaque {
+        return self.follow_owner.load(.acquire);
     }
 
     /// The scope this cell names right now, or null if it has retired.
@@ -1408,6 +1431,10 @@ pub const ScopeCell = struct {
     /// deadlocks. The `Env` owns every cell and frees them together at
     /// teardown, which is the only point at which no reader exists.
     pub fn retire(self: *ScopeCell) void {
+        // Owner first: a reader that gets past this has a live publisher to
+        // take its pin from, and one that does not fails definitely instead of
+        // reading a scope whose generation is going away.
+        self.follow_owner.store(null, .release);
         self.scope.store(null, .release);
     }
 };
@@ -1508,8 +1535,11 @@ const EnvState = struct {
     core: Environment,
     session: Environment,
     core_cell: ScopeCell,
-    /// Every cell this Env has issued, freed together at teardown.
+    /// Every cell this Env has issued, freed together at teardown. Images are
+    /// constructed concurrently, so the list needs its own lock: it is grown
+    /// off the registry's writer lock and off the scope index's.
     cells: std.ArrayList(*ScopeCell) = .empty,
+    cells_mutex: std.Io.Mutex = .init,
     scopes: ScopeIndex = .{},
 };
 
@@ -1610,10 +1640,14 @@ pub const Env = enum(usize) {
         // without a lock and without a reference on every word dispatch, so
         // there is no safe earlier point to free one. Taking ownership before
         // registering leaves the failure path with nothing to undo.
-        backing.cells.append(allocator, cell) catch |err| {
-            allocator.destroy(cell);
-            return err;
-        };
+        {
+            std.Io.Threaded.mutexLock(&backing.cells_mutex);
+            defer std.Io.Threaded.mutexUnlock(&backing.cells_mutex);
+            backing.cells.append(allocator, cell) catch |err| {
+                allocator.destroy(cell);
+                return err;
+            };
+        }
         // Owned by `cells` from here, so a failed registration leaves a cell
         // that names nothing rather than one that leaks.
         cell.id = try backing.scopes.register(allocator, cell);
@@ -1628,8 +1662,7 @@ pub const Env = enum(usize) {
         if (id == .none) return .unscoped;
         const cell = self.privateState().scopes.get(id) orelse return .retired;
         if (cell.core) return .core;
-        if (cell.follows.load(.acquire) != null)
-            return .{ .followed = .{ .cell = cell, .current = cell.resolve() } };
+        if (cell.follows.load(.acquire) != null) return .{ .followed = cell };
         return if (cell.resolve()) |scope| .{ .scope = scope } else .retired;
     }
 
