@@ -398,6 +398,48 @@ test "idioms: automatic hits and forced generic preserves behavior" {
 // prelude behavior is what executes. Recognition stays off in these cases too,
 // which is why the hit counts are unchanged, but it is no longer *late
 // binding* that keeps it off.
+test "idioms: a foreign stamp keeps recognition off" {
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+
+    // A module shadows `+` and hands out a quotation over it. Applied under
+    // `fold` from the session, the quotation's words are stamped with the
+    // module's image, which is on no chain the recognizer is about to resolve
+    // in -- so recognition must stand down and let dispatch honor the stamp.
+    // Recognizing it substituted the core builtin and returned 6.
+    try expectStack(
+        &runtime,
+        "((pop pop 42) '+ def ((+)) 'q def) 'm @defm [1 2 3] 0 m.q fold",
+        "42",
+    );
+    try std.testing.expectEqual(@as(u64, 0), runtime.lastIdiomHits());
+
+    // The mirror: a quotation written where it is applied still recognizes, so
+    // the gate is not simply switching recognition off for module code.
+    var native_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&native_heap);
+    var native = try session.Session.init(native_heap.allocator(), &.{});
+    defer native.deinit();
+    try expectStack(&native, "[1 2 3] 0 (+) fold", "6");
+    try std.testing.expect(native.lastIdiomHits() > 0);
+
+    // And a quotation stamped in one module applied inside another resolves in
+    // the chain it was written in, not the one shadowing around it.
+    var across_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&across_heap);
+    var across = try session.Session.init(across_heap.allocator(), &.{});
+    defer across.deinit();
+    try expectStack(
+        &across,
+        "(((+)) 'q def) 'a @defm " ++
+            "((pop pop 42) '+ def (|l q| l 0 q fold) 'run def) 'b @defm " ++
+            "[1 2 3] a.q b.run",
+        "6",
+    );
+}
+
 test "idioms: a rebound name keeps recognition off" {
     var runtime_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&runtime_heap);

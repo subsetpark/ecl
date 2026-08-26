@@ -465,6 +465,10 @@ const IdiomDriver = struct {
                         self.rejectEntry();
                         continue;
                     }
+                    if (!stampOnRunningChain(evaluator, word.scope)) {
+                        self.rejectEntry();
+                        continue;
+                    }
                     self.capture.active_word = word.name;
                     self.capture.active_index = @intCast(self.atom_index);
                     self.expected_binding = operationBinding(entry.operation);
@@ -480,6 +484,10 @@ const IdiomDriver = struct {
                         continue;
                     };
                     if (!std.mem.eql(u8, intern.get(word.name), expected_word.spelling)) {
+                        self.rejectEntry();
+                        continue;
+                    }
+                    if (!stampOnRunningChain(evaluator, word.scope)) {
                         self.rejectEntry();
                         continue;
                     }
@@ -931,4 +939,43 @@ fn binaryPrimitive(operation: numeric.BinaryOp) env.PrimitiveImpl {
     return switch (operation) {
         inline else => |selected| numeric.binaryPrimitiveFor(selected),
     };
+}
+
+/// Whether a token's stamp names a scope on the chain the recognizer is about to
+/// resolve in.
+///
+/// Recognition resolves a token in the running chain and compares the result
+/// against the primitive it would substitute. That comparison is only meaningful
+/// for a token whose stamp points *at* that chain; one stamped elsewhere -- a
+/// quotation that escaped its module and is being applied here -- resolves
+/// somewhere the recognizer is not looking, and recognizing it ran the core
+/// builtin where the module's own shadow was the answer.
+///
+/// The relation is membership, not equality, and three equality proxies each
+/// failed on a different population before that was clear: the activation's own
+/// scope (a nested application runs in a descendant that minted no cell) and the
+/// unit root (prelude and stdlib idioms are stamped with neither) both
+/// under-approximate, because a stamp is an *ancestor* of the running chain far
+/// more often than it is the running chain.
+///
+/// It walks from the running chain outward rather than resolving the stamp,
+/// which is what keeps it free of any borrow: every node here is
+/// activation-owned and alive by construction, ids are never recycled, and a
+/// node whose `cellId` equals the stamp is by identity the node that minted it.
+/// So membership-by-id *is* encloses-or-equals, computed with integer compares
+/// over a chain whose length dispatch's own refinement already walks.
+///
+/// Zero is unscoped -- it resolves where invoked, so it matches by definition.
+/// A core stamp resolves against core alone, which no scope denotes, so it
+/// cannot appear on any chain; it is admitted directly, and the untouched
+/// resolution behind this gate still suppresses recognition when anything on the
+/// chain has rebound the name.
+fn stampOnRunningChain(evaluator: *machine.Machine, stamp: u32) bool {
+    if (stamp == 0) return true;
+    if (@intFromEnum(evaluator.unit.environment.coreScopeId()) == stamp) return true;
+    var node: ?*env.Scope = evaluator.unit.current.?.resolutionScope();
+    while (node) |scope| : (node = scope.parent) {
+        if (@intFromEnum(scope.cellId()) == stamp) return true;
+    }
+    return false;
 }
