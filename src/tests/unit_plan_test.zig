@@ -238,6 +238,37 @@ test "unit plans: a runtime-built body acquires no attribution" {
         "5 'k set [(k *)] ('scale def ( -- n ) (4 scale) 'go def) with 'flat @defm flat.go",
         &.{ "'undefined-word", "scale" },
     );
+
+    // Rejected roots must also avoid the stable image ScopeId used only to
+    // label rewritten occurrences. Construct, execute, register, replace, and
+    // retire runtime-built bodies in one Unit so the measurement excludes
+    // per-source archive retention; ten times the cycles must not retain ten
+    // times the settled memory.
+    var counting: std.heap.DebugAllocator(.{ .enable_memory_limit = true }) = .init;
+    {
+        var measured = try session.Session.initWithConfig(
+            counting.allocator(),
+            &.{},
+            .cooperative,
+        );
+        defer measured.deinit();
+        const cycle = "((1) 'x def) () cat @module " ++
+            "dup 'runtime-built register " ++
+            "dup 'runtime-built register " ++
+            "runtime-built.x pop 'runtime-built unmodule pop";
+        const small = "[1] 20 take (pop " ++ cycle ++ ") for";
+        const large = "[1] 200 take (pop " ++ cycle ++ ") for";
+        try expectStack(&measured, small, "");
+        const before_small = counting.total_requested_bytes;
+        try expectStack(&measured, small, "");
+        const after_small = counting.total_requested_bytes;
+        try expectStack(&measured, large, "");
+        const after_large = counting.total_requested_bytes;
+        const small_growth = after_small -| before_small;
+        const large_growth = after_large -| after_small;
+        try std.testing.expect(large_growth <= small_growth * 2 + 4096);
+    }
+    try std.testing.expectEqual(.ok, counting.deinit());
 }
 
 test "unit plans: one reader body serves two images independently" {

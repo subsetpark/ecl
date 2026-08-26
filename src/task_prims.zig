@@ -54,11 +54,12 @@ fn spawnTask(
 
 fn spawn(evaluator: *Machine) MachineError!void {
     var input = try evaluator.popUnitInput();
-    defer input.deinit();
+    defer input.deinit(evaluator.releaseDomain());
+    const borrowed = input.borrow();
     const task = try spawnTask(
         evaluator,
-        input.borrow().body,
-        input.borrow().initialStack(),
+        borrowed.quotation(),
+        borrowed.initialStack(null),
         .spawn,
     );
     try evaluator.pushOwned(task);
@@ -114,18 +115,16 @@ fn awaitFor(evaluator: *Machine) MachineError!void {
 fn parEach(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     var input = try evaluator.popUnitInput();
-    defer input.deinit();
+    defer input.deinit(evaluator.releaseDomain());
     var sequence = try evaluator.popList();
     defer sequence.deinit();
 
     const count: usize = @intCast(sequence.borrow().list.length());
     var task_buffer = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
     defer task_buffer.deinit();
-    const taken = input.take();
     try evaluator.startDriver(ParEachDriver{
         .sequence = .init(sequence.take()),
-        .quotation = .init(.{ .list = taken.body }),
-        .seeds = if (taken.seeds) |seeds| .init(.{ .list = seeds }) else null,
+        .input = .init(input.move()),
         .tasks = .init(task_buffer.take()),
     });
 }
@@ -133,11 +132,10 @@ fn parEach(evaluator: *Machine) MachineError!void {
 const ParEachDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     sequence: heap.Owned(Value),
-    quotation: heap.Owned(Value),
-    /// The plan's shared seeds, absent when `@each` was handed a raw
-    /// quotation. Every child stack holds its element deepest and these above
-    /// it, so one plan seeds the whole fan-out identically.
-    seeds: ?heap.Owned(Value),
+    /// One moved decoded owner supplies the quotation and shared seeds to
+    /// every immediate child launch; children retain their own references
+    /// before this fan-out state advances.
+    input: heap.Owned(machine.OwnedUnitInput),
     tasks: heap.Owned(heap.OwnedValueBuffer),
     index: usize = 0,
 
@@ -150,13 +148,11 @@ const ParEachDriver = struct {
         const end = @min(self.index + par_each_work_quantum, count);
         while (self.index != end) : (self.index += 1) {
             const element = list.atUnchecked(self.sequence.borrow(), self.index);
+            const borrowed = self.input.borrow().borrow();
             const task = try spawnTask(
                 evaluator,
-                self.quotation.borrow().list,
-                if (self.seeds) |seeds| .{ .borrowed_element_and_seeds = .{
-                    .element = element,
-                    .seeds = seeds.borrow().list,
-                } } else .{ .borrowed_element = element },
+                borrowed.quotation(),
+                borrowed.initialStack(element),
                 .each,
             );
             self.tasks.borrowMut().appendOwned(task);

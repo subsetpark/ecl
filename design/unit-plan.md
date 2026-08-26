@@ -140,9 +140,13 @@ Lineage cannot be handed out, only inherited, and no proof of it is a value that
 crosses an API. A portable proof would say only that the reader wrote *some*
 body, nothing about a destination header a caller chose, and it could be replayed
 against a second archive. So the archive owns admission and its application
-together: `SpanArchive.prepareConstructionBody(body, scope)` returns either
-`unchanged` or a cursor already holding the admission result, it builds its own
-destination, and the span-and-lineage commit is private to that cursor. A generic
+together. Preparation consumes the exact owned body before any image scope is
+minted and returns either the unchanged owner or an opaque admitted root bound
+to that source and archive. Consuming the admitted root with the target scope
+starts the archive's bounded cursor; that cursor builds its own destination,
+and the span-and-lineage commit is private to it. The cursor remains in one
+movable owner until construction-driver installation consumes it, including
+the allocation-failure path. A generic
 reconstruction — `cat`, `compose`, `cons`, `append`, `raze`, slicing, reversal,
 `with` — never enters the rewrite, so it has no lineage, and neither has a value
 another Session's archive read.
@@ -328,9 +332,10 @@ receipt, and a pointer to a separately allocated runtime, while
 directly to the latter, which is not recoverably embedded in the owner state.
 `SpanArchiveOwner` alone stores the retirement registration, performs blocking
 synchronous reads, and exposes `deinit`; Units and scheduler work receive only
-the worker view. The view may advance bounded reads, absorb, locate, admit, and
-re-scope, but it cannot recover host ownership, register, detach, drain, or
-destroy the archive. `requireOpaqueWorkerFacade` enforces that backing shape.
+the worker view. The view may advance bounded reads, absorb, locate, prepare an
+exact root, and re-scope, but it cannot recover host ownership, register,
+detach, drain, or destroy the archive. `requireOpaqueWorkerFacade` enforces
+that backing shape.
 
 The retirement registration itself is one tagged state, not a nullable callback
 correlated with a separate counter:
@@ -349,8 +354,9 @@ quiescence precedes archive-owner detachment and destruction.
 Reader-text lineage is distinct from span identity. The archive must expose only
 these semantic operations to the machine:
 
-- decide admission for an exact body, applying the answer itself;
-- copy source projections for diagnostics;
+- decide admission for an exact owned body, returning a root-bound consuming
+  operation rather than a portable result;
+- require descendant source projections for diagnostics after admission;
 - re-scope an admitted body, producing the copy itself and attesting only that
   copy.
 
@@ -359,6 +365,12 @@ header — no proof crosses the API at all — so lineage cannot be granted to a
 value the archive did not build. Generic heap builders have no
 lineage-assignment authority. This is enforced by opaque capability types, not
 by naming, assertions, or a source denylist.
+
+Exact-root rejection returns the owned body unchanged and performs no
+descendant lookup or attribution traversal. Exact-root admission is the only
+semantic decision. During the admitted traversal, nested reader containers use
+required diagnostic projection; a missing projection is `InvalidProvenance`,
+never a fallback that shares a descendant unchanged.
 
 Lineage storage must settle proportional to live re-scoped headers rather than
 to identities ever issued. A rewritten body's directory slot is cleared and its
@@ -378,6 +390,20 @@ re-scoping a reader body — run through bounded cursors as ordinary resumable
 scheduler work. No nominal scheduler step may recursively walk the complete
 body, copy a whole seed list, or multiply either by the number of children a
 fan-out starts per turn.
+
+`Machine.popUnitInput` returns one nominal non-struct owner and is the only
+quotation/plan decoder. Its raw-quotation representation carries only the body
+pointer and allocates nothing; its seeded representation owns both pointers.
+Child launch borrows it, fan-out moves it, and boundary construction consumes
+its halves into later typed owners. There is no public raw body/seeds tuple or
+second destructor. One `SeedMaterializer` owns the retained seed list and next
+index in both construction and child drivers, reserving each slice before its
+first append.
+
+Module construction prepares the body before requesting an image `ScopeId`.
+Only the admitted branch mints one and begins re-scoping. The unchanged branch
+executes the original body in its existing scopes and retains no
+attribution-only cell or anchor.
 
 One caller-issued work budget is shared by the complete re-scoping traversal,
 including nested containers and dictionary-index copying. Every frame owns its

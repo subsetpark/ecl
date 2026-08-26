@@ -4224,25 +4224,17 @@ pub const Machine = struct {
         switch (item.borrow()) {
             .list => |quotation| {
                 _ = item.take();
-                return .init(self.releaseDomain(), .{ .seeds = null, .body = quotation });
+                return OwnedUnitInput.init(null, quotation);
             },
             .unit_plan => |plan| {
                 const seeds = heap.unitPlanSeeds(plan);
                 const body = heap.unitPlanBody(plan);
                 heap.incRef(seeds);
                 heap.incRef(body);
-                return .init(self.releaseDomain(), .{ .seeds = seeds, .body = body });
+                return OwnedUnitInput.init(seeds, body);
             },
             else => return self.typeError("a quotation/list or unit plan"),
         }
-    }
-    /// Releases whichever halves of a consumed `UnitInput` a failing
-    /// constructor still owns. Every constructor failure path goes through
-    /// this, so the consuming contract does not depend on remembering that a
-    /// seeded input has two references rather than one.
-    fn releaseUnitInput(self: *Machine, input: UnitInput) void {
-        if (input.seeds) |seeds| self.releaseDomain().releaseHeader(seeds);
-        self.releaseDomain().releaseHeader(input.body);
     }
     pub fn popString(self: *Machine) MachineError!heap.OwnedValue {
         return self.popChecked("a string", struct {
@@ -4781,7 +4773,7 @@ pub const Machine = struct {
             .application_selection = if (select_initial) provenance_target else null,
         };
     }
-    pub fn attemptOwned(self: *Machine, input: UnitInput) error{OutOfMemory}!void {
+    pub fn attemptOwned(self: *Machine, input: OwnedUnitInput) error{OutOfMemory}!void {
         return self.beginAttemptOwned(input);
     }
     /// Publishes an already-constructed image under a validated name. The
@@ -4816,82 +4808,85 @@ pub const Machine = struct {
     pub fn moduleOwned(
         self: *Machine,
         registration: ?u32,
-        input: UnitInput,
+        input: OwnedUnitInput,
     ) MachineError!void {
+        var owned = input;
+        defer owned.deinit(self.releaseDomain());
         const registry = self.unit.inherited.registry orelse {
-            self.releaseUnitInput(input);
             return self.fail(.domain, "module registry is unavailable");
         };
         const word = self.unit.active_word;
-        var candidate = registry.createImage() catch {
-            self.releaseUnitInput(input);
-            return error.OutOfMemory;
-        };
+        var candidate = try registry.createImage();
         errdefer candidate.deinit();
-        // The construction body's words name this image and nothing else, so
-        // the image gets its own scope cell. A reload builds a new image and
-        // publishes it under the name; the words of the generation it replaced
-        // go on naming the image they were written in, for as long as anything
-        // still holds it.
-        const home = candidate.executionHome(self.unit.module_access);
-        const stamp_scope = self.unit.environment.scopeIdForOwned(
-            home.scope(self.unit.module_access),
-            modules.anchorHandle(home, self.unit.module_access),
-        ) catch {
-            self.releaseUnitInput(input);
-            return error.OutOfMemory;
-        };
-        // Attribution asks one question, of the exact designated body: is it
-        // does this exact body carry reader-text lineage? Admission is the
-        // archive's own, so the answer arrives already applied: either a cursor
-        // that will produce the re-scoped copy, or "run it unchanged", in which
-        // case the body's words go on resolving in the scopes they were written
-        // in. Seeds are a separate value and are never reached either way.
+        // Attribution asks one question, of the exact designated body. The
+        // archive consumes that body into either an unchanged owner or an
+        // opaque exact-root admission awaiting a target scope. Seeds are a
+        // separate value and are never reached either way.
         //
         // Both re-scoping and seeding are user-sized, so they are ordinary
         // resumable scheduler work: the driver holds the candidate image, the
         // seeds, and the source body until the copy is finished and the
         // boundary can open. Only a body with neither to do still opens it in
         // this step, and that case copies nothing at all.
-        var prepared = self.unit.archive.prepareConstructionBody(
-            input.body,
-            @intFromEnum(stamp_scope),
-        );
-        if (prepared == .unchanged and input.seeds == null) {
-            const body_header = input.body;
-            heap.incRef(body_header);
-            self.releaseUnitInput(input);
-            return self.openImageBoundary(&candidate, registration, word, body_header);
+        var body = heap.Owned(*Header).init(owned.takeBody());
+        defer body.deinit(self.releaseDomain(), self.allocator());
+        const prepared = try self.unit.archive.prepareConstructionBody(&body);
+        switch (prepared) {
+            .unchanged => |prepared_body| {
+                var runnable = prepared_body;
+                defer runnable.deinit(self.releaseDomain(), self.allocator());
+                if (owned.seedHeader() == null) {
+                    return self.openImageBoundary(
+                        &candidate,
+                        registration,
+                        word,
+                        runnable.take(),
+                    );
+                }
+                try self.startDriver(ConstructionDriver{
+                    .target = .init(.{ .image = .{
+                        .candidate = candidate.move(),
+                        .registration = registration,
+                    } }),
+                    .rescope = null,
+                    .body = .init(runnable.take()),
+                    .materializer = .init(.init(owned.takeSeeds().?)),
+                    .word = word,
+                    .phase = .open,
+                });
+            },
+            .admitted => |admitted| {
+                var admission: ?*spans.SpanArchive.AdmittedConstructionBody = admitted;
+                defer if (admission) |remaining| remaining.deinit();
+                // Only admitted reader text needs a stable image ScopeId. An
+                // unchanged runtime body keeps its existing word scopes, so it
+                // never creates an attribution-only directory cell.
+                const home = candidate.executionHome(self.unit.module_access);
+                const stamp_scope = try self.unit.environment.scopeIdForOwned(
+                    home.scope(self.unit.module_access),
+                    modules.anchorHandle(home, self.unit.module_access),
+                );
+                var cursor = heap.Owned(spans.SpanArchive.RescopeCursor).init(
+                    admission.?.begin(@intFromEnum(stamp_scope)),
+                );
+                admission = null;
+                defer cursor.deinit(self.releaseDomain(), self.allocator());
+                try self.startDriver(ConstructionDriver{
+                    .target = .init(.{ .image = .{
+                        .candidate = candidate.move(),
+                        .registration = registration,
+                    } }),
+                    .rescope = .init(cursor.take()),
+                    .body = null,
+                    .materializer = if (owned.takeSeeds()) |seeds|
+                        .init(.init(seeds))
+                    else
+                        null,
+                    .word = word,
+                    .phase = .rescope,
+                });
+            },
         }
-        errdefer if (prepared == .rewriting) prepared.rewriting.deinit();
-        try self.startDriver(ConstructionDriver{
-            .target = .init(.{ .image = .{
-                .candidate = candidate.move(),
-                .registration = registration,
-            } }),
-            .rescope = switch (prepared) {
-                .unchanged => null,
-                .rewriting => |cursor| .init(cursor),
-            },
-            .source = switch (prepared) {
-                .unchanged => null,
-                .rewriting => .init(input.body),
-            },
-            .body = switch (prepared) {
-                .unchanged => body: {
-                    heap.incRef(input.body);
-                    self.releaseDomain().releaseHeader(input.body);
-                    break :body .init(input.body);
-                },
-                .rewriting => null,
-            },
-            .seeds = if (input.seeds) |seeds| .init(seeds) else null,
-            .word = word,
-            .phase = switch (prepared) {
-                .unchanged => .open,
-                .rewriting => .rescope,
-            },
-        });
     }
     /// Opens one construction boundary. Consuming: the body is owned by the
     /// boundary on success and released here on every failure, and the image is
@@ -5243,19 +5238,20 @@ pub const Machine = struct {
     }
     fn beginAttemptOwned(
         self: *Machine,
-        input: UnitInput,
+        input: OwnedUnitInput,
     ) error{OutOfMemory}!void {
+        var owned = input;
+        defer owned.deinit(self.releaseDomain());
         // An unseeded `@attempt` opens its boundary in this step and allocates
         // nothing extra; a seeded one materializes a user-sized seed list, so
         // it becomes ordinary resumable scheduler work like every other
         // user-sized traversal.
-        if (input.seeds == null) return self.openAttempt(input.body);
+        if (owned.seedHeader() == null) return self.openAttempt(owned.takeBody());
         return self.startDriver(ConstructionDriver{
             .target = .init(.attempt),
             .rescope = null,
-            .source = null,
-            .body = .init(input.body),
-            .seeds = .init(input.seeds.?),
+            .body = .init(owned.takeBody()),
+            .materializer = .init(.init(owned.takeSeeds().?)),
             .word = self.unit.active_word,
             .phase = .open,
         });
@@ -5363,68 +5359,91 @@ pub const Machine = struct {
 
 pub const RunStatus = enum { completed, yielded, parked };
 
-/// The input every unit constructor takes, with the two halves the language
-/// requires it to tell apart: the construction body, and the values the new
-/// unit's stack starts with. A raw quotation seeds nothing; a unit plan names
-/// both. Flattening them into one quotation is exactly what makes module-text
-/// attribution unanswerable, so nothing between `seed` and the boundary is
-/// allowed to join them.
-///
-/// Both halves are owned. Every constructor consumes a `UnitInput` and
-/// releases whatever it still holds on every failure path.
-pub const UnitInput = struct {
-    /// Absent — not an empty list — for a raw quotation, so unseeded
-    /// construction stays exactly as cheap as it was.
-    seeds: ?*Header,
+/// A non-owning child-launch projection. The decoded owner remains alive until
+/// the scheduler has retained the quotation and initial operands into the new
+/// Unit, so a child launch never invents a second teardown protocol.
+pub const BorrowedUnitInput = struct {
     body: *Header,
+    seeds: ?*Header,
 
-    pub fn seedCount(self: UnitInput) usize {
-        const seeds = self.seeds orelse return 0;
-        return @intCast(seeds.length());
+    pub fn quotation(self: BorrowedUnitInput) *Header {
+        return self.body;
     }
 
-    /// How the new unit's stack begins, for the constructors that hand a whole
-    /// Unit to the scheduler rather than opening a boundary in this one.
-    pub fn initialStack(self: UnitInput) InitialStack {
+    pub fn initialStack(self: BorrowedUnitInput, element: ?Value) InitialStack {
+        if (element) |item| {
+            const seeds = self.seeds orelse return .{ .borrowed_element = item };
+            return .{ .borrowed_element_and_seeds = .{ .element = item, .seeds = seeds } };
+        }
         const seeds = self.seeds orelse return .empty;
         return .{ .borrowed_seeds = seeds };
     }
-
-    /// The same, for `@each`, whose child stack holds its element beneath the
-    /// plan's shared seeds.
-    pub fn initialStackWithElement(self: UnitInput, element: Value) InitialStack {
-        const seeds = self.seeds orelse return .{ .borrowed_element = element };
-        return .{ .borrowed_element_and_seeds = .{ .element = element, .seeds = seeds } };
-    }
 };
 
-/// A popped `UnitInput` before a constructor takes it. `deinit` releases both
-/// halves, so a validation failure between the pop and the constructor cannot
-/// strand either one.
-pub const OwnedUnitInput = struct {
-    domain: *heap.ReleaseDomain,
-    input: ?UnitInput,
+/// The decoded input every unit constructor takes. A raw quotation owns only
+/// `body`; a plan independently owns both list references. This remains the
+/// one nominal owner through validation, child borrowing, fan-out transfer,
+/// and boundary handoff. Moving it empties the source, and `deinit` is the sole
+/// destructor for an input that has not split into later boundary states.
+pub const OwnedUnitInput = enum(u128) {
+    consumed = 0,
+    _,
 
-    pub fn init(domain: *heap.ReleaseDomain, input: UnitInput) OwnedUnitInput {
-        return .{ .domain = domain, .input = input };
+    const pointer_mask: u128 = std.math.maxInt(u64);
+
+    comptime {
+        if (@bitSizeOf(usize) > 64)
+            @compileError("OwnedUnitInput requires pointers no wider than 64 bits");
     }
 
-    pub fn borrow(self: *const OwnedUnitInput) UnitInput {
-        return self.input.?;
+    fn init(seeds: ?*Header, body: *Header) OwnedUnitInput {
+        const body_bits: u128 = @intFromPtr(body);
+        const seed_bits: u128 = if (seeds) |items| @intFromPtr(items) else 0;
+        std.debug.assert(body_bits != 0 and body_bits <= pointer_mask);
+        std.debug.assert(seed_bits <= pointer_mask);
+        return @enumFromInt(body_bits | (seed_bits << 64));
     }
 
-    pub fn take(self: *OwnedUnitInput) UnitInput {
-        const input = self.input.?;
-        self.input = null;
-        return input;
+    fn bodyHeader(self: OwnedUnitInput) ?*Header {
+        const bits = @intFromEnum(self) & pointer_mask;
+        return if (bits == 0) null else @ptrFromInt(@as(usize, @intCast(bits)));
     }
 
-    pub fn deinit(self: *OwnedUnitInput) void {
-        if (self.input) |input| {
-            if (input.seeds) |seeds| self.domain.releaseHeader(seeds);
-            self.domain.releaseHeader(input.body);
-        }
-        self.input = null;
+    fn seedHeader(self: OwnedUnitInput) ?*Header {
+        const bits = @intFromEnum(self) >> 64;
+        return if (bits == 0) null else @ptrFromInt(@as(usize, @intCast(bits)));
+    }
+
+    pub fn borrow(self: *const OwnedUnitInput) BorrowedUnitInput {
+        std.debug.assert(self.* != .consumed);
+        return .{ .body = self.bodyHeader().?, .seeds = self.seedHeader() };
+    }
+
+    pub fn move(self: *OwnedUnitInput) OwnedUnitInput {
+        std.debug.assert(self.* != .consumed);
+        const moved = self.*;
+        self.* = .consumed;
+        return moved;
+    }
+
+    fn takeBody(self: *OwnedUnitInput) *Header {
+        const body = self.bodyHeader().?;
+        const seed_bits = @intFromEnum(self.*) & ~pointer_mask;
+        self.* = if (seed_bits == 0) .consumed else @enumFromInt(seed_bits);
+        return body;
+    }
+
+    fn takeSeeds(self: *OwnedUnitInput) ?*Header {
+        const seeds = self.seedHeader();
+        const body_bits = @intFromEnum(self.*) & pointer_mask;
+        self.* = if (body_bits == 0) .consumed else @enumFromInt(body_bits);
+        return seeds;
+    }
+
+    pub fn deinit(self: *OwnedUnitInput, releases: *heap.ReleaseDomain) void {
+        if (self.seedHeader()) |items| releases.releaseHeader(items);
+        if (self.bodyHeader()) |quotation| releases.releaseHeader(quotation);
+        self.* = .consumed;
     }
 };
 
@@ -5465,7 +5484,9 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
         // `startDriver` disposes the pending driver's fields for us.
         heap.incRef(items);
         var evaluator = Machine{ .unit = unit };
-        try evaluator.startDriver(ChildSeedDriver{ .seeds = .init(items) });
+        try evaluator.startDriver(ChildSeedDriver{
+            .materializer = .init(.init(items)),
+        });
     }
     heap.incRef(code);
     unit.current = .{
@@ -7318,27 +7339,46 @@ fn advanceRegistration(
     return .yielded;
 }
 
-/// Pushes up to `budget` of a plan's seeds, in list order, onto the stack they
-/// seed, and reports how far it got. Capacity for each slice is secured before
-/// its pushes, so a failure adds no partial value; a prefix already on the
-/// stack is released by the ordinary boundary or Unit teardown, exactly as any
-/// other operand would be.
-fn advanceSeeds(
-    unit: *Unit,
-    seeds: *Header,
-    from: usize,
-    budget: usize,
-) error{OutOfMemory}!usize {
-    const count: usize = @intCast(seeds.length());
-    const end = @min(from + budget, count);
-    try unit.stack.ensureUnusedCapacity(unit.allocator, end - from);
-    for (from..end) |index| {
-        const item = list.atUnchecked(.{ .list = seeds }, index);
-        unit.stack.appendAssumeCapacity(item);
-        heap.retainValue(item);
+/// The one bounded owner/progress state for plan seed materialization. Both an
+/// in-machine construction boundary and a fresh child Unit embed this exact
+/// state machine. Capacity for a granted slice is secured before its first
+/// append, so allocation failure adds none of that slice; an earlier prefix is
+/// ordinary stack ownership and retires with its boundary or Unit.
+const SeedMaterializer = struct {
+    seeds: heap.Owned(*Header),
+    next: usize = 0,
+
+    fn init(seeds: *Header) SeedMaterializer {
+        return .{ .seeds = .init(seeds) };
     }
-    return end;
-}
+
+    pub fn deinit(
+        self: *SeedMaterializer,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.seeds.deinit(releases, allocator);
+        self.next = 0;
+    }
+
+    fn advance(
+        self: *SeedMaterializer,
+        unit: *Unit,
+        budget: usize,
+    ) error{OutOfMemory}!bool {
+        const seeds = self.seeds.borrow();
+        const count: usize = @intCast(seeds.length());
+        const end = @min(self.next + budget, count);
+        try unit.stack.ensureUnusedCapacity(unit.allocator, end - self.next);
+        for (self.next..end) |index| {
+            const item = list.atUnchecked(.{ .list = seeds }, index);
+            unit.stack.appendAssumeCapacity(item);
+            heap.retainValue(item);
+        }
+        self.next = end;
+        return self.next == count;
+    }
+};
 
 /// What a `ConstructionDriver` opens once its body is final.
 const ConstructionTarget = union(enum) {
@@ -7372,18 +7412,16 @@ const ConstructionDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .fields;
     target: heap.Owned(ConstructionTarget),
-    /// The re-scoping pass and the source it reads, both absent when the body
-    /// is not text this archive's reader wrote.
+    /// The re-scoping pass owns its exact admitted source. It is absent when
+    /// the body is not text this archive's reader wrote.
     rescope: ?heap.Owned(spans.SpanArchive.RescopeCursor),
-    source: ?heap.Owned(*Header),
     /// The body to run: the finished copy, or the input body when nothing was
     /// re-scoped. Absent only while the copy is still being built.
     body: ?heap.Owned(*Header),
-    seeds: ?heap.Owned(*Header),
+    materializer: ?heap.Owned(SeedMaterializer),
     /// The word that opened the construction, captured because the boundary is
     /// opened in a later step than the one that dispatched it.
     word: intern.TraceWord,
-    seeded: usize = 0,
     phase: enum { rescope, open, seed } = .rescope,
 
     pub fn advance(evaluator: *Machine, self: *ConstructionDriver) MachineError!WorkProgress {
@@ -7401,8 +7439,6 @@ const ConstructionDriver = struct {
                 };
                 self.rescope.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.rescope = null;
-                evaluator.releaseDomain().releaseHeader(self.source.?.take());
-                self.source = null;
                 self.body = .init(stamped);
                 self.phase = .open;
                 return .yielded;
@@ -7437,15 +7473,12 @@ const ConstructionDriver = struct {
             .seed => {
                 // A construction that only had a body to re-scope reaches this
                 // phase with nothing to seed, which is the whole of its work.
-                const owned = self.seeds orelse return .completed;
-                const seeds = owned.borrow();
-                self.seeded = try advanceSeeds(
-                    evaluator.unit,
-                    seeds,
-                    self.seeded,
-                    construction_work_quantum,
-                );
-                if (self.seeded != @as(usize, @intCast(seeds.length()))) return .yielded;
+                if (self.materializer) |*materializer| {
+                    return if (try materializer.borrowMut().advance(
+                        evaluator.unit,
+                        construction_work_quantum,
+                    )) .completed else .yielded;
+                }
                 return .completed;
             },
         }
@@ -7459,15 +7492,14 @@ const ConstructionDriver = struct {
 const ChildSeedDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .fields;
-    seeds: heap.Owned(*Header),
-    seeded: usize = 0,
+    materializer: heap.Owned(SeedMaterializer),
 
     pub fn advance(evaluator: *Machine, self: *ChildSeedDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
-        const seeds = self.seeds.borrow();
-        self.seeded = try advanceSeeds(evaluator.unit, seeds, self.seeded, construction_work_quantum);
-        if (self.seeded != @as(usize, @intCast(seeds.length()))) return .yielded;
-        return .completed;
+        return if (try self.materializer.borrowMut().advance(
+            evaluator.unit,
+            construction_work_quantum,
+        )) .completed else .yielded;
     }
 };
 

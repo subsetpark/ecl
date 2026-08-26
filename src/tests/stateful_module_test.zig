@@ -235,11 +235,11 @@ test "modules: a nonempty construction stack becomes the durable initial stack o
     try std.testing.expect(counting.deinit() == .ok);
 }
 
-test "modules: with-seeded @defm seeds the construction stack in order" {
+test "modules: unit plans seed the @defm construction stack in order" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
-    // `with` seeds the isolated body in list order, so the body observes the
-    // list's first element deepest. Consuming them proves the order without
+    // A unit plan seeds the isolated body in list order, so the body observes
+    // the list's first element deepest. Consuming them proves the order without
     // needing to read the durable stack back.
     try expectStack(
         &runtime,

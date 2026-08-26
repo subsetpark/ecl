@@ -373,7 +373,10 @@ pub fn build(b: *std.Build) void {
     full_session_oom_mod.link_libc = true;
     const full_session_oom_tests = b.addTest(.{
         .root_module = full_session_oom_mod,
-        .filters = &.{"oom: full-session surfaces propagate every allocation failure"},
+        .filters = &.{
+            "oom: full-session surfaces propagate every allocation failure",
+            "oom: admitted construction driver allocation failure transfers its cursor once",
+        },
     });
     full_session_oom_tests.linkage = runtime_linkage;
     const run_full_session_oom_tests = b.addRunArtifact(full_session_oom_tests);

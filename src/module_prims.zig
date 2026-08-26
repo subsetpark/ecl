@@ -41,8 +41,8 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 /// program decides later whether, and under what name, to register it.
 fn moduleWord(evaluator: *Machine) MachineError!void {
     var input = try evaluator.popUnitInput();
-    defer input.deinit();
-    return evaluator.moduleOwned(null, input.take());
+    defer input.deinit(evaluator.releaseDomain());
+    return evaluator.moduleOwned(null, input.move());
 }
 /// Publication alone: name an already-constructed image. A missing name
 /// creates its registration; an existing one installs this image over the
@@ -66,11 +66,11 @@ fn defmWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     const name = try evaluator.popSymbol();
     var input = try evaluator.popUnitInput();
-    defer input.deinit();
+    defer input.deinit(evaluator.releaseDomain());
     // The name is carried unvalidated into the construction boundary. The
     // composition this word stands for evaluates the body first, so checking
     // the name here would skip a body `@module` plus `register` would run.
-    return evaluator.moduleOwned(name, input.take());
+    return evaluator.moduleOwned(name, input.move());
 }
 /// Removal completes the lifecycle. A canonical or alias name is resolved
 /// through the registry and drives the owner-issued close protocol.

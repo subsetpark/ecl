@@ -350,13 +350,16 @@ primitives, operationalized as two rules:
   construction rewrite attesting the copy it just produced — because that copy
   *is* the same reader text with different scopes on its words, which is what a
   construction nested inside an already-stamped body depends on.
-  Crucially, lineage cannot be handed out, only inherited, and no proof crosses
-  the API at all. `SpanArchive.prepareConstructionBody(body, scope)` is the
-  entire interface: the archive performs *admission* itself and returns either
-  `unchanged` or a cursor already holding the admission result. So the predicate
-  and its application cannot disagree, there is no portable proof to replay
-  against a second archive, and the publication step is a lookup-free commit
-  rather than a silently failing one.
+  Crucially, lineage cannot be handed out, only inherited. Preparation consumes
+  the exact owned body and performs the one semantic admission decision before
+  any image scope is minted. Rejection returns that body unchanged. Admission
+  returns an opaque root-bound owner that fixes its source and archive and has
+  one consuming operation: begin the archive's bounded rewrite after the image
+  scope exists. It accepts neither an archive nor a destination header from its
+  caller, so there is no portable proof to replay or mis-pair. The resulting
+  cursor stays in one `heap.Owned` until `take()` transfers it into the pending
+  `ConstructionDriver`; if driver allocation fails, pending-driver cleanup is
+  the sole owner and the emptied local cleanup is a no-op.
   The cursor's frame stack is the recursion, so depth costs no native stack, and
   every frame owns its destination builder from its first element: the builder's
   length *is* the initialized prefix, so publishing a finished container is O(1)
@@ -366,8 +369,11 @@ primitives, operationalized as two rules:
   compared, and a keys or vals list that is not a generic spine can hold no word
   and is shared too. Traversal and the index copy draw from one caller-supplied
   `poll.WorkBudget`, so a step cannot spend its slice and then begin a second
-  pass. Each nested descent re-asks the lineage question, which is why reader
-  fragments inside a runtime-built root grant no admission. Lineage storage is
+  pass. Once the exact root is admitted, every supported nested reader
+  container is traversed. Descendant directory access is diagnostic projection,
+  not another admission gate; a missing projection is `InvalidProvenance`, not
+  permission to share that descendant unchanged. A rejected runtime-built root
+  never begins traversal, so reader fragments inside it grant nothing. Lineage storage is
   live-proportional, not history-proportional: a rewritten header's directory
   slot is cleared and its identity recycled when that header is destroyed,
   through an O(1) hook the archive attaches to the reclamation domain it shares.
@@ -377,7 +383,7 @@ primitives, operationalized as two rules:
   candidate is prepared and claimed once. A racing loser yields, retaining the
   absorption entry or completed re-scope header in an explicit pending stage,
   and retries on a later scheduler slice rather than looping locally.
-  The second half is `UnitInput`'s business. A constructor that received a
+  The second half is decoded-input ownership. A constructor that received a
   flattened quotation cannot say which part was the body, so the two halves
   arrive separately: `heap.HeapKind.unit_plan` is a nominal kind whose private
   `UnitPlanStorage` owns one reference to the seed list and one to the body,
@@ -395,6 +401,20 @@ primitives, operationalized as two rules:
   ordinary release domain one bounded step each, exactly as a dict's payload
   headers do, so live plan memory is bounded by simultaneously live plans rather
   than by how many were ever made.
+  `Machine.popUnitInput` is the only tag decoder. It returns one non-struct
+  nominal owner whose empty-seed quotation representation allocates nothing.
+  Child launch borrows it until the new Unit retains its operands; fan-out moves
+  the same owner; boundary construction consumes its halves into the unchanged
+  body, root-bound rewrite, and seed materializer states. There is no public raw
+  body/seeds tuple or duplicate release helper. One `SeedMaterializer` owns the
+  retained seed list and next index for both construction boundaries and child
+  Units, reserves each granted slice before appending it, and is always serviced
+  before body code.
+  A candidate module image exists in both attribution branches, but
+  `scopeIdForOwned` runs only after admission. Runtime-built bodies therefore
+  execute with their existing word scopes and retain no attribution-only scope
+  cell or anchor; admitted bodies lazily mint the stable id their rewritten word
+  occurrences carry.
   Nothing extracts a published body, which is what lets the rule stand without
   an exception: code cannot be lifted out of its home and re-sited, so no caller
   reaches a module private by indexing the literals out of a public word's body.

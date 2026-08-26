@@ -514,15 +514,50 @@ pub const SpanArchive = enum(usize) {
         return self.privateState().release_domain;
     }
 
-    /// The construction namespace a rewritten code value must be built in so
-    /// it stays archive-bound: a stamped construction body is still this
-    /// archive's code, just re-scoped.
-    pub fn provenanceNamespaceOf(self: *const SpanArchive) heap.CodeProvenanceNamespace {
+    fn provenanceNamespace(self: *const SpanArchive) heap.CodeProvenanceNamespace {
         return self.privateState().identity_issuer.constructionNamespace();
     }
 
-    fn provenanceNamespace(self: *const SpanArchive) heap.CodeProvenanceNamespace {
-        return self.privateState().identity_issuer.constructionNamespace();
+    const AdmittedConstructionBacking = struct {
+        archive: SpanArchive,
+        source: heap.Owned(*value.ListHandle),
+        projection: IndexedSpan,
+    };
+
+    /// A consuming, exact-root admission. Its opaque backing owns the source
+    /// body and fixes both the archive and source projection; the only
+    /// operation consumes it into the archive's own bounded rewrite, so no
+    /// caller can pair admission with another archive or destination header.
+    pub const AdmittedConstructionBody = opaque {
+        pub fn begin(
+            self: *AdmittedConstructionBody,
+            scope: u32,
+        ) RescopeCursor {
+            const backing = admittedConstructionBacking(self);
+            const archive = backing.archive;
+            const source = backing.source.take();
+            const projection = backing.projection;
+            archive.allocator().destroy(backing);
+            return .{
+                .archive = archive,
+                .source = .init(source),
+                .root_projection = projection,
+                .scope = scope,
+            };
+        }
+
+        pub fn deinit(self: *AdmittedConstructionBody) void {
+            const backing = admittedConstructionBacking(self);
+            const archive = backing.archive;
+            backing.source.deinit(archive.releaseDomain(), archive.allocator());
+            archive.allocator().destroy(backing);
+        }
+    };
+
+    fn admittedConstructionBacking(
+        admitted: *AdmittedConstructionBody,
+    ) *AdmittedConstructionBacking {
+        return @ptrCast(@alignCast(admitted));
     }
 
     /// Records that `rewritten` is a re-scoped copy of admitted reader text:
@@ -549,10 +584,17 @@ pub const SpanArchive = enum(usize) {
         };
     }
 
-    /// Admission: does this exact header carry reader-text lineage? The result
-    /// never leaves the archive, which is what makes it impossible to present
-    /// one archive's answer to another.
-    fn admit(self: *const SpanArchive, header: *value.ListHandle) ?IndexedSpan {
+    /// The one semantic attribution decision: does this exact root carry
+    /// reader-text lineage in this archive?
+    fn admitRoot(self: *const SpanArchive, header: *value.ListHandle) ?IndexedSpan {
+        return self.privateState().indexed(header);
+    }
+
+    /// Diagnostic projection for a descendant of an already-admitted reader
+    /// subtree. This is not another semantic gate: a missing projection is an
+    /// invariant failure reported by the cursor, never permission to share the
+    /// descendant unchanged.
+    fn projectDescendant(self: *const SpanArchive, header: *value.ListHandle) ?IndexedSpan {
         return self.privateState().indexed(header);
     }
 
@@ -561,31 +603,34 @@ pub const SpanArchive = enum(usize) {
         /// No reader-text lineage, or nothing in this representation that a
         /// re-scope could change. The caller runs the body exactly as it is and
         /// keeps the reference it already holds.
-        unchanged,
-        /// Admitted. The cursor produces the re-scoped copy itself.
-        rewriting: RescopeCursor,
+        unchanged: heap.Owned(*value.ListHandle),
+        /// Admitted and bound to this exact root/archive, but awaiting the
+        /// target image's lazily minted scope id.
+        admitted: *AdmittedConstructionBody,
     };
 
     /// The single attribution operation. The archive performs admission
-    /// internally and hands back either "run it unchanged" or a cursor already
-    /// holding the admission result, so the predicate and its application
-    /// cannot disagree and no proof crosses the API to be replayed against a
-    /// different archive.
+    /// internally and hands back either the unchanged owner or an opaque root
+    /// bound to this archive and awaiting its target scope. The predicate and
+    /// its application therefore cannot disagree, and no proof crosses the API
+    /// to be replayed against a different archive.
     pub fn prepareConstructionBody(
         self: *SpanArchive,
-        body: *value.ListHandle,
-        scope: u32,
-    ) PreparedConstructionBody {
+        body: *heap.Owned(*value.ListHandle),
+    ) error{OutOfMemory}!PreparedConstructionBody {
         // A specialized leaf holds no word and no container, so re-scoping it
         // could not change anything even if it were admitted.
-        if (body.kind() != .generic_spine) return .unchanged;
-        const lineage = self.admit(body) orelse return .unchanged;
-        return .{ .rewriting = .{
-            .archive = self,
-            .root = body,
-            .root_lineage = lineage,
-            .scope = scope,
-        } };
+        if (body.borrow().kind() != .generic_spine)
+            return .{ .unchanged = .init(body.take()) };
+        const projection = self.admitRoot(body.borrow()) orelse
+            return .{ .unchanged = .init(body.take()) };
+        const backing = try self.allocator().create(AdmittedConstructionBacking);
+        backing.* = .{
+            .archive = self.*,
+            .source = .init(body.take()),
+            .projection = projection,
+        };
+        return .{ .admitted = @ptrCast(backing) };
     }
 
     pub const RescopeProgress = poll.Progress(*value.ListHandle);
@@ -652,9 +697,9 @@ pub const SpanArchive = enum(usize) {
             }
         };
 
-        archive: *SpanArchive,
-        root: *value.ListHandle,
-        root_lineage: IndexedSpan,
+        archive: SpanArchive,
+        source: heap.Owned(*value.ListHandle),
+        root_projection: IndexedSpan,
         scope: u32,
         frames: std.ArrayList(Frame) = .empty,
         started: bool = false,
@@ -666,6 +711,7 @@ pub const SpanArchive = enum(usize) {
             const releases = self.archive.releaseDomain();
             for (self.frames.items) |*frame| frame.retire(scratch, releases);
             self.frames.deinit(scratch);
+            self.source.deinit(releases, scratch);
             self.* = undefined;
         }
 
@@ -675,7 +721,7 @@ pub const SpanArchive = enum(usize) {
         ) error{ OutOfMemory, InvalidProvenance }!RescopeProgress {
             const scratch = self.archive.allocator();
             if (!self.started) {
-                try self.pushCode(self.root, self.root_lineage);
+                try self.pushCode(self.source.borrow(), self.root_projection);
                 self.started = true;
             }
             // Each step charges the budget for exactly the work it does, so a
@@ -738,7 +784,7 @@ pub const SpanArchive = enum(usize) {
             self: *RescopeCursor,
             frame: *DictFrame,
             work: *poll.WorkBudget,
-        ) error{OutOfMemory}!?value.Value {
+        ) error{ OutOfMemory, InvalidProvenance }!?value.Value {
             const scratch = self.archive.allocator();
             const entries: usize = @intCast(frame.source.length());
             switch (frame.stage) {
@@ -808,7 +854,10 @@ pub const SpanArchive = enum(usize) {
 
         /// The rewritten form of one element, or null when a nested container
         /// was pushed instead and the parent must wait for it.
-        fn rewrite(self: *RescopeCursor, item: value.Value) error{OutOfMemory}!?value.Value {
+        fn rewrite(
+            self: *RescopeCursor,
+            item: value.Value,
+        ) error{ OutOfMemory, InvalidProvenance }!?value.Value {
             shared: switch (item) {
                 // The one rewrite: a word occurrence inside this body's text
                 // names the image the body is becoming.
@@ -816,12 +865,10 @@ pub const SpanArchive = enum(usize) {
                     .word = .{ .name = reference.name, .scope = self.scope },
                 },
                 .list => |nested| {
-                    // A list rebuilt at run time is not this body's text however
-                    // its parts arrived, so lineage on a fragment grants no
-                    // admission through a root that has none.
                     if (nested.kind() != .generic_spine) break :shared;
-                    const lineage = self.archive.admit(nested) orelse break :shared;
-                    try self.pushCode(nested, lineage);
+                    const projection = self.archive.projectDescendant(nested) orelse
+                        return error.InvalidProvenance;
+                    try self.pushCode(nested, projection);
                     return null;
                 },
                 .dict => |nested| {
@@ -866,7 +913,7 @@ pub const SpanArchive = enum(usize) {
                 scratch,
                 0,
                 @intCast(source.length()),
-                self.archive.provenanceNamespaceOf(),
+                self.archive.provenanceNamespace(),
             );
             errdefer builder.retirePartial(self.archive.releaseDomain());
             try self.frames.append(scratch, .{ .code = .{
@@ -1240,24 +1287,55 @@ fn drive(fixture: *ArchiveFixture, cursor: *SpanArchive.RescopeCursor) !*value.L
     }
 }
 
+fn prepareForTest(
+    fixture: *ArchiveFixture,
+    header: *value.ListHandle,
+) !SpanArchive.PreparedConstructionBody {
+    heap.incRef(header);
+    var body = heap.Owned(*value.ListHandle).init(header);
+    errdefer body.deinit(heap.hostDomain(fixture.owner.cleanup()), fixture.archive.allocator());
+    return fixture.archive.prepareConstructionBody(&body);
+}
+
+fn admittedForTest(
+    fixture: *ArchiveFixture,
+    header: *value.ListHandle,
+    scope: u32,
+) !SpanArchive.RescopeCursor {
+    const prepared = try prepareForTest(fixture, header);
+    return switch (prepared) {
+        .admitted => |admitted| admitted.begin(scope),
+        .unchanged => |owned| {
+            var body = owned;
+            body.deinit(heap.hostDomain(fixture.owner.cleanup()), fixture.archive.allocator());
+            return error.ExpectedAdmission;
+        },
+    };
+}
+
 test "spans: only the reader's own text is admitted" {
     var fixture: ArchiveFixture = undefined;
     try fixture.init(std.testing.allocator);
     defer fixture.deinit();
 
     const root = try fixture.absorbSource("(1 +) 'go def");
-    try std.testing.expect(fixture.archive.prepareConstructionBody(root, 7) == .rewriting);
     {
-        var prepared = fixture.archive.prepareConstructionBody(root, 7);
-        prepared.rewriting.deinit();
+        const prepared = try prepareForTest(&fixture, root);
+        try std.testing.expect(prepared == .admitted);
+        prepared.admitted.deinit();
     }
 
     // A code value in this archive's own construction namespace that the reader
     // never produced is what every generic reconstruction is.
     var rebuilt = try fixture.rebuilt();
     defer rebuilt.deinit();
-    try std.testing.expect(
-        fixture.archive.prepareConstructionBody(rebuilt.borrow().list, 7) == .unchanged,
+    heap.incRef(rebuilt.borrow().list);
+    var rebuilt_body = heap.Owned(*value.ListHandle).init(rebuilt.borrow().list);
+    var rejected = try fixture.archive.prepareConstructionBody(&rebuilt_body);
+    try std.testing.expect(rejected == .unchanged);
+    rejected.unchanged.deinit(
+        heap.hostDomain(fixture.owner.cleanup()),
+        fixture.archive.allocator(),
     );
 }
 
@@ -1271,16 +1349,19 @@ test "spans: one archive never admits another archive's text" {
 
     const root = try reading.absorbSource("(1 +) 'go def");
     {
-        var prepared = reading.archive.prepareConstructionBody(root, 7);
-        try std.testing.expect(prepared == .rewriting);
-        prepared.rewriting.deinit();
+        const prepared = try prepareForTest(&reading, root);
+        try std.testing.expect(prepared == .admitted);
+        prepared.admitted.deinit();
     }
     // The decisive case: the *other* archive is asked to prepare the exact
     // header this one read. There is no proof to carry across, so admission is
     // its own and it declines. A foreign construction namespace yields no
     // identity, and an identity alone never grants membership, because the
     // directory is keyed by exact header.
-    try std.testing.expect(other.archive.prepareConstructionBody(root, 7) == .unchanged);
+    const foreign = try prepareForTest(&other, root);
+    try std.testing.expect(foreign == .unchanged);
+    var unchanged = foreign.unchanged;
+    unchanged.deinit(heap.hostDomain(reading.owner.cleanup()), reading.archive.allocator());
 }
 
 test "spans: re-scoping produces the only header that inherits reader lineage" {
@@ -1290,25 +1371,28 @@ test "spans: re-scoping produces the only header that inherits reader lineage" {
     const releases = heap.hostDomain(fixture.owner.cleanup());
 
     const root = try fixture.absorbSource("(1 +) 'go def");
-    var prepared = fixture.archive.prepareConstructionBody(root, 7);
-    errdefer prepared.rewriting.deinit();
-    const copy = try drive(&fixture, &prepared.rewriting);
+    var cursor = heap.Owned(SpanArchive.RescopeCursor).init(
+        try admittedForTest(&fixture, root, 7),
+    );
+    defer cursor.deinit(releases, fixture.archive.allocator());
+    const copy = try drive(&fixture, cursor.borrowMut());
+    cursor.deinit(releases, fixture.archive.allocator());
     defer releases.releaseHeader(copy);
 
     // A distinct header, and the lineage came with it: a later constructor may
     // re-stamp this exact copy to its own image, which is what a construction
     // nested inside an already-re-scoped body depends on.
     try std.testing.expect(copy != root);
-    try std.testing.expect(fixture.archive.prepareConstructionBody(copy, 9) == .rewriting);
     {
-        var again = fixture.archive.prepareConstructionBody(copy, 9);
-        again.rewriting.deinit();
+        const again = try prepareForTest(&fixture, copy);
+        try std.testing.expect(again == .admitted);
+        again.admitted.deinit();
     }
     // The source is untouched and still admissible.
-    try std.testing.expect(fixture.archive.prepareConstructionBody(root, 9) == .rewriting);
     {
-        var again = fixture.archive.prepareConstructionBody(root, 9);
-        again.rewriting.deinit();
+        const again = try prepareForTest(&fixture, root);
+        try std.testing.expect(again == .admitted);
+        again.admitted.deinit();
     }
     try std.testing.expectEqual(root.length(), copy.length());
 
@@ -1341,8 +1425,10 @@ test "spans: every re-scope step is one budget unit, publication included" {
             "'i (dup) 'j (dup) 'k (dup) 'l (dup) 'm (dup) 'n (dup) 'o (dup) 'p (dup) " ++
             "'q (dup) 'r (dup)} 'd def",
     );
-    var prepared = fixture.archive.prepareConstructionBody(root, 3);
-    errdefer prepared.rewriting.deinit();
+    var cursor = heap.Owned(SpanArchive.RescopeCursor).init(
+        try admittedForTest(&fixture, root, 3),
+    );
+    defer cursor.deinit(releases, fixture.archive.allocator());
 
     // One unit per advance. Every transition — an element, an index slice, a
     // container's publication — costs exactly one, so the number of advances is
@@ -1350,11 +1436,12 @@ test "spans: every re-scope step is one budget unit, publication included" {
     var steps: usize = 0;
     const copy = while (true) : (steps += 1) {
         var work: poll.WorkBudget = .init(1);
-        switch (try prepared.rewriting.advance(&work)) {
+        switch (try cursor.borrowMut().advance(&work)) {
             .pending => {},
             .complete => |header| break header,
         }
     };
+    cursor.deinit(releases, fixture.archive.allocator());
     defer releases.releaseHeader(copy);
     // Two top-level elements, the dict's 36 key/value positions, its index
     // slices, and one publication per container: many steps, none of them the
@@ -1378,16 +1465,18 @@ test "spans: settled lineage storage tracks live copies, not copies ever made" {
         // a directory page per 256 rounds the way a history-proportional
         // directory would.
         for (0..64) |_| {
-            var prepared = fixture.archive.prepareConstructionBody(root, 5);
-            releases.releaseHeader(try drive(&fixture, &prepared.rewriting));
+            var cursor = try admittedForTest(&fixture, root, 5);
+            releases.releaseHeader(try drive(&fixture, &cursor));
+            cursor.deinit();
             // Recycling happens at destruction, and destruction is deferred
             // retirement work: settling it is what makes the identity free.
             fixture.owner.cleanup().drain();
         }
         const warmed = counting.total_requested_bytes;
         for (0..1024) |_| {
-            var prepared = fixture.archive.prepareConstructionBody(root, 5);
-            releases.releaseHeader(try drive(&fixture, &prepared.rewriting));
+            var cursor = try admittedForTest(&fixture, root, 5);
+            releases.releaseHeader(try drive(&fixture, &cursor));
+            cursor.deinit();
             fixture.owner.cleanup().drain();
         }
         try std.testing.expect(counting.total_requested_bytes <= warmed + 4096);
@@ -1434,11 +1523,11 @@ test "spans: an abandoned re-scope releases its partial copy" {
     // built nested headers, and a partly copied index, and every one of them
     // goes back. The test allocator reports a leak if any does not.
     for (1..24) |steps| {
-        var prepared = fixture.archive.prepareConstructionBody(root, 9);
+        var cursor = try admittedForTest(&fixture, root, 9);
         for (0..steps) |_| {
             var work: poll.WorkBudget = .init(1);
-            if (try prepared.rewriting.advance(&work) == .complete) unreachable;
+            if (try cursor.advance(&work) == .complete) unreachable;
         }
-        prepared.rewriting.deinit();
+        cursor.deinit();
     }
 }

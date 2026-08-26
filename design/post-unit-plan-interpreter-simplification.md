@@ -1,362 +1,504 @@
 # Post-unit-plan interpreter simplification
 
-Status: deferred; blocked on the complete unit-plan feature landing
+Status: implemented 2026-08-26 on the complete unit-plan base `dc8c845`
+
+## Implementation record
+
+The required unit-plan landing is the direct base commit. The simplification
+keeps its public language behavior and replaces only the redundant internal
+protocols identified below:
+
+- exact-root preparation now consumes the owned body and returns either that
+  unchanged owner or an opaque source/archive-bound admission awaiting a scope;
+- admitted traversal uses required descendant diagnostic projection rather
+  than a second semantic admission gate;
+- candidate images mint a stable `ScopeId` only in the admitted branch;
+- an admitted re-scope cursor remains in one movable owner until `take()`
+  transfers it into `ConstructionDriver`, so failed driver allocation cannot
+  leave a second local cleanup armed for the same source;
+- one non-struct `OwnedUnitInput` remains intact through child borrowing and
+  fan-out movement, then consumes its halves into boundary states;
+- one `SeedMaterializer` owns seed-list progress in both construction and child
+  drivers; and
+- formatter navigation recognizes only raw and nominal `seed` registration
+  shapes, while `with` formats as ordinary composition.
+
+The initialized-Session OOM tier includes a post-bootstrap sweep of the
+minimal admitted `@defm` operation. It exhausts every allocation in that
+operation, including pending `ConstructionDriver` allocation after the cursor
+owns its source.
 
 ## Execution barrier
 
-These instructions describe a follow-up change. They must not be implemented
-in the unit-plan patch or interleaved with its patch stack.
+These instructions describe a follow-up change. Do not implement them in the
+unit-plan patch or interleave them with that patch stack.
 
 Work may begin only when all of the following are true on the base commit:
 
-1. `design/unit-plan.md` is implemented in full, including its public behavior,
-   ownership rules, static enforcement, documentation migration, and bounded
-   work requirements.
-2. The unit-plan change has landed as a complete commit or patch stack rather
-   than existing only as uncommitted work in the shared tree.
-3. `zig build precommit` passes for that landed base with standard input closed
-   and its exit status captured directly.
-4. The `cat` reproduction, raw reader-body attribution, seed preservation, and
-   cross-archive witness rejection are passing through public runtime tests.
+1. `design/unit-plan.md` is implemented in full, including public behavior,
+   reader-text lineage, ownership, bounded work, static enforcement, and
+   documentation migration.
+2. The implementation containing the architecture named under **Landed
+   baseline** is a complete landed commit or patch stack, not uncommitted work
+   in a shared tree.
+3. `zig build precommit` passes on that base with standard input closed and the
+   command's exit status captured directly.
+4. The public `cat` reproduction, literal-body attribution, seed preservation,
+   nested-construction re-entrancy, and cross-archive rejection cases pass.
+5. The bounded re-scope, identity-claim contention, cancellation, and
+   live-proportional lineage-retention properties pass.
 
-If any entry condition is absent, stop. Repair or finish unit-plan first. Do not
-use this follow-up to complete, redesign, or compensate for a partial unit-plan
-implementation.
+If any entry condition is absent, stop and repair unit-plan first. This
+follow-up may remove redundancy exposed by the feature; it may not finish,
+redesign, or compensate for an incomplete feature landing.
 
 The first simplification commit must have the complete unit-plan landing as an
-ancestor. Record that prerequisite in the active gameplan so the dependency is
-machine-reviewable rather than a convention about patch order.
+ancestor. Record that dependency in the active gameplan.
 
-The landed feature may still contain semantically redundant mechanisms that do
-not violate its specification: descendant identity checks inside an already
-admitted original body, duplicated constructor-input adapters, duplicated
-bounded seed materializers, eager image scope allocation, and formatter
-recognition of the former `with` idiom. Those are the inputs to this cleanup.
-The landing may not defer any public semantics, ownership guarantee, witness
-separation, or bounded-work requirement to this document.
+## Landed baseline
+
+Treat the following as the starting architecture. Do not re-introduce an
+earlier witness, mint, reservation, or privileged-handler design while trying
+to simplify it.
+
+- `unit-plan` is a nominal heap kind with private typed storage for one seed
+  list and one body list. The raw constructor is private.
+- `seed` is a dedicated binding kind carrying a root-derived opaque
+  `UnitPlanSeal`. Generic core installers accept only ordinary validated names
+  and cannot install, replace, or alias `seed` behavior.
+- `Machine.popUnitInput` is the sole language-facing decoder for
+  `quotation | unit-plan`; it returns `OwnedUnitInput`.
+- All five constructors use that decoder. Child constructors describe initial
+  operands with `InitialStack`; in-machine construction uses
+  `ConstructionDriver`.
+- Seed materialization is bounded. `ConstructionDriver` and
+  `ChildSeedDriver` currently share the `advanceSeeds` algorithm but retain
+  parallel ownership/progress state.
+- `SpanArchiveOwner` and `SpanArchive` have separately allocated backing.
+  Only the owner holds `HostOwner`, the code-retirement registration, blocking
+  host reads, and teardown. Units receive the worker facade and bounded read,
+  absorption, and re-scope cursors.
+- `SpanArchive.prepareConstructionBody(body, scope)` makes the exact-root
+  admission decision and returns either `unchanged` or an already-bound
+  `RescopeCursor`. No portable witness or proof crosses the interface.
+- Re-scoping is non-recursive native code driven by a shared
+  `poll.WorkBudget`. Frames own initialized destination prefixes; list and dict
+  publication is O(1); a dict shares scope-invariant hashes and copies its
+  optional index in bounded slices.
+- A re-scoped list is published through the archive's private lineage path.
+  Identity acquisition is a scalar transaction with one claim attempt per
+  cursor advance. Claim contention returns `pending`; alias publication returns
+  `published` or `refused`; refusal becomes `InvalidProvenance`. A completed
+  header remains owned in `ready_to_publish` while publication is pending.
+- Reader absorption and the scope-only construction rewrite are the only two
+  lineage mints. Rewritten copies inherit lineage so nested construction is
+  re-entrant. Generic reconstruction never acquires lineage.
+- Code retirement clears exact-header directory entries and recycles
+  identities through the owner-held registration. Storage is proportional to
+  live re-scoped headers rather than publication history.
+- First-party source, primitive documentation, isolation guidance, and the
+  formatter's nominal path use `seed`. Ordinary `with` remains composition,
+  although the formatter still preserves a compatibility recognition path for
+  the former `with ... @defm` shape.
+
+The simplification must preserve every item above unless this document
+explicitly identifies its present duplication as the thing to remove.
 
 ## Objective
 
-Remove the interpreter mechanisms that existed only because seed values and a
-construction body were flattened into an ordinary quotation, and because
-diagnostic reader identity was being used as a proxy for module-text
-attribution.
-
-The resulting interpreter must express these facts directly:
+Make the interpreter say the language rule once at each owning boundary:
 
 ```text
-UnitInput identifies one body and zero or more seeds.
-Only the exact body root may admit construction attribution.
-Only reader-text lineage grants that admission, and the archive decides it
-internally: no proof of admission is a value a caller can hold or replay.
-Admission stamps the complete body subtree.
-Rejection performs no stamping and does not inspect descendants.
-Seeds are initial stack values and are never construction text.
+Unit input decides body versus seeds.
+The archive admits or rejects the exact body root once.
+Rejection executes the owned body unchanged and does no attribution work.
+Admission authorizes one bounded scope-only rewrite of that bound source.
+The rewrite traverses the complete reader-text subtree without re-deciding
+admission at each descendant.
+Seeds are initial operands and never construction text.
 ```
 
-This is a representation and authority cleanup. It must not change the language
-behavior specified by `design/unit-plan.md`.
+The target is less state and fewer parallel protocols, not a new unit-plan
+implementation. Public language behavior remains exactly that of
+`design/unit-plan.md`.
 
-## Invariants to preserve
+## Invariants
 
-1. A word resolves in the scope carried by the occurrence.
-2. A witnessed original reader body is copied and every word in its complete
-   reader-built subtree is stamped to the new image.
-3. An unwitnessed body is executed unchanged. Nested witnessed fragments do not
-   admit it, and the interpreter does not descend looking for them.
-4. A stamped copy carries diagnostic source projections *and* reader-text
-   lineage: it is the same reader text re-scoped, so a later constructor may
-   re-stamp that exact copy to its own image. Nothing outside the scope-only
-   construction rewrite acquires lineage. (Ruled 2026-08-26; this replaces the
-   earlier non-transfer invariant, which made a construction nested inside a
-   construction body resolve against the enclosing image. See
-   `design/unit-plan.md`, Reader-text lineage.)
-5. Lineage is valid only for the exact header and issuing Session archive, and
-   no operation grants it to a header its caller chose.
-6. Seeds retain their values, word scopes, ordering, and diagnostic provenance.
-7. A raw quotation is exactly the empty-seed case of `UnitInput`.
-8. `@each` places its element deepest in the child stack, below plan seeds.
-9. Every consuming operation states and implements ownership on success and on
-   every failure path.
-10. User-sized seed materialization and body stamping remain bounded scheduler
-    work.
+1. A word resolves in the scope carried by that occurrence.
+2. Exact-root admission is the only semantic attribution decision.
+3. An unadmitted root is executed unchanged. Its descendants are neither
+   inspected nor used to recover attribution.
+4. An admitted root is copied completely through reader-built quotations,
+   lists, and dicts, and every word occurrence receives the target image's
+   `ScopeId`.
+5. The scope-only rewrite's copies retain diagnostic projection and reader-text
+   lineage. A nested constructor may therefore re-scope its exact copied body
+   against its own image.
+6. Ordinary reconstruction loses lineage. No operation accepts a witness plus
+   a caller-chosen destination header, and one archive never admits another's
+   text.
+7. Seeds retain identity, order, word scopes, and provenance. `@each` puts its
+   element deepest, below the plan seeds.
+8. Every input, cursor, builder, finished header, seed list, and candidate image
+   has one explicit owner on success, failure, cancellation, and transfer.
+9. Re-scoping, seed materialization, identity contention, partial teardown, and
+   publication remain bounded scheduler work. No terminal step hides a
+   user-sized copy, hash, rehash, duplicate scan, or release walk.
+10. Lineage storage remains live-proportional and code-retirement registration
+    remains owner-only, issuance-checked, and unavailable from the worker
+    facade.
+11. The privileged `seed` binding and `UnitPlanSeal` remain unavailable through
+    generic installation, aliasing, reflection, native calls, or ordinary
+    handlers.
+12. A raw quotation remains the allocation-free empty-seed case.
 
-## Simplification 1: make attribution a one-time root decision
+## Simplification 1: separate root admission from descendant projection
 
-The landed feature already makes one semantic admission decision at the
-construction boundary. Consolidate that decision into the only representation
-the later construction path can consume.
+The landed cursor correctly asks `prepareConstructionBody` once at the root,
+but its nested-list traversal calls `admit` again. That second operation is
+serving two different purposes:
 
-The boundary must ask the reader-witness authority to classify the exact body
-root. The result must be a tagged or opaque capability, not a correlated
-`bool`, identity number, archive pointer, and header tuple that callers can
-mis-pair. The two outcomes own everything needed for their respective paths:
+- it appears to re-decide whether a nested value is construction text; and
+- it obtains the source projection needed to publish the nested copied header.
+
+After exact-root admission, the first purpose is redundant and obscures the
+rule. The complete reader-text subtree is already the admitted unit. A
+descendant query may still be needed as an implementation lookup for spans and
+lineage publication, but it must no longer be a semantic gate that can silently
+turn a nested reader container into shared runtime data.
+
+Refactor the archive-side representation so these concepts are distinct:
 
 ```text
-runtime body     -> owned unchanged body
-original body    -> owned body plus unforgeable stamping admission
+root admission        = optional, semantic, performed exactly once
+descendant projection = required within an admitted traversal, diagnostic
 ```
 
-After classification:
+The admitted result must be a root-bound executable capability, not a portable
+claim of lineage. It owns or borrows the exact source header and the archive
+state needed to build and attest only its own output. It must not expose an
+identity, archive entry, namespace, boolean witness, or operation that accepts
+a destination header supplied by its caller.
 
-- The runtime-body branch transfers the original body directly into module
-  execution. It performs no copy, traversal, source projection, or descendant
-  identity query.
-- The original-body branch mints the image scope and passes its admission to a
-  bounded structural stamping driver.
-- The stamping driver rewrites every word and traverses every supported nested
-  container. It contains no archive-membership, child-identity, or provenance
-  gate.
-- The driver constructs its own output and projects source locations onto it,
-  inheriting the input's reader-text lineage as part of the same commit. It
-  never accepts a destination header from its caller.
+Within an admitted traversal:
 
-Delete the nested-list `identityOf` test from `Machine.stampValue`. Delete any
-comment, helper, or test that describes archive-wide code identity as the
-admission rule. There must be no fallback that scans descendants when the root
-is rejected.
+- every supported nested container is traversed according to structure;
+- no descendant can cause a fallback to “share unchanged” merely because a
+  second admission lookup returned null;
+- any lookup retained solely to project spans is named and typed as projection,
+  not admission;
+- failure to find projection for a descendant that the admitted representation
+  says belongs to the reader subtree is `InvalidProvenance` or an equivalent
+  explicit invariant failure, never semantic rejection;
+- lineage publication continues to build the destination internally and keeps
+  the landed `pending | published | refused` distinction.
 
-The unit-plan landing must already have made stamping bounded. Do not replace
-its cursor or driver with recursive traversal during this cleanup. Simplify the
-bounded walker by deleting descendant admission state and queries while
-retaining its exact next position and ordinary work budget.
+Do not replace the cursor with recursive traversal. Preserve its frame stack,
+builders, `ready_to_publish` state, shared `WorkBudget`, one-attempt identity
+transaction, O(1) publication, and exact abandonment cleanup.
 
-## Simplification 2: narrow the reader/archive authority surface
+If the archive can carry descendant projection directly from the parent span
+structure without an identity lookup, prefer that. If the existing exact-header
+directory remains the honest source, retain the lookup but make its non-semantic
+role explicit. Do not delete diagnostic identity merely to make the traversal
+look purer.
 
-Diagnostic identity and construction attribution must have separate APIs and
-separate minting authority.
+## Simplification 2: decide admission before minting an image ScopeId
 
-After all production consumers use the root-classification seam:
+`Machine.moduleOwned` currently creates the candidate image, eagerly calls
+`scopeIdForOwned`, and then calls `prepareConstructionBody(body, scope)`. An
+unadmitted runtime body receives no rewritten word, so that eager stable
+`ScopeId` and its anchor/cell retention exist solely for work that never occurs.
+This is observable resource behavior, not merely one unnecessary call: scope
+cells are Env-lifetime directory entries, so minting one for every short-lived
+unadmitted image makes residual memory proportional to construction history.
 
-- Remove `SpanArchive.identityOf` from the machine-facing surface if it has no
-  remaining non-attribution consumer.
-- Do not expose a raw provenance namespace merely so arbitrary machine code can
-  manufacture archive-associated code. Give the admitted stamping operation
-  only the narrow construction capability it needs.
-- Replace raw span aliasing in the construction path with a semantic
-  source-projection-and-lineage operation private to the re-scoping cursor,
-  which supplies its own destination header.
-- Keep code identities, span indexes, and source projections internally where
-  diagnostics still require them. Do not delete diagnostic provenance merely
-  because it no longer decides attribution.
-
-Enforce witness minting and non-transfer with opaque capability types first.
-Use `comptime` validation or the exhaustive production source audit only for
-properties Zig cannot express. Do not add runtime tests that read source files
-or test-only accessors exposing witness tables, code identities, or archive
-layout.
-
-## Simplification 3: normalize every constructor through one owned input
-
-The landed feature may initially decode the tagged input at more than one
-constructor adapter. Consolidate those paths into one consuming decoder:
+Change preparation into two consuming stages:
 
 ```text
-raw quotation -> empty seeds, quotation body
-unit-plan      -> stored seeds, stored body
+prepare exact body -> unchanged owned body
+                   | admitted root-bound rewrite awaiting a target ScopeId
+admitted + ScopeId -> bounded RescopeCursor
 ```
 
-Its result must be one nominal owned value whose destructor covers both fields
-until they are transferred. Constructors must not independently inspect the
-heap tag, unpack plans, or recreate ownership cleanup.
+The intermediate admitted value is not a witness. It is bound to its exact
+source and archive, can only be consumed once to start the archive's own
+rewrite, and still cannot attest a caller-chosen output.
 
-Route `@attempt`, `@spawn`, `@each`, `@module`, and `@defm` through this decoder.
-`@defm` continues to consume its name in the specified stack order, then uses
-the same constructor-input path as `@module`.
+Then make module construction branch as follows:
 
-Keep the five constructors' lifecycle behavior distinct. This cleanup does not
-merge attempt boundaries, module publication, task spawning, parallel joining,
-or registration. It unifies only their input and initial-stack protocol.
+- `unchanged`: retain no rewrite capability, mint no image `ScopeId` for
+  attribution, and transfer the original body directly to the boundary;
+- `admitted`: obtain the candidate image's stable `ScopeId`, consume the
+  root-bound capability into the bounded cursor, and continue through the
+  existing construction driver.
 
-## Simplification 4: use one bounded initial-stack materializer
+The candidate image, execution home, module scope, registration behavior, and
+durable state still exist in both branches. Only the stable cell/id used to
+label rewritten occurrences becomes conditional. If another consumer truly
+needs that id, expose an explicit lazy request at that consumer; do not restore
+unconditional allocation.
 
-Consolidate the landed bounded seed-initialization paths behind the existing
-explicit child `InitialStack` seam rather than retaining separate in-machine
-and child-task plan mechanisms.
+Express the distinction with a tagged state owned by the construction path.
+Do not coordinate it with nullable scope ids, booleans, and separately held
+source headers. Preserve candidate-image ownership on every allocation failure.
 
-The materializer must support:
+## Simplification 3: keep decoded unit input owned through handoff
 
-- no seeds;
-- a plan's ordered seed list;
-- the `@each` element followed by a plan's ordered seeds.
+The landing already centralized decoding in `Machine.popUnitInput`; do not
+rebuild that work. Simplify what happens after it.
 
-It must retain or consume every value according to one documented ownership
-contract, preserve list order, yield on large inputs, and unwind partially
-materialized stacks without leaks. Child tasks must own the references they
-need independently of the parent plan and of sibling children.
+Today `OwnedUnitInput` can be converted into a raw `UnitInput` tuple, after
+which `releaseUnitInput` duplicates the destructor and several call sites
+manually split body and seeds into driver fields. Replace that parallel
+ownership protocol with one nominal consuming handoff.
 
-Use the same materializer when opening an in-machine isolated boundary. Record
-the caller's stack length as the new floor, materialize seeds above it, and
-execute the body with that floor. Do not implement plan seeding by synthesizing
-or executing `literal`, `partial`, `with`, or another quotation.
+The result should make these states explicit:
 
-The combinator contract machinery's existing use of the term `seeded` is a
-different invariant. Do not merge `StackWindow`/contract arity state with the
-unit-plan initial-stack capability merely because both involve initial values.
+```text
+decoded input owned together
+|- borrowed for one child launch; owner remains with caller
+|- transferred to fan-out state; that state owns body and optional seeds
+`- transferred to boundary construction; that state owns body and optional seeds
+```
 
-## Simplification 5: make image scope allocation conditional
+Requirements:
 
-An unwitnessed runtime body receives no newly stamped word occurrences.
-Therefore the construction path must not eagerly mint a stable image `ScopeId`
-solely for stamping that will not occur.
+- `popUnitInput` remains the only tag inspection for all five constructors.
+- The plan object may be released after decoding because the decoded owner has
+  independent references to its two halves.
+- No public constructor accepts a raw pair of owned header pointers whose
+  failure contract must be remembered separately.
+- The destructor for an untransferred decoded input is written once.
+- Moving the body and seeds into a child, fan-out driver, or construction driver
+  consumes the corresponding ownership exactly once.
+- Do not merge the five constructors' distinct lifecycle semantics. This is
+  only their common input and ownership protocol.
 
-Create the image and its execution home in both branches. Mint the image scope
-cell and anchor reference only in the admitted stamping branch, or lazily at a
-later operation that genuinely needs a stable `ScopeId`. Preserve image homes,
-definition ownership, publication, reload isolation, and qualified dispatch;
-those are independent of whether this body contributed stamped occurrences.
+Delete dead conveniences exposed by the landing—such as unused count or
+initial-stack adapters—rather than preserving a second vocabulary for the same
+handoff.
 
-Before deleting any unconditional scope allocation, audit every consumer of the
-cell and express the distinction in types. If a non-stamping consumer genuinely
-requires it, give that consumer an explicit lazy request rather than restoring
-unconditional allocation. Acceptance must demonstrate that unstamped anonymous
-and registered images still execute, define, publish, reload, and retire
-correctly.
+## Simplification 4: give seed materialization one state machine
 
-## Simplification 6: remove recognition of `with` as constructor metadata
+The landing correctly shares the element-copying algorithm in `advanceSeeds`,
+but `ConstructionDriver` and `ChildSeedDriver` still each own a seed list and a
+parallel progress counter. Extract one nominal bounded seed materializer that
+owns:
 
-Once first-party source and documentation use `seed`, remove interpreter-adjacent
-code that treats ordinary `with` composition as nominal unit seeding.
+- the retained seed list;
+- the next index;
+- its consuming/finished state.
 
+Its one advance operation appends at most the granted construction quantum in
+list order. It must reserve capacity for the slice before adding any member, so
+allocation failure adds no partial member from that slice. An earlier prefix is
+ordinary stack ownership and is released by boundary or Unit teardown.
+
+Use that same materializer as:
+
+- the final phase of in-machine `@attempt`, `@module`, and `@defm`
+  construction; and
+- the first work installed in child Units for `@spawn` and `@each`.
+
+The surrounding drivers may remain distinct because they own different
+lifecycle transitions. They should embed or own the same materializer rather
+than restating its fields and completion test.
+
+Preserve these ordering facts:
+
+- a boundary opens before its seeds are placed, but its body cannot execute
+  until materialization completes because the work driver is serviced first;
+- a child Unit receives the `@each` element immediately and deepest, then the
+  materializer appends plan seeds above it before code runs;
+- creating many `@each` children never copies the whole shared seed list in the
+  parent's spawn slice.
+
+Do not combine this with `StackWindow` or combinator contract state merely
+because those mechanisms also use the word “seeded.”
+
+## Simplification 5: retire the former `with` metadata path
+
+The formatter now recognizes nominal `seed`, but
+`moduleRegistrationInfo` still treats `with` as if it carried constructor
+metadata and `precedingSeedList` still preserves the old phrase's navigation
+shape.
+
+Remove that compatibility inference. Formatter recognition of a seeded module
+registration must be based on the explicit sequence:
+
+```text
+values-list body seed 'name @defm
+```
+
+A bare `body 'name @defm` remains recognized. A phrase using `with` remains
+valid ECL and formats as ordinary composition followed by a constructor; it no
+longer earns nominal seed metadata or special navigation solely from that
+shape.
+
+Delete `precedingSeedList` if it has no independent formatter purpose. Remove
+comments, fixtures, snapshots, or guidance that describe `with` as constructor
+seeding metadata. Do not remove or specialize `with`, `partial`, `literal`,
+`cat`, `compose`, `cons`, `append`, `raze`, slicing, reversal, or generic
+list construction.
+
+## Simplification 6: narrow names and surfaces to the final concepts
+
+After the preceding changes, remove only mechanisms made unreachable by them.
 In particular:
 
-- Formatter recognition of a syntactically evident seeded `@defm` must key on
-  `seed`, not infer intent from neighboring lists and `with`.
-- Remove the `with`-specific backward seed-list heuristic when it has no other
-  formatter use.
-- Isolation guidance must recommend the corresponding `seed` spelling.
-- Centralize the common guidance text so the five constructors supply only the
-  constructor-specific phrase and `@each` ordering note.
-- Primitive documentation and reflective effects must describe `UnitInput`, not
-  a quotation secretly prepared through composition.
+- make the archive's raw construction namespace accessor private if its only
+  remaining use is inside archive-owned readers/builders;
+- remove duplicate admission helpers after exact-root preparation is the sole
+  semantic gate;
+- remove obsolete raw input release helpers and duplicate seed progress fields;
+- remove stale comments that call every provenance lookup “admission” or imply
+  that a runtime-built root can be recovered by inspecting descendants;
+- retain `SpanArchiveOwner`/`SpanArchive` backing separation,
+  `requireOpaqueWorkerFacade`, owner-only blocking reads, and owner-only
+  registration/teardown;
+- retain absorption cursors, diagnostic location/source cursors, exact-header
+  indexing, scalar identity transactions, and retirement recycling wherever
+  they still serve their own contracts.
 
-The old `values body with @constructor` spelling remains valid ordinary ECL:
-`with` returns a runtime-built quotation and the constructor accepts that raw
-quotation. It need not receive special formatter navigation or diagnostic
-status. Do not reject, reinterpret, or nominalize it.
-
-## Simplification 7: delete obsolete synthetic seeding, not composition
-
-No constructor may generate or execute capture quotations for nominal plan
-seeds. Remove dead helpers, branches, comments, examples, and allocation-failure
-cases that exist solely for that path after production references are gone.
-
-Do not remove or specialize `literal`, `partial`, `with`, `cat`, `compose`,
-`cons`, `append`, `raze`, slicing, reversal, or generic list construction. They
-remain public homoiconic composition operations, and their runtime-built
-results must continue preserving the scopes already carried by their words.
+Do not broaden a worker facade for convenience. If a new synchronous wrapper is
+needed only by bootstrap or a blocking Session turn, put it on the host owner;
+execution keeps the bounded cursor surface.
 
 ## Patch sequence
 
 Keep every patch buildable and behavior-preserving. Use this order unless the
 landed representation makes two adjacent steps inseparable:
 
-1. Make the landed root-classification result nominal and move every module
-   constructor consumer onto it without deleting the old archive API yet.
-2. Remove descendant admission state from the landed bounded stamping driver
-   and activate the unchanged-body fast path.
-3. Consolidate constructor decoding and initial-stack materialization across
-   all five constructors.
-4. Make image scope allocation conditional and prove image lifetime behavior.
-5. Simplify formatter recognition, diagnostics, primitive metadata, and
-   first-party implementation comments.
-6. Delete now-unused identity/provenance authority, helpers, and obsolete tests;
-   update architectural documentation and the active gameplan.
+1. Split descendant source projection from semantic admission inside the
+   existing re-scope cursor. Preserve the current external preparation API and
+   all publication states while doing so.
+2. Introduce the root-bound, pre-scope preparation state; move image `ScopeId`
+   minting into its admitted branch and delete eager attribution-only minting.
+3. Keep decoded unit input under one consuming owner through boundary, child,
+   and fan-out handoff; delete the raw duplicate teardown path.
+4. Extract the shared bounded seed-materializer state and embed it in the two
+   lifecycle-specific drivers.
+5. Remove `with`-specific formatter metadata recognition and update its public
+   formatter fixtures/snapshots.
+6. Delete newly dead helpers and narrow archive/machine surfaces. Update
+   `design/INTERPRETER.md`, the active gameplan, and the workstream to describe
+   the final representations and proof boundaries.
 
-Do not combine a semantic repair discovered during this work with a cleanup
-patch. If the landed unit-plan behavior is wrong or incomplete, stop, repair
-the feature against `design/unit-plan.md`, establish a new passing baseline,
-and only then resume this sequence.
+Do not mix a semantic repair discovered during this work into a cleanup patch.
+If the landed behavior is wrong or incomplete, stop, repair unit-plan against
+`design/unit-plan.md`, establish a new passing baseline, and resume from it.
 
 ## Verification
 
 Tests must observe public runtime or formatter behavior. They must not inspect
-implementation source text, private witness tables, identities, fields, helper
-names, or call patterns.
+implementation source, private indexes, identities, fields, helper names, or
+call patterns. Static architecture belongs in types, `comptime` validation, and
+the exhaustive source audit where the compiler cannot express it.
 
-Retain or add public coverage for:
+Retain the landed unit-plan suite and add only coverage that distinguishes the
+simplified paths:
 
-1. Literal reader bodies stamp words through quotations, list literals, and
-   dict literals.
-2. Runtime-built roots are unchanged even when every child is reader-built.
-3. A rejected root containing a very large reader-built fragment is not
-   admitted through that fragment.
-4. Span projection preserves exact error locations in a stamped copy, and that
-   copy is admissible for a construction nested inside it, while no runtime
-   reconstruction of it is.
-5. Raw quotations and empty-seed plans behave identically in all five
+1. Literal bodies still re-scope through quotations, lists, and dicts.
+2. Runtime-built roots remain unchanged even when every child is reader-built.
+3. A rejected root containing a very large reader-built fragment completes
+   without traversing that fragment for attribution.
+4. Nested construction remains re-entrant for raw and seeded inner bodies.
+5. A stamped copy keeps exact error locations and is admitted again, while an
+   ordinary reconstruction of it is not.
+6. Cross-archive preparation rejects the exact foreign header.
+7. Raw quotations and empty-seed plans behave identically in all five
    constructors.
-6. Multiple plan seeds preserve order; `@each` keeps its element deepest.
-7. Parent plan, sibling tasks, cancellation, and allocation failures do not
-   invalidate or leak child seed values.
-8. Unstamped anonymous and registered images define, execute, publish, reload,
-   and retire without an eagerly minted stamping scope.
-9. Formatter navigation recognizes the nominal `seed` spelling; ordinary
-   `with` composition remains valid and formats as ordinary code.
-10. Isolation errors recommend `seed` for each constructor.
+8. Multiple seeds preserve order; `@each` keeps its element deepest; child
+   seeding yields and cancellation can interrupt it.
+9. Allocation failure and abandonment at every decoded-input transfer,
+   re-scope frame, identity publication, and seed-materializer phase leak
+   neither values nor identity capacity.
+10. Repeated unadmitted anonymous and registered images define, execute,
+    publish, reload, and retire with warmed residual memory bounded independently
+    of construction count, proving that no attribution-only `ScopeId` cell is
+    minted for each image.
+11. Formatter navigation recognizes raw and nominally seeded `@defm` phrases;
+    the former `with` spelling formats as ordinary code.
+12. Repeated re-scope-and-release remains bounded by peak live copies, not
+    construction history.
 
-Place allocation-failure coverage deliberately. Component-level failure probes
-belong beside the new decoder, plan-opening, materializer, and stamping driver.
+Use the existing real concurrency cases for peer progress during large
+re-scopes/seeding and cancellation of a sibling mid-seed. Do not replace them
+with a model. If a patch changes when child tasks become reachable, how long a
+driver lives, or when archive-owned memory retires, run the Docker-only
+Linux/x86_64 TSan gate for that specific reason, following `AGENTS.md`.
+
+Choose allocation-failure coverage deliberately. Component-level failure
+probes belong beside the owning decoder, cursor, transaction, or materializer.
 Add the smallest initialized-Session snippet to `src/tests/oom_test.zig` only
-for paths unreachable without a live Session. Do not multiply seeds or body
-elements merely to add volume.
+for a path unavailable without a live Session.
 
 After each patch, run the local tier with standard input closed and capture the
-status of that invocation immediately:
+status of that command itself:
 
 ```sh
 timeout 500 zig build precommit < /dev/null > run.log 2>&1; code=$?
 ```
 
-Inspect `code` before inspecting `run.log`. Do not run the complete local CI
-matrix. If the change alters scheduler lifetime or when tasks become reachable,
-run the Docker-only Linux/x86_64 TSan gate for that specific reason, following
-`AGENTS.md` exactly.
+Inspect `code` before inspecting `run.log`. Do not run the complete CI matrix
+locally. Prove every new runtime test is selected by temporarily breaking its
+assertion, observing the intended tier fail, and restoring it.
 
-For every new runtime test, prove the selected tier executes it by temporarily
-breaking its assertion, observing the intended tier fail, and restoring it.
+## Architectural enforcement
 
-## Documentation and architectural enforcement
+The final representation must establish, without source-substring tests, that:
 
-Update `design/INTERPRETER.md` in the patch that establishes each revised
-structural invariant. Update the active gameplan and `design/workstream-v1.md`
-when their dependency, implementation, or proof claims move. `design/SPEC.md`
-must not acquire implementation detail; change it only if stale pre-unit-plan
-language remains after the feature landing.
-
-Static enforcement must establish, without source-substring tests, that:
-
-- only reader absorption can mint an original witness;
-- source projection cannot mint or transfer one;
-- only an admitted exact root can obtain stamping authority;
-- the stamping driver has no descendant admission operation;
-- all `UnitInput`, initial-stack, and attribution variants are handled
+- generic core installation cannot express the privileged `seed` binding;
+- only the root-derived seal can construct a unit plan and ordinary handlers
+  cannot obtain it;
+- all five constructors decode through the same input boundary;
+- an unadmitted root has no operation that traverses descendants for
+  attribution;
+- an admitted rewrite is bound to one exact source/archive and cannot attest a
+  caller-supplied destination;
+- descendant projection cannot become a second semantic admission gate;
+- the re-scope state machine handles `pending`, `published`, and `refused`
   exhaustively;
-- generic list/dict/code builders cannot obtain witness-minting authority.
+- the seed materializer has one owner and one progress state across both uses;
+- worker archive state cannot recover host registration, blocking cleanup, or
+  teardown authority;
+- all new tagged ownership and preparation states are switched exhaustively.
 
-Prefer closed types and opaque capabilities. Use the exhaustive production
-source audit only where the compiler cannot express the rule, and make the
-audit fail closed on every classified production file.
+Use opaque or closed capabilities and consuming tagged transitions first. Use
+the exhaustive production source audit only for a property Zig cannot express,
+and make it fail closed over every classified production file. Do not add a
+source-name or call-site count for a boundary the type system can close.
+
+Update `design/INTERPRETER.md` in the patch that changes each structural
+invariant. Update `design/workstream-v1.md` and the active gameplan when their
+implementation or proof claims move. Change `design/SPEC.md` only if the
+simplification exposes stale language text; implementation detail does not
+belong there.
 
 ## Completion criteria
 
 This follow-up is complete only when all of the following are simultaneously
 true:
 
-- The machine makes exactly one attribution decision per module body, at the
-  exact root.
-- The stamping traversal contains no archive identity or admission query.
-- The rejected-root path performs no stamping copy or descendant traversal.
-- The machine-facing archive surface exposes no generic identity lookup used
-  as semantic authority.
-- Every unit constructor consumes the same nominal owned decoded input.
-- Every constructor uses the same bounded seed materialization protocol.
-- No nominal seed is implemented by generated quotation execution.
-- Images with no stamped occurrences do not eagerly allocate a scope solely
-  for stamping.
-- Formatter and diagnostics assign no special seeding meaning to `with`.
-- Public composition words retain their general behavior.
-- `zig build precommit` passes, the required targeted behavior passes, and any
+- The archive makes one semantic admission decision for the exact body root.
+- The admitted traversal has no descendant semantic admission or unchanged
+  fallback; descendant provenance access, if retained, is projection only.
+- The rejected-root branch performs no attribution copy, descendant traversal,
+  or attribution-only `ScopeId` allocation.
+- A re-scoped copy remains lineage-bearing and nested construction remains
+  re-entrant.
+- Tri-state alias publication, one-attempt identity acquisition, bounded
+  finalization, and live-proportional recycling remain intact.
+- Every constructor enters through `popUnitInput`, and decoded body/seed
+  ownership has one destructor and explicit consuming handoffs.
+- In-machine and child seeding use one bounded materializer state machine.
+- No constructor synthesizes or executes a quotation to implement plan seeds.
+- Formatter metadata assigns no special seeding meaning to `with`.
+- Public composition words retain their general homoiconic behavior.
+- The owner/view split and privileged seed-binding boundary remain enforced by
+  types in every build mode.
+- `zig build precommit` passes, required targeted behavior passes, and every
   reason-triggered specialized gate passes.
 - `design/INTERPRETER.md`, the active gameplan, and the workstream describe the
   final seams and their enforcement accurately.

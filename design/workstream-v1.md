@@ -1869,7 +1869,7 @@ time or last-registered name.
    collision, allocation failure, cancellation, or a conflicting state turn
    leaves the prior directory entry, generation, and state unchanged.
 
-4. **`@defm` is exactly the composition.** For ordinary and `with`-seeded
+4. **`@defm` is exactly the composition.** For ordinary and plan-seeded
    bodies, successful and failing construction, invalid names, allocation
    failure, and cancellation, `(body 'name @defm)` has the same stack,
    registry, error, and ownership outcome as `(body @module 'name register)`
@@ -2931,22 +2931,37 @@ INTERPRETER.md and its entry here is retired.
   portable witness would prove only that the reader wrote *some* body, saying
   nothing about a destination header a caller picked, and it could be replayed
   against a second archive. So the archive owns admission and its application
-  together: `SpanArchive.prepareConstructionBody(body, scope)` returns either
-  `unchanged` or a cursor already holding the admission result, it builds its
-  own output, and the span/lineage commit is private to it. So
+  together. Preparation consumes the exact owned body before any image scope
+  is minted. Rejection returns that body unchanged; admission returns an opaque
+  source/archive-bound owner whose sole consuming operation begins the bounded
+  rewrite with the target scope. The cursor builds its own output, and the
+  span/lineage commit is private to it. So
   `7 'k set ((k) 'geta) (def) cat 'm @defm` leaves `k` naming the session and
   `m.geta` is `7`, and wrapping that runtime-built body in a plan changes only
   its initial stack.
-  Both user-sized halves of opening a unit are bounded, finalizers included.
+  The admitted cursor remains in one movable owner until `take()` transfers it
+  into the pending construction driver. Driver-allocation failure therefore
+  destroys the cursor through the pending driver exactly once; the local owner
+  is already empty.
+  Once the root is admitted, nested directory access is required diagnostic
+  projection rather than another semantic admission gate; a missing projection
+  is `InvalidProvenance`, never an unchanged fallback. A rejected root performs
+  no descendant traversal. Both user-sized halves of opening a unit are
+  bounded, finalizers included.
   The rewrite is a resumable cursor whose frame stack is the recursion and whose
   every frame owns its destination builder from the first element, so publishing
   a container is O(1); a re-scoped dict shares the source's hashes outright,
   because neither equality nor hashing looks at a word's scope, so nothing is
   rehashed or compared. Traversal and the index copy draw from one nominal
-  `poll.WorkBudget`. A plan's seeds are materialized in fixed slices by the
-  driver that opens the boundary — for a child Unit, by the child's own first
-  slices, so `@each` cannot multiply a seed copy by the children it starts per
-  turn. Identity publication likewise makes one claim attempt per cursor
+  `poll.WorkBudget`. `Machine.popUnitInput` returns the one nominal decoded
+  owner; child launch borrows it, fan-out moves it, and boundary construction
+  consumes it without a public raw body/seeds tuple. A raw quotation retains
+  the allocation-free empty-seed representation. One `SeedMaterializer` owns
+  the seed list and next index in both the boundary and child drivers, so
+  `@each` cannot multiply a seed copy by the children it starts per turn.
+  Module construction mints an image `ScopeId` only after root admission;
+  unchanged runtime bodies retain no attribution-only cell or anchor. Identity
+  publication likewise makes one claim attempt per cursor
   advance; a racing loser retains its current absorption entry or completed
   re-scope header and yields. Minting a plan needs `heap.UnitPlanSeal`, an opaque
   authority issued by the Session's reclamation root alone: the raw constructor
@@ -2965,7 +2980,10 @@ INTERPRETER.md and its entry here is retired.
   tears it down. A hard
   change, pre-`1.0`:
   `with`-seeded module bodies stop resolving in the image, and first-party source
-  and every example moved to `seed` in the same change.
+  and every example moved to `seed` in the same change. Formatter navigation
+  recognizes only bare `body 'name @defm` and explicit
+  `values body seed 'name @defm`; the former `with` phrase formats as ordinary
+  composition and receives no constructor metadata.
 
 - **Verification is tiered, and the local tier is not a copy of CI
   (2026-08-20, user ruling).** Local runs had become a repetition of the CI
@@ -3507,7 +3525,9 @@ INTERPRETER.md and its entry here is retired.
   (`gameplans/bitwise-and-randomness.json`, local, untracked), executed
   after the M12 gameplan completes and before M13 acceptance.
 - **Unit constructors carry a `@` spelling convention** (user ruling,
-  2026-08-18; `@` chosen over `&` — `&` implies async, wrong for the
+  2026-08-18; its `with` seeding and formatter-metadata portions are
+  superseded by the 2026-08-26 unit-plan ruling above; `@` chosen over `&` —
+  `&` implies async, wrong for the
   synchronous attempt; `@` reads as *place*, which is what a
   share-nothing unit is). A leading `@` marks exactly the words that
   apply a quotation in a fresh unit — one unit per application for
@@ -3532,7 +3552,8 @@ INTERPRETER.md and its entry here is retired.
   existed to protect, now needing no dedicated words. The renames:
   `attempt -> @attempt`, `spawn -> @spawn`, `par-each -> @each`,
   `module -> @module`. Hard changes, no
-  aliases, pre-`0.1.0`. Two same-patch companions (ruled 2026-08-18):
+  aliases, pre-`0.1.0`. The following seeding and formatter details record the
+  superseded historical state. Two same-patch companions (ruled 2026-08-18):
   **`@module` flips to name-last operand order** — `( quotation name -- )`,
   `(body) 'stats @module` — matching `def`/`set`, where the bound name
   sits nearest the binder (M4's name-first order was an unreconciled
@@ -3543,7 +3564,7 @@ INTERPRETER.md and its entry here is retired.
   un-flipped call site `'type`, never a misregistration. And **`ecl fmt`
   extends its commenting convention to modules**: a top-level
   registration ending in a literal quoted name followed by `@module`
-  (bare or `with`-seeded) gains
+  (bare or, under that former rule, `with`-seeded) gains
   a synthesized `### module <name>` header exactly as definitions gain
   `### def <name>`; the embedded stdlib sources are reformatted under it.
   Deliberately unmarked: `each`/`fold`-family

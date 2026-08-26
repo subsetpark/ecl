@@ -370,8 +370,8 @@ const DictOfDriver = struct {
 };
 fn attempt(evaluator: *Machine) MachineError!void {
     var input = try evaluator.popUnitInput();
-    defer input.deinit();
-    try evaluator.attemptOwned(input.take());
+    defer input.deinit(evaluator.releaseDomain());
+    try evaluator.attemptOwned(input.move());
 }
 /// The metaprogramming escape hatch: the exact two values a plan holds, so a
 /// program can transform either one and seal the result into another plan.

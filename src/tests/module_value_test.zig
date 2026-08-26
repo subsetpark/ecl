@@ -190,7 +190,7 @@ test "module registration: @defm is construction followed by registration" {
     try expectEmptyStack(&runtime);
     try expectStack(&runtime, "combined.bump composed.bump", "1 1");
 
-    // A `with`-seeded construction stack behaves identically under both
+    // A plan-seeded construction stack behaves identically under both
     // spellings, including as the registration's initial durable state.
     try expectOk(&runtime, "[4 5] (+ 'sum set) seed 'seeded-combined @defm");
     try expectOk(&runtime, "[4 5] (+ 'sum set) seed @module 'seeded-composed register");

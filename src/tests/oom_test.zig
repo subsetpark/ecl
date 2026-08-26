@@ -297,6 +297,9 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[3 4] (+) with call pop [5 6] (+) seed @attempt pop " ++
             "[7 8] (+) seed @spawn await pop " ++
             "[1] (2) seed unseed seed @attempt pop " ++
+            // This admitted reader body reaches ConstructionDriver allocation
+            // after the re-scope cursor owns its source. Exhausting that exact
+            // allocation proves cleanup remains with only one movable owner.
             "[9 10] (+ 'x set) seed 'oom-seeded @defm oom-seeded.x pop",
     );
     try runOk(
@@ -611,6 +614,50 @@ test "oom: full-session surfaces propagate every allocation failure" {
         fullSessionAllocationProbe,
         .{},
     );
+}
+
+const admitted_construction_source = "() 'oom-driver @defm";
+
+fn admittedConstructionAllocationCount() !usize {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var runtime = try session.Session.initWithConfig(
+        failing.allocator(),
+        &.{},
+        .cooperative,
+    );
+    defer runtime.deinit();
+
+    const before = failing.alloc_index;
+    try std.testing.expectEqual(
+        .ok,
+        try runtime.runUnit("oom-driver-count.ecl", admitted_construction_source),
+    );
+    return failing.alloc_index - before;
+}
+
+test "oom: admitted construction driver allocation failure transfers its cursor once" {
+    const allocation_count = try admittedConstructionAllocationCount();
+    try std.testing.expect(allocation_count != 0);
+
+    // Bootstrap outside the failure window, then exhaust every allocation in
+    // the smallest public operation that admits reader text and installs a
+    // ConstructionDriver. In particular, failure of the driver's own pending
+    // allocation must destroy its re-scope cursor once, without leaving a
+    // second local owner to destroy the same source header again.
+    for (0..allocation_count) |offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var runtime = try session.Session.initWithConfig(
+            failing.allocator(),
+            &.{},
+            .cooperative,
+        );
+        defer runtime.deinit();
+
+        failing.fail_index = failing.alloc_index + offset;
+        const result = runtime.runUnit("oom-driver-failure.ecl", admitted_construction_source);
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectError(error.OutOfMemory, result);
+    }
 }
 
 test "oom: standard-library and host surfaces propagate every allocation failure" {

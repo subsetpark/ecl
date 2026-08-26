@@ -374,6 +374,14 @@ test "formatter synthesizes and normalizes module navigation headers" {
         "### module counter\n# a seeded counter\n[[0]]\n(\n ### def tick\n" ++
             " (1 +) 'tick def) seed 'counter @defm\n",
     );
+    // `with` is ordinary composition rather than constructor metadata. Its
+    // former seeded spelling therefore earns no module navigation header and
+    // formats as the independent forms the program actually evaluates.
+    const composed = "[1] ((1) 'x def) with 'legacy @defm\n";
+    try expectFormat(
+        composed,
+        "[1]\n(\n ### def x\n (1) 'x def)\nwith\n'legacy\n@defm\n",
+    );
     // A computed name gets no header, matching def's rule.
     try expectFormat(
         "((1) 'x def) chosen-name @defm\n",
@@ -399,5 +407,6 @@ test "formatter synthesizes and normalizes module navigation headers" {
     );
     try expectParseEquivalent(registration);
     try expectParseEquivalent(seeded);
+    try expectParseEquivalent(composed);
     try expectParseEquivalent("((1) 'x def) @module 'stats register\n");
 }
