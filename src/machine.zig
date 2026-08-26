@@ -852,9 +852,50 @@ pub fn stringValue(
     defer materializer.retire(releases);
     return poll_api.driveFallible(Value, &materializer, .{kernel_poll_quantum});
 }
+/// What a dispatch acquired so its resolution scope stays alive while it is
+/// read, if it had to acquire anything.
+///
+/// One union rather than two optional fields, because there is exactly one
+/// release and it must be impossible to forget half of it.
+pub const ScopeBorrow = union(enum) {
+    /// The activation already holds this scope: it is the chain the activation
+    /// is running, or an ancestor of it, which `lazy` retained on the way down.
+    /// Nothing was acquired and nothing is released.
+    activation_held,
+    /// A module image, acquired through its anchor. Unit-lifetime, because the
+    /// body keeps running against the image long after resolution ends.
+    pinned: modules.GenerationPin,
+    /// A scope belonging to some other unit, reached through a value -- a
+    /// quotation parked in durable state, applied here. Activation-lifetime,
+    /// because unlike an image pin this borrow ends when the chain walk does.
+    /// That difference is why it is not held in the unit's pin set: the unit's
+    /// teardown spins on its own root's refcount *before* releasing pins, so a
+    /// unit-held scope borrow could wait on itself, and two units borrowing
+    /// each other could wait forever. Owning it per activation makes both
+    /// unrepresentable.
+    retained: *env.ScopeCell,
+
+    pub fn deinit(self: *ScopeBorrow) void {
+        switch (self.*) {
+            .activation_held => {},
+            .pinned => |pin| {
+                var owned = pin;
+                owned.deinit();
+            },
+            .retained => |cell| cell.releaseBorrow(),
+        }
+        self.* = .activation_held;
+    }
+};
+
 const Eval = struct {
     code: *Header,
     ip: u32,
+    /// Released when this activation retires, alongside `code`. A child that
+    /// inherits this activation's scope takes its own retain rather than
+    /// sharing this one, so a tail call replacing the parent cannot leave the
+    /// survivor holding a pointer whose retain died.
+    borrowed_scope: ?*env.ScopeCell = null,
     /// Where this body's definitions land, where its references resolve, and
     /// whose privacy and durable state it runs against. One value rather than
     /// three fields, so a construction site cannot set two of them and leave
@@ -884,6 +925,27 @@ const Eval = struct {
     pub fn resolutionScope(self: Eval) ?*env.Scope {
         return self.site.resolution_scope;
     }
+    /// Whether a stamp names a scope on the chain this activation already
+    /// holds -- its own resolution scope or an ancestor of it.
+    ///
+    /// Ancestors count because `Scope.lazy` retains its parent, so the whole
+    /// chain above the activation is held by the activation itself. That makes
+    /// this a proof rather than an exemption, and it is what keeps the borrow
+    /// count off every ordinary dispatch: only a scope reached through a value
+    /// -- a quotation parked in durable state and applied here -- is foreign.
+    ///
+    /// Walks outward comparing never-recycled ids, dereferencing nothing this
+    /// activation does not own. Same shape as the dispatch fast path and the
+    /// idiom recognizer's gate.
+    pub fn chainHolds(self: Eval, stamp: u32) bool {
+        if (stamp == 0) return true;
+        var node: ?*env.Scope = self.site.resolution_scope;
+        while (node) |link| : (node = link.parent) {
+            if (@intFromEnum(link.cellId()) == stamp) return true;
+        }
+        return false;
+    }
+
     /// Whose privacy and durable state this body runs against.
     pub fn home(self: Eval) ?*modules.ModuleHome {
         return self.site.home;
@@ -4534,6 +4596,7 @@ pub const Machine = struct {
     /// the ordinary release. This delays one existing release but creates no
     /// additional retain/release pair.
     fn retireCompletedEval(self: *Machine, current: Eval) void {
+        if (current.borrowed_scope) |cell| cell.releaseBorrow();
         if (current.application_selection) |application_index| {
             const frame = &self.unit.frames.items[@intFromEnum(application_index)];
             std.debug.assert(frame.* == .application);
@@ -4899,6 +4962,10 @@ pub const Machine = struct {
         // pin taken here is the one `scheduleWord` consumes.
         var borrow_pin: ?modules.GenerationPin = null;
         errdefer if (borrow_pin) |*owned| owned.deinit();
+        // Held by the activation this dispatch enters, not by the unit: unlike
+        // an image pin, a scope borrow ends when the chain walk does.
+        var borrowed_cell: ?*env.ScopeCell = null;
+        errdefer if (borrowed_cell) |cell| cell.releaseBorrow();
 
         // Is this occurrence stamped with the activation's own scope? One
         // integer compare, ahead of everything else, because straight-line code
@@ -4921,6 +4988,9 @@ pub const Machine = struct {
                     self,
                     word.name,
                     running_site.resolution_scope,
+                    null,
+                    // The activation already holds this chain, so the fast path
+                    // acquires nothing -- that is the point of it.
                     null,
                 )),
             });
@@ -4950,7 +5020,26 @@ pub const Machine = struct {
                         );
                     };
                     break :held .fresh_pin;
-                } else .non_image;
+                } else if (self.unit.current.?.chainHolds(word.scope)) blk: {
+                    // Ours already: the activation holds this chain, so there is
+                    // nothing to acquire and nothing to release.
+                    break :blk .non_image;
+                } else foreign: {
+                    // A scope belonging to some other unit, reached through a
+                    // value. Acquire-then-validate on the cell, whose memory is
+                    // immortal, rather than a retain on the scope, whose memory
+                    // is not -- a `fetchAdd` there would be the very
+                    // retain-after-load this design exists to remove.
+                    if (cell.acquire() == null) {
+                        self.unit.active_word = .plain(word.name);
+                        return self.fail(
+                            .domain,
+                            "the scope this word was written in has retired",
+                        );
+                    }
+                    borrowed_cell = cell;
+                    break :foreign .non_image;
+                };
 
                 const written_scope = cell.scopeUnder(proof) orelse {
                     self.unit.active_word = .plain(word.name);
@@ -4982,9 +5071,11 @@ pub const Machine = struct {
         self.unit.active_word = .plain(word.name);
         const owned_pin = borrow_pin;
         borrow_pin = null;
+        const owned_cell = borrowed_cell;
+        borrowed_cell = null;
         try self.startDriver(DispatchDriver{
             .word = word.name,
-            .resolution = .init(.init(self, word.name, written, owned_pin)),
+            .resolution = .init(.init(self, word.name, written, owned_pin, owned_cell)),
         });
     }
     /// Opens one state application against the invoking word's home slot.
@@ -5905,6 +5996,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 resolved.defining_scope,
                 cross_home_effect,
                 resolved.takeBorrowPin(),
+                resolved.takeBorrowedCell(),
             );
         },
         .builtin => |primitive| {
@@ -5935,7 +6027,7 @@ const DirectWordFallback = struct {
     pub fn run(evaluator: *Machine, self: *DirectWordFallback) MachineError!void {
         // Only a core-origin word reaches idiom recognition, and core alone is
         // its chain, so this fallback resumes one with no scope.
-        return scheduleWord(evaluator, self.body.borrow(), self.word, null, null, null, null);
+        return scheduleWord(evaluator, self.body.borrow(), self.word, null, null, null, null, null);
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
@@ -5998,6 +6090,9 @@ pub const Resolution = struct {
     /// The reference the borrow acquired for this dispatch, moved out of the
     /// cursor. `scheduleWord` consumes it so no second pin is taken.
     borrow_pin: ?modules.GenerationPin = null,
+    /// The foreign scope borrowed for this dispatch, released by the activation
+    /// that reads it rather than by the unit.
+    borrowed_cell: ?*env.ScopeCell = null,
     trace_word: intern.TraceWord,
     origin: ResolutionOrigin,
     /// The scope this binding was found in, which is therefore the chain its
@@ -6014,12 +6109,19 @@ pub const Resolution = struct {
         return owned;
     }
 
+    pub fn takeBorrowedCell(self: *Resolution) ?*env.ScopeCell {
+        const owned = self.borrowed_cell;
+        self.borrowed_cell = null;
+        return owned;
+    }
+
     pub fn deinit(self: *Resolution, _: std.mem.Allocator) void {
         self.lease.deinit();
         if (self.execution_generation) |*generation| generation.deinit();
         // Released only if the dispatch never scheduled a body; `scheduleWord`
-        // consumes it otherwise.
+        // consumes them otherwise.
         if (self.borrow_pin) |*pin| pin.deinit();
+        if (self.borrowed_cell) |cell| cell.releaseBorrow();
         self.* = undefined;
     }
 };
@@ -6122,6 +6224,9 @@ pub const ResolutionCursor = struct {
     /// moved into the resolution and consumed by `scheduleWord`, which
     /// therefore does not pin again.
     borrow_pin: ?modules.GenerationPin = null,
+    /// The foreign scope this dispatch borrowed, if any. Rides here so the
+    /// activation that ends up reading the scope is the one that releases it.
+    borrowed_cell: ?*env.ScopeCell = null,
 
     /// A cursor for a name that genuinely means "whatever the running chain
     /// says": reflection like `which`, `see`, and `doc`, and the fallback paths
@@ -6135,7 +6240,7 @@ pub const ResolutionCursor = struct {
     /// module's own shadow was the answer. Reaching this from a dispatch path
     /// now means visibly discarding a `WordRef` for its bare id, which greps.
     pub fn initAtCurrent(evaluator: *Machine, word: u32) ResolutionCursor {
-        return .init(evaluator, word, evaluator.unit.current.?.resolutionScope(), null);
+        return .init(evaluator, word, evaluator.unit.current.?.resolutionScope(), null, null);
     }
 
     pub fn init(
@@ -6143,10 +6248,12 @@ pub const ResolutionCursor = struct {
         word: u32,
         written: ?*env.Scope,
         borrow_pin: ?modules.GenerationPin,
+        borrowed_cell: ?*env.ScopeCell,
     ) ResolutionCursor {
         const spelling = intern.get(word);
         return .{
             .borrow_pin = borrow_pin,
+            .borrowed_cell = borrowed_cell,
             .allocator = evaluator.unit.allocator,
             .registry = evaluator.unit.inherited.registry,
             .module_access = evaluator.unit.module_access,
@@ -6163,9 +6270,10 @@ pub const ResolutionCursor = struct {
     pub fn deinit(self: *ResolutionCursor) void {
         self.work.deinit();
         if (self.generation) |*lease| lease.deinit();
-        // Released here only when no resolution took it: a dispatch that
-        // schedules a body moves it out first.
+        // Released here only when no resolution took them: a dispatch that
+        // schedules a body moves them out first.
         if (self.borrow_pin) |*pin| pin.deinit();
+        if (self.borrowed_cell) |cell| cell.releaseBorrow();
         self.* = undefined;
     }
 
@@ -6173,6 +6281,12 @@ pub const ResolutionCursor = struct {
     fn takeBorrowPin(self: *ResolutionCursor) ?modules.GenerationPin {
         const owned = self.borrow_pin;
         self.borrow_pin = null;
+        return owned;
+    }
+
+    fn takeBorrowedCell(self: *ResolutionCursor) ?*env.ScopeCell {
+        const owned = self.borrowed_cell;
+        self.borrowed_cell = null;
         return owned;
     }
 
@@ -6220,6 +6334,7 @@ pub const ResolutionCursor = struct {
             .execution_generation = null,
             .home = home,
             .borrow_pin = self.takeBorrowPin(),
+            .borrowed_cell = self.takeBorrowedCell(),
             .trace_word = if (home) |resolved| homeTraceWord(resolved, local.?) else .plain(self.word),
             .origin = if (home != null) .module else .direct,
             // A module-local hit resolves against its image, which the home
@@ -6568,6 +6683,7 @@ fn scheduleWord(
     defining_scope: ?*env.Scope,
     effect: ?env.Effect,
     borrow_pin: ?modules.GenerationPin,
+    borrowed_cell: ?*env.ScopeCell,
 ) MachineError!void {
     const scope = if (resolved_home) |home|
         home.scope(self.unit.module_access)
@@ -6610,6 +6726,7 @@ fn scheduleWord(
     self.unit.current = .{
         .code = body,
         .ip = 0,
+        .borrowed_scope = borrowed_cell,
         .site = .{
             .scope = scope,
             .resolution_scope = resolution_scope,

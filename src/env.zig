@@ -1004,6 +1004,12 @@ pub const Scope = struct {
         state: State,
 
         const State = union(enum) {
+            /// The cell has been cleared, so no new borrow can succeed; this
+            /// waits out the ones that already did. Resumable rather than
+            /// spinning, because the release domain drives it -- a borrow is
+            /// held by a live activation on some other unit, and blocking a
+            /// worker on it would be a hang rather than a wait.
+            waiting_for_borrows: *ScopeCell,
             environment: struct {
                 target: *Environment,
                 cursor: Environment.TeardownCursor,
@@ -1012,6 +1018,29 @@ pub const Scope = struct {
             destroy,
             complete,
         };
+
+        /// The state that follows the cell clear: wait for outstanding borrows
+        /// first when there is a cell to wait on, otherwise start tearing down.
+        fn afterClear(scope: *Scope, cell: ?*ScopeCell) State {
+            if (cell) |named| {
+                if (named.borrowed()) return .{ .waiting_for_borrows = named };
+            }
+            return startTeardown(scope);
+        }
+
+        fn startTeardown(scope: *Scope) State {
+            const target = if (scope.storage == .isolated)
+                scope.isolated_environment.load(.acquire)
+            else
+                null;
+            return if (target) |environment|
+                .{ .environment = .{
+                    .target = environment,
+                    .cursor = .init(environment),
+                } }
+            else
+                .parent;
+        }
 
         pub fn init(scope: *Scope) RetireCursor {
             const old = scope.refs.fetchSub(1, .release);
@@ -1028,25 +1057,18 @@ pub const Scope = struct {
             // cell retires with it. That is what makes applying a quotation
             // from a replaced image a definite failure rather than a silent
             // change of meaning.
-            if (scope.label_cell.swap(null, .acq_rel)) |cell| cell.retire();
-            const target = if (scope.storage == .isolated)
-                scope.isolated_environment.load(.acquire)
-            else
-                null;
-            return .{
-                .scope = scope,
-                .state = if (target) |environment|
-                    .{ .environment = .{
-                        .target = environment,
-                        .cursor = .init(environment),
-                    } }
-                else
-                    .parent,
-            };
+            const cleared = scope.label_cell.swap(null, .acq_rel);
+            if (cleared) |cell| cell.retire();
+            return .{ .scope = scope, .state = afterClear(scope, cleared) };
         }
 
         pub fn advance(self: *RetireCursor) bool {
             return switch (self.state) {
+                .waiting_for_borrows => |cell| result: {
+                    if (cell.borrowed()) break :result false;
+                    self.state = startTeardown(self.scope);
+                    break :result false;
+                },
                 .environment => |*environment| result: {
                     if (!environment.cursor.advance()) break :result false;
                     self.scope.isolated_environment.store(null, .release);
@@ -1190,7 +1212,17 @@ pub const Scope = struct {
         self.retirement_state = cursor.state;
         return false;
     }
+    /// Drops a root scope that was never really used: `replaceRoot` overwriting
+    /// a freshly built one.
+    ///
+    /// This neither clears a label cell nor frees through `RetireCursor`, so it
+    /// is only sound while no cell exists -- which is to say before the unit has
+    /// executed anything. Both callers (`prelude.install` and task spawn) run
+    /// there. The assert encodes that precondition rather than leaving it to
+    /// commentary: a third caller appearing mid-execution trips here instead of
+    /// silently stranding a borrow whose cell still names this scope.
     pub fn releaseTrivial(self: *Scope) void {
+        std.debug.assert(self.label_cell.load(.acquire) == null);
         std.debug.assert(self.parent == null and self.environmentOrNull() != null);
         std.debug.assert(self.storage != .isolated);
         const old = self.refs.fetchSub(1, .release);
@@ -1438,6 +1470,14 @@ pub const ScopeCell = struct {
     /// it has no `Scope` to point at. One embedded cell carries this instead,
     /// and a primitive or embedded-prelude literal labels against it.
     core: bool = false,
+    /// How many borrows currently hold the scope this cell names.
+    ///
+    /// The count lives here and not on the `Scope` because this cell is
+    /// immortal -- `Env`-owned, freed only at `Env` teardown -- so bumping it is
+    /// always safe, while the scope it names can be freed underneath a reader.
+    /// That is the whole trick: put the count on the metadata that outlives the
+    /// object, and a borrow needs no anchor of its own.
+    borrows: std.atomic.Value(u32) = .init(0),
 
     /// Fills in what this cell names, before its id has escaped.
     ///
@@ -1457,6 +1497,35 @@ pub const ScopeCell = struct {
     /// The image owner, or null when this cell names none.
     pub fn ownerHandle(self: *const ScopeCell) ?*anyopaque {
         return self.owner.load(.acquire);
+    }
+
+    /// Acquire-then-validate: take a borrow of the named scope, or nothing.
+    ///
+    /// `RetireCursor.init` clears this cell before any teardown step, which
+    /// makes the clear the commit point and covers both interleavings. A
+    /// borrower that bumped before the clear is seen by the teardown wait and
+    /// held for. One that bumped after sees null here, drops the count, and
+    /// never dereferences -- and its bump landed on immortal memory, so nothing
+    /// was resurrected.
+    pub fn acquire(self: *ScopeCell) ?*Scope {
+        _ = self.borrows.fetchAdd(1, .acq_rel);
+        if (self.scope.load(.acquire)) |named| return named;
+        self.releaseBorrow();
+        return null;
+    }
+
+    /// Drops one borrow. The teardown wait reads this, so it must run exactly
+    /// once per successful `acquire`.
+    pub fn releaseBorrow(self: *ScopeCell) void {
+        const old = self.borrows.fetchSub(1, .acq_rel);
+        std.debug.assert(old != 0);
+    }
+
+    /// Whether any borrow still holds the named scope. Teardown waits on this
+    /// after clearing the cell, never before: clearing first is what stops new
+    /// borrows from succeeding.
+    pub fn borrowed(self: *const ScopeCell) bool {
+        return self.borrows.load(.acquire) != 0;
     }
 
     /// The borrowed scope, obtainable only against a liveness proof. The proof
