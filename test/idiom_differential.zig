@@ -459,10 +459,27 @@ test "idioms: capture shapes preserve generic behavior" {
     try expectHits("[1 2 3] 3 (+) partial each", 1);
     try expectHits("[1 2 3] 3 (swap -) partial each", 1);
     try expectHits("[1 2 3] ((3 4) first +) each", 3);
-    // Shadowing `first` takes the entry out of play entirely: no capture
-    // entry fires, and the shadow is not core-resolved either, so the
-    // shadowed body earns no direct recognition of its own.
-    try expectHits("(pop 99) 'first def [1 2 3] 3 (+) partial each", 0);
+    // Shadowing `first` takes the *capture* entry out of play -- which is why
+    // this is three direct hits and not one fused hit -- but the three hits are
+    // core `first`, not the shadow. `partial` is `(swap literal swap compose)`
+    // and `literal` is `(wrap (first) cons)`, so the `(first)` token lives in
+    // prelude source and seals to core; `each` runs that captured quotation once
+    // per element, and each execution earns its own direct recognition.
+    //
+    // This expectation was 0 before scope-on-the-word, and the 0 was measuring
+    // the leak the sealing rule exists to remove: a session `def` reaching into
+    // prelude internals. What proves the shadow no longer runs there is the
+    // value, not the count -- `(pop 99)` in that position would destroy the
+    // capture, yet the result is byte-identical to the unshadowed baseline:
+    //
+    //   (pop 99) 'first def [1 2 3] 3 (+) partial each   =>  [4 5 6]
+    //   [1 2 3] 3 (+) partial each                       =>  [4 5 6]
+    //   (pop 99) 'first def [1 2 3] first                =>  99
+    //
+    // The third line is the control: the shadow is live, just sealed out of
+    // prelude internals, exactly as `table.where` does not become the `where`
+    // that `filter` is written against.
+    try expectHits("(pop 99) 'first def [1 2 3] 3 (+) partial each", 3);
 }
 
 fn expectHits(source: []const u8, expected: u64) !void {
