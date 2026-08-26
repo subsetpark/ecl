@@ -476,7 +476,7 @@ const IdiomDriver = struct {
                         operationPrimitive(entry.operation)
                     else
                         null;
-                    self.resolution = .init(.init(evaluator, word.name, evaluator.unit.current.?.resolutionScope(), null));
+                    self.resolution = .init(.initAtCurrent(evaluator, word.name));
                 },
                 .word => |expected_word| {
                     const word = if (actual == .word) actual.word else {
@@ -497,7 +497,7 @@ const IdiomDriver = struct {
                     }
                     self.expected_binding = expected_word.binding;
                     self.expected = null;
-                    self.resolution = .init(.init(evaluator, word.name, evaluator.unit.current.?.resolutionScope(), null));
+                    self.resolution = .init(.initAtCurrent(evaluator, word.name));
                 },
             }
         }

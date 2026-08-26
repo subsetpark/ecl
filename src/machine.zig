@@ -4011,13 +4011,19 @@ pub const Machine = struct {
     /// What the running activation would have searched, for the callers that
     /// have no word in hand — reflection, and a miss reported before a word's
     /// scope is known.
+    /// The chain a lookup from the running activation searched.
+    ///
+    /// Derived from the resolution scope, exactly as `lookupChainFor` derives
+    /// it for a stamped occurrence, because they answer the same question and
+    /// must not answer it differently. This used to key on whether a home was
+    /// present, which is a related fact and not the same one: `ExecutionSite`
+    /// says so itself -- a homeless word called from module code inherits the
+    /// caller's home while resolving against its own chain -- so a module home
+    /// over a session chain reported `module` for a lookup that searched the
+    /// session.
     fn currentLookupChain(self: *const Machine) LookupChain {
         const current = self.unit.current orelse return .session;
-        // Core alone is spelled by an absent chain, and it is checked first
-        // because a prelude word called from module code carries the caller's
-        // home while resolving against core.
-        if (current.site.resolution_scope == null) return .core;
-        return if (current.home() != null) .module else .session;
+        return lookupChainFor(current.site.resolution_scope);
     }
     pub fn available(self: *const Machine) usize {
         return self.unit.stack.items.len - self.unit.stack_base;
@@ -5795,7 +5801,7 @@ fn continueQualifiedRequest(
             evaluator.setActiveWord(.plain(dispatch_request.word));
             try evaluator.startDriver(DispatchDriver{
                 .word = dispatch_request.word,
-                .resolution = .init(.init(evaluator, dispatch_request.word, evaluator.unit.current.?.resolutionScope(), null)),
+                .resolution = .init(.initAtCurrent(evaluator, dispatch_request.word)),
             });
             if (dispatch_request.site) |site|
                 evaluator.setWorkDriverSite(site.code, site.index);
@@ -6116,6 +6122,21 @@ pub const ResolutionCursor = struct {
     /// moved into the resolution and consumed by `scheduleWord`, which
     /// therefore does not pin again.
     borrow_pin: ?modules.GenerationPin = null,
+
+    /// A cursor for a name that genuinely means "whatever the running chain
+    /// says": reflection like `which`, `see`, and `doc`, and the fallback paths
+    /// that re-enter resolution for a word already being dispatched.
+    ///
+    /// Named apart from `init` because the distinction is the one this branch
+    /// keeps paying for. A stamped occurrence resolves where its *text* was
+    /// written, which is rarely the running chain; the seven verbatim copies
+    /// this replaces were each a place where that difference was invisible, and
+    /// one of them -- the idiom recognizer -- silently ran core's `+` where a
+    /// module's own shadow was the answer. Reaching this from a dispatch path
+    /// now means visibly discarding a `WordRef` for its bare id, which greps.
+    pub fn initAtCurrent(evaluator: *Machine, word: u32) ResolutionCursor {
+        return .init(evaluator, word, evaluator.unit.current.?.resolutionScope(), null);
+    }
 
     pub fn init(
         evaluator: *Machine,

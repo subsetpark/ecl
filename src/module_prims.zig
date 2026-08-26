@@ -231,7 +231,7 @@ const ImportDriver = struct {
                     if (index == 0 or index + 1 == bytes.len)
                         return evaluator.fail(.domain, "import original must be a qualified word");
                     self.qualified = true;
-                    self.resolution = .init(machine.ResolutionCursor.init(evaluator, self.original, evaluator.unit.current.?.resolutionScope(), null));
+                    self.resolution = .init(machine.ResolutionCursor.initAtCurrent(evaluator, self.original));
                     continue;
                 },
             };
