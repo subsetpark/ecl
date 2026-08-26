@@ -856,7 +856,7 @@ test "pkg: resolve reports a requirement cycle with every responsible package" {
     const catalog = comptime "{\"a\" {\"1.0.0\" " ++ manifest("a", "1.0.0", "{\"b\" " ++ requirement_b ++ "}") ++
         "} \"b\" {\"1.0.0\" " ++ manifest("b", "1.0.0", "{\"a\" " ++ requirement_a ++ "}") ++ "}} ";
     try support.expectStack(
-        root ++ " " ++ catalog ++ "2 pack (pkg.mvs.resolve) with @attempt " ++
+        root ++ " " ++ catalog ++ "2 pack (pkg.mvs.resolve) seed @attempt " ++
             "'err at dup 'kind at swap ['data 'packages] at-path",
         "'domain (\"a\" \"b\")",
     );

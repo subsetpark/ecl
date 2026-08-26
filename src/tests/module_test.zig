@@ -542,7 +542,7 @@ test "env: concurrent cell publication is lease-safe and TSan-clean" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
-    var container = try env.Env.init(host.cleanup());
+    var container = try env.Env.init(&host);
     defer container.deinit();
     var scope = container.sessionRoot(std.testing.allocator);
     defer env.testing.deinitScope(&scope, releases);
@@ -569,7 +569,7 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
-    var container = try env.Env.init(host.cleanup());
+    var container = try env.Env.init(&host);
     defer container.deinit();
     var scope = container.sessionRoot(std.testing.allocator);
     defer env.testing.deinitScope(&scope, releases);
@@ -617,7 +617,7 @@ test "environment and registry retirement stays bounded after a delayed reader d
         var host = heap.HostOwner.init(allocator);
         const releases = host.domain();
         defer host.cleanup().drain();
-        var environment = try env.Env.init(host.cleanup());
+        var environment = try env.Env.init(&host);
         defer environment.deinit();
         var scope = environment.sessionRoot(allocator);
         defer env.testing.deinitScope(&scope, releases);
@@ -777,7 +777,7 @@ test "env: a replaced interior remains valid only through its binding lease" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
-    var environment = try env.Env.init(host.cleanup());
+    var environment = try env.Env.init(&host);
     defer environment.deinit();
     var scope = environment.sessionRoot(std.testing.allocator);
     defer env.testing.deinitScope(&scope, releases);
@@ -842,7 +842,7 @@ fn registryWorker(context: RegistryThreadContext, worker_id: u32) void {
 test "registry: concurrent commits are linearized without lost names" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    var environment = try env.Env.init(host.cleanup());
+    var environment = try env.Env.init(&host);
     defer {
         // Images clear their Env-owned scope-label cell as they
         // retire, so that work must drain before the Env frees them.
@@ -883,7 +883,7 @@ test "registry: old generation leases survive reload and reclaim after release" 
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
-    var environment = try env.Env.init(host.cleanup());
+    var environment = try env.Env.init(&host);
     defer {
         // Images clear their Env-owned scope-label cell as they
         // retire, so that work must drain before the Env frees them.
@@ -929,7 +929,7 @@ test "registry: generation cursors independently pin their snapshot" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
-    var environment = try env.Env.init(host.cleanup());
+    var environment = try env.Env.init(&host);
     defer {
         // Images clear their Env-owned scope-label cell as they
         // retire, so that work must drain before the Env frees them.
@@ -1027,7 +1027,7 @@ fn environmentAllocationProbe(allocator: std.mem.Allocator) !void {
     var host = heap.HostOwner.init(allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
-    var environment = try env.Env.init(host.cleanup());
+    var environment = try env.Env.init(&host);
     defer environment.deinit();
     var scope = environment.sessionRoot(allocator);
     defer env.testing.deinitScope(&scope, releases);
@@ -1052,7 +1052,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     var host = heap.HostOwner.init(allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
-    var environment = try env.Env.init(host.cleanup());
+    var environment = try env.Env.init(&host);
     defer {
         // Images clear their Env-owned scope-label cell as they
         // retire, so that work must drain before the Env frees them.

@@ -1019,10 +1019,11 @@ fn isLiteralValueForm(form_item: *const Form) bool {
         },
     };
 }
-/// `(body) 'name @defm`, or its seeded spelling `values (body) with 'name
+/// `(body) 'name @defm`, or its seeded spelling `values (body) seed 'name
 /// @defm`: the registration shape that earns a navigation header, mirroring
 /// definition navigation. A computed name gets no header, exactly as a
-/// definition does.
+/// definition does. The superseded `with` spelling is still a legal phrase and
+/// keeps its header, so reformatting existing source does not move it.
 /// A bare `@module` is an ordinary value-producing expression: it names
 /// nothing, so there is no header to write.
 fn moduleRegistrationName(sequence: Sequence, start: usize) ?[]const u8 {
@@ -1059,8 +1060,8 @@ fn moduleRegistrationInfo(sequence: Sequence, start: usize) ?ModuleRegistration 
                 .body = body,
                 .terminator = part_index,
             } else null;
-            if (std.mem.eql(u8, bytes, "with")) {
-                // `head with` means `head` is the body of a phrase whose seed
+            if (std.mem.eql(u8, bytes, "seed") or std.mem.eql(u8, bytes, "with")) {
+                // `head seed` means `head` is the body of a phrase whose seed
                 // list, if any, already owns the header.
                 if (!body_seen and precedingSeedList(sequence, start)) return null;
                 continue;

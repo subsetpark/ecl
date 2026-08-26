@@ -1038,7 +1038,7 @@ pub const ValueMaterializer = struct {
                 .float => .{ .kind = .float },
                 .char => |codepoint| .{ .kind = .char, .max_codepoint = codepoint },
                 .symbol => .{ .kind = .symbol },
-                .word, .list, .dict, .task, .module => .{ .kind = .mixed },
+                .word, .list, .dict, .task, .module, .unit_plan => .{ .kind = .mixed },
             };
             return;
         }

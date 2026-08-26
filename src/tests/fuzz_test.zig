@@ -68,7 +68,7 @@ test "fuzz: formatter is idempotent for every accepted source" {
             // The `### module` header path: bare, seeded, and with a stale header
             // the formatter must rewrite from the registration itself.
             "((1) 'x def) 'stats @defm",
-            "[[0]] ((1 +) 'tick def) with 'counter @defm",
+            "[[0]] ((1 +) 'tick def) seed 'counter @defm",
             "### module wrong\n# attached\n((1) 'x def) 'stats @defm",
             "(a -- ...) (dup) 'row def",
         },

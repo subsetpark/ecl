@@ -392,7 +392,7 @@ const WhichDriver = struct {
         try self.add(.{ .bytes = " " });
         try self.add(.{ .bytes = switch (self.resolved.?.borrow().lease.binding) {
             .word => "def",
-            .builtin => "primitive",
+            .builtin, .seed => "primitive",
             .native => "native",
         } });
         try self.add(.{ .bytes = " " });
@@ -523,7 +523,7 @@ const SeeDriver = struct {
                 try self.add(.{ .bytes = source.bytes() })
             else
                 try self.add(.{ .value = .{ .list = env.quotationHeader(word_body) } }),
-            .builtin => try self.add(.{ .bytes = "<primitive>" }),
+            .builtin, .seed => try self.add(.{ .bytes = "<primitive>" }),
             .native => {
                 try self.add(.{ .bytes = "<native:" });
                 try self.add(.{ .trace_word = self.resolved.?.borrow().trace_word });
@@ -544,8 +544,7 @@ const SeeDriver = struct {
         try self.add(.{ .trace_word = self.resolved.?.borrow().trace_word });
         try self.add(.{ .bytes = switch (self.resolved.?.borrow().lease.binding) {
             .word => if (self.resolved.?.borrow().lease.visibility == .private) " defp\n" else " def\n",
-            .builtin => " def\n",
-            .native => " def\n",
+            .builtin, .seed, .native => " def\n",
         } });
         self.actions.borrowMut().seal();
         self.plan_ready = true;

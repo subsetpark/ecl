@@ -192,7 +192,7 @@ test "table: invalid candidates fail with the frozen error kinds" {
     try support.expectErrors(&.{
         .{
             .name = "the next boundary rejects a forged candidate",
-            .source = "{\"a\" [1 2]} \"b\" [9] put wrap (table.rows) with @attempt result.or-raise",
+            .source = "{\"a\" [1 2]} \"b\" [9] put wrap (table.rows) seed @attempt result.or-raise",
             .kind = "shape",
             .message_contains = "one length",
         },

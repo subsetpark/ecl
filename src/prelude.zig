@@ -20,14 +20,14 @@ pub fn install(
     host: *const heap.HostCleanup,
     building: *env.BuildingEnv,
     registry: *modules.Registry,
-    archive: *spans.SpanArchive,
+    archive_owner: *spans.SpanArchiveOwner,
     cancelled: *const std.atomic.Value(bool),
 ) Error!void {
     return installSource(
         host,
         building,
         registry,
-        archive,
+        archive_owner,
         cancelled,
         "prelude.ecl",
         @embedFile("prelude.ecl"),
@@ -38,7 +38,7 @@ pub fn installSource(
     host: *const heap.HostCleanup,
     building: *env.BuildingEnv,
     registry: *modules.Registry,
-    archive: *spans.SpanArchive,
+    archive_owner: *spans.SpanArchiveOwner,
     cancelled: *const std.atomic.Value(bool),
     source_name: []const u8,
     source: []const u8,
@@ -46,10 +46,11 @@ pub fn installSource(
     const allocator = host.allocator();
     const release_domain = heap.hostDomain(host);
     const environment = building.runtime();
+    var archive = archive_owner.view();
     var diag: reader.Diag = .{};
     // Core alone is the chain for a primitive or an embedded prelude
     // definition, so every word this text contains carries the core scope.
-    const result = archive.read(
+    const result = archive_owner.read(
         source_name,
         source,
         &diag,
@@ -79,7 +80,7 @@ pub fn installSource(
         executionAccess(),
         .empty,
         environment,
-        archive,
+        &archive,
         null,
         arguments.borrow(),
         cancelled,

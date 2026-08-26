@@ -53,9 +53,14 @@ fn spawnTask(
 }
 
 fn spawn(evaluator: *Machine) MachineError!void {
-    var quotation = try evaluator.popQuotation();
-    defer quotation.deinit();
-    const task = try spawnTask(evaluator, quotation.borrow().list, .empty, .spawn);
+    var input = try evaluator.popUnitInput();
+    defer input.deinit();
+    const task = try spawnTask(
+        evaluator,
+        input.borrow().body,
+        input.borrow().initialStack(),
+        .spawn,
+    );
     try evaluator.pushOwned(task);
 }
 
@@ -108,18 +113,19 @@ fn awaitFor(evaluator: *Machine) MachineError!void {
 
 fn parEach(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    var quotation = try evaluator.popValue();
-    defer quotation.deinit();
+    var input = try evaluator.popUnitInput();
+    defer input.deinit();
     var sequence = try evaluator.popList();
     defer sequence.deinit();
-    if (quotation.borrow() != .list) return evaluator.typeError("a quotation");
 
     const count: usize = @intCast(sequence.borrow().list.length());
     var task_buffer = try heap.OwnedValueBuffer.init(evaluator.releaseDomain(), count);
     defer task_buffer.deinit();
+    const taken = input.take();
     try evaluator.startDriver(ParEachDriver{
         .sequence = .init(sequence.take()),
-        .quotation = .init(quotation.take()),
+        .quotation = .init(.{ .list = taken.body }),
+        .seeds = if (taken.seeds) |seeds| .init(.{ .list = seeds }) else null,
         .tasks = .init(task_buffer.take()),
     });
 }
@@ -128,6 +134,10 @@ const ParEachDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     sequence: heap.Owned(Value),
     quotation: heap.Owned(Value),
+    /// The plan's shared seeds, absent when `@each` was handed a raw
+    /// quotation. Every child stack holds its element deepest and these above
+    /// it, so one plan seeds the whole fan-out identically.
+    seeds: ?heap.Owned(Value),
     tasks: heap.Owned(heap.OwnedValueBuffer),
     index: usize = 0,
 
@@ -139,10 +149,14 @@ const ParEachDriver = struct {
         const count: usize = @intCast(self.sequence.borrow().list.length());
         const end = @min(self.index + par_each_work_quantum, count);
         while (self.index != end) : (self.index += 1) {
+            const element = list.atUnchecked(self.sequence.borrow(), self.index);
             const task = try spawnTask(
                 evaluator,
                 self.quotation.borrow().list,
-                .{ .borrowed_seed = list.atUnchecked(self.sequence.borrow(), self.index) },
+                if (self.seeds) |seeds| .{ .borrowed_element_and_seeds = .{
+                    .element = element,
+                    .seeds = seeds.borrow().list,
+                } } else .{ .borrowed_element = element },
                 .each,
             );
             self.tasks.borrowMut().appendOwned(task);

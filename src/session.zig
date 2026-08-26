@@ -220,6 +220,7 @@ const SessionCore = struct {
     registry: modules.Registry,
     native_owner: *native_module.Owner,
     stack: std.ArrayList(Value) = .empty,
+    archive_owner: spans.SpanArchiveOwner,
     archive: spans.SpanArchive,
     output: ?*std.Io.Writer,
     diagnostics: ?*std.Io.Writer,
@@ -335,18 +336,25 @@ pub const Session = enum(usize) {
             host_owner.cleanup().drain();
             allocator.destroy(host_owner);
         }
-        var environment = try env.Env.init(host_owner.cleanup());
+        var environment = try env.Env.init(host_owner);
         errdefer environment.deinit();
         var building = environment.beginCoreBuild();
         try prims.install(&building);
+        try building.installSeed("seed");
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
         const native_owner = try native_module.Owner.init(host_owner.cleanup());
         errdefer native_owner.closeCalls().settle().deinit();
-        var archive = try spans.SpanArchive.init(host_owner.cleanup());
-        errdefer archive.deinit();
+        // A Session builds exactly one archive on its own reclamation root, so
+        // the provenance owner is always free here; treating the refusal as an
+        // allocation failure keeps the public Session error set unchanged.
+        var archive_owner = spans.SpanArchiveOwner.init(host_owner) catch |err| switch (err) {
+            error.OutOfMemory, error.CodeProvenanceTaken => return error.OutOfMemory,
+        };
+        errdefer archive_owner.deinit();
+        const archive = archive_owner.view();
         var bootstrap_cancelled: std.atomic.Value(bool) = .init(false);
-        prelude.install(host_owner.cleanup(), &building, &registry, &archive, &bootstrap_cancelled) catch |err| switch (err) {
+        prelude.install(host_owner.cleanup(), &building, &registry, &archive_owner, &bootstrap_cancelled) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidPrelude => @panic("embedded prelude is invalid"),
         };
@@ -396,6 +404,7 @@ pub const Session = enum(usize) {
             .environment = environment,
             .registry = registry,
             .native_owner = native_owner,
+            .archive_owner = archive_owner,
             .archive = archive,
             .output = output,
             .diagnostics = if (host) |services| services.diagnostics else null,
@@ -438,7 +447,7 @@ pub const Session = enum(usize) {
         };
         snapshot.deinit(core.allocator());
         core.registry.deinit();
-        core.archive.deinit();
+        core.archive_owner.deinit();
         // Registry teardown retires images, and an image clears its Env-owned
         // scope-label cell as it goes. Drain that work before the Env releases
         // the cells, so no deferred image release ever touches freed memory.
@@ -473,7 +482,7 @@ pub const Session = enum(usize) {
         var diag: reader.Diag = .{};
         // The unit that read this text is the scope its words were written in.
         const unit_scope = try core.environment.scopeIdFor(core.root_scope.?);
-        const read_result = core.archive.read(
+        const read_result = core.archive_owner.read(
             source_name,
             source,
             &diag,

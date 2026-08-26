@@ -1048,7 +1048,9 @@ stack snapshot. Concretely:
   nominal brand, so raw intern ids cannot be accidentally substituted. A
   qualified executable name splits at its final dot; aliases remain
   unqualified. `'name (body) module` and
-  the source-defined `with 'name @module` constructor build a candidate; the first
+  the source-defined seeded constructor build a candidate (spelled `with 'name
+  @module` as built; see the 2026-08-26 unit-plan ruling for the current
+  `values (body) seed 'name @defm`); the first
   successful registration of a canonical name creates its slot, while later
   registrations replace only its code generation. Separately constructed names
   own independent stacks even when their bodies come from the same quotation.
@@ -1063,8 +1065,9 @@ stack snapshot. Concretely:
   representation and build only the immutable candidate code environment. The
   isolated body's final operand stack becomes the durable initial stack for a
   newly created slot instead of being required to be empty. `values (body)
-  with 'name @module` supplies its values in order as that construction stack's
-  initial contents, using `with` exactly as `with @attempt` and `with @spawn` do;
+  seed 'name @defm` supplies its values in order as that construction stack's
+  initial contents, exactly as `seed @attempt` and `seed @spawn` do (as built
+  this was `with`; see the 2026-08-26 unit-plan ruling);
   the body may consume, reorder, or extend them before publication. On
   re-registration, the successfully built candidate's initial-state stack is
   discarded and the existing slot's durable stack is retained: initialization
@@ -1267,9 +1270,9 @@ owns the explicit host scripting words needed by that layer:
   exhaustive eliminator (`result.either`), and list aggregation
   (`result.all`, `result.partition`). Successful values are always a list
   representing a stack, never one privileged scalar. `result.and-then` seeds
-  that stack into its quotation through `with @attempt`; an existing error is
+  that stack into its quotation through `seed @attempt`; an existing error is
   returned unchanged. Recovery seeds the error dict as one value and runs the
-  recovery quotation through `with @attempt`; `recover-kinds` leaves an
+  recovery quotation through `seed @attempt`; `recover-kinds` leaves an
   unmatched result unchanged. `result.all` preserves input order and returns
   the leftmost error unchanged, or one successful value containing the list
   of per-result success stacks. `result.partition` returns success-stack lists
@@ -2900,6 +2903,70 @@ INTERPRETER.md and its entry here is retired.
 
 ## Decisions Made
 
+- **A unit constructor's seeds are a nominal plan, not a flattened quotation
+  (2026-08-26, user ruling; supersedes the 2026-08-18 `-with` ruling's seeding
+  spelling).** `with @X` was the seeding idiom because it needed no new
+  vocabulary. It is information-losing, and the loss is load-bearing: `with`
+  returns one runtime-built quotation, so `@module` and `@defm` can no longer
+  say which part of it was the construction body, while module-text attribution
+  must name exactly that body. `seed ( values quotation -- unit-plan )` seals
+  the two halves into `'unit-plan`, a nominal opaque heap kind whose only
+  producer is that word; `unseed` returns the exact pair. Every unit constructor
+  now takes the tagged sum `unseeded quotation | unit-plan`, so the concise
+  spellings are unchanged and the seeded ones become `values (q) seed @attempt`,
+  `values (q) seed @spawn`, `list values (q) seed @each`,
+  `values (body) seed @module`, and `values (body) seed 'name @defm`. `with`,
+  `partial`, and every generic reconstruction keep their existing meanings and
+  construct nothing.
+  Attribution becomes exact and is enforced by a capability rather than by a
+  predicate anyone can approximate. The rule: *reader-text lineage survives only
+  the interpreter's scope-only construction rewrite; a later constructor may
+  re-stamp that exact rewritten body to its own image; ordinary runtime
+  reconstruction loses the lineage.* Lineage has exactly two mints — absorbing a
+  reader result, and the rewrite attesting the copy it just produced. The feature's
+  first draft denied the second, which made a construction nested inside a
+  construction body resolve against the enclosing image and broke the per-reload
+  retention soak.
+  Lineage is inherited, never handed out, and no proof of it crosses an API. A
+  portable witness would prove only that the reader wrote *some* body, saying
+  nothing about a destination header a caller picked, and it could be replayed
+  against a second archive. So the archive owns admission and its application
+  together: `SpanArchive.prepareConstructionBody(body, scope)` returns either
+  `unchanged` or a cursor already holding the admission result, it builds its
+  own output, and the span/lineage commit is private to it. So
+  `7 'k set ((k) 'geta) (def) cat 'm @defm` leaves `k` naming the session and
+  `m.geta` is `7`, and wrapping that runtime-built body in a plan changes only
+  its initial stack.
+  Both user-sized halves of opening a unit are bounded, finalizers included.
+  The rewrite is a resumable cursor whose frame stack is the recursion and whose
+  every frame owns its destination builder from the first element, so publishing
+  a container is O(1); a re-scoped dict shares the source's hashes outright,
+  because neither equality nor hashing looks at a word's scope, so nothing is
+  rehashed or compared. Traversal and the index copy draw from one nominal
+  `poll.WorkBudget`. A plan's seeds are materialized in fixed slices by the
+  driver that opens the boundary — for a child Unit, by the child's own first
+  slices, so `@each` cannot multiply a seed copy by the children it starts per
+  turn. Identity publication likewise makes one claim attempt per cursor
+  advance; a racing loser retains its current absorption entry or completed
+  re-scope header and yields. Minting a plan needs `heap.UnitPlanSeal`, an opaque
+  authority issued by the Session's reclamation root alone: the raw constructor
+  is private, the Env derives the canonical seed binding's seal directly from
+  its `HostOwner`, and `root.heap` exposes no allocator-plus-headers factory at
+  all. The generic core installer accepts only quotations, so the `seed` opcode
+  cannot be aliased through a caller-supplied `Binding`; both runtime quotation
+  names and compile-time builtin names must first become a validated ordinary
+  core name that excludes `seed`. Archive execution is a separate view and a
+  separately allocated backing from `SpanArchiveOwner`: only
+  `SpanArchiveOwnerState` retains `*HostOwner` and the receipt, while worker
+  `SpanArchiveState` contains the release domain and runtime lineage/index data
+  and cannot recover an enclosing owner allocation. Alias publication has distinct
+  pending, published, and refused outcomes, so success means the header is
+  indexed. The owner registers the tagged checked-`u64` retirement slot and
+  tears it down. A hard
+  change, pre-`1.0`:
+  `with`-seeded module bodies stop resolving in the image, and first-party source
+  and every example moved to `seed` in the same change.
+
 - **Verification is tiered, and the local tier is not a copy of CI
   (2026-08-20, user ruling).** Local runs had become a repetition of the CI
   matrix: `zig build test` alone measures 5m06s after a one-line change (about
@@ -3824,7 +3891,7 @@ script in CI.
 
 - **DoD-25a — result algebra**
   - **Assert**: the embedded `result` module constructs and observes canonical
-    results, composes successful stack values through `with @attempt`, maps and
+    results, composes successful stack values through `seed @attempt`, maps and
     selectively recovers errors without swallowing unmatched kinds, eliminates
     either variant, and aggregates ordered result lists with the specified
     leftmost-error and partition behavior. Malformed result dicts fail before
@@ -3841,7 +3908,7 @@ script in CI.
     `partition` preserves order within both outputs; malformed inputs are
     rejected without executing probe quotations.
   - **Traces to**: Milestone 12 — embedded source `result` module using the M6
-    result protocol and `with @attempt`.
+    result protocol and `seed @attempt`.
 
 - **DoD-25 — json round-trip**
   - **Assert**: `json.parse` maps objects/arrays/numbers per the
@@ -4070,7 +4137,7 @@ script in CI.
 
 - **DoD-39 — dynamically constructed modules are independent state singletons**
   - **Assert**: two canonical module names registered from the same
-    `with 'name @module` body own independent durable stacks initialized from their
+    `seed 'name @defm` body own independent durable stacks initialized from their
     supplied construction values; module-homed `within` reaches only its
     definition-site slot. Dotted canonical names, unqualified aliases, and
     final-dot qualified resolution select the intended module without exposing
@@ -4084,7 +4151,7 @@ script in CI.
   - **Expected**: both worker counts produce the same distinct final values;
     dotted dynamic execution reaches the expected word, both invalid operands
     are `'type`, and neither module can observe or mutate the other's stack.
-  - **Traces to**: Milestone 11 — `with 'name @module`, branded module/qualified names,
+  - **Traces to**: Milestone 11 — seeded `'name @defm`, branded module/qualified names,
     construction-stack publication, `qualify`/`execute`, and module-home
     `within` authority.
 
@@ -4207,8 +4274,8 @@ script in CI.
     and every `-with` variant (`attempt-with`, `spawn-with`, `par-each-with`,
     `module-with`, and any `@…-with`) are `'undefined-word`; an
     underflow at a unit-constructor substack base carries the guided
-    isolation message suggesting `with` seeding or `partial`;
-    `[1 2] [10] (|x a| x a +) with @each`
+    isolation message suggesting `seed` or `partial`;
+    `[1 2] [10] (|x a| x a +) seed @each`
     computes 11 and 12 per child (element deepest, values above),
     delivered in `@each`'s existing ordered-join result shape;
     `(body) 'name @module` registers name-last and the former
@@ -4218,7 +4285,7 @@ script in CI.
   - **Verify by** `cmd`: `zig build source-audit` (the spelling
     manifest); e2e cases for one old spelling raising `'undefined-word`
     and for `10 20 30 (+ +) @attempt` showing the guided error; the same e2e
-    test runs `[1 2] [10] (|x a| x a +) with @each`; the snapshot corpus pins
+    test runs `[1 2] [10] (|x a| x a +) seed @each`; the snapshot corpus pins
     the exact guided error dict.
   - **Expected**: audit exit 0; the old-spelling and guided-error cases
     match; `(q) @attempt` and `(q) @spawn await` produce structurally

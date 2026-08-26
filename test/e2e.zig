@@ -1024,7 +1024,7 @@ test "e2e: stateful module reload acceptance" {
 }
 
 test "e2e: module removal acceptance" {
-    const module = "[7] (((dup without) within) 'peek def) with 'core.c @defm ";
+    const module = "[7] (((dup without) within) 'peek def) seed 'core.c @defm ";
     var by_name = try run(&.{
         build_options.ecl_exe,
         "-e",
@@ -1583,7 +1583,7 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer isolated.deinit();
     try isolated.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{ "'isolation @attempt", "with @attempt", "partial" },
+        .stdout_contains = &.{ "'isolation @attempt", "seed @attempt", "partial" },
     });
     var child = try run(&.{ build_options.ecl_exe, "-e", "3 [1 2] (+ +) @each io.pp" });
     defer child.deinit();
@@ -1592,14 +1592,14 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
         .stderr_contains = &.{ "'isolation @each", "only its element" },
     });
     // And the seeding composition that fixes it.
-    var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) with @attempt io.pp" });
+    var seeded = try run(&.{ build_options.ecl_exe, "-e", "[3] (1 +) seed @attempt io.pp" });
     defer seeded.deinit();
     try seeded.expect(.{ .exit_code = 0, .stdout = "{'ok [4]}\n", .stderr = "" });
 
     var seeded_each = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "[1 2] [10] (|x a| x a +) with @each io.pp",
+        "[1 2] [10] (|x a| x a +) seed @each io.pp",
     });
     defer seeded_each.deinit();
     try seeded_each.expect(.{ .exit_code = 0, .stdout = "[11 12]\n", .stderr = "" });
@@ -1617,7 +1617,7 @@ test "e2e: the old unit-constructor spellings are gone and the boundary error gu
     defer anonymous_isolation.deinit();
     try anonymous_isolation.expect(.{
         .exit_code = 1,
-        .stderr_contains = &.{ "'isolation @module", "with @module" },
+        .stderr_contains = &.{ "'isolation @module", "seed @module" },
     });
 
     // The value the external binary shows for a module image, and the two

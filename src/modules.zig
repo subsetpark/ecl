@@ -1020,7 +1020,7 @@ test "modules: an image's registration-less home is reachable from its own root 
     const releases = host.domain();
     defer host.cleanup().drain();
 
-    var container = try env.Env.init(host.cleanup());
+    var container = try env.Env.init(&host);
     defer container.deinit();
 
     const image = try ModuleImage.create(std.testing.allocator, releases);
@@ -1053,7 +1053,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
     {
         var host = heap.HostOwner.init(allocator);
         const releases = host.domain();
-        var container = try env.Env.init(host.cleanup());
+        var container = try env.Env.init(&host);
 
         const rounds = 64;
 
@@ -1112,7 +1112,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
     {
         var host = heap.HostOwner.init(allocator);
         const releases = host.domain();
-        var container = try env.Env.init(host.cleanup());
+        var container = try env.Env.init(&host);
 
         const image = try ModuleImage.create(allocator, releases);
         const owner: *anyopaque = @ptrCast(image.anchor);
@@ -1175,7 +1175,7 @@ test "modules: the same drop with no borrow reclaims the contents" {
     {
         var host = heap.HostOwner.init(allocator);
         const releases = host.domain();
-        var container = try env.Env.init(host.cleanup());
+        var container = try env.Env.init(&host);
 
         const image = try ModuleImage.create(allocator, releases);
         const owner: *anyopaque = @ptrCast(image.anchor);

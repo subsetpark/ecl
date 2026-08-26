@@ -733,7 +733,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
         .neg => switch (operand) {
             .int => |integer| .{ .int = std.math.sub(i64, 0, integer) catch return error.Overflow },
             .float => |number| try checkedFloat(-number, !std.math.isFinite(number)),
-            .char, .symbol, .word, .list, .dict, .task, .module => error.Type,
+            .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => error.Type,
         },
         .abs => switch (operand) {
             .int => |integer| if (integer == std.math.minInt(i64))
@@ -741,7 +741,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
             else
                 .{ .int = if (integer < 0) -integer else integer },
             .float => |number| try checkedFloat(@abs(number), !std.math.isFinite(number)),
-            .char, .symbol, .word, .list, .dict, .task, .module => error.Type,
+            .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => error.Type,
         },
         .sqrt => switch (operand) {
             .int => |integer| if (integer < 0)
@@ -752,7 +752,7 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
                 error.Domain
             else
                 try checkedFloat(@sqrt(number), !std.math.isFinite(number)),
-            .char, .symbol, .word, .list, .dict, .task, .module => error.Type,
+            .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => error.Type,
         },
         .floor, .ceil, .round => switch (operand) {
             .int => operand,
@@ -762,12 +762,12 @@ fn scalarUnary(comptime operation: UnaryOp, operand: Value) ScalarError!Value {
                 .round => @round(number),
                 else => unreachable,
             }),
-            .char, .symbol, .word, .list, .dict, .task, .module => error.Type,
+            .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => error.Type,
         },
         .exp, .log, .sin, .cos => transcendental(operation, operand),
         .bnot => switch (operand) {
             .int => |integer| .{ .int = ~integer },
-            .char, .float, .symbol, .word, .list, .dict, .task, .module => error.Type,
+            .char, .float, .symbol, .word, .list, .dict, .task, .module, .unit_plan => error.Type,
         },
     };
 }
@@ -942,7 +942,7 @@ fn asFloat(operand: Value) f64 {
     return switch (operand) {
         .int => |integer| @floatFromInt(integer),
         .float => |number| number,
-        .char, .symbol, .word, .list, .dict, .task, .module => unreachable,
+        .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => unreachable,
     };
 }
 
@@ -1011,7 +1011,7 @@ fn scalarNumber(item: Value) ?Number {
     return switch (item) {
         .int => .integer,
         .float => .real,
-        .char, .symbol, .word, .list, .dict, .task, .module => null,
+        .char, .symbol, .word, .list, .dict, .task, .module, .unit_plan => null,
     };
 }
 
@@ -2004,7 +2004,7 @@ fn firstFlatElement(item: Value) ?Value {
         .leaf_char2 => .{ .char = heap.chars16(item.list)[0] },
         .leaf_char4 => .{ .char = @intCast(heap.chars32(item.list)[0]) },
         .leaf_symbol => .{ .symbol = heap.symbols(item.list)[0] },
-        .generic_spine, .dict, .task, .module, .reserved_mask => null,
+        .generic_spine, .dict, .task, .module, .unit_plan, .reserved_mask => null,
     };
 }
 

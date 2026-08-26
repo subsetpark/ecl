@@ -43,7 +43,7 @@
   "Return 1 when a candidate is a table and 0 when it is not.
 
    Cancellation, allocation failure, and other runtime errors propagate.")
- (wrap (checked pop) with @attempt dup result.ok? (pop 1) (convention-miss?) if)
+ (wrap (checked pop) seed @attempt dup result.ok? (pop 1) (convention-miss?) if)
  'valid? def
 
  ### def names

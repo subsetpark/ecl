@@ -35,6 +35,12 @@ const ApplicationProvenanceNonce = enum(u32) { _ };
 var next_application_provenance_nonce: std.atomic.Value(u64) = .init(1);
 const fuel_quantum: u32 = 1024;
 pub const kernel_poll_quantum: u32 = 65_536;
+/// Elements of a construction body re-scoped, and seed values materialized,
+/// per scheduler step. Deliberately the same small scale as
+/// `par_each_work_quantum` rather than the kernel quantum: both of these are
+/// bounded traversals whose whole purpose is to keep a user-sized construction
+/// off one step, and a 65,536-element slice is not a bound anyone would feel.
+pub const construction_work_quantum: usize = 256;
 pub const IdiomMode = enum { automatic, generic_only };
 pub const ErrorKind = enum {
     underflow,
@@ -4141,16 +4147,16 @@ pub const Machine = struct {
                 .attempt => .{
                     .constructor = "@attempt",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "seed it with `values (q) with @attempt` or capture with `partial`",
+                        "seed it with `values (q) seed @attempt` or capture with `partial`",
                 },
                 .module => |construction| if (construction.registration == null) .{
                     .constructor = "@module",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "seed it with `values (body) with @module` or capture with `partial`",
+                        "seed it with `values (body) seed @module` or capture with `partial`",
                 } else .{
                     .constructor = "@defm",
                     .advice = "the substack is isolated from the caller's stack — " ++
-                        "seed it with `values (body) with 'name @defm` or capture with `partial`",
+                        "seed it with `values (body) seed 'name @defm` or capture with `partial`",
                 },
                 .state => null,
             };
@@ -4160,12 +4166,12 @@ pub const Machine = struct {
             .spawn => .{
                 .constructor = "@spawn",
                 .advice = "the child unit's stack is isolated from the caller's — " ++
-                    "seed it with `values (q) with @spawn` or capture with `partial`",
+                    "seed it with `values (q) seed @spawn` or capture with `partial`",
             },
             .each => .{
                 .constructor = "@each",
                 .advice = "the child unit's stack holds only its element — " ++
-                    "seed it with `list values (q) with @each` or capture with `partial`",
+                    "seed it with `list values (q) seed @each` or capture with `partial`",
             },
         };
     }
@@ -4203,6 +4209,40 @@ pub const Machine = struct {
                 return item == .list;
             }
         }.accepts);
+    }
+    /// Pops the input every unit constructor takes: a bare quotation, which
+    /// seeds nothing, or a unit plan, which names its seeds and its body
+    /// separately. Nothing else is accepted, and the type error is the one a
+    /// constructor has always reported for a non-quotation.
+    ///
+    /// A plan's two fields are borrows, so each is retained here: the returned
+    /// input owns both halves independently of the plan it came from, which is
+    /// what lets the plan itself be released before the body starts running.
+    pub fn popUnitInput(self: *Machine) MachineError!OwnedUnitInput {
+        var item = try self.popValue();
+        defer item.deinit();
+        switch (item.borrow()) {
+            .list => |quotation| {
+                _ = item.take();
+                return .init(self.releaseDomain(), .{ .seeds = null, .body = quotation });
+            },
+            .unit_plan => |plan| {
+                const seeds = heap.unitPlanSeeds(plan);
+                const body = heap.unitPlanBody(plan);
+                heap.incRef(seeds);
+                heap.incRef(body);
+                return .init(self.releaseDomain(), .{ .seeds = seeds, .body = body });
+            },
+            else => return self.typeError("a quotation/list or unit plan"),
+        }
+    }
+    /// Releases whichever halves of a consumed `UnitInput` a failing
+    /// constructor still owns. Every constructor failure path goes through
+    /// this, so the consuming contract does not depend on remembering that a
+    /// seeded input has two references rather than one.
+    fn releaseUnitInput(self: *Machine, input: UnitInput) void {
+        if (input.seeds) |seeds| self.releaseDomain().releaseHeader(seeds);
+        self.releaseDomain().releaseHeader(input.body);
     }
     pub fn popString(self: *Machine) MachineError!heap.OwnedValue {
         return self.popChecked("a string", struct {
@@ -4741,8 +4781,8 @@ pub const Machine = struct {
             .application_selection = if (select_initial) provenance_target else null,
         };
     }
-    pub fn attemptOwned(self: *Machine, quotation: *Header) error{OutOfMemory}!void {
-        return self.beginAttemptOwned(quotation);
+    pub fn attemptOwned(self: *Machine, input: UnitInput) error{OutOfMemory}!void {
+        return self.beginAttemptOwned(input);
     }
     /// Publishes an already-constructed image under a validated name. The
     /// module value is consumed: the driver retains it for its whole lifetime,
@@ -4770,141 +4810,100 @@ pub const Machine = struct {
             )),
         });
     }
-    /// Restamps one element of a construction body. Everything structurally
-    /// inside a body the reader produced is that body's text, whatever
-    /// container it sits in, so this descends through dicts as readily as
-    /// through lists. Stopping at a dict is what let
-    /// `{'a (k)} 'd setp` reach a session binding while the identical
-    /// `[(k)] 'd setp` did not.
-    fn stampValue(self: *Machine, item: Value, scope: env.ScopeId) error{OutOfMemory}!Value {
-        switch (item) {
-            .word => |reference| return .{
-                .word = .{ .name = reference.name, .scope = @intFromEnum(scope) },
-            },
-            .list => |nested| {
-                // Descend only into code this archive read. A list with no
-                // reader identity was built at run time, so its parts already
-                // carry the scopes they were written in and none of them
-                // belongs to this body — which is exactly what `with` produces
-                // when it captures a seed with `literal`.
-                if (nested.kind() != .generic_spine or
-                    self.unit.archive.identityOf(nested) == null)
-                {
-                    heap.retainValue(item);
-                    return item;
-                }
-                return .{ .list = try self.stampConstructionBody(nested, scope) };
-            },
-            .dict => |nested| {
-                const pairs = try self.unit.allocator.alloc(dict.Pair, @intCast(nested.length()));
-                defer self.unit.allocator.free(pairs);
-                var built: usize = 0;
-                errdefer for (pairs[0..built]) |pair| {
-                    self.releaseDomain().releaseValue(pair[0]);
-                    self.releaseDomain().releaseValue(pair[1]);
-                };
-                while (built < pairs.len) : (built += 1) {
-                    const key = try self.stampValue(dict.keyAt(nested, built), scope);
-                    errdefer self.releaseDomain().releaseValue(key);
-                    pairs[built] = .{ key, try self.stampValue(dict.valueAt(nested, built), scope) };
-                }
-                const stamped = try dict.fromUniquePairs(
-                    self.unit.allocator,
-                    self.releaseDomain(),
-                    pairs,
-                );
-                for (pairs[0..built]) |pair| {
-                    self.releaseDomain().releaseValue(pair[0]);
-                    self.releaseDomain().releaseValue(pair[1]);
-                }
-                built = 0;
-                return stamped;
-            },
-            else => {
-                heap.retainValue(item);
-                return item;
-            },
-        }
-    }
-
-    /// Rewrites a construction body so its words name the image's scope, and
-    /// returns a fresh owned header. Reading stamps a word with the unit that
-    /// read it, which cannot know that a quotation will become a module body;
-    /// `@module` and `@defm` are where that becomes knowable, so this is the
-    /// one place the enclosing-construct rule is applied.
-    ///
-    /// It copies rather than mutating, because a body is an ordinary shared
-    /// value: stamping in place would make a second `@defm` of the same body
-    /// re-site the first image's words. The copy also leaves a quotation handed
-    /// in as a *parameter* untouched, because a parameter is a separate value
-    /// that was never inside the body term — which is exactly what separates
-    /// `[(k *)] (...) with 'm @defm` from `((k *) 'scale def) 'm @defm`.
-    fn stampConstructionBody(
-        self: *Machine,
-        body: *Header,
-        scope: env.ScopeId,
-    ) error{OutOfMemory}!*Header {
-        const scratch = self.unit.allocator;
-        const namespace = self.unit.archive.provenanceNamespaceOf();
-        const length: usize = @intCast(body.length());
-        const items = try scratch.alloc(Value, length);
-        defer scratch.free(items);
-        var built: usize = 0;
-        errdefer for (items[0..built]) |item| self.releaseDomain().releaseValue(item);
-        while (built < length) : (built += 1) {
-            items[built] = try self.stampValue(list.atUnchecked(.{ .list = body }, built), scope);
-        }
-        const stamped = try list.fromValuesGenericCode(scratch, items[0..length], namespace);
-        // The rewrite produces a new header, and the span index is keyed by
-        // header, so the source this body was read from has to be carried over
-        // or every error raised inside the module would report no location.
-        // Aliasing allocates, and on failure the stamped header owns a retain
-        // on every element, so it has to go back rather than leak.
-        errdefer self.releaseDomain().releaseValue(stamped);
-        try self.unit.archive.aliasSpans(body, stamped.list);
-        // `fromValuesGenericCode` retains each element, so the local references
-        // built above are handed off rather than duplicated.
-        for (items[0..length]) |item| self.releaseDomain().releaseValue(item);
-        return stamped.list;
-    }
-
     /// Opens a construction boundary. The body evaluates against a fresh
     /// anonymous image; `registration`, when present, is the name that image
     /// is published under the instant the body succeeds.
     pub fn moduleOwned(
         self: *Machine,
         registration: ?u32,
-        quotation: *Header,
+        input: UnitInput,
     ) MachineError!void {
         const registry = self.unit.inherited.registry orelse {
-            self.releaseDomain().releaseHeader(quotation);
+            self.releaseUnitInput(input);
             return self.fail(.domain, "module registry is unavailable");
         };
         const word = self.unit.active_word;
         var candidate = registry.createImage() catch {
-            self.releaseDomain().releaseHeader(quotation);
+            self.releaseUnitInput(input);
             return error.OutOfMemory;
         };
         errdefer candidate.deinit();
-        const home = candidate.executionHome(self.unit.module_access);
         // The construction body's words name this image and nothing else, so
         // the image gets its own scope cell. A reload builds a new image and
         // publishes it under the name; the words of the generation it replaced
         // go on naming the image they were written in, for as long as anything
         // still holds it.
+        const home = candidate.executionHome(self.unit.module_access);
         const stamp_scope = self.unit.environment.scopeIdForOwned(
             home.scope(self.unit.module_access),
             modules.anchorHandle(home, self.unit.module_access),
         ) catch {
-            self.releaseDomain().releaseHeader(quotation);
+            self.releaseUnitInput(input);
             return error.OutOfMemory;
         };
-        const stamped = self.stampConstructionBody(quotation, stamp_scope) catch {
-            self.releaseDomain().releaseHeader(quotation);
-            return error.OutOfMemory;
-        };
-        self.releaseDomain().releaseHeader(quotation);
-        const body_header = stamped;
+        // Attribution asks one question, of the exact designated body: is it
+        // does this exact body carry reader-text lineage? Admission is the
+        // archive's own, so the answer arrives already applied: either a cursor
+        // that will produce the re-scoped copy, or "run it unchanged", in which
+        // case the body's words go on resolving in the scopes they were written
+        // in. Seeds are a separate value and are never reached either way.
+        //
+        // Both re-scoping and seeding are user-sized, so they are ordinary
+        // resumable scheduler work: the driver holds the candidate image, the
+        // seeds, and the source body until the copy is finished and the
+        // boundary can open. Only a body with neither to do still opens it in
+        // this step, and that case copies nothing at all.
+        var prepared = self.unit.archive.prepareConstructionBody(
+            input.body,
+            @intFromEnum(stamp_scope),
+        );
+        if (prepared == .unchanged and input.seeds == null) {
+            const body_header = input.body;
+            heap.incRef(body_header);
+            self.releaseUnitInput(input);
+            return self.openImageBoundary(&candidate, registration, word, body_header);
+        }
+        errdefer if (prepared == .rewriting) prepared.rewriting.deinit();
+        try self.startDriver(ConstructionDriver{
+            .target = .init(.{ .image = .{
+                .candidate = candidate.move(),
+                .registration = registration,
+            } }),
+            .rescope = switch (prepared) {
+                .unchanged => null,
+                .rewriting => |cursor| .init(cursor),
+            },
+            .source = switch (prepared) {
+                .unchanged => null,
+                .rewriting => .init(input.body),
+            },
+            .body = switch (prepared) {
+                .unchanged => body: {
+                    heap.incRef(input.body);
+                    self.releaseDomain().releaseHeader(input.body);
+                    break :body .init(input.body);
+                },
+                .rewriting => null,
+            },
+            .seeds = if (input.seeds) |seeds| .init(seeds) else null,
+            .word = word,
+            .phase = switch (prepared) {
+                .unchanged => .open,
+                .rewriting => .rescope,
+            },
+        });
+    }
+    /// Opens one construction boundary. Consuming: the body is owned by the
+    /// boundary on success and released here on every failure, and the image is
+    /// consumed only once the boundary owns it.
+    fn openImageBoundary(
+        self: *Machine,
+        candidate: *modules.OwnedImage,
+        registration: ?u32,
+        word: intern.TraceWord,
+        body_header: *Header,
+    ) MachineError!void {
+        const home = candidate.executionHome(self.unit.module_access);
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(body_header);
             return error.OutOfMemory;
@@ -4943,6 +4942,40 @@ pub const Machine = struct {
             .image = image,
             .validation = .init(binding),
         });
+    }
+    /// The whole of `seed`: seal the two values into one immutable plan.
+    ///
+    /// It lives here rather than behind a handler value because `seed` is a
+    /// binding kind, not a primitive anything can be bound to. The two halves
+    /// come off this unit's own stack and the binding's opaque seal derives the
+    /// plan allocation from the Env's host owner, so no allocator crosses this
+    /// call boundary.
+    ///
+    /// The two stay separate for the whole life of the plan: nothing here
+    /// executes, stamps, copies, parses, or otherwise transforms either input,
+    /// because the only thing a plan is for is letting a unit constructor tell
+    /// a body from the values handed to it.
+    fn sealUnitPlan(
+        self: *Machine,
+        seal: *const heap.UnitPlanSeal,
+    ) MachineError!void {
+        try self.require(2);
+        var body = try self.popQuotation();
+        errdefer body.deinit();
+        var values = try self.popList();
+        errdefer values.deinit();
+        // `popList` and `popQuotation` established both tags, so the factory's
+        // list parameters are satisfied without a second check and without
+        // projecting a tag anything here has not established.
+        const plan = try seal.seal(
+            values.borrow().list,
+            body.borrow().list,
+        );
+        // The plan owns both references now; the local handles hand theirs over
+        // rather than releasing them.
+        _ = values.take();
+        _ = body.take();
+        try self.pushOwned(plan);
     }
     /// Resolves a word in the scope its text was written in, which is carried
     /// by the occurrence rather than by the quotation containing it. A word
@@ -5210,33 +5243,51 @@ pub const Machine = struct {
     }
     fn beginAttemptOwned(
         self: *Machine,
-        quotation: *Header,
+        input: UnitInput,
     ) error{OutOfMemory}!void {
+        // An unseeded `@attempt` opens its boundary in this step and allocates
+        // nothing extra; a seeded one materializes a user-sized seed list, so
+        // it becomes ordinary resumable scheduler work like every other
+        // user-sized traversal.
+        if (input.seeds == null) return self.openAttempt(input.body);
+        return self.startDriver(ConstructionDriver{
+            .target = .init(.attempt),
+            .rescope = null,
+            .source = null,
+            .body = .init(input.body),
+            .seeds = .init(input.seeds.?),
+            .word = self.unit.active_word,
+            .phase = .open,
+        });
+    }
+    /// Opens one `@attempt` boundary. Consuming: the body is owned by the
+    /// boundary on success and released here on every failure.
+    fn openAttempt(self: *Machine, body: *Header) error{OutOfMemory}!void {
         const parent_scope = self.unit.current.?.scope();
         const invoker = self.unit.current.?;
         const word = self.unit.active_word;
         const child = env.Scope.createLazy(self.unit.allocator, parent_scope) catch {
-            self.releaseDomain().releaseHeader(quotation);
+            self.releaseDomain().releaseHeader(body);
             return error.OutOfMemory;
         };
         _ = self.suspendCurrent() catch {
             child.retire();
-            self.releaseDomain().releaseHeader(quotation);
+            self.releaseDomain().releaseHeader(body);
             return error.OutOfMemory;
         };
         if (self.unit.frames.items.len >= max_frame_count) {
             child.retire();
-            self.releaseDomain().releaseHeader(quotation);
+            self.releaseDomain().releaseHeader(body);
             return error.OutOfMemory;
         }
         try self.openBoundary(
             .{ .attempt = child },
             @intCast(self.unit.stack.items.len),
             word,
-            quotation,
+            body,
         );
         self.unit.current = .{
-            .code = quotation,
+            .code = body,
             .ip = 0,
             .site = .inheriting(invoker, child),
             .traced_word = no_word,
@@ -5247,7 +5298,9 @@ pub const Machine = struct {
     /// body, a state application, and `@attempt` — differ in what they record
     /// and what runs inside them, never in how the boundary is opened. The
     /// caller keeps the frame-count check, because what it has to release on
-    /// refusal differs; past that point failure releases the quotation here.
+    /// refusal differs; past that point failure releases the body here. A
+    /// plan's seeds are never handed in: they belong to the driver that
+    /// materializes them after the boundary is open.
     fn openBoundary(
         self: *Machine,
         mode: BoundaryMode,
@@ -5310,23 +5363,109 @@ pub const Machine = struct {
 
 pub const RunStatus = enum { completed, yielded, parked };
 
+/// The input every unit constructor takes, with the two halves the language
+/// requires it to tell apart: the construction body, and the values the new
+/// unit's stack starts with. A raw quotation seeds nothing; a unit plan names
+/// both. Flattening them into one quotation is exactly what makes module-text
+/// attribution unanswerable, so nothing between `seed` and the boundary is
+/// allowed to join them.
+///
+/// Both halves are owned. Every constructor consumes a `UnitInput` and
+/// releases whatever it still holds on every failure path.
+pub const UnitInput = struct {
+    /// Absent — not an empty list — for a raw quotation, so unseeded
+    /// construction stays exactly as cheap as it was.
+    seeds: ?*Header,
+    body: *Header,
+
+    pub fn seedCount(self: UnitInput) usize {
+        const seeds = self.seeds orelse return 0;
+        return @intCast(seeds.length());
+    }
+
+    /// How the new unit's stack begins, for the constructors that hand a whole
+    /// Unit to the scheduler rather than opening a boundary in this one.
+    pub fn initialStack(self: UnitInput) InitialStack {
+        const seeds = self.seeds orelse return .empty;
+        return .{ .borrowed_seeds = seeds };
+    }
+
+    /// The same, for `@each`, whose child stack holds its element beneath the
+    /// plan's shared seeds.
+    pub fn initialStackWithElement(self: UnitInput, element: Value) InitialStack {
+        const seeds = self.seeds orelse return .{ .borrowed_element = element };
+        return .{ .borrowed_element_and_seeds = .{ .element = element, .seeds = seeds } };
+    }
+};
+
+/// A popped `UnitInput` before a constructor takes it. `deinit` releases both
+/// halves, so a validation failure between the pop and the constructor cannot
+/// strand either one.
+pub const OwnedUnitInput = struct {
+    domain: *heap.ReleaseDomain,
+    input: ?UnitInput,
+
+    pub fn init(domain: *heap.ReleaseDomain, input: UnitInput) OwnedUnitInput {
+        return .{ .domain = domain, .input = input };
+    }
+
+    pub fn borrow(self: *const OwnedUnitInput) UnitInput {
+        return self.input.?;
+    }
+
+    pub fn take(self: *OwnedUnitInput) UnitInput {
+        const input = self.input.?;
+        self.input = null;
+        return input;
+    }
+
+    pub fn deinit(self: *OwnedUnitInput) void {
+        if (self.input) |input| {
+            if (input.seeds) |seeds| self.domain.releaseHeader(seeds);
+            self.domain.releaseHeader(input.body);
+        }
+        self.input = null;
+    }
+};
+
+/// What a constructed unit's stack starts with. Every reference here is a
+/// borrow the caller keeps through initialization; the Unit retains its own
+/// independent stack-owned reference to each before returning.
 pub const InitialStack = union(enum) {
     empty,
-    /// The caller keeps its reference through initialization; the Unit
-    /// retains an independent stack-owned reference before returning.
-    borrowed_seed: Value,
+    /// `@each`'s per-child element and nothing else.
+    borrowed_element: Value,
+    /// A plan's seed values, in list order.
+    borrowed_seeds: *Header,
+    /// `@each` over a plan: the element deepest, the plan's shared seeds
+    /// above it.
+    borrowed_element_and_seeds: struct { element: Value, seeds: *Header },
 };
 
 pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
     std.debug.assert(unit.frames.items.len == 0);
     std.debug.assert(unit.pending == null and unit.last_error == null);
     std.debug.assert(unit.current == null);
-    switch (initial_stack) {
-        .empty => {},
-        .borrowed_seed => |seed| {
-            try unit.stack.append(unit.allocator, seed);
-            heap.retainValue(seed);
-        },
+    const element: ?Value, const seeds: ?*Header = switch (initial_stack) {
+        .empty => .{ null, null },
+        .borrowed_element => |item| .{ item, null },
+        .borrowed_seeds => |items| .{ null, items },
+        .borrowed_element_and_seeds => |both| .{ both.element, both.seeds },
+    };
+    // One element is O(1) and goes on now, deepest. A plan's seeds are
+    // user-sized, so the Unit is instead handed a driver that materializes them
+    // in bounded slices: the evaluator services a driver before the
+    // activation's code, so the body still starts on a fully seeded stack.
+    if (element) |item| {
+        try unit.stack.append(unit.allocator, item);
+        heap.retainValue(item);
+    }
+    if (seeds) |items| {
+        // The driver's field owns this reference on every exit: a failed
+        // `startDriver` disposes the pending driver's fields for us.
+        heap.incRef(items);
+        var evaluator = Machine{ .unit = unit };
+        try evaluator.startDriver(ChildSeedDriver{ .seeds = .init(items) });
     }
     heap.incRef(code);
     unit.current = .{
@@ -5714,7 +5853,7 @@ fn poll(self: *Machine) MachineError!void {
 fn dispatch(self: *Machine, form: Value) MachineError!void {
     const word = switch (form) {
         .word => |reference| reference,
-        .int, .float, .char, .symbol, .list, .dict, .task, .module => return self.pushBorrowed(form),
+        .int, .float, .char, .symbol, .list, .dict, .task, .module, .unit_plan => return self.pushBorrowed(form),
     };
     try self.executeWord(word);
 }
@@ -5965,7 +6104,7 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
         // may. One that hands its work to a scheduler driver has to: the check
         // below reads the stack the instant the primitive returns, which is
         // before any deferred output exists.
-        .builtin => if (cross_home_effect == null)
+        .builtin, .seed => if (cross_home_effect == null)
             null
         else
             try prepareEffectCheck(self, cross_home_effect, resolved.trace_word),
@@ -5998,6 +6137,20 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
                 resolved.takeBorrowPin(),
                 resolved.takeBorrowedCell(),
             );
+        },
+        .seed => |seal| {
+            self.sealUnitPlan(seal) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Ecl => {
+                    const failure_value = self.takePrimitiveFailure() orelse
+                        EclErr.init(.domain, "builtin primitive returned error.Ecl without a failure payload");
+                    return self.installPrimitiveFailure(failure_value);
+                },
+            };
+            if (self.takePrimitiveFailure()) |failure_value| {
+                return self.installPrimitiveFailure(failure_value);
+            }
+            if (check) |*effect_check| try finishEffectCheck(self, effect_check);
         },
         .builtin => |primitive| {
             primitive(self) catch |err| switch (err) {
@@ -7164,6 +7317,159 @@ fn advanceRegistration(
     }
     return .yielded;
 }
+
+/// Pushes up to `budget` of a plan's seeds, in list order, onto the stack they
+/// seed, and reports how far it got. Capacity for each slice is secured before
+/// its pushes, so a failure adds no partial value; a prefix already on the
+/// stack is released by the ordinary boundary or Unit teardown, exactly as any
+/// other operand would be.
+fn advanceSeeds(
+    unit: *Unit,
+    seeds: *Header,
+    from: usize,
+    budget: usize,
+) error{OutOfMemory}!usize {
+    const count: usize = @intCast(seeds.length());
+    const end = @min(from + budget, count);
+    try unit.stack.ensureUnusedCapacity(unit.allocator, end - from);
+    for (from..end) |index| {
+        const item = list.atUnchecked(.{ .list = seeds }, index);
+        unit.stack.appendAssumeCapacity(item);
+        heap.retainValue(item);
+    }
+    return end;
+}
+
+/// What a `ConstructionDriver` opens once its body is final.
+const ConstructionTarget = union(enum) {
+    /// `@attempt`: a child scope on the enclosing chain, created at open time.
+    attempt,
+    /// `@module`/`@defm`: the candidate image and the name it registers under.
+    image: struct { candidate: modules.OwnedImage, registration: ?u32 },
+
+    pub fn deinit(self: *ConstructionTarget) void {
+        switch (self.*) {
+            .attempt => {},
+            .image => |*owned| owned.candidate.deinit(),
+        }
+        self.* = .attempt;
+    }
+};
+
+/// The user-sized half of opening a unit: re-scoping a witnessed construction
+/// body, and materializing a plan's seeds onto the stack it seeds.
+///
+/// Both are proportional to what the program wrote, so neither may run to
+/// completion inside one scheduler step. Everything the boundary will need is
+/// held here meanwhile — the candidate image, the source body, the finished
+/// copy, and the seeds — so abandoning the unit at any point releases all of it
+/// through field ownership and publishes nothing.
+///
+/// The driver stays installed across the open phase on purpose: the evaluator
+/// services a work driver before the activation's own code, so the body cannot
+/// begin until the last seed is on the stack.
+const ConstructionDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .fields;
+    target: heap.Owned(ConstructionTarget),
+    /// The re-scoping pass and the source it reads, both absent when the body
+    /// is not text this archive's reader wrote.
+    rescope: ?heap.Owned(spans.SpanArchive.RescopeCursor),
+    source: ?heap.Owned(*Header),
+    /// The body to run: the finished copy, or the input body when nothing was
+    /// re-scoped. Absent only while the copy is still being built.
+    body: ?heap.Owned(*Header),
+    seeds: ?heap.Owned(*Header),
+    /// The word that opened the construction, captured because the boundary is
+    /// opened in a later step than the one that dispatched it.
+    word: intern.TraceWord,
+    seeded: usize = 0,
+    phase: enum { rescope, open, seed } = .rescope,
+
+    pub fn advance(evaluator: *Machine, self: *ConstructionDriver) MachineError!WorkProgress {
+        try evaluator.pollKernel();
+        switch (self.phase) {
+            .rescope => {
+                var work: poll_api.WorkBudget = .init(construction_work_quantum);
+                const progress = self.rescope.?.borrowMut().advance(&work) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.InvalidProvenance => @panic("archive refused its own completed re-scope publication"),
+                };
+                const stamped = switch (progress) {
+                    .pending => return .yielded,
+                    .complete => |header| header,
+                };
+                self.rescope.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.rescope = null;
+                evaluator.releaseDomain().releaseHeader(self.source.?.take());
+                self.source = null;
+                self.body = .init(stamped);
+                self.phase = .open;
+                return .yielded;
+            },
+            .open => {
+                // The body is consumed by the open, on success and on failure
+                // alike; the seeds are not, so they stay owned here until the
+                // boundary they seed exists.
+                const body = self.body.?.take();
+                self.body = null;
+                switch (self.target.borrowMut().*) {
+                    .attempt => {
+                        _ = self.target.take();
+                        try evaluator.openAttempt(body);
+                    },
+                    .image => |*owned| {
+                        const registration = owned.registration;
+                        var candidate = owned.candidate.move();
+                        _ = self.target.take();
+                        errdefer candidate.deinit();
+                        try evaluator.openImageBoundary(
+                            &candidate,
+                            registration,
+                            self.word,
+                            body,
+                        );
+                    },
+                }
+                self.phase = .seed;
+                return .yielded;
+            },
+            .seed => {
+                // A construction that only had a body to re-scope reaches this
+                // phase with nothing to seed, which is the whole of its work.
+                const owned = self.seeds orelse return .completed;
+                const seeds = owned.borrow();
+                self.seeded = try advanceSeeds(
+                    evaluator.unit,
+                    seeds,
+                    self.seeded,
+                    construction_work_quantum,
+                );
+                if (self.seeded != @as(usize, @intCast(seeds.length()))) return .yielded;
+                return .completed;
+            },
+        }
+    }
+};
+
+/// The child half of the same rule: a fresh Unit's own first slices put its
+/// plan's seeds on its stack, so a spawn never copies a user-sized seed list
+/// inside the step that created it — and `@each` cannot multiply that copy by
+/// the number of children it starts per turn.
+const ChildSeedDriver = struct {
+    pub const address_stable_driver = {};
+    pub const ownership: heap.DriverOwnership = .fields;
+    seeds: heap.Owned(*Header),
+    seeded: usize = 0,
+
+    pub fn advance(evaluator: *Machine, self: *ChildSeedDriver) MachineError!WorkProgress {
+        try evaluator.pollKernel();
+        const seeds = self.seeds.borrow();
+        self.seeded = try advanceSeeds(evaluator.unit, seeds, self.seeded, construction_work_quantum);
+        if (self.seeded != @as(usize, @intCast(seeds.length()))) return .yielded;
+        return .completed;
+    }
+};
 
 const ModuleRegisterDriver = struct {
     pub const address_stable_driver = {};

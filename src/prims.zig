@@ -36,6 +36,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "parse-float", .primitive = parseFloat },
         .{ .name = "dict-of", .primitive = dictOf },
         .{ .name = "@attempt", .primitive = attempt },
+        .{ .name = "unseed", .primitive = unseedWord },
         .{ .name = "raise", .primitive = raise },
         .{ .name = "args", .primitive = args },
         .{ .name = "exit", .primitive = exit },
@@ -211,6 +212,7 @@ fn typeWord(evaluator: *Machine) MachineError!void {
         .dict => "dict",
         .task => "task",
         .module => "module",
+        .unit_plan => "unit-plan",
     };
     try evaluator.pushOwned(.{ .symbol = try intern.intern(spelling) });
 }
@@ -367,9 +369,25 @@ const DictOfDriver = struct {
     }
 };
 fn attempt(evaluator: *Machine) MachineError!void {
-    var quotation = try evaluator.popQuotation();
-    defer quotation.deinit();
-    try evaluator.attemptOwned(quotation.take().list);
+    var input = try evaluator.popUnitInput();
+    defer input.deinit();
+    try evaluator.attemptOwned(input.take());
+}
+/// The metaprogramming escape hatch: the exact two values a plan holds, so a
+/// program can transform either one and seal the result into another plan.
+/// Whether the transformed body is still module text is then answered the same
+/// way it is for any other value — by whether the reader wrote it.
+fn unseedWord(evaluator: *Machine) MachineError!void {
+    var item = try evaluator.popValue();
+    defer item.deinit();
+    const plan = switch (item.borrow()) {
+        .unit_plan => |handle| handle,
+        else => return evaluator.typeError("a unit plan"),
+    };
+    var reservation = try evaluator.reserveStack(2);
+    reservation.pushBorrowed(.{ .list = heap.unitPlanSeeds(plan) });
+    reservation.pushBorrowed(.{ .list = heap.unitPlanBody(plan) });
+    std.debug.assert(reservation.complete());
 }
 fn raise(evaluator: *Machine) MachineError!void {
     var raised = try evaluator.popValue();

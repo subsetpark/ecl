@@ -71,7 +71,7 @@
   "For an ok result, run the quotation under @attempt on an isolated stack seeded with the success
    values. Return an err result unchanged.")
  (swap checked swap over 'ok has?
-  (swap 'ok at swap with @attempt)
+  (swap 'ok at swap seed @attempt)
   (pop)
   if)
  'and-then def
@@ -80,7 +80,7 @@
  (result quotation -- result :
   "Apply an isolated ( error -- error ) quotation to an err result. Return an ok result unchanged.")
  (swap checked swap over 'err has?
-  (swap 'err at wrap swap with @attempt
+  (swap 'err at wrap swap seed @attempt
    dup 'ok has?
    ('ok at dup len 1 =
     'contract error.new "result.map-err expects ( error -- error )" error.with-message assert
@@ -97,7 +97,7 @@
   "For an err result, run the quotation under @attempt with the stored error. Return an ok result
    unchanged.")
  (swap checked swap over 'err has?
-  (swap 'err at wrap swap with @attempt)
+  (swap 'err at wrap swap seed @attempt)
   (pop)
   if)
  'recover def

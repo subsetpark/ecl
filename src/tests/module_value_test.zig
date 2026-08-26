@@ -192,8 +192,8 @@ test "module registration: @defm is construction followed by registration" {
 
     // A `with`-seeded construction stack behaves identically under both
     // spellings, including as the registration's initial durable state.
-    try expectOk(&runtime, "[4 5] (+ 'sum set) with 'seeded-combined @defm");
-    try expectOk(&runtime, "[4 5] (+ 'sum set) with @module 'seeded-composed register");
+    try expectOk(&runtime, "[4 5] (+ 'sum set) seed 'seeded-combined @defm");
+    try expectOk(&runtime, "[4 5] (+ 'sum set) seed @module 'seeded-composed register");
     try expectStack(&runtime, "seeded-combined.sum seeded-composed.sum", "9 9");
 
     // A failing body produces the same error and registers nothing either way.
@@ -412,12 +412,12 @@ test "module values: a construction can be parameterized by another module" {
     // caller's decision rather than a global registry fact.
     try expectStack(
         &runtime,
-        "((2 *) 'scale def) @module wrap ('dep set (4 dep 'scale invoke) 'go def) with 'doubling @defm doubling.go",
+        "((2 *) 'scale def) @module wrap ('dep set (4 dep 'scale invoke) 'go def) seed 'doubling @defm doubling.go",
         "8",
     );
     try expectStack(
         &runtime,
-        "((10 *) 'scale def) @module wrap ('dep set (4 dep 'scale invoke) 'go def) with 'tenfold @defm tenfold.go",
+        "((10 *) 'scale def) @module wrap ('dep set (4 dep 'scale invoke) 'go def) seed 'tenfold @defm tenfold.go",
         "40",
     );
     // Two images exporting the same name coexist, which a registry keyed by
@@ -532,11 +532,11 @@ test "module sources: formatter and standard modules use @defm" {
     );
     const seeded = try formatter.format(
         std.testing.allocator,
-        "[[0]] ((1 +) 'tick def) with 'counter @defm\n",
+        "[[0]] ((1 +) 'tick def) seed 'counter @defm\n",
     );
     defer std.testing.allocator.free(seeded);
     try std.testing.expectEqualStrings(
-        "### module counter\n[[0]]\n(\n ### def tick\n (1 +) 'tick def) with 'counter @defm\n",
+        "### module counter\n[[0]]\n(\n ### def tick\n (1 +) 'tick def) seed 'counter @defm\n",
         seeded,
     );
     const anonymous = try formatter.format(std.testing.allocator, "((1) 'x def) @module\n");

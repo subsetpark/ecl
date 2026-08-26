@@ -36,7 +36,7 @@
  (package required-package version -- parts :
   "Validate a reachable version or raise with requirement provenance.")
  (|package required version|
-  version wrap (pkg.version.validate) with @attempt
+  version wrap (pkg.version.validate) seed @attempt
   dup 'ok has?
   ('ok at first)
   package required version 3 pack

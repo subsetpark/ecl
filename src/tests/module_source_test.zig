@@ -751,7 +751,7 @@ test "module: a construction sees only its parameters its own definitions and co
     });
     // Parameterization is the way in, and it is the ordinary seeding
     // composition rather than a construction-specific mechanism.
-    try expectOk(&runtime, "[41] ('base set ( -- n ) (base 1 +) 'go def) with 'seeded @defm seeded.go");
+    try expectOk(&runtime, "[41] ('base set ( -- n ) (base 1 +) 'go def) seed 'seeded @defm seeded.go");
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[0].int);
     // Core stays reachable, so a module needs no parameter for `+`.
     try expectOk(&runtime, "((2 3 +) 'go def) 'core-only @defm core-only.go");
@@ -770,7 +770,7 @@ test "module: a parameterized behavior dependency is a quotation the caller wrot
     // discipline: the caller writes the structure it hands in. There is no way
     // to hand over an existing word, because nothing extracts a published
     // body — to share a word, both parties call a module.
-    try expectOk(&runtime, "[(dup +)] ('double def ( -- n ) (4 double) 'go def) with 'w @defm w.go");
+    try expectOk(&runtime, "[(dup +)] ('double def ( -- n ) (4 double) 'go def) seed 'w @defm w.go");
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[0].int);
     // Nothing later can reach it: the image holds the quotation it was handed,
     // and a session name of the same spelling is not in its chain.
@@ -1054,7 +1054,7 @@ test "module: a quotation parameter carries the caller's scope" {
     // module needs no parameter for them. `def`-ing it makes the binding
     // module-local without re-siting what it refers to.
     try expectOk(&runtime, "(10) 'k def " ++
-        "[(k *)] ('scale def ( -- n ) (4 scale) 'go def) with 'caller-dep @defm caller-dep.go");
+        "[(k *)] ('scale def ( -- n ) (4 scale) 'go def) seed 'caller-dep @defm caller-dep.go");
     try std.testing.expectEqual(@as(i64, 40), runtime.stackItems()[0].int);
 }
 

@@ -154,8 +154,8 @@ const cases = [_]Case{
     // seeding composition that replaced the `-with` family.
     .{ .name = "isolated substack", .source = "3 (1 +) @attempt" },
     .{ .name = "isolated child", .source = "3 [1 2] (+ +) @each" },
-    .{ .name = "seeded attempt", .source = "[3] (1 +) with @attempt" },
-    .{ .name = "seeded module", .source = "[7] ('base set) with 'm @defm m.base" },
+    .{ .name = "seeded attempt", .source = "[3] (1 +) seed @attempt" },
+    .{ .name = "seeded module", .source = "[7] ('base set) seed 'm @defm m.base" },
     // Anonymous construction, opaque identity, and one image under two names.
     .{ .name = "anonymous module", .source = "(1 'x set) @module type" },
     .{ .name = "module identity", .source = "(1) @module dup match? (1) @module (1) @module match?" },
@@ -1124,7 +1124,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\  {
         \\    'err {
         \\      'kind 'underflow
-        \\      'msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — seed it with `values (q) with @attempt` or capture with `partial`"
+        \\      'msg "+ needs 2 stack values, but found 1; the substack is isolated from the caller's stack — seed it with `values (q) seed @attempt` or capture with `partial`"
         \\      'word '+
         \\      'trace ['+]
         \\      'data {
@@ -1145,16 +1145,16 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'underflow 'msg "+ needs 2 stack values, but found 1; the child unit's stack holds only its element — seed it with `list values (q) with @each` or capture with `partial`" 'word '+ 'trace ['+] 'data {'needed 2 'available 1 'isolation @each 'source "<command>" 'line 1 'col 10}}
+        \\{'kind 'underflow 'msg "+ needs 2 stack values, but found 1; the child unit's stack holds only its element — seed it with `list values (q) seed @each` or capture with `partial`" 'word '+ 'trace ['+] 'data {'needed 2 'available 1 'isolation @each 'source "<command>" 'line 1 'col 10}}
         \\=== seeded attempt ===
-        \\source: [3] (1 +) with @attempt
+        \\source: [3] (1 +) seed @attempt
         \\exit: 0
         \\stdout:
         \\{'ok [4]}
         \\stderr:
         \\<empty>
         \\=== seeded module ===
-        \\source: [7] ('base set) with 'm @defm m.base
+        \\source: [7] ('base set) seed 'm @defm m.base
         \\exit: 0
         \\stdout:
         \\7

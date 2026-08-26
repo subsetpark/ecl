@@ -10,6 +10,7 @@ pub const ListHandle = value.ListHandle;
 pub const DictHandle = value.DictHandle;
 pub const TaskHandle = value.TaskHandle;
 pub const ModuleHandle = value.ModuleHandle;
+pub const UnitPlanHandle = value.UnitPlanHandle;
 pub const HeapKind = value.HeapKind;
 /// A read capability over one list's unboxed payload.
 ///
@@ -357,6 +358,42 @@ test "module capability exhausts allocation failures" {
     );
 }
 
+/// Ownership on both exits: a failed `createUnitPlan` publishes nothing and
+/// the caller still owns both lists, while a published plan releases each of
+/// them exactly once when its last reference drops. The two slots stay
+/// distinct, and both are the exact lists handed in rather than copies.
+fn unitPlanCapabilityFailureProbe(allocator: std.mem.Allocator) !void {
+    var cleanup = testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    var seed_writer = try LeafWriter(.leaf_i64).init(allocator, 1);
+    errdefer seed_writer.retirePartial(cleanup.domain());
+    seed_writer.writeRange(0, &.{7});
+    var seeds = OwnedValue.init(cleanup.domain(), seed_writer.finish());
+    errdefer seeds.deinit();
+    var body_writer = try LeafWriter(.leaf_i64).init(allocator, 1);
+    errdefer body_writer.retirePartial(cleanup.domain());
+    body_writer.writeRange(0, &.{9});
+    var body = OwnedValue.init(cleanup.domain(), body_writer.finish());
+    errdefer body.deinit();
+
+    const plan = try createUnitPlan(allocator, seeds.borrow().list, body.borrow().list);
+    try std.testing.expectEqual(HeapKind.unit_plan, kind(plan.heapHeader().?));
+    try std.testing.expectEqual(seeds.borrow().list, unitPlanSeeds(plan.unit_plan));
+    try std.testing.expectEqual(body.borrow().list, unitPlanBody(plan.unit_plan));
+    _ = seeds.take();
+    _ = body.take();
+    cleanup.releaseValue(plan);
+    cleanup.capability().drain();
+}
+
+test "unit plan capability exhausts allocation failures" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        unitPlanCapabilityFailureProbe,
+        .{},
+    );
+}
+
 pub const DictPayload = value.DictPayload;
 
 /// Capabilities are nominal opaque pointers with the same address as Header.
@@ -365,6 +402,7 @@ const InitializingList = opaque {};
 const InitializingDict = opaque {};
 const InitializingTask = opaque {};
 const InitializingModule = opaque {};
+const InitializingUnitPlan = opaque {};
 const UniqueHeader = opaque {};
 pub const UniqueList = opaque {};
 pub const UniqueDict = opaque {};
@@ -459,6 +497,17 @@ pub const TaskStorage = struct {
 pub const ModuleStorage = struct {
     payload: *anyopaque,
     release: *const fn (*anyopaque) void,
+};
+
+/// A unit plan owns one reference to its seed list and one to its construction
+/// body, kept apart for the whole life of the plan. Private, and typed: both
+/// slots are list handles, so a plan holding anything else is unrepresentable
+/// rather than merely asserted against. `createUnitPlan` is the only producer,
+/// `unitPlanSeeds` and `unitPlanBody` are the only readers, and both are
+/// borrows.
+const UnitPlanStorage = struct {
+    seeds: *ListHandle,
+    body: *ListHandle,
 };
 
 const Object = struct {
@@ -630,6 +679,10 @@ pub fn headerFromModule(handle: *ModuleHandle) *Header {
     return @ptrCast(@alignCast(handle));
 }
 
+pub fn headerFromUnitPlan(handle: *UnitPlanHandle) *Header {
+    return @ptrCast(@alignCast(handle));
+}
+
 fn mutableHeader(handle: anytype) *Header {
     return @ptrCast(@alignCast(@constCast(handle)));
 }
@@ -638,7 +691,7 @@ pub fn listKind(handle: *ListHandle) HeapKind {
     const result = kind(headerFromList(handle));
     std.debug.assert(switch (result) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .dict, .task, .module, .reserved_mask => false,
+        .dict, .task, .module, .unit_plan, .reserved_mask => false,
     });
     return result;
 }
@@ -672,6 +725,10 @@ fn publishTask(header: *InitializingTask) *TaskHandle {
 }
 
 fn publishModule(header: *InitializingModule) *ModuleHandle {
+    return @ptrCast(@alignCast(header));
+}
+
+fn publishUnitPlan(header: *InitializingUnitPlan) *UnitPlanHandle {
     return @ptrCast(@alignCast(header));
 }
 
@@ -736,7 +793,7 @@ fn allocObject(
         .leaf_char4 => try allocPayload(u32, allocator, capacity_value),
         .leaf_symbol => try allocPayload(u32, allocator, capacity_value),
         .dict => @ptrCast(try allocator.create(DictStorage)),
-        .task, .module => unreachable,
+        .task, .module, .unit_plan => unreachable,
         .reserved_mask => null,
     };
     return @ptrCast(@alignCast(&obj.header));
@@ -751,7 +808,7 @@ fn allocListHeader(
 ) error{OutOfMemory}!*InitializingList {
     std.debug.assert(switch (kind_value) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => true,
-        .dict, .task, .module, .reserved_mask => false,
+        .dict, .task, .module, .unit_plan, .reserved_mask => false,
     });
     const header = try allocObject(allocator, kind_value, len_value, capacity_value);
     object(header).provenance_namespace = provenance_namespace;
@@ -771,7 +828,7 @@ pub fn LeafElement(comptime kind_value: HeapKind) type {
         .leaf_char1 => u8,
         .leaf_char2 => u16,
         .leaf_char4, .leaf_symbol => u32,
-        .dict, .task, .module, .reserved_mask => @compileError("a list representation is required"),
+        .dict, .task, .module, .unit_plan, .reserved_mask => @compileError("a list representation is required"),
     };
 }
 
@@ -789,7 +846,7 @@ pub fn leafElementSize(kind_value: HeapKind) usize {
         .leaf_char1 => @sizeOf(u8),
         .leaf_char2 => @sizeOf(u16),
         .leaf_char4, .leaf_symbol => @sizeOf(u32),
-        .dict, .task, .module, .reserved_mask => 0,
+        .dict, .task, .module, .unit_plan, .reserved_mask => 0,
     };
 }
 
@@ -902,7 +959,7 @@ pub const AnyListBuilder = union(enum) {
             .leaf_char2 => .{ .char2 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_char4 => .{ .char4 = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
             .leaf_symbol => .{ .symbol = try .initCode(allocator, len_value, capacity_value, provenance_namespace) },
-            .dict, .task, .module, .reserved_mask => unreachable,
+            .dict, .task, .module, .unit_plan, .reserved_mask => unreachable,
         };
     }
 
@@ -1083,6 +1140,60 @@ pub fn moduleStorage(header: *const ModuleHandle) *const ModuleStorage {
     return @ptrCast(@alignCast(objectConst(headerFromModule(@constCast(header))).payload.?));
 }
 
+fn allocUnitPlanHeader(
+    allocator: std.mem.Allocator,
+    seeds: *ListHandle,
+    body: *ListHandle,
+) error{OutOfMemory}!*InitializingUnitPlan {
+    const obj = try allocator.create(Object);
+    errdefer allocator.destroy(obj);
+    const storage = try allocator.create(UnitPlanStorage);
+    storage.* = .{ .seeds = seeds, .body = body };
+    obj.* = .{
+        .header = HeaderImpl.init(.unit_plan, 0),
+        .capacity = 0,
+        .payload = @ptrCast(storage),
+        .provenance_namespace = .none,
+        .next_destroy = null,
+        .destroy_index = 0,
+    };
+    return @ptrCast(@alignCast(&obj.header));
+}
+
+/// Seals two already-owned lists into one immutable plan. On success the plan
+/// owns both references the caller handed over; on failure the caller still
+/// owns both, because nothing was published. Neither list is inspected,
+/// copied, or transformed: a plan is exactly the pair it was given.
+///
+/// The parameter types are the validation, and there is nothing correlated to
+/// get wrong: a plan whose seeds are not a list, or whose body is not usable as
+/// code, cannot be built here at all, so no consumer needs an assertion to
+/// trust what it reads back out and there is nothing for an optimized build to
+/// drop. The raw operation is private; the public `UnitPlanSeal` below derives
+/// this allocator from its issuing host instead of accepting one from the
+/// cross-module caller.
+fn createUnitPlan(
+    allocator: std.mem.Allocator,
+    seeds: *ListHandle,
+    body: *ListHandle,
+) error{OutOfMemory}!Value {
+    return .{ .unit_plan = publishUnitPlan(try allocUnitPlanHeader(allocator, seeds, body)) };
+}
+
+fn unitPlanStorage(header: *const UnitPlanHandle) *const UnitPlanStorage {
+    return @ptrCast(@alignCast(objectConst(headerFromUnitPlan(@constCast(header))).payload.?));
+}
+
+/// The plan's seed list. A borrow: the plan owns the reference.
+pub fn unitPlanSeeds(header: *const UnitPlanHandle) *ListHandle {
+    return unitPlanStorage(header).seeds;
+}
+
+/// The plan's construction body. A borrow: the plan owns the reference.
+pub fn unitPlanBody(header: *const UnitPlanHandle) *ListHandle {
+    return unitPlanStorage(header).body;
+}
+
 fn allocPayload(
     comptime T: type,
     allocator: std.mem.Allocator,
@@ -1153,7 +1264,7 @@ pub fn writeUniqueList(list_header: *UniqueList, index: usize, item: Value) void
         .leaf_char2 => payloadItems(u16, raw)[index] = @intCast(item.char),
         .leaf_char4 => payloadItems(u32, raw)[index] = item.char,
         .leaf_symbol => payloadItems(u32, raw)[index] = item.symbol,
-        .dict, .task, .module, .reserved_mask => unreachable,
+        .dict, .task, .module, .unit_plan, .reserved_mask => unreachable,
     }
 }
 
@@ -1183,6 +1294,7 @@ pub fn retainValue(item: Value) void {
         .dict => |header| incRef(header),
         .task => |header| incRef(header),
         .module => |header| incRef(header),
+        .unit_plan => |header| incRef(header),
     }
 }
 
@@ -1265,6 +1377,27 @@ pub fn requireOpaqueHostRoot(comptime Handle: type, comptime State: type) void {
         @compileError(@typeName(Handle) ++ " must expose only its consumed state");
     }
     requireSingleHostCapability(State);
+}
+
+/// A host-side opaque owner whose private state retains the one `HostOwner`
+/// needed for construction-time registration and final teardown. Unlike a
+/// worker facade, this handle may expose lifecycle operations; the owner
+/// pointer never crosses through a cleanup capability.
+pub fn requireOpaqueHostOwnerRoot(comptime Handle: type, comptime State: type) void {
+    const handle_info = switch (@typeInfo(Handle)) {
+        .@"enum" => |info| info,
+        else => @compileError(@typeName(Handle) ++ " must be an opaque pointer-sized host owner"),
+    };
+    if (handle_info.tag_type != usize or @sizeOf(Handle) != @sizeOf(usize))
+        @compileError(@typeName(Handle) ++ " must be an opaque pointer-sized host owner");
+    if (handle_info.is_exhaustive or
+        handle_info.fields.len != 1 or
+        !std.mem.eql(u8, handle_info.fields[0].name, "consumed") or
+        handle_info.fields[0].value != 0)
+    {
+        @compileError(@typeName(Handle) ++ " must expose only its consumed state");
+    }
+    requireSingleHostOwner(State);
 }
 
 /// Worker-visible scheduler authority is a non-owning facade. It may retain
@@ -1384,6 +1517,19 @@ pub const ReleaseDomain = struct {
         wake_fn: *const fn (*anyopaque) void,
     };
 
+    /// The archive's O(1) notification that one code header it indexed is
+    /// being destroyed, so the directory slot holding that header's lineage can
+    /// be cleared and its identity recycled.
+    ///
+    /// It hangs off the release domain rather than off the header because both
+    /// belong to the same reclamation root, and a header carries only its
+    /// numeric namespace — not a way back to the issuer. The namespace travels
+    /// with the call so an archive can ignore anything that is not its own.
+    const CodeRetirement = struct {
+        context: *anyopaque,
+        retire_fn: *const fn (*anyopaque, CodeProvenanceNamespace, CodeIdentity, *ListHandle) void,
+    };
+
     allocator: std.mem.Allocator,
     queue_mutex: std.Io.Mutex = .init,
     drain_mutex: std.Io.Mutex = .init,
@@ -1394,6 +1540,16 @@ pub const ReleaseDomain = struct {
     tombstones: std.atomic.Value(?*TombstoneNode) = .init(null),
     prefer_retirement: bool = false,
     wake: ?Wake = null,
+    /// Registration metadata is one state: a callback can exist only together
+    /// with the nonzero issuance that owns it, and a vacant slot remembers the
+    /// last issuance without leaving independently correlated fields behind.
+    code_retirement: union(enum) {
+        vacant: u64,
+        attached: struct {
+            issuance: u64,
+            callback: CodeRetirement,
+        },
+    } = .{ .vacant = 0 },
 
     pub fn init(allocator: std.mem.Allocator) ReleaseDomain {
         return .{ .allocator = allocator };
@@ -1454,6 +1610,25 @@ pub const ReleaseDomain = struct {
 
     pub fn detachWake(self: *ReleaseDomain) void {
         self.wake = null;
+    }
+
+    /// Announces one destroyed code header to its archive. O(1), and reached
+    /// only from the single destruction site, immediately before the header's
+    /// storage goes away.
+    fn retireCodeIdentity(self: *ReleaseDomain, header: *Header) void {
+        const hook = switch (self.code_retirement) {
+            .vacant => return,
+            .attached => |attached| attached.callback,
+        };
+        const obj = objectConst(header);
+        if (obj.provenance_namespace == .none) return;
+        const identity = headerImplConst(header).identity() orelse return;
+        hook.retire_fn(
+            hook.context,
+            obj.provenance_namespace,
+            identity,
+            @ptrCast(@alignCast(header)),
+        );
     }
 
     pub fn retire(self: *ReleaseDomain, owner: anytype, node: *Retirement) void {
@@ -1570,6 +1745,7 @@ pub const ReleaseDomain = struct {
                 if (self.releaseNextChild(header)) {
                     self.enqueueZero(header);
                 } else {
+                    self.retireCodeIdentity(header);
                     freePayload(self.allocator, header);
                     self.allocator.destroy(object(header));
                 }
@@ -1637,6 +1813,19 @@ pub const ReleaseDomain = struct {
                 storage.release(storage.payload);
                 return true;
             },
+            // The plan's two owned values retire through this same domain, one
+            // bounded step each, exactly as a dict's three payload headers do.
+            .unit_plan => {
+                const storage = unitPlanStorage(@ptrCast(@alignCast(header)));
+                const child = switch (obj.destroy_index) {
+                    0 => storage.seeds,
+                    1 => storage.body,
+                    else => return false,
+                };
+                obj.destroy_index += 1;
+                self.releaseHeader(child);
+                return true;
+            },
             .leaf_u8,
             .leaf_i64,
             .leaf_f64,
@@ -1655,6 +1844,7 @@ pub const ReleaseDomain = struct {
 /// only `domain()`, while shutdown code may additionally borrow `cleanup()`.
 pub const HostOwner = struct {
     cleanup_seal: u8 = 0,
+    unit_plan_seal: u8 = 0,
     releases: ReleaseDomain,
 
     pub fn init(allocator: std.mem.Allocator) HostOwner {
@@ -1668,7 +1858,98 @@ pub const HostOwner = struct {
     pub fn cleanup(self: *const HostOwner) *const HostCleanup {
         return @ptrCast(&self.cleanup_seal);
     }
+
+    /// The sole cross-module authority that can allocate a unit plan in this
+    /// owner's reclamation root. The seal is address-derived from this owner,
+    /// so allocator and retirement-domain selection are not caller inputs.
+    pub fn unitPlanSeal(self: *const HostOwner) *const UnitPlanSeal {
+        return @ptrCast(&self.unit_plan_seal);
+    }
+
+    /// Registers the archive that owns this root's code provenance, and is the
+    /// receipt required to unregister it.
+    ///
+    /// A receipt names one *issuance*, not an owner address, so a copied or
+    /// stale one cannot detach the registration that replaced it. It is
+    /// host-side on purpose: workers hold `ReleaseDomain`, which has no
+    /// registration surface at all, and both operations belong to the quiescent
+    /// construction and teardown phases where the host owner is the only thing
+    /// running.
+    pub const CodeRetirementRegistration = enum(u64) {
+        released = 0,
+        _,
+    };
+
+    /// Attaching is what turns lineage storage from history-proportional into
+    /// live-proportional: without it, every identity ever issued keeps its
+    /// directory slot for the archive's whole life. Null means this root already
+    /// has a code provenance owner — refused in every build mode, not asserted.
+    pub fn attachCodeRetirement(
+        self: *HostOwner,
+        owner: anytype,
+    ) ?CodeRetirementRegistration {
+        const Pointer = @TypeOf(owner);
+        const pointer = switch (@typeInfo(Pointer)) {
+            .pointer => |info| info,
+            else => @compileError("code retirement owner must be a pointer"),
+        };
+        if (pointer.size != .one) @compileError("code retirement owner must be a single-item pointer");
+        const last_issuance = switch (self.releases.code_retirement) {
+            .vacant => |issuance| issuance,
+            .attached => return null,
+        };
+        const issuance = std.math.add(u64, last_issuance, 1) catch return null;
+        if (issuance == 0) return null;
+        const adapters = CodeRetirementAdapters(pointer.child);
+        self.releases.code_retirement = .{ .attached = .{
+            .issuance = issuance,
+            .callback = .{
+                .context = @ptrCast(owner),
+                .retire_fn = adapters.retire,
+            },
+        } };
+        return @enumFromInt(issuance);
+    }
+
+    /// Detached before the archive's directory is torn down; headers retiring
+    /// after this point simply keep their slots, which are about to be freed
+    /// wholesale. Consumes the receipt, and does nothing for one that does not
+    /// name the current issuance.
+    pub fn detachCodeRetirement(
+        self: *HostOwner,
+        registration: *CodeRetirementRegistration,
+    ) void {
+        const claimed = registration.*;
+        registration.* = .released;
+        if (claimed == .released) return;
+        const attached = switch (self.releases.code_retirement) {
+            .vacant => return,
+            .attached => |attached| attached,
+        };
+        if (@intFromEnum(claimed) != attached.issuance) return;
+        self.releases.code_retirement = .{ .vacant = attached.issuance };
+    }
 };
+
+/// Opaque authority for sealing the two typed halves of a unit plan. A caller
+/// cannot select the plan header's allocator; the issuing `HostOwner` supplies
+/// its allocation root. The existing Session-stack ownership invariant remains
+/// responsible for the two input handles' root.
+pub const UnitPlanSeal = opaque {
+    pub fn seal(
+        self: *const UnitPlanSeal,
+        seeds: *ListHandle,
+        body: *ListHandle,
+    ) error{OutOfMemory}!Value {
+        const owner = unitPlanOwner(self);
+        return createUnitPlan(owner.releases.allocator, seeds, body);
+    }
+};
+
+fn unitPlanOwner(seal: *const UnitPlanSeal) *const HostOwner {
+    const byte: *const u8 = @ptrCast(seal);
+    return @alignCast(@fieldParentPtr("unit_plan_seal", byte));
+}
 
 fn cleanupOwner(host: *const HostCleanup) *const HostOwner {
     const seal: *const u8 = @ptrCast(host);
@@ -1688,6 +1969,20 @@ fn RetirementAdapters(comptime Owner: type) type {
         ) bool {
             const owner: *Owner = @ptrCast(@alignCast(raw));
             return Owner.advanceRetirement(domain, allocator, owner);
+        }
+    };
+}
+
+fn CodeRetirementAdapters(comptime Owner: type) type {
+    return struct {
+        fn retire(
+            raw: *anyopaque,
+            namespace: CodeProvenanceNamespace,
+            identity: CodeIdentity,
+            header: *ListHandle,
+        ) void {
+            const owner: *Owner = @ptrCast(@alignCast(raw));
+            Owner.retireCodeIdentity(owner, namespace, identity, header);
         }
     };
 }
@@ -2154,6 +2449,10 @@ fn freePayload(allocator: std.mem.Allocator, header: *Header) void {
             const storage: *ModuleStorage = @constCast(moduleStorage(@ptrCast(@alignCast(header))));
             allocator.destroy(storage);
         },
+        .unit_plan => {
+            const storage: *UnitPlanStorage = @constCast(unitPlanStorage(@ptrCast(@alignCast(header))));
+            allocator.destroy(storage);
+        },
         .reserved_mask => {},
     }
     obj.payload = null;
@@ -2205,7 +2504,7 @@ pub fn replaceBuffer(
         .leaf_char1 => resizePayload(u8, allocator, raw, new_capacity),
         .leaf_char2 => resizePayload(u16, allocator, raw, new_capacity),
         .leaf_char4, .leaf_symbol => resizePayload(u32, allocator, raw, new_capacity),
-        .dict, .task, .module, .reserved_mask => unreachable,
+        .dict, .task, .module, .unit_plan, .reserved_mask => unreachable,
     };
 }
 

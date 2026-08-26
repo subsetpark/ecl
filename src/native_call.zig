@@ -439,6 +439,7 @@ pub fn begin(
     )) {
         .task => return evaluator.fail(.type, "native words cannot observe task capabilities"),
         .module => return evaluator.fail(.type, "native words cannot observe module capabilities"),
+        .unit_plan => return evaluator.fail(.type, "native words cannot observe unit plans"),
         else => {},
     };
     const transferred = owned_check;
@@ -492,7 +493,7 @@ fn writeView(item: Value, output: *abi.ValueView) abi.HostStatus {
         },
         .list => |header| .{ .kind = .list, .aggregate_len = header.length() },
         .dict => |header| .{ .kind = .dict, .aggregate_len = header.length() },
-        .task, .module => return .invalid,
+        .task, .module, .unit_plan => return .invalid,
     };
     return .ok;
 }
@@ -575,7 +576,7 @@ fn hostReadPath(
             else
                 dict.valueAt(header, @intCast(entry));
         },
-        .int, .float, .char, .symbol, .word, .task, .module => return .invalid,
+        .int, .float, .char, .symbol, .word, .task, .module, .unit_plan => return .invalid,
     };
     return writeView(current, output);
 }

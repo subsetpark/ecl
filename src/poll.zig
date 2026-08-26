@@ -17,6 +17,40 @@ pub fn StreamProgress(comptime T: type) type {
     return union(enum) { pending, complete, item: T };
 }
 
+/// A shared, decrementing allowance for one scheduler step's work. Every part
+/// of a resumable traversal — element rewriting, hashing, index copying, and
+/// each nested cursor — draws from the same budget, so no phase can start an
+/// independent unbounded pass inside a step that has already spent its slice.
+///
+/// A cursor that takes a `*WorkBudget` rather than a count cannot be given one
+/// budget per phase by accident: there is nothing to pass but the caller's.
+pub const WorkBudget = struct {
+    remaining: usize,
+
+    pub fn init(units: usize) WorkBudget {
+        std.debug.assert(units != 0);
+        return .{ .remaining = units };
+    }
+
+    pub fn exhausted(self: *const WorkBudget) bool {
+        return self.remaining == 0;
+    }
+
+    /// Charges one unit, or reports that the step is over.
+    pub fn spend(self: *WorkBudget) bool {
+        if (self.remaining == 0) return false;
+        self.remaining -= 1;
+        return true;
+    }
+
+    /// Charges the largest slice of `wanted` this budget can still pay for.
+    pub fn take(self: *WorkBudget, wanted: usize) usize {
+        const granted = @min(wanted, self.remaining);
+        self.remaining -= granted;
+        return granted;
+    }
+};
+
 /// Drive a non-failing finite cursor to its observable result.
 pub fn drive(comptime T: type, cursor: anytype, args: anytype) T {
     const Cursor = @TypeOf(cursor.*);

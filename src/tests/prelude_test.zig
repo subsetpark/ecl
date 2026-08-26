@@ -71,10 +71,10 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "seeded attempts tasks and modules",
-            .source = "[] (42) with @attempt [2 3] (+) with @attempt " ++
-                "[2 3] (+) with @spawn await [2 0] (/) with @attempt result.ok? " ++
-                "[2 3] (+) with @attempt [2 3] (+) with @spawn await match? " ++
-                "[4 5] (+ 'sum set) with 'seeded @defm seeded.sum",
+            .source = "[] (42) seed @attempt [2 3] (+) seed @attempt " ++
+                "[2 3] (+) seed @spawn await [2 0] (/) seed @attempt result.ok? " ++
+                "[2 3] (+) seed @attempt [2 3] (+) seed @spawn await match? " ++
+                "[4 5] (+ 'sum set) seed 'seeded @defm seeded.sum",
             .expected = "{'ok [42]} {'ok [5]} {'ok [5]} 0 1 9",
         },
         .{ .name = "results", .source = "(2 3 +) @attempt result.ok? (2 3 +) @attempt result.or-raise (missing) @attempt 9 result.or-else", .expected = "1 [5] 9" },
@@ -176,20 +176,21 @@ fn expectInvalidPrelude(source: []const u8) !void {
     const allocator = std.testing.allocator;
     var host = heap.HostOwner.init(allocator);
     defer host.cleanup().drain();
-    var environment = try env.Env.init(host.cleanup());
+    var environment = try env.Env.init(&host);
     defer environment.deinit();
     var building = environment.beginCoreBuild();
     try prims.install(&building);
+    try building.installSeed("seed");
     var registry = try modules.Registry.init(host.cleanup());
     defer registry.deinit();
-    var archive = try spans.SpanArchive.init(host.cleanup());
-    defer archive.deinit();
+    var archive_owner = try spans.SpanArchiveOwner.init(&host);
+    defer archive_owner.deinit();
     var cancelled: std.atomic.Value(bool) = .init(false);
     try std.testing.expectError(error.InvalidPrelude, prelude.installSource(
         host.cleanup(),
         &building,
         &registry,
-        &archive,
+        &archive_owner,
         &cancelled,
         "invalid-prelude.ecl",
         source,
@@ -198,7 +199,7 @@ fn expectInvalidPrelude(source: []const u8) !void {
     defer heap.hostDomain(host.cleanup()).releaseValue(body);
     try building.installCore(
         try intern.internNamespace("still-writable"),
-        .{ .word = env.quotation(body.list).? },
+        env.quotation(body.list).?,
     );
 }
 

@@ -30,7 +30,7 @@ pub const EffectQuotation = opaque {};
 pub fn quotation(header: *value.ListHandle) ?*Quotation {
     return switch (header.kind()) {
         .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => @ptrCast(@alignCast(header)),
-        .dict, .task, .module, .reserved_mask => null,
+        .dict, .task, .module, .unit_plan, .reserved_mask => null,
     };
 }
 
@@ -41,7 +41,7 @@ pub fn quotationHeader(body: *const Quotation) *value.ListHandle {
 pub fn documentation(header: *value.ListHandle) ?*DocumentationString {
     return switch (header.kind()) {
         .leaf_char1, .leaf_char2, .leaf_char4 => @ptrCast(@alignCast(header)),
-        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .module, .reserved_mask => null,
+        .generic_spine, .leaf_u8, .leaf_i64, .leaf_f64, .leaf_symbol, .dict, .task, .module, .unit_plan, .reserved_mask => null,
     };
 }
 
@@ -52,18 +52,22 @@ pub fn documentationHeader(document: *const DocumentationString) *value.ListHand
 pub const Binding = union(enum) {
     word: *Quotation,
     builtin: PrimitiveImpl,
+    /// The one word whose behavior is a binding kind rather than a handler
+    /// value: `seed`. Its opaque seal is the authority to allocate a nominal
+    /// unit plan in the issuing host's reclamation root.
+    seed: *const heap.UnitPlanSeal,
     native: NativeCallable,
     pub fn retain(self: Binding) void {
         switch (self) {
             .word => |body| heap.incRef(quotationHeader(body)),
-            .builtin => {},
+            .builtin, .seed => {},
             .native => |callable| callable.instance.retain(),
         }
     }
     pub fn retire(self: Binding, releases: *heap.ReleaseDomain) void {
         switch (self) {
             .word => |body| releases.releaseHeader(quotationHeader(body)),
-            .builtin => {},
+            .builtin, .seed => {},
             .native => |callable| callable.instance.releasePin(),
         }
     }
@@ -271,6 +275,28 @@ const BindingSpec = struct {
     pub fn deinit(self: *BindingSpec, releases: *heap.ReleaseDomain) void {
         self.retire(releases);
     }
+};
+
+/// A core name admitted to non-privileged installation. Private construction
+/// is the boundary: every generic installer must validate away the canonical
+/// `seed` spelling before it can obtain this type.
+const OrdinaryCoreName = struct {
+    value: intern.NamespaceName,
+
+    const ValidationError = error{PrivilegedCoreName};
+
+    fn validate(name: intern.NamespaceName) ValidationError!OrdinaryCoreName {
+        if (std.mem.eql(u8, intern.get(intern.namespaceId(name)), "seed"))
+            return error.PrivilegedCoreName;
+        return .{ .value = name };
+    }
+};
+
+/// The privileged name is a closed variant rather than a raw id. No generic
+/// path can manufacture it by validating a runtime or compile-time spelling.
+const CoreInstallName = union(enum) {
+    ordinary: OrdinaryCoreName,
+    seed,
 };
 const BindingSnapshot = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
@@ -1645,9 +1671,11 @@ const ScopeIndex = struct {
 
 const EnvState = struct {
     host: *const heap.HostCleanup,
+    unit_plan_seal: *const heap.UnitPlanSeal,
     core: Environment,
     session: Environment,
     core_cell: ScopeCell,
+    seed_binding: enum { vacant, installed } = .vacant,
     /// Every cell this Env has issued, freed together at teardown. Images are
     /// constructed concurrently, so the list needs its own lock: it is grown
     /// off the registry's writer lock and off the scope index's.
@@ -1665,12 +1693,14 @@ pub const Env = enum(usize) {
         return @ptrFromInt(@intFromEnum(self.*));
     }
 
-    pub fn init(host: *const heap.HostCleanup) error{OutOfMemory}!Env {
+    pub fn init(host_owner: *heap.HostOwner) error{OutOfMemory}!Env {
+        const host = host_owner.cleanup();
         const allocator = host.allocator();
         const releases = heap.hostDomain(host);
         const backing = try allocator.create(EnvState);
         backing.* = .{
             .host = host,
+            .unit_plan_seal = host_owner.unitPlanSeal(),
             .core = Environment.init(allocator, releases),
             .session = Environment.init(allocator, releases),
             // SAFETY: the cell needs the Env handle that this very allocation
@@ -1854,14 +1884,18 @@ pub const Env = enum(usize) {
             error.Frozen => unreachable,
         };
     }
-    fn installCoreSpec(self: *Env, name: intern.NamespaceName, spec: BindingSpec) error{OutOfMemory}!void {
-        _ = self.privateState().core.bind(name, spec) catch |err| switch (err) {
+    fn installCoreSpec(self: *Env, name: CoreInstallName, spec: BindingSpec) error{OutOfMemory}!void {
+        const validated_name: intern.NamespaceName = switch (name) {
+            .ordinary => |ordinary| ordinary.value,
+            .seed => intern.internReservedNamespace("seed") catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidName => unreachable,
+            },
+        };
+        _ = self.privateState().core.bind(validated_name, spec) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Frozen => unreachable,
         };
-    }
-    fn installCore(self: *Env, name: intern.NamespaceName, binding: Binding) error{OutOfMemory}!void {
-        try self.installCoreSpec(name, .{ .binding = binding });
     }
     pub fn beginCoreBuild(self: *Env) BuildingEnv {
         return .{ .target = self };
@@ -1915,17 +1949,55 @@ pub const BuildingEnv = struct {
     pub fn installCore(
         self: *BuildingEnv,
         name: intern.NamespaceName,
-        binding: Binding,
+        body: *Quotation,
+    ) error{ OutOfMemory, PrivilegedCoreName }!void {
+        const ordinary = try OrdinaryCoreName.validate(name);
+        try self.target.installCoreSpec(.{ .ordinary = ordinary }, .{
+            .binding = .{ .word = body },
+        });
+    }
+    /// Installs `seed`, and only `seed`: the name is a `comptime` parameter and
+    /// any other word fails to compile. The target, rather than the copyable
+    /// builder, records installation, and the binding carries only the opaque
+    /// root-issued plan seal.
+    pub fn installSeed(
+        self: *BuildingEnv,
+        comptime name: []const u8,
     ) error{OutOfMemory}!void {
-        try self.target.installCore(name, binding);
+        comptime if (!std.mem.eql(u8, name, "seed")) @compileError(
+            "the seed binding kind belongs to `seed` and to no other word; " ++
+                "`" ++ name ++ "` may not be installed with it",
+        );
+        const target = self.target.privateState();
+        if (target.seed_binding == .installed) return;
+        try self.installBuiltinBinding(.seed, name, .{ .seed = target.unit_plan_seal });
+        target.seed_binding = .installed;
     }
     pub fn installBuiltin(
         self: *BuildingEnv,
         comptime name: []const u8,
         primitive: PrimitiveImpl,
     ) error{OutOfMemory}!void {
+        comptime assertOrdinaryStaticNamespace(name);
+        const raw_name = intern.internReservedNamespace(name) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidName => unreachable,
+        };
+        const ordinary = OrdinaryCoreName.validate(raw_name) catch
+            @panic("compile-time ordinary core-name validation disagreed with runtime validation");
+        return self.installBuiltinBinding(
+            .{ .ordinary = ordinary },
+            name,
+            .{ .builtin = primitive },
+        );
+    }
+    fn installBuiltinBinding(
+        self: *BuildingEnv,
+        install_name: CoreInstallName,
+        comptime name: []const u8,
+        binding: Binding,
+    ) error{OutOfMemory}!void {
         const core = &self.target.privateState().core;
-        comptime assertStaticNamespace(name);
         const metadata = comptime primitive_docs.forName(name);
         const document_value = try machine.stringValue(
             core.allocator,
@@ -1941,12 +2013,9 @@ pub const BuildingEnv = struct {
             core.releases.releaseValue(effect.value);
         };
         try self.target.installCoreSpec(
-            intern.internReservedNamespace(name) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidName => unreachable,
-            },
+            install_name,
             .{
-                .binding = .{ .builtin = primitive },
+                .binding = binding,
                 .effect = if (builtin_effect) |effect| effect.validated else null,
                 .doc = documentation(document_value.list).?,
             },
@@ -1956,7 +2025,7 @@ pub const BuildingEnv = struct {
         comptime {
             @setEvalBranchQuota(4000);
             for (definitions, 0..) |definition, index| {
-                assertStaticNamespace(definition.name);
+                assertOrdinaryStaticNamespace(definition.name);
                 for (definitions[0..index]) |prior| {
                     if (std.mem.eql(u8, prior.name, definition.name)) {
                         @compileError("duplicate builtin namespace name: " ++ definition.name);
@@ -1975,6 +2044,8 @@ pub const BuildingEnv = struct {
         return Scope.direct(allocator, .{ .core_build = &self.target.privateState().core }, null);
     }
     pub fn finish(self: *BuildingEnv) void {
+        if (self.target.privateState().seed_binding != .installed)
+            @panic("core build finished without the canonical seed binding");
         self.target.privateState().core.freeze();
         // SAFETY: Finishing consumes the builder; invalidation catches reuse
         // after its target environment becomes immutable.
@@ -1992,6 +2063,11 @@ pub fn assertStaticNamespace(comptime name: []const u8) void {
     if (intern.isReservedBytes(name) or !lexer.validSymbolSegment(name)) {
         @compileError("invalid builtin namespace name: " ++ name);
     }
+}
+fn assertOrdinaryStaticNamespace(comptime name: []const u8) void {
+    assertStaticNamespace(name);
+    if (std.mem.eql(u8, name, "seed"))
+        @compileError("the canonical seed name is reserved for installSeed");
 }
 pub fn assertStaticModuleName(comptime name: []const u8) void {
     @setEvalBranchQuota(10_000);
@@ -2039,7 +2115,7 @@ test "environment definition propagates every allocation failure" {
             var host = heap.HostOwner.init(allocator);
             const releases = host.domain();
             defer host.cleanup().drain();
-            var environment = try Env.init(host.cleanup());
+            var environment = try Env.init(&host);
             defer environment.deinit();
             const body = try @import("list.zig").fromValuesGeneric(allocator, &.{.{ .int = 7 }});
             defer releases.releaseValue(body);
@@ -2056,7 +2132,7 @@ test "environment definition propagates every allocation failure" {
 test "env: issued scope ids leave their reserved high bits clear" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
-    var container = try Env.init(host.cleanup());
+    var container = try Env.init(&host);
     defer container.deinit();
 
     // More than one leaf's worth, so the assertion covers ids whose directory
@@ -2075,4 +2151,24 @@ test "env: issued scope ids leave their reserved high bits clear" {
         try std.testing.expect(raw > previous);
         previous = raw;
     }
+}
+
+test "env: only `seed` may be installed as the seed binding kind" {
+    const allocator = std.testing.allocator;
+    var host: heap.HostOwner = .init(allocator);
+    defer host.cleanup().drain();
+    var environment = try Env.init(&host);
+    defer environment.deinit();
+    var building = environment.beginCoreBuild();
+    // Static builtin names reject `seed` at compile time. This runtime surface
+    // must reject the same spelling after the canonical binding is installed,
+    // leaving the target's seed state and behavior inseparable.
+    try building.installSeed("seed");
+    const body = try list.fromValuesGeneric(allocator, &.{.{ .int = 1 }});
+    defer host.domain().releaseValue(body);
+    const seed_name = try intern.internReservedNamespace("seed");
+    try std.testing.expectError(
+        error.PrivilegedCoreName,
+        building.installCore(seed_name, quotation(body.list).?),
+    );
 }

@@ -271,6 +271,43 @@ test "concurrency: one-worker kernel safe points let another unit progress" {
     try std.testing.expectEqualStrings("1", actual.bytes());
 }
 
+test "concurrency: a large seeded construction cannot starve a peer task" {
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    defer runtime.deinit();
+    // One worker, so the short task can only win if the long one yields. Both
+    // user-sized halves of opening a unit are in the long task: 70,000 seeds
+    // materialized onto a fresh substack, and a construction body re-scoped
+    // against a new image. If either ran to completion inside one scheduler
+    // step, the peer could not report first.
+    try runOk(
+        &runtime,
+        "(70000 range (69999 (pop) times) seed @attempt pop " ++
+            "70000 range (69999 (pop) times) seed ((1) 'x defp ( -- n ) (x) 'go def) " ++
+            "seed 'starve @defm starve.go) @spawn " ++
+            "(7) @spawn pair await-any pop",
+    );
+    var actual = try display(&runtime);
+    defer actual.deinit();
+    try std.testing.expectEqualStrings("1", actual.bytes());
+}
+
+test "concurrency: a failing sibling cancels peers mid-construction" {
+    var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
+    defer runtime.deinit();
+    // The leftmost child fails at once; its siblings are each part-way through
+    // seeding a large plan. Cancellation has to reach them between slices, so a
+    // construction that only yielded at completion would hang this case rather
+    // than fail it.
+    const failure = switch (try runtime.runUnit(
+        "concurrency.ecl",
+        "[0 1 2 3] ((0 =) (1 0 /) (30000 range (29999 (pop) times) seed @attempt pop 1) if) @each",
+    )) {
+        .err => |item| item,
+        .ok, .incomplete => return error.ExpectedLanguageError,
+    };
+    defer runtime.release(failure);
+}
+
 test "concurrency: large task results materialize across scheduler slices" {
     var runtime = try session.Session.initWithConfig(std.testing.allocator, &.{}, .{ .worker_pool = 1 });
     defer runtime.deinit();
@@ -380,7 +417,7 @@ test "concurrency: primitive @each is reflective and task-join is absent" {
     try runOk(
         &runtime,
         "'@each doc " ++
-            "\"Apply a quotation concurrently in one fresh unit per element and return one result per element in input order.\" match? " ++
+            "\"Apply a quotation or unit plan concurrently in one fresh unit per element and return one result per element in input order.\" match? " ++
             "'@each which '@each see words",
     );
     var reflected = try display(&runtime);
@@ -389,14 +426,14 @@ test "concurrency: primitive @each is reflective and task-join is absent" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         output.buffered(),
-        "@each -> @each primitive public (sequence quotation -- results)\n",
+        "@each -> @each primitive public (sequence unit-input -- results)\n",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         output.buffered(),
-        "(sequence quotation -- results :\n" ++
-            " \"Apply a quotation concurrently in one fresh unit per element and return one result per element in\n" ++
-            "  input order.\")\n" ++
+        "(sequence unit-input -- results :\n" ++
+            " \"Apply a quotation or unit plan concurrently in one fresh unit per element and return one result\n" ++
+            "  per element in input order.\")\n" ++
             "<primitive>\n" ++
             "'@each\n" ++
             "def\n",

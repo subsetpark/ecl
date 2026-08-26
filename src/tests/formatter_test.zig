@@ -368,11 +368,11 @@ test "formatter synthesizes and normalizes module navigation headers" {
     try expectFormat("### module wrong\n" ++ registration, headed);
     // The seeded phrase is one form, so its values list carries the header and
     // an attached comment stays below it exactly as it does for a definition.
-    const seeded = "# a seeded counter\n[[0]] ((1 +) 'tick def) with 'counter @defm\n";
+    const seeded = "# a seeded counter\n[[0]] ((1 +) 'tick def) seed 'counter @defm\n";
     try expectFormat(
         seeded,
         "### module counter\n# a seeded counter\n[[0]]\n(\n ### def tick\n" ++
-            " (1 +) 'tick def) with 'counter @defm\n",
+            " (1 +) 'tick def) seed 'counter @defm\n",
     );
     // A computed name gets no header, matching def's rule.
     try expectFormat(

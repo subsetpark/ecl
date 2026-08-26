@@ -108,9 +108,10 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
 
 ## Values
 
-Every value is one of eight kinds, as reported by `type`: `'int`,
-`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, or `'task`.
-There is no public module-handle value kind.
+Every value is one of eight readable kinds, as reported by `type`: `'int`,
+`'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, or `'task`. Two
+further kinds are opaque runtime capabilities that no source text can
+denote: `'module` (see Modules) and `'unit-plan` (see Seeding a unit).
 
 All values are immutable. Mutation exists only as environment rebinding
 (`def`/`set`). Performance is a documented guarantee, not a semantic:
@@ -148,6 +149,13 @@ through timing.
   Tasks are runtime capabilities bound to their session: `match?` and
   hashing use handle identity, and a task prints as `<task:N>`, which the
   reader rejects. A task value cannot be forged from text.
+- **unit-plan** — a sealed pair of seed values and a construction body,
+  built only by `seed` and consumed only by a unit constructor. Like a
+  task it is opaque: `match?` and hashing use plan identity, it prints as
+  `<unit-plan>`, which the reader rejects, and it cannot be called,
+  concatenated, indexed, serialized, or passed to a native word. It is an
+  ordinary first-class value for everything else — `dup`, `pop`, storage,
+  selection, and passage between words.
 
 ### Equality and ordering
 
@@ -237,11 +245,12 @@ A leading `@` marks exactly the words that apply their quotation **in a
 fresh unit** — one unit per application for `@each`. There are five:
 `@attempt`, `@spawn`, `@each`, `@module`, and `@defm`. Unit construction is
 the whole of the class invariant; the marked word may or may not seed the
-unit it makes. `@attempt`, `@spawn`, `@module`, and `@defm` seed nothing, so
-their quotations must be self-contained: their effect is `( -- ... )` and
-inputs arrive via `literal`/`partial`/`compose`/`with` or environment
-names, never the ambient stack. `@each` seeds each child with exactly its
-element. `register` is not marked: it publishes an already-constructed
+unit it makes. Handed a bare quotation, `@attempt`, `@spawn`,
+`@module`, and `@defm` seed nothing, so that quotation must be
+self-contained: its effect is `( -- ... )` and inputs arrive through a plan's
+seeds, or via `literal`/`partial`/`compose`, or through environment names,
+never the ambient stack. `@each` seeds each child with exactly its element.
+Handed a plan, every one of the five seeds the unit it makes. `register` is not marked: it publishes an already-constructed
 module value and takes no quotation.
 
 Words that are isolated but *not* marked, with their reasons:
@@ -256,6 +265,8 @@ Words that are isolated but *not* marked, with their reasons:
 - `await`, `await-all`, `await-any`, `await-for`, `cancel`, `tasks` —
   they consume tasks rather than making them.
 - `with` — pure composition; it constructs nothing.
+- `seed`, `unseed` — a unit constructor's *input*, sealed and unsealed. A
+  plan is not a unit and running one is not a thing you can do.
 
 `@` is an ordinary word character, not reader-reserved: a user's `@retry`
 lexes and defines normally. The convention is enforced for first-party
@@ -264,19 +275,45 @@ user-defined word that wraps its quotation in a unit.
 
 #### Seeding a unit
 
-There are no `-with` words. A unit constructor is seeded by composition
-over `with`, which captures every element of a values list inertly and in
-order:
+There are no `-with` words. Every unit constructor takes one input, the
+tagged sum
 
-    values (q) with @attempt
-    values (q) with @spawn
-    list values (q) with @each          ( element deepest in each child )
-    values (body) with @module
-    values (body) with 'name @defm
+    UnitInput = unseeded quotation | unit-plan
 
-One composition scales to every unit constructor, including ones users
-write, with no companion-word obligation. Any future phrase-level fast
-path for these idioms must preserve the composition observationally.
+A bare quotation seeds nothing, which is why the concise spellings are
+unchanged. A plan supplies seeds, and `seed` is the only word that builds
+one:
+
+    values (q) seed @attempt
+    values (q) seed @spawn
+    list values (q) seed @each          ( element deepest in each child )
+    values (body) seed @module
+    values (body) seed 'name @defm
+
+`seed` is `( values quotation -- unit-plan )`. It consumes a values list
+and a quotation and returns an immutable opaque plan owning the two
+*separately*. It does not execute, stamp, copy, parse, or otherwise
+transform either input, and it is not itself a unit constructor: a plan
+is an input protocol, not a unit.
+
+`unseed` is `( unit-plan -- values quotation )`, the metaprogramming
+escape hatch: it returns the exact two values a plan holds, so a program
+may unpack a plan, transform either ordinary value, and seal the result
+into another plan.
+
+The new unit's operand stack is initialized from the seed list in list
+order, and then the body runs. Seeds are values, not code contributed to
+the body: even when a seed is itself a reader-built quotation, none of its
+contents is part of the construction body's text. `@each` puts the
+iterated element deepest in each child stack, beneath the plan's shared
+seeds.
+
+Keeping the two apart is what makes seeding compatible with module text.
+`with` also produces something a constructor accepts, because its result
+is an ordinary quotation, but the flattened value it returns can no longer
+say which part was the body — and `@module` and `@defm` must know. A
+`with`-seeded construction is therefore a runtime-built body and takes no
+module attribution; see Modules.
 
 Underflow against the floor of a constructed unit is reported specially:
 the message names the isolation and the seeding remedy, and the error
@@ -502,10 +539,11 @@ anonymously, be passed as data, and be registered more than once.
 - `@defm` is `( body 'module-name -- )` and is exactly `@module` followed by
   `register`, including the ordering: the body is evaluated before the name is
   validated. It is the source spelling for a module definition.
-- `values (body) with @module` and `values (body) with 'name @defm` capture
-  every value inertly and in order before running the same isolated
-  construction. The values form the body unit's initial stack; the body may
-  consume, reorder, or extend them.
+- `values (body) seed @module` and `values (body) seed 'name @defm` supply
+  seeds without disturbing the same isolated construction. The values form the
+  body unit's initial stack, in list order; the body may consume, reorder, or
+  extend them. The plan keeps the seeds and the body apart, which is what lets
+  attribution below name the body exactly.
 - **A module value is an opaque capability.** Its `type` is `'module`; it
   prints as the unreadable marker `<module>`; `match?` compares **image
   identity**, so one construction duplicated matches itself and two
@@ -706,13 +744,13 @@ anonymously, be passed as data, and be registered more than once.
   reachable by dissecting a public. The module kind exists to carry that
   environment, and `invoke` is the operation that enters it.
 - **Capture is parameterization, and parameterization is the only capture.**
-  A construction receives everything it needs on its stack, seeded by the
-  ordinary composition of `with` — `values (body) with @module`,
-  `values (body) with 'name @defm` — and nothing else crosses the boundary.
+  A construction receives everything it needs on its stack, seeded by a plan
+  — `values (body) seed @module`, `values (body) seed 'name @defm` — and
+  nothing else crosses the boundary.
   There is no ambient environment between a module's own definitions and core,
   and no construction-time snapshot of one.
   To depend on a session value, pass the value. To depend on behavior, pass a
-  quotation you write at the call site — `[(2 *)] ('scale def …) with 'm @defm`
+  quotation you write at the call site — `[(2 *)] ('scale def …) seed 'm @defm`
   — which is the functor discipline: the caller writes the structure it hands
   in. To share a *word* between a session and a module, or between two
   modules, make it a module both parties call. No operation lifts a published
@@ -735,7 +773,7 @@ anonymously, be passed as data, and be registered more than once.
   one package able to coexist.
   A quotation parameter carries the scope it was written in, so its own
   references are the caller's rather than the module's. With `10 'k set` in
-  scope, `[(k *)] ('scale def ( -- n ) (4 scale) 'go def) with 'm @defm` makes
+  scope, `[(k *)] ('scale def ( -- n ) (4 scale) 'go def) seed 'm @defm` makes
   `m.scale` multiply by ten, and the module needs no parameter for `k`. That is
   what a functor argument should do: the caller supplies the behavior, and the
   behavior means what it meant where it was written.
@@ -754,7 +792,7 @@ anonymously, be passed as data, and be registered more than once.
   private still resolves, because the literal was written inside the module;
   a module word may accept `(bump)` from its caller and that `bump` resolves in
   the caller, because the caller wrote it; and both hold when the stdlib splices
-  the caller's quotation into a seeded one with `with`. Neither depends on which
+  the caller's quotation into a plan's seeds. Neither depends on which
   activation launched the combinator. A word with no written-in scope — one a
   host built, or one appearing in an error trace — resolves where it is invoked.
   Reading is what assigns a scope, so `load` and `parse` both give the words
@@ -766,12 +804,37 @@ anonymously, be passed as data, and be registered more than once.
   differ only because an image's scope has no parent: they stamp the
   construction body with the image's scope, which is why a bare session name
   inside a construction body is undefined while a quotation handed in as a
-  *parameter* — a separate value, never inside the body — keeps the caller's.
+  *seed* — a separate value, never inside the body — keeps the caller's.
   What a word *defines* — `def`, `set`, `setp` — still lands in the invoking
   context, which is how `setp` inside a module body binds a module private.
   `def`-ing a quotation therefore makes the *binding* local without re-siting
   the quotation's *references*: they stay where the text was written.
   Resolution moved; definition placement did not.
+- **Module text is exactly what the reader wrote inside the designated body.**
+  Two independent facts decide attribution, and both are required. First, the
+  constructor's input identifies the exact body value, separately from its
+  seeds — which is what `seed` preserves and `with` destroys. Second, the body
+  must carry reader-text lineage. Every word occurrence in the reader-built
+  subtree rooted at such a body is copied with the new image's scope, descending
+  through nested quotations, list literals, and dict literals alike.
+  Lineage survives only the interpreter's scope-only construction rewrite. That
+  rewrite copies, and the copy is the same reader text with different scopes on
+  its words, so a later constructor may re-stamp that exact rewritten body to
+  its own image — which is what makes a construction nested inside a
+  construction body resolve against its own image rather than the enclosing one.
+  Ordinary runtime reconstruction loses the lineage. `cat`, `compose`, `cons`,
+  `append`, `raze`, slicing, reversal, `with`, and every other generic
+  reconstruction produce values with none, so a body built that way is stamped
+  nowhere and is not descended into: it is not module text merely because its
+  parts came from the reader, and reader lineage carried by nested fragments
+  grants no admission through a root that has none. So `7 'k set ((k) 'geta)
+  (def) cat 'm @defm` leaves `k` naming the session, and `m.geta` is `7`;
+  wrapping that same runtime-built body in a plan changes only its initial
+  stack, never its attribution.
+  Seeds are never traversed or stamped, whatever they contain. Nothing about
+  archive-wide membership, a coinciding source range, or the operation history
+  of a runtime list is a substitute for lineage, and no operation grants lineage
+  to a value chosen by its caller.
 - **`within` is the explicit stack boundary.** `within` runs a quotation
   against a private draft of the home module's durable stack rather than
   the ambient caller stack. It is legal only while executing a published
@@ -987,7 +1050,7 @@ because an error dict in flight is not a result: it becomes one only when
 - `result.or-else` `( result fallback -- value )` — the success payload, or
   the fallback value.
 - `result.and-then` `( result quotation -- result )` — seeds the success
-  stack through `with @attempt`; an existing failure is returned unchanged.
+  stack through `seed @attempt`; an existing failure is returned unchanged.
   There is no separate `result.map`: `@attempt`'s automatic `{'ok [...]}`
   wrapping collapses the functor map and the monadic bind into one word on
   the success side. The distinction survives only on the failure side, which
@@ -1829,9 +1892,10 @@ and cross task boundaries unchanged.
 Concurrency is structured tasks — futures with enforced lifetime — over
 share-nothing units. Immutability makes sharing safe without copying.
 
-- `@spawn` `( q -- task )` runs a self-contained quotation (the `@attempt`
-  contract: inputs via `partial`/environment, never the ambient stack) on
-  its own isolated substack, concurrently.
+- `@spawn` `( unit-input -- task )` runs a quotation, or a plan's body seeded
+  by its values (the `@attempt` contract: an unseeded quotation takes its inputs
+  via `seed`/`partial`/environment, never the ambient stack), on its own
+  isolated substack, concurrently.
 - `await` `( task -- result )` parks the current unit until the task
   completes and delivers the same `{'ok …}`/`{'err …}` result shape as
   `@attempt`. It is idempotent — the result is cached — so task handles
@@ -2056,50 +2120,51 @@ masks.
 `< not`.
 
 ### @attempt
-`( quotation -- result )` — *Unit constructor.* Run a self-contained
-quotation (contract `( -- ... )`; inputs via `literal`/`partial`/`with`)
-as a new unit on an isolated substack. Always pushes exactly one result:
+`( unit-input -- result )` — *Unit constructor.* Run a quotation, or a plan's
+body seeded by its values (an unseeded quotation's contract is `( -- ... )`;
+inputs via `seed`, `literal`, or `partial`) as a new unit on an isolated
+substack. Always pushes exactly one result:
 `{'ok (values)}` with the successful stack values as a list, or
 `{'err <error dict>}`.
 
 Observationally `@spawn await` — same result shape, same error protocol,
 same self-contained-quotation contract — differing only in scheduling.
 That identity is what makes the isolation non-arbitrary rather than an
-implementation accident. Seed it with `values (q) with @attempt`. See
+implementation accident. Seed it with `values (q) seed @attempt`. See
 Errors.
 
 ### @defm
-`( body 'module-name -- )` — *Unit constructor.* Exactly `@module` followed
+`( unit-input 'module-name -- )` — *Unit constructor.* Exactly `@module` followed
 by `register`: run the body on a fresh environment, then validate the
 canonical module path and register the resulting image under it. The body is
 evaluated before the name is validated, so the two spellings agree on every
 observable outcome.
 
 The name is last, matching `def` and `set`: the bound name sits nearest
-the binder. Seeded registration is therefore `values (body) with 'name
-@defm`, with the name riding above the composition and no shuffle at
-all. See Modules.
+the binder. Seeded registration is therefore `values (body) seed 'name
+@defm`, with the name riding above the plan and no shuffle at all. See
+Modules.
 
 ### @each
-`( sequence quotation -- results )` — *Unit constructor*, one fresh unit
+`( sequence unit-input -- results )` — *Unit constructor*, one fresh unit
 per element, contract `( a -- b )` enforced per element. Concurrent
 `each`: ordered results, leftmost failure re-raised after cancelling and
 quiescing the remainder. Each child's stack is seeded with exactly its
-element; `list values (q) with @each` adds shared values beneath it. See
+element; `list values (q) seed @each` adds shared values above it. See
 Concurrency.
 
 ### @module
-`( body -- module )` — *Unit constructor.* Run the body on a fresh
+`( unit-input -- module )` — *Unit constructor.* Run the body on a fresh
 environment and return the resulting anonymous immutable module image. No
 registry name is claimed and no name is validated. The body's final operand
 stack becomes the image's initial-state template. Seed it with `values (body)
-with @module`. See Modules.
+seed @module`. See Modules.
 
 ### @spawn
-`( quotation -- task )` — *Unit constructor*, contract `( -- ... )`
-(inputs via `partial`/`with`, never the ambient stack). Run a
+`( unit-input -- task )` — *Unit constructor*, contract `( -- ... )`
+(inputs via `seed`/`partial`, never the ambient stack). Run a
 self-contained quotation concurrently in a child task. Seed it with
-`values (q) with @spawn`. See Concurrency.
+`values (q) seed @spawn`. See Concurrency.
 
 ### abs
 `( x -- y )` — **Pervasive.** Absolute value. Defined in ecl; `'abs see`
@@ -2693,6 +2758,13 @@ print with their authored local names even though execution uses the lowered
 provenance fall back to their canonical value form. Native and module origins
 are displayed.
 
+### seed
+`( values quotation -- unit-plan )` — Seal a values list and a construction
+body into one immutable unit plan, holding the two separately. Nothing is
+executed, stamped, copied, or parsed: a plan is exactly the pair it was given.
+The result is the seeded input every unit constructor accepts; `seed` itself
+constructs no unit. See Seeding a unit.
+
 ### set
 `( annotation? value 'name -- )` — Bind a value as a constant word in the current
 environment. Reference applies the constant's body and pushes the exact
@@ -2805,6 +2877,12 @@ every alias targeting the slot in the same publish and is `'domain` when
 initiated from inside any state application, since a unit holds at most one
 slot's turn. See Modules.
 
+### unseed
+`( unit-plan -- values quotation )` — Return the exact values list and
+construction body a unit plan holds. Whether a transformed body is still module
+text is answered the same way as for any other value: by whether the reader
+wrote it. `'type` for anything but a plan. See Seeding a unit.
+
 ### vals
 `( dict -- values )` — Values in insertion order. Defined in ecl.
 
@@ -2847,6 +2925,11 @@ width. Equivalent to `() stencil`.
 an inert input to a quotation, preserving order. Calling the result starts
 with the list's elements as separate stack values. Defined in ecl as
 `((literal) each) dip append raze`.
+
+This is ordinary quotation composition and constructs nothing. It is not how a
+unit is seeded: the flattened quotation it returns is runtime-built, so a
+constructor cannot tell the body from the values, and `@module` and `@defm`
+therefore give it no module attribution. Use `seed`.
 
 ### within
 `( quotation -- ... )` — Run the quotation against a
@@ -3251,7 +3334,7 @@ success whose value is the list of success stacks in input order.
 
 ### and-then
 `( result quotation -- result )` — Seed a success payload onto an isolated
-stack and run the quotation through `with @attempt`; return an existing
+stack and run the quotation through `seed @attempt`; return an existing
 failure unchanged.
 
 ### either

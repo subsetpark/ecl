@@ -160,7 +160,7 @@ pub fn atUnchecked(collection: Value, index: usize) Value {
         .leaf_char2 => .{ .char = heap.chars16(header)[index] },
         .leaf_char4 => .{ .char = heap.chars32(header)[index] },
         .leaf_symbol => .{ .symbol = heap.symbols(header)[index] },
-        .dict, .task, .module, .reserved_mask => unreachable,
+        .dict, .task, .module, .unit_plan, .reserved_mask => unreachable,
     };
 }
 
@@ -190,7 +190,7 @@ pub fn append(
         .leaf_char2 => item == .char and item.char <= std.math.maxInt(u16),
         .leaf_char4 => item == .char,
         .leaf_symbol => item == .symbol,
-        .dict, .task, .module, .reserved_mask => return error.NotAList,
+        .dict, .task, .module, .unit_plan, .reserved_mask => return error.NotAList,
     };
     if (!same_kind) return rebuildWithItem(allocator, releases, collection, item, true);
 
@@ -204,7 +204,7 @@ pub fn append(
             heap.writeUniqueList(unique, used, item);
         },
         .leaf_u8, .leaf_i64, .leaf_f64, .leaf_char1, .leaf_char2, .leaf_char4, .leaf_symbol => heap.writeUniqueList(unique, used, item),
-        .dict, .task, .module, .reserved_mask => return error.NotAList,
+        .dict, .task, .module, .unit_plan, .reserved_mask => return error.NotAList,
     }
     heap.setUniqueListLength(unique, used + 1);
     return .{ .in_place = collection };
@@ -222,9 +222,9 @@ fn listHeader(collection: Value) error{NotAList}!*ListHandle {
             .leaf_char4,
             .leaf_symbol,
             => header,
-            .dict, .task, .module, .reserved_mask => error.NotAList,
+            .dict, .task, .module, .unit_plan, .reserved_mask => error.NotAList,
         },
-        .int, .float, .char, .symbol, .word, .dict, .task, .module => error.NotAList,
+        .int, .float, .char, .symbol, .word, .dict, .task, .module, .unit_plan => error.NotAList,
     };
 }
 
@@ -235,7 +235,7 @@ fn profile(source: []const Value) Profile {
         .float => .{ .kind = .all_float },
         .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
         .symbol => .{ .kind = .all_symbol },
-        .word, .list, .dict, .task, .module => .{ .kind = .mixed },
+        .word, .list, .dict, .task, .module, .unit_plan => .{ .kind = .mixed },
     };
     for (source[1..]) |item| switch (result.kind) {
         .empty => unreachable,

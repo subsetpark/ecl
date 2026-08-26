@@ -67,6 +67,6 @@ io.pp
 {"a" [1 2]} "b" [9] put 'broken set
 broken type io.pp
 broken valid? io.pp
-broken wrap (rows) with @attempt 'err at 'kind at io.pp
-broken wrap (records) with @attempt 'err at 'kind at io.pp
+broken wrap (rows) seed @attempt 'err at 'kind at io.pp
+broken wrap (records) seed @attempt 'err at 'kind at io.pp
 broken "b" [9 9] put valid? io.pp

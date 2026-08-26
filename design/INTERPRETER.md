@@ -39,7 +39,7 @@ primitives, operationalized as two rules:
 - **Value = 16-byte two-word tagged cell** (a Zig tagged union). Word 0:
   payload (i64 / f64 / char codepoint / u32 symbol id / u32 word id / heap
   pointer). Word 1: tag. All atoms are inline; heap objects exist only for
-  lists, dicts, and tasks. NaN-boxing is impossible here: full-range int64
+  lists, dicts, tasks, module images, and unit plans. NaN-boxing is impossible here: full-range int64
   with overflow-as-error cannot live in a 48-bit payload. The data stack
   is contiguous `Value` storage.
 - **Heap header (16 bytes):** `{ rc: AtomicU32, meta: u32, len: u64 }`;
@@ -343,6 +343,58 @@ primitives, operationalized as two rules:
   make a second `@defm` of the same body re-site the first image's words.
   `@attempt` stamps nothing — its child's parent is the enclosing scope, so the
   chain already does the work.
+  **Construction stamping is gated on unforgeable reader-text lineage, not on
+  span identity.** The predicate is exact: the reader wrote this occurrence,
+  inside the exact designated body. The first half is `SpanArchive`'s business.
+  Lineage has exactly two mints — absorbing a reader result, and the
+  construction rewrite attesting the copy it just produced — because that copy
+  *is* the same reader text with different scopes on its words, which is what a
+  construction nested inside an already-stamped body depends on.
+  Crucially, lineage cannot be handed out, only inherited, and no proof crosses
+  the API at all. `SpanArchive.prepareConstructionBody(body, scope)` is the
+  entire interface: the archive performs *admission* itself and returns either
+  `unchanged` or a cursor already holding the admission result. So the predicate
+  and its application cannot disagree, there is no portable proof to replay
+  against a second archive, and the publication step is a lookup-free commit
+  rather than a silently failing one.
+  The cursor's frame stack is the recursion, so depth costs no native stack, and
+  every frame owns its destination builder from its first element: the builder's
+  length *is* the initialized prefix, so publishing a finished container is O(1)
+  and abandonment releases exactly what was written. A re-scoped dict shares the
+  source's hash list outright — neither equality nor hashing looks at a word's
+  scope, which `equal.zig` pins with a test — so nothing is rehashed or
+  compared, and a keys or vals list that is not a generic spine can hold no word
+  and is shared too. Traversal and the index copy draw from one caller-supplied
+  `poll.WorkBudget`, so a step cannot spend its slice and then begin a second
+  pass. Each nested descent re-asks the lineage question, which is why reader
+  fragments inside a runtime-built root grant no admission. Lineage storage is
+  live-proportional, not history-proportional: a rewritten header's directory
+  slot is cleared and its identity recycled when that header is destroyed,
+  through an O(1) hook the archive attaches to the reclamation domain it shares.
+  Recycling needs no generation counter, because an identity is offered for
+  reuse only after its header is gone and the directory is keyed by exact header
+  anyway. Identity acquisition itself is one bounded cursor operation: one
+  candidate is prepared and claimed once. A racing loser yields, retaining the
+  absorption entry or completed re-scope header in an explicit pending stage,
+  and retries on a later scheduler slice rather than looping locally.
+  The second half is `UnitInput`'s business. A constructor that received a
+  flattened quotation cannot say which part was the body, so the two halves
+  arrive separately: `heap.HeapKind.unit_plan` is a nominal kind whose private
+  `UnitPlanStorage` owns one reference to the seed list and one to the body,
+  and the typed slots make an invalid plan unrepresentable rather than asserted
+  against. Minting requires `heap.UnitPlanSeal`, an opaque authority issued by
+  one `HostOwner`: the raw constructor is private, so `root.heap` exposes no
+  allocator-plus-headers factory, and `seal` derives allocation from its issuing
+  root. `Env.init` takes that owner once and retains the derived seal privately;
+  the dedicated canonical installer therefore cannot correlate a foreign seal
+  with the Env's reclamation domain. The authority reaches execution only as the
+  payload of `env.Binding.seed`; the public generic core installer accepts a
+  quotation, not the full `Binding` union, and no ordinary handler holds the
+  seal. This is a compiler-enforced capability boundary, not a source-audit
+  call-site count. Its two owned values retire through the
+  ordinary release domain one bounded step each, exactly as a dict's payload
+  headers do, so live plan memory is bounded by simultaneously live plans rather
+  than by how many were ever made.
   Nothing extracts a published body, which is what lets the rule stand without
   an exception: code cannot be lifted out of its home and re-sited, so no caller
   reaches a module private by indexing the literals out of a public word's body.
@@ -417,9 +469,13 @@ primitives, operationalized as two rules:
   module then core. Nothing is snapshotted at construction, so there is no
   mutation epoch to validate, no resumable copy pass to bound, no second
   environment to retire, and no context to propagate through calls,
-  applications, or images. A construction receives what it needs through the
-  ordinary `with` seeding composition, and those values are inert data on the
-  construction stack like any other.
+  applications, or images. A construction receives what it needs through a
+  `seed` plan, and those values are inert data on the construction stack like
+  any other. Seeding is bounded work, not a reservation: seeds are appended in
+  fixed slices by the driver that opened the boundary — for a child Unit, by
+  that Unit's own first slices, since the evaluator services a driver before the
+  activation's code — and any prefix already on the stack is owned by the
+  ordinary boundary or Unit teardown, exactly as any other operand is.
   Two designs were tried and removed. A closure environment on every quotation
   was rejected outright: it would put an environment on the most common value
   in the language, make `'m.f body` something other than plain data, and turn
@@ -865,11 +921,21 @@ Any change to this machinery must preserve:
   retire into it on abandonment. Unit OOM/exit teardown pops continuations
   and operands through a scheduler-owned cursor instead of looping on the
   evaluator stack. Blocking teardown does not accept a free-standing
-  cleanup argument. Root-owned `Env`, `Registry`, `SpanArchive`, and
-  `Scheduler` expose only opaque, consumable root identities; each
-  identity points to module-private backing state containing the one
-  `HostCleanup` issued at construction, and no public root field can
-  replace that capability after allocation. Their constructors derive both
+  cleanup argument. Root-owned `Env`, `Registry`, and `Scheduler` expose only
+  opaque, consumable root identities; each identity points to module-private
+  backing state containing the one `HostCleanup` issued at construction, and no
+  public root field can replace that capability after allocation. The span
+  subsystem instead separates `SpanArchiveOwner` from its copyable
+  `SpanArchive` execution view. The owner is constructed directly from
+  `*HostOwner`; its distinct `SpanArchiveOwnerState` holds that owner, the
+  receipt, and a pointer to a separately allocated runtime. The view points
+  directly to that `SpanArchiveState`, which contains only the release domain
+  and lineage/index runtime and is not parent-recoverable as an embedded field.
+  The owner exclusively holds registration, synchronous host reading,
+  and teardown; the view exposes only bounded reader cursors, admission,
+  re-scoping, and location operations. `requireOpaqueWorkerFacade` checks the
+  runtime backing, and no cleanup capability or view upgrades back to
+  `HostOwner`. Their constructors derive both
   the allocator and retirement domain from the private capability, and
   teardown destroys the backing through the same owner before consuming
   the identity; they expose no independently mutable
@@ -914,6 +980,11 @@ Any change to this machinery must preserve:
   `HostOwner` and derives allocator and release-domain borrows;
   compile-time representation checks reject cached correlated fields, host
   authority in worker state, and lifecycle methods on the worker facade.
+  Code retirement registration is one tagged slot — either
+  `vacant(last_issuance)` or `attached(issuance, callback)`. Attachment computes
+  a checked nonzero `u64` successor before publishing the callback and refuses
+  exhaustion; detachment consumes only the matching receipt and returns the
+  same issuance to the vacant state.
 - **Task cells:** write-once, multi-waiter (handles are dup-able values),
   under a small per-cell mutex. `await` parks the unit — it never blocks a
   worker; completion moves waiters to run queues. **Wake decisions:** one

@@ -40,9 +40,9 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
 /// Construction alone: the body builds an anonymous immutable image and the
 /// program decides later whether, and under what name, to register it.
 fn moduleWord(evaluator: *Machine) MachineError!void {
-    var body = try evaluator.popQuotation();
-    defer body.deinit();
-    return evaluator.moduleOwned(null, body.take().list);
+    var input = try evaluator.popUnitInput();
+    defer input.deinit();
+    return evaluator.moduleOwned(null, input.take());
 }
 /// Publication alone: name an already-constructed image. A missing name
 /// creates its registration; an existing one installs this image over the
@@ -60,17 +60,17 @@ fn registerWord(evaluator: *Machine) MachineError!void {
 }
 /// The source-module spelling: construction followed immediately by
 /// registration, with the same all-or-nothing outcome as writing the two
-/// words. Name-last, matching `def` and `set`, so a `with`-seeded definition
-/// needs no shuffle above the binder.
+/// words. Name-last, matching `def` and `set`, so a seeded definition needs no
+/// shuffle above the binder.
 fn defmWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     const name = try evaluator.popSymbol();
-    var body = try evaluator.popQuotation();
-    defer body.deinit();
+    var input = try evaluator.popUnitInput();
+    defer input.deinit();
     // The name is carried unvalidated into the construction boundary. The
     // composition this word stands for evaluates the body first, so checking
     // the name here would skip a body `@module` plus `register` would run.
-    return evaluator.moduleOwned(name, body.take().list);
+    return evaluator.moduleOwned(name, input.take());
 }
 /// Removal completes the lifecycle. A canonical or alias name is resolved
 /// through the registry and drives the owner-issued close protocol.

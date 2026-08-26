@@ -14,8 +14,8 @@
 'counter-body
 set
 
-[10] counter-body with 'left @defm
-[100] counter-body with 'right @defm
+[10] counter-body seed 'left @defm
+[100] counter-body seed 'right @defm
 
 ### Independent slots: separately constructed names own independent stacks.
 left.peek io.pp
@@ -53,7 +53,7 @@ core.utils io.pp
 
  ### def size
  ((dup len without) within) 'size def
- ) with 'pool @defm
+ ) seed 'pool @defm
 pool.size io.pp
 pool.checkout io.pp
 pool.size io.pp

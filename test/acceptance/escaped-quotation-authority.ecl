@@ -25,7 +25,7 @@
  ### def peek
  (-- n)
  ((dup without) within) 'peek def
- ) with 'counter @defm
+ ) seed 'counter @defm
 
 ### module other
 [999]
@@ -37,7 +37,7 @@
  ### def peek
  (-- n)
  ((dup without) within) 'peek def
- ) with 'other @defm
+ ) seed 'other @defm
 
 ### Resolution is unaffected: a foreign private is still reached, because lookup
 ### rides the word's own scope rather than the running activation's chain.

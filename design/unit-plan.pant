@@ -1,0 +1,45 @@
+module UNITPLAN.
+
+> The scope used for one word occurrence when a unit plan constructs an image.
+> This is the model's primary observation: only reader text inside the exact
+> designated body changes scope.
+UnitPlan.
+Image.
+WordOccurrence.
+Quotation.
+Value.
+Scope.
+construction-scope p: UnitPlan, i: Image, w: WordOccurrence => Scope.
+---
+all p: UnitPlan, i: Image, w: WordOccurrence |
+  body-text? p w -> construction-scope p i w = image-scope i.
+all p: UnitPlan, i: Image, w: WordOccurrence |
+  ~body-text? p w -> construction-scope p i w = authored-scope w.
+all p: UnitPlan, i: Image, w: WordOccurrence, ~reader-root? (body p) |
+  construction-scope p i w = authored-scope w.
+all p: UnitPlan, i: Image, w: WordOccurrence, seed-occurrence? p w |
+  construction-scope p i w = authored-scope w.
+
+where
+
+> A plan retains seeds and body as separate values. `reader-root?` is admission:
+> true exactly when the archive recognizes reader-text lineage on that header --
+> an absorbed reader result, or the copy the scope-only construction rewrite
+> makes of one -- and false for every ordinary runtime reconstruction. It is
+> decided by the archive itself; no value denoting it is observable to a caller.
+> `body-text?` is true only when the exact designated root is admitted and the
+> word occurrence belongs to its reader-built subtree. Nested reader fragments
+> do not qualify through a root that has none.
+body p: UnitPlan => Quotation.
+seeds p: UnitPlan => [Value].
+reader-root? q: Quotation => Bool.
+inside-body? w: WordOccurrence, q: Quotation => Bool.
+seed-occurrence? p: UnitPlan, w: WordOccurrence => Bool.
+body-text? p: UnitPlan, w: WordOccurrence => Bool.
+authored-scope w: WordOccurrence => Scope.
+image-scope i: Image => Scope.
+---
+all p: UnitPlan, w: WordOccurrence |
+  body-text? p w <-> (reader-root? (body p) and inside-body? w (body p)).
+all p: UnitPlan, w: WordOccurrence |
+  seed-occurrence? p w -> ~body-text? p w.

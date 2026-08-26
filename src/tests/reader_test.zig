@@ -19,11 +19,12 @@ test "span archive rejects a substitutable provenance issuer" {
     const allocator = std.testing.allocator;
     var host = heap.HostOwner.init(allocator);
     defer host.cleanup().drain();
-    var archive = try spans.SpanArchive.init(host.cleanup());
-    defer archive.deinit();
+    var archive_owner = try spans.SpanArchiveOwner.init(&host);
+    defer archive_owner.deinit();
+    var archive = archive_owner.view();
 
     var diag: reader.Diag = .{};
-    var parsed = switch (try archive.read("issuer.ecl", "(1)", &diag, 0)) {
+    var parsed = switch (try archive_owner.read("issuer.ecl", "(1)", &diag, 0)) {
         .complete => |complete| complete,
         .incomplete => return error.UnexpectedIncomplete,
     };
@@ -56,8 +57,9 @@ test "span archive fails closed on unbound publication artifacts" {
     const allocator = std.testing.allocator;
     var host = heap.HostOwner.init(allocator);
     defer host.cleanup().drain();
-    var archive = try spans.SpanArchive.init(host.cleanup());
-    defer archive.deinit();
+    var archive_owner = try spans.SpanArchiveOwner.init(&host);
+    defer archive_owner.deinit();
+    var archive = archive_owner.view();
 
     var diag: reader.Diag = .{};
     var parsed = switch (try reader.read(host.cleanup(), "unbound.ecl", "(1)", &diag)) {
@@ -83,11 +85,12 @@ test "span archive cancellation keeps committed location storage alive" {
     const allocator = std.testing.allocator;
     var host = heap.HostOwner.init(allocator);
     defer host.cleanup().drain();
-    var archive = try spans.SpanArchive.init(host.cleanup());
-    defer archive.deinit();
+    var archive_owner = try spans.SpanArchiveOwner.init(&host);
+    defer archive_owner.deinit();
+    var archive = archive_owner.view();
 
     var diag: reader.Diag = .{};
-    var parsed = switch (try archive.read("cancelled-absorb.ecl", "(1)", &diag, 0)) {
+    var parsed = switch (try archive_owner.read("cancelled-absorb.ecl", "(1)", &diag, 0)) {
         .complete => |complete| complete,
         .incomplete => return error.UnexpectedIncomplete,
     };

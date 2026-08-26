@@ -294,9 +294,10 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-primitives.ecl",
         "(3 4 +) 'oom-sum def oom-sum pop (1 0 /) @attempt pop (5 6 +) @attempt pop " ++
             "({'kind 'custom 'data {'detail 7}} raise) @attempt pop " ++
-            "[3 4] (+) with call pop [5 6] (+) with @attempt pop " ++
-            "[7 8] (+) with @spawn await pop " ++
-            "[9 10] (+ 'x set) with 'oom-seeded @defm oom-seeded.x pop",
+            "[3 4] (+) with call pop [5 6] (+) seed @attempt pop " ++
+            "[7 8] (+) seed @spawn await pop " ++
+            "[1] (2) seed unseed seed @attempt pop " ++
+            "[9 10] (+ 'x set) seed 'oom-seeded @defm oom-seeded.x pop",
     );
     try runOk(
         &runtime,
@@ -360,14 +361,14 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             // A non-empty construction stack is captured as durable slot
             // state, so capture, commit, and re-registration discard each
             // have an allocation-failure path of their own.
-            "[11 12 13] (1 +) with 'oom-stateful @defm " ++
-            "[21 22] (2 +) with 'oom-stateful @defm " ++
+            "[11 12 13] (1 +) seed 'oom-stateful @defm " ++
+            "[21 22] (2 +) seed 'oom-stateful @defm " ++
             // Transactional updates allocate on the draft, the replacement
             // snapshot, and the caller window; the failing half must leave
             // the durable stack and the caller stack untouched.
             "[0] (((1 + dup without) within) 'bump def " ++
             "((dup without missing) within) 'boom def " ++
-            "((dup without) within) 'peek def) with 'oom-within @defm " ++
+            "((dup without) within) 'peek def) seed 'oom-within @defm " ++
             "oom-within.bump pop (oom-within.boom) @attempt pop " ++
             // The failing half must publish nothing, so the durable stack
             // still holds exactly what the successful half left.
@@ -379,7 +380,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "3 (dup) first execute pop pop " ++
             // Removal closes, quiesces, and retires through the same bounded
             // work, so its allocation-failure paths belong in the sweep too.
-            "[1 2] (((dup without) within) 'peek def) with 'oom-removed @defm " ++
+            "[1 2] (((dup without) within) 'peek def) seed 'oom-removed @defm " ++
             "oom-removed.peek pop 'oom-removed unmodule",
     );
     try runOk(

@@ -3,7 +3,7 @@
 (
  ### defp env-or-empty
  (name -- text : "Read one captured environment value, returning an empty string when absent.")
- (wrap (getenv) with @attempt
+ (wrap (getenv) seed @attempt
   dup 'ok has?
   ('ok at first)
   (pop "")
@@ -155,7 +155,7 @@
  ### defp inspect-checked
  (body package -- manifest-text : "Inspect an archive and preserve package provenance on failure.")
  (|body package|
-  body package 2 pack (pkg.store.inspect) with @attempt
+  body package 2 pack (pkg.store.inspect) seed @attempt
   dup 'ok has?
   ('ok at first)
   ('err at) package (raise-package-error) partial compose
@@ -349,7 +349,7 @@
  (|result destination|
   result 'err at
   dup 'data at 'destination-exists 0 at-or
-  destination wrap (pkg.store.present?) with @attempt
+  destination wrap (pkg.store.present?) seed @attempt
   dup 'ok has?
   ('ok at first)
   (pop 0)
@@ -364,7 +364,7 @@
  (bytes package destination -- :
   "Install one immutable package, treating a concurrently published real directory as success.")
  (|bytes package destination|
-  bytes package destination 3 pack (pkg.store.install pop) with @attempt
+  bytes package destination 3 pack (pkg.store.install pop) seed @attempt
   dup 'ok has?
   (pop)
   destination (finish-install) partial
@@ -455,7 +455,7 @@
 
  ### defp project-mode
  (project-root -- mode : "Read store mode only from the explicit project being synchronized.")
- ("/ecl.lock" cat wrap (io.slurp pkg.lock.read) with @attempt mode-result)
+ ("/ecl.lock" cat wrap (io.slurp pkg.lock.read) seed @attempt mode-result)
  'project-mode defp
 
  ### defp run-mode
