@@ -1633,10 +1633,34 @@ pub const Env = enum(usize) {
         while (!session_cursor.advance()) {}
         var core_cursor = Environment.TeardownCursor.init(&backing.core);
         while (!core_cursor.advance()) {}
+        // Drain before freeing, not after. The reverse order is a
+        // write-after-free, and the path is short enough to walk: teardown
+        // defers each binding cell, whose retirement releases its snapshots,
+        // whose `spec.retire` releases a `.word` body's header, whose
+        // destruction releases that quotation's elements. A module value
+        // element drops the last reference to a stamped image, and
+        // `ModuleImage.release` retires the image's `label_cell` -- an
+        // Env-owned cell -- before any other teardown step. `drainOwned` runs
+        // to quiescence, so every one of those generations lands inside the
+        // single drain below.
+        //
+        // The reachable shape is an *unregistered* image held only by a
+        // binding: `((1) 'x def) @module 'm set`. A registered one dies in
+        // `Session.deinit`'s earlier registry drain instead, with the cells
+        // still alive, which is why the obvious `@defm` repro never reaches
+        // this. Note also that a leak checker cannot witness the failure --
+        // `DebugAllocator` reports double frees and leaks, not a stray write
+        // into freed-but-mapped memory -- so a green allocator result here is
+        // not evidence about this ordering. Only a sanitizer or this argument
+        // is.
+        backing.host.drain();
         for (backing.cells.items) |cell| allocator.destroy(cell);
         backing.cells.deinit(allocator);
+        // The directory outlives nothing that reads it: `scopes.get` has exactly
+        // one caller, `scopeOf`, reached only from dispatch, and execution stops
+        // at `scheduler.deinit` before any teardown begins. Its pages hold
+        // pointers nobody follows again.
         backing.scopes.deinit(allocator);
-        backing.host.drain();
         allocator.destroy(backing);
         self.* = .consumed;
     }
