@@ -1439,15 +1439,18 @@ pub const ScopeCell = struct {
     /// and a primitive or embedded-prelude literal labels against it.
     core: bool = false,
 
-    pub fn publish(self: *ScopeCell, scope: *Scope) void {
-        self.scope.store(scope, .release);
-    }
-
-    /// Publishes a cell that names an image owner. Ordered so the owner is
-    /// visible before the scope: a reader that sees the scope must already be
-    /// able to see what to acquire before touching it.
-    pub fn publishOwned(self: *ScopeCell, scope: *Scope, owner: *anyopaque) void {
-        self.owner.store(owner, .release);
+    /// Fills in what this cell names, before its id has escaped.
+    ///
+    /// The owner is stored before the scope, and both before registration, so a
+    /// reader that can see the scope can already see what to acquire before
+    /// touching it. This used to be a post-hoc store on a cell whose id was
+    /// already reachable through the lock-free directory, which left two
+    /// windows: an id naming a cell with no scope yet (a spurious `retired` for
+    /// a live image), and one naming a live scope with no owner yet (the
+    /// `non_image` arm dereferencing an image with nothing held). Being the
+    /// only constructor is what closes them.
+    pub fn publishOwned(self: *ScopeCell, scope: *Scope, owner: ?*anyopaque) void {
+        if (owner) |handle| self.owner.store(handle, .release);
         self.scope.store(scope, .release);
     }
 
@@ -1645,7 +1648,7 @@ pub const Env = enum(usize) {
 
     /// The id the words of source read in this scope carry.
     pub fn scopeIdFor(self: *Env, scope: *Scope) error{OutOfMemory}!ScopeId {
-        return (try self.scopeCell(scope)).id;
+        return (try self.scopeCell(scope, null)).id;
     }
 
     /// The same, for a scope owned by a module image. `owner` is stored opaque
@@ -1656,9 +1659,7 @@ pub const Env = enum(usize) {
         scope: *Scope,
         owner: *anyopaque,
     ) error{OutOfMemory}!ScopeId {
-        const cell = try self.scopeCell(scope);
-        cell.owner.store(owner, .release);
-        return cell.id;
+        return (try self.scopeCell(scope, owner)).id;
     }
 
     /// The cell a primitive or embedded-prelude definition labels against.
@@ -1669,10 +1670,20 @@ pub const Env = enum(usize) {
 
     /// The cell for one ordinary scope, created on first use. The scope retires
     /// it when its own refcount drops, before any teardown step.
-    pub fn scopeCell(self: *Env, scope: *Scope) error{OutOfMemory}!*ScopeCell {
-        if (scope.label_cell.load(.acquire)) |existing| return existing;
-        const cell = try self.newScopeCell();
-        cell.publish(scope);
+    pub fn scopeCell(
+        self: *Env,
+        scope: *Scope,
+        owner: ?*anyopaque,
+    ) error{OutOfMemory}!*ScopeCell {
+        if (scope.label_cell.load(.acquire)) |existing| {
+            // A cell is born with its owner, so a later mint for the same scope
+            // agrees rather than amends. An owner arriving after the id has
+            // escaped is precisely the window this shape exists to remove, so
+            // reintroducing it here would be the same defect one call deeper.
+            std.debug.assert(owner == null or existing.ownerHandle() == owner);
+            return existing;
+        }
+        const cell = try self.newScopeCell(scope, owner);
         if (scope.label_cell.cmpxchgStrong(null, cell, .release, .acquire)) |raced| {
             // The loser's cell is simply never named by anything. It stays
             // owned by the `Env` like every other cell and is freed at
@@ -1686,11 +1697,21 @@ pub const Env = enum(usize) {
     /// A fresh indirection cell for one publishing scope. The caller owns the
     /// scope's lifetime and must `retire()` the cell before that scope's storage
     /// is torn down.
-    pub fn newScopeCell(self: *Env) error{OutOfMemory}!*ScopeCell {
+    /// A cell complete before its id exists.
+    ///
+    /// `register` is the sole point at which an id escapes into the lock-free
+    /// directory, so everything the cell will ever name is set before it. A null
+    /// scope is the cell that names nothing -- what a race loser becomes.
+    pub fn newScopeCell(
+        self: *Env,
+        scope: ?*Scope,
+        owner: ?*anyopaque,
+    ) error{OutOfMemory}!*ScopeCell {
         const backing = self.privateState();
         const allocator = backing.host.allocator();
         const cell = try allocator.create(ScopeCell);
         cell.* = .{ .id = .none };
+        if (scope) |named| cell.publishOwned(named, owner);
         // The Env owns every cell for its whole lifetime. A cell is read
         // without a lock and without a reference on every word dispatch, so
         // there is no safe earlier point to free one. Taking ownership before
@@ -1950,7 +1971,8 @@ test "env: issued scope ids leave their reserved high bits clear" {
     const issued = ScopeIndex.radix + 3;
     var previous: u32 = 0;
     for (0..issued) |_| {
-        const cell = try container.newScopeCell();
+        // Names nothing: this asserts about issued ids, not about scopes.
+        const cell = try container.newScopeCell(null, null);
         const raw = @intFromEnum(cell.id);
         try std.testing.expect(raw != 0);
         try std.testing.expect(raw <= ScopeIndex.max_id);

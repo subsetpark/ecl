@@ -1075,7 +1075,7 @@ test "modules: a stamped retired image leaves one anchor and an unstamped one le
         const stamped_base = counting.total_requested_bytes;
         for (0..rounds) |_| {
             const image = try ModuleImage.create(allocator, releases);
-            _ = try container.scopeIdFor(&image.scope);
+            _ = try container.scopeIdForOwned(&image.scope, @ptrCast(image.anchor));
             image.release();
             host.cleanup().drain();
         }
@@ -1117,7 +1117,7 @@ test "modules: a borrow holds an image's contents across a full drain" {
         const image = try ModuleImage.create(allocator, releases);
         const owner: *anyopaque = @ptrCast(image.anchor);
         _ = try container.scopeIdForOwned(&image.scope, owner);
-        const cell = try container.scopeCell(&image.scope);
+        const cell = try container.scopeCell(&image.scope, owner);
 
         // Through the real primitive, not a hand-rolled retain.
         var borrowed = tryPinAnchorInternal(owner) orelse
