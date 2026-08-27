@@ -234,18 +234,6 @@ const GzipDecoder = struct {
     }
 };
 
-const LegacyParsePhase = enum {
-    tar_header,
-    insert_member,
-    parse_pax,
-    scan_pax,
-    trailing_zeroes,
-    materialize_manifest,
-    allocate_results,
-    materialize_paths,
-    materialize_result,
-};
-
 const Mode = enum { unpack, package_inspect, package_install };
 
 var next_stage_identity: std.atomic.Value(u64) = .init(1);
@@ -325,25 +313,6 @@ const UnpackDriver = struct {
     tar: ?heap.Owned([]u8) = null,
 
     slots: ?heap.Owned([]?*Entry) = null,
-    tar_offset: usize = 0,
-    zero_blocks: u2 = 0,
-    member_count: usize = 0,
-    file_count: usize = 0,
-    pending_path: ?heap.Owned([]u8) = null,
-    pending_size: ?u64 = null,
-    pending_entry: ?Entry = null,
-    pending_next_offset: usize = 0,
-    pending_hash: u64 = 0,
-    pending_slot: usize = 0,
-    pending_probes: usize = 0,
-    pax_offset: usize = 0,
-    pax_end: usize = 0,
-    pax_next_offset: usize = 0,
-    pax_record_end: usize = 0,
-    pax_key_start: usize = 0,
-    pax_scan_offset: usize = 0,
-    manifest_data: ?struct { offset: usize, size: usize } = null,
-
     result_values: ?[]Value = null,
     result_values_built: usize = 0,
     result_iterator: ?EntryList.Iterator = null,
@@ -376,6 +345,45 @@ const UnpackDriver = struct {
     const EncodedInputs = struct {
         bytes: heap.Owned(storage.ByteVector),
         target: EncodedTarget,
+    };
+    const ScanContext = struct {
+        tar_offset: usize = 0,
+        zero_blocks: u2 = 0,
+        member_count: usize = 0,
+        file_count: usize = 0,
+        pending_path: ?heap.Owned([]u8) = null,
+        pending_size: ?u64 = null,
+        manifest_data: ?struct { offset: usize, size: usize } = null,
+    };
+    const Pax = struct {
+        offset: usize,
+        end: usize,
+        next_offset: usize,
+    };
+    const ScanWork = union(enum) {
+        tar_header,
+        insert_member: struct {
+            entry: Entry,
+            next_offset: usize,
+            slot: usize,
+            probes: usize = 0,
+        },
+        parse_pax: Pax,
+        scan_pax: struct {
+            pax: Pax,
+            record_end: usize,
+            key_start: usize,
+            scan_offset: usize,
+        },
+        trailing_zeroes,
+        materialize_manifest,
+        allocate_results,
+        materialize_paths,
+        materialize_result,
+    };
+    const Scanning = struct {
+        context: ScanContext = .{},
+        work: ScanWork = .tar_header,
     };
     const Parsing = union(enum) {
         encode_bytes: struct {
@@ -413,7 +421,7 @@ const UnpackDriver = struct {
             slots: heap.Owned([]?*Entry),
             index: usize = 0,
         },
-        legacy: LegacyParsePhase,
+        scanning: Scanning,
     };
     const ExtractWork = union(enum) {
         next,
@@ -497,16 +505,16 @@ const UnpackDriver = struct {
             .verify => |*verification| self.verifyGzip(evaluator, verification),
             .allocate_slots => |*allocation| self.allocateSlots(allocation),
             .initialize_slots => |*initialization| self.initializeSlots(initialization),
-            .legacy => |phase| switch (phase) {
-                .tar_header => self.readTarHeader(evaluator),
-                .insert_member => self.insertMember(evaluator),
-                .parse_pax => self.parsePaxRecord(evaluator),
-                .scan_pax => self.scanPaxRecord(evaluator),
-                .trailing_zeroes => self.trailingZeroes(evaluator),
-                .materialize_manifest => self.materializeManifest(evaluator),
-                .allocate_results => self.allocateResults(),
-                .materialize_paths => self.materializePaths(evaluator),
-                .materialize_result => self.materializeResult(),
+            .scanning => |*scanning| switch (scanning.work) {
+                .tar_header => self.readTarHeader(evaluator, scanning),
+                .insert_member => |*insertion| self.insertMember(evaluator, scanning, insertion),
+                .parse_pax => |*pax| self.parsePaxRecord(evaluator, scanning, pax),
+                .scan_pax => |*scan| self.scanPaxRecord(evaluator, scanning, scan),
+                .trailing_zeroes => self.trailingZeroes(evaluator, scanning),
+                .materialize_manifest => self.materializeManifest(evaluator, scanning),
+                .allocate_results => self.allocateResults(scanning),
+                .materialize_paths => self.materializePaths(evaluator, scanning),
+                .materialize_result => self.materializeResult(scanning),
             },
         };
     }
@@ -773,38 +781,39 @@ const UnpackDriver = struct {
                 self.package_name = install.package;
             },
         }
-        self.state = .{ .parsing = .{ .legacy = .tar_header } };
+        self.state = .{ .parsing = .{ .scanning = .{} } };
         return .yielded;
     }
 
-    fn readTarHeader(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+    fn readTarHeader(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        scanning: *Scanning,
+    ) MachineError!machine.WorkProgress {
+        const context = &scanning.context;
         const tar = self.tar.?.borrow();
-        if (self.tar_offset == tar.len) {
-            if (self.zero_blocks < 2) return self.failDomain(evaluator, "tar archive has no end marker");
-            self.state = .{ .parsing = .{ .legacy = if (self.mode == .unpack)
-                .allocate_results
-            else
-                .materialize_manifest } };
+        if (context.tar_offset == tar.len) {
+            if (context.zero_blocks < 2) return self.failDomain(evaluator, "tar archive has no end marker");
+            scanning.work = if (self.mode == .unpack) .allocate_results else .materialize_manifest;
             return .yielded;
         }
-        if (self.tar_offset + tar_block_bytes > tar.len)
+        if (context.tar_offset + tar_block_bytes > tar.len)
             return self.failDomain(evaluator, "truncated tar header");
-        const header: *const [tar_block_bytes]u8 = @ptrCast(tar[self.tar_offset..][0..tar_block_bytes]);
+        const header: *const [tar_block_bytes]u8 = @ptrCast(tar[context.tar_offset..][0..tar_block_bytes]);
         if (allZero(header)) {
-            if (self.pending_path != null or self.pending_size != null)
+            if (context.pending_path != null or context.pending_size != null)
                 return self.failDomain(evaluator, "tar extension has no following member");
-            self.zero_blocks += 1;
-            self.tar_offset += tar_block_bytes;
-            if (self.zero_blocks == 2)
-                self.state = .{ .parsing = .{ .legacy = .trailing_zeroes } };
+            context.zero_blocks += 1;
+            context.tar_offset += tar_block_bytes;
+            if (context.zero_blocks == 2) scanning.work = .trailing_zeroes;
             return .yielded;
         }
-        if (self.zero_blocks != 0) return self.failDomain(evaluator, "tar data follows an end marker");
+        if (context.zero_blocks != 0) return self.failDomain(evaluator, "tar data follows an end marker");
         if (!validChecksum(header)) return self.failDomain(evaluator, "tar header checksum is invalid");
         const header_size = parseTarNumber(header[124..136]) orelse
             return self.failDomain(evaluator, "tar member size is malformed");
         const typeflag = header[156];
-        const data_offset = self.tar_offset + tar_block_bytes;
+        const data_offset = context.tar_offset + tar_block_bytes;
         const header_data_end = std.math.add(usize, data_offset, std.math.cast(usize, header_size) orelse
             return self.failDomain(evaluator, "tar member size exceeds addressable memory")) catch
             return self.failDomain(evaluator, "tar member size overflows");
@@ -813,20 +822,21 @@ const UnpackDriver = struct {
         if (header_next > tar.len) return self.failDomain(evaluator, "truncated tar member");
 
         if (typeflag == 'x') {
-            self.pax_offset = data_offset;
-            self.pax_end = header_data_end;
-            self.pax_next_offset = header_next;
-            self.state = .{ .parsing = .{ .legacy = .parse_pax } };
+            scanning.work = .{ .parse_pax = .{
+                .offset = data_offset,
+                .end = header_data_end,
+                .next_offset = header_next,
+            } };
             return .yielded;
         }
         if (typeflag == 'L') {
             if (header_size == 0 or header_size > max_path_bytes + 1)
                 return self.failDomain(evaluator, "GNU long name exceeds the path limit");
-            if (self.pending_path) |*old| old.deinit(evaluator.releaseDomain(), self.allocator);
+            if (context.pending_path) |*old| old.deinit(evaluator.releaseDomain(), self.allocator);
             const raw = tar[data_offset..header_data_end];
             const trimmed = std.mem.trimEnd(u8, raw, "\x00");
-            self.pending_path = .init(try self.allocator.dupe(u8, trimmed));
-            self.tar_offset = header_next;
+            context.pending_path = .init(try self.allocator.dupe(u8, trimmed));
+            context.tar_offset = header_next;
             return .yielded;
         }
 
@@ -837,8 +847,8 @@ const UnpackDriver = struct {
             '3', '4', '6' => return self.failDomain(evaluator, "tar special nodes are not permitted"),
             else => return self.failDomain(evaluator, "tar member kind is unsupported"),
         };
-        const effective_size = self.pending_size orelse header_size;
-        self.pending_size = null;
+        const effective_size = context.pending_size orelse header_size;
+        context.pending_size = null;
         if (effective_size > max_uncompressed_bytes)
             return self.failDomain(evaluator, "tar member exceeds the 1 GiB uncompressed limit");
         if (kind == .directory and effective_size != 0)
@@ -849,11 +859,11 @@ const UnpackDriver = struct {
         const next_offset = paddedTarOffset(effective_end) orelse
             return self.failDomain(evaluator, "tar member padding overflows");
         if (next_offset > tar.len) return self.failDomain(evaluator, "truncated tar member");
-        const path = try self.memberPath(header);
+        const path = try self.memberPath(context, header);
         errdefer self.allocator.free(path);
         if (!validMemberPath(path)) return self.failDomain(evaluator, "tar member path is unsafe");
-        self.member_count += 1;
-        if (self.member_count > max_members)
+        context.member_count += 1;
+        if (context.member_count > max_members)
             return self.failDomain(evaluator, "archive exceeds the 100000 member limit");
         const entry = Entry{
             .path = path,
@@ -861,73 +871,94 @@ const UnpackDriver = struct {
             .data_offset = data_offset,
             .size = @intCast(effective_size),
         };
-        if (self.mode != .unpack) try self.validatePackageEntry(evaluator, entry);
-        if (kind == .file) self.file_count += 1;
-        self.pending_entry = entry;
-        self.pending_next_offset = next_offset;
-        self.pending_hash = std.hash.Wyhash.hash(0, path);
-        self.pending_slot = @intCast(self.pending_hash & (member_slots - 1));
-        self.pending_probes = 0;
-        self.state = .{ .parsing = .{ .legacy = .insert_member } };
+        if (self.mode != .unpack) try self.validatePackageEntry(evaluator, context, entry);
+        if (kind == .file) context.file_count += 1;
+        const hash = std.hash.Wyhash.hash(0, path);
+        scanning.work = .{ .insert_member = .{
+            .entry = entry,
+            .next_offset = next_offset,
+            .slot = @intCast(hash & (member_slots - 1)),
+        } };
         return .yielded;
     }
 
-    fn parsePaxRecord(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        if (self.pax_offset == self.pax_end) {
-            self.tar_offset = self.pax_next_offset;
-            self.state = .{ .parsing = .{ .legacy = .tar_header } };
+    fn parsePaxRecord(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        scanning: *Scanning,
+        pax: *Pax,
+    ) MachineError!machine.WorkProgress {
+        if (pax.offset == pax.end) {
+            scanning.context.tar_offset = pax.next_offset;
+            scanning.work = .tar_header;
             return .yielded;
         }
         const tar = self.tar.?.borrow();
-        var space = self.pax_offset;
-        while (space != self.pax_end and tar[space] != ' ') : (space += 1) {
-            if (space - self.pax_offset >= 20 or tar[space] < '0' or tar[space] > '9')
+        var space = pax.offset;
+        while (space != pax.end and tar[space] != ' ') : (space += 1) {
+            if (space - pax.offset >= 20 or tar[space] < '0' or tar[space] > '9')
                 return self.failDomain(evaluator, "PAX record length is malformed");
         }
-        if (space == self.pax_end) return self.failDomain(evaluator, "PAX record is truncated");
-        const record_len = std.fmt.parseInt(usize, tar[self.pax_offset..space], 10) catch
+        if (space == pax.end) return self.failDomain(evaluator, "PAX record is truncated");
+        const record_len = std.fmt.parseInt(usize, tar[pax.offset..space], 10) catch
             return self.failDomain(evaluator, "PAX record length is malformed");
-        if (record_len <= space - self.pax_offset + 2 or record_len > self.pax_end - self.pax_offset)
+        if (record_len <= space - pax.offset + 2 or record_len > pax.end - pax.offset)
             return self.failDomain(evaluator, "PAX record length is invalid");
-        const record_end = self.pax_offset + record_len;
+        const record_end = pax.offset + record_len;
         if (tar[record_end - 1] != '\n') return self.failDomain(evaluator, "PAX record lacks a newline");
-        self.pax_record_end = record_end;
-        self.pax_key_start = space + 1;
-        self.pax_scan_offset = space + 1;
-        self.state = .{ .parsing = .{ .legacy = .scan_pax } };
+        const moved = pax.*;
+        scanning.work = .{ .scan_pax = .{
+            .pax = moved,
+            .record_end = record_end,
+            .key_start = space + 1,
+            .scan_offset = space + 1,
+        } };
         return .yielded;
     }
 
-    fn scanPaxRecord(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+    fn scanPaxRecord(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        scanning: *Scanning,
+        scan: *@FieldType(ScanWork, "scan_pax"),
+    ) MachineError!machine.WorkProgress {
         const tar = self.tar.?.borrow();
-        const payload_end = self.pax_record_end - 1;
-        const end = @min(self.pax_scan_offset + work_quantum, payload_end);
-        const equals_relative = std.mem.indexOfScalar(u8, tar[self.pax_scan_offset..end], '=') orelse {
-            self.pax_scan_offset = end;
+        const payload_end = scan.record_end - 1;
+        const end = @min(scan.scan_offset + work_quantum, payload_end);
+        const equals_relative = std.mem.indexOfScalar(u8, tar[scan.scan_offset..end], '=') orelse {
+            scan.scan_offset = end;
             if (end == payload_end) return self.failDomain(evaluator, "PAX record lacks a value");
             return .yielded;
         };
-        const equals = equals_relative + self.pax_scan_offset;
-        const key = tar[self.pax_key_start..equals];
+        const equals = equals_relative + scan.scan_offset;
+        const key = tar[scan.key_start..equals];
         const field = tar[equals + 1 .. payload_end];
         if (std.mem.eql(u8, key, "path")) {
             if (field.len == 0 or field.len > max_path_bytes)
                 return self.failDomain(evaluator, "PAX path exceeds the path limit");
-            if (self.pending_path) |*old| old.deinit(evaluator.releaseDomain(), self.allocator);
-            self.pending_path = .init(try self.allocator.dupe(u8, field));
+            if (scanning.context.pending_path) |*old| old.deinit(evaluator.releaseDomain(), self.allocator);
+            scanning.context.pending_path = .init(try self.allocator.dupe(u8, field));
         } else if (std.mem.eql(u8, key, "size")) {
             if (field.len == 0 or field.len > 20)
                 return self.failDomain(evaluator, "PAX size is malformed");
-            self.pending_size = std.fmt.parseInt(u64, field, 10) catch
+            scanning.context.pending_size = std.fmt.parseInt(u64, field, 10) catch
                 return self.failDomain(evaluator, "PAX size is malformed");
         }
-        self.pax_offset = self.pax_record_end;
-        self.state = .{ .parsing = .{ .legacy = .parse_pax } };
+        const pax = scan.pax;
+        scanning.work = .{ .parse_pax = .{
+            .offset = scan.record_end,
+            .end = pax.end,
+            .next_offset = pax.next_offset,
+        } };
         return .yielded;
     }
 
-    fn memberPath(self: *UnpackDriver, header: *const [tar_block_bytes]u8) error{OutOfMemory}![]u8 {
-        const raw = if (self.pending_path) |*owned| owned.take() else path: {
+    fn memberPath(
+        self: *UnpackDriver,
+        context: *ScanContext,
+        header: *const [tar_block_bytes]u8,
+    ) error{OutOfMemory}![]u8 {
+        const raw = if (context.pending_path) |*owned| owned.take() else path: {
             const name = tarString(header[0..100]);
             const prefix = tarString(header[345..500]);
             break :path if (prefix.len == 0)
@@ -935,62 +966,68 @@ const UnpackDriver = struct {
             else
                 try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ prefix, name });
         };
-        self.pending_path = null;
+        context.pending_path = null;
         defer self.allocator.free(raw);
         const normalized = std.mem.trimEnd(u8, raw, "/");
         return self.allocator.dupe(u8, normalized);
     }
 
-    fn insertMember(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const entry = &self.pending_entry.?;
+    fn insertMember(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        scanning: *Scanning,
+        insertion: *@FieldType(ScanWork, "insert_member"),
+    ) MachineError!machine.WorkProgress {
+        const entry = &insertion.entry;
         var remaining = work_quantum;
         while (remaining != 0) : (remaining -= 1) {
-            const slot = &self.slots.?.borrow()[self.pending_slot];
+            const slot = &self.slots.?.borrow()[insertion.slot];
             if (slot.*) |prior| {
                 if (std.mem.eql(u8, prior.path, entry.path))
                     return self.failDomain(evaluator, "tar archive contains a duplicate member path");
-                self.pending_probes += 1;
-                if (self.pending_probes == member_slots)
+                insertion.probes += 1;
+                if (insertion.probes == member_slots)
                     return self.failDomain(evaluator, "tar member table is full");
-                self.pending_slot = (self.pending_slot + 1) & (member_slots - 1);
+                insertion.slot = (insertion.slot + 1) & (member_slots - 1);
                 continue;
             }
             const stored = try self.entries.borrowMut().appendPtr(entry.*);
             slot.* = stored;
-            self.pending_entry = null;
-            self.tar_offset = self.pending_next_offset;
-            self.state = .{ .parsing = .{ .legacy = .tar_header } };
+            scanning.context.tar_offset = insertion.next_offset;
+            scanning.work = .tar_header;
             return .yielded;
         }
         return .yielded;
     }
 
-    fn trailingZeroes(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+    fn trailingZeroes(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        scanning: *Scanning,
+    ) MachineError!machine.WorkProgress {
         const tar = self.tar.?.borrow();
-        const end = @min(self.tar_offset + work_quantum, tar.len);
-        for (tar[self.tar_offset..end]) |byte| if (byte != 0)
+        const end = @min(scanning.context.tar_offset + work_quantum, tar.len);
+        for (tar[scanning.context.tar_offset..end]) |byte| if (byte != 0)
             return self.failDomain(evaluator, "tar data follows its end marker");
-        self.tar_offset = end;
+        scanning.context.tar_offset = end;
         if (end != tar.len) return .yielded;
-        self.state = .{ .parsing = .{ .legacy = if (self.mode == .unpack)
-            .allocate_results
-        else
-            .materialize_manifest } };
+        scanning.work = if (self.mode == .unpack) .allocate_results else .materialize_manifest;
         return .yielded;
     }
 
     fn validatePackageEntry(
         self: *UnpackDriver,
         evaluator: *Machine,
+        context: *ScanContext,
         entry: Entry,
     ) MachineError!void {
         if (entry.kind == .directory) return;
         if (std.mem.eql(u8, entry.path, package_seal_name))
             return self.failPackageMember(evaluator, "package archive uses a reserved store member", entry.path);
         if (std.mem.eql(u8, entry.path, "ecl.pkg")) {
-            if (self.manifest_data != null)
+            if (context.manifest_data != null)
                 return self.failPackageMember(evaluator, "package archive contains more than one root manifest", entry.path);
-            self.manifest_data = .{ .offset = entry.data_offset, .size = entry.size };
+            context.manifest_data = .{ .offset = entry.data_offset, .size = entry.size };
             return;
         }
         if (std.mem.endsWith(u8, entry.path, ".eclmod"))
@@ -1005,8 +1042,12 @@ const UnpackDriver = struct {
             return self.failPackageMember(evaluator, "package does not own source module", entry.path);
     }
 
-    fn materializeManifest(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const manifest = self.manifest_data orelse
+    fn materializeManifest(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        scanning: *Scanning,
+    ) MachineError!machine.WorkProgress {
+        const manifest = scanning.context.manifest_data orelse
             return self.failDomain(evaluator, "package archive has no root ecl.pkg manifest");
         if (self.text_materializer == null) {
             const tar = self.tar.?.borrow();
@@ -1022,20 +1063,24 @@ const UnpackDriver = struct {
                 self.text_materializer = null;
                 if (self.mode == .package_inspect) break :result .{ .output = text };
                 evaluator.releaseDomain().releaseValue(text);
-                self.state = .{ .parsing = .{ .legacy = .allocate_results } };
+                scanning.work = .allocate_results;
                 break :result .yielded;
             },
         };
     }
 
-    fn allocateResults(self: *UnpackDriver) MachineError!machine.WorkProgress {
-        self.result_values = try self.allocator.alloc(Value, self.file_count);
+    fn allocateResults(self: *UnpackDriver, scanning: *Scanning) MachineError!machine.WorkProgress {
+        self.result_values = try self.allocator.alloc(Value, scanning.context.file_count);
         self.result_iterator = self.entries.borrow().iterator();
-        self.state = .{ .parsing = .{ .legacy = .materialize_paths } };
+        scanning.work = .materialize_paths;
         return .yielded;
     }
 
-    fn materializePaths(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+    fn materializePaths(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        scanning: *Scanning,
+    ) MachineError!machine.WorkProgress {
         if (self.text_materializer) |*materializer| switch (materializer.advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return self.failDomain(evaluator, "tar member path is not valid UTF-8"),
@@ -1054,7 +1099,7 @@ const UnpackDriver = struct {
         while (remaining != 0) : (remaining -= 1) {
             const entry = self.result_iterator.?.next() orelse {
                 self.result_materializer = .init(self.allocator, self.result_values.?);
-                self.state = .{ .parsing = .{ .legacy = .materialize_result } };
+                scanning.work = .materialize_result;
                 return .yielded;
             };
             if (entry.kind == .directory) continue;
@@ -1065,7 +1110,8 @@ const UnpackDriver = struct {
         return .yielded;
     }
 
-    fn materializeResult(self: *UnpackDriver) MachineError!machine.WorkProgress {
+    fn materializeResult(self: *UnpackDriver, scanning: *Scanning) MachineError!machine.WorkProgress {
+        _ = scanning;
         return switch (try self.result_materializer.?.advance(work_quantum)) {
             .pending => .yielded,
             .complete => |result| result: {
@@ -1535,7 +1581,14 @@ const UnpackDriver = struct {
                 initialization.tar.deinit(releases, allocator);
                 initialization.slots.deinit(releases, allocator);
             },
-            .legacy => {},
+            .scanning => |*scanning| {
+                switch (scanning.work) {
+                    .insert_member => |insertion| allocator.free(insertion.entry.path),
+                    else => {},
+                }
+                if (scanning.context.pending_path) |*path| path.deinit(releases, allocator);
+                scanning.context.pending_path = null;
+            },
         }
     }
 
@@ -1580,10 +1633,6 @@ const UnpackDriver = struct {
         self.text_materializer = null;
         if (self.result_materializer) |*materializer| materializer.retire(releases);
         self.result_materializer = null;
-        if (self.pending_entry) |entry| allocator.free(entry.path);
-        self.pending_entry = null;
-        if (self.pending_path) |*path| path.deinit(releases, allocator);
-        self.pending_path = null;
         if (self.slots) |*slots| slots.deinit(releases, allocator);
         self.slots = null;
         if (self.tar) |*tar| tar.deinit(releases, allocator);
