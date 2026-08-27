@@ -4237,9 +4237,11 @@ pub const Machine = struct {
         }
         try self.startDriver(FileSourceDriver{
             .allocator = self.unit.allocator,
-            .path = .init(path),
-            .path_value = if (path_value) |item| .init(item) else null,
-            .transfer = .init(transfer),
+            .state = .init(.{ .open = .{
+                .path = .init(path),
+                .path_value = if (path_value) |item| .init(item) else null,
+                .transfer = .init(transfer),
+            } }),
         });
     }
     /// What one read file's bytes become. Both arms are ordinary results of
@@ -4277,120 +4279,205 @@ pub const Machine = struct {
         }
     };
     const FileSourceDriver = struct {
-        allocator: std.mem.Allocator,
-        path: heap.Owned([]u8),
-        path_value: ?heap.Owned(Value),
-        transfer: heap.Owned(FileTransfer),
-        open_file: ?heap.Owned(OpenFile) = null,
-        file_reader: ?std.Io.File.Reader = null,
-        source: ?heap.Owned([]u8) = null,
-        text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
-        offset: usize = 0,
-        phase: enum { open, size, read, transfer, text } = .open,
+        const Context = struct {
+            path: heap.Owned([]u8),
+            path_value: ?heap.Owned(Value),
+            transfer: heap.Owned(FileTransfer),
 
-        fn diagnosticPath(self: *FileSourceDriver) ?Value {
-            if (self.path_value) |*item| return item.borrow();
-            return self.transfer.borrow().diagnosticPath();
+            fn move(self: *Context) Context {
+                return .{
+                    .path = .init(self.path.take()),
+                    .path_value = if (self.path_value) |*item| .init(item.take()) else null,
+                    .transfer = .init(self.transfer.take()),
+                };
+            }
+            fn deinit(
+                self: *Context,
+                releases: *heap.ReleaseDomain,
+                storage_allocator: std.mem.Allocator,
+            ) void {
+                self.transfer.deinit(releases, storage_allocator);
+                if (self.path_value) |*item| item.deinit(releases, storage_allocator);
+                self.path.deinit(releases, storage_allocator);
+            }
+        };
+        const State = union(enum) {
+            open: Context,
+            size: struct { context: Context, file: heap.Owned(OpenFile) },
+            read: struct {
+                context: Context,
+                file: heap.Owned(OpenFile),
+                reader: std.Io.File.Reader,
+                source: heap.Owned([]u8),
+                offset: usize,
+            },
+            transfer: struct { context: Context, source: heap.Owned([]u8) },
+            text: struct {
+                context: Context,
+                source: heap.Owned([]u8),
+                builder: heap.Owned(kernel_storage.Utf8Materializer),
+            },
+            complete: struct { context: Context, source: heap.Owned([]u8) },
+
+            pub fn deinit(
+                self: *State,
+                releases: *heap.ReleaseDomain,
+                storage_allocator: std.mem.Allocator,
+            ) void {
+                switch (self.*) {
+                    .open => |*context| context.deinit(releases, storage_allocator),
+                    .size => |*size| {
+                        size.file.deinit(releases, storage_allocator);
+                        size.context.deinit(releases, storage_allocator);
+                    },
+                    .read => |*read| {
+                        read.source.deinit(releases, storage_allocator);
+                        read.file.deinit(releases, storage_allocator);
+                        read.context.deinit(releases, storage_allocator);
+                    },
+                    .transfer => |*transfer| {
+                        transfer.source.deinit(releases, storage_allocator);
+                        transfer.context.deinit(releases, storage_allocator);
+                    },
+                    .complete => |*transfer| {
+                        transfer.source.deinit(releases, storage_allocator);
+                        transfer.context.deinit(releases, storage_allocator);
+                    },
+                    .text => |*text| {
+                        text.builder.deinit(releases, storage_allocator);
+                        text.source.deinit(releases, storage_allocator);
+                        text.context.deinit(releases, storage_allocator);
+                    },
+                }
+            }
+        };
+
+        allocator: std.mem.Allocator,
+        state: heap.Owned(State),
+
+        fn diagnosticPath(context: *Context) ?Value {
+            if (context.path_value) |*item| return item.borrow();
+            return context.transfer.borrow().diagnosticPath();
         }
-        fn failIo(self: *FileSourceDriver, evaluator: *Machine, message: []const u8) MachineError {
+        fn failIo(context: *Context, evaluator: *Machine, message: []const u8) MachineError {
             const failure = evaluator.fail(.io, message);
-            if (self.diagnosticPath()) |item| evaluator.unit.pendingFailure().addData(.path, item);
+            if (diagnosticPath(context)) |item| evaluator.unit.pendingFailure().addData(.path, item);
             return failure;
         }
         pub fn advance(evaluator: *Machine, self: *FileSourceDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             const io = evaluator.unit.inherited.host_io.?;
-            switch (self.phase) {
-                .open => {
-                    const file = std.Io.Dir.cwd().openFile(io, self.path.borrow(), .{}) catch |err| {
+            switch (self.state.borrowMut().*) {
+                .open => |*context| {
+                    const file = std.Io.Dir.cwd().openFile(io, context.path.borrow(), .{}) catch |err| {
                         const failure = evaluator.failFmt(
                             .io,
                             "cannot read `{s}`: {s}",
-                            .{ self.path.borrow(), @errorName(err) },
+                            .{ context.path.borrow(), @errorName(err) },
                         );
-                        if (self.diagnosticPath()) |item| evaluator.unit.pendingFailure().addData(.path, item);
+                        if (diagnosticPath(context)) |item| evaluator.unit.pendingFailure().addData(.path, item);
                         return failure;
                     };
-                    self.open_file = .init(.{ .io = io, .file = file });
-                    self.phase = .size;
+                    self.state.borrowMut().* = .{ .size = .{
+                        .context = context.move(),
+                        .file = .init(.{ .io = io, .file = file }),
+                    } };
                     return .yielded;
                 },
-                .size => {
-                    const opened = self.open_file.?.borrow();
+                .size => |*size| {
+                    const opened = size.file.borrow();
                     const stat = opened.file.stat(opened.io) catch |err| {
                         const failure = evaluator.failFmt(
                             .io,
                             "cannot read `{s}`: {s}",
-                            .{ self.path.borrow(), @errorName(err) },
+                            .{ size.context.path.borrow(), @errorName(err) },
                         );
-                        if (self.diagnosticPath()) |item| evaluator.unit.pendingFailure().addData(.path, item);
+                        if (diagnosticPath(&size.context)) |item| evaluator.unit.pendingFailure().addData(.path, item);
                         return failure;
                     };
                     if (stat.size > std.math.maxInt(usize))
-                        return self.failIo(evaluator, "source file is too large");
-                    self.source = .init(try self.allocator.alloc(u8, @intCast(stat.size)));
-                    self.file_reader = opened.file.reader(opened.io, &.{});
-                    self.phase = .read;
+                        return failIo(&size.context, evaluator, "source file is too large");
+                    const source = try self.allocator.alloc(u8, @intCast(stat.size));
+                    const file_reader = opened.file.reader(opened.io, &.{});
+                    self.state.borrowMut().* = .{ .read = .{
+                        .context = size.context.move(),
+                        .file = .init(size.file.take()),
+                        .reader = file_reader,
+                        .source = .init(source),
+                        .offset = 0,
+                    } };
                     return .yielded;
                 },
-                .read => {
-                    if (self.offset != self.source.?.borrow().len) {
-                        const end = @min(self.offset + kernel_poll_quantum, self.source.?.borrow().len);
-                        const amount = self.file_reader.?.interface.readSliceShort(
-                            self.source.?.borrow()[self.offset..end],
+                .read => |*read| {
+                    if (read.offset != read.source.borrow().len) {
+                        const end = @min(read.offset + kernel_poll_quantum, read.source.borrow().len);
+                        const amount = read.reader.interface.readSliceShort(
+                            read.source.borrow()[read.offset..end],
                         ) catch {
-                            const name = if (self.file_reader.?.err) |err| @errorName(err) else "ReadFailed";
+                            const name = if (read.reader.err) |err| @errorName(err) else "ReadFailed";
                             const failure = evaluator.failFmt(
                                 .io,
                                 "cannot read `{s}`: {s}",
-                                .{ self.path.borrow(), name },
+                                .{ read.context.path.borrow(), name },
                             );
-                            if (self.diagnosticPath()) |item| evaluator.unit.pendingFailure().addData(.path, item);
+                            if (diagnosticPath(&read.context)) |item| evaluator.unit.pendingFailure().addData(.path, item);
                             return failure;
                         };
-                        if (amount == 0) return self.failIo(evaluator, "source file changed while being read");
-                        self.offset += amount;
+                        if (amount == 0) return failIo(
+                            &read.context,
+                            evaluator,
+                            "source file changed while being read",
+                        );
+                        read.offset += amount;
                         return .yielded;
                     }
-                    self.file_reader = null;
-                    self.open_file.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.open_file = null;
-                    self.phase = .transfer;
+                    const context = read.context.move();
+                    const source = read.source.take();
+                    read.file.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.state.borrowMut().* = .{ .transfer = .{
+                        .context = context,
+                        .source = .init(source),
+                    } };
                     return .yielded;
                 },
-                .transfer => {
-                    switch (self.transfer.borrow()) {
+                .transfer => |*transfer| {
+                    switch (transfer.context.transfer.borrow()) {
                         .text => {
-                            self.text = .init(.init(self.allocator, self.source.?.borrow()));
-                            self.phase = .text;
+                            const builder = kernel_storage.Utf8Materializer.init(
+                                self.allocator,
+                                transfer.source.borrow(),
+                            );
+                            self.state.borrowMut().* = .{ .text = .{
+                                .context = transfer.context.move(),
+                                .source = .init(transfer.source.take()),
+                                .builder = .init(builder),
+                            } };
                             return .yielded;
                         },
                         .source => {},
                     }
-                    const path = self.path.take();
-                    const source = self.source.?.take();
-                    const completion = self.transfer.take().source;
-                    self.source = null;
-                    if (self.path_value) |*item| item.deinit(
-                        evaluator.releaseDomain(),
-                        evaluator.allocator(),
-                    );
-                    self.path_value = null;
+                    const path = transfer.context.path.take();
+                    const source = transfer.source.take();
+                    const completion = transfer.context.transfer.take().source;
                     evaluator.retireDriver(self);
                     try evaluator.sourceOwned(path, source, completion);
                     return .detached;
                 },
-                .text => switch (self.text.?.borrowMut().advance(kernel_poll_quantum) catch |err| switch (err) {
+                .text => |*text| switch (text.builder.borrowMut().advance(kernel_poll_quantum) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
-                    error.InvalidUtf8 => return self.failIo(evaluator, "file is not valid UTF-8"),
+                    error.InvalidUtf8 => return failIo(&text.context, evaluator, "file is not valid UTF-8"),
                 }) {
                     .pending => return .yielded,
-                    .complete => |text| {
-                        self.text.?.borrowMut().deinit();
-                        self.text = null;
-                        return .{ .output = text };
+                    .complete => |text_value| {
+                        text.builder.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.state.borrowMut().* = .{ .complete = .{
+                            .context = text.context.move(),
+                            .source = .init(text.source.take()),
+                        } };
+                        return .{ .output = text_value };
                     },
                 },
+                .complete => unreachable,
             }
         }
         pub const ownership: heap.DriverOwnership = .fields;
