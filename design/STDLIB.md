@@ -792,6 +792,11 @@ text is answered the same way as for any other value: by whether the reader
 wrote it. `'type` for anything but a plan. See
 [Seeding a unit](SPEC.md#seeding-a-unit).
 
+### unset
+`( name -- )` — Remove a direct binding from the current scope, or do nothing
+when that scope does not bind the name. An exact alias of `undef`; removing a
+local shadow may reveal a parent or core binding.
+
 ### when
 `( bool then -- ... )` — *Inline.* Run the quotation when the condition
 is 1. Equivalent to `() if`.
@@ -991,11 +996,6 @@ one existing value without moving its key. An absent key is `'domain`.
 `( dict key default quotation -- dict )` — Update an existing value as
 `update` does, or append the absent key with the default unchanged. The default
 does not pass through the quotation.
-
-### unset
-`( name -- )` — Remove a direct binding from the current scope, or do nothing
-when that scope does not bind the name. An exact alias of `undef`; removing a
-local shadow may reveal a parent or core binding.
 
 ### vals
 `( dict -- values )` — Return values in insertion order.
