@@ -1086,6 +1086,7 @@ fn formatPrimitive(evaluator: *Machine) MachineError!void {
         .template = .init(template.take()),
         .replacements = .init(replacements),
         .replacement_values = .init(replacement_values),
+        .state = .init(.{ .scan = .{} }),
     });
 }
 
@@ -1098,25 +1099,68 @@ const FormatDriver = struct {
     template: heap.Owned(Value),
     replacements: heap.Owned([]RenderedReplacement),
     replacement_values: heap.Owned(heap.OwnedValueBuffer),
-    phase: enum { scan, render, materialize_replacement, fill, materialize } = .scan,
-    cursor: usize = 0,
-    replacement_index: usize = 0,
-    replacement_cursor: usize = 0,
-    output_count: usize = 0,
-    output: ?heap.Owned([]u32) = null,
-    output_index: usize = 0,
-    filling_replacement: bool = false,
-    renderer: ?heap.Owned(printer.OwnedStringCursor) = null,
-    rendered: ?heap.Owned([]u8) = null,
-    replacement_materializer: ?heap.Owned(storage.Utf8Materializer) = null,
-    materializer: ?heap.Owned(storage.CodepointMaterializer) = null,
+    state: heap.Owned(State),
+    const Scan = struct {
+        cursor: usize = 0,
+        replacement_index: usize = 0,
+        output_count: usize = 0,
+    };
+    const FillMode = union(enum) {
+        template,
+        replacement: usize,
+    };
+    const Fill = struct {
+        output: heap.Owned([]u32),
+        cursor: usize = 0,
+        replacement_index: usize = 0,
+        output_index: usize = 0,
+        mode: FillMode = .template,
+    };
+    const State = union(enum) {
+        scan: Scan,
+        render: struct {
+            scan: Scan,
+            renderer: heap.Owned(printer.OwnedStringCursor),
+        },
+        materialize_replacement: struct {
+            scan: Scan,
+            rendered: heap.Owned([]u8),
+            materializer: heap.Owned(storage.Utf8Materializer),
+        },
+        fill: Fill,
+        materialize: struct {
+            output: heap.Owned([]u32),
+            materializer: heap.Owned(storage.CodepointMaterializer),
+        },
+        complete: heap.Owned([]u32),
 
-    fn templatePair(self: *const FormatDriver) struct { codepoint: u32, next: ?u32 } {
+        pub fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .scan => {},
+                .render => |*render| render.renderer.deinit(releases, allocator),
+                .materialize_replacement => |*materialize| {
+                    materialize.materializer.deinit(releases, allocator);
+                    materialize.rendered.deinit(releases, allocator);
+                },
+                .fill => |*fill| fill.output.deinit(releases, allocator),
+                .materialize => |*materialize| {
+                    materialize.materializer.deinit(releases, allocator);
+                    materialize.output.deinit(releases, allocator);
+                },
+                .complete => |*output| output.deinit(releases, allocator),
+            }
+        }
+    };
+    fn templatePair(self: *const FormatDriver, cursor: usize) struct { codepoint: u32, next: ?u32 } {
         const count: usize = @intCast(self.template.borrow().list.length());
         return .{
-            .codepoint = list.atUnchecked(self.template.borrow(), self.cursor).char,
-            .next = if (self.cursor + 1 < count)
-                list.atUnchecked(self.template.borrow(), self.cursor + 1).char
+            .codepoint = list.atUnchecked(self.template.borrow(), cursor).char,
+            .next = if (cursor + 1 < count)
+                list.atUnchecked(self.template.borrow(), cursor + 1).char
             else
                 null,
         };
@@ -1125,142 +1169,150 @@ const FormatDriver = struct {
     pub fn advance(evaluator: *Machine, self: *FormatDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.phase) {
-            .scan => {
+        while (budget != 0) switch (self.state.borrowMut().*) {
+            .scan => |*scan| {
                 const count: usize = @intCast(self.template.borrow().list.length());
-                if (self.cursor == count) {
-                    if (self.replacement_index != self.replacements.borrow().len) {
+                if (scan.cursor == count) {
+                    if (scan.replacement_index != self.replacements.borrow().len) {
                         return evaluator.fail(.contract, "format has more values than placeholders");
                     }
-                    self.output = .init(try evaluator.allocator().alloc(u32, self.output_count));
-                    self.cursor = 0;
-                    self.replacement_index = 0;
-                    self.phase = .fill;
+                    const output = try evaluator.allocator().alloc(u32, scan.output_count);
+                    self.state.borrowMut().* = .{ .fill = .{ .output = .init(output) } };
                     continue;
                 }
-                const pair = self.templatePair();
+                const pair = self.templatePair(scan.cursor);
                 if ((pair.codepoint == '{' and pair.next == '{') or
                     (pair.codepoint == '}' and pair.next == '}'))
                 {
-                    try addFormatCount(evaluator, &self.output_count, 1);
-                    self.cursor += 2;
+                    try addFormatCount(evaluator, &scan.output_count, 1);
+                    scan.cursor += 2;
                 } else if (pair.codepoint == '{' and pair.next == '}') {
-                    if (self.replacement_index == self.replacements.borrow().len) {
+                    if (scan.replacement_index == self.replacements.borrow().len) {
                         return evaluator.fail(.contract, "format has more placeholders than values");
                     }
-                    self.cursor += 2;
+                    scan.cursor += 2;
                     const replacement = list.atUnchecked(
                         self.values.borrow(),
-                        self.replacement_index,
+                        scan.replacement_index,
                     );
                     if (replacement.isString()) {
-                        self.replacements.borrow()[self.replacement_index] = .{ .text = replacement };
+                        self.replacements.borrow()[scan.replacement_index] = .{ .text = replacement };
                         try addFormatCount(
                             evaluator,
-                            &self.output_count,
+                            &scan.output_count,
                             @intCast(replacement.list.length()),
                         );
-                        self.replacement_index += 1;
+                        scan.replacement_index += 1;
                     } else {
-                        self.renderer = .init(try printer.OwnedStringCursor.init(
+                        const renderer = try printer.OwnedStringCursor.init(
                             evaluator.allocator(),
                             replacement,
-                        ));
-                        self.phase = .render;
+                        );
+                        self.state.borrowMut().* = .{ .render = .{
+                            .scan = scan.*,
+                            .renderer = .init(renderer),
+                        } };
                     }
                 } else if (pair.codepoint == '{' or pair.codepoint == '}') {
                     return evaluator.fail(.domain, "format contains an unmatched brace");
                 } else {
-                    try addFormatCount(evaluator, &self.output_count, 1);
-                    self.cursor += 1;
+                    try addFormatCount(evaluator, &scan.output_count, 1);
+                    scan.cursor += 1;
                 }
                 budget -= 1;
             },
-            .render => switch (try self.renderer.?.borrowMut().advance(budget)) {
+            .render => |*render| switch (try render.renderer.borrowMut().advance(budget)) {
                 .pending => return .yielded,
                 .complete => |bytes| {
-                    self.renderer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.renderer = null;
-                    self.rendered = .init(bytes);
-                    self.replacement_materializer = .init(.init(evaluator.allocator(), bytes));
-                    self.phase = .materialize_replacement;
+                    const scan = render.scan;
+                    render.renderer.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.state.borrowMut().* = .{ .materialize_replacement = .{
+                        .scan = scan,
+                        .rendered = .init(bytes),
+                        .materializer = .init(.init(evaluator.allocator(), bytes)),
+                    } };
                     return .yielded;
                 },
             },
-            .materialize_replacement => switch (self.replacement_materializer.?.borrowMut().advance(budget) catch |err| switch (err) {
+            .materialize_replacement => |*materialize| switch (materialize.materializer.borrowMut().advance(budget) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.InvalidUtf8 => return evaluator.fail(.domain, "rendered value is not valid UTF-8"),
             }) {
                 .pending => return .yielded,
                 .complete => |text| {
-                    self.replacement_materializer.?.deinit(
+                    var scan = materialize.scan;
+                    materialize.materializer.deinit(
                         evaluator.releaseDomain(),
                         evaluator.allocator(),
                     );
-                    self.replacement_materializer = null;
-                    self.rendered.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.rendered = null;
-                    self.replacements.borrow()[self.replacement_index] = .{ .text = text };
+                    materialize.rendered.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.replacements.borrow()[scan.replacement_index] = .{ .text = text };
                     self.replacement_values.borrowMut().appendOwned(text);
-                    try addFormatCount(evaluator, &self.output_count, @intCast(text.list.length()));
-                    self.replacement_index += 1;
-                    self.phase = .scan;
+                    try addFormatCount(evaluator, &scan.output_count, @intCast(text.list.length()));
+                    scan.replacement_index += 1;
+                    self.state.borrowMut().* = .{ .scan = scan };
                     return .yielded;
                 },
             },
-            .fill => {
-                if (self.filling_replacement) {
-                    const replacement = self.replacements.borrow()[self.replacement_index];
-                    if (self.replacement_cursor == replacement.text.list.length()) {
-                        self.filling_replacement = false;
-                        self.replacement_index += 1;
+            .fill => |*fill| {
+                switch (fill.mode) {
+                    .replacement => |replacement_cursor| {
+                        const replacement = self.replacements.borrow()[fill.replacement_index];
+                        if (replacement_cursor == replacement.text.list.length()) {
+                            fill.mode = .template;
+                            fill.replacement_index += 1;
+                            continue;
+                        }
+                        fill.output.borrow()[fill.output_index] = list.atUnchecked(
+                            replacement.text,
+                            replacement_cursor,
+                        ).char;
+                        fill.mode = .{ .replacement = replacement_cursor + 1 };
+                        fill.output_index += 1;
+                        budget -= 1;
                         continue;
-                    }
-                    self.output.?.borrow()[self.output_index] = list.atUnchecked(
-                        replacement.text,
-                        self.replacement_cursor,
-                    ).char;
-                    self.replacement_cursor += 1;
-                    self.output_index += 1;
-                    budget -= 1;
-                    continue;
+                    },
+                    .template => {},
                 }
                 const count: usize = @intCast(self.template.borrow().list.length());
-                if (self.cursor == count) {
-                    std.debug.assert(self.output_index == self.output.?.borrow().len);
-                    self.materializer = .init(.init(
+                if (fill.cursor == count) {
+                    std.debug.assert(fill.output_index == fill.output.borrow().len);
+                    const materializer = storage.CodepointMaterializer.init(
                         evaluator.allocator(),
-                        self.output.?.borrow(),
-                    ));
-                    self.phase = .materialize;
+                        fill.output.borrow(),
+                    );
+                    self.state.borrowMut().* = .{ .materialize = .{
+                        .output = .init(fill.output.take()),
+                        .materializer = .init(materializer),
+                    } };
                     continue;
                 }
-                const pair = self.templatePair();
+                const pair = self.templatePair(fill.cursor);
                 if ((pair.codepoint == '{' and pair.next == '{') or
                     (pair.codepoint == '}' and pair.next == '}'))
                 {
-                    self.output.?.borrow()[self.output_index] = pair.codepoint;
-                    self.output_index += 1;
-                    self.cursor += 2;
+                    fill.output.borrow()[fill.output_index] = pair.codepoint;
+                    fill.output_index += 1;
+                    fill.cursor += 2;
                 } else if (pair.codepoint == '{' and pair.next == '}') {
-                    self.filling_replacement = true;
-                    self.replacement_cursor = 0;
-                    self.cursor += 2;
+                    fill.mode = .{ .replacement = 0 };
+                    fill.cursor += 2;
                 } else {
-                    self.output.?.borrow()[self.output_index] = pair.codepoint;
-                    self.output_index += 1;
-                    self.cursor += 1;
+                    fill.output.borrow()[fill.output_index] = pair.codepoint;
+                    fill.output_index += 1;
+                    fill.cursor += 1;
                 }
                 budget -= 1;
             },
-            .materialize => return switch (try self.materializer.?.borrowMut().advance(budget)) {
+            .materialize => |*materialize| return switch (try materialize.materializer.borrowMut().advance(budget)) {
                 .pending => .yielded,
                 .complete => |result| completed: {
-                    self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.materializer = null;
+                    materialize.materializer.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.state.borrowMut().* = .{ .complete = .init(materialize.output.take()) };
                     break :completed .{ .output = result };
                 },
             },
+            .complete => unreachable,
         };
         return .yielded;
     }
