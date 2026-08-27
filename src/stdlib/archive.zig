@@ -307,12 +307,6 @@ const UnpackDriver = struct {
     entries: heap.Owned(EntryList),
     state: State,
 
-    bytes: ?heap.Owned(storage.ByteVector) = null,
-    destination: ?heap.Owned([]u8) = null,
-    package_name: ?heap.Owned([]u8) = null,
-    tar: ?heap.Owned([]u8) = null,
-
-    slots: ?heap.Owned([]?*Entry) = null,
     result_inputs: ResultInputs = .none,
     free_iterator: ?EntryList.ReverseIterator = null,
 
@@ -339,6 +333,12 @@ const UnpackDriver = struct {
     const EncodedInputs = struct {
         bytes: heap.Owned(storage.ByteVector),
         target: EncodedTarget,
+    };
+    const Archive = struct {
+        bytes: heap.Owned(storage.ByteVector),
+        target: EncodedTarget,
+        tar: heap.Owned([]u8),
+        slots: heap.Owned([]?*Entry),
     };
     const ScanContext = struct {
         tar_offset: usize = 0,
@@ -437,7 +437,6 @@ const UnpackDriver = struct {
             slots: heap.Owned([]?*Entry),
             index: usize = 0,
         },
-        scanning: Scanning,
     };
     const ExtractWork = union(enum) {
         next,
@@ -469,6 +468,14 @@ const UnpackDriver = struct {
         commit: struct { staged: Staged, created_count: usize },
         published: heap.Owned([]u8),
     };
+    const ActiveWork = union(enum) {
+        scanning: Scanning,
+        publication: Publication,
+    };
+    const Active = struct {
+        archive: Archive,
+        work: ActiveWork,
+    };
     const RollbackContext = struct {
         path: heap.Owned([]u8),
         created_count: usize,
@@ -487,22 +494,27 @@ const UnpackDriver = struct {
     };
     const State = union(enum) {
         parsing: Parsing,
-        publication: Publication,
-        rollback_reopen: RollbackContext,
+        active: Active,
+        rollback_reopen: struct {
+            archive: Archive,
+            context: RollbackContext,
+        },
         rollback: struct {
+            archive: Archive,
             context: RollbackContext,
             dir: std.Io.Dir,
             work: RollbackWork,
         },
-        cleanup_archive,
+        cleanup_archive: Archive,
+        cleanup_unparsed,
     };
 
     pub fn advance(evaluator: *Machine, self: *UnpackDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (self.state) {
             .parsing => |*parsing| self.advanceParsing(evaluator, parsing),
-            .publication => |*publication| self.advancePublication(evaluator, publication),
-            .rollback_reopen, .rollback, .cleanup_archive => unreachable,
+            .active => |*active| self.advanceActive(evaluator, active),
+            .rollback_reopen, .rollback, .cleanup_archive, .cleanup_unparsed => unreachable,
         };
     }
 
@@ -521,13 +533,27 @@ const UnpackDriver = struct {
             .verify => |*verification| self.verifyGzip(evaluator, verification),
             .allocate_slots => |*allocation| self.allocateSlots(allocation),
             .initialize_slots => |*initialization| self.initializeSlots(initialization),
+        };
+    }
+
+    fn advanceActive(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        active: *Active,
+    ) MachineError!machine.WorkProgress {
+        return switch (active.work) {
             .scanning => |*scanning| switch (scanning.work) {
-                .tar_header => self.readTarHeader(evaluator, scanning),
-                .insert_member => |*insertion| self.insertMember(evaluator, scanning, insertion),
-                .parse_pax => |*pax| self.parsePaxRecord(evaluator, scanning, pax),
-                .scan_pax => |*scan| self.scanPaxRecord(evaluator, scanning, scan),
-                .trailing_zeroes => self.trailingZeroes(evaluator, scanning),
-                .materialize_manifest => self.materializeManifest(evaluator, scanning),
+                .tar_header => self.readTarHeader(evaluator, &active.archive, scanning),
+                .insert_member => |*insertion| self.insertMember(
+                    evaluator,
+                    &active.archive,
+                    scanning,
+                    insertion,
+                ),
+                .parse_pax => |*pax| self.parsePaxRecord(evaluator, &active.archive, scanning, pax),
+                .scan_pax => |*scan| self.scanPaxRecord(evaluator, &active.archive, scanning, scan),
+                .trailing_zeroes => self.trailingZeroes(evaluator, &active.archive, scanning),
+                .materialize_manifest => self.materializeManifest(evaluator, &active.archive, scanning),
                 .materialize_manifest_text => |*materializer| self.materializeManifestText(
                     evaluator,
                     scanning,
@@ -535,9 +561,10 @@ const UnpackDriver = struct {
                 ),
                 .allocate_results => self.allocateResults(scanning),
                 .materialize_paths => |*paths| self.materializePaths(evaluator, scanning, paths),
-                .materialize_result => |*materializer| self.materializeResult(scanning, materializer),
+                .materialize_result => |*materializer| self.materializeResult(active, materializer),
                 .complete => unreachable,
             },
+            .publication => |*publication| self.advancePublication(evaluator, &active.archive, publication),
         };
     }
 
@@ -567,6 +594,31 @@ const UnpackDriver = struct {
         return .{
             .bytes = .init(inputs.bytes.take()),
             .target = takeEncodedTarget(&inputs.target),
+        };
+    }
+
+    fn takeArchive(archive: *Archive) Archive {
+        return .{
+            .bytes = .init(archive.bytes.take()),
+            .target = takeEncodedTarget(&archive.target),
+            .tar = .init(archive.tar.take()),
+            .slots = .init(archive.slots.take()),
+        };
+    }
+
+    fn archiveDestination(archive: *Archive) []u8 {
+        return switch (archive.target) {
+            .unpack => |*path| path.borrow(),
+            .install => |*install| install.destination.borrow(),
+            .inspect => unreachable,
+        };
+    }
+
+    fn archivePackageName(archive: *Archive) []u8 {
+        return switch (archive.target) {
+            .inspect => |*name| name.borrow(),
+            .install => |*install| install.package.borrow(),
+            .unpack => unreachable,
         };
     }
 
@@ -792,28 +844,27 @@ const UnpackDriver = struct {
         if (end != slots.len) return .yielded;
 
         var inputs = takeEncodedInputs(&initialization.inputs);
-        self.bytes = .init(inputs.bytes.take());
-        self.tar = .init(initialization.tar.take());
-        self.slots = .init(initialization.slots.take());
-        switch (inputs.target) {
-            .unpack => |path| self.destination = path,
-            .inspect => |name| self.package_name = name,
-            .install => |install| {
-                self.destination = install.destination;
-                self.package_name = install.package;
-            },
-        }
-        self.state = .{ .parsing = .{ .scanning = .{} } };
+        const archive: Archive = .{
+            .bytes = .init(inputs.bytes.take()),
+            .target = takeEncodedTarget(&inputs.target),
+            .tar = .init(initialization.tar.take()),
+            .slots = .init(initialization.slots.take()),
+        };
+        self.state = .{ .active = .{
+            .archive = archive,
+            .work = .{ .scanning = .{} },
+        } };
         return .yielded;
     }
 
     fn readTarHeader(
         self: *UnpackDriver,
         evaluator: *Machine,
+        archive: *Archive,
         scanning: *Scanning,
     ) MachineError!machine.WorkProgress {
         const context = &scanning.context;
-        const tar = self.tar.?.borrow();
+        const tar = archive.tar.borrow();
         if (context.tar_offset == tar.len) {
             if (context.zero_blocks < 2) return self.failDomain(evaluator, "tar archive has no end marker");
             scanning.work = if (self.mode == .unpack) .allocate_results else .materialize_manifest;
@@ -893,7 +944,7 @@ const UnpackDriver = struct {
             .data_offset = data_offset,
             .size = @intCast(effective_size),
         };
-        if (self.mode != .unpack) try self.validatePackageEntry(evaluator, context, entry);
+        if (self.mode != .unpack) try self.validatePackageEntry(evaluator, archive, context, entry);
         if (kind == .file) context.file_count += 1;
         const hash = std.hash.Wyhash.hash(0, path);
         scanning.work = .{ .insert_member = .{
@@ -907,6 +958,7 @@ const UnpackDriver = struct {
     fn parsePaxRecord(
         self: *UnpackDriver,
         evaluator: *Machine,
+        archive: *Archive,
         scanning: *Scanning,
         pax: *Pax,
     ) MachineError!machine.WorkProgress {
@@ -915,7 +967,7 @@ const UnpackDriver = struct {
             scanning.work = .tar_header;
             return .yielded;
         }
-        const tar = self.tar.?.borrow();
+        const tar = archive.tar.borrow();
         var space = pax.offset;
         while (space != pax.end and tar[space] != ' ') : (space += 1) {
             if (space - pax.offset >= 20 or tar[space] < '0' or tar[space] > '9')
@@ -941,10 +993,11 @@ const UnpackDriver = struct {
     fn scanPaxRecord(
         self: *UnpackDriver,
         evaluator: *Machine,
+        archive: *Archive,
         scanning: *Scanning,
         scan: *@FieldType(ScanWork, "scan_pax"),
     ) MachineError!machine.WorkProgress {
-        const tar = self.tar.?.borrow();
+        const tar = archive.tar.borrow();
         const payload_end = scan.record_end - 1;
         const end = @min(scan.scan_offset + work_quantum, payload_end);
         const equals_relative = std.mem.indexOfScalar(u8, tar[scan.scan_offset..end], '=') orelse {
@@ -997,13 +1050,14 @@ const UnpackDriver = struct {
     fn insertMember(
         self: *UnpackDriver,
         evaluator: *Machine,
+        archive: *Archive,
         scanning: *Scanning,
         insertion: *@FieldType(ScanWork, "insert_member"),
     ) MachineError!machine.WorkProgress {
         const entry = &insertion.entry;
         var remaining = work_quantum;
         while (remaining != 0) : (remaining -= 1) {
-            const slot = &self.slots.?.borrow()[insertion.slot];
+            const slot = &archive.slots.borrow()[insertion.slot];
             if (slot.*) |prior| {
                 if (std.mem.eql(u8, prior.path, entry.path))
                     return self.failDomain(evaluator, "tar archive contains a duplicate member path");
@@ -1025,9 +1079,10 @@ const UnpackDriver = struct {
     fn trailingZeroes(
         self: *UnpackDriver,
         evaluator: *Machine,
+        archive: *Archive,
         scanning: *Scanning,
     ) MachineError!machine.WorkProgress {
-        const tar = self.tar.?.borrow();
+        const tar = archive.tar.borrow();
         const end = @min(scanning.context.tar_offset + work_quantum, tar.len);
         for (tar[scanning.context.tar_offset..end]) |byte| if (byte != 0)
             return self.failDomain(evaluator, "tar data follows its end marker");
@@ -1040,38 +1095,45 @@ const UnpackDriver = struct {
     fn validatePackageEntry(
         self: *UnpackDriver,
         evaluator: *Machine,
+        archive: *Archive,
         context: *ScanContext,
         entry: Entry,
     ) MachineError!void {
         if (entry.kind == .directory) return;
         if (std.mem.eql(u8, entry.path, package_seal_name))
-            return self.failPackageMember(evaluator, "package archive uses a reserved store member", entry.path);
+            return self.failPackageMember(evaluator, archive, "package archive uses a reserved store member", entry.path);
         if (std.mem.eql(u8, entry.path, "ecl.pkg")) {
             if (context.manifest_data != null)
-                return self.failPackageMember(evaluator, "package archive contains more than one root manifest", entry.path);
+                return self.failPackageMember(
+                    evaluator,
+                    archive,
+                    "package archive contains more than one root manifest",
+                    entry.path,
+                );
             context.manifest_data = .{ .offset = entry.data_offset, .size = entry.size };
             return;
         }
         if (std.mem.endsWith(u8, entry.path, ".eclmod"))
-            return self.failPackageMember(evaluator, "native package members are not permitted", entry.path);
+            return self.failPackageMember(evaluator, archive, "native package members are not permitted", entry.path);
         if (!std.mem.endsWith(u8, entry.path, ".ecl")) return;
         if (lastSlash(entry.path) != null)
-            return self.failPackageMember(evaluator, "package source modules must be at the archive root", entry.path);
+            return self.failPackageMember(evaluator, archive, "package source modules must be at the archive root", entry.path);
         const module_name = entry.path[0 .. entry.path.len - ".ecl".len];
         if (!validPackageName(module_name))
-            return self.failPackageMember(evaluator, "package source module name is not canonical", entry.path);
-        if (!packageOwns(self.package_name.?.borrow(), module_name))
-            return self.failPackageMember(evaluator, "package does not own source module", entry.path);
+            return self.failPackageMember(evaluator, archive, "package source module name is not canonical", entry.path);
+        if (!packageOwns(archivePackageName(archive), module_name))
+            return self.failPackageMember(evaluator, archive, "package does not own source module", entry.path);
     }
 
     fn materializeManifest(
         self: *UnpackDriver,
         evaluator: *Machine,
+        archive: *Archive,
         scanning: *Scanning,
     ) MachineError!machine.WorkProgress {
         const manifest = scanning.context.manifest_data orelse
             return self.failDomain(evaluator, "package archive has no root ecl.pkg manifest");
-        const tar = self.tar.?.borrow();
+        const tar = archive.tar.borrow();
         scanning.work = .{ .materialize_manifest_text = .init(
             self.allocator,
             tar[manifest.offset .. manifest.offset + manifest.size],
@@ -1151,15 +1213,15 @@ const UnpackDriver = struct {
 
     fn materializeResult(
         self: *UnpackDriver,
-        scanning: *Scanning,
+        active: *Active,
         materializer: *storage.ValueMaterializer,
     ) MachineError!machine.WorkProgress {
-        _ = scanning;
+        _ = self;
         return switch (try materializer.advance(work_quantum)) {
             .pending => .yielded,
             .complete => |result| result: {
                 materializer.deinit();
-                self.state = .{ .publication = .{ .destination_check = result } };
+                active.work = .{ .publication = .{ .destination_check = result } };
                 break :result .yielded;
             },
         };
@@ -1168,17 +1230,18 @@ const UnpackDriver = struct {
     fn advancePublication(
         self: *UnpackDriver,
         evaluator: *Machine,
+        archive: *Archive,
         publication: *Publication,
     ) MachineError!machine.WorkProgress {
         const io = self.io.?;
         switch (publication.*) {
             .destination_check => |result| {
                 if (self.mode == .package_install) {
-                    const parent = std.fs.path.dirname(self.destination.?.borrow()) orelse ".";
+                    const parent = std.fs.path.dirname(archiveDestination(archive)) orelse ".";
                     std.Io.Dir.cwd().createDirPath(io, parent) catch |err|
                         return self.failIo(evaluator, "cannot create package store parents", err);
                 }
-                std.Io.Dir.cwd().access(io, self.destination.?.borrow(), .{}) catch |err| switch (err) {
+                std.Io.Dir.cwd().access(io, archiveDestination(archive), .{}) catch |err| switch (err) {
                     error.FileNotFound => {
                         publication.* = .{ .stage_path = result };
                         return .yielded;
@@ -1189,9 +1252,9 @@ const UnpackDriver = struct {
             },
             .stage_path => |result| {
                 const identity = next_stage_identity.fetchAdd(1, .monotonic);
-                const destination = self.destination.?.borrow();
-                const parent = std.fs.path.dirname(destination) orelse ".";
-                const basename = std.fs.path.basename(destination);
+                const destination_path = archiveDestination(archive);
+                const parent = std.fs.path.dirname(destination_path) orelse ".";
+                const basename = std.fs.path.basename(destination_path);
                 const path = try std.fmt.allocPrint(
                     self.allocator,
                     "{s}{c}.ecl-unpack-{x}-{s}",
@@ -1274,7 +1337,7 @@ const UnpackDriver = struct {
                 .file => |*file_state| {
                     if (file_state.written != file_state.entry.size) {
                         const end = @min(file_state.written + work_quantum, file_state.entry.size);
-                        const source = self.tar.?.borrow()[file_state.entry.data_offset + file_state.written .. file_state.entry.data_offset + end];
+                        const source = archive.tar.borrow()[file_state.entry.data_offset + file_state.written .. file_state.entry.data_offset + end];
                         file_state.file.writePositionalAll(io, source, file_state.written) catch |err|
                             return self.failIo(evaluator, "cannot write archive file", err);
                         file_state.written = end;
@@ -1285,7 +1348,7 @@ const UnpackDriver = struct {
                 },
             },
             .seal => |*seal| {
-                const compressed = self.bytes.?.borrow().bytes();
+                const compressed = archive.bytes.borrow().bytes();
                 if (seal.written != compressed.len) {
                     const end = @min(seal.written + work_quantum, compressed.len);
                     seal.file.writePositionalAll(
@@ -1308,15 +1371,15 @@ const UnpackDriver = struct {
                 }
             },
             .commit => |*commit_state| {
-                const destination = self.destination.?.borrow();
-                const parent_path = std.fs.path.dirname(destination) orelse ".";
+                const destination_path = archiveDestination(archive);
+                const parent_path = std.fs.path.dirname(destination_path) orelse ".";
                 var parent = std.Io.Dir.cwd().openDir(io, parent_path, .{}) catch |err|
                     return self.failIo(evaluator, "cannot open archive destination parent", err);
                 defer parent.close(io);
                 renamePreserve(
                     parent,
                     std.fs.path.basename(commit_state.staged.path.borrow()),
-                    std.fs.path.basename(destination),
+                    std.fs.path.basename(destination_path),
                     io,
                 ) catch |err| switch (err) {
                     error.PathAlreadyExists => return self.failDestinationExists(
@@ -1343,13 +1406,15 @@ const UnpackDriver = struct {
     fn failPackageMember(
         self: *UnpackDriver,
         evaluator: *Machine,
+        archive: *Archive,
         message: []const u8,
         member: []const u8,
     ) MachineError {
+        _ = self;
         return evaluator.failFmt(
             .domain,
             "{s}: package `{s}`, member `{s}`",
-            .{ message, self.package_name.?.borrow(), member },
+            .{ message, archivePackageName(archive), member },
         );
     }
 
@@ -1379,25 +1444,30 @@ const UnpackDriver = struct {
         self: *UnpackDriver,
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
+        active: *Active,
         publication: *Publication,
     ) void {
+        const archive = takeArchive(&active.archive);
         switch (publication.*) {
             .destination_check, .stage_path => |result| {
                 releases.releaseValue(result);
-                self.state = .cleanup_archive;
+                self.state = .{ .cleanup_archive = archive };
             },
             .create_stage => |*staged| {
                 releases.releaseValue(staged.result);
                 staged.path.deinit(releases, allocator);
-                self.state = .cleanup_archive;
+                self.state = .{ .cleanup_archive = archive };
             },
             .open_stage => |*staged| {
                 releases.releaseValue(staged.result);
                 const path = staged.path.take();
                 self.state = .{ .rollback_reopen = .{
-                    .path = .init(path),
-                    .created_count = 0,
-                    .seal_created = false,
+                    .archive = archive,
+                    .context = .{
+                        .path = .init(path),
+                        .created_count = 0,
+                        .seal_created = false,
+                    },
                 } };
             },
             .extract => |*extraction| {
@@ -1414,6 +1484,7 @@ const UnpackDriver = struct {
                 };
                 const dir = extraction.dir;
                 self.state = .{ .rollback = .{
+                    .archive = archive,
                     .context = context,
                     .dir = dir,
                     .work = rollbackEntries(self, context.created_count),
@@ -1430,6 +1501,7 @@ const UnpackDriver = struct {
                 };
                 const dir = seal.dir;
                 self.state = .{ .rollback = .{
+                    .archive = archive,
                     .context = context,
                     .dir = dir,
                     .work = .seal,
@@ -1439,14 +1511,17 @@ const UnpackDriver = struct {
                 releases.releaseValue(commit_state.staged.result);
                 const path = commit_state.staged.path.take();
                 self.state = .{ .rollback_reopen = .{
-                    .path = .init(path),
-                    .created_count = commit_state.created_count,
-                    .seal_created = self.mode == .package_install,
+                    .archive = archive,
+                    .context = .{
+                        .path = .init(path),
+                        .created_count = commit_state.created_count,
+                        .seal_created = self.mode == .package_install,
+                    },
                 } };
             },
             .published => |*path| {
                 path.deinit(releases, allocator);
-                self.state = .cleanup_archive;
+                self.state = .{ .cleanup_archive = archive };
             },
         }
     }
@@ -1462,18 +1537,22 @@ const UnpackDriver = struct {
         self: *UnpackDriver,
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
-        context: *RollbackContext,
+        reopening: *@FieldType(State, "rollback_reopen"),
     ) bool {
+        const context = &reopening.context;
         const directory = std.Io.Dir.cwd().openDir(self.io.?, context.path.borrow(), .{}) catch |open_err| {
             observeCleanupError("reopen the stage", open_err);
             std.Io.Dir.cwd().deleteDir(self.io.?, context.path.borrow()) catch |err|
                 observeCleanupError("remove an unopened stage", err);
             context.path.deinit(releases, allocator);
-            self.state = .cleanup_archive;
+            const archive = takeArchive(&reopening.archive);
+            self.state = .{ .cleanup_archive = archive };
             return false;
         };
         const moved = context.*;
+        const archive = takeArchive(&reopening.archive);
         self.state = .{ .rollback = .{
+            .archive = archive,
             .context = moved,
             .dir = directory,
             .work = if (moved.seal_created) .seal else rollbackEntries(self, moved.created_count),
@@ -1537,7 +1616,8 @@ const UnpackDriver = struct {
                 std.Io.Dir.cwd().deleteDir(self.io.?, rollback.context.path.borrow()) catch |err|
                     observeCleanupError("remove the stage root", err);
                 rollback.context.path.deinit(releases, allocator);
-                self.state = .cleanup_archive;
+                const archive = takeArchive(&rollback.archive);
+                self.state = .{ .cleanup_archive = archive };
             },
         }
         return false;
@@ -1578,6 +1658,36 @@ const UnpackDriver = struct {
     ) void {
         inputs.bytes.deinit(releases, allocator);
         retireEncodedTarget(&inputs.target, releases, allocator);
+    }
+
+    fn retireArchive(
+        archive: *Archive,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        archive.slots.deinit(releases, allocator);
+        archive.tar.deinit(releases, allocator);
+        archive.bytes.deinit(releases, allocator);
+        retireEncodedTarget(&archive.target, releases, allocator);
+    }
+
+    fn retireScanning(
+        scanning: *Scanning,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (scanning.work) {
+            .insert_member => |insertion| allocator.free(insertion.entry.path),
+            .materialize_manifest_text => |*materializer| materializer.retire(releases),
+            .materialize_paths => |*paths| switch (paths.work) {
+                .text => |*materializer| materializer.retire(releases),
+                .next => {},
+            },
+            .materialize_result => |*materializer| materializer.retire(releases),
+            else => {},
+        }
+        if (scanning.context.pending_path) |*path| path.deinit(releases, allocator);
+        scanning.context.pending_path = null;
     }
 
     fn retireParsing(
@@ -1623,20 +1733,6 @@ const UnpackDriver = struct {
                 initialization.tar.deinit(releases, allocator);
                 initialization.slots.deinit(releases, allocator);
             },
-            .scanning => |*scanning| {
-                switch (scanning.work) {
-                    .insert_member => |insertion| allocator.free(insertion.entry.path),
-                    .materialize_manifest_text => |*materializer| materializer.retire(releases),
-                    .materialize_paths => |*paths| switch (paths.work) {
-                        .text => |*materializer| materializer.retire(releases),
-                        .next => {},
-                    },
-                    .materialize_result => |*materializer| materializer.retire(releases),
-                    else => {},
-                }
-                if (scanning.context.pending_path) |*path| path.deinit(releases, allocator);
-                scanning.context.pending_path = null;
-            },
         }
     }
 
@@ -1648,20 +1744,37 @@ const UnpackDriver = struct {
         switch (self.state) {
             .parsing => |*parsing| {
                 retireParsing(parsing, releases, allocator);
-                self.state = .cleanup_archive;
+                self.state = .cleanup_unparsed;
                 return false;
             },
-            .publication => |*publication| {
-                self.beginPublicationRetirement(releases, allocator, publication);
+            .active => |*active| {
+                switch (active.work) {
+                    .scanning => |*scanning| {
+                        retireScanning(scanning, releases, allocator);
+                        const archive = takeArchive(&active.archive);
+                        self.state = .{ .cleanup_archive = archive };
+                    },
+                    .publication => |*publication| self.beginPublicationRetirement(
+                        releases,
+                        allocator,
+                        active,
+                        publication,
+                    ),
+                }
                 return false;
             },
-            .rollback_reopen => |*context| return self.advanceRollbackReopen(
+            .rollback_reopen => |*reopening| return self.advanceRollbackReopen(
                 releases,
                 allocator,
-                context,
+                reopening,
             ),
             .rollback => |*rollback| return self.advanceRollback(releases, allocator, rollback),
-            .cleanup_archive => {},
+            .cleanup_archive => |*archive| {
+                retireArchive(archive, releases, allocator);
+                self.state = .cleanup_unparsed;
+                return false;
+            },
+            .cleanup_unparsed => {},
         }
         if (self.free_iterator == null) self.free_iterator = self.entries.borrow().reverseIterator();
         if (self.free_iterator.?.next()) |entry| {
@@ -1688,16 +1801,6 @@ const UnpackDriver = struct {
             },
             .retired => {},
         }
-        if (self.slots) |*slots| slots.deinit(releases, allocator);
-        self.slots = null;
-        if (self.tar) |*tar| tar.deinit(releases, allocator);
-        self.tar = null;
-        if (self.bytes) |*bytes| bytes.deinit(releases, allocator);
-        self.bytes = null;
-        if (self.destination) |*destination| destination.deinit(releases, allocator);
-        self.destination = null;
-        if (self.package_name) |*name| name.deinit(releases, allocator);
-        self.package_name = null;
         self.bytes_value.deinit(releases, allocator);
         if (self.destination_value) |*destination| destination.deinit(releases, allocator);
         self.destination_value = null;
