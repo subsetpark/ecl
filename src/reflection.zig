@@ -291,18 +291,39 @@ pub const ActionPlan = struct {
 
     allocator: std.mem.Allocator,
     pending: poll.ChunkList(Action),
-    actions: ?[]Action = null,
-    iterator: ?poll.ChunkList(Action).Iterator = null,
-    materialize_index: usize = 0,
-    renderer: ?OwnedPlanCursor = null,
-    sealed: bool = false,
+    state: State = .building,
+
+    const State = union(enum) {
+        building,
+        sealed,
+        materializing: struct {
+            actions: []Action,
+            iterator: poll.ChunkList(Action).Iterator,
+            index: usize,
+        },
+        rendering: struct {
+            actions: []Action,
+            renderer: OwnedPlanCursor,
+        },
+
+        fn deinit(self: *State, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .building, .sealed => {},
+                .materializing => |materializing| allocator.free(materializing.actions),
+                .rendering => |*rendering| {
+                    rendering.renderer.deinit();
+                    allocator.free(rendering.actions);
+                },
+            }
+        }
+    };
 
     pub fn init(allocator: std.mem.Allocator) ActionPlan {
         return .{ .allocator = allocator, .pending = .init(allocator) };
     }
 
     pub fn add(self: *ActionPlan, action: Action) error{OutOfMemory}!void {
-        std.debug.assert(!self.sealed);
+        std.debug.assert(self.state == .building);
         try self.pending.append(action);
     }
 
@@ -311,44 +332,53 @@ pub const ActionPlan = struct {
     }
 
     pub fn isSealed(self: *const ActionPlan) bool {
-        return self.sealed;
+        return self.state != .building;
     }
 
     pub fn seal(self: *ActionPlan) void {
-        std.debug.assert(!self.sealed);
-        self.sealed = true;
+        std.debug.assert(self.state == .building);
+        self.state = .sealed;
     }
 
     pub fn advance(self: *ActionPlan, budget: usize) error{OutOfMemory}!OwnedPlanProgress {
-        std.debug.assert(self.sealed and budget != 0);
+        std.debug.assert(self.state != .building and budget != 0);
         var remaining = budget;
-        if (self.actions == null) {
-            self.actions = try self.allocator.alloc(Action, self.pending.count);
-            self.iterator = self.pending.iterator();
+        if (self.state == .sealed) {
+            const actions = try self.allocator.alloc(Action, self.pending.count);
+            self.state = .{ .materializing = .{
+                .actions = actions,
+                .iterator = self.pending.iterator(),
+                .index = 0,
+            } };
         }
-        while (remaining != 0 and self.iterator != null) : (remaining -= 1) {
-            if (self.iterator.?.next()) |action| {
-                self.actions.?[self.materialize_index] = action.*;
-                self.materialize_index += 1;
+        while (remaining != 0 and self.state == .materializing) : (remaining -= 1) {
+            const materializing = &self.state.materializing;
+            if (materializing.iterator.next()) |action| {
+                materializing.actions[materializing.index] = action.*;
+                materializing.index += 1;
             } else {
-                self.iterator = null;
-                self.renderer = .init(self.allocator, self.actions.?);
+                const actions = materializing.actions;
+                self.state = .{ .rendering = .{
+                    .actions = actions,
+                    .renderer = .init(self.allocator, actions),
+                } };
             }
         }
-        if (self.iterator != null or self.renderer == null) return .pending;
-        return self.renderer.?.advance(@max(remaining, 1));
+        return switch (self.state) {
+            .materializing => .pending,
+            .rendering => |*rendering| rendering.renderer.advance(@max(remaining, 1)),
+            .building, .sealed => unreachable,
+        };
     }
 
     pub fn deinit(self: *ActionPlan) void {
-        if (self.renderer) |*renderer| renderer.deinit();
-        if (self.actions) |actions| self.allocator.free(actions);
+        self.state.deinit(self.allocator);
         self.pending.deinit();
         self.* = undefined;
     }
 
     pub fn retire(self: *ActionPlan, releases: *heap.ReleaseDomain) void {
-        if (self.renderer) |*renderer| renderer.deinit();
-        if (self.actions) |actions| self.allocator.free(actions);
+        self.state.deinit(self.allocator);
         self.pending.retire(releases);
     }
 };
