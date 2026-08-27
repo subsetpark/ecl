@@ -3322,9 +3322,9 @@ pub const Machine = struct {
             const next = NativeLoadDriver{
                 .name = self.name,
                 .request = self.request,
-                .loader = .init(loader),
                 .loading = .init(self.loading.?.take()),
                 .path = .init(self.path_value.?.take()),
+                .state = .init(.{ .validate = .init(loader) }),
             };
             self.loading = null;
             self.path_value = null;
@@ -3350,9 +3350,9 @@ pub const Machine = struct {
             const next = NativeLoadDriver{
                 .name = self.name,
                 .request = self.request,
-                .loader = .init(loader),
                 .loading = .init(self.loading.?.take()),
                 .path = .init(self.path_value.?.take()),
+                .state = .init(.{ .validate = .init(loader) }),
             };
             evaluator.retireDriver(self);
             try evaluator.startDriver(next);
@@ -3424,14 +3424,44 @@ pub const Machine = struct {
     const NativeLoadDriver = struct {
         name: intern.ModuleName,
         request: QualifiedLoadRequest,
-        loader: heap.Owned(native_module.LoadCursor),
         loading: heap.Owned(modules.LoadingLease),
         path: heap.Owned(Value),
-        instance: ?heap.Owned(*native_module.ModuleInstance) = null,
-        publication: ?heap.Owned(modules.Registry.NativeCandidateCursor) = null,
-        candidate: ?heap.Owned(modules.SealedImage) = null,
-        commit: ?heap.Owned(modules.Registry.RegistrationCursor) = null,
-        phase: enum { validate, definitions, commit } = .validate,
+        state: heap.Owned(State),
+
+        const State = union(enum) {
+            validate: heap.Owned(native_module.LoadCursor),
+            loaded: heap.Owned(*native_module.ModuleInstance),
+            definitions: struct {
+                instance: heap.Owned(*native_module.ModuleInstance),
+                publication: heap.Owned(modules.Registry.NativeCandidateCursor),
+            },
+            commit: struct {
+                instance: heap.Owned(*native_module.ModuleInstance),
+                candidate: heap.Owned(modules.SealedImage),
+                cursor: heap.Owned(modules.Registry.RegistrationCursor),
+            },
+
+            pub fn deinit(
+                self: *State,
+                releases: *heap.ReleaseDomain,
+                storage_allocator: std.mem.Allocator,
+            ) void {
+                switch (self.*) {
+                    .validate => |*loader| loader.deinit(releases, storage_allocator),
+                    .loaded => |*instance| instance.deinit(releases, storage_allocator),
+                    .definitions => |*definitions| {
+                        definitions.publication.deinit(releases, storage_allocator);
+                        definitions.instance.deinit(releases, storage_allocator);
+                    },
+                    .commit => |*commit| {
+                        commit.cursor.deinit(releases, storage_allocator);
+                        commit.candidate.deinit(releases, storage_allocator);
+                        commit.instance.deinit(releases, storage_allocator);
+                    },
+                }
+                self.* = undefined;
+            }
+        };
 
         fn failLoad(self: *NativeLoadDriver, evaluator: *Machine, message: []const u8) MachineError {
             const failure = evaluator.fail(.io, message);
@@ -3441,37 +3471,51 @@ pub const Machine = struct {
 
         pub fn advance(evaluator: *Machine, self: *NativeLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
-            switch (self.phase) {
-                .validate => switch (try self.loader.borrowMut().advance(kernel_poll_quantum)) {
+            switch (self.state.borrowMut().*) {
+                .validate => |*loader| switch (try loader.borrowMut().advance(kernel_poll_quantum)) {
                     .pending => return .yielded,
                     .failure => |failure| return self.failLoad(evaluator, failure.text()),
                     .loaded => |instance| {
-                        self.instance = .init(instance);
-                        self.publication = .init(try .init(
-                            evaluator.unit.inherited.registry.?,
-                            instance,
-                        ));
-                        self.phase = .definitions;
+                        loader.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.state.borrowMut().* = .{ .loaded = .init(instance) };
                         return .yielded;
                     },
                 },
-                .definitions => switch (try self.publication.?.borrowMut().advance()) {
+                .loaded => |*instance| {
+                    const publication = try modules.Registry.NativeCandidateCursor.init(
+                        evaluator.unit.inherited.registry.?,
+                        instance.borrow(),
+                    );
+                    self.state.borrowMut().* = .{ .definitions = .{
+                        .instance = .init(instance.take()),
+                        .publication = .init(publication),
+                    } };
+                    return .yielded;
+                },
+                .definitions => |*definitions| switch (try definitions.publication.borrowMut().advance()) {
                     .pending => return .yielded,
                     .complete => |candidate| {
-                        self.publication.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.publication = null;
+                        const instance = definitions.instance.take();
+                        definitions.publication.deinit(
+                            evaluator.releaseDomain(),
+                            evaluator.allocator(),
+                        );
                         var built = candidate;
-                        self.candidate = .init(built.seal());
-                        self.commit = .init(evaluator.unit.inherited.registry.?.registrationCursor(
-                            self.candidate.?.borrow().ref(),
+                        var sealed = heap.Owned(modules.SealedImage).init(built.seal());
+                        const cursor = evaluator.unit.inherited.registry.?.registrationCursor(
+                            sealed.borrow().ref(),
                             self.name,
                             &evaluator.unit.turn_authority,
-                        ));
-                        self.phase = .commit;
+                        );
+                        self.state.borrowMut().* = .{ .commit = .{
+                            .instance = .init(instance),
+                            .candidate = .init(sealed.take()),
+                            .cursor = .init(cursor),
+                        } };
                         return .yielded;
                     },
                 },
-                .commit => switch (self.commit.?.borrowMut().advance() catch |err| switch (err) {
+                .commit => |*commit| switch (commit.cursor.borrowMut().advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return evaluator.failFmt(
                         .io,
@@ -3481,8 +3525,7 @@ pub const Machine = struct {
                 }) {
                     .pending => return .yielded,
                     .complete => {
-                        self.commit.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                        self.commit = null;
+                        commit.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         return verifyPublishedModule(
                             evaluator,
                             self,
