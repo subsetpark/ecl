@@ -1,4 +1,4 @@
-//! Poll-aware construction, lookup, and update for kernel-owned traversals.
+//! Poll-aware text conversion for kernel-owned traversals.
 
 const std = @import("std");
 const value = @import("value.zig");

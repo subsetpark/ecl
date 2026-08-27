@@ -91,7 +91,7 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
     // A dict has one key to find and nothing to descend into, so it needs the
     // find cursor and not the index cursor's frame stack -- which is sized by
     // its widest frame and costs a chunk allocation per lookup to hold one
-    // entry. `DictFindCursor` allocates nothing for a key without structure,
+    // entry. `dict.FindCursor` allocates nothing for a key without structure,
     // and falls back to its own worklists for one that has some.
     if (collection.borrow() == .dict) {
         const find = dict.FindCursor.initHeader(

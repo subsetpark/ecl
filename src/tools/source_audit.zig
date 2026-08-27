@@ -637,8 +637,7 @@ fn auditSourceBodies() bool {
     const boxed_flat_route = [_][]const []const u8{
         &.{ "list", ".", "atUnchecked" },
         &.{"OwnedValueBuffer"},
-        &.{ "storage", ".", "ValueMaterializer" },
-        &.{ "kernel_storage", ".", "ValueMaterializer" },
+        &.{ "list", ".", "ValueMaterializer" },
     };
     failed = auditTokens(
         "typed flat loops",
