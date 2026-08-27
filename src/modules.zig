@@ -3189,74 +3189,83 @@ pub const Registry = enum(usize) {
         registry: *const Registry,
         directory: DirectoryLease,
         name: intern.ModuleName,
-        phase: enum { module, alias, canonical_module, maintenance, complete } = .module,
-        module_lookup: ?Directory.ModuleMap.RawLookupCursor = null,
-        alias_lookup: ?Directory.AliasMap.RawLookupCursor = null,
-        canonical_lookup: ?Directory.ModuleMap.RawLookupCursor = null,
-        pending_lease: ?GenerationLease = null,
-        maintenance: ?MaintenanceCursor = null,
+        state: State,
+
+        const State = union(enum) {
+            absent,
+            module: Directory.ModuleMap.RawLookupCursor,
+            alias: Directory.AliasMap.RawLookupCursor,
+            canonical_module: Directory.ModuleMap.RawLookupCursor,
+            maintenance: struct {
+                lease: ?GenerationLease,
+                cursor: MaintenanceCursor,
+            },
+            complete,
+        };
 
         pub fn deinit(self: *AcquireCursor) void {
             self.directory.deinit();
-            if (self.pending_lease) |*lease| lease.deinit();
+            switch (self.state) {
+                .maintenance => |*maintenance| if (maintenance.lease) |*lease| lease.deinit(),
+                .absent, .module, .alias, .canonical_module, .complete => {},
+            }
             self.* = undefined;
         }
         fn acceptSlot(self: *AcquireCursor, slot: *ModuleSlot) AcquireProgress {
             const protected = self.registry.leaseSlot(slot);
             if (protected.needs_maintenance) {
-                self.pending_lease = protected.lease;
-                self.maintenance = @constCast(self.registry).maintenanceCursor();
-                self.phase = .maintenance;
+                self.state = .{ .maintenance = .{
+                    .lease = protected.lease,
+                    .cursor = @constCast(self.registry).maintenanceCursor(),
+                } };
                 return .pending;
             }
-            self.phase = .complete;
+            self.state = .complete;
             return .{ .complete = protected.lease };
         }
         pub fn advance(self: *AcquireCursor) AcquireProgress {
-            while (true) switch (self.phase) {
-                .module => {
-                    const lookup = &(self.module_lookup orelse {
-                        self.phase = .complete;
-                        return .{ .complete = null };
-                    });
+            while (true) switch (self.state) {
+                .absent => {
+                    self.state = .complete;
+                    return .{ .complete = null };
+                },
+                .module => |*lookup| {
                     switch (lookup.advance()) {
                         .pending => return .pending,
                         .complete => |slot| if (slot) |found| {
                             return self.acceptSlot(found);
                         } else {
                             if (intern.moduleBindingName(self.name)) |alias_name| {
-                                self.alias_lookup = self.directory.directory.?.aliases.rawLookup(alias_name);
-                                self.phase = .alias;
+                                const alias_lookup = self.directory.directory.?.aliases.rawLookup(alias_name);
+                                self.state = .{ .alias = alias_lookup };
                             } else {
-                                self.phase = .complete;
+                                self.state = .complete;
                                 return .{ .complete = null };
                             }
                         },
                     }
                 },
-                .alias => switch (self.alias_lookup.?.advance()) {
+                .alias => |*lookup| switch (lookup.advance()) {
                     .pending => return .pending,
                     .complete => |canonical_name| if (canonical_name) |found| {
-                        self.canonical_lookup = self.directory.directory.?.modules.rawLookup(found);
-                        self.phase = .canonical_module;
+                        const canonical_lookup = self.directory.directory.?.modules.rawLookup(found);
+                        self.state = .{ .canonical_module = canonical_lookup };
                     } else {
-                        self.phase = .complete;
+                        self.state = .complete;
                         return .{ .complete = null };
                     },
                 },
-                .canonical_module => switch (self.canonical_lookup.?.advance()) {
+                .canonical_module => |*lookup| switch (lookup.advance()) {
                     .pending => return .pending,
                     .complete => |slot| {
                         return self.acceptSlot(slot orelse unreachable);
                     },
                 },
-                .maintenance => switch (self.maintenance.?.advance()) {
+                .maintenance => |*maintenance| switch (maintenance.cursor.advance()) {
                     .pending => return .pending,
                     .complete => {
-                        const lease = self.pending_lease;
-                        self.pending_lease = null;
-                        self.maintenance = null;
-                        self.phase = .complete;
+                        const lease = maintenance.lease;
+                        self.state = .complete;
                         return .{ .complete = lease };
                     },
                 },
@@ -3270,10 +3279,10 @@ pub const Registry = enum(usize) {
             .registry = self,
             .directory = directory,
             .name = name,
-            .module_lookup = if (directory.directory) |current|
-                current.modules.rawLookup(name)
+            .state = if (directory.directory) |current|
+                .{ .module = current.modules.rawLookup(name) }
             else
-                null,
+                .absent,
         };
     }
 
