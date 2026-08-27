@@ -526,24 +526,99 @@ const StringBuilder = struct {
     spans: *reader.SpanTable,
     provenance_namespace: heap.CodeProvenanceNamespace,
     word_scope: u32,
-    index: usize = 0,
-    line: u32,
-    col: u32,
-    codepoints: CodepointList,
-    char_spans: SpanList,
-    unicode_value: u32 = 0,
-    unicode_digits: usize = 0,
-    unicode_span: Span = .{},
-    unicode_mode: bool = false,
-    codepoint_array: ?[]u32 = null,
-    span_array: ?[]Span = null,
-    codepoint_iterator: ?CodepointList.Iterator = null,
-    span_iterator: ?SpanList.Iterator = null,
-    copy_index: usize = 0,
-    materializer: ?storage.CodepointMaterializer = null,
-    result: ?Value = null,
-    span_writer: ?reader.SpanTable.PutCursor = null,
-    phase: enum { parse, copy_codepoints, copy_spans, materialize, spans, complete } = .parse,
+    state: State,
+
+    const Unicode = union(enum) {
+        ordinary,
+        escape: struct {
+            value: u32 = 0,
+            digits: usize = 0,
+            span: Span,
+        },
+    };
+    const Parsing = struct {
+        index: usize = 0,
+        line: u32,
+        col: u32,
+        codepoints: CodepointList,
+        char_spans: SpanList,
+        unicode: Unicode = .ordinary,
+
+        fn retire(self: *Parsing, releases: *heap.ReleaseDomain) void {
+            self.codepoints.retire(releases);
+            self.char_spans.retire(releases);
+        }
+    };
+    const AllocatedCodepoints = struct {
+        parsing: Parsing,
+        codepoints: []u32,
+    };
+    const Copying = struct {
+        parsing: Parsing,
+        codepoints: []u32,
+        spans: []Span,
+        iterator: CodepointList.Iterator,
+        index: usize = 0,
+    };
+    const State = union(enum) {
+        parsing: Parsing,
+        allocate_codepoints: Parsing,
+        allocate_spans: AllocatedCodepoints,
+        copy_codepoints: Copying,
+        copy_spans: struct {
+            parsing: Parsing,
+            codepoints: []u32,
+            spans: []Span,
+            iterator: SpanList.Iterator,
+            index: usize = 0,
+        },
+        materialize: struct {
+            codepoints: []u32,
+            spans: []Span,
+            materializer: storage.CodepointMaterializer,
+        },
+        spans: struct {
+            spans: []Span,
+            result: Value,
+            writer: reader.SpanTable.PutCursor,
+        },
+        complete,
+
+        fn retire(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .parsing, .allocate_codepoints => |*parsing| parsing.retire(releases),
+                .allocate_spans => |*allocated| {
+                    allocator.free(allocated.codepoints);
+                    allocated.parsing.retire(releases);
+                },
+                .copy_codepoints => |*copy| {
+                    allocator.free(copy.spans);
+                    allocator.free(copy.codepoints);
+                    copy.parsing.retire(releases);
+                },
+                .copy_spans => |*copy| {
+                    allocator.free(copy.spans);
+                    allocator.free(copy.codepoints);
+                    copy.parsing.retire(releases);
+                },
+                .materialize => |*materialization| {
+                    materialization.materializer.retire(releases);
+                    allocator.free(materialization.spans);
+                    allocator.free(materialization.codepoints);
+                },
+                .spans => |*span_state| {
+                    span_state.writer.deinit();
+                    releases.releaseValue(span_state.result);
+                    allocator.free(span_state.spans);
+                },
+                .complete => {},
+            }
+        }
+    };
 
     fn init(
         allocator: std.mem.Allocator,
@@ -558,155 +633,198 @@ const StringBuilder = struct {
             .spans = spans,
             .provenance_namespace = provenance_namespace,
             .word_scope = word_scope,
-            .line = token.span.line,
-            .col = token.span.col + 1,
-            .codepoints = .init(allocator),
-            .char_spans = .init(allocator),
+            .state = .{ .parsing = .{
+                .line = token.span.line,
+                .col = token.span.col + 1,
+                .codepoints = .init(allocator),
+                .char_spans = .init(allocator),
+            } },
         };
     }
     fn deinit(self: *StringBuilder, releases: *heap.ReleaseDomain) void {
         self.retire(releases);
     }
     fn retire(self: *StringBuilder, releases: *heap.ReleaseDomain) void {
-        if (self.materializer) |*materializer| materializer.retire(releases);
-        if (self.span_writer) |*writer| writer.deinit();
-        if (self.result) |item| releases.releaseValue(item);
-        if (self.codepoint_array) |items| self.allocator.free(items);
-        if (self.span_array) |items| self.allocator.free(items);
-        self.codepoints.retire(releases);
-        self.char_spans.retire(releases);
+        self.state.retire(releases, self.allocator);
     }
-    fn bump(self: *StringBuilder) u21 {
-        const length = std.unicode.utf8ByteSequenceLength(self.token.bytes[self.index]) catch
+    fn bump(self: *StringBuilder, parsing: *Parsing) u21 {
+        const length = std.unicode.utf8ByteSequenceLength(self.token.bytes[parsing.index]) catch
             @panic("validated string token contains an invalid UTF-8 start byte");
-        const codepoint = std.unicode.utf8Decode(self.token.bytes[self.index..][0..length]) catch
+        const codepoint = std.unicode.utf8Decode(self.token.bytes[parsing.index..][0..length]) catch
             @panic("validated string token contains invalid UTF-8");
-        self.index += length;
+        parsing.index += length;
         if (codepoint == '\n') {
-            self.line += 1;
-            self.col = 1;
-        } else self.col += 1;
+            parsing.line += 1;
+            parsing.col = 1;
+        } else parsing.col += 1;
         return codepoint;
     }
-    fn append(self: *StringBuilder, codepoint: u32, span: Span) error{OutOfMemory}!void {
-        try self.codepoints.append(codepoint);
-        try self.char_spans.append(span);
+    fn append(parsing: *Parsing, codepoint: u32, span: Span) error{OutOfMemory}!void {
+        try parsing.codepoints.append(codepoint);
+        try parsing.char_spans.append(span);
     }
     fn failUnknown(self: *StringBuilder, diag: *reader.Diag, codepoint: u21, span: Span) error{Parse} {
         _ = self;
         diag.setFmt(span, "unknown string escape `\\{u}`", .{codepoint});
         return error.Parse;
     }
-    fn parseOne(self: *StringBuilder, diag: *reader.Diag) (error{ OutOfMemory, Parse })!void {
-        if (self.unicode_mode) {
-            if (self.index == self.token.bytes.len) {
-                diag.set(self.unicode_span, "unclosed Unicode escape; expected `}`");
-                return error.Parse;
-            }
-            const codepoint = self.bump();
-            if (codepoint == '}') {
-                if (self.unicode_digits == 0 or self.unicode_digits > 6 or
-                    self.unicode_value > 0x10ffff or
-                    (self.unicode_value >= 0xd800 and self.unicode_value <= 0xdfff))
-                {
-                    diag.set(self.unicode_span, "invalid Unicode escape");
+    const StringParseProgress = enum { pending, complete };
+    fn parseOne(
+        self: *StringBuilder,
+        parsing: *Parsing,
+        diag: *reader.Diag,
+    ) (error{ OutOfMemory, Parse })!StringParseProgress {
+        switch (parsing.unicode) {
+            .escape => |*unicode| {
+                if (parsing.index == self.token.bytes.len) {
+                    diag.set(unicode.span, "unclosed Unicode escape; expected `}`");
                     return error.Parse;
                 }
-                try self.append(self.unicode_value, self.unicode_span);
-                self.unicode_mode = false;
-                return;
-            }
-            if (codepoint > 0x7f or !std.ascii.isHex(@intCast(codepoint))) {
-                diag.setFmt(self.unicode_span, "invalid character `{u}` in string", .{codepoint});
-                return error.Parse;
-            }
-            self.unicode_digits += 1;
-            if (self.unicode_digits > 6) return;
-            self.unicode_value = self.unicode_value * 16 +
-                @as(u32, std.fmt.charToDigit(@intCast(codepoint), 16) catch
-                    @panic("validated Unicode escape contains a non-hex digit"));
-            return;
+                const codepoint = self.bump(parsing);
+                if (codepoint == '}') {
+                    if (unicode.digits == 0 or unicode.digits > 6 or
+                        unicode.value > 0x10ffff or
+                        (unicode.value >= 0xd800 and unicode.value <= 0xdfff))
+                    {
+                        diag.set(unicode.span, "invalid Unicode escape");
+                        return error.Parse;
+                    }
+                    try append(parsing, unicode.value, unicode.span);
+                    parsing.unicode = .ordinary;
+                    return .pending;
+                }
+                if (codepoint > 0x7f or !std.ascii.isHex(@intCast(codepoint))) {
+                    diag.setFmt(unicode.span, "invalid character `{u}` in string", .{codepoint});
+                    return error.Parse;
+                }
+                unicode.digits += 1;
+                if (unicode.digits <= 6)
+                    unicode.value = unicode.value * 16 +
+                        @as(u32, std.fmt.charToDigit(@intCast(codepoint), 16) catch
+                            @panic("validated Unicode escape contains a non-hex digit"));
+                return .pending;
+            },
+            .ordinary => {},
         }
-        if (self.index == self.token.bytes.len) {
-            self.codepoint_array = try self.allocator.alloc(u32, self.codepoints.count);
-            self.span_array = try self.allocator.alloc(Span, self.char_spans.count);
-            self.codepoint_iterator = self.codepoints.iterator();
-            self.span_iterator = self.char_spans.iterator();
-            self.phase = .copy_codepoints;
-            return;
+        if (parsing.index == self.token.bytes.len) return .complete;
+        const span: Span = .{ .line = parsing.line, .col = parsing.col };
+        const next = self.bump(parsing);
+        if (next != '\\') {
+            try append(parsing, next, span);
+            return .pending;
         }
-        const span: Span = .{ .line = self.line, .col = self.col };
-        const next = self.bump();
-        if (next != '\\') return self.append(next, span);
-        if (self.index == self.token.bytes.len) {
+        if (parsing.index == self.token.bytes.len) {
             diag.set(self.token.span, "unclosed string escape");
             return error.Parse;
         }
-        const escaped = self.bump();
+        const escaped = self.bump(parsing);
         const codepoint: u32 = switch (escaped) {
             '\\' => '\\',
             '"' => '"',
             'n' => '\n',
             't' => '\t',
-            'u' => if (self.index != self.token.bytes.len and self.token.bytes[self.index] == '{') {
-                _ = self.bump();
-                self.unicode_mode = true;
-                self.unicode_value = 0;
-                self.unicode_digits = 0;
-                self.unicode_span = span;
-                return;
+            'u' => if (parsing.index != self.token.bytes.len and self.token.bytes[parsing.index] == '{') {
+                _ = self.bump(parsing);
+                parsing.unicode = .{ .escape = .{ .span = span } };
+                return .pending;
             } else return self.failUnknown(diag, escaped, span),
             else => return self.failUnknown(diag, escaped, span),
         };
-        try self.append(codepoint, span);
+        try append(parsing, codepoint, span);
+        return .pending;
     }
-    fn advance(self: *StringBuilder, diag: *reader.Diag) (error{ OutOfMemory, Parse })!ScalarProgress {
-        return switch (self.phase) {
-            .parse => result: {
-                try self.parseOne(diag);
-                break :result .pending;
-            },
-            .copy_codepoints => if (self.codepoint_iterator.?.next()) |item| result: {
-                self.codepoint_array.?[self.copy_index] = item.*;
-                self.copy_index += 1;
-                break :result .pending;
-            } else result: {
-                self.copy_index = 0;
-                self.phase = .copy_spans;
-                break :result .pending;
-            },
-            .copy_spans => if (self.span_iterator.?.next()) |item| result: {
-                self.span_array.?[self.copy_index] = item.*;
-                self.copy_index += 1;
-                break :result .pending;
-            } else result: {
-                self.materializer = .initCode(
-                    self.allocator,
-                    self.codepoint_array.?,
-                    self.provenance_namespace,
-                );
-                self.phase = .materialize;
-                break :result .pending;
-            },
-            .materialize => switch (try self.materializer.?.advance(1)) {
+    fn advance(
+        self: *StringBuilder,
+        releases: *heap.ReleaseDomain,
+        diag: *reader.Diag,
+    ) (error{ OutOfMemory, Parse })!ScalarProgress {
+        return switch (self.state) {
+            .parsing => |*parsing| switch (try self.parseOne(parsing, diag)) {
                 .pending => .pending,
-                .complete => |item| result: {
-                    self.result = item;
-                    self.materializer.?.deinit();
-                    self.materializer = null;
-                    self.span_writer = .init(self.spans, self.allocator, item.list, self.span_array.?);
-                    self.phase = .spans;
+                .complete => result: {
+                    const moved = parsing.*;
+                    self.state = .{ .allocate_codepoints = moved };
                     break :result .pending;
                 },
             },
-            .spans => switch (try self.span_writer.?.advance()) {
+            .allocate_codepoints => |*parsing| result: {
+                const codepoints = try self.allocator.alloc(u32, parsing.codepoints.count);
+                const moved = parsing.*;
+                self.state = .{ .allocate_spans = .{
+                    .parsing = moved,
+                    .codepoints = codepoints,
+                } };
+                break :result .pending;
+            },
+            .allocate_spans => |*allocated| result: {
+                const spans = try self.allocator.alloc(Span, allocated.parsing.char_spans.count);
+                const parsing = allocated.parsing;
+                const codepoints = allocated.codepoints;
+                self.state = .{ .copy_codepoints = .{
+                    .parsing = parsing,
+                    .codepoints = codepoints,
+                    .spans = spans,
+                    .iterator = parsing.codepoints.iterator(),
+                } };
+                break :result .pending;
+            },
+            .copy_codepoints => |*copy| if (copy.iterator.next()) |item| result: {
+                copy.codepoints[copy.index] = item.*;
+                copy.index += 1;
+                break :result .pending;
+            } else result: {
+                const parsing = copy.parsing;
+                const codepoints = copy.codepoints;
+                const spans = copy.spans;
+                self.state = .{ .copy_spans = .{
+                    .parsing = parsing,
+                    .codepoints = codepoints,
+                    .spans = spans,
+                    .iterator = parsing.char_spans.iterator(),
+                } };
+                break :result .pending;
+            },
+            .copy_spans => |*copy| if (copy.iterator.next()) |item| result: {
+                copy.spans[copy.index] = item.*;
+                copy.index += 1;
+                break :result .pending;
+            } else result: {
+                const codepoints = copy.codepoints;
+                const spans = copy.spans;
+                const materializer = storage.CodepointMaterializer.initCode(
+                    self.allocator,
+                    codepoints,
+                    self.provenance_namespace,
+                );
+                copy.parsing.retire(releases);
+                self.state = .{ .materialize = .{
+                    .codepoints = codepoints,
+                    .spans = spans,
+                    .materializer = materializer,
+                } };
+                break :result .pending;
+            },
+            .materialize => |*materialization| switch (try materialization.materializer.advance(1)) {
+                .pending => .pending,
+                .complete => |item| result: {
+                    const spans = materialization.spans;
+                    materialization.materializer.deinit();
+                    self.allocator.free(materialization.codepoints);
+                    self.state = .{ .spans = .{
+                        .spans = spans,
+                        .result = item,
+                        .writer = .init(self.spans, self.allocator, item.list, spans),
+                    } };
+                    break :result .pending;
+                },
+            },
+            .spans => |*span_state| switch (try span_state.writer.advance()) {
                 .pending => .pending,
                 .complete => result: {
-                    self.span_writer.?.deinit();
-                    self.span_writer = null;
-                    const item = self.result.?;
-                    self.result = null;
-                    self.phase = .complete;
+                    const item = span_state.result;
+                    span_state.writer.deinit();
+                    self.allocator.free(span_state.spans);
+                    self.state = .complete;
                     break :result .{ .complete = item };
                 },
             },
@@ -1252,7 +1370,7 @@ const ParserCursor = struct {
         };
         const progress: ScalarProgress = switch (scalar.*) {
             .atom => |*builder| try builder.advance(self.diag),
-            .string => |*builder| try builder.advance(self.diag),
+            .string => |*builder| try builder.advance(self.releases, self.diag),
             .character => |*builder| try builder.advance(self.diag),
         };
         return switch (progress) {
