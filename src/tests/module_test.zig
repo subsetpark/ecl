@@ -53,6 +53,15 @@ fn expectErrorContains(
     for (needles) |needle| try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), needle) != null);
 }
 
+fn unpublish(scope: *env.Scope, name: intern.NamespaceName) env.BindError!bool {
+    var cursor = scope.unpublishWordCursor(name);
+    defer cursor.deinit();
+    while (true) switch (try cursor.advance()) {
+        .pending => {},
+        .complete => |removed| return removed,
+    };
+}
+
 fn errorField(allocator: std.mem.Allocator, error_value: value.Value, name: []const u8) !?value.Value {
     return dict.symbolField(allocator, error_value, try intern.intern(name));
 }
@@ -163,7 +172,7 @@ test "module names: branded factories enforce the reader symbol grammar" {
     _ = try intern.internModuleName("valid.module-name");
 }
 
-test "env: new names bump the shape generation and rebinding does not" {
+test "env: creating and removing names bump the shape generation and rebinding does not" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();
     defer host.cleanup().drain();
@@ -181,16 +190,20 @@ test "env: new names bump the shape generation and rebinding does not" {
     try std.testing.expectEqual(@as(u64, 1), environment.shapeGeneration());
     _ = try scope.publisher().module.publish(second, binding.module(effect.effect, .public));
     try std.testing.expectEqual(@as(u64, 2), environment.shapeGeneration());
-    // Creating a name publishes a shape; rebinding one replaces its cell in
-    // place and publishes none. That asymmetry is why this counter is named
-    // for shapes rather than for mutation: it is not a "did anything change"
-    // signal and nothing may read it as one.
+    // Creating or removing a name publishes a shape; rebinding one replaces
+    // its cell in place and publishes none. That asymmetry is why this counter
+    // is named for shapes rather than for mutation: it is not a "did anything
+    // change" signal and nothing may read it as one.
     _ = try scope.publisher().module.publish(first, binding.module(effect.effect, .public));
     try std.testing.expectEqual(@as(u64, 2), environment.shapeGeneration());
+    try std.testing.expect(try unpublish(&scope, first));
+    try std.testing.expectEqual(@as(u64, 3), environment.shapeGeneration());
+    try std.testing.expect(!(try unpublish(&scope, first)));
+    try std.testing.expectEqual(@as(u64, 3), environment.shapeGeneration());
     const names = try environment.namesOwned(std.testing.allocator);
     defer std.testing.allocator.free(names);
     std.mem.sort(u32, names, {}, std.sort.asc(u32));
-    var expected = [_]u32{ intern.namespaceId(first), intern.namespaceId(second) };
+    var expected = [_]u32{intern.namespaceId(second)};
     std.mem.sort(u32, &expected, {}, std.sort.asc(u32));
     try std.testing.expectEqualSlices(u32, &expected, names);
     scope.publisher().module.freeze();
@@ -198,6 +211,7 @@ test "env: new names bump the shape generation and rebinding does not" {
         error.Frozen,
         scope.publisher().module.publish(first, binding.module(effect.effect, .public)),
     );
+    try std.testing.expectError(error.Frozen, unpublish(&scope, second));
 }
 
 test "module: long definition names stay within the cancellation bound" {
@@ -366,13 +380,11 @@ fn envWorker(context: EnvThreadContext) void {
     }
 }
 
-/// Distinct interned names for shape-history churn. Creating a name is the
-/// only production path that publishes a new environment shape — rebinding an
-/// existing name replaces its cell in place — so a shape-history property has
-/// to walk a pool of fresh names. That is why the churn counts here are
-/// smaller than the retired `use`-order edits they replace: each new name
-/// republishes a cloned name map, making the pass quadratic in publications
-/// where a use edit was linear.
+/// Distinct interned names for growing-state shape-history churn. Creating or
+/// removing a name publishes a new environment shape, while rebinding an
+/// existing name replaces its cell in place. This property intentionally
+/// grows the current shape, so it walks fresh names; each publication clones a
+/// larger map, making the pass quadratic in publications.
 const NamePool = struct {
     allocator: std.mem.Allocator,
     names: []intern.NamespaceName,
@@ -632,11 +644,28 @@ test "environment and registry retirement stays bounded after a delayed reader d
         defer binding.release(releases);
         _ = try scope.publisher().top.publish(binding_name, binding.top());
 
+        // A production lookup cursor keeps the removed shape and its cell
+        // alive until it finishes. Re-publication uses a distinct cell, while
+        // the delayed cursor must still observe the old complete binding.
+        var delayed_removed = environment.sessionView().directLookupCursor(
+            intern.namespaceId(binding_name),
+        );
+        try std.testing.expect(try unpublish(&scope, binding_name));
+        _ = try scope.publisher().top.publish(binding_name, binding.top());
+        const delayed_binding = while (true) switch (delayed_removed.advance()) {
+            .pending => {},
+            .complete => |maybe_binding| break maybe_binding.?,
+        };
+        var old_binding = delayed_binding;
+        old_binding.deinit();
+        delayed_removed.deinit();
+        host.cleanup().drain();
+
         // One public shape lease deliberately delays reclamation while a long
         // shape history accumulates. Releasing it must transfer the whole
         // history to bounded retirement work rather than freeing it on the
-        // reader's stack. The names are distinct because that is the only
-        // production path that publishes a shape.
+        // reader's stack. Distinct names make every shape larger than the last
+        // so this covers growing-state history separately from unset churn.
         const shape_churn = try NamePool.init(allocator, "bounded-shape-churn", 256);
         defer shape_churn.deinit();
         var delayed = environment.sessionView().acquireShape();
@@ -670,6 +699,8 @@ test "environment and registry retirement stays bounded after a delayed reader d
 
         for (0..128) |index| {
             _ = try scope.publisher().top.publish(binding_name, binding.top());
+            try std.testing.expect(try unpublish(&scope, binding_name));
+            _ = try scope.publisher().top.publish(binding_name, binding.top());
             try commitEmptyModule(&registry, module_name);
             try registry.alias(
                 alias_name,
@@ -680,9 +711,12 @@ test "environment and registry retirement stays bounded after a delayed reader d
         host.cleanup().drain();
         const warmed_live_bytes = counting.total_requested_bytes;
 
-        // Rebinding, re-registration, and alias replacement only: this batch
-        // states a bound, and creating names would grow live state instead.
+        // Rebinding, removal/re-creation of one name, re-registration, and
+        // alias replacement only: this batch states a bound, while creating
+        // distinct names would grow live state instead.
         for (0..2048) |index| {
+            _ = try scope.publisher().top.publish(binding_name, binding.top());
+            try std.testing.expect(try unpublish(&scope, binding_name));
             _ = try scope.publisher().top.publish(binding_name, binding.top());
             try commitEmptyModule(&registry, module_name);
             try registry.alias(

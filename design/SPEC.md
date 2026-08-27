@@ -344,6 +344,11 @@ always applies it. Values are bound by capturing them in a body.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete binding snapshot: omitting an effect or docstring clears the
   old one. Code holding the old body keeps running it safely.
+- `'name unset` and `'name undef` are exact aliases. They remove a binding
+  only from the current writable scope and otherwise do nothing. Removing a
+  shadow reveals the next binding in the ordinary parent/core lookup chain;
+  it never mutates that parent. The name must be unqualified and non-reserved,
+  under the same namespace validation as `def`.
 - `defp`/`setp` are the private forms, legal only inside a module body
   (see Modules); at top level they are errors.
 - Because `set`/`setp` are sugar, their failures are raised by the words
@@ -2848,6 +2853,11 @@ in order. Equivalent to `((keep) dip keep) dip call`.
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
 `'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, or `'task`.
 
+### undef
+`( name -- )` — Remove a direct binding from the current scope, or do nothing
+when that scope does not bind the name. An exact alias of `unset`; removing a
+local shadow may reveal a parent or core binding.
+
 ### unappend
 `( list -- initial last )` — Split a nonempty list into its initial
 elements and last element. Equivalent to `reverse uncons reverse swap`.
@@ -2882,6 +2892,11 @@ slot's turn. See Modules.
 construction body a unit plan holds. Whether a transformed body is still module
 text is answered the same way as for any other value: by whether the reader
 wrote it. `'type` for anything but a plan. See Seeding a unit.
+
+### unset
+`( name -- )` — Remove a direct binding from the current scope, or do nothing
+when that scope does not bind the name. An exact alias of `undef`; removing a
+local shadow may reveal a parent or core binding.
 
 ### vals
 `( dict -- values )` — Values in insertion order. Defined in ecl.

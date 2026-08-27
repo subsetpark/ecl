@@ -31,6 +31,8 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]Definition{
         .{ .name = "def", .primitive = bind(.def) },
         .{ .name = "defp", .primitive = bind(.defp) },
+        .{ .name = "unset", .primitive = unbind },
+        .{ .name = "undef", .primitive = unbind },
         .{ .name = "doc", .primitive = doc },
         .{ .name = "which", .primitive = which },
         .{ .name = "see", .primitive = see },
@@ -83,6 +85,67 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
         } } else .{ .validate_name = .init(name) }),
     });
 }
+
+fn unbind(evaluator: *Machine) MachineError!void {
+    const name = try evaluator.popSymbol();
+    try evaluator.startDriver(UnbindDriver{
+        .scope = evaluator.currentScope(),
+        .state = .init(.{ .validate_name = .init(name) }),
+    });
+}
+
+const UnbindDriver = struct {
+    scope: *env.Scope,
+    state: heap.Owned(State),
+
+    const State = union(enum) {
+        validate_name: intern.NamespaceCursor,
+        unpublishing: heap.Owned(env.Scope.UnpublishCursor),
+
+        pub fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .validate_name => {},
+                .unpublishing => |*cursor| cursor.deinit(releases, allocator),
+            }
+        }
+    };
+
+    pub fn advance(evaluator: *Machine, self: *UnbindDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+            .validate_name => |*validation| switch (validation.advance()) {
+                .pending => {},
+                .complete => |maybe_name| {
+                    const name = maybe_name orelse return evaluator.fail(
+                        .domain,
+                        "unset/undef requires an unqualified, non-reserved name",
+                    );
+                    self.state.borrowMut().* = .{ .unpublishing = .init(
+                        self.scope.unpublishWordCursor(name),
+                    ) };
+                },
+            },
+            .unpublishing => |*cursor| switch (cursor.borrowMut().advance() catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Frozen => return evaluator.fail(
+                    .domain,
+                    "module environments are immutable after registration",
+                ),
+            }) {
+                .pending => {},
+                .complete => return .completed,
+            },
+        };
+        return .yielded;
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
 
 const DefineDriver = struct {
     mode: Mode,

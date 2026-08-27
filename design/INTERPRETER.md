@@ -478,10 +478,17 @@ primitives, operationalized as two rules:
   and compiled form. Omitting metadata clears it in the new
   snapshot; extant leases retain the old snapshot's body and metadata
   until release. Every future resolution heals by construction, so late
-  binding needs zero invalidation. Creating a name publishes a new immutable
-  shape and bumps `shapeGeneration`; rebinding an existing name replaces its
-  cell in place and deliberately does not, which is why that counter is named
-  for shapes and is not a "has anything changed" signal. **The iron law for
+  binding needs zero invalidation. Creating or removing a name publishes a new
+  immutable shape and bumps `shapeGeneration`; rebinding an existing name
+  replaces its cell in place and deliberately does not, which is why that
+  counter is named for shapes and is not a "has anything changed" signal.
+  `unset` and `undef` are the same direct-scope removal operation: absence is a
+  no-op, and removing a shadow never grants mutation authority over its parent.
+  Each shape independently owns references to every cell it names. A filtered
+  removal shape therefore leaves delayed readers' cells alive through their
+  old shape leases, while bounded shape retirement releases one cell edge per
+  turn; after readers drain, retained cells and shapes are bounded by current
+  state rather than definition/removal history. **The iron law for
   any future cache: hold the cell, re-read its interior every execution;
   never cache a resolution.**
 - **A module's construction boundary passes values, never environments.** An
