@@ -53,15 +53,15 @@
     Run it before every commit and after every patch in a stack. Iterate faster
     still with `zig build` plus real behavior against `./zig-out/bin/ecl`, and
     `zig build check` when all you need is "does the tree still compile".
-  - **CI: `.builds/ci.yml`.** The complete matrix in Debug and ReleaseSafe, plus
+  - **CI: `.github/workflows/ci.yml`.** The complete matrix in Debug and ReleaseSafe, plus
     PTY, native, fuzz, worker-count, differential, TSan, lint, and terminal
     acceptance. Do not run this locally. `zig build test` alone is a five-minute
     round trip after a one-line change, and re-running the matrix by hand
     replaces CI's evidence with a slower copy of it.
-    Use the authenticated `hut builds` commands to list, inspect, and manage
-    SourceHut jobs; do not scrape the builds website or guess job URLs. Start
-    with `hut builds list ~subsetpark --count <n>` and inspect a selected job
-    with `hut builds show <job-id>`.
+    Use the authenticated GitHub CLI to list, inspect, and manage workflow
+    runs; do not scrape the Actions website or guess run URLs. Start with
+    `gh run list --workflow ci.yml --limit <n>` and inspect a selected run with
+    `gh run view <run-id> --log-failed`.
   - **Release candidate.** The exhaustive initialized-Session `zig build
     test-oom` sweep and the complete ReleaseFast suite, run once against a
     candidate commit.

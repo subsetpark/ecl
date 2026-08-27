@@ -594,7 +594,7 @@ pub fn build(b: *std.Build) void {
         );
         acceptance_step.dependOn(&release_required.step);
     } else {
-        // SourceHut runs manifest tasks sequentially. The preceding named CI
+        // GitHub Actions runs the workflow gates sequentially. The preceding named CI
         // gates already own the full behavioral, PTY, native, worker-count,
         // OOM, differential, TSan, and lint matrices; replaying them here
         // would add no evidence. This target owns only the M13-specific
@@ -630,7 +630,7 @@ pub fn build(b: *std.Build) void {
     // cross-home effect/TCO walk, the maximum-nesting formatter case, and the
     // twenty-thousand-deep recursion. None of those is the check that catches
     // an ordinary edit. This tier is what a developer runs on every commit
-    // instead; CI (`.builds/ci.yml`) owns the complete matrix, and the
+    // instead; CI (`.github/workflows/ci.yml`) owns the complete matrix, and the
     // release-candidate matrix owns the exhaustive initialized-Session OOM
     // sweep plus the full ReleaseFast suite.
     //

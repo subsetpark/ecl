@@ -18,7 +18,7 @@ Building requires Zig 0.16.0, as pinned by `build.zig.zon` and CI.
 The default install prefix is the repository's `zig-out` directory:
 
 ```sh
-git clone https://git.sr.ht/~subsetpark/ecl
+git clone https://github.com/subsetpark/ecl.git
 cd ecl
 zig build install -Doptimize=ReleaseSafe
 ./zig-out/bin/ecl --version

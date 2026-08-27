@@ -2078,7 +2078,7 @@ elements add work but no allocation site.
 **Terminal acceptance topology.** `zig build acceptance` rejects Debug builds
 and owns only the M13-specific ReleaseSafe assertions: the public
 definition/module retention soak, the installed-binary soul check, bounded
-display rendering, and the source architecture audit. The SourceHut manifest
+display rendering, and the source architecture audit. The GitHub Actions workflow
 runs it last. Earlier sequential tasks remain the owners of the general
 behavioral, PTY, native, worker-count, fuzz, differential, TSan, and lint
 evidence; terminal acceptance does not replay those matrices. The exhaustive
