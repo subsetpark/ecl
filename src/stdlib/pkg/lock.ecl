@@ -181,7 +181,7 @@
    lock wrap
    (|lock| 'lock lock 'lines [])
    infra
-   dict-of
+   dict.from-flat
    lock 'requires at pkg.data.sorted-entries
    swap (tree-requirer) fold
    'lines at
@@ -227,7 +227,7 @@
    lock target path 3 pack
    (|lock target path| 'lock lock 'target target 'path path 'results [])
    infra
-   dict-of
+   dict.from-flat
    lock 'requires at current {} at-or pkg.data.sorted-entries
    swap (path-edge) fold
    'results at)
@@ -271,7 +271,7 @@
   lock wrap
   (|lock| 'lock lock 'nodes [])
   infra
-  dict-of
+  dict.from-flat
   path swap (render-path-node) fold
   'nodes at
   " -> " join)
@@ -295,7 +295,7 @@
   lock 'packages at dict.keys module (pkg.name.owns?) partial filter
   dup empty? not
   'domain error.new "no locked package owns the requested module" error.with-message
-  'data 'module module pair dict-of put
+  'data 'module module pair dict.from-flat put
   assert
   "" (longer-owner) fold
   lock swap [] lock 'root at paths-from

@@ -14,7 +14,7 @@
  (key -- : "Raise an inert-data error for a dict entry.")
  (|key|
   'domain error.new "a manifest or lock holds only inert data" error.with-message
-  'key key pair dict-of
+  'key key pair dict.from-flat
   error.with-data
   raise)
  'offending defp

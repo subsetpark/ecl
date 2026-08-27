@@ -106,7 +106,7 @@ pub const Operation = union(enum) {
                 // `split`, `join`, and `format` read two sized operands; the
                 // rest dispatch on their collection alone.
                 .split, .join, .format => .two,
-                .put, .to_dict, .del, .str => .one,
+                .put, .del, .str => .one,
             },
             .random => .one,
         };
@@ -738,10 +738,7 @@ const text_rows = [_]Row{
         // a boxed spine or a keyed collection stores through the generic path
     },
     .{
-        .operations = only(.{
-            Operation{ .text = .to_dict },
-            Operation{ .text = .del },
-        }),
+        .operations = only(.{Operation{ .text = .del }}),
         .left = any_aggregate,
         .class = .generic_fallback,
         // dict identity hashing and key order are whole-value properties

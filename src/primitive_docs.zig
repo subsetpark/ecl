@@ -36,7 +36,6 @@ const entries = [_]Metadata{
     .{ .name = "parse", .effect = "string -- quotation", .text = "Parse source text into an unevaluated quotation." },
     .{ .name = "parse-int", .effect = "string -- integer", .text = "Parse one ECL integer literal without evaluating source text." },
     .{ .name = "parse-float", .effect = "string -- float", .text = "Parse one ECL numeric literal and return its floating-point value." },
-    .{ .name = "dict-of", .effect = "entries -- dict", .text = "Build a dictionary from a flat list of adjacent key and value entries." },
     .{ .name = "@attempt", .effect = "unit-input -- result", .text = "Run a quotation or unit plan in a fresh unit and return an ok or error result dictionary; observationally `@spawn await`." },
     .{ .name = "seed", .effect = "values quotation -- unit-plan", .text = "Seal a values list and a construction body into one immutable unit plan, holding both separately." },
     .{ .name = "unseed", .effect = "unit-plan -- values quotation", .text = "Return the exact values list and construction body a unit plan holds." },
@@ -137,7 +136,6 @@ const entries = [_]Metadata{
     .{ .name = "group", .effect = "list -- dict", .text = "Group equal list values into a dictionary of zero-based index lists." },
 
     .{ .name = "put", .effect = "collection key value -- collection", .text = "Functionally update a list index or dictionary key." },
-    .{ .name = "to-dict", .effect = "keys values -- dict", .text = "Build a dictionary from conforming key and value lists." },
     .{ .name = "del", .effect = "collection key -- collection", .text = "Functionally remove an in-bounds list index or a dictionary key; a missing dictionary key is unchanged." },
     .{ .name = "split", .effect = "string separator -- parts", .text = "Split a string at every occurrence of a separator; an empty separator yields its Unicode scalar strings." },
     .{ .name = "join", .effect = "strings separator -- string", .text = "Join a list of strings with a separator string." },

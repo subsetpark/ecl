@@ -326,12 +326,6 @@ index or a dictionary key. List indices must be nonnegative integers within
 the list; an invalid index is `'domain`. A missing dictionary key leaves the
 dictionary unchanged.
 
-### dict-of
-`( entries -- dict )` — Build a dict from one flat, even-length list by
-pairing adjacent entries; executes nothing. The runtime counterpart of
-the `{…}` literal: `'total 3 4 + pair dict-of` is `{'total 7}`. Duplicate
-keys error.
-
 ### dip
 `( x q -- … x )` — *Inline.* Run a quotation beneath a protected top
 value: `q` runs with `x` removed, then `x` returns. Equivalent to
@@ -778,10 +772,6 @@ preorder.
 `( n q -- ... )` — *Inline.* Run the quotation `n` times; `n` must be a
 nonnegative int. Tail-call optimized.
 
-### to-dict
-`( keys values -- dict )` — Dict from two conforming lists; duplicate
-keys error.
-
 ### tri
 `( x p q r -- ... )` — *Inline.* Apply three quotations to the same input
 in order. Equivalent to `((keep) dip keep) dip call`.
@@ -940,10 +930,10 @@ quoting is `'parse`.
 ## dict
 
 These operations preserve the language's immutable, insertion-ordered
-dictionary semantics. Core `dict-of` builds from one flat adjacent-entry list
-and `to-dict` builds from parallel key/value lists; `from-pairs` supplies the
-association-list construction shape. All constructors reject duplicate keys
-instead of silently choosing a winner.
+dictionary semantics. The constructor family accepts flat adjacent entries,
+parallel key/value lists, association lists, or one shared value for a key
+list. All constructors reject duplicate keys instead of silently choosing a
+winner.
 
 ### drop
 `( dict keys -- dict )` — Remove entries named by a key list, ignoring absent
@@ -953,9 +943,19 @@ keys and preserving the relative order of every retained entry.
 `( dict predicate -- dict )` — Call a `( key value -- bool )` predicate in
 insertion order and retain the entries for which it returns 1.
 
+### from-flat
+`( entries -- dict )` — Build a dictionary from one flat, even-length list by
+pairing adjacent entries without executing them. This is the runtime
+counterpart of the `{…}` literal: `'total 3 4 + pair dict.from-flat` is
+`{'total 7}`. An odd entry count is `'contract`; duplicate keys are `'domain`.
+
 ### from-keys
 `( keys value -- dict )` — Build a dictionary assigning one value to every
 distinct key. Duplicate keys are `'domain`.
+
+### from-lists
+`( keys values -- dict )` — Build a dictionary from parallel conforming key
+and value lists. Unequal lengths are `'shape`; duplicate keys are `'domain`.
 
 ### from-pairs
 `( pairs -- dict )` — Build a dictionary from a list of exact `[key value]`

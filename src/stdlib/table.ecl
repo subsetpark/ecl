@@ -83,7 +83,7 @@
   'type error.new "table.from-rows expects every row to be a list" error.with-message assert
   rows names (len swap len =) partial all?
   'shape error.new "every row must have one cell per column name" error.with-message assert
-  names rows names len transpose to-dict)
+  names rows names len transpose dict.from-lists)
  'from-rows def
 
  ### def from-header-rows
@@ -122,7 +122,7 @@
   assert
   records first dict.keys
   records first dict.keys records (record-column) partial each
-  to-dict)
+  dict.from-lists)
  'from-records def
 
  ### def rows
@@ -138,7 +138,7 @@
  ### def records
  (table -- records :
   "Return one record per row, with keys in column order. A zero-row table returns an empty list.")
- (checked dup dict.keys swap rows swap (swap to-dict) partial each)
+ (checked dup dict.keys swap rows swap (swap dict.from-lists) partial each)
  'records def
 
  ### def column
@@ -189,7 +189,7 @@
   'domain error.new "table.select requires existing column names" error.with-message assert
   names
   names table (swap at) partial each
-  to-dict)
+  dict.from-lists)
  'select def
 
  ### def rename
@@ -207,7 +207,7 @@
   table dict.keys mapping (swap dup at-or) partial each
   dup distinct len over len =
   'domain error.new "table.rename would collide two columns onto one name" error.with-message assert
-  table dict.vals to-dict)
+  table dict.vals dict.from-lists)
  'rename def
 
  ### def with-column
@@ -246,7 +246,7 @@
 
  ### defp name-set
  (names -- set : "Build a dictionary for whole-name membership tests.")
- (|names| names names (pop 1) each to-dict)
+ (|names| names names (pop 1) each dict.from-lists)
  'name-set defp
 
  ### defp exclude
@@ -268,7 +268,7 @@
   'shape error.new "a table mask must match the table's row count" error.with-message assert
   table dict.keys
   table dict.vals mask selected (at) partial each
-  to-dict)
+  dict.from-lists)
  'where def
 
  # --- grouping, aggregation, and joins -------------------------------------
@@ -299,7 +299,7 @@
 
  ### defp global-group
  (table -- groups : "Return one group containing every row index.")
- (|table| [] wrap table height range wrap to-dict)
+ (|table| [] wrap table height range wrap dict.from-lists)
  'global-group defp
 
  ### def group-by
@@ -378,7 +378,7 @@
   groups names key-columns
   specs table groups (aggregate-column) partial partial each
   cat
-  to-dict)
+  dict.from-lists)
  'aggregate-build defp
 
  ### def aggregate

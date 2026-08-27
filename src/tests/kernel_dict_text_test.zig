@@ -13,11 +13,11 @@ test "dict-text: polymorphic collection updates preserve ownership" {
     );
 }
 
-test "dict-text: to-dict and polymorphic list updates" {
+test "dict-text: dict.from-lists and polymorphic list updates" {
     try helper.expectStack(
         "1 type 1.0 type \\a type 'a type (missing) first type [] type {} type " ++
             "['a 1] str " ++
-            "['a 'b] [1 2] to-dict [1 2 3] 1 9 put [1 2 3] dup 1 9 put swap " ++
+            "['a 'b] [1 2] dict.from-lists [1 2 3] 1 9 put [1 2 3] dup 1 9 put swap " ++
             "[1 2 3] 1 del \"abc\" 0 del",
         "'int 'float 'char 'symbol 'word 'list 'dict " ++
             "\"('a 1)\" " ++
@@ -25,16 +25,16 @@ test "dict-text: to-dict and polymorphic list updates" {
     );
     try helper.expectErrors(&.{
         .{
-            .name = "to-dict requires conforming lists",
-            .source = "['a] [1 2] to-dict",
+            .name = "dict.from-lists requires conforming lists",
+            .source = "['a] [1 2] dict.from-lists",
             .kind = "shape",
-            .word = "to-dict",
+            .word = "dict.from-lists",
         },
         .{
-            .name = "to-dict requires distinct keys",
-            .source = "['a 'a] [1 2] to-dict",
+            .name = "dict.from-lists requires distinct keys",
+            .source = "['a 'a] [1 2] dict.from-lists",
             .kind = "domain",
-            .word = "to-dict",
+            .word = "dict.from-lists",
         },
         .{
             .name = "put index must be in bounds",
@@ -79,30 +79,30 @@ test "dict-text: to-dict and polymorphic list updates" {
     );
 }
 
-test "dict-text: dict-of converts one flat list without evaluation" {
+test "dict-text: dict.from-flat converts one flat list without evaluation" {
     try helper.expectStack(
-        "'total 3 4 + pair dict-of",
+        "'total 3 4 + pair dict.from-flat",
         "{'total 7}",
     );
-    try helper.expectStack("[plus +] dict-of", "{plus +}");
+    try helper.expectStack("[plus +] dict.from-flat", "{plus +}");
     try helper.expectErrors(&.{
         .{
-            .name = "dict-of requires an even item count",
-            .source = "[1] dict-of",
+            .name = "dict.from-flat requires an even item count",
+            .source = "[1] dict.from-flat",
             .kind = "contract",
-            .word = "dict-of",
+            .word = "dict.from-flat",
         },
         .{
-            .name = "dict-of rejects numerically duplicate keys",
-            .source = "[1 one 1.0 two] dict-of",
+            .name = "dict.from-flat rejects numerically duplicate keys",
+            .source = "[1 one 1.0 two] dict.from-flat",
             .kind = "domain",
-            .word = "dict-of",
+            .word = "dict.from-flat",
         },
         .{
-            .name = "dict-of requires a list",
-            .source = "1 dict-of",
+            .name = "dict.from-flat requires a list",
+            .source = "1 dict.from-flat",
             .kind = "type",
-            .word = "dict-of",
+            .word = "dict.from-flat",
         },
     });
 }

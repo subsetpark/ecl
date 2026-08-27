@@ -93,7 +93,7 @@ binder   :=  "|" name+ "|"           # names: distinct unqualified symbols
   are stored as word values — `{foo bar}` stores the word `bar` under the
   word key `foo` without resolving either name. An odd form count and a
   duplicate key are parse errors. `{}` is the empty dict. When entries
-  require computation, build a flat entry list and use `dict-of`.
+  require computation, build a flat entry list and use `dict.from-flat`.
 - The binder is the locals sugar: `(|lo hi| hi lo - rand lo +)`,
   `(|x| x x *) each`. It is legal only immediately after `(` or `[` and is
   desugared to point-free code before the list value exists — the stored

@@ -181,7 +181,6 @@ pub const OrderOp = enum {
 
 pub const TextOp = enum {
     put,
-    to_dict,
     del,
     split,
     join,
@@ -191,7 +190,6 @@ pub const TextOp = enum {
     pub fn spelling(self: TextOp) []const u8 {
         return switch (self) {
             .put => "put",
-            .to_dict => "to-dict",
             .del => "del",
             .split => "split",
             .join => "join",

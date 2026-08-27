@@ -326,48 +326,6 @@ const NumericParseDriver = struct {
         };
     }
 };
-fn dictOf(evaluator: *Machine) MachineError!void {
-    var entries = try evaluator.popValue();
-    defer entries.deinit();
-    if (entries.borrow() != .list) return evaluator.typeError("a flat key/value list");
-    const count: usize = @intCast(entries.borrow().list.length());
-    if (count % 2 != 0) {
-        return evaluator.fail(.contract, "dict-of requires an even-length key/value list");
-    }
-    const pairs = try evaluator.allocator().alloc(dict.Pair, count / 2);
-    try evaluator.startDriver(DictOfDriver{
-        .entries = .init(entries.take()),
-        .pairs = .init(pairs),
-    });
-}
-
-const DictOfDriver = struct {
-    pub const ownership: heap.DriverOwnership = .fields;
-    entries: heap.Owned(Value),
-    pairs: heap.Owned([]dict.Pair),
-    index: usize = 0,
-    materializer: ?heap.Owned(dict.Materializer) = null,
-
-    pub fn advance(evaluator: *Machine, self: *DictOfDriver) MachineError!machine.WorkProgress {
-        try evaluator.pollKernel();
-        if (self.materializer == null) {
-            const pairs = self.pairs.borrow();
-            const end = @min(self.index + machine.kernel_poll_quantum, pairs.len);
-            while (self.index != end) : (self.index += 1) pairs[self.index] = .{
-                list.atUnchecked(self.entries.borrow(), self.index * 2),
-                list.atUnchecked(self.entries.borrow(), self.index * 2 + 1),
-            };
-            if (self.index != pairs.len) return .yielded;
-            self.materializer = .init(try .init(evaluator.allocator(), pairs, true));
-            return .yielded;
-        }
-        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
-            .duplicate_key => evaluator.fail(.domain, "dict-of received a duplicate key"),
-            .complete => |dictionary| .{ .output = dictionary },
-        };
-    }
-};
 fn attempt(evaluator: *Machine) MachineError!void {
     var input = try evaluator.popUnitInput();
     defer input.deinit(evaluator.releaseDomain());

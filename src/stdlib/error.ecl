@@ -45,7 +45,7 @@
  (kind -- error : "Build an error dictionary from a kind symbol.")
  (dup type 'symbol match?
   {'kind 'type 'msg "error.new expects a kind symbol"} assert
-  'kind swap pair dict-of)
+  'kind swap pair dict.from-flat)
  'new def
 
  ### def with-message

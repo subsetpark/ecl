@@ -47,6 +47,16 @@ pub const words = [_]env.BuiltinWord{
         .primitive = dict_kernels.mergeForModule,
     },
     .{
+        .name = "from-flat",
+        .doc = "( entries -- dict ) Build a dictionary from one flat adjacent key/value list.",
+        .primitive = fromFlat,
+    },
+    .{
+        .name = "from-lists",
+        .doc = "( keys values -- dict ) Build a dictionary from parallel key and value lists.",
+        .primitive = dict_kernels.fromListsForModule,
+    },
+    .{
         .name = "from-pairs",
         .doc = "( pairs -- dict ) Build a dictionary from distinct two-element key/value pairs in list order.",
         .primitive = fromPairs,
@@ -166,6 +176,49 @@ fn pairs(evaluator: *Machine) MachineError!void {
     });
 }
 
+fn fromFlat(evaluator: *Machine) MachineError!void {
+    var entries = try evaluator.popValue();
+    defer entries.deinit();
+    if (entries.borrow() != .list) return evaluator.typeError("a flat key/value list");
+    const count: usize = @intCast(entries.borrow().list.length());
+    if (count % 2 != 0) {
+        return evaluator.fail(.contract, "dict.from-flat requires an even-length key/value list");
+    }
+    const flat_pairs = try evaluator.allocator().alloc(dict_storage.Pair, count / 2);
+    try evaluator.startDriver(FromFlatDriver{
+        .entries = .init(entries.take()),
+        .pairs = .init(flat_pairs),
+    });
+}
+
+const FromFlatDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    entries: heap.Owned(Value),
+    pairs: heap.Owned([]dict_storage.Pair),
+    index: usize = 0,
+    materializer: ?heap.Owned(storage.DictMaterializer) = null,
+
+    pub fn advance(evaluator: *Machine, self: *FromFlatDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (self.materializer == null) {
+            const flat_pairs = self.pairs.borrow();
+            const end = @min(self.index + machine.kernel_poll_quantum, flat_pairs.len);
+            while (self.index != end) : (self.index += 1) flat_pairs[self.index] = .{
+                list.atUnchecked(self.entries.borrow(), self.index * 2),
+                list.atUnchecked(self.entries.borrow(), self.index * 2 + 1),
+            };
+            if (self.index != flat_pairs.len) return .yielded;
+            self.materializer = .init(try .init(evaluator.allocator(), flat_pairs, true));
+            return .yielded;
+        }
+        return switch (try self.materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .duplicate_key => evaluator.fail(.domain, "dict.from-flat received a duplicate key"),
+            .complete => |dictionary| .{ .output = dictionary },
+        };
+    }
+};
+
 fn fromPairs(evaluator: *Machine) MachineError!void {
     var pairs_value = try evaluator.popValue();
     defer pairs_value.deinit();
@@ -189,7 +242,7 @@ fn fromPairs(evaluator: *Machine) MachineError!void {
         "dict.from-pairs expects two-element pairs",
     );
     defer shape_failure.deinit();
-    var build = try quotation(evaluator, &.{ try word("raze"), try word("dict-of") });
+    var build = try quotation(evaluator, &.{ try word("raze"), try word("dict.from-flat") });
     defer build.deinit();
     var valid_list = try quotation(evaluator, &.{
         try word("dup"),
@@ -229,7 +282,7 @@ fn fromKeys(evaluator: *Machine) MachineError!void {
         discard_key.borrow(),
         try word("partial"),
         try word("each"),
-        try word("to-dict"),
+        try word("dict.from-lists"),
     });
 }
 
@@ -353,7 +406,7 @@ fn map(evaluator: *Machine) MachineError!void {
         try word("dict.pairs"),
         apply_entry.borrow(),
         try word("each"),
-        try word("to-dict"),
+        try word("dict.from-lists"),
     });
 }
 
@@ -370,7 +423,7 @@ fn mapValues(evaluator: *Machine) MachineError!void {
         try word("dict.vals"),
         transform.borrow(),
         try word("each"),
-        try word("to-dict"),
+        try word("dict.from-lists"),
     });
 }
 

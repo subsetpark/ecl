@@ -142,7 +142,7 @@
   version wrap url append hash append
   (|version url hash| 'version version 'url url 'hash hash)
   infra
-  dict-of
+  dict.from-flat
   pkg.manifest.validate-requirement)
  'requirement-checked defp
 
@@ -307,7 +307,7 @@
   package destination pair
   (|package destination| 'package package 'path destination)
   infra
-  dict-of
+  dict.from-flat
   error.with-data
   raise)
  'offline-missing defp
@@ -339,7 +339,7 @@
   store offline pair
   (|store offline| 'catalog {} 'seen [] 'store store 'offline offline)
   infra
-  dict-of
+  dict.from-flat
   root discover-manifest
   'catalog at)
  'discover defp

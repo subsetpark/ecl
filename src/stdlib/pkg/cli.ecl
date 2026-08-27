@@ -24,13 +24,13 @@
    name root 2 pack
    (|name root| 'name name 'path root)
    infra
-   dict-of
+   dict.from-flat
    error.with-data
    assert
    name wrap
    (|name| 'format 1 'name name 'version "0.1.0" 'requires {})
    infra
-   dict-of
+   dict.from-flat
    pkg.manifest.write
    root manifest-path
    pkg.store.write-new

@@ -513,7 +513,7 @@ test "allocation: generic membership holds its recorded cost" {
 /// One of them has since been looked at, and the answer is worth keeping. `del`
 /// spending eight allocations to produce an empty dict read as the most
 /// suspicious number here; it is not `del`'s. Building an empty dict costs
-/// eight whatever produces it -- `[] [] to-dict` spends the same eight, in the
+/// eight whatever produces it -- `[] [] dict.from-lists` spends the same eight, in the
 /// same sizes -- because a dict is several heap objects even when it holds
 /// nothing. Making that cheaper is a question about the representation, a
 /// shared empty dict or arrays allocated on first use, and not about any

@@ -1454,7 +1454,7 @@ a word in the prelude when its definition in ecl is compact, or when its
 performance does not justify a host idiom; keep a word entirely primitive
 only when its source definition would be substantial and its performance
 characteristics justify the host implementation (`zip-with`, `range`,
-`to-dict`, `del`, `dict.has?`, `dict.merge`). Recognition is the third option and
+`dict.from-lists`, `del`, `dict.has?`, `dict.merge`). Recognition is the third option and
 the one for a definition that is both compact and hot: `dip` reaches a
 host implementation without becoming one, which also keeps it a source
 binding for the patterns that guard on it. Prelude words therefore stay
@@ -1697,8 +1697,9 @@ honest source with no public dual representation.
   native words carry, exactly as source module words are, and `json` and
   `http` state their stack shape in prose instead.
 - **`dict` uses the existing mixed host/hosted module pattern.** Direct
-  observers and rebuilds (`keys`, `vals`, `has?`, and right-biased `merge`)
-  reuse the bounded host kernels under qualified exports. Derived operations
+  observers and rebuilds (`keys`, `vals`, `has?`, right-biased `merge`,
+  `from-flat`, and `from-lists`) reuse bounded host drivers under qualified
+  exports; no constructor backend remains globally reachable. Derived operations
   schedule ordinary ECL quotations from their callbacks, as derived `io`
   operations do. `merge-with` is the exceptional quotation-dependent rebuild:
   one owned state alternates bounded key search/materialization drivers with

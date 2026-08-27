@@ -68,7 +68,7 @@ test "dict module: construction accepts pairs and repeated values" {
             .name = "from-pairs rejects duplicate keys",
             .source = "[['a 1] ['a 2]] dict.from-pairs",
             .kind = "domain",
-            .word = "dict-of",
+            .word = "dict.from-flat",
         },
     });
 }
@@ -165,6 +165,8 @@ test "dict module: dictionary words no longer occupy the global namespace" {
         .{ .name = "merge", .source = "merge", .kind = "undefined-word", .word = "merge" },
         .{ .name = "vals", .source = "vals", .kind = "undefined-word", .word = "vals" },
         .{ .name = "pairs", .source = "pairs", .kind = "undefined-word", .word = "pairs" },
+        .{ .name = "dict-of", .source = "dict-of", .kind = "undefined-word", .word = "dict-of" },
+        .{ .name = "to-dict", .source = "to-dict", .kind = "undefined-word", .word = "to-dict" },
         .{
             .name = "keys-exactly?",
             .source = "keys-exactly?",
@@ -176,8 +178,9 @@ test "dict module: dictionary words no longer occupy the global namespace" {
 
 test "dict module: every public operation carries reflective documentation" {
     try support.expectStack(
-        "['dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.merge 'dict.from-pairs " ++
-            "'dict.from-keys 'dict.keys-exactly? 'dict.update 'dict.update-or 'dict.map " ++
+        "['dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.merge 'dict.from-flat " ++
+            "'dict.from-lists 'dict.from-pairs 'dict.from-keys 'dict.keys-exactly? " ++
+            "'dict.update 'dict.update-or 'dict.map " ++
             "'dict.map-values 'dict.filter 'dict.reject 'dict.take 'dict.drop 'dict.split " ++
             "'dict.merge-with] (doc len 0 >) all?",
         "1",

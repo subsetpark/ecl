@@ -310,7 +310,7 @@
 
 ### def fail
 (: "Raise a user-kind error whose message is the supplied value.")
-(wrap ('kind 'user 'msg) swap compose dict-of raise)
+(wrap ('kind 'user 'msg) swap compose dict.from-flat raise)
 'fail def
 
 ### def find

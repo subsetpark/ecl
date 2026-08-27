@@ -1072,7 +1072,7 @@ test "module: every container the reader built inside a body is the module's tex
     try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[0].int);
     try expectOk(&runtime, "((99) 'k defp {'a (k)} 'd setp ( -- n ) (d 'a at call) 'go def) 'dl @defm dl.go");
     try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[1].int);
-    try expectOk(&runtime, "((99) 'k defp ('a) ((k)) to-dict 'd setp ( -- n ) (d 'a at call) 'go def) 'td @defm td.go");
+    try expectOk(&runtime, "((99) 'k defp ('a) ((k)) dict.from-lists 'd setp ( -- n ) (d 'a at call) 'go def) 'td @defm td.go");
     try std.testing.expectEqual(@as(i64, 99), runtime.stackItems()[2].int);
     // And with no private to find, the session binding is still not reachable.
     try expectErrorContains(

@@ -36,14 +36,14 @@
  (values -- result : "Build an ok result from a list of successful stack values.")
  (dup type 'list match?
   'type error.new "result.ok expects a list of success values" error.with-message assert
-  'ok swap pair dict-of)
+  'ok swap pair dict.from-flat)
  'ok def
 
  ### def err
  (error -- result : "Tag an error dict as a failed result.")
  (dup error.valid?
   'type error.new "result.err expects an error dict" error.with-message assert
-  'err swap pair dict-of)
+  'err swap pair dict.from-flat)
  'err def
 
  ### def ok?

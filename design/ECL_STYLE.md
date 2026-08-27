@@ -187,7 +187,7 @@ state wrap
  'root state ['root 'name] at-path
  'packages state selected-packages
  'requires state resolved-requires)
-infra dict-of
+infra dict.from-flat
 ```
 
 This is preferable to a raw sentinel: the quotation supplies a lexical
@@ -196,8 +196,8 @@ it. Use `pair` for two values and `pack` when a literal count is itself the
 clearest description; do not retain a distant count solely to delimit a long
 computed region.
 
-Use `to-dict` when keys and values already exist as parallel lists. Use
-`dict-of` when the natural intermediate form is alternating key and value
+Use `dict.from-lists` when keys and values already exist as parallel lists. Use
+`dict.from-flat` when the natural intermediate form is alternating key and value
 entries. Use `dict.from-pairs` when the natural form is a list of `[key value]`
 associations. Use literal dictionaries for inert fixed data, not for
 expressions that must execute. Dictionary observation and transformation words

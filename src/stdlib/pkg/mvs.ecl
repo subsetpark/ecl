@@ -27,7 +27,7 @@
    'required-package required
    'version version)
   infra
-  dict-of
+  dict.from-flat
   error.with-data
   raise)
  'malformed-version defp
@@ -126,7 +126,7 @@
    'required-package required
    'version version)
   infra
-  dict-of
+  dict.from-flat
   error.with-data
   raise)
  'missing-manifest defp
@@ -164,7 +164,7 @@
    'right-package declarations [1 0] at-path
    'right-hash declarations [1 1] at-path)
   infra
-  dict-of
+  dict.from-flat
   error.with-data
   raise)
  'raise-hash-conflict defp
@@ -184,7 +184,7 @@
  (packages -- : "Raise a requirement-cycle error from sorted package names.")
  (|packages|
   'domain error.new "the package requirement graph has a cycle" error.with-message
-  'packages packages pair dict-of
+  'packages packages pair dict.from-flat
   error.with-data
   raise)
  'raise-cycle-packages defp
@@ -210,7 +210,7 @@
    'left-package pair first
    'right-package pair 1 at)
   infra
-  dict-of
+  dict.from-flat
   error.with-data
   raise)
  'raise-prefix-collision defp
@@ -444,12 +444,12 @@
 
  ### defp selected-packages
  (state -- packages : "Build the selected package map from reached artifact sources.")
- (|state| state selected-names state (selection-pair) partial each raze dict-of)
+ (|state| state selected-names state (selection-pair) partial each raze dict.from-flat)
  'selected-packages defp
 
  ### defp minimum-map
  (manifest -- minimums : "Return one manifest's required names and minimum versions.")
- ('requires at dup dict.keys swap dict.vals ('version at) each to-dict)
+ ('requires at dup dict.keys swap dict.vals ('version at) each dict.from-lists)
  'minimum-map defp
 
  ### defp requires-pair
@@ -464,7 +464,7 @@
  (|state|
   state (['root 'name] at-path) ('root at minimum-map) bi pair wrap
   state selected-names state (requires-pair) partial each
-  cat raze dict-of)
+  cat raze dict.from-flat)
  'resolved-requires defp
 
  ### defp resolved-lock
@@ -479,7 +479,7 @@
    'packages state selected-packages
    'requires state resolved-requires)
   infra
-  dict-of
+  dict.from-flat
   pkg.lock.validate)
  'resolved-lock defp
 
@@ -507,7 +507,7 @@
    'sources {}
    'manifests {})
   infra
-  dict-of
+  dict.from-flat
   root walk-manifest resolved-lock)
  'resolve-validated defp
  ) 'pkg.mvs @defm

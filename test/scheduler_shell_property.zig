@@ -148,7 +148,7 @@ fn runShellScenario(encoded: u16) !void {
         .raise_fairness => {
             try source_buffer.writer.writeAll(
                 "['x] 200000 take 'trace-value set " ++
-                    "(('kind 'custom 'trace trace-value 4 pack dict-of raise) @attempt) @spawn " ++
+                    "(('kind 'custom 'trace trace-value 4 pack dict.from-flat raise) @attempt) @spawn " ++
                     "(7) @spawn pair await-any pop",
             );
             try expected_buffer.writer.writeAll("1\n");

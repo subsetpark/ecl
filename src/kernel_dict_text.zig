@@ -31,7 +31,6 @@ fn bind(comptime operation: Op) env.PrimitiveImpl {
         fn run(evaluator: *Machine) MachineError!void {
             return switch (operation) {
                 .put => putPrimitive(evaluator),
-                .to_dict => toDictPrimitive(evaluator),
                 .del => delPrimitive(evaluator),
                 .split => splitPrimitive(evaluator),
                 .join => joinPrimitive(evaluator),
@@ -488,7 +487,7 @@ const DictPutDriver = struct {
     }
 };
 
-fn toDictPrimitive(evaluator: *Machine) MachineError!void {
+pub fn fromListsForModule(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     var values = try evaluator.popValue();
     defer values.deinit();
@@ -497,17 +496,17 @@ fn toDictPrimitive(evaluator: *Machine) MachineError!void {
     if (keys.borrow() != .list or values.borrow() != .list) return evaluator.typeError("two lists");
     const count: usize = @intCast(keys.borrow().list.length());
     if (values.borrow().list.length() != keys.borrow().list.length()) {
-        return evaluator.fail(.shape, "to-dict requires equal key and value lengths");
+        return evaluator.fail(.shape, "dict.from-lists requires equal key and value lengths");
     }
     const pairs = try evaluator.allocator().alloc(dict.Pair, count);
-    try evaluator.startDriver(ToDictDriver{
+    try evaluator.startDriver(FromListsDriver{
         .keys = .init(keys.take()),
         .values = .init(values.take()),
         .pairs = .init(pairs),
     });
 }
 
-const ToDictDriver = struct {
+const FromListsDriver = struct {
     /// One dict built from two lists, then it publishes.
     pub const inline_driver = true;
     pub const ownership: heap.DriverOwnership = .fields;
@@ -517,7 +516,7 @@ const ToDictDriver = struct {
     index: usize = 0,
     materializer: ?heap.Owned(dict.Materializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *ToDictDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Machine, self: *FromListsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         if (self.materializer == null) {
@@ -534,7 +533,7 @@ const ToDictDriver = struct {
         }
         return switch (try self.materializer.?.borrowMut().advance(budget)) {
             .pending => .yielded,
-            .duplicate_key => evaluator.fail(.domain, "to-dict keys must be distinct"),
+            .duplicate_key => evaluator.fail(.domain, "dict.from-lists keys must be distinct"),
             .complete => |result| completed: {
                 self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.materializer = null;
