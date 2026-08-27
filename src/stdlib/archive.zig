@@ -304,8 +304,6 @@ const UnpackDriver = struct {
     entries: heap.Owned(EntryList),
     state: State,
 
-    result_inputs: ResultInputs = .none,
-
     const Staged = struct {
         result: Value,
         path: heap.Owned([]u8),
@@ -375,12 +373,14 @@ const UnpackDriver = struct {
         end: usize,
         next_offset: usize,
     };
-    const ResultInputs = union(enum) {
-        none,
-        owned: struct {
-            values: []Value,
-            built: usize = 0,
-        },
+    const ResultInputs = struct {
+        values: []Value,
+        built: usize = 0,
+    };
+    const ResultRelease = struct {
+        values: []Value,
+        built: usize,
+        index: usize = 0,
     };
     const PathWork = union(enum) {
         next,
@@ -406,10 +406,18 @@ const UnpackDriver = struct {
         materialize_manifest_text: storage.Utf8Materializer,
         allocate_results,
         materialize_paths: struct {
+            inputs: ResultInputs,
             iterator: EntryList.Iterator,
             work: PathWork = .next,
         },
-        materialize_result: storage.ValueMaterializer,
+        materialize_result: struct {
+            inputs: ResultInputs,
+            materializer: storage.ValueMaterializer,
+        },
+        release_result_inputs: struct {
+            release: ResultRelease,
+            result: Value,
+        },
         complete,
     };
     const Scanning = struct {
@@ -493,11 +501,13 @@ const UnpackDriver = struct {
     };
     const RollbackContext = struct {
         path: heap.Owned([]u8),
-        created_count: usize,
-        seal_created: bool,
+    };
+    const RollbackPlan = union(enum) {
+        entries: usize,
+        seal_then_entries: usize,
     };
     const RollbackWork = union(enum) {
-        seal,
+        seal: usize,
         skip: struct { iterator: EntryList.ReverseIterator, remaining: usize },
         entries: EntryList.ReverseIterator,
         parents: struct {
@@ -509,12 +519,16 @@ const UnpackDriver = struct {
     };
     const CleanupWork = union(enum) {
         entries: EntryList.ReverseIterator,
-        results: struct {
-            values: []Value,
-            built: usize,
-            index: usize = 0,
+        entries_with_results: struct {
+            iterator: EntryList.ReverseIterator,
+            release: ResultRelease,
         },
+        results: ResultRelease,
         finish,
+    };
+    const ScanningRetirement = union(enum) {
+        plain,
+        results: ResultRelease,
     };
     const State = union(enum) {
         parsing: Parsing,
@@ -522,6 +536,7 @@ const UnpackDriver = struct {
         rollback_reopen: struct {
             archive: Archive,
             context: RollbackContext,
+            plan: RollbackPlan,
         },
         rollback: struct {
             archive: Archive,
@@ -530,6 +545,10 @@ const UnpackDriver = struct {
             work: RollbackWork,
         },
         cleanup_archive: Archive,
+        cleanup_archive_with_results: struct {
+            archive: Archive,
+            release: ResultRelease,
+        },
         cleanup: CleanupWork,
     };
 
@@ -538,7 +557,12 @@ const UnpackDriver = struct {
         return switch (self.state) {
             .parsing => |*parsing| self.advanceParsing(evaluator, parsing),
             .active => |*active| self.advanceActive(evaluator, active),
-            .rollback_reopen, .rollback, .cleanup_archive, .cleanup => unreachable,
+            .rollback_reopen,
+            .rollback,
+            .cleanup_archive,
+            .cleanup_archive_with_results,
+            .cleanup,
+            => unreachable,
         };
     }
 
@@ -585,7 +609,15 @@ const UnpackDriver = struct {
                 ),
                 .allocate_results => self.allocateResults(scanning),
                 .materialize_paths => |*paths| self.materializePaths(evaluator, scanning, paths),
-                .materialize_result => |*materializer| self.materializeResult(active, materializer),
+                .materialize_result => |*materialization| materializeResult(
+                    active,
+                    materialization,
+                ),
+                .release_result_inputs => |*release| self.releaseResultInputs(
+                    evaluator,
+                    active,
+                    release,
+                ),
                 .complete => unreachable,
             },
             .publication => |*publication| self.advancePublication(evaluator, &active.archive, publication),
@@ -1207,8 +1239,8 @@ const UnpackDriver = struct {
 
     fn allocateResults(self: *UnpackDriver, scanning: *Scanning) MachineError!machine.WorkProgress {
         const values = try self.allocator.alloc(Value, scanning.context.file_count);
-        self.result_inputs = .{ .owned = .{ .values = values } };
         scanning.work = .{ .materialize_paths = .{
+            .inputs = .{ .values = values },
             .iterator = self.entries.borrow().iterator(),
         } };
         return .yielded;
@@ -1227,11 +1259,11 @@ const UnpackDriver = struct {
             }) {
                 .pending => return .yielded,
                 .complete => |path_value| {
-                    materializer.deinit();
-                    const results = &self.result_inputs.owned;
-                    results.values[results.built] = path_value;
-                    results.built += 1;
+                    var completed = materializer.*;
+                    paths.inputs.values[paths.inputs.built] = path_value;
+                    paths.inputs.built += 1;
                     paths.work = .next;
+                    completed.deinit();
                     return .yielded;
                 },
             },
@@ -1240,8 +1272,11 @@ const UnpackDriver = struct {
         var remaining = work_quantum;
         while (remaining != 0) : (remaining -= 1) {
             const entry = paths.iterator.next() orelse {
-                const values = self.result_inputs.owned.values;
-                scanning.work = .{ .materialize_result = .init(self.allocator, values) };
+                const inputs = paths.inputs;
+                scanning.work = .{ .materialize_result = .{
+                    .inputs = inputs,
+                    .materializer = .init(self.allocator, inputs.values),
+                } };
                 return .yielded;
             };
             if (entry.kind == .directory) continue;
@@ -1252,19 +1287,44 @@ const UnpackDriver = struct {
     }
 
     fn materializeResult(
-        self: *UnpackDriver,
         active: *Active,
-        materializer: *storage.ValueMaterializer,
+        materialization: *@FieldType(ScanWork, "materialize_result"),
     ) MachineError!machine.WorkProgress {
-        _ = self;
-        return switch (try materializer.advance(work_quantum)) {
+        return switch (try materialization.materializer.advance(work_quantum)) {
             .pending => .yielded,
             .complete => |result| result: {
-                materializer.deinit();
-                active.work = .{ .publication = .{ .destination_check = result } };
+                var completed = materialization.materializer;
+                const inputs = materialization.inputs;
+                const next: ActiveWork = .{ .scanning = .{
+                    .work = .{ .release_result_inputs = .{
+                        .release = .{ .values = inputs.values, .built = inputs.built },
+                        .result = result,
+                    } },
+                } };
+                active.work = next;
+                completed.deinit();
                 break :result .yielded;
             },
         };
+    }
+
+    fn releaseResultInputs(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        active: *Active,
+        release: *@FieldType(ScanWork, "release_result_inputs"),
+    ) machine.WorkProgress {
+        if (release.release.index != release.release.built) {
+            evaluator.releaseDomain().releaseValue(
+                release.release.values[release.release.index],
+            );
+            release.release.index += 1;
+            return .yielded;
+        }
+        self.allocator.free(release.release.values);
+        const result = release.result;
+        active.work = .{ .publication = .{ .destination_check = result } };
+        return .yielded;
     }
 
     fn advancePublication(
@@ -1505,9 +1565,8 @@ const UnpackDriver = struct {
                     .archive = archive,
                     .context = .{
                         .path = .init(path),
-                        .created_count = 0,
-                        .seal_created = false,
                     },
+                    .plan = .{ .entries = 0 },
                 } };
             },
             .extract => |*extraction| {
@@ -1519,15 +1578,13 @@ const UnpackDriver = struct {
                 const path = extraction.staged.path.take();
                 const context: RollbackContext = .{
                     .path = .init(path),
-                    .created_count = extraction.created_count,
-                    .seal_created = false,
                 };
                 const dir = extraction.dir;
                 self.state = .{ .rollback = .{
                     .archive = archive,
                     .context = context,
                     .dir = dir,
-                    .work = rollbackEntries(self, context.created_count),
+                    .work = rollbackEntries(self, extraction.created_count),
                 } };
             },
             .seal => |*seal| {
@@ -1536,15 +1593,13 @@ const UnpackDriver = struct {
                 const path = seal.staged.path.take();
                 const context: RollbackContext = .{
                     .path = .init(path),
-                    .created_count = seal.created_count,
-                    .seal_created = true,
                 };
                 const dir = seal.dir;
                 self.state = .{ .rollback = .{
                     .archive = archive,
                     .context = context,
                     .dir = dir,
-                    .work = .seal,
+                    .work = .{ .seal = seal.created_count },
                 } };
             },
             .commit => |*commit_state| {
@@ -1554,9 +1609,11 @@ const UnpackDriver = struct {
                     .archive = archive,
                     .context = .{
                         .path = .init(path),
-                        .created_count = commit_state.created_count,
-                        .seal_created = self.operationMode() == .package_install,
                     },
+                    .plan = if (self.operationMode() == .package_install)
+                        .{ .seal_then_entries = commit_state.created_count }
+                    else
+                        .{ .entries = commit_state.created_count },
                 } };
             },
             .published => |*path| {
@@ -1590,12 +1647,16 @@ const UnpackDriver = struct {
             return false;
         };
         const moved = context.*;
+        const work = switch (reopening.plan) {
+            .entries => |created_count| rollbackEntries(self, created_count),
+            .seal_then_entries => |created_count| RollbackWork{ .seal = created_count },
+        };
         const archive = takeArchive(&reopening.archive);
         self.state = .{ .rollback = .{
             .archive = archive,
             .context = moved,
             .dir = directory,
-            .work = if (moved.seal_created) .seal else rollbackEntries(self, moved.created_count),
+            .work = work,
         } };
         return false;
     }
@@ -1607,10 +1668,10 @@ const UnpackDriver = struct {
         rollback: *@FieldType(State, "rollback"),
     ) bool {
         switch (rollback.work) {
-            .seal => {
+            .seal => |created_count| {
                 rollback.dir.deleteFile(self.io.?, package_seal_name) catch |err|
                     observeCleanupError("remove the package archive seal", err);
-                rollback.work = rollbackEntries(self, rollback.context.created_count);
+                rollback.work = rollbackEntries(self, created_count);
             },
             .skip => |*skip| {
                 if (skip.remaining != 0) {
@@ -1715,19 +1776,42 @@ const UnpackDriver = struct {
         scanning: *Scanning,
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
-    ) void {
-        switch (scanning.work) {
-            .insert_member => |insertion| allocator.free(insertion.entry.path),
-            .materialize_manifest_text => |*materializer| materializer.retire(releases),
-            .materialize_paths => |*paths| switch (paths.work) {
-                .text => |*materializer| materializer.retire(releases),
-                .next => {},
+    ) ScanningRetirement {
+        const retirement: ScanningRetirement = switch (scanning.work) {
+            .insert_member => |insertion| result: {
+                allocator.free(insertion.entry.path);
+                break :result .plain;
             },
-            .materialize_result => |*materializer| materializer.retire(releases),
-            else => {},
-        }
+            .materialize_manifest_text => |*materializer| result: {
+                materializer.retire(releases);
+                break :result .plain;
+            },
+            .materialize_paths => |*paths| result: {
+                switch (paths.work) {
+                    .text => |*materializer| materializer.retire(releases),
+                    .next => {},
+                }
+                break :result .{ .results = .{
+                    .values = paths.inputs.values,
+                    .built = paths.inputs.built,
+                } };
+            },
+            .materialize_result => |*materialization| result: {
+                materialization.materializer.retire(releases);
+                break :result .{ .results = .{
+                    .values = materialization.inputs.values,
+                    .built = materialization.inputs.built,
+                } };
+            },
+            .release_result_inputs => |release| result: {
+                releases.releaseValue(release.result);
+                break :result .{ .results = release.release };
+            },
+            else => .plain,
+        };
         if (scanning.context.pending_path) |*path| path.deinit(releases, allocator);
         scanning.context.pending_path = null;
+        return retirement;
     }
 
     fn retireParsing(
@@ -1792,9 +1876,15 @@ const UnpackDriver = struct {
             .active => |*active| {
                 switch (active.work) {
                     .scanning => |*scanning| {
-                        retireScanning(scanning, releases, allocator);
+                        const retirement = retireScanning(scanning, releases, allocator);
                         const archive = takeArchive(&active.archive);
-                        self.state = .{ .cleanup_archive = archive };
+                        self.state = switch (retirement) {
+                            .plain => .{ .cleanup_archive = archive },
+                            .results => |release| .{ .cleanup_archive_with_results = .{
+                                .archive = archive,
+                                .release = release,
+                            } },
+                        };
                     },
                     .publication => |*publication| self.beginPublicationRetirement(
                         releases,
@@ -1818,22 +1908,31 @@ const UnpackDriver = struct {
                 } };
                 return false;
             },
+            .cleanup_archive_with_results => |*cleanup| {
+                retireArchive(&cleanup.archive, releases, allocator);
+                const release = cleanup.release;
+                self.state = .{ .cleanup = .{ .entries_with_results = .{
+                    .iterator = self.entries.borrow().reverseIterator(),
+                    .release = release,
+                } } };
+                return false;
+            },
             .cleanup => |*cleanup| switch (cleanup.*) {
                 .entries => |*iterator| {
                     if (iterator.next()) |entry| {
                         allocator.free(entry.path);
                         return false;
                     }
-                    switch (self.result_inputs) {
-                        .none => self.state = .{ .cleanup = .finish },
-                        .owned => |owned| {
-                            self.result_inputs = .none;
-                            self.state = .{ .cleanup = .{ .results = .{
-                                .values = owned.values,
-                                .built = owned.built,
-                            } } };
-                        },
+                    self.state = .{ .cleanup = .finish };
+                    return false;
+                },
+                .entries_with_results => |*entries| {
+                    if (entries.iterator.next()) |entry| {
+                        allocator.free(entry.path);
+                        return false;
                     }
+                    const release = entries.release;
+                    self.state = .{ .cleanup = .{ .results = release } };
                     return false;
                 },
                 .results => |*results| {
