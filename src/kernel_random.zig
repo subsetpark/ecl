@@ -3,7 +3,8 @@
 //! Generator state is plain ECL data — a two-int list `[key counter]` — and
 //! every word here is a pure function of it. Identical states therefore
 //! produce identical results, which is what makes these values rather than
-//! effects: a program is reproducible unless it explicitly mixes in `entropy`.
+//! effects: a program is reproducible unless it explicitly mixes in
+//! `rand.entropy`.
 //!
 //! The construction is counter-based rather than iterated: draw `i` comes from
 //! `SplitMix64.init(key +% ((counter + i) *% gamma))`, so element `i` of a
@@ -12,7 +13,7 @@
 //! distinct keys with no coordination.
 //!
 //! **Not cryptographic.** SplitMix64 is a fast mixer with a 64-bit period per
-//! key; `entropy` is the only word that reaches the host CSPRNG.
+//! key; `rand.entropy` is the only word that reaches the host CSPRNG.
 //!
 //! The bounding and float conversion below are deliberately *ours* rather than
 //! `std.Random`'s helpers. std's bounded-int routine documents itself as
@@ -23,7 +24,6 @@ const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
-const env = @import("env.zig");
 const machine = @import("machine.zig");
 const poll_api = @import("poll.zig");
 const support = @import("kernel_support.zig");
@@ -36,28 +36,20 @@ const MachineError = machine.MachineError;
 /// per-counter stride so consecutive counters land in unrelated sub-streams.
 const gamma: u64 = 0x9E3779B97F4A7C15;
 
-/// The sized-operation taxonomy lives in `kernel_support` so the registry in
-/// `kernels.zig` classifies exactly the operations this installer publishes.
-const Op = support.RandomOp;
-
-pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    inline for (std.meta.fields(Op)) |field| {
-        const operation: Op = @enumFromInt(field.value);
-        try core.installBuiltin(operation.spelling(), bind(operation));
-    }
+pub fn intForModule(evaluator: *Machine) MachineError!void {
+    return randInt(evaluator);
 }
 
-fn bind(comptime operation: Op) env.PrimitiveImpl {
-    return struct {
-        fn run(evaluator: *Machine) MachineError!void {
-            return switch (operation) {
-                .rand_int => randInt(evaluator),
-                .rand_ints => randInts(evaluator),
-                .rand_float => randFloat(evaluator),
-                .entropy => entropy(evaluator),
-            };
-        }
-    }.run;
+pub fn intsForModule(evaluator: *Machine) MachineError!void {
+    return randInts(evaluator);
+}
+
+pub fn floatForModule(evaluator: *Machine) MachineError!void {
+    return randFloat(evaluator);
+}
+
+pub fn entropyForModule(evaluator: *Machine) MachineError!void {
+    return entropy(evaluator);
 }
 
 /// One decoded generator state. The ECL representation stays a plain list;

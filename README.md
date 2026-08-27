@@ -210,12 +210,13 @@ cannot be replaced accidentally by a file with the same name.
 | `dict` | Immutable map construction, observation, transformation, selection, and merging |
 | `error` | Structured error construction and inspection |
 | `result` | Validated success and error envelopes |
-| `str` | Text search, replacement, case, trimming, and padding |
+| `str` | Text formatting, search, replacement, case, trimming, and padding |
 | `io` | Terminal, stdin, and UTF-8 file operations |
 | `csv`, `json` | External data formats |
 | `table` | Column-oriented tables represented as ordinary dictionaries |
 | `http` | HTTP GET and POST |
-| `rng` | Explicit-state and module-state random generation |
+| `rand` | Explicit-state random draws and host entropy |
+| `rng` | Durable module-state random generation |
 | `archive` | SHA-256 and atomic validated `.tgz` extraction |
 | `pkg.*` | Package names, versions, manifests, locks, and minimal-version resolution |
 

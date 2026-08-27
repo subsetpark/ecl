@@ -1542,10 +1542,10 @@ test "e2e: entropy is the one draw that differs between processes" {
     // Every other random word is a pure function of its state, so only a real
     // process can show that `entropy` reaches the host and returns something
     // new each time. Two 128-bit keys colliding is not a flake worth guarding.
-    var first = try run(&.{ build_options.ecl_exe, "-e", "entropy io.pp" });
+    var first = try run(&.{ build_options.ecl_exe, "-e", "rand.entropy io.pp" });
     defer first.deinit();
     try first.expect(.{ .exit_code = 0, .stderr = "" });
-    var second = try run(&.{ build_options.ecl_exe, "-e", "entropy io.pp" });
+    var second = try run(&.{ build_options.ecl_exe, "-e", "rand.entropy io.pp" });
     defer second.deinit();
     try second.expect(.{ .exit_code = 0, .stderr = "" });
     try std.testing.expect(!std.mem.eql(u8, first.stdout, second.stdout));
@@ -1556,7 +1556,7 @@ test "e2e: entropy is the one draw that differs between processes" {
         build_options.ecl_exe,
         "-e",
         "'rng.seed 'seed import 'rng.ints 'ints import " ++
-            "entropy dup 'k set seed 100 6 ints 'a set k seed 100 6 ints a match? io.pp",
+            "rand.entropy dup 'k set seed 100 6 ints 'a set k seed 100 6 ints a match? io.pp",
     });
     defer seeded.deinit();
     try seeded.expect(.{ .exit_code = 0, .stdout = "1\n", .stderr = "" });

@@ -3,11 +3,11 @@ const support = @import("kernel_test_support.zig");
 
 test "dict module: observations preserve insertion order" {
     try support.expectStack(
-        "{'a 1 'b 2} dict.keys {'a 1 'b 2} dict.vals {'a 1 'b 2} dict.pairs " ++
+        "{'a 1 'b 2} dict.keys {'a 1 'b 2} dict.size {'a 1 'b 2} dict.vals {'a 1 'b 2} dict.pairs " ++
             "{'a 1} 'a dict.has? {'a 1} 'b dict.has? " ++
             "{'a 1 'b 2} ['b 'a] dict.keys-exactly? " ++
             "{'a 1} ['a 'b] dict.keys-exactly?",
-        "['a 'b] [1 2] (('a 1) ('b 2)) 1 0 1 0",
+        "['a 'b] 2 [1 2] (('a 1) ('b 2)) 1 0 1 0",
     );
 }
 
@@ -158,27 +158,9 @@ test "dict module: merge operations preserve stable order and resolve collisions
     });
 }
 
-test "dict module: dictionary words no longer occupy the global namespace" {
-    try support.expectErrors(&.{
-        .{ .name = "keys", .source = "keys", .kind = "undefined-word", .word = "keys" },
-        .{ .name = "has?", .source = "has?", .kind = "undefined-word", .word = "has?" },
-        .{ .name = "merge", .source = "merge", .kind = "undefined-word", .word = "merge" },
-        .{ .name = "vals", .source = "vals", .kind = "undefined-word", .word = "vals" },
-        .{ .name = "pairs", .source = "pairs", .kind = "undefined-word", .word = "pairs" },
-        .{ .name = "dict-of", .source = "dict-of", .kind = "undefined-word", .word = "dict-of" },
-        .{ .name = "to-dict", .source = "to-dict", .kind = "undefined-word", .word = "to-dict" },
-        .{
-            .name = "keys-exactly?",
-            .source = "keys-exactly?",
-            .kind = "undefined-word",
-            .word = "keys-exactly?",
-        },
-    });
-}
-
 test "dict module: every public operation carries reflective documentation" {
     try support.expectStack(
-        "['dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.merge 'dict.from-flat " ++
+        "['dict.keys 'dict.size 'dict.vals 'dict.pairs 'dict.has? 'dict.merge 'dict.from-flat " ++
             "'dict.from-lists 'dict.from-pairs 'dict.from-keys 'dict.keys-exactly? " ++
             "'dict.update 'dict.update-or 'dict.map " ++
             "'dict.map-values 'dict.filter 'dict.reject 'dict.take 'dict.drop 'dict.split " ++

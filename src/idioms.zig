@@ -9,6 +9,7 @@ const machine = @import("machine.zig");
 const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
 const sequence = @import("kernel_sequence.zig");
+const dict_text = @import("kernel_dict_text.zig");
 const combinators = @import("combinators.zig");
 
 const Value = value.Value;
@@ -23,9 +24,13 @@ pub const DirectOp = enum {
     reverse,
     distinct,
     dip,
+    str_format,
 
     pub fn spelling(self: DirectOp) []const u8 {
-        return @tagName(self);
+        return switch (self) {
+            .str_format => "str.format",
+            else => @tagName(self),
+        };
     }
 };
 pub const Operation = union(enum) {
@@ -42,9 +47,11 @@ pub const Operation = union(enum) {
     }
 };
 pub const BindingKind = enum { builtin, source };
+pub const ExpectedOrigin = enum { trusted, candidate_module };
 pub const ExpectedWord = struct {
     spelling: []const u8,
     binding: BindingKind = .builtin,
+    origin: ExpectedOrigin = .trusted,
 };
 pub const PatternAtom = union(enum) {
     constant,
@@ -163,10 +170,17 @@ const dip_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "compose", .binding = .source } },
     .{ .word = .{ .spelling = "call" } },
 };
+const str_format_pattern = [_]PatternAtom{
+    .{ .word = .{
+        .spelling = "format-valid",
+        .binding = .source,
+        .origin = .candidate_module,
+    } },
+};
 const unary_count = std.meta.fields(numeric.UnaryOp).len;
 const binary_count = std.meta.fields(numeric.BinaryOp).len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 5 + 8 + 14]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 5 + 8 + 15]RegistryEntry = undefined;
     var index: usize = 0;
     for (std.meta.fields(numeric.UnaryOp)) |field| {
         entries[index] = .{
@@ -245,12 +259,16 @@ pub const registry = blk: {
         .{ .operation = .reverse, .pattern = &reverse_pattern },
         .{ .operation = .distinct, .pattern = &distinct_pattern },
         .{ .operation = .dip, .pattern = &dip_pattern },
+        .{ .operation = .str_format, .pattern = &str_format_pattern },
     }) |direct| {
         entries[index] = .{
             .context = .direct,
             .pattern = direct.pattern,
             .operation = .{ .direct = direct.operation },
-            .source_word = direct.operation.spelling(),
+            .source_word = if (direct.operation == .str_format)
+                "format"
+            else
+                direct.operation.spelling(),
         };
         index += 1;
     }
@@ -278,7 +296,9 @@ const Candidate = struct {
     context: Context,
     phrase: Value,
     source_word: ?u32 = null,
+    direct_scope: ?*env.Scope = null,
 };
+
 const Capture = struct {
     constant: ?Value = null,
     active_word: ?u32 = null,
@@ -312,12 +332,16 @@ fn requestCandidate(evaluator: *Machine, request: machine.IdiomRequest) ?Candida
             .direct => |direct| direct.word,
             else => null,
         },
+        .direct_scope = switch (request) {
+            .direct => |direct| direct.scope,
+            else => null,
+        },
     };
 }
 
 const IdiomDriver = struct {
-    /// Started once per core-origin word application, which is every prelude
-    /// word a program calls.
+    /// Started once per trusted source-word application: embedded prelude or
+    /// the nominal embedded standard-library generation.
     pub const inline_driver = true;
 
     candidate: Candidate,
@@ -328,6 +352,7 @@ const IdiomDriver = struct {
     resolution: ?heap.Owned(machine.ResolutionCursor) = null,
     expected: ?env.PrimitiveImpl = null,
     expected_binding: BindingKind = .builtin,
+    expected_origin: ExpectedOrigin = .trusted,
 
     fn rejectEntry(self: *IdiomDriver) void {
         self.entry_index += 1;
@@ -335,6 +360,7 @@ const IdiomDriver = struct {
         self.capture = .{};
         self.expected = null;
         self.expected_binding = .builtin;
+        self.expected_origin = .trusted;
     }
     fn finish(
         self: *IdiomDriver,
@@ -393,13 +419,23 @@ const IdiomDriver = struct {
                             (self.expected == null or resolved.lease.binding.builtin == self.expected.?),
                         .source => resolved.lease.binding == .word,
                     };
-                    if (resolved.origin != .core or !binding_matches) {
+                    const origin_matches = switch (self.expected_origin) {
+                        .trusted => resolved.origin == .core or resolved.origin == .standard_library,
+                        .candidate_module => resolved.origin == .standard_library or
+                            (resolved.origin == .module and
+                                self.candidate.direct_scope != null and
+                                resolved.home != null and
+                                resolved.home.?.scope(evaluator.unit.module_access) ==
+                                    self.candidate.direct_scope.?),
+                    };
+                    if (!origin_matches or !binding_matches) {
                         self.rejectEntry();
                         continue;
                     }
                     self.atom_index += 1;
                     self.expected = null;
                     self.expected_binding = .builtin;
+                    self.expected_origin = .trusted;
                     continue;
                 },
             };
@@ -452,7 +488,7 @@ const IdiomDriver = struct {
                         self.rejectEntry();
                         continue;
                     }
-                    if (!stampOnRunningChain(evaluator, word.scope)) {
+                    if (!stampOnCandidateChain(evaluator, self.candidate, word.scope, .trusted)) {
                         self.rejectEntry();
                         continue;
                     }
@@ -463,7 +499,13 @@ const IdiomDriver = struct {
                         operationPrimitive(entry.operation)
                     else
                         null;
-                    self.resolution = .init(.initAtCurrent(evaluator, word.name));
+                    self.resolution = .init(.init(
+                        evaluator,
+                        word.name,
+                        resolutionScopeForOrigin(evaluator, self.candidate, .trusted),
+                        null,
+                        null,
+                    ));
                 },
                 .word => |expected_word| {
                     const word = if (actual == .word) actual.word else {
@@ -474,7 +516,12 @@ const IdiomDriver = struct {
                         self.rejectEntry();
                         continue;
                     }
-                    if (!stampOnRunningChain(evaluator, word.scope)) {
+                    if (!stampOnCandidateChain(
+                        evaluator,
+                        self.candidate,
+                        word.scope,
+                        expected_word.origin,
+                    )) {
                         self.rejectEntry();
                         continue;
                     }
@@ -483,8 +530,15 @@ const IdiomDriver = struct {
                         self.capture.active_index = @intCast(self.atom_index);
                     }
                     self.expected_binding = expected_word.binding;
+                    self.expected_origin = expected_word.origin;
                     self.expected = null;
-                    self.resolution = .init(.initAtCurrent(evaluator, word.name));
+                    self.resolution = .init(.init(
+                        evaluator,
+                        word.name,
+                        resolutionScopeForOrigin(evaluator, self.candidate, expected_word.origin),
+                        null,
+                        null,
+                    ));
                 },
             }
         }
@@ -523,6 +577,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
         // still names the word that observed it.
         .direct => |operation| switch (operation) {
             .dip => evaluator.available() >= 2 and stack[stack.len - 1] == .list,
+            .str_format => evaluator.available() >= 2,
             else => evaluator.available() >= 1,
         },
     };
@@ -559,6 +614,7 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
         .reverse => sequence.reverseForIdiom(evaluator),
         .distinct => order.distinctForIdiom(evaluator),
         .dip => combinators.dipForIdiom(evaluator),
+        .str_format => dict_text.formatForIdiom(evaluator),
     };
 }
 
@@ -956,10 +1012,26 @@ fn binaryPrimitive(operation: numeric.BinaryOp) env.PrimitiveImpl {
 /// cannot appear on any chain; it is admitted directly, and the untouched
 /// resolution behind this gate still suppresses recognition when anything on the
 /// chain has rebound the name.
-fn stampOnRunningChain(evaluator: *machine.Machine, stamp: u32) bool {
+fn resolutionScopeForOrigin(
+    evaluator: *machine.Machine,
+    candidate: Candidate,
+    expected_origin: ExpectedOrigin,
+) ?*env.Scope {
+    return if (expected_origin == .candidate_module)
+        candidate.direct_scope
+    else
+        evaluator.unit.current.?.resolutionScope();
+}
+
+fn stampOnCandidateChain(
+    evaluator: *machine.Machine,
+    candidate: Candidate,
+    stamp: u32,
+    expected_origin: ExpectedOrigin,
+) bool {
     if (stamp == 0) return true;
     if (@intFromEnum(evaluator.unit.environment.coreScopeId()) == stamp) return true;
-    var node: ?*env.Scope = evaluator.unit.current.?.resolutionScope();
+    var node = resolutionScopeForOrigin(evaluator, candidate, expected_origin);
     while (node) |scope| : (node = scope.parent) {
         if (@intFromEnum(scope.cellId()) == stamp) return true;
     }

@@ -1248,6 +1248,7 @@ const OwnedApplication = enum(usize) {
 const ModuleBoundary = struct {
     image: modules.OwnedImage,
     registration: ?u32,
+    provenance: modules.RegistrationProvenance,
 
     fn deinit(self: ModuleBoundary) void {
         var owned = self.image;
@@ -1428,6 +1429,10 @@ pub const ExecutionSite = struct {
     /// there is no resolution scope, either of which fails the compare, which
     /// is the conservative direction.
     resolution_scope_id: env.ScopeId = .none,
+    /// Authority carried only while evaluating an embedded source module.
+    /// A named module constructed by that source moves it into the immutable
+    /// registration; ordinary source always carries ordinary provenance.
+    registration_provenance: modules.RegistrationProvenance = .ordinary,
 
     fn idOf(scope: ?*env.Scope) env.ScopeId {
         return if (scope) |resolved| resolved.cellId() else .none;
@@ -1464,7 +1469,9 @@ pub const ExecutionSite = struct {
     /// A quotation resolves where its invoker runs, so both scopes are the one
     /// it was handed.
     pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
-        return .resumed(scope, invoker.home());
+        var site = resumed(scope, invoker.home());
+        site.registration_provenance = invoker.site.registration_provenance;
+        return site;
     }
 
     /// An application resuming in `scope` under its launch home. The only
@@ -1653,7 +1660,13 @@ comptime {
     if (@sizeOf(Frame) > 104) @compileError("machine frames must remain at most 104 bytes");
 }
 pub const IdiomRequest = union(enum) {
-    direct: struct { body: *Header, word: u32 },
+    direct: struct {
+        body: *Header,
+        word: u32,
+        /// The trusted source word's defining chain: null for core, the
+        /// standard module image for a shipped source word.
+        scope: ?*env.Scope,
+    },
     each,
     zip_with,
     fold,
@@ -1666,7 +1679,7 @@ pub const IdiomFallback = struct {
     /// allocation. Storing it inline also removes the question a pointer
     /// raised: with every payload here, teardown always retires fields and
     /// never frees storage.
-    pub const storage_len = 32;
+    pub const storage_len = 96;
     storage: [storage_len]u8 align(@alignOf(usize)) = @splat(0),
     run_fn: *const fn (*Machine, ?*anyopaque) MachineError!void,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, ?*anyopaque) void,
@@ -3349,12 +3362,14 @@ pub const Machine = struct {
         fn sourceCompletion(
             self: *AutoLoadDriver,
             transfer: *@FieldType(State, "transfer"),
+            provenance: modules.RegistrationProvenance,
         ) SourceCompletion {
             return .{ .register = .{
                 .loading = transfer.loading.borrowMut().move(),
                 .name = self.name,
                 .path = transfer.path.take(),
                 .request = self.request,
+                .provenance = provenance,
             } };
         }
         pub fn advance(evaluator: *Machine, self: *AutoLoadDriver) MachineError!WorkProgress {
@@ -3698,7 +3713,7 @@ pub const Machine = struct {
                     .native => return self.transferNative(evaluator, transfer),
                     .source => {
                         const candidate = transfer.candidate.take();
-                        const completion = self.sourceCompletion(transfer);
+                        const completion = self.sourceCompletion(transfer, .ordinary);
                         evaluator.retireDriver(self);
                         try evaluator.fileSourceOwned(candidate, null, completion);
                         return .detached;
@@ -3724,7 +3739,7 @@ pub const Machine = struct {
                 .builtin => |words| return self.transferBuiltin(evaluator, transfer, words),
             };
             const source_name = transfer.candidate.take();
-            const completion = self.sourceCompletion(transfer);
+            const completion = self.sourceCompletion(transfer, .standard_library);
             evaluator.retireDriver(self);
             try evaluator.sourceOwned(source_name, text, completion);
             return .detached;
@@ -3774,6 +3789,7 @@ pub const Machine = struct {
             const next = NativeLoadDriver{
                 .name = self.name,
                 .request = self.request,
+                .provenance = .standard_library,
                 .loading = .init(transfer.loading.take()),
                 .path = .init(transfer.path.take()),
                 .state = .init(.{ .validate = .init(loader) }),
@@ -3804,6 +3820,7 @@ pub const Machine = struct {
             const next = NativeLoadDriver{
                 .name = self.name,
                 .request = self.request,
+                .provenance = .ordinary,
                 .loading = .init(transfer.loading.take()),
                 .path = .init(transfer.path.take()),
                 .state = .init(.{ .validate = .init(loader) }),
@@ -3847,6 +3864,7 @@ pub const Machine = struct {
                 self.commit = .init(evaluator.unit.inherited.registry.?.registrationCursor(
                     self.candidate.?.borrow().ref(),
                     self.name,
+                    .standard_library,
                     &evaluator.unit.turn_authority,
                 ));
                 return .yielded;
@@ -3878,6 +3896,7 @@ pub const Machine = struct {
     const NativeLoadDriver = struct {
         name: intern.ModuleName,
         request: QualifiedLoadRequest,
+        provenance: modules.RegistrationProvenance,
         loading: heap.Owned(modules.LoadingLease),
         path: heap.Owned(Value),
         state: heap.Owned(State),
@@ -3967,6 +3986,7 @@ pub const Machine = struct {
                         const cursor = evaluator.unit.inherited.registry.?.registrationCursor(
                             sealed.borrow().ref(),
                             self.name,
+                            self.provenance,
                             &evaluator.unit.turn_authority,
                         );
                         self.state.borrowMut().* = .{ .commit = .{
@@ -4032,6 +4052,7 @@ pub const Machine = struct {
             name: intern.ModuleName,
             path: ?Value,
             request: QualifiedLoadRequest,
+            provenance: modules.RegistrationProvenance,
         },
 
         pub fn deinit(self: *SourceCompletion, releases: *heap.ReleaseDomain) void {
@@ -4159,10 +4180,11 @@ pub const Machine = struct {
                             try evaluator.callOwned(root_header);
                         },
                         .register => |*register| {
-                            const site = ExecutionSite.inheriting(
+                            var site = ExecutionSite.inheriting(
                                 evaluator.unit.current.?,
                                 evaluator.unit.current.?.scope(),
                             );
+                            site.registration_provenance = register.provenance;
                             heap.incRef(root_header);
                             const preserves_caller = switch (register.request.continuation) {
                                 .replay, .dispatch => true,
@@ -5478,6 +5500,7 @@ pub const Machine = struct {
             .cursor = .init(registry.registrationCursor(
                 image,
                 name,
+                .ordinary,
                 &self.unit.turn_authority,
             )),
         });
@@ -5496,6 +5519,7 @@ pub const Machine = struct {
             return self.fail(.domain, "module registry is unavailable");
         };
         const word = self.unit.active_word;
+        const provenance = self.unit.current.?.site.registration_provenance;
         var candidate = try registry.createImage();
         errdefer candidate.deinit();
         // Attribution asks one question, of the exact designated body. The
@@ -5519,6 +5543,7 @@ pub const Machine = struct {
                     return self.openImageBoundary(
                         &candidate,
                         registration,
+                        provenance,
                         word,
                         runnable.take(),
                     );
@@ -5528,6 +5553,7 @@ pub const Machine = struct {
                         .target = .init(.{ .image = .{
                             .candidate = candidate.move(),
                             .registration = registration,
+                            .provenance = provenance,
                         } }),
                         .body = .init(runnable.take()),
                     } }),
@@ -5556,6 +5582,7 @@ pub const Machine = struct {
                         .target = .init(.{ .image = .{
                             .candidate = candidate.move(),
                             .registration = registration,
+                            .provenance = provenance,
                         } }),
                         .cursor = .init(cursor.take()),
                     } }),
@@ -5575,6 +5602,7 @@ pub const Machine = struct {
         self: *Machine,
         candidate: *modules.OwnedImage,
         registration: ?u32,
+        provenance: modules.RegistrationProvenance,
         word: intern.TraceWord,
         body_header: *Header,
     ) MachineError!void {
@@ -5588,7 +5616,11 @@ pub const Machine = struct {
             return error.OutOfMemory;
         }
         try self.openBoundary(
-            .{ .module = .{ .image = candidate.move(), .registration = registration } },
+            .{ .module = .{
+                .image = candidate.move(),
+                .registration = registration,
+                .provenance = provenance,
+            } },
             @intCast(self.unit.stack.items.len),
             word,
             body_header,
@@ -6898,16 +6930,30 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     switch (resolved.lease.binding) {
         .word => |body| {
             const body_header = env.quotationHeader(body);
-            if (resolved.origin == .core) {
+            if (resolved.origin == .core or resolved.origin == .standard_library) {
                 heap.incRef(body_header);
                 const fallback: DirectWordFallback = .{
                     .body = .init(body_header),
                     .word = resolved.trace_word,
+                    .home = resolved.home,
+                    .effect = if (cross_home_effect) |effect|
+                        .init(RetainedEffect.init(effect))
+                    else
+                        null,
+                    .pin = if (resolved.home) |home|
+                        .init(home.pin(self.unit.module_access))
+                    else
+                        null,
                 };
                 return self.continueWithIdiom(
-                    // Only a core-origin word reaches recognition, and a core
-                    // word's trace spelling is its own atom.
-                    .{ .direct = .{ .body = body_header, .word = resolved.trace_word.atom() } },
+                    .{ .direct = .{
+                        .body = body_header,
+                        .word = resolved.trace_word.atom(),
+                        .scope = if (resolved.home) |home|
+                            home.scope(self.unit.module_access)
+                        else
+                            null,
+                    } },
                     typedIdiomFallback(fallback),
                 );
             }
@@ -6958,18 +7004,48 @@ fn executeResolved(self: *Machine, resolved: *Resolution) MachineError!void {
     }
 }
 
+const RetainedEffect = struct {
+    effect: env.Effect,
+
+    fn init(effect: env.Effect) RetainedEffect {
+        effect.retain();
+        return .{ .effect = effect };
+    }
+    pub fn deinit(self: *RetainedEffect, releases: *heap.ReleaseDomain) void {
+        self.effect.retire(releases);
+        self.* = undefined;
+    }
+};
+
 const DirectWordFallback = struct {
     body: heap.Owned(*Header),
     word: intern.TraceWord,
+    home: ?*modules.ModuleHome,
+    effect: ?heap.Owned(RetainedEffect),
+    pin: ?heap.Owned(modules.GenerationPin),
     pub fn run(evaluator: *Machine, self: *DirectWordFallback) MachineError!void {
-        // Only a core-origin word reaches idiom recognition, and core alone is
-        // its chain, so this fallback resumes one with no scope.
-        return scheduleWord(evaluator, self.body.borrow(), self.word, null, null, null, null, null);
+        return scheduleWord(
+            evaluator,
+            self.body.borrow(),
+            self.word,
+            self.home,
+            null,
+            if (self.effect) |*owned| owned.borrow().effect else null,
+            if (self.pin) |*owned| owned.take() else null,
+            null,
+        );
     }
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
 pub const ResolutionOrigin = resolution_core.Origin;
+
+fn moduleResolutionOrigin(home: *const modules.ModuleHome) ResolutionOrigin {
+    return switch (home.registrationProvenance()) {
+        .ordinary => .module,
+        .standard_library => .standard_library,
+    };
+}
 
 /// How a module-local definition is spelled when reached through `home`. An
 /// anonymous construction root has no name to qualify with, so code running
@@ -7273,7 +7349,7 @@ pub const ResolutionCursor = struct {
             .borrow_pin = self.takeBorrowPin(),
             .borrowed_cell = self.takeBorrowedCell(),
             .trace_word = if (home) |resolved| homeTraceWord(resolved, local.?) else .plain(self.word),
-            .origin = if (home != null) .module else .direct,
+            .origin = if (home) |resolved| moduleResolutionOrigin(resolved) else .direct,
             // A module-local hit resolves against its image, which the home
             // supplies; anything else resolves against the scope it was found
             // in.
@@ -7297,7 +7373,7 @@ pub const ResolutionCursor = struct {
             .execution_generation = execution_generation,
             .home = home,
             .trace_word = homeTraceWord(home, lease.traceWord().?),
-            .origin = .module,
+            .origin = moduleResolutionOrigin(home),
         };
     }
 
@@ -7627,6 +7703,10 @@ fn scheduleWord(
     else
         self.unit.current.?.scope();
     const home = resolved_home orelse self.unit.current.?.home();
+    const registration_provenance = if (resolved_home == null)
+        self.unit.current.?.site.registration_provenance
+    else
+        modules.RegistrationProvenance.ordinary;
     // Each binding resolves against the chain it was defined in, with no
     // exception. A module word resolves against its home. Anything else
     // resolves against the scope resolution found it in, which is null for a
@@ -7669,6 +7749,7 @@ fn scheduleWord(
             .resolution_scope = resolution_scope,
             .home = home,
             .resolution_scope_id = ExecutionSite.idOf(resolution_scope),
+            .registration_provenance = registration_provenance,
         },
         .traced_word = word,
         .effect_tail = effect_tail,
@@ -7908,7 +7989,10 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
             .image = .init(image.move()),
             .remaining = observed,
             .completion = if (owned.registration) |symbol|
-                .{ .named = .init(symbol) }
+                .{ .named = .{
+                    .cursor = .init(symbol),
+                    .provenance = owned.provenance,
+                } }
             else
                 .value,
         } }),
@@ -8152,7 +8236,11 @@ const ConstructionTarget = union(enum) {
     /// `@attempt`: a child scope on the enclosing chain, created at open time.
     attempt,
     /// `@module`/`@defm`: the candidate image and the name it registers under.
-    image: struct { candidate: modules.OwnedImage, registration: ?u32 },
+    image: struct {
+        candidate: modules.OwnedImage,
+        registration: ?u32,
+        provenance: modules.RegistrationProvenance,
+    },
 
     pub fn deinit(self: *ConstructionTarget) void {
         switch (self.*) {
@@ -8256,6 +8344,7 @@ const ConstructionDriver = struct {
                         try evaluator.openImageBoundary(
                             &owned.candidate,
                             registration,
+                            owned.provenance,
                             self.word,
                             body,
                         );
@@ -8324,13 +8413,17 @@ const ModuleCompletionDriver = struct {
             remaining: usize,
             completion: union(enum) {
                 value,
-                named: intern.ModuleNameCursor,
+                named: struct {
+                    cursor: intern.ModuleNameCursor,
+                    provenance: modules.RegistrationProvenance,
+                },
             },
         },
         value: heap.Owned(modules.SealedImage),
         validate: struct {
             sealed: heap.Owned(modules.SealedImage),
             cursor: intern.ModuleNameCursor,
+            provenance: modules.RegistrationProvenance,
         },
         publish: struct {
             sealed: heap.Owned(modules.SealedImage),
@@ -8375,7 +8468,8 @@ const ModuleCompletionDriver = struct {
                     .value => self.state.borrowMut().* = .{ .value = .init(sealed.take()) },
                     .named => |validation| self.state.borrowMut().* = .{ .validate = .{
                         .sealed = .init(sealed.take()),
-                        .cursor = validation,
+                        .cursor = validation.cursor,
+                        .provenance = validation.provenance,
                     } },
                 }
             },
@@ -8394,6 +8488,7 @@ const ModuleCompletionDriver = struct {
                     const registration = evaluator.unit.inherited.registry.?.registrationCursor(
                         validate.sealed.borrow().ref(),
                         name,
+                        validate.provenance,
                         &evaluator.unit.turn_authority,
                     );
                     self.state.borrowMut().* = .{ .publish = .{

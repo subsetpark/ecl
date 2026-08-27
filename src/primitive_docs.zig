@@ -113,11 +113,6 @@ const entries = [_]Metadata{
     .{ .name = "bnot", .effect = "x -- y", .text = "Invert every bit of an integer pattern pervasively." },
     .{ .name = "bsl", .effect = "x count -- y", .text = "Shift an integer pattern left, truncating bits off the top." },
     .{ .name = "bsr", .effect = "x count -- y", .text = "Shift an integer pattern right, filling zeros from the top." },
-    .{ .name = "rand-int", .effect = "state bound -- state result", .text = "Draw one uniform integer below a positive bound from a generator state." },
-    .{ .name = "rand-ints", .effect = "state count bound -- state results", .text = "Draw a vector of uniform integers below a positive bound from a generator state." },
-    .{ .name = "rand-float", .effect = "state -- state result", .text = "Draw one uniform float in the unit interval from a generator state." },
-    .{ .name = "entropy", .effect = "-- result", .text = "Read one integer of host entropy, the only nondeterministic word." },
-
     .{ .name = "at", .effect = "collection key -- value", .text = "Select a list index or dictionary key, pervading over list indices." },
     .{ .name = "where", .effect = "counts -- indices", .text = "Expand integer counts into their replicated zero-based indices." },
     .{ .name = "in?", .effect = "value list -- bool", .text = "Test whole-value membership, pervading over the sought value and never into the list." },
@@ -140,7 +135,6 @@ const entries = [_]Metadata{
     .{ .name = "split", .effect = "string separator -- parts", .text = "Split a string at every occurrence of a separator; an empty separator yields its Unicode scalar strings." },
     .{ .name = "join", .effect = "strings separator -- string", .text = "Join a list of strings with a separator string." },
     .{ .name = "str", .effect = "value -- string", .text = "Return the canonical printed representation of a value as a string." },
-    .{ .name = "format", .effect = "values template -- string", .text = "Interpolate strings directly and other values canonically into a template's positional placeholders." },
 };
 
 comptime {

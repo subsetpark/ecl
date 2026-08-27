@@ -356,12 +356,20 @@ const ModuleImage = struct {
 /// it publishes and owns everything the image deliberately does not: the name,
 /// the generation number, and the slot lifetime witness that keeps the durable
 /// state and arbiter reachable while old code can still name them.
+/// Nominal publication provenance. Only the embedded-module loader may pass
+/// `standard_library`; every program-facing registration path is ordinary.
+/// Resolution exposes this distinction without exposing a registry, image, or
+/// mutation capability, so optimizers can trust shipped module definitions
+/// without trusting a later replacement registered under the same name.
+pub const RegistrationProvenance = enum { ordinary, standard_library };
+
 const Registration = struct {
     allocator: std.mem.Allocator,
     refs: std.atomic.Value(u32) = .init(1),
     /// One retained image reference held for this generation's whole lifetime.
     image: *ModuleImage,
     name: intern.ModuleName,
+    provenance: RegistrationProvenance,
     generation: u64 = 0,
     /// A provisional registration exists only inside a publication cursor and
     /// is never reachable as a home, which makes `within` at registration
@@ -385,6 +393,7 @@ const Registration = struct {
         allocator: std.mem.Allocator,
         image: *ModuleImage,
         name: intern.ModuleName,
+        provenance: RegistrationProvenance,
     ) error{OutOfMemory}!*Registration {
         const result = try allocator.create(Registration);
         image.retain();
@@ -392,6 +401,7 @@ const Registration = struct {
         result.refs = .init(1);
         result.image = image;
         result.name = name;
+        result.provenance = provenance;
         result.generation = 0;
         result.slot_lifetime = .provisional;
         result.home = .{ .image = image, .registration = result };
@@ -936,6 +946,10 @@ pub const ModuleHome = opaque {
     pub fn generationNumber(self: *const ModuleHome) u64 {
         const registration = self.state().registration orelse return 0;
         return registration.generation;
+    }
+    pub fn registrationProvenance(self: *const ModuleHome) RegistrationProvenance {
+        const registration = self.state().registration orelse return .ordinary;
+        return registration.provenance;
     }
     fn pinInternal(self: *const ModuleHome) GenerationPin {
         self.state().retain();
@@ -2134,6 +2148,7 @@ pub const Registry = enum(usize) {
         /// what the caller does with its own reference.
         image: RetainedImage,
         name: intern.ModuleName,
+        provenance: RegistrationProvenance,
         authority: *TurnAuthority,
         state: State,
         /// The generation record for this publication. It retains the image on
@@ -2153,12 +2168,14 @@ pub const Registry = enum(usize) {
             registry: *Registry,
             image: ImageRef,
             name: intern.ModuleName,
+            provenance: RegistrationProvenance,
             authority: *TurnAuthority,
         ) RegistrationCursor {
             return .{
                 .registry = registry,
                 .image = .retain(image),
                 .name = name,
+                .provenance = provenance,
                 .authority = authority,
                 .state = .{ .maintenance = registry.maintenanceCursor() },
             };
@@ -2218,6 +2235,7 @@ pub const Registry = enum(usize) {
                 self.registry.allocator(),
                 self.image.image(),
                 self.name,
+                self.provenance,
             );
         }
         fn takeRegistration(self: *RegistrationCursor) *Registration {
@@ -2510,9 +2528,10 @@ pub const Registry = enum(usize) {
         self: *Registry,
         image: ImageRef,
         name: intern.ModuleName,
+        provenance: RegistrationProvenance,
         authority: *TurnAuthority,
     ) RegistrationCursor {
-        return .init(self, image, name, authority);
+        return .init(self, image, name, provenance, authority);
     }
 
     /// Cancellation-independent owner of all work after the directory close
@@ -3461,7 +3480,7 @@ pub const testing = if (builtin.is_test) struct {
         name: intern.ModuleName,
     ) CommitError!u64 {
         var authority: TurnAuthority = .available;
-        var cursor = registry.registrationCursor(image, name, &authority);
+        var cursor = registry.registrationCursor(image, name, .ordinary, &authority);
         defer cursor.deinit();
         return poll.driveFallible(u64, &cursor, .{});
     }

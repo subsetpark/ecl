@@ -50,6 +50,20 @@ fn execute(
     var runtime = try ecl.session.Session.init(session_allocator, &.{});
     errdefer runtime.deinit();
     runtime.setIdiomMode(mode);
+    const warmup: ?[]const u8 = if (std.mem.indexOf(u8, source, "str.format") != null)
+        "\"\" str.upper pop"
+    else if (std.mem.indexOf(u8, source, "distinct") != null)
+        "{} dict.keys pop"
+    else
+        null;
+    if (warmup) |stdlib_source| switch (try runtime.runUnit("<idiom-warmup>", stdlib_source)) {
+        .ok => {},
+        .incomplete => return error.TestUnexpectedResult,
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+    };
     const failure = switch (try runtime.runUnit("<idiom-differential>", source)) {
         .ok => null,
         .incomplete => return error.TestUnexpectedResult,
@@ -140,7 +154,10 @@ fn directSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
         .direct => |operation| std.fmt.allocPrint(
             allocator,
             "{s} {s}",
-            .{ directInput(operation, variant), entry.source_word.? },
+            .{
+                directInput(operation, variant),
+                if (operation == .str_format) operation.spelling() else entry.source_word.?,
+            },
         ),
     };
 }
@@ -332,6 +349,13 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .float => "0.5 9 (1 +)",
             .failure => "'sym 9 (1 +)",
         },
+        .str_format => switch (variant) {
+            .atom => "[\"Ada\" 2] \"name={} n={}\"",
+            .empty => "[] \"\"",
+            .spine => "[[1] {'a 2}] \"{} {}\"",
+            .float => "[0.1] \"{}\"",
+            .failure => "[] \"{\"",
+        },
     };
 }
 
@@ -474,6 +498,22 @@ test "idioms: capture shapes preserve generic behavior" {
     // prelude internals, exactly as `table.where` does not become the `where`
     // that `filter` is written against.
     try expectHits("(pop 99) 'first def [1 2 3] 3 (+) partial each", 3);
+}
+
+test "idioms: an ordinary replacement cannot inherit stdlib recognition" {
+    const source =
+        "((pop pop \"ordinary\") 'format-valid defp " ++
+        "(format-valid) 'format def) 'str @defm " ++
+        "[] \"\" str.format";
+    var heap: SessionHeap = .init;
+    defer retireHeap(&heap);
+    var run = try execute(source, .automatic, heap.allocator());
+    defer run.deinit();
+    try std.testing.expect(run.failure == null);
+    try std.testing.expectEqual(@as(u64, 0), run.runtime.lastIdiomHits());
+    var display = try run.runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("\"ordinary\"", display.bytes());
 }
 
 fn expectHits(source: []const u8, expected: u64) !void {

@@ -34,7 +34,7 @@
    pkg.manifest.write
    root manifest-path
    pkg.store.write-new
-   name wrap "initialized ecl.pkg for {}" format io.print)
+   name wrap "initialized ecl.pkg for {}" str.format io.print)
   call)
  'init def
 
@@ -60,7 +60,7 @@
    root manifest-path io.slurp pkg.manifest.read
    package version url pkg.sync.requirement
    root package record-requirement
-   package version pair "added {} {}" format io.print)
+   package version pair "added {} {}" str.format io.print)
   call)
  'add def
 
@@ -71,7 +71,7 @@
   root
   operation call
   'packages at dict.keys len
-  wrap "synced {} packages" format io.print)
+  wrap "synced {} packages" str.format io.print)
  'sync-result defp
 
  ### def sync
@@ -98,7 +98,7 @@
  (arguments -- : "Verify every sealed package archive selected by the project lock.")
  (first
   (|root| root lock-path io.slurp pkg.lock.read root pkg.sync.verify
-   wrap "verified {} packages" format io.print)
+   wrap "verified {} packages" str.format io.print)
   call)
  'verify def
 
@@ -150,7 +150,7 @@
    lock pkg.lock.vendor
    dup pkg.lock.write root lock-path pkg.store.write-lock
    'packages at dict.keys len
-   wrap "vendored {} packages" format io.print)
+   wrap "vendored {} packages" str.format io.print)
   with call)
  'vendor def
 
@@ -158,6 +158,6 @@
  (lock-paths -- : "Remove shared-cache entries absent from every named lock file.")
  ((io.slurp pkg.lock.read pkg.sync.store-keys) each raze distinct
   pkg.store.gc
-  wrap "removed {} packages" format io.print)
+  wrap "removed {} packages" str.format io.print)
  'gc def
  ) 'pkg.cli @defm

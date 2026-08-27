@@ -494,7 +494,7 @@ so `(1 2 3) 10 *` is simply `[10 20 30]`.
 
 Randomness is *counter-based*, not stateful: a generator state is a
 two-element list `[key counter]`, and every draw is a pure function of
-it. `rand-int`, `rand-ints`, and `rand-float` each take a state and
+it. `rand.int`, `rand.ints`, and `rand.float` each take a state and
 return the advanced state alongside the result, so a program's draws are
 reproducible by construction — running it twice from the same key
 produces the same values, and nothing hidden accumulates between units,
@@ -502,12 +502,12 @@ tasks, or module loads.
 
 - The mixer is SplitMix64 applied to `key + counter * gamma`. Each draw
   addresses its own counter position rather than stepping a register, so
-  `rand-ints` produces the same list whatever order its elements are
+  `rand.ints` produces the same list whatever order its elements are
   materialized in, and two states that share a key but differ in counter
   do not correlate.
-- `entropy` is the only word that reads the host, and the only
+- `rand.entropy` is the only word that reads the host, and the only
   nondeterministic word in the language. A program is reproducible unless
-  it explicitly seeds from `entropy`; there is no ambient default seed
+  it explicitly seeds from `rand.entropy`; there is no ambient default seed
   drawn at startup, and no word silently reaches a CSPRNG.
 - The `rng` module carries a state so ordinary code need not thread one
   by hand (see The standard library). It is threaded state, not global
@@ -1256,7 +1256,7 @@ stores the advanced state back.
   `deal` over the list's own length.
 
 A fresh process starts from a fixed key, so a program using `rng` and
-never calling `rng.seed` is fully reproducible. Seeding from `entropy` is
+never calling `rng.seed` is fully reproducible. Seeding from `rand.entropy` is
 the explicit opt out.
 
 ### Package modules

@@ -134,23 +134,23 @@ test "dict-text: join requires strings and chooses narrow char width" {
 
 test "dict-text: format splices strings and canonically renders other values" {
     try helper.expectStack(
-        "[\"Ada\" 2] \"name={} n={} {{ok}}\" format " ++
-            "\"foo\" str wrap \"source={}\" format " ++
-            "[\"\"] \"a{}b\" format",
+        "[\"Ada\" 2] \"name={} n={} {{ok}}\" str.format " ++
+            "\"foo\" str wrap \"source={}\" str.format " ++
+            "[\"\"] \"a{}b\" str.format",
         "\"name=Ada n=2 {ok}\" \"source=\\\"foo\\\"\" \"ab\"",
     );
     try helper.expectErrors(&.{
         .{
             .name = "format requires one value per placeholder",
-            .source = "[1] \"{} {}\" format",
+            .source = "[1] \"{} {}\" str.format",
             .kind = "contract",
-            .word = "format",
+            .word = "str.format",
         },
         .{
             .name = "format rejects an unmatched brace",
-            .source = "[] \"{\" format",
+            .source = "[] \"{\" str.format",
             .kind = "domain",
-            .word = "format",
+            .word = "str.format",
         },
     });
 }

@@ -1,7 +1,7 @@
 ### module rng
 # The module stores one [key counter] generator state on its durable stack.
 # Draw operations update that state through `within` transactions. The initial
-# state is [0 0], so sequential draws are reproducible; `entropy rng.seed`
+# state is [0 0], so sequential draws are reproducible; `rand.entropy rng.seed`
 # selects a nondeterministic key.
 #
 # This generator is not cryptographic. Concurrent draws are serialized, but
@@ -16,17 +16,17 @@
 
  ### def int
  (bound -- result : "Return a uniform integer from 0 through bound - 1.")
- ((rand-int without) partial within)
+ ((rand.int without) partial within)
  'int def
 
  ### def ints
  (count bound -- results : "Return count uniform integers from 0 through bound - 1.")
- (pair (rand-ints without) with within)
+ (pair (rand.ints without) with within)
  'ints def
 
  ### def float
  (-- result : "Return a uniform float in the half-open interval [0, 1).")
- ((rand-float without) within)
+ ((rand.float without) within)
  'float def
 
  ### defp deal-pick

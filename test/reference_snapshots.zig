@@ -61,7 +61,7 @@ const cases = [_]Case{
     .{ .name = "dict.has?", .source = "{\"ab\" 9} \"ab\" dict.has? {[1 2] 9} [1 2] dict.has?" },
     .{ .name = "split", .source = "\"a—b—\" \"—\" split first" },
     .{ .name = "join", .source = "[\"a\" 2] \"-\" join" },
-    .{ .name = "format", .source = "[3.14 2] \"pi={} n={}\" format" },
+    .{ .name = "str.format", .source = "[3.14 2] \"pi={} n={}\" str.format" },
     .{ .name = "parse", .source = "\"42\" parse first" },
     .{ .name = "parse-int", .source = "\"42\" parse-int" },
     .{ .name = "parse-float", .source = "\"3.5\" parse-float" },
@@ -145,10 +145,10 @@ const cases = [_]Case{
     .{ .name = "bsr", .source = "-1 1 bsr" },
     .{ .name = "bnot", .source = "[0 5] bnot" },
     .{ .name = "bsl overshift", .source = "1 64 bsl" },
-    .{ .name = "rand-int", .source = "[7 0] 6 rand-int" },
-    .{ .name = "rand-ints", .source = "[7 0] 4 6 rand-ints" },
-    .{ .name = "rand-float", .source = "[7 0] rand-float" },
-    .{ .name = "rand-int empty range", .source = "[7 0] 0 rand-int" },
+    .{ .name = "rand.int", .source = "[7 0] 6 rand.int" },
+    .{ .name = "rand.ints", .source = "[7 0] 4 6 rand.ints" },
+    .{ .name = "rand.float", .source = "[7 0] rand.float" },
+    .{ .name = "rand.int empty range", .source = "[7 0] 0 rand.int" },
     .{ .name = "rng deal", .source = "'rng.deal 'deal import 3 10 deal" },
     // The unit-constructor convention: the guided boundary error and the
     // seeding composition that replaced the `-with` family.
@@ -544,8 +544,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\<empty>
         \\stderr:
         \\{'kind 'type 'msg "join expected a list of strings" 'word 'join 'trace ['join] 'data {'index 1 'source "<command>" 'line 1 'col 13}}
-        \\=== format ===
-        \\source: [3.14 2] "pi={} n={}" format
+        \\=== str.format ===
+        \\source: [3.14 2] "pi={} n={}" str.format
         \\exit: 0
         \\stdout:
         \\"pi=3.14 n=2"
@@ -1082,34 +1082,34 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\<empty>
         \\stderr:
         \\{'kind 'domain 'msg "a shift count must be from 0 to 63" 'word 'bsl 'trace ['bsl] 'data {'source "<command>" 'line 1 'col 6}}
-        \\=== rand-int ===
-        \\source: [7 0] 6 rand-int
+        \\=== rand.int ===
+        \\source: [7 0] 6 rand.int
         \\exit: 0
         \\stdout:
         \\[7 1] 3
         \\stderr:
         \\<empty>
-        \\=== rand-ints ===
-        \\source: [7 0] 4 6 rand-ints
+        \\=== rand.ints ===
+        \\source: [7 0] 4 6 rand.ints
         \\exit: 0
         \\stdout:
         \\[7 4] [3 0 0 3]
         \\stderr:
         \\<empty>
-        \\=== rand-float ===
-        \\source: [7 0] rand-float
+        \\=== rand.float ===
+        \\source: [7 0] rand.float
         \\exit: 0
         \\stdout:
         \\[7 1] 0.3898297483912715
         \\stderr:
         \\<empty>
-        \\=== rand-int empty range ===
-        \\source: [7 0] 0 rand-int
+        \\=== rand.int empty range ===
+        \\source: [7 0] 0 rand.int
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "rand-int expected a positive bound, not 0" 'word 'rand-int 'trace ['rand-int] 'data {'source "<command>" 'line 1 'col 9}}
+        \\{'kind 'domain 'msg "rand.int expected a positive bound, not 0" 'word 'rand.int 'trace ['rand.int] 'data {'source "<command>" 'line 1 'col 9}}
         \\=== rng deal ===
         \\source: 'rng.deal 'deal import 3 10 deal
         \\exit: 0

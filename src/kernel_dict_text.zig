@@ -15,15 +15,20 @@ const Value = value.Value;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 
-/// The sized-operation taxonomy lives in `kernel_support` so the registry in
-/// `kernels.zig` classifies exactly the operations this installer publishes.
+/// The sized-operation taxonomy also includes the hosted `str.format` idiom;
+/// every other text operation is installed directly in core.
 const Op = support.TextOp;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(Op)) |field| {
         const operation: Op = @enumFromInt(field.value);
+        if (operation == .format) continue;
         try support.installPrimitive(core, operation.spelling(), bind(operation));
     }
+}
+
+pub fn formatForIdiom(evaluator: *Machine) MachineError!void {
+    return formatPrimitive(evaluator);
 }
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
@@ -128,6 +133,12 @@ fn keysPrimitive(evaluator: *Machine) MachineError!void {
 
 pub fn keysForModule(evaluator: *Machine) MachineError!void {
     return keysPrimitive(evaluator);
+}
+
+pub fn sizeForModule(evaluator: *Machine) MachineError!void {
+    var dictionary = try evaluator.popDict();
+    defer dictionary.deinit();
+    try evaluator.pushOwned(.{ .int = @intCast(dictionary.borrow().dict.length()) });
 }
 
 fn valsPrimitive(evaluator: *Machine) MachineError!void {
@@ -591,7 +602,7 @@ const ListDelDriver = struct {
     values: heap.Owned([]Value),
     source_index: usize = 0,
     destination_index: usize = 0,
-    materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *ListDelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -607,7 +618,7 @@ const ListDelDriver = struct {
                 budget -= 1;
             }
             if (self.source_index != count) return .yielded;
-            self.materializer = .init(storage.ValueMaterializer.init(
+            self.materializer = .init(list.ValueMaterializer.init(
                 evaluator.allocator(),
                 self.values.borrow(),
             ));

@@ -130,7 +130,7 @@ const cases = [_]Case{
     .{ .class = "order", .name = "distinct", .setup = "5000 range 100 mod", .workload = "distinct len" },
     .{ .class = "text", .name = "split", .setup = "\"a,b,c,d,e,f,g,h\" 8000 take", .workload = "\",\" split len" },
     .{ .class = "text", .name = "join", .setup = "\"a,b,c,d,e,f,g,h\" 8000 take \",\" split", .workload = "\",\" join len" },
-    .{ .class = "random", .name = "rand-ints", .setup = "[7 9]", .workload = "1000000 1000 rand-ints nip len" },
+    .{ .class = "random", .name = "rand.ints", .setup = "[7 9]", .workload = "1000000 1000 rand.ints nip len" },
 };
 
 const scaling_sizes = [_]usize{ 1, 32, 1_024, 65_535, 65_536, 65_537, 1_048_576 };

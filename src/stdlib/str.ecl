@@ -174,4 +174,112 @@
   (|s w| s " " w s len - 0 max take pair raze) call)
  'pad-right def
 
+ ### defp format-fail
+ (kind message -- : "Raise a formatting error with the supplied kind and message.")
+ (error.new swap error.with-message 0 swap assert)
+ 'format-fail defp
+
+ ### defp format-render
+ (value -- string : "Render one replacement, preserving string contents verbatim.")
+ (dup str? () (str) if)
+ 'format-render defp
+
+ ### defp format-template-char
+ (state offset -- char : "Read a character relative to the state's template cursor.")
+ (|state offset| state 2 at state 3 at offset + at)
+ 'format-template-char defp
+
+ ### defp format-advance
+ (state count part -- state : "Advance the template cursor and append one rendered part.")
+ (|state count part|
+  state 3 state 3 at count + put
+  4 state 4 at part append put)
+ 'format-advance defp
+
+ ### defp format-finish
+ (state -- string : "Validate the final replacement count and join the accumulated parts.")
+ (dup 1 at over 0 at len =
+  (4 at "" join)
+  ('contract "format has more values than placeholders" format-fail)
+  if)
+ 'format-finish defp
+
+ ### defp format-placeholder-valid
+ (state -- string : "Render one available replacement and continue scanning.")
+ (dup 0 at over 1 at at format-render
+  2 swap format-advance
+  dup 1 at 1 + 1 swap put
+  format-loop)
+ 'format-placeholder-valid defp
+
+ ### defp format-placeholder
+ (state -- string : "Validate and consume one positional placeholder.")
+ (dup 1 at over 0 at len >=
+  ('contract "format has more placeholders than values" format-fail)
+  (format-placeholder-valid)
+  if)
+ 'format-placeholder defp
+
+ ### defp format-open
+ (state -- string : "Interpret an opening brace at the template cursor.")
+ (dup 3 at 1 + over 2 at len >=
+  ('domain "format contains an unmatched brace" format-fail)
+  (dup 1 format-template-char
+   dup \{ =
+   (pop 2 "{" format-advance format-loop)
+   (\} =
+    (format-placeholder)
+    ('domain "format contains an unmatched brace" format-fail)
+    if)
+   if)
+  if)
+ 'format-open defp
+
+ ### defp format-close
+ (state -- string : "Interpret a closing brace at the template cursor.")
+ (dup 3 at 1 + over 2 at len >=
+  ('domain "format contains an unmatched brace" format-fail)
+  (dup 1 format-template-char \} =
+   (2 "}" format-advance format-loop)
+   ('domain "format contains an unmatched brace" format-fail)
+   if)
+  if)
+ 'format-close defp
+
+ ### defp format-step
+ (state -- string : "Interpret one template character and continue scanning.")
+ (dup 0 format-template-char
+  dup \{ =
+  (pop format-open)
+  (dup \} =
+   (pop format-close)
+   (wrap 1 swap format-advance format-loop)
+   if)
+  if)
+ 'format-step defp
+
+ ### defp format-loop
+ (state -- string : "Scan a validated template from one immutable cursor state.")
+ (dup 3 at over 2 at len =
+  (format-finish)
+  (format-step)
+  if)
+ 'format-loop defp
+
+ ### defp format-valid
+ (values template -- string :
+  "Validate formatting inputs and interpolate them through the hosted scanner.")
+ (|values template|
+  values type 'list match?
+  'type error.new "str.format expects a value list and a template string" error.with-message assert
+  template "str.format expects a value list and a template string" checked pop
+  values 0 template 0 () 5 pack format-loop)
+ 'format-valid defp
+
+ ### def format
+ (values template -- string :
+  "Interpolate positional braces, preserving strings and canonically rendering other values.")
+ (format-valid)
+ 'format def
+
  ) 'str @defm

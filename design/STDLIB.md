@@ -370,11 +370,6 @@ as the predecessor of the first element. Thus
 `( sequence -- bool )` — 1 when the sequence has no elements. Equivalent
 to `len 0 =`.
 
-### entropy
-`( -- result )` — Read one int of entropy from the host. The only
-nondeterministic word in the language; see [Randomness](SPEC.md#randomness). Requires the host
-IO capability, and is `'io` without it.
-
 ### execute
 `( word -- ... )` — Resolve and apply a word value late through the ordinary
 word-dispatch path, exactly as if that word appeared in executable position.
@@ -427,14 +422,6 @@ accumulator form `fold` is required for an empty list. Defined in ecl.
 ### for
 `( list quotation -- )` — *Isolated*, contract `( a -- )`. The ordered
 effect loop: left-to-right, collects nothing.
-
-### format
-`( values template -- string )` — Interpolate a list of values into the
-template's `{}` positional placeholders. A string contributes its contents;
-every other value contributes its canonical `str`. `{{` and `}}` are literal
-braces. `["Ada" 2] "name={} n={}" format` is `"name=Ada n=2"`. Apply
-`str` explicitly before `format` when a string's quoted source representation
-is wanted.
 
 ### getenv
 `( name -- string )` — The value of an environment variable, read from an
@@ -615,22 +602,6 @@ to invoke the result dynamically.
 
 ### raise
 `( error -- )` — Raise a language error from an error dict.
-
-### rand-float
-`( state -- state result )` — Draw one uniform float in `[0, 1)` and
-return the advanced state. See [Randomness](SPEC.md#randomness).
-
-### rand-int
-`( state bound -- state result )` — Draw one uniform int in `[0, bound)`
-and return the advanced state. A `bound` below 1 is `'domain`. The draw
-is unbiased: candidates in the incomplete top range are rejected rather
-than folded.
-
-### rand-ints
-`( state count bound -- state results )` — Draw `count` uniform ints in
-`[0, bound)` as a list, returning the state advanced by `count`. Each
-element is the draw at its own counter position, so the list does not
-depend on the order in which it was built.
 
 ### range
 `( bound -- list )` — The ints `[0 1 … bound-1]`; the bound must be a
@@ -968,6 +939,9 @@ absence is false: lookup machinery failures are errors, never converted to 0.
 
 ### keys
 `( dict -- keys )` — Return keys in insertion order.
+
+### size
+`( dict -- count )` — Return the number of entries in constant time.
 
 ### keys-exactly?
 `( candidate declared -- bool )` — Return 1 when a dictionary has exactly the
@@ -1414,10 +1388,32 @@ isolated stack and run the recovery quotation; leave a success unchanged.
 `( result kinds quotation -- result )` — Recover only when a failure's kind is
 one of the listed symbols; leave every other result unchanged.
 
+## rand
+
+Explicit-state pseudorandom draws are pure except for `entropy`; see
+[Randomness](SPEC.md#randomness). The state is `[key counter]`, and every draw
+returns the advanced state alongside its result.
+
+### entropy
+`( -- result )` — Read one int from the host CSPRNG. This is the language's
+only nondeterministic word, requires host IO, and is `'io` without it.
+
+### float
+`( state -- state result )` — Draw one uniform float in `[0, 1)`.
+
+### int
+`( state bound -- state result )` — Draw one unbiased uniform int in
+`[0, bound)`. A bound below 1 is `'domain`.
+
+### ints
+`( state count bound -- state results )` — Draw `count` uniform ints in
+`[0, bound)`, advancing the state by `count`. Each element is addressed by its
+own counter position, so materialization order cannot change the list.
+
 ## rng
 
 These words transact against the module's durable `[key counter]` state. A
-fresh process begins with a fixed key; use `entropy rng.seed` to opt into
+fresh process begins with a fixed key; use `rand.entropy rng.seed` to opt into
 nondeterminism.
 
 ### deal
@@ -1451,6 +1447,12 @@ string. The empty needle is present at index zero.
 
 ### ends?
 `( string suffix -- bool )` — Return 1 when a string ends with a suffix.
+
+### format
+`( values template -- string )` — Interpolate `{}` placeholders. Strings
+contribute their contents; other values contribute canonical `str`. `{{` and
+`}}` emit literal braces. `["Ada" 2] "name={} n={}" str.format` is
+`"name=Ada n=2"`.
 
 ### index-of
 `( string needle -- index )` — Return the zero-based index of a needle's first

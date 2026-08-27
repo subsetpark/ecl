@@ -6,7 +6,7 @@
 
 const intern = @import("intern.zig");
 
-pub const Origin = enum { direct, module, core };
+pub const Origin = enum { direct, module, standard_library, core };
 
 pub const Candidate = struct {
     trace_word: intern.TraceWord,

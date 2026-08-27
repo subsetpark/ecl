@@ -207,10 +207,10 @@ pub const RandomOp = enum {
 
     pub fn spelling(self: RandomOp) []const u8 {
         return switch (self) {
-            .rand_int => "rand-int",
-            .rand_ints => "rand-ints",
-            .rand_float => "rand-float",
-            .entropy => "entropy",
+            .rand_int => "rand.int",
+            .rand_ints => "rand.ints",
+            .rand_float => "rand.float",
+            .entropy => "rand.entropy",
         };
     }
 };

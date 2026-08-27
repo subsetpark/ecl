@@ -526,7 +526,7 @@ primitives, operationalized as two rules:
   no mixed-generation execution mid-word.
 - **One dispatch tail, several resolution sources.** `executeResolved` is the
   tail: cross-home detection, the annotation check with its native/builtin/word
-  distinctions, core-origin idiom recognition, and the handoff to
+  distinctions, trusted-source idiom recognition, and the handoff to
   `scheduleWord`. Every property worth protecting — home, private visibility,
   annotation checks, trace metadata, builtin/native behavior, cancellation,
   state authority — lives there, so the invariant is that no *source* may reach
@@ -1246,16 +1246,18 @@ operand shape, and rows that still run boxed say so.
   does a length-zero result, whose representation is the value layer's existing
   per-producer choice and observable as printed brackets.
 - **What crosses the seam today.** Numeric, comparison, logical, bitwise, and
-  shift pervasion, including the guarded idioms; `range`; `where`; `rand-ints`;
+  shift pervasion, including the guarded idioms; `range`; `where`; `rand.ints`;
   and the exact-size copies and gathers behind `cat`, `take`, `drop`, `rest`,
   `reverse`, and `at` with a typed index vector; typed membership over scalar
   or flat-list needles; rank-one `reshape`; same-kind list `put`; and `shape`'s
   known-width result; cross-width string `cmp`; stable typed `grade`/`sort`;
   and first-seen typed `group`/`distinct`; pinned width-specialized `split`;
-  and two-pass exact-width `join`. Character-element pervasion uses a fixed
+  and two-pass exact-width `join`; `str.format` keeps hosted semantics while
+  its standard-library body selects the existing two-pass format driver.
+  Character-element pervasion uses a fixed
   i64 writer for subtraction and comparison and a profile/fill pass for
   character offsets and selection; invalid character and symbol combinations
-  reject at the first logical element without a boxed traversal. `format` is
+  reject at the first logical element without a boxed traversal. `str.format` is
   value-shaped by definition rather than a pending flat traversal. Generic
   spine and dictionary descent embeds these same typed states when it reaches
   a flat leaf, preserving the inner logical fault index.
@@ -1296,7 +1298,7 @@ operand shape, and rows that still run boxed say so.
   incomplete top range (`threshold = (0 -% bound) % bound`) rather than
   folding them, which keeps the distribution exactly uniform at the cost
   of an unbounded — but geometrically improbable — retry.
-- **`entropy` is the one kernel that reads the host.** It is gated on the
+- **`rand.entropy` is the one kernel that reads the host.** It is gated on the
   host IO capability and calls the platform CSPRNG. Every other random
   word is pure, which is what makes an ecl program reproducible without a
   recording layer.
@@ -1452,12 +1454,10 @@ per-application late binding, and resolutions are never cached.
 The standard-library placement rule is deliberately asymmetric: implement
 a word in the prelude when its definition in ecl is compact, or when its
 performance does not justify a host idiom; keep a word entirely primitive
-only when its source definition would be substantial and its performance
-characteristics justify the host implementation (`zip-with`, `range`,
-`dict.from-lists`, `del`, `dict.has?`, `dict.merge`). Recognition is the third option and
-the one for a definition that is both compact and hot: `dip` reaches a
-host implementation without becoming one, which also keeps it a source
-binding for the patterns that guard on it. Prelude words therefore stay
+only when ECL cannot express the needed host authority or representation
+operation. Recognition is the preferred third option for compact hot
+definitions: `dip` and `str.format` reach host implementations without
+becoming primitive bindings. Prelude and source-module words therefore stay
 honest source with no public dual representation.
 
 ## Typed publication and control state
@@ -1608,6 +1608,16 @@ honest source with no public dual representation.
   concatenates definition fragments nor synthesizes umbrella modules, so
   privacy, cold loading, and cross-module qualified dispatch are the same for
   `pkg.*` modules as for user-authored modules.
+- **Trusted recognition follows nominal publication provenance.** A module
+  registration is tagged `standard_library` only by the embedded loader;
+  program-facing `register`, `@defm`, dynamic native loading, and explicit
+  replacement always publish `ordinary`. Resolution reports the trusted
+  origin for qualified and module-local hits, allowing idiom patterns to
+  admit both core and shipped stdlib bindings. A replacement under the same
+  textual module name remains ordinary and can neither trigger nor satisfy a
+  recognizer. The inline idiom fallback was raised to 96 bytes so it owns the
+  module pin and retained annotation needed to preserve generic fallback
+  semantics while recognition yields.
 - **The manifest and project lock are ordered before `ECL_PATH`.**
   `AutoLoadDriver` acquires the loading lease, rechecks whether a racing Unit
   registered the module, consults the embedded manifest, advances the
@@ -1697,7 +1707,7 @@ honest source with no public dual representation.
   native words carry, exactly as source module words are, and `json` and
   `http` state their stack shape in prose instead.
 - **`dict` uses the existing mixed host/hosted module pattern.** Direct
-  observers and rebuilds (`keys`, `vals`, `has?`, right-biased `merge`,
+  observers and rebuilds (`keys`, constant-time `size`, `vals`, `has?`, right-biased `merge`,
   `from-flat`, and `from-lists`) reuse bounded host drivers under qualified
   exports; no constructor backend remains globally reachable. Derived operations
   schedule ordinary ECL quotations from their callbacks, as derived `io`
@@ -1713,10 +1723,11 @@ honest source with no public dual representation.
   the only routes to those words. The
   primitive callbacks keep host authority private, while `print`, `inspect`,
   and `lines` schedule fixed quotations over sibling exports. The canonical
-  any-value renderer `str` is a bounded core primitive because `format`
+  any-value renderer `str` is a bounded core primitive because `str.format`
   interpolates string contents directly; it still produces a value and
-  performs no I/O. The `str` module contains only transformations whose
-  subject is a string.
+  performs no I/O. The `str` module owns text transformations and positional
+  formatting; formatting is hosted ECL with a trusted idiom into the bounded
+  two-pass kernel.
 - **Static linkage needs no entry symbol.** `ecl.module` takes a `linkage`
   spec: a dynamically loaded extension exports `ecl_module_abi_v1`, while a
   module linked into this image does not, so several first-party SDK modules

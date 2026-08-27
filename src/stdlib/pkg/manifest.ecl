@@ -69,17 +69,17 @@
    requirement 'url at str
    requirement 'hash at str)
   infra
-  "{{'version {} 'url {} 'hash {}}}" format)
+  "{{'version {} 'url {} 'hash {}}}" str.format)
  'render-requirement defp
 
  ### defp render-requirement-entry
  (pair -- text : "Render one manifest requirement while retaining dictionary order.")
- (wrap ((first str) (1 at render-requirement) bi) infra "{} {}" format)
+ (wrap ((first str) (1 at render-requirement) bi) infra "{} {}" str.format)
  'render-requirement-entry defp
 
  ### defp render-requirements
  (requirements -- text : "Render manifest requirements in their retained insertion order.")
- (dict.pairs (render-requirement-entry) each " " join wrap "{{{}}}" format)
+ (dict.pairs (render-requirement-entry) each " " join wrap "{{{}}}" str.format)
  'render-requirements defp
 
  ### def write
@@ -92,6 +92,6 @@
    manifest 'version at str
    manifest 'requires at render-requirements)
   infra
-  "{{'format 1 'name {} 'version {} 'requires {}}}\n" format)
+  "{{'format 1 'name {} 'version {} 'requires {}}}\n" str.format)
  'write def
  ) 'pkg.manifest @defm

@@ -96,37 +96,37 @@
  (requirement -- text : "Render one selection in the canonical field order.")
  (('version at) ('url at) ('hash at) tri
   3 pack (str) each
-  "{{'version {} 'url {} 'hash {}}}" format)
+  "{{'version {} 'url {} 'hash {}}}" str.format)
  'render-requirement defp
 
  ### defp render-selection
  (pair -- text : "Render one `packages` entry.")
  ((first str) (1 at render-requirement) bi
-  2 pack "{} {}" format)
+  2 pack "{} {}" str.format)
  'render-selection defp
 
  ### defp render-minimum
  (pair -- text : "Render one package name and minimum version.")
- ((str) each "{} {}" format)
+ ((str) each "{} {}" str.format)
  'render-minimum defp
 
  ### defp render-minimums
  (minimums -- text : "Render one package's minimum versions on a single line.")
  (pkg.data.sorted-entries (render-minimum) each " " join
-  wrap "{{{}}}" format)
+  wrap "{{{}}}" str.format)
  'render-minimums defp
 
  ### defp render-requirer
  (pair -- text : "Render one `requires` entry.")
  ((first str) (1 at render-minimums) bi
-  2 pack "{} {}" format)
+  2 pack "{} {}" str.format)
  'render-requirer defp
 
  ### defp render-block
  (holder renderer -- text : "Render a dict as an indented block.")
  (|holder renderer|
   holder pkg.data.sorted-entries renderer each "\n  " join
-  wrap "{{{}}}" format)
+  wrap "{{{}}}" str.format)
  'render-block defp
 
  ### def write
@@ -143,7 +143,7 @@
   lock 'packages at (render-selection) render-block
   lock 'requires at (render-requirer) render-block
   4 pack
-  "{{'format 1\n 'root {}{}\n 'packages\n {}\n 'requires\n {}}}\n" format)
+  "{{'format 1\n 'root {}{}\n 'packages\n {}\n 'requires\n {}}}\n" str.format)
  'render-validated defp
 
  ### defp append-tree-line
@@ -160,7 +160,7 @@
    entry first
    state 'lock at 'packages at entry first 'version pair at-path)
   infra
-  "{} -> {} {}" format
+  "{} -> {} {}" str.format
   state append-tree-line)
  'tree-edge defp
 

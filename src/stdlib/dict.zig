@@ -14,7 +14,6 @@ const modules = @import("../modules.zig");
 const machine = @import("../machine.zig");
 const dict_kernels = @import("../kernel_dict_text.zig");
 const dict_storage = @import("../dict.zig");
-const storage = @import("../kernel_storage.zig");
 
 const Value = value.Value;
 const Machine = machine.Machine;
@@ -25,6 +24,11 @@ pub const words = [_]env.BuiltinWord{
         .name = "keys",
         .doc = "( dict -- keys ) Return a dictionary's keys in insertion order.",
         .primitive = dict_kernels.keysForModule,
+    },
+    .{
+        .name = "size",
+        .doc = "( dict -- count ) Return the number of dictionary entries in constant time.",
+        .primitive = dict_kernels.sizeForModule,
     },
     .{
         .name = "vals",
@@ -196,7 +200,7 @@ const FromFlatDriver = struct {
     entries: heap.Owned(Value),
     pairs: heap.Owned([]dict_storage.Pair),
     index: usize = 0,
-    materializer: ?heap.Owned(storage.DictMaterializer) = null,
+    materializer: ?heap.Owned(dict_storage.Materializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *FromFlatDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -551,8 +555,8 @@ const MergeWithState = struct {
 
 const MergeWithWork = union(enum) {
     pub const owned_disposal: heap.OwnedDisposal = .retire;
-    finding: storage.DictFindCursor,
-    materializing: storage.DictMaterializer,
+    finding: dict_storage.FindCursor,
+    materializing: dict_storage.Materializer,
     between,
 
     pub fn retire(self: *MergeWithWork, releases: *heap.ReleaseDomain) void {
@@ -634,7 +638,7 @@ const MergeWithWorkDriver = struct {
                 }
                 const key = dict_storage.keyAt(state.right.borrow().dict, state.index);
                 if (state.work.borrowMut().* != .finding) state.work.borrowMut().* = .{
-                    .finding = storage.DictFindCursor.initHeader(
+                    .finding = dict_storage.FindCursor.initHeader(
                         evaluator.allocator(),
                         state.left.borrow().dict,
                         key,

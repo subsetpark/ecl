@@ -34,7 +34,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "parse", .primitive = parse },
         .{ .name = "parse-int", .primitive = parseInt },
         .{ .name = "parse-float", .primitive = parseFloat },
-        .{ .name = "dict-of", .primitive = dictOf },
         .{ .name = "@attempt", .primitive = attempt },
         .{ .name = "unseed", .primitive = unseedWord },
         .{ .name = "raise", .primitive = raise },
