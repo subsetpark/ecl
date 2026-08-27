@@ -366,65 +366,145 @@ fn which(evaluator: *Machine) MachineError!void {
 const WhichDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     requested: u32,
-    resolution: ?heap.Owned(machine.ResolutionCursor),
-    shadow_cursor: ?heap.Owned(machine.ShadowCursor) = null,
-    resolved: ?heap.Owned(machine.Resolution) = null,
-    shadows: ?heap.Owned([]intern.TraceWord) = null,
     actions: heap.Owned(reflection.ActionPlan),
-    initialized: bool = false,
-    shadow_index: usize = 0,
-    rendered: ?heap.Owned([]u8) = null,
+    state: heap.Owned(State),
+
+    const OwnedContext = struct {
+        resolved: heap.Owned(machine.Resolution),
+        shadows: heap.Owned([]intern.TraceWord),
+
+        fn deinit(
+            self: *OwnedContext,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            self.shadows.deinit(releases, allocator);
+            self.resolved.deinit(releases, allocator);
+        }
+    };
+    const State = union(enum) {
+        resolve: heap.Owned(machine.ResolutionCursor),
+        shadow: struct {
+            resolved: heap.Owned(machine.Resolution),
+            cursor: heap.Owned(machine.ShadowCursor),
+        },
+        base_actions: struct {
+            context: OwnedContext,
+            step: u8,
+            requirement_index: usize,
+            requirement_separator: bool,
+        },
+        shadow_actions: struct {
+            context: OwnedContext,
+            index: usize,
+            emit_name: bool,
+        },
+        render: OwnedContext,
+        write: struct {
+            context: OwnedContext,
+            rendered: heap.Owned([]u8),
+        },
+
+        pub fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .resolve => |*cursor| cursor.deinit(releases, allocator),
+                .shadow => |*shadow| {
+                    shadow.cursor.deinit(releases, allocator);
+                    shadow.resolved.deinit(releases, allocator);
+                },
+                .base_actions => |*base| base.context.deinit(releases, allocator),
+                .shadow_actions => |*shadows| shadows.context.deinit(releases, allocator),
+                .render => |*context| context.deinit(releases, allocator),
+                .write => |*write| {
+                    write.rendered.deinit(releases, allocator);
+                    write.context.deinit(releases, allocator);
+                },
+            }
+        }
+    };
 
     fn init(evaluator: *Machine, requested: u32) WhichDriver {
         return .{
             .requested = requested,
-            .resolution = .init(machine.ResolutionCursor.initAtCurrent(evaluator, requested)),
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
+            .state = .init(.{ .resolve = .init(
+                machine.ResolutionCursor.initAtCurrent(evaluator, requested),
+            ) }),
         };
     }
     fn add(self: *WhichDriver, action: reflection.Action) error{OutOfMemory}!void {
         try self.actions.borrowMut().add(action);
     }
-    fn initialize(self: *WhichDriver) error{OutOfMemory}!void {
-        try self.add(.{ .name = self.requested });
-        try self.add(.{ .bytes = " -> " });
-        try self.add(.{ .trace_word = self.resolved.?.borrow().trace_word });
-        try self.add(.{ .bytes = " " });
-        try self.add(.{ .bytes = switch (self.resolved.?.borrow().lease.binding) {
-            .word => "def",
-            .builtin, .seed => "primitive",
-            .native => "native",
-        } });
-        try self.add(.{ .bytes = " " });
-        try self.add(.{ .bytes = @tagName(self.resolved.?.borrow().lease.visibility) });
-        if (self.resolved.?.borrow().home) |home| {
-            try self.add(.{ .bytes = " generation " });
-            try self.add(.{ .value = .{ .int = @intCast(home.generationNumber()) } });
-        }
-        if (self.resolved.?.borrow().lease.effect) |effect| {
-            try self.add(.{ .bytes = " " });
-            try self.add(.{ .value = .{ .list = effect.header() } });
-        }
-        switch (self.resolved.?.borrow().lease.binding) {
-            .native => |callable| {
-                try self.add(.{ .bytes = " requires " });
-                for (callable.instance.requirements(), 0..) |requirement, index| {
-                    if (index != 0) try self.add(.{ .bytes = ", " });
-                    try self.add(.{ .bytes = native_module.capabilityName(requirement.id) });
-                }
+    fn advanceBaseActions(
+        self: *WhichDriver,
+        base: *@FieldType(State, "base_actions"),
+    ) error{OutOfMemory}!void {
+        const resolved = base.context.resolved.borrow();
+        switch (base.step) {
+            0 => try self.add(.{ .name = self.requested }),
+            1 => try self.add(.{ .bytes = " -> " }),
+            2 => try self.add(.{ .trace_word = resolved.trace_word }),
+            3 => try self.add(.{ .bytes = " " }),
+            4 => try self.add(.{ .bytes = switch (resolved.lease.binding) {
+                .word => "def",
+                .builtin, .seed => "primitive",
+                .native => "native",
+            } }),
+            5 => try self.add(.{ .bytes = " " }),
+            6 => try self.add(.{ .bytes = @tagName(resolved.lease.visibility) }),
+            7 => if (resolved.home != null)
+                try self.add(.{ .bytes = " generation " }),
+            8 => if (resolved.home) |home|
+                try self.add(.{ .value = .{ .int = @intCast(home.generationNumber()) } }),
+            9 => if (resolved.lease.effect != null) try self.add(.{ .bytes = " " }),
+            10 => if (resolved.lease.effect) |effect|
+                try self.add(.{ .value = .{ .list = effect.header() } }),
+            11 => switch (resolved.lease.binding) {
+                .native => try self.add(.{ .bytes = " requires " }),
+                else => {},
             },
-            else => {},
+            12 => {
+                const requirements = switch (resolved.lease.binding) {
+                    .native => |callable| callable.instance.requirements(),
+                    else => &.{},
+                };
+                if (base.requirement_index == requirements.len) {
+                    const context = base.context;
+                    self.state.borrowMut().* = .{ .shadow_actions = .{
+                        .context = context,
+                        .index = 0,
+                        .emit_name = false,
+                    } };
+                    return;
+                }
+                if (base.requirement_index != 0 and !base.requirement_separator) {
+                    try self.add(.{ .bytes = ", " });
+                    base.requirement_separator = true;
+                    return;
+                }
+                try self.add(.{ .bytes = native_module.capabilityName(
+                    requirements[base.requirement_index].id,
+                ) });
+                base.requirement_index += 1;
+                base.requirement_separator = false;
+                return;
+            },
+            else => unreachable,
         }
-        self.initialized = true;
+        base.step += 1;
     }
     pub fn advance(evaluator: *Machine, self: *WhichDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.resolved == null) {
-            var budget: usize = machine.kernel_poll_quantum;
-            while (budget != 0) : (budget -= 1) switch (self.resolution.?.borrowMut().advance()) {
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+            .resolve => |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => {},
                 .complete => |outcome| {
-                    self.resolved = .init(switch (try resolveForReflection(
+                    const resolved = switch (try resolveForReflection(
                         evaluator,
                         self,
                         self.requested,
@@ -432,52 +512,68 @@ const WhichDriver = struct {
                     )) {
                         .retry => |progress| return progress,
                         .resolved => |resolution| resolution,
-                    });
-                    self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.resolution = null;
-                    self.shadow_cursor = .init(machine.ShadowCursor.init(evaluator, self.requested));
-                    return .yielded;
+                    };
+                    cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.state.borrowMut().* = .{ .shadow = .{
+                        .resolved = .init(resolved),
+                        .cursor = .init(machine.ShadowCursor.init(evaluator, self.requested)),
+                    } };
                 },
-            };
-            return .yielded;
-        }
-        if (self.shadows == null) {
-            var budget: usize = machine.kernel_poll_quantum;
-            while (budget != 0) : (budget -= 1) switch (try self.shadow_cursor.?.borrowMut().advance()) {
+            },
+            .shadow => |*shadow| switch (try shadow.cursor.borrowMut().advance()) {
                 .pending => {},
                 .complete => |shadows| {
-                    self.shadows = .init(shadows);
-                    self.shadow_cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.shadow_cursor = null;
-                    break;
+                    const resolved = shadow.resolved.take();
+                    shadow.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.state.borrowMut().* = .{ .base_actions = .{
+                        .context = .{
+                            .resolved = .init(resolved),
+                            .shadows = .init(shadows),
+                        },
+                        .step = 0,
+                        .requirement_index = 0,
+                        .requirement_separator = false,
+                    } };
                 },
-            };
-            if (self.shadows == null) return .yielded;
-        }
-        if (!self.initialized) try self.initialize();
-        var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0 and self.shadow_index != self.shadows.?.borrow().len) : (budget -= 1) {
-            try self.add(.{ .bytes = "; shadows " });
-            try self.add(.{ .trace_word = self.shadows.?.borrow()[self.shadow_index] });
-            self.shadow_index += 1;
-        }
-        if (self.shadow_index != self.shadows.?.borrow().len) return .yielded;
-        if (!self.actions.borrow().isSealed()) {
-            try self.add(.{ .bytes = "\n" });
-            self.actions.borrowMut().seal();
-        }
-        if (self.rendered == null) switch (try self.actions.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => return .yielded,
-            .complete => |bytes| self.rendered = .init(bytes),
+            },
+            .base_actions => |*base| try self.advanceBaseActions(base),
+            .shadow_actions => |*shadows| {
+                if (shadows.index == shadows.context.shadows.borrow().len) {
+                    try self.add(.{ .bytes = "\n" });
+                    self.actions.borrowMut().seal();
+                    const context = shadows.context;
+                    self.state.borrowMut().* = .{ .render = context };
+                } else if (!shadows.emit_name) {
+                    try self.add(.{ .bytes = "; shadows " });
+                    shadows.emit_name = true;
+                } else {
+                    try self.add(.{ .trace_word = shadows.context.shadows.borrow()[shadows.index] });
+                    shadows.index += 1;
+                    shadows.emit_name = false;
+                }
+            },
+            .render => |*context| switch (try self.actions.borrowMut().advance(1)) {
+                .pending => {},
+                .complete => |bytes| {
+                    const moved = context.*;
+                    self.state.borrowMut().* = .{ .write = .{
+                        .context = moved,
+                        .rendered = .init(bytes),
+                    } };
+                },
+            },
+            .write => |*write| {
+                if (evaluator.unit.inherited.console) |console| {
+                    console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
+                    return .completed;
+                }
+                const output = try outputWriter(evaluator);
+                output.writeAll(write.rendered.borrow()) catch return writeFailure(evaluator);
+                output.flush() catch return evaluator.fail(.io, "standard output flush failed");
+                return .completed;
+            },
         };
-        if (evaluator.unit.inherited.console) |console| {
-            console.writeOutput(self.rendered.?.borrow(), false) catch return writeFailure(evaluator);
-            return .completed;
-        }
-        const output = try outputWriter(evaluator);
-        output.writeAll(self.rendered.?.borrow()) catch return writeFailure(evaluator);
-        output.flush() catch return evaluator.fail(.io, "standard output flush failed");
-        return .completed;
+        return .yielded;
     }
 };
 
