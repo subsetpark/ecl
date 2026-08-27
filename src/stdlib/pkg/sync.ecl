@@ -4,7 +4,7 @@
  ### defp env-or-empty
  (name -- text : "Read one captured environment value, returning an empty string when absent.")
  (wrap (getenv) seed @attempt
-  dup 'ok has?
+  dup 'ok dict.has?
   ('ok at first)
   (pop "")
   if)
@@ -69,7 +69,7 @@
  (|lock project|
   lock pkg.lock.validate pop
   project
-  lock 'store has?
+  lock 'store dict.has?
   ("/vendor" cat)
   (pop pkg.sync.cache-root)
   if)
@@ -156,7 +156,7 @@
  (body package -- manifest-text : "Inspect an archive and preserve package provenance on failure.")
  (|body package|
   body package 2 pack (pkg.store.inspect) seed @attempt
-  dup 'ok has?
+  dup 'ok dict.has?
   ('ok at first)
   ('err at) package (raise-package-error) partial compose
   if)
@@ -350,7 +350,7 @@
   result 'err at
   dup 'data at 'destination-exists 0 at-or
   destination wrap (pkg.store.present?) seed @attempt
-  dup 'ok has?
+  dup 'ok dict.has?
   ('ok at first)
   (pop 0)
   if
@@ -365,7 +365,7 @@
   "Install one immutable package, treating a concurrently published real directory as success.")
  (|bytes package destination|
   bytes package destination 3 pack (pkg.store.install pop) seed @attempt
-  dup 'ok has?
+  dup 'ok dict.has?
   (pop)
   destination (finish-install) partial
   if)
@@ -439,7 +439,7 @@
 
  ### defp lock-mode
  (lock -- mode : "Return the closed store mode of one validated project lock.")
- (dup 'store has?
+ (dup 'store dict.has?
   ('store at)
   (pop 'cache)
   if)
@@ -447,7 +447,7 @@
 
  ### defp mode-result
  (result -- mode : "Return an explicit project's lock mode or cache when it can be regenerated.")
- (dup 'ok has?
+ (dup 'ok dict.has?
   ('ok at first lock-mode)
   (pop 'cache)
   if)

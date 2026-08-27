@@ -13,12 +13,12 @@
  (dup type 'dict match?
   'type error.new "a result must be a dict tagged {'ok values} or {'err error}" error.with-message
   assert
-  dup keys len 1 =
+  dup dict.keys len 1 =
   'type error.new "a result must carry exactly one of 'ok or 'err" error.with-message assert
-  dup 'ok has?
+  dup 'ok dict.has?
   (dup 'ok at type 'list match?
    'type error.new "an ok result must carry a list of success values" error.with-message assert)
-  (dup 'err has?
+  (dup 'err dict.has?
    'type error.new "a result must carry exactly one of 'ok or 'err" error.with-message assert
    dup 'err at error.valid?
    'type error.new "an err result must carry an error dict" error.with-message assert)
@@ -48,29 +48,29 @@
 
  ### def ok?
  (result -- bool : "Return 1 for an ok result.")
- (checked 'ok has?)
+ (checked 'ok dict.has?)
  'ok? def
 
  ### def err?
  (result -- bool : "Return 1 for an err result.")
- (checked 'err has?)
+ (checked 'err dict.has?)
  'err? def
 
  ### def or-raise
  (result -- values : "Return the success list or raise the stored error.")
- (checked dup 'ok has? ('ok at) ('err at raise) if)
+ (checked dup 'ok dict.has? ('ok at) ('err at raise) if)
  'or-raise def
 
  ### def or-else
  (result fallback -- value : "Return the success list or a fallback value for an err result.")
- (swap checked swap over 'ok has? (pop 'ok at) (nip) if)
+ (swap checked swap over 'ok dict.has? (pop 'ok at) (nip) if)
  'or-else def
 
  ### def and-then
  (result quotation -- result :
   "For an ok result, run the quotation under @attempt on an isolated stack seeded with the success
    values. Return an err result unchanged.")
- (swap checked swap over 'ok has?
+ (swap checked swap over 'ok dict.has?
   (swap 'ok at swap seed @attempt)
   (pop)
   if)
@@ -79,9 +79,9 @@
  ### def map-err
  (result quotation -- result :
   "Apply an isolated ( error -- error ) quotation to an err result. Return an ok result unchanged.")
- (swap checked swap over 'err has?
+ (swap checked swap over 'err dict.has?
   (swap 'err at wrap swap seed @attempt
-   dup 'ok has?
+   dup 'ok dict.has?
    ('ok at dup len 1 =
     'contract error.new "result.map-err expects ( error -- error )" error.with-message assert
     first dup error.valid?
@@ -96,7 +96,7 @@
  (result quotation -- result :
   "For an err result, run the quotation under @attempt with the stored error. Return an ok result
    unchanged.")
- (swap checked swap over 'err has?
+ (swap checked swap over 'err dict.has?
   (swap 'err at wrap swap seed @attempt)
   (pop)
   if)
@@ -118,7 +118,7 @@
   kinds (error.kind-in?) partial
   (pop 0)
   if
-  result 'err has? and
+  result 'err dict.has? and
   result handler pair (recover) with
   result literal
   if)
@@ -130,7 +130,7 @@
    leave any number of values.")
  (|result on-ok on-err|
   result checked pop
-  result 'ok has?
+  result 'ok dict.has?
   result ('ok at) partial on-ok compose
   result ('err at) partial on-err compose
   if)
@@ -140,7 +140,7 @@
  (results -- result :
   "Return the first err result, or an ok result containing all success lists in input order.")
  (checked-all
-  dup ('err has?) each where
+  dup ('err dict.has?) each where
   dup len 0 >
   (first at)
   (pop ('ok at) each ok)
@@ -151,8 +151,8 @@
  (results -- successes errors :
   "Return the success lists and error dictionaries as separate lists in input order.")
  (checked-all
-  dup ('ok has?) filter ('ok at) each
-  swap ('err has?) filter ('err at) each)
+  dup ('ok dict.has?) filter ('ok at) each
+  swap ('err dict.has?) filter ('err at) each)
  'partition def
 
  ) 'result @defm

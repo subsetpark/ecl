@@ -124,7 +124,7 @@ test "concurrency: task identity rendering dict keys and cached await are observ
         &runtime,
         "pop 'identity-task set " ++
             "identity-task type identity-task dup match? " ++
-            "identity-task 9 pair dict-of identity-task has?",
+            "identity-task 9 pair dict-of identity-task dict.has?",
     );
     {
         var actual = try display(&runtime);

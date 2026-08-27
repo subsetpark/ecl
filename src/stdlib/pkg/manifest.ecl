@@ -16,7 +16,7 @@
  (|requirement|
   requirement type 'dict match?
   'type error.new "a requirement is a dict" error.with-message assert
-  requirement requirement-keys keys-exactly?
+  requirement requirement-keys dict.keys-exactly?
   'domain error.new "a requirement has exactly the keys 'version 'url 'hash" error.with-message
   assert
   requirement 'version at pkg.version.validate pop
@@ -34,8 +34,8 @@
  (|candidate|
   candidate type 'dict match?
   'type error.new "a manifest is a dict" error.with-message assert
-  candidate pairs (pkg.data.assert-inert-entry) for
-  candidate manifest-keys keys-exactly?
+  candidate dict.pairs (pkg.data.assert-inert-entry) for
+  candidate manifest-keys dict.keys-exactly?
   'domain error.new "a manifest has exactly the keys 'format 'name 'version 'requires"
   error.with-message
   assert
@@ -47,10 +47,10 @@
   candidate 'requires at type 'dict match?
   'type error.new "manifest requirements are a dict from package name to requirement"
   error.with-message assert
-  candidate 'requires at keys (pkg.name.valid?) all?
+  candidate 'requires at dict.keys (pkg.name.valid?) all?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
-  candidate 'requires at vals (pkg.manifest.validate-requirement pop) for
-  candidate 'name at wrap candidate 'requires at keys cat pkg.name.collides? not
+  candidate 'requires at dict.vals (pkg.manifest.validate-requirement pop) for
+  candidate 'name at wrap candidate 'requires at dict.keys cat pkg.name.collides? not
   'domain error.new "no package may own another's name, its own included" error.with-message assert
   candidate)
  'validate def
@@ -79,7 +79,7 @@
 
  ### defp render-requirements
  (requirements -- text : "Render manifest requirements in their retained insertion order.")
- (pairs (render-requirement-entry) each " " join wrap "{{{}}}" format)
+ (dict.pairs (render-requirement-entry) each " " join wrap "{{{}}}" format)
  'render-requirements defp
 
  ### def write

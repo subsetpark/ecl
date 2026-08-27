@@ -319,13 +319,6 @@ fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
             .float => "[0.1 -0.0 0.1]",
             .failure => "1",
         },
-        .vals => switch (variant) {
-            .atom => "{'a 1 'b 2}",
-            .empty => "{}",
-            .spine => "{'a [1] 'b [2]}",
-            .float => "{'a 0.1 'b -0.0}",
-            .failure => "1",
-        },
         // `dip` needs a value below the protected one for its quotation to
         // work on, and quotations built only from builtins so the pass counts
         // one recognition rather than a nested one. The failure variant fails

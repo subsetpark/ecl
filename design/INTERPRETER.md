@@ -1,9 +1,10 @@
 # ecl — the interpreter
 
 This document describes the interpreter as built: one Zig program whose
-observable behavior is specified by SPEC.md. SPEC.md is the semantics
-authority; nothing here may change an observable behavior. Type and file
-names below are the real ones under `src/`.
+observable behavior is specified by SPEC.md and the shipped vocabulary by
+STDLIB.md. Those documents are the public-contract authorities; nothing here
+may change an observable behavior. Type and file names below are the real ones
+under `src/`.
 
 The interpreter is six cooperating components: immutable reference-counted
 **values**, one explicit **frame machine**, chained **environments** plus a
@@ -1453,7 +1454,7 @@ a word in the prelude when its definition in ecl is compact, or when its
 performance does not justify a host idiom; keep a word entirely primitive
 only when its source definition would be substantial and its performance
 characteristics justify the host implementation (`zip-with`, `range`,
-`to-dict`, `has?`, `del`, `merge`). Recognition is the third option and
+`to-dict`, `del`, `dict.has?`, `dict.merge`). Recognition is the third option and
 the one for a definition that is both compact and hot: `dip` reaches a
 host implementation without becoming one, which also keeps it a source
 binding for the patterns that guard on it. Prelude words therefore stay
@@ -1695,6 +1696,16 @@ honest source with no public dual representation.
   module words are therefore exempt from the declared-effect requirement that
   native words carry, exactly as source module words are, and `json` and
   `http` state their stack shape in prose instead.
+- **`dict` uses the existing mixed host/hosted module pattern.** Direct
+  observers and rebuilds (`keys`, `vals`, `has?`, and right-biased `merge`)
+  reuse the bounded host kernels under qualified exports. Derived operations
+  schedule ordinary ECL quotations from their callbacks, as derived `io`
+  operations do. `merge-with` is the exceptional quotation-dependent rebuild:
+  one owned state alternates bounded key search/materialization drivers with
+  isolated conflict applications, and an exact owned value buffer retains
+  collision results until the dictionary materializer has retained them.
+  The module publishes no helper primitive, while bare `del` remains the
+  polymorphic functional update paired with `put` for both lists and dicts.
 - **`io` is the observable-I/O boundary.** Its builtin table publishes
   `pp`, `prin`, `print`, `inspect`, `stdin`, `slurp`, `spit`, and `lines`;
   qualified names and explicit imports such as `'io.print 'print import` are

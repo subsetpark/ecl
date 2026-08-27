@@ -385,7 +385,7 @@ test "pkg: read-manifest accepts the canonical manifest and rejects undeclared k
             // which is why nothing that rewrites the file can preserve them.
             .name = "comments are permitted",
             .source = "\"# a comment\\n{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
-                "'requires {}}\" pkg.manifest.read 'requires at keys len",
+                "'requires {}}\" pkg.manifest.read 'requires at dict.keys len",
             .expected = "0",
         },
         .{
@@ -715,10 +715,10 @@ test "pkg: the lock keys requirements by the requiring package" {
             // record two versions of one name without a break.
             .name = "requirements are keyed by requirer, the root under its own name",
             .source = "(lock -- root names) (|lock| lock 'root at " ++
-                "lock 'requires lock 'root at pair at-path keys) " ++
+                "lock 'requires lock 'root at pair at-path dict.keys) " ++
                 "'root-requirements def " ++
                 canonical_lock_source ++
-                "pkg.lock.read dup 'requires at keys sort swap root-requirements",
+                "pkg.lock.read dup 'requires at dict.keys sort swap root-requirements",
             .expected = "(\"foo\" \"my.proj\") \"my.proj\" (\"foo\")",
         },
     });
@@ -753,7 +753,7 @@ test "pkg: the lock keys requirements by the requiring package" {
 test "pkg: resolve selects the maximum of every reachable declared minimum" {
     try support.expectStack(
         mvs_root ++ " " ++ mvs_catalog ++
-            "pkg.mvs.resolve 'packages at dup keys len swap [\"c\" 'version] at-path",
+            "pkg.mvs.resolve 'packages at dup dict.keys len swap [\"c\" 'version] at-path",
         "2 \"1.5.0\"",
     );
 }
@@ -764,7 +764,7 @@ test "pkg: every resolved selection meets every recorded minimum" {
             "entry 1 at pkg.version.less? not) " ++
             "'selection-meets? def " ++
             mvs_root ++ " " ++ mvs_catalog ++
-            "pkg.mvs.resolve dup 'requires at vals (pairs) each raze " ++
+            "pkg.mvs.resolve dup 'requires at dict.vals (dict.pairs) each raze " ++
             "swap 'packages at (selection-meets?) partial all?",
         "1",
     );

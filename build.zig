@@ -720,6 +720,7 @@ pub fn build(b: *std.Build) void {
             "tests.unit_plan_test.",
             "tests.stdlib_test.",
             "tests.error_test.",
+            "tests.dict_module_test.",
             "tests.result_test.",
             "tests.str_test.",
             "tests.csv_test.",

@@ -17,15 +17,15 @@
   minimums type 'dict match?
   'type error.new "a lock's requirements are a dict from package name to version" error.with-message
   assert
-  minimums keys (pkg.name.valid?) all?
+  minimums dict.keys (pkg.name.valid?) all?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
-  minimums vals (pkg.version.validate pop) for
+  minimums dict.vals (pkg.version.validate pop) for
   minimums)
  'minimums-checked defp
 
  ### defp known?
  (pair packages -- bool : "Test whether a required package has a locked selection.")
- (|pair packages| packages pair first has?)
+ (|pair packages| packages pair first dict.has?)
  'known? defp
 
  ### defp satisfied?
@@ -41,9 +41,9 @@
  (|candidate|
   candidate type 'dict match?
   'type error.new "a lock is a dict" error.with-message assert
-  candidate pairs (pkg.data.assert-inert-entry) for
-  candidate lock-keys keys-exactly?
-  candidate vendor-lock-keys keys-exactly?
+  candidate dict.pairs (pkg.data.assert-inert-entry) for
+  candidate lock-keys dict.keys-exactly?
+  candidate vendor-lock-keys dict.keys-exactly?
   or
   'domain error.new "a lock has exactly the keys 'format 'root 'packages 'requires, or adds 'store"
   error.with-message
@@ -53,7 +53,7 @@
   candidate 'root at pkg.name.valid?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
   candidate
-  candidate 'store has?
+  candidate 'store dict.has?
   ('store at 'vendor match?
    'domain error.new "a lock's only project-local store mode is 'vendor" error.with-message assert)
   (pop)
@@ -61,19 +61,19 @@
   candidate 'packages at type 'dict match?
   'type error.new "a lock's packages are a dict from package name to selection" error.with-message
   assert
-  candidate 'packages at keys (pkg.name.valid?) all?
+  candidate 'packages at dict.keys (pkg.name.valid?) all?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
-  candidate 'packages at vals (pkg.manifest.validate-requirement pop) for
+  candidate 'packages at dict.vals (pkg.manifest.validate-requirement pop) for
   candidate 'requires at type 'dict match?
   'type error.new "a lock's requirements are keyed by the requiring package" error.with-message
   assert
-  candidate 'requires at keys (pkg.name.valid?) all?
+  candidate 'requires at dict.keys (pkg.name.valid?) all?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
-  candidate 'requires at vals (minimums-checked pop) for
-  candidate 'requires at candidate 'root at has?
+  candidate 'requires at dict.vals (minimums-checked pop) for
+  candidate 'requires at candidate 'root at dict.has?
   'domain error.new "a lock records the root's own requirements under its name" error.with-message
   assert
-  candidate 'requires at vals (pairs) each raze
+  candidate 'requires at dict.vals (dict.pairs) each raze
   dup candidate 'packages at (known?) partial all?
   'domain error.new "every required package has a selection in the lock" error.with-message assert
   candidate 'packages at (satisfied?) partial all?
@@ -139,7 +139,7 @@
  (lock -- text : "Render an already validated lock in canonical layout.")
  (|lock|
   lock 'root at str
-  lock 'store has? ("\n 'store 'vendor") ("") if
+  lock 'store dict.has? ("\n 'store 'vendor") ("") if
   lock 'packages at (render-selection) render-block
   lock 'requires at (render-requirer) render-block
   4 pack
@@ -292,7 +292,7 @@
   lock pkg.lock.validate pop
   module pkg.name.valid?
   'domain error.new "pkg why expects a canonical module name" error.with-message assert
-  lock 'packages at keys module (pkg.name.owns?) partial filter
+  lock 'packages at dict.keys module (pkg.name.owns?) partial filter
   dup empty? not
   'domain error.new "no locked package owns the requested module" error.with-message
   'data 'module module pair dict-of put

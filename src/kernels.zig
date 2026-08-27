@@ -103,10 +103,10 @@ pub const Operation = union(enum) {
                 .grade, .group => .one,
             },
             .text => |operation| switch (operation) {
-                // `split`, `join`, `format`, and `merge` read two sized
-                // operands; the rest dispatch on their collection alone.
-                .split, .join, .format, .merge => .two,
-                .keys, .put, .to_dict, .del, .has, .str => .one,
+                // `split`, `join`, and `format` read two sized operands; the
+                // rest dispatch on their collection alone.
+                .split, .join, .format => .two,
+                .put, .to_dict, .del, .str => .one,
             },
             .random => .one,
         };
@@ -718,10 +718,7 @@ const text_rows = [_]Row{
         // canonical rendering follows whole values and may descend through any representation
     },
     .{
-        .operations = only(.{
-            Operation{ .text = .format },
-            Operation{ .text = .merge },
-        }),
+        .operations = only(.{Operation{ .text = .format }}),
         .left = any_operand,
         .right = any_operand,
         .class = .generic_fallback,
@@ -742,10 +739,8 @@ const text_rows = [_]Row{
     },
     .{
         .operations = only(.{
-            Operation{ .text = .keys },
             Operation{ .text = .to_dict },
             Operation{ .text = .del },
-            Operation{ .text = .has },
         }),
         .left = any_aggregate,
         .class = .generic_fallback,

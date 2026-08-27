@@ -136,12 +136,9 @@ const entries = [_]Metadata{
     .{ .name = "grade", .effect = "list -- indices", .text = "Return the stable ascending sort permutation of a comparable list." },
     .{ .name = "group", .effect = "list -- dict", .text = "Group equal list values into a dictionary of zero-based index lists." },
 
-    .{ .name = "keys", .effect = "dict -- keys", .text = "Return a dictionary's keys in insertion order." },
     .{ .name = "put", .effect = "collection key value -- collection", .text = "Functionally update a list index or dictionary key." },
     .{ .name = "to-dict", .effect = "keys values -- dict", .text = "Build a dictionary from conforming key and value lists." },
-    .{ .name = "del", .effect = "dict key -- dict", .text = "Functionally remove a key from a dictionary." },
-    .{ .name = "merge", .effect = "left right -- dict", .text = "Merge two dictionaries, with right-hand values winning." },
-    .{ .name = "has?", .effect = "dict key -- bool", .text = "Return whether a dictionary contains a whole-value key." },
+    .{ .name = "del", .effect = "collection key -- collection", .text = "Functionally remove an in-bounds list index or a dictionary key; a missing dictionary key is unchanged." },
     .{ .name = "split", .effect = "string separator -- parts", .text = "Split a string at every occurrence of a separator; an empty separator yields its Unicode scalar strings." },
     .{ .name = "join", .effect = "strings separator -- string", .text = "Join a list of strings with a separator string." },
     .{ .name = "str", .effect = "value -- string", .text = "Return the canonical printed representation of a value as a string." },

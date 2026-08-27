@@ -9,7 +9,6 @@ const machine = @import("machine.zig");
 const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
 const sequence = @import("kernel_sequence.zig");
-const dict_text = @import("kernel_dict_text.zig");
 const combinators = @import("combinators.zig");
 
 const Value = value.Value;
@@ -23,7 +22,6 @@ pub const DirectOp = enum {
     rest,
     reverse,
     distinct,
-    vals,
     dip,
 
     pub fn spelling(self: DirectOp) []const u8 {
@@ -157,7 +155,7 @@ const reverse_pattern = [_]PatternAtom{
 };
 const distinct_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "group" } },
-    .{ .word = .{ .spelling = "keys" } },
+    .{ .word = .{ .spelling = "dict.keys" } },
 };
 const dip_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "swap" } },
@@ -165,19 +163,10 @@ const dip_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "compose", .binding = .source } },
     .{ .word = .{ .spelling = "call" } },
 };
-const vals_pattern = [_]PatternAtom{
-    .{ .word = .{ .spelling = "dup" } },
-    .{ .word = .{ .spelling = "keys" } },
-    .{ .word = .{ .spelling = "swap" } },
-    .literal,
-    .{ .word = .{ .spelling = "partial", .binding = .source } },
-    .{ .word = .{ .spelling = "each" } },
-};
-
 const unary_count = std.meta.fields(numeric.UnaryOp).len;
 const binary_count = std.meta.fields(numeric.BinaryOp).len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 5 + 8 + 15]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 5 + 8 + 14]RegistryEntry = undefined;
     var index: usize = 0;
     for (std.meta.fields(numeric.UnaryOp)) |field| {
         entries[index] = .{
@@ -255,7 +244,6 @@ pub const registry = blk: {
         .{ .operation = .rest, .pattern = &rest_pattern },
         .{ .operation = .reverse, .pattern = &reverse_pattern },
         .{ .operation = .distinct, .pattern = &distinct_pattern },
-        .{ .operation = .vals, .pattern = &vals_pattern },
         .{ .operation = .dip, .pattern = &dip_pattern },
     }) |direct| {
         entries[index] = .{
@@ -570,7 +558,6 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
         .rest => sequence.restForIdiom(evaluator),
         .reverse => sequence.reverseForIdiom(evaluator),
         .distinct => order.distinctForIdiom(evaluator),
-        .vals => dict_text.valsForIdiom(evaluator),
         .dip => combinators.dipForIdiom(evaluator),
     };
 }

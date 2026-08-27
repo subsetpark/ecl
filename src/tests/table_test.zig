@@ -7,7 +7,7 @@ test "table: constructors validate the column convention" {
         .{
             // A table is an ordinary dict, and core reflection says so.
             .name = "representation honesty",
-            .source = "{\"a\" [1 2] \"b\" [3 4]} dup type swap dup table.valid? swap keys",
+            .source = "{\"a\" [1 2] \"b\" [3 4]} dup type swap dup table.valid? swap dict.keys",
             .expected = "'dict 1 (\"a\" \"b\")",
         },
         .{

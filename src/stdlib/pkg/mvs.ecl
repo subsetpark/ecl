@@ -37,7 +37,7 @@
   "Validate a reachable version or raise with requirement provenance.")
  (|package required version|
   version wrap (pkg.version.validate) seed @attempt
-  dup 'ok has?
+  dup 'ok dict.has?
   ('ok at first)
   package required version 3 pack
   (|attempt-result package required version| package required version malformed-version)
@@ -60,7 +60,7 @@
  (requirement pair package -- : "Validate a requirement version when the field is present.")
  (|requirement pair package|
   requirement type 'dict match?
-  requirement 'version has?
+  requirement 'version dict.has?
   and
   requirement pair package 3 pack (precheck-requirement-value) with
   when)
@@ -74,7 +74,7 @@
 
  ### defp precheck-requirements-dict
  (requirements package -- : "Validate every version in a requirements dict.")
- (|requirements package| requirements pairs package (precheck-requirement) partial for)
+ (|requirements package| requirements dict.pairs package (precheck-requirement) partial for)
  'precheck-requirements-dict defp
 
  ### defp precheck-requirements-value
@@ -106,10 +106,10 @@
  (candidate package -- manifest :
   "Attach provenance to version failures, then validate a manifest.")
  (|candidate package|
-  candidate 'version has?
+  candidate 'version dict.has?
   candidate package pair (precheck-own-version) with
   when
-  candidate 'requires has?
+  candidate 'requires dict.has?
   candidate package pair (precheck-manifest-requirements) with
   when
   candidate pkg.manifest.validate)
@@ -259,7 +259,7 @@
  (sources node name requirement package -- record :
   "Return the canonical source record after one declaration.")
  (|sources node name requirement package|
-  sources node has?
+  sources node dict.has?
   sources node name requirement package 5 pack (existing-source) with
   requirement package pair (source-record) with
   if)
@@ -313,10 +313,10 @@
  (state package version requirer -- manifest :
   "Return an exact catalog manifest, or raise an error naming the requiring package.")
  (|state package version requirer|
-  state 'catalog at package has?
+  state 'catalog at package dict.has?
   state 'catalog at package {} at-or type 'dict match?
   and
-  state 'catalog at package {} at-or version has?
+  state 'catalog at package {} at-or version dict.has?
   and
   state package version 3 pack (catalog-value) with
   requirer package version 3 pack (missing-manifest) with
@@ -413,13 +413,13 @@
 
  ### defp selected-names
  (state -- names : "Return reached package names in canonical order.")
- ('sources at keys (first) each distinct sort)
+ ('sources at dict.keys (first) each distinct sort)
  'selected-names defp
 
  ### defp selected-node
  (name state -- node : "Return the highest reached exact node for a package name.")
  (|name state|
-  state 'sources at keys
+  state 'sources at dict.keys
   name (node-named?) partial filter
   dup (1 at) each pkg.version.max
   node-with-version)
@@ -449,7 +449,7 @@
 
  ### defp minimum-map
  (manifest -- minimums : "Return one manifest's required names and minimum versions.")
- ('requires at dup keys swap vals ('version at) each to-dict)
+ ('requires at dup dict.keys swap dict.vals ('version at) each to-dict)
  'minimum-map defp
 
  ### defp requires-pair

@@ -380,7 +380,7 @@ test "typed differential: sequence order text and random operation parity across
         "dup in?",
         "distinct",
         "grade",
-        "group keys",
+        "group dict.keys",
         "0 (+) fold",
         "raze",
         "len",
@@ -427,7 +427,7 @@ test "typed differential: sequence order text and random operation parity across
         try expectParity(&runtime, case.inputs, case.absent);
         try expectParity(&runtime, case.inputs, "dup in?");
         try expectParity(&runtime, case.inputs, "5 wrap reshape");
-        try expectParity(&runtime, case.inputs, "group keys");
+        try expectParity(&runtime, case.inputs, "group dict.keys");
         try expectParity(&runtime, case.inputs, "distinct");
     }
     for ([_]Inputs{
@@ -480,7 +480,7 @@ test "typed differential: sequence order text and random operation parity across
         try expectParity(&runtime, .{ .ints = numbers }, "grade");
 
         @memset(numbers, 1);
-        try expectParity(&runtime, .{ .ints = numbers }, "group keys");
+        try expectParity(&runtime, .{ .ints = numbers }, "group dict.keys");
         try expectParity(&runtime, .{ .ints = numbers }, "distinct");
     }
 

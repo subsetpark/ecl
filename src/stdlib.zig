@@ -17,6 +17,7 @@ const http_module = @import("stdlib/http.zig");
 const archive_module = @import("stdlib/archive.zig");
 const pkg_store_module = @import("stdlib/pkg_store.zig");
 const io_module = @import("stdlib/io.zig");
+const dict_module = @import("stdlib/dict.zig");
 
 /// One complete transport for one embedded module. Each arm carries
 //  everything its publication path needs, so no loader has to repair a
@@ -47,6 +48,7 @@ const Module = struct {
 };
 
 const modules = [_]Module{
+    .{ .name = "dict", .entry = .{ .builtin = &dict_module.words } },
     .{ .name = "error", .entry = .{ .source = .{
         .name = "<stdlib:error>",
         .text = @embedFile("stdlib/error.ecl"),

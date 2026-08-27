@@ -13,14 +13,14 @@
  ### def valid?
  (value -- bool : "Return 1 when a value satisfies the error dictionary schema.")
  (dup type 'dict match?
-  (dup 'kind has?
+  (dup 'kind dict.has?
    over 'kind 'missing at-or type 'symbol match?
    and
-   over 'msg has? (over 'msg at text?) (1) if
+   over 'msg dict.has? (over 'msg at text?) (1) if
    and
-   over 'word has? (over 'word at type 'symbol match?) (1) if
+   over 'word dict.has? (over 'word at type 'symbol match?) (1) if
    and
-   over 'trace has?
+   over 'trace dict.has?
    (over 'trace at dup type 'list match?
     ((type 'symbol match?) all?)
     (pop 0)
@@ -28,7 +28,7 @@
    (1)
    if
    and
-   over 'data has? (over 'data at type 'dict match?) (1) if
+   over 'data dict.has? (over 'data at type 'dict match?) (1) if
    and
    nip)
   (pop 0)

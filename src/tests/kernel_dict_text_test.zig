@@ -6,37 +6,22 @@ const list = @import("../list.zig");
 const dict = @import("../dict.zig");
 const helper = @import("kernel_test_support.zig");
 
-test "dict-text: dict operations preserve order ownership and right wins" {
+test "dict-text: polymorphic collection updates preserve ownership" {
     try helper.expectStack(
-        "{'a 1 'b 2} keys {'a 1} 'b 2 put {'a 1 'b 2} 'a del " ++
-            "{'a 1 'b 2} {'b 20 'c 3} merge {'a 1} 'a has?",
-        "['a 'b] {'a 1 'b 2} {'b 2} {'a 1 'b 20 'c 3} 1",
+        "{'a 1} 'b 2 put {'a 1 'b 2} 'a del [1 2 3] 1 9 put [1 2 3] 1 del",
+        "{'a 1 'b 2} {'b 2} [1 9 3] [1 3]",
     );
 }
 
-test "dict-text: has is key membership for every inert structural value" {
-    try helper.expectStack(
-        "{\"ab\" 9} \"ab\" has? {[1 2] 9} [1 2] has? " ++
-            "{missing 9} (missing) first has? {{'a 1} 9} {'a 1} has? " ++
-            "{1 9} 1.0 has? {\"ab\" 9} \"a\" has?",
-        "1 1 1 1 1 0",
-    );
-    try helper.expectError(.{
-        .name = "has requires a dictionary",
-        .source = "[] 'a has?",
-        .kind = "type",
-        .word = "has?",
-    });
-}
-
-test "dict-text: to-dict and list put" {
+test "dict-text: to-dict and polymorphic list updates" {
     try helper.expectStack(
         "1 type 1.0 type \\a type 'a type (missing) first type [] type {} type " ++
             "['a 1] str " ++
-            "['a 'b] [1 2] to-dict [1 2 3] 1 9 put [1 2 3] dup 1 9 put swap",
+            "['a 'b] [1 2] to-dict [1 2 3] 1 9 put [1 2 3] dup 1 9 put swap " ++
+            "[1 2 3] 1 del \"abc\" 0 del",
         "'int 'float 'char 'symbol 'word 'list 'dict " ++
             "\"('a 1)\" " ++
-            "{'a 1 'b 2} [1 9 3] [1 9 3] [1 2 3]",
+            "{'a 1 'b 2} [1 9 3] [1 9 3] [1 2 3] [1 3] \"bc\"",
     );
     try helper.expectErrors(&.{
         .{
@@ -68,6 +53,24 @@ test "dict-text: to-dict and list put" {
             .source = "[1 2] 'a 9 put",
             .kind = "type",
             .word = "put",
+        },
+        .{
+            .name = "del index must be in bounds",
+            .source = "[1 2] 2 del",
+            .kind = "domain",
+            .word = "del",
+        },
+        .{
+            .name = "del index must be nonnegative",
+            .source = "[1 2] -1 del",
+            .kind = "domain",
+            .word = "del",
+        },
+        .{
+            .name = "del index must be an integer",
+            .source = "[1 2] 'a del",
+            .kind = "type",
+            .word = "del",
         },
     });
     try helper.expectStack(
@@ -168,6 +171,10 @@ test "dict-text: large updates yield through the public runtime" {
     try std.testing.expect((try runtime.runUnit("<test>", "69999 1 put pop")) == .ok);
     try std.testing.expect(runtime.lastPolls() >= 1);
 
+    try runtime.pushBorrowed(sequence);
+    try std.testing.expect((try runtime.runUnit("<test>", "69999 del pop")) == .ok);
+    try std.testing.expect(runtime.lastPolls() >= 1);
+
     const pairs = try allocator.alloc(dict.Pair, 70_000);
     defer allocator.free(pairs);
     for (pairs, 0..) |*pair, index| pair.* = .{
@@ -186,6 +193,6 @@ test "dict-text: large updates yield through the public runtime" {
     try std.testing.expect(runtime.lastPolls() >= 1);
 
     try runtime.pushBorrowed(dictionary);
-    try std.testing.expect((try runtime.runUnit("<test>", "{70000 1} merge pop")) == .ok);
+    try std.testing.expect((try runtime.runUnit("<test>", "{70000 1} dict.merge pop")) == .ok);
     try std.testing.expect(runtime.lastPolls() >= 1);
 }

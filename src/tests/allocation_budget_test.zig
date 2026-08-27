@@ -269,8 +269,8 @@ const dispatch_free = [_]Case{
     },
     .{
         .name = "dict membership",
-        .setup = "{d} range",
-        .workload = "(pop {'a 1} 'a has?) each len",
+        .setup = "{} dict.keys pop {d} range",
+        .workload = "(pop {'a 1} 'a dict.has?) each len",
         .per_element = 0,
     },
     .{
@@ -463,14 +463,14 @@ const dispatch_free = [_]Case{
     },
     .{
         .name = "dict keys",
-        .setup = "{d} range",
-        .workload = "(pop {'a 1} keys len) each len",
+        .setup = "{} dict.keys pop {d} range",
+        .workload = "(pop {'a 1} dict.keys len) each len",
         .per_element = 0,
     },
     .{
         .name = "dict values",
-        .setup = "{d} range",
-        .workload = "(pop {'a 1} vals len) each len",
+        .setup = "{} dict.keys pop {d} range",
+        .workload = "(pop {'a 1} dict.vals len) each len",
         .per_element = 0,
     },
 };
@@ -619,8 +619,8 @@ const construction = [_]Case{
     },
     .{
         .name = "dict delete",
-        .setup = "{d} range",
-        .workload = "(pop {'a 1} 'a del keys len) each len",
+        .setup = "{} dict.keys pop {d} range",
+        .workload = "(pop {'a 1} 'a del dict.keys len) each len",
         .per_element = 8,
     },
     .{
@@ -631,14 +631,14 @@ const construction = [_]Case{
     },
     .{
         .name = "dict put",
-        .setup = "{d} range",
-        .workload = "(pop {'a 1} 'b 2 put keys len) each len",
+        .setup = "{} dict.keys pop {d} range",
+        .workload = "(pop {'a 1} 'b 2 put dict.keys len) each len",
         .per_element = 14,
     },
     .{
         .name = "dict merge",
-        .setup = "{d} range",
-        .workload = "(pop {'a 1} {'b 2} merge keys len) each len",
+        .setup = "{} dict.keys pop {d} range",
+        .workload = "(pop {'a 1} {'b 2} dict.merge dict.keys len) each len",
         .per_element = 14,
     },
     .{
@@ -649,8 +649,8 @@ const construction = [_]Case{
     },
     .{
         .name = "group",
-        .setup = "{d} range",
-        .workload = "(pop [1 1 2] group keys len) each len",
+        .setup = "{} dict.keys pop {d} range",
+        .workload = "(pop [1 1 2] group dict.keys len) each len",
         .per_element = 27,
     },
 };
