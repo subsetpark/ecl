@@ -5158,15 +5158,15 @@ pub const Machine = struct {
                     );
                 }
                 try self.startDriver(ConstructionDriver{
-                    .target = .init(.{ .image = .{
-                        .candidate = candidate.move(),
-                        .registration = registration,
+                    .state = .init(.{ .open = .{
+                        .target = .init(.{ .image = .{
+                            .candidate = candidate.move(),
+                            .registration = registration,
+                        } }),
+                        .body = .init(runnable.take()),
                     } }),
-                    .rescope = null,
-                    .body = .init(runnable.take()),
                     .materializer = .init(.init(owned.takeSeeds().?)),
                     .word = word,
-                    .phase = .open,
                 });
             },
             .admitted => |admitted| {
@@ -5186,18 +5186,18 @@ pub const Machine = struct {
                 admission = null;
                 defer cursor.deinit(self.releaseDomain(), self.allocator());
                 try self.startDriver(ConstructionDriver{
-                    .target = .init(.{ .image = .{
-                        .candidate = candidate.move(),
-                        .registration = registration,
+                    .state = .init(.{ .rescope = .{
+                        .target = .init(.{ .image = .{
+                            .candidate = candidate.move(),
+                            .registration = registration,
+                        } }),
+                        .cursor = .init(cursor.take()),
                     } }),
-                    .rescope = .init(cursor.take()),
-                    .body = null,
                     .materializer = if (owned.takeSeeds()) |seeds|
                         .init(.init(seeds))
                     else
                         null,
                     .word = word,
-                    .phase = .rescope,
                 });
             },
         }
@@ -5561,12 +5561,12 @@ pub const Machine = struct {
         // user-sized traversal.
         if (owned.seedHeader() == null) return self.openAttempt(owned.takeBody());
         return self.startDriver(ConstructionDriver{
-            .target = .init(.attempt),
-            .rescope = null,
-            .body = .init(owned.takeBody()),
+            .state = .init(.{ .open = .{
+                .target = .init(.attempt),
+                .body = .init(owned.takeBody()),
+            } }),
             .materializer = .init(.init(owned.takeSeeds().?)),
             .word = self.unit.active_word,
-            .phase = .open,
         });
     }
     /// Opens one `@attempt` boundary. Consuming: the body is owned by the
@@ -7746,25 +7746,55 @@ const ConstructionTarget = union(enum) {
 const ConstructionDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .fields;
-    target: heap.Owned(ConstructionTarget),
-    /// The re-scoping pass owns its exact admitted source. It is absent when
-    /// the body is not text this archive's reader wrote.
-    rescope: ?heap.Owned(spans.SpanArchive.RescopeCursor),
-    /// The body to run: the finished copy, or the input body when nothing was
-    /// re-scoped. Absent only while the copy is still being built.
-    body: ?heap.Owned(*Header),
+    const State = union(enum) {
+        /// The re-scoping pass owns its exact admitted source and the target
+        /// that will receive the completed copy.
+        rescope: struct {
+            target: heap.Owned(ConstructionTarget),
+            cursor: heap.Owned(spans.SpanArchive.RescopeCursor),
+        },
+        /// The finished copy, or an unchanged input body, is owned until the
+        /// target boundary consumes it on both success and failure.
+        open: struct {
+            target: heap.Owned(ConstructionTarget),
+            body: heap.Owned(*Header),
+        },
+        /// The boundary exists and only the independently optional seeds may
+        /// remain to be materialized.
+        seed,
+
+        pub fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .rescope => |*rescope| {
+                    rescope.cursor.deinit(releases, allocator);
+                    rescope.target.deinit(releases, allocator);
+                },
+                .open => |*open| {
+                    open.body.deinit(releases, allocator);
+                    open.target.deinit(releases, allocator);
+                },
+                .seed => {},
+            }
+            self.* = undefined;
+        }
+    };
+
+    state: heap.Owned(State),
     materializer: ?heap.Owned(SeedMaterializer),
     /// The word that opened the construction, captured because the boundary is
     /// opened in a later step than the one that dispatched it.
     word: intern.TraceWord,
-    phase: enum { rescope, open, seed } = .rescope,
 
     pub fn advance(evaluator: *Machine, self: *ConstructionDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
-        switch (self.phase) {
-            .rescope => {
+        switch (self.state.borrowMut().*) {
+            .rescope => |*rescope| {
                 var work: poll_api.WorkBudget = .init(construction_work_quantum);
-                const progress = self.rescope.?.borrowMut().advance(&work) catch |err| switch (err) {
+                const progress = rescope.cursor.borrowMut().advance(&work) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidProvenance => @panic("archive refused its own completed re-scope publication"),
                 };
@@ -7772,37 +7802,35 @@ const ConstructionDriver = struct {
                     .pending => return .yielded,
                     .complete => |header| header,
                 };
-                self.rescope.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.rescope = null;
-                self.body = .init(stamped);
-                self.phase = .open;
+                rescope.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                const next = @FieldType(State, "open"){
+                    .target = .init(rescope.target.take()),
+                    .body = .init(stamped),
+                };
+                self.state.borrowMut().* = .{ .open = next };
                 return .yielded;
             },
-            .open => {
+            .open => |*open| {
                 // The body is consumed by the open, on success and on failure
                 // alike; the seeds are not, so they stay owned here until the
                 // boundary they seed exists.
-                const body = self.body.?.take();
-                self.body = null;
-                switch (self.target.borrowMut().*) {
+                const body = open.body.take();
+                switch (open.target.borrowMut().*) {
                     .attempt => {
-                        _ = self.target.take();
                         try evaluator.openAttempt(body);
                     },
                     .image => |*owned| {
                         const registration = owned.registration;
-                        var candidate = owned.candidate.move();
-                        _ = self.target.take();
-                        errdefer candidate.deinit();
                         try evaluator.openImageBoundary(
-                            &candidate,
+                            &owned.candidate,
                             registration,
                             self.word,
                             body,
                         );
                     },
                 }
-                self.phase = .seed;
+                open.target.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.state.borrowMut().* = .seed;
                 return .yielded;
             },
             .seed => {
