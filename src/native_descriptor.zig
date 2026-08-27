@@ -113,65 +113,86 @@ pub const Progress = union(enum) {
 
 const DocumentBuild = struct {
     host: *const heap.HostCleanup,
-    materializer: storage.TextMaterializer,
-    phase: enum { materialize, normalize, complete } = .materialize,
-    source_value: ?value.Value = null,
-    normalizer: ?doc.NormalizeCursor = null,
-    result: ?*env.DocumentationString = null,
+    state: State,
+
+    const State = union(enum) {
+        materialize: storage.TextMaterializer,
+        source: value.Value,
+        normalize: struct {
+            source: value.Value,
+            cursor: doc.NormalizeCursor,
+        },
+        complete: *env.DocumentationString,
+        failed,
+        consumed,
+    };
 
     fn init(host: *const heap.HostCleanup, source: []const u8) DocumentBuild {
-        return .{ .host = host, .materializer = .init(host.allocator(), source) };
+        return .{
+            .host = host,
+            .state = .{ .materialize = .init(host.allocator(), source) },
+        };
     }
 
     fn deinit(self: *DocumentBuild) void {
         const releases = heap.hostDomain(self.host);
-        switch (self.phase) {
-            .materialize => self.materializer.retire(releases),
-            .normalize, .complete => {},
+        switch (self.state) {
+            .materialize => |*materializer| materializer.retire(releases),
+            .source => |source| releases.releaseValue(source),
+            .normalize => |*normalizing| {
+                normalizing.cursor.retire(releases);
+                releases.releaseValue(normalizing.source);
+            },
+            .complete => |result| releases.releaseHeader(env.documentationHeader(result)),
+            .failed, .consumed => {},
         }
-        if (self.normalizer) |*normalizer| normalizer.retire(releases);
-        if (self.source_value) |item| releases.releaseValue(item);
-        if (self.result) |result| releases.releaseHeader(env.documentationHeader(result));
         self.* = undefined;
     }
 
     fn advance(self: *DocumentBuild, budget: usize) ValidateError!?*env.DocumentationString {
-        switch (self.phase) {
-            .materialize => switch (try self.materializer.advance(budget)) {
+        switch (self.state) {
+            .materialize => |*materializer| switch (try materializer.advance(budget)) {
                 .pending => return null,
                 .complete => |document| {
-                    self.materializer.deinit();
-                    self.source_value = document;
-                    self.phase = .normalize;
-                    self.normalizer = try .init(self.host.allocator(), document);
+                    materializer.deinit();
+                    self.state = .{ .source = document };
                     return null;
                 },
             },
-            .normalize => switch (try self.normalizer.?.advance(budget)) {
+            .source => |source| {
+                const normalizer = try doc.NormalizeCursor.init(self.host.allocator(), source);
+                self.state = .{ .normalize = .{ .source = source, .cursor = normalizer } };
+                return null;
+            },
+            .normalize => |*normalizing| switch (try normalizing.cursor.advance(budget)) {
                 .pending => return null,
                 .complete => |normalized| {
-                    self.normalizer.?.deinit();
-                    self.normalizer = null;
-                    heap.hostDomain(self.host).releaseValue(self.source_value.?);
-                    self.source_value = null;
+                    const source = normalizing.source;
+                    normalizing.cursor.deinit();
+                    heap.hostDomain(self.host).releaseValue(source);
                     if (normalized.list.length() == 0) {
                         heap.hostDomain(self.host).releaseValue(normalized);
+                        self.state = .failed;
                         return error.EmptyDocumentation;
                     }
-                    self.result = env.documentation(normalized.list).?;
-                    self.phase = .complete;
-                    return self.result;
+                    const result = env.documentation(normalized.list).?;
+                    self.state = .{ .complete = result };
+                    return result;
                 },
             },
-            .complete => return self.result,
+            .complete => |result| return result,
+            .failed, .consumed => unreachable,
         }
     }
 
     fn take(self: *DocumentBuild) *env.DocumentationString {
-        std.debug.assert(self.phase == .complete);
-        const result = self.result.?;
-        self.result = null;
-        return result;
+        return switch (self.state) {
+            .complete => |result| moved: {
+                self.state = .consumed;
+                break :moved result;
+            },
+            else => unreachable,
+        };
     }
 };
 
