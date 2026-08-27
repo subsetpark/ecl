@@ -285,32 +285,46 @@ const WaitSet = struct {
     queue: QueueEntry,
     registrations: []WaitRegistration,
     canonical: []CanonicalSlot,
-    initialized: usize = 0,
-    canonical_initialized: usize = 0,
     wake_handles: usize = 0,
-    awaiting_handles: bool = false,
-    request: ?machine.ParkRequest,
-    setup_phase: SetupPhase = .initialize,
-    setup_index: usize = 0,
-    probe_index: usize = 0,
-    cancel_index: usize = 0,
-    cancel_cursor: ?CancellationCursor = null,
-    discarding: bool = false,
-    delivery_reason: ?core.WakeReason = null,
-    park_result: ?machine.ParkResume = null,
-    cleanup_index: usize = 0,
-    cell_release_index: usize = 0,
+    state: State,
     timer: TimerNode,
     absolute_deadline: ?std.Io.Timestamp = null,
 
-    const SetupPhase = enum {
-        initialize,
-        cancel_join_tail,
-        find_duplicate,
-        register,
-        timer,
-        release_request,
-        activate,
+    const JoinRequest = @FieldType(machine.ParkRequest, "join");
+    const State = union(enum) {
+        initializing: struct {
+            request: machine.ParkRequest,
+            registrations: usize = 0,
+            canonical: usize = 0,
+        },
+        cancelling: struct {
+            join: JoinRequest,
+            index: usize,
+            work: union(enum) {
+                next,
+                active: CancellationCursor,
+            } = .next,
+        },
+        finding_duplicate: struct {
+            request: machine.ParkRequest,
+            index: usize = 0,
+            probe: usize = 0,
+        },
+        registering: struct {
+            request: machine.ParkRequest,
+            index: usize,
+        },
+        timer: machine.ParkRequest,
+        release_request: machine.ParkRequest,
+        activating,
+        ready,
+        delivering: struct {
+            result: machine.ParkResume,
+            cleanup_index: usize = 0,
+            cell_release_index: usize = 0,
+            awaiting_handles: bool = false,
+        },
+        discard: machine.ParkRequest,
         complete,
     };
 
@@ -346,7 +360,7 @@ const WaitSet = struct {
             .kind = kind,
             .registrations = registrations,
             .canonical = canonical,
-            .request = request,
+            .state = .{ .initializing = .{ .request = request } },
             .timer = .{ .wait = self },
             .queue = .{ .item = .{ .wait = self } },
         };
@@ -367,8 +381,7 @@ const WaitSet = struct {
         std.debug.assert(self.timer.membership == .detached);
         std.debug.assert(self.registrations.len == 0);
         std.debug.assert(self.canonical.len == 0);
-        std.debug.assert(self.request == null);
-        std.debug.assert(self.cancel_cursor == null);
+        std.debug.assert(self.state == .complete);
         self.allocator.destroy(self);
     }
 
@@ -377,10 +390,13 @@ const WaitSet = struct {
         std.Io.Threaded.mutexLock(&self.mutex);
         std.debug.assert(self.wake_handles != 0);
         self.wake_handles -= 1;
-        if (self.wake_handles == 0 and self.awaiting_handles) {
-            self.awaiting_handles = false;
-            enqueue = true;
-        }
+        if (self.wake_handles == 0) switch (self.state) {
+            .delivering => |*delivery| if (delivery.awaiting_handles) {
+                delivery.awaiting_handles = false;
+                enqueue = true;
+            },
+            else => {},
+        };
         std.Io.Threaded.mutexUnlock(&self.mutex);
         if (enqueue) self.scheduler.enqueueWait(self);
     }
@@ -485,19 +501,24 @@ const WaitSet = struct {
     }
 
     fn performWaitCommand(self: *WaitSet, command: core.WaitCommand) void {
-        const reason = switch (command) {
+        switch (command) {
             .none => return,
-            .deliver => |winner| winner,
-        };
-        std.debug.assert(self.delivery_reason == null);
-        self.delivery_reason = reason;
+            .deliver => {},
+        }
         self.scheduler.enqueueWait(self);
     }
 
     fn discard(self: *WaitSet) void {
         std.debug.assert(self.policy == .registering);
-        std.debug.assert(self.initialized == 0);
-        self.discarding = true;
+        const request = switch (self.state) {
+            .initializing => |initializing| request: {
+                std.debug.assert(initializing.registrations == 0);
+                std.debug.assert(initializing.canonical == 0);
+                break :request initializing.request;
+            },
+            else => unreachable,
+        };
+        self.state = .{ .discard = request };
         self.scheduler.enqueueWait(self);
     }
 
@@ -521,134 +542,140 @@ const WaitSet = struct {
 
     fn advanceSetup(self: *WaitSet) bool {
         var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.setup_phase) {
-            .initialize => {
-                if (self.initialized != self.registrations.len) {
-                    self.registrations[self.initialized] = .{ .wait = self };
-                    self.initialized += 1;
+        while (budget != 0) switch (self.state) {
+            .initializing => |*initializing| {
+                if (initializing.registrations != self.registrations.len) {
+                    self.registrations[initializing.registrations] = .{ .wait = self };
+                    initializing.registrations += 1;
                     self.wake_handles += 1;
                     budget -= 1;
                     continue;
                 }
-                if (self.canonical_initialized != self.canonical.len) {
-                    self.canonical[self.canonical_initialized] = .{};
-                    self.canonical_initialized += 1;
+                if (initializing.canonical != self.canonical.len) {
+                    self.canonical[initializing.canonical] = .{};
+                    initializing.canonical += 1;
                     budget -= 1;
                     continue;
                 }
-                {
-                    self.setup_phase = .cancel_join_tail;
-                    continue;
-                }
+                const request = initializing.request;
+                self.state = switch (request) {
+                    .join => |join| if (join.cancel_from) |start|
+                        .{ .cancelling = .{ .join = join, .index = start } }
+                    else
+                        .{ .finding_duplicate = .{ .request = request } },
+                    else => .{ .finding_duplicate = .{ .request = request } },
+                };
             },
-            .cancel_join_tail => {
-                const join = switch (self.request.?) {
-                    .join => |join| join,
-                    else => {
-                        self.setup_phase = .find_duplicate;
-                        continue;
-                    },
-                };
-                const start = join.cancel_from orelse {
-                    self.setup_phase = .find_duplicate;
-                    continue;
-                };
-                const count: usize = @intCast(join.tasks.list.length());
-                if (self.cancel_index == 0) self.cancel_index = start;
-                if (self.cancel_cursor) |*cursor| {
+            .cancelling => |*cancelling| switch (cancelling.work) {
+                .active => |*cursor| {
                     if (!cursor.advance()) return false;
                     cursor.deinit();
-                    self.cancel_cursor = null;
-                    self.cancel_index += 1;
+                    cancelling.work = .next;
+                    cancelling.index += 1;
                     budget -|= cancellation_tree_quantum;
-                    continue;
-                }
-                if (self.cancel_index == count) {
-                    self.setup_phase = .find_duplicate;
-                    continue;
-                }
-                const cell = taskCell(list.atUnchecked(join.tasks, self.cancel_index)).?;
-                cancelArriving(cell);
-                self.cancel_cursor = .{ .root = &cell.scope };
-                budget -= 1;
+                },
+                .next => {
+                    const join = cancelling.join;
+                    const count: usize = @intCast(join.tasks.list.length());
+                    if (cancelling.index == count) {
+                        self.state = .{ .finding_duplicate = .{
+                            .request = .{ .join = join },
+                        } };
+                        continue;
+                    }
+                    const cell = taskCell(list.atUnchecked(join.tasks, cancelling.index)).?;
+                    cancelArriving(cell);
+                    cancelling.work = .{ .active = .{ .root = &cell.scope } };
+                    budget -= 1;
+                },
             },
-            .find_duplicate => {
-                if (self.setup_index == self.registrations.len) {
-                    self.setup_phase = .timer;
+            .finding_duplicate => |*finding| {
+                if (finding.index == self.registrations.len) {
+                    const request = finding.request;
+                    self.state = .{ .timer = request };
                     continue;
                 }
                 if (self.kind != .any) {
-                    self.setup_phase = .register;
+                    const registering = finding.*;
+                    self.state = .{ .registering = .{
+                        .request = registering.request,
+                        .index = registering.index,
+                    } };
                     continue;
                 }
-                const cell = self.requestCell(self.setup_index);
-                if (self.probe_index == 0) self.probe_index = canonicalStart(
+                const cell = requestCell(finding.request, finding.index);
+                if (finding.probe == 0) finding.probe = canonicalStart(
                     cell,
                     self.canonical.len,
                 );
-                const slot = &self.canonical[self.probe_index - 1];
+                const slot = &self.canonical[finding.probe - 1];
                 if (slot.cell == null) {
-                    slot.* = .{ .cell = cell, .index = @intCast(self.setup_index) };
-                    self.setup_phase = .register;
+                    slot.* = .{ .cell = cell, .index = @intCast(finding.index) };
+                    const registering = finding.*;
+                    self.state = .{ .registering = .{
+                        .request = registering.request,
+                        .index = registering.index,
+                    } };
                 } else if (slot.cell == cell) {
                     const terminal = self.registerCell(
-                        self.setup_index,
+                        finding.index,
                         cell,
                         slot.index,
                         false,
                     );
                     if (terminal) self.select(.{ .task = slot.index });
-                    self.setup_index += 1;
-                    self.probe_index = 0;
-                } else self.probe_index = self.probe_index % self.canonical.len + 1;
+                    finding.index += 1;
+                    finding.probe = 0;
+                } else finding.probe = finding.probe % self.canonical.len + 1;
                 budget -= 1;
             },
-            .register => {
-                const cell = self.requestCell(self.setup_index);
+            .registering => |registering| {
+                const cell = requestCell(registering.request, registering.index);
                 const terminal = self.registerCell(
-                    self.setup_index,
+                    registering.index,
                     cell,
-                    @intCast(self.setup_index),
+                    @intCast(registering.index),
                     true,
                 );
-                if (terminal) self.select(.{ .task = @intCast(self.setup_index) });
-                self.setup_index += 1;
-                self.probe_index = 0;
-                self.setup_phase = .find_duplicate;
+                if (terminal) self.select(.{ .task = @intCast(registering.index) });
+                self.state = .{ .finding_duplicate = .{
+                    .request = registering.request,
+                    .index = registering.index + 1,
+                } };
                 budget -= 1;
             },
-            .timer => {
-                if (self.request.? == .deadline) {
-                    self.addTimer(self.request.?.deadline.milliseconds) catch |err| switch (err) {
+            .timer => |request| {
+                if (request == .deadline) {
+                    self.addTimer(request.deadline.milliseconds) catch |err| switch (err) {
                         error.Io => self.select(.io),
                         error.OutOfMemory => self.select(.out_of_memory),
                     };
                 }
-                self.setup_phase = .release_request;
+                self.state = .{ .release_request = request };
             },
-            .release_request => {
-                self.scheduler.releaseDomain().releaseValue(self.request.?.ownedValue().?);
-                self.request = null;
-                self.setup_phase = .activate;
+            .release_request => |request| {
+                self.scheduler.releaseDomain().releaseValue(request.ownedValue().?);
+                self.state = .activating;
                 budget -= 1;
             },
-            .activate => {
+            .activating => {
                 // `activate` publishes the wait set, and publication is what
                 // lets another selector deliver and drop the last reference —
                 // so `self` may be freed the moment it returns. The phase
                 // therefore advances *before* the publish, and this arm
                 // touches nothing afterward.
-                self.setup_phase = .complete;
+                self.state = .ready;
                 self.activate();
                 return true;
             },
-            .complete => return true,
+            .ready => return true,
+            .delivering, .discard, .complete => unreachable,
         };
         return false;
     }
 
-    fn requestCell(self: *WaitSet, index: usize) *TaskCell {
-        return taskCell(self.request.?.taskAt(index)).?;
+    fn requestCell(request: machine.ParkRequest, index: usize) *TaskCell {
+        return taskCell(request.taskAt(index)).?;
     }
 
     fn registerCell(
@@ -680,12 +707,32 @@ const WaitSet = struct {
     }
 
     fn advanceDelivery(self: *WaitSet) DeliveryProgress {
-        if (self.discarding) return self.advanceDiscard();
-        const reason = self.delivery_reason.?;
-        if (self.park_result == null) self.park_result = self.materializeResume(reason);
+        switch (self.state) {
+            .discard => |request| return self.advanceDiscard(request),
+            .ready => {
+                const reason = self.deliveredReason();
+                const result = self.materializeResume(reason);
+                std.Io.Threaded.mutexLock(&self.mutex);
+                std.debug.assert(self.state == .ready);
+                self.state = .{ .delivering = .{ .result = result } };
+                std.Io.Threaded.mutexUnlock(&self.mutex);
+            },
+            .delivering => {},
+            .initializing,
+            .cancelling,
+            .finding_duplicate,
+            .registering,
+            .timer,
+            .release_request,
+            .activating,
+            .complete,
+            => unreachable,
+        }
+        const reason = self.deliveredReason();
+        const delivery = &self.state.delivering;
         var budget: usize = machine.kernel_poll_quantum;
-        while (self.cleanup_index != self.initialized and budget != 0) : (budget -= 1) {
-            const registration = &self.registrations[self.cleanup_index];
+        while (delivery.cleanup_index != self.registrations.len and budget != 0) : (budget -= 1) {
+            const registration = &self.registrations[delivery.cleanup_index];
             const command = if (registration.cell) |cell| command: {
                 std.Io.Threaded.mutexLock(&cell.mutex);
                 const cleanup = registrationDecision(registration.phase, .cleanup);
@@ -700,44 +747,53 @@ const WaitSet = struct {
             };
             if (command.release_external) registration.release();
             if (command.release_directory) registration.release();
-            self.cleanup_index += 1;
+            delivery.cleanup_index += 1;
         }
-        if (self.cleanup_index != self.initialized) return .yielded;
+        if (delivery.cleanup_index != self.registrations.len) return .yielded;
         self.removeTimer();
         std.Io.Threaded.mutexLock(&self.mutex);
         if (self.wake_handles != 0) {
-            self.awaiting_handles = true;
+            delivery.awaiting_handles = true;
             std.Io.Threaded.mutexUnlock(&self.mutex);
             return .waiting;
         }
         std.Io.Threaded.mutexUnlock(&self.mutex);
 
         var release_budget: usize = machine.kernel_poll_quantum;
-        while (self.cell_release_index != self.initialized and release_budget != 0) : (release_budget -= 1) {
-            const registration = &self.registrations[self.cell_release_index];
+        while (delivery.cell_release_index != self.registrations.len and release_budget != 0) : (release_budget -= 1) {
+            const registration = &self.registrations[delivery.cell_release_index];
             if (registration.cell) |cell| self.scheduler.releaseDomain().releaseHeader(cell.handle());
             registration.cell = null;
-            self.cell_release_index += 1;
+            delivery.cell_release_index += 1;
         }
-        if (self.cell_release_index != self.initialized) return .yielded;
+        if (delivery.cell_release_index != self.registrations.len) return .yielded;
         self.allocator.free(self.registrations);
         self.registrations = &.{};
         self.allocator.free(self.canonical);
         self.canonical = &.{};
-        const result = self.park_result.?;
-        self.park_result = null;
+        const result = delivery.result;
+        self.state = .complete;
         self.wakeOwner(reason, result);
         self.release();
         return .complete;
     }
 
-    fn advanceDiscard(self: *WaitSet) DeliveryProgress {
-        self.scheduler.releaseDomain().releaseValue(self.request.?.ownedValue().?);
-        self.request = null;
+    fn deliveredReason(self: *WaitSet) core.WakeReason {
+        std.Io.Threaded.mutexLock(&self.mutex);
+        defer std.Io.Threaded.mutexUnlock(&self.mutex);
+        return switch (self.policy) {
+            .delivered => |reason| reason,
+            .registering, .selected, .active => unreachable,
+        };
+    }
+
+    fn advanceDiscard(self: *WaitSet, request: machine.ParkRequest) DeliveryProgress {
+        self.scheduler.releaseDomain().releaseValue(request.ownedValue().?);
         self.allocator.free(self.registrations);
         self.registrations = &.{};
         self.allocator.free(self.canonical);
         self.canonical = &.{};
+        self.state = .complete;
         self.release();
         return .complete;
     }
