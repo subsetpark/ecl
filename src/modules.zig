@@ -2688,9 +2688,11 @@ pub const Registry = enum(usize) {
                             .registry = self.registry,
                             .turn = .init(SlotLease.retain(found), self.authority),
                         };
+                        const canonical = module.canonical;
+                        const directory = module.directory;
                         self.state = .{ .barrier = .{
-                            .canonical = module.canonical,
-                            .directory = module.directory,
+                            .canonical = canonical,
+                            .directory = directory,
                             .retirement = retirement,
                         } };
                         break :result .pending;
@@ -2717,26 +2719,33 @@ pub const Registry = enum(usize) {
                         break :result .pending;
                     }
                     if (!retirement.turn.granted()) break :result .pending;
+                    const canonical = barrier.canonical;
+                    const directory = barrier.directory;
+                    const cloner = directory.directory.?.modules
+                        .cloneExcludingCursor(canonical, null);
                     self.state = .{ .modules_map = .{
-                        .canonical = barrier.canonical,
-                        .directory = barrier.directory,
+                        .canonical = canonical,
+                        .directory = directory,
                         .retirement = retirement,
-                        .cloner = barrier.directory.directory.?.modules
-                            .cloneExcludingCursor(barrier.canonical, null),
+                        .cloner = cloner,
                     } };
                     break :result .pending;
                 },
                 .modules_map => |*modules_state| switch (try modules_state.cloner.advance()) {
                     .pending => .pending,
                     .complete => |map| result: {
+                        const canonical = modules_state.canonical;
+                        const directory = modules_state.directory;
+                        const retirement = modules_state.retirement;
                         modules_state.cloner.deinit();
+                        const cloner = directory.directory.?.aliases
+                            .cloneExcludingCursor(null, canonical);
                         self.state = .{ .aliases_map = .{
-                            .canonical = modules_state.canonical,
-                            .directory = modules_state.directory,
-                            .retirement = modules_state.retirement,
+                            .canonical = canonical,
+                            .directory = directory,
+                            .retirement = retirement,
                             .modules = map,
-                            .cloner = modules_state.directory.directory.?.aliases
-                                .cloneExcludingCursor(null, modules_state.canonical),
+                            .cloner = cloner,
                         } };
                         break :result .pending;
                     },
@@ -2744,12 +2753,16 @@ pub const Registry = enum(usize) {
                 .aliases_map => |*aliases_state| switch (try aliases_state.cloner.advance()) {
                     .pending => .pending,
                     .complete => |map| result: {
+                        const canonical = aliases_state.canonical;
+                        const directory = aliases_state.directory;
+                        const retirement = aliases_state.retirement;
+                        const modules = aliases_state.modules;
                         aliases_state.cloner.deinit();
                         self.state = .{ .commit = .{
-                            .canonical = aliases_state.canonical,
-                            .directory = aliases_state.directory,
-                            .retirement = aliases_state.retirement,
-                            .modules = aliases_state.modules,
+                            .canonical = canonical,
+                            .directory = directory,
+                            .retirement = retirement,
+                            .modules = modules,
                             .aliases = map,
                         } };
                         break :result .pending;
