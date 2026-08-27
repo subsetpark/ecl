@@ -346,7 +346,7 @@ const DictOfDriver = struct {
     entries: heap.Owned(Value),
     pairs: heap.Owned([]dict.Pair),
     index: usize = 0,
-    materializer: ?heap.Owned(kernel_storage.DictMaterializer) = null,
+    materializer: ?heap.Owned(dict.Materializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *DictOfDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -406,7 +406,7 @@ const RaiseDriver = struct {
     raised: heap.Owned(Value),
     keys: [5]u32,
     field_index: usize = 0,
-    lookup: ?heap.Owned(kernel_storage.DictFindCursor) = null,
+    lookup: ?heap.Owned(dict.FindCursor) = null,
     trace: ?Value = null,
     trace_index: usize = 0,
     phase: enum { lookup, trace, finish } = .lookup,

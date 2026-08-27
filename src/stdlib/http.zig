@@ -188,7 +188,7 @@ const RequestDriver = struct {
         headers_dictionary_prepare: HeaderBuild,
         headers_dictionary: struct {
             build: HeaderBuild,
-            dictionary: kernel_storage.DictMaterializer,
+            dictionary: dict.Materializer,
         },
         release_header_pairs: struct { build: HeaderBuild, headers: Value },
         response_body_text: struct {
@@ -212,7 +212,7 @@ const RequestDriver = struct {
         finish_dictionary: struct {
             results: Results,
             slots: []dict.Pair,
-            dictionary: kernel_storage.DictMaterializer,
+            dictionary: dict.Materializer,
         },
         output: Results,
         cleanup_pairs: HeaderBuild,
@@ -362,7 +362,7 @@ const RequestDriver = struct {
                 self.state = .{ .response_headers = build };
             },
             .headers_dictionary_prepare => |*headers| {
-                const dictionary = try kernel_storage.DictMaterializer.init(
+                const dictionary = try dict.Materializer.init(
                     self.allocator,
                     headers.pairs.items,
                     true,
@@ -475,7 +475,7 @@ const RequestDriver = struct {
                 } };
             },
             .finish_dictionary_prepare => |*finish| {
-                const dictionary = try kernel_storage.DictMaterializer.init(
+                const dictionary = try dict.Materializer.init(
                     self.allocator,
                     finish.slots,
                     true,

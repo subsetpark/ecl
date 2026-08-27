@@ -8,7 +8,6 @@ const equal = @import("equal.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const support = @import("kernel_support.zig");
-const storage = @import("kernel_storage.zig");
 const poll = @import("poll.zig");
 const kernel_flat = @import("kernel_flat.zig");
 
@@ -753,7 +752,7 @@ fn TypedGroupDriver(comptime kind: value.HeapKind) type {
         index: usize = 0,
         group_writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
         group_cursor: kernel_flat.FlatCursor = .{ .length = 0 },
-        dict_materializer: ?heap.Owned(storage.DictMaterializer) = null,
+        dict_materializer: ?heap.Owned(dict.Materializer) = null,
         group_values: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
         fn allocate(self: *Self, evaluator: *Machine) error{OutOfMemory}!void {
@@ -776,7 +775,7 @@ fn TypedGroupDriver(comptime kind: value.HeapKind) type {
 
             if (self.phase == .groups) {
                 if (self.index == self.key_count) {
-                    self.dict_materializer = .init(try storage.DictMaterializer.init(
+                    self.dict_materializer = .init(try dict.Materializer.init(
                         evaluator.allocator(),
                         self.pairs.?.borrow()[0..self.key_count],
                         false,
@@ -931,7 +930,7 @@ const GroupDriver = struct {
     matcher: ?heap.Owned(equal.MatchCursor) = null,
     group_writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
     group_fill: usize = 0,
-    dict_materializer: ?heap.Owned(storage.DictMaterializer) = null,
+    dict_materializer: ?heap.Owned(dict.Materializer) = null,
     group_values: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
     fn allocate(self: *GroupDriver, evaluator: *Machine) error{OutOfMemory}!void {
@@ -1030,7 +1029,7 @@ const GroupDriver = struct {
             },
             .groups => {
                 if (self.index == self.key_count) {
-                    self.dict_materializer = .init(try storage.DictMaterializer.init(
+                    self.dict_materializer = .init(try dict.Materializer.init(
                         evaluator.allocator(),
                         self.pairs.?.borrow()[0..self.key_count],
                         false,

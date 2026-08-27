@@ -147,7 +147,7 @@ fn hasPrimitive(evaluator: *Machine) MachineError!void {
     defer key.deinit();
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
-    const cursor = storage.DictFindCursor.initHeader(
+    const cursor = dict.FindCursor.initHeader(
         evaluator.allocator(),
         dictionary.borrow().dict,
         key.borrow(),
@@ -168,7 +168,7 @@ const HasDriver = struct {
     pub const inline_driver = true;
     dictionary: heap.Owned(Value),
     key: heap.Owned(Value),
-    cursor: heap.Owned(storage.DictFindCursor),
+    cursor: heap.Owned(dict.FindCursor),
 
     pub fn advance(evaluator: *Machine, self: *HasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -189,7 +189,7 @@ fn putPrimitive(evaluator: *Machine) MachineError!void {
     defer collection.deinit();
     switch (collection.borrow()) {
         .dict => {
-            const finder = storage.DictFindCursor.initHeader(
+            const finder = dict.FindCursor.initHeader(
                 evaluator.allocator(),
                 collection.borrow().dict,
                 key.borrow(),
@@ -400,8 +400,8 @@ const ListPutDriver = struct {
 const RebuildPhase = union(enum) {
     pub const owned_disposal: heap.OwnedDisposal = .retire;
 
-    finding: storage.DictFindCursor,
-    materializing: storage.DictMaterializer,
+    finding: dict.FindCursor,
+    materializing: dict.Materializer,
     between,
 
     pub fn retire(self: *RebuildPhase, releases: *heap.ReleaseDomain) void {
@@ -510,7 +510,7 @@ const ToDictDriver = struct {
     values: heap.Owned(Value),
     pairs: heap.Owned([]dict.Pair),
     index: usize = 0,
-    materializer: ?heap.Owned(storage.DictMaterializer) = null,
+    materializer: ?heap.Owned(dict.Materializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *ToDictDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -545,7 +545,7 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
     defer key.deinit();
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
-    const finder = storage.DictFindCursor.initHeader(
+    const finder = dict.FindCursor.initHeader(
         evaluator.allocator(),
         dictionary.borrow().dict,
         key.borrow(),
@@ -669,7 +669,7 @@ const MergeDriver = struct {
             .merge_right => {
                 const count: usize = @intCast(self.right.borrow().dict.length());
                 if (self.index == count) {
-                    self.work.borrowMut().* = .{ .materializing = try storage.DictMaterializer.init(
+                    self.work.borrowMut().* = .{ .materializing = try dict.Materializer.init(
                         evaluator.allocator(),
                         self.pairs.borrow()[0..self.pair_count],
                         false,
@@ -679,7 +679,7 @@ const MergeDriver = struct {
                 }
                 const key = dict.keyAt(self.right.borrow().dict, self.index);
                 if (self.work.borrowMut().* != .finding) self.work.borrowMut().* = .{
-                    .finding = storage.DictFindCursor.initHeader(
+                    .finding = dict.FindCursor.initHeader(
                         evaluator.allocator(),
                         self.left.borrow().dict,
                         key,

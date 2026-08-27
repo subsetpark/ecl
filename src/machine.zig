@@ -310,12 +310,12 @@ const OrdinaryErrorCursor = struct {
         data_build: struct {
             base: BaseValues,
             source: ?Value,
-            builder: kernel_storage.DictMaterializer,
+            builder: dict.Materializer,
         },
         outer_prepare: CompletedValues,
         outer: struct {
             values: CompletedValues,
-            builder: kernel_storage.DictMaterializer,
+            builder: dict.Materializer,
         },
         complete: CompletedValues,
 
@@ -417,7 +417,7 @@ const OrdinaryErrorCursor = struct {
         count += 1;
         self.outer_pairs[count] = .{ .{ .symbol = self.names[5] }, values.data };
         count += 1;
-        const builder = try kernel_storage.DictMaterializer.init(
+        const builder = try dict.Materializer.init(
             self.allocator,
             self.outer_pairs[0..count],
             false,
@@ -547,7 +547,7 @@ const OrdinaryErrorCursor = struct {
                 },
             },
             .data_prepare => |*data| result: {
-                const builder = try kernel_storage.DictMaterializer.init(
+                const builder = try dict.Materializer.init(
                     self.allocator,
                     self.data_pairs[0..data.index],
                     false,
@@ -619,7 +619,7 @@ const RaisedErrorCursor = struct {
         names: usize,
         name_insert: struct { index: usize, cursor: intern.InternInsertionCursor },
         fields: usize,
-        field_find: struct { index: usize, cursor: kernel_storage.DictFindCursor },
+        field_find: struct { index: usize, cursor: dict.FindCursor },
         message: kernel_storage.TextMaterializer,
         trace_allocate,
         trace_copy: struct { items: []Value, index: usize },
@@ -628,7 +628,7 @@ const RaisedErrorCursor = struct {
             builder: list.ValueMaterializer,
         },
         data_fields: usize,
-        data_field_find: struct { index: usize, cursor: kernel_storage.DictFindCursor },
+        data_field_find: struct { index: usize, cursor: dict.FindCursor },
         data_copy: struct {
             pairs: []dict.Pair,
             index: usize,
@@ -642,13 +642,13 @@ const RaisedErrorCursor = struct {
         },
         data_build: struct {
             pairs: []dict.Pair,
-            builder: kernel_storage.DictMaterializer,
+            builder: dict.Materializer,
         },
         outer_allocate,
         outer_copy: struct { pairs: []dict.Pair, index: usize },
         outer_build: struct {
             pairs: []dict.Pair,
-            builder: kernel_storage.DictMaterializer,
+            builder: dict.Materializer,
         },
         complete,
 
@@ -789,7 +789,7 @@ const RaisedErrorCursor = struct {
             data.pairs[index] = .{ .{ .symbol = self.names[7] }, .{ .int = located.span.col } };
             index += 1;
         }
-        const builder = try kernel_storage.DictMaterializer.init(
+        const builder = try dict.Materializer.init(
             self.allocator,
             data.pairs[0..index],
             false,
@@ -830,7 +830,7 @@ const RaisedErrorCursor = struct {
             outer.pairs[index] = .{ .{ .symbol = self.names[4] }, self.built.data.? };
             index += 1;
         }
-        const builder = try kernel_storage.DictMaterializer.init(
+        const builder = try dict.Materializer.init(
             self.allocator,
             outer.pairs[0..index],
             false,
@@ -8506,7 +8506,7 @@ const FailureDriver = struct {
         outcome_prepare: Value,
         outcome: struct {
             error_value: Value,
-            builder: kernel_storage.DictMaterializer,
+            builder: dict.Materializer,
         },
         caught: Value,
         failed,
@@ -8731,7 +8731,7 @@ const FailureDriver = struct {
                 },
             },
             .outcome_prepare => |error_value| {
-                const builder = try kernel_storage.DictMaterializer.init(
+                const builder = try dict.Materializer.init(
                     self.allocator,
                     &self.outcome_pair,
                     false,

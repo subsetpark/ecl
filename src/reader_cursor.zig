@@ -1075,7 +1075,7 @@ const CollectionBuilder = struct {
         materialize_dict: struct {
             body: []binder.SpannedValue,
             pairs: []dict.Pair,
-            materializer: storage.DictMaterializer,
+            materializer: dict.Materializer,
         },
         complete,
 
@@ -1379,7 +1379,7 @@ const CollectionBuilder = struct {
                     copy.index += 1;
                     break :result .pending;
                 }
-                const materializer = try storage.DictMaterializer.init(self.allocator, copy.pairs, true);
+                const materializer = try dict.Materializer.init(self.allocator, copy.pairs, true);
                 const body = copy.body;
                 const pairs = copy.pairs;
                 self.state = .{ .materialize_dict = .{

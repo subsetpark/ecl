@@ -5,6 +5,7 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const equal = @import("equal.zig");
+const poll = @import("poll.zig");
 
 pub const Value = value.Value;
 pub const Header = value.Header;
@@ -16,55 +17,433 @@ pub const Error = error{ OutOfMemory, DuplicateKey, NotADict };
 const index_threshold = 16;
 const empty_index: u32 = 0;
 
+pub const MaterializeProgress = union(enum) {
+    pending,
+    complete: Value,
+    duplicate_key,
+};
+
+/// The single dictionary construction traversal. Duplicate detection and the
+/// retained lookup index share `index_threshold`, so execution mode cannot
+/// change either policy.
+pub const Materializer = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    const State = union(enum) {
+        table_init: usize,
+        hash: struct {
+            index: usize = 0,
+            cursor: ?equal.HashCursor = null,
+        },
+        duplicate_linear: struct {
+            index: usize,
+            candidate: usize = 0,
+            cursor: ?equal.MatchCursor = null,
+        },
+        duplicate_index: struct {
+            index: usize,
+            slot: usize,
+            cursor: ?equal.MatchCursor = null,
+        },
+        keys: list.ValueMaterializer,
+        vals: struct { keys: Value, materializer: list.ValueMaterializer },
+        hashes: struct { keys: Value, vals: Value, materializer: list.I64Materializer },
+        finish: struct { keys: Value, vals: Value, hashes: Value },
+        complete,
+    };
+
+    allocator: std.mem.Allocator,
+    source_keys: []const Value,
+    source_vals: []const Value,
+    check_duplicates: bool,
+    keys: []Value,
+    vals: []Value,
+    hashes: []i64,
+    table: ?[]u32,
+    state: State,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        pairs: []const Pair,
+        check_duplicates: bool,
+    ) error{OutOfMemory}!Materializer {
+        if (pairs.len >= std.math.maxInt(u32)) return error.OutOfMemory;
+        const keys = try allocator.alloc(Value, pairs.len);
+        errdefer allocator.free(keys);
+        const vals = try allocator.alloc(Value, pairs.len);
+        errdefer allocator.free(vals);
+        const hashes = try allocator.alloc(i64, pairs.len);
+        errdefer allocator.free(hashes);
+        const table = try allocateIndex(allocator, pairs.len);
+        for (pairs, 0..) |pair, index| {
+            keys[index] = pair[0];
+            vals[index] = pair[1];
+        }
+        return initOwned(allocator, keys, vals, hashes, table, check_duplicates);
+    }
+
+    pub fn initSlices(
+        allocator: std.mem.Allocator,
+        source_keys: []const Value,
+        source_vals: []const Value,
+        check_duplicates: bool,
+    ) error{OutOfMemory}!Materializer {
+        if (source_keys.len != source_vals.len or source_keys.len >= std.math.maxInt(u32))
+            return error.OutOfMemory;
+        const keys = try allocator.alloc(Value, source_keys.len);
+        errdefer allocator.free(keys);
+        const vals = try allocator.alloc(Value, source_vals.len);
+        errdefer allocator.free(vals);
+        const hashes = try allocator.alloc(i64, source_keys.len);
+        errdefer allocator.free(hashes);
+        const table = try allocateIndex(allocator, source_keys.len);
+        @memcpy(keys, source_keys);
+        @memcpy(vals, source_vals);
+        return initOwned(allocator, keys, vals, hashes, table, check_duplicates);
+    }
+
+    fn initOwned(
+        allocator: std.mem.Allocator,
+        keys: []Value,
+        vals: []Value,
+        hashes: []i64,
+        table: ?[]u32,
+        check_duplicates: bool,
+    ) Materializer {
+        return .{
+            .allocator = allocator,
+            .source_keys = keys,
+            .source_vals = vals,
+            .check_duplicates = check_duplicates,
+            .keys = keys,
+            .vals = vals,
+            .hashes = hashes,
+            .table = table,
+            .state = if (table != null) .{ .table_init = 0 } else .{ .hash = .{} },
+        };
+    }
+
+    pub fn deinit(self: *Materializer) void {
+        std.debug.assert(self.state == .complete);
+        self.freeBuffers();
+    }
+    pub fn retire(self: *Materializer, releases: *heap.ReleaseDomain) void {
+        switch (self.state) {
+            .table_init => {},
+            .hash => |*state| if (state.cursor) |*cursor| cursor.deinit(),
+            .duplicate_linear => |*state| if (state.cursor) |*cursor| cursor.deinit(),
+            .duplicate_index => |*state| if (state.cursor) |*cursor| cursor.deinit(),
+            .keys => |*materializer| materializer.retire(releases),
+            .vals => |*state| {
+                state.materializer.retire(releases);
+                releases.releaseValue(state.keys);
+            },
+            .hashes => |*state| {
+                state.materializer.retire(releases);
+                releases.releaseValue(state.keys);
+                releases.releaseValue(state.vals);
+            },
+            .finish => |state| {
+                releases.releaseValue(state.keys);
+                releases.releaseValue(state.vals);
+                releases.releaseValue(state.hashes);
+            },
+            .complete => {},
+        }
+        self.freeBuffers();
+    }
+    fn freeBuffers(self: *Materializer) void {
+        self.allocator.free(self.keys);
+        self.allocator.free(self.vals);
+        self.allocator.free(self.hashes);
+        if (self.table) |table| self.allocator.free(table);
+    }
+
+    pub fn advance(self: *Materializer, budget: usize) error{OutOfMemory}!MaterializeProgress {
+        std.debug.assert(budget != 0 and self.state != .complete);
+        while (true) switch (self.state) {
+            .table_init => |*index| {
+                const table = self.table.?;
+                const end = @min(index.* + budget, table.len);
+                @memset(table[index.*..end], empty_index);
+                index.* = end;
+                if (index.* != table.len) return .pending;
+                self.state = .{ .hash = .{} };
+                return .pending;
+            },
+            .hash => |*state| {
+                if (state.index == self.source_keys.len) {
+                    self.state = .{ .keys = .init(self.allocator, self.keys) };
+                    continue;
+                }
+                if (state.cursor == null)
+                    state.cursor = try .init(self.allocator, self.source_keys[state.index]);
+                switch (try state.cursor.?.advance(budget)) {
+                    .pending => return .pending,
+                    .complete => |computed| {
+                        state.cursor.?.deinit();
+                        state.cursor = null;
+                        self.hashes[state.index] = @bitCast(computed);
+                        if (self.table) |table| {
+                            self.state = .{ .duplicate_index = .{
+                                .index = state.index,
+                                .slot = @intCast(computed & (table.len - 1)),
+                            } };
+                        } else if (self.check_duplicates and state.index != 0) {
+                            self.state = .{ .duplicate_linear = .{ .index = state.index } };
+                        } else {
+                            state.index += 1;
+                        }
+                        return .pending;
+                    },
+                }
+            },
+            .duplicate_linear => |*state| {
+                var remaining = budget;
+                while (remaining != 0 and state.candidate != state.index) {
+                    if (self.hashes[state.candidate] != self.hashes[state.index]) {
+                        state.candidate += 1;
+                        remaining -= 1;
+                        continue;
+                    }
+                    if (state.cursor == null) state.cursor = try .init(
+                        self.allocator,
+                        self.keys[state.candidate],
+                        self.keys[state.index],
+                    );
+                    switch (try state.cursor.?.advance(remaining)) {
+                        .pending => return .pending,
+                        .complete => |matches| {
+                            state.cursor.?.deinit();
+                            state.cursor = null;
+                            if (matches) return .duplicate_key;
+                            state.candidate += 1;
+                            return .pending;
+                        },
+                    }
+                }
+                if (state.candidate == state.index) {
+                    self.state = .{ .hash = .{ .index = state.index + 1 } };
+                }
+                return .pending;
+            },
+            .duplicate_index => |*state| {
+                var remaining = budget;
+                const table = self.table.?;
+                while (remaining != 0) {
+                    const encoded = table[state.slot];
+                    if (encoded == empty_index) {
+                        table[state.slot] = @intCast(state.index + 1);
+                        self.state = .{ .hash = .{ .index = state.index + 1 } };
+                        return .pending;
+                    }
+                    const candidate = encoded - 1;
+                    if (!self.check_duplicates or self.hashes[candidate] != self.hashes[state.index]) {
+                        state.slot = (state.slot + 1) & (table.len - 1);
+                        remaining -= 1;
+                        continue;
+                    }
+                    if (state.cursor == null) state.cursor = try .init(
+                        self.allocator,
+                        self.keys[candidate],
+                        self.keys[state.index],
+                    );
+                    switch (try state.cursor.?.advance(remaining)) {
+                        .pending => return .pending,
+                        .complete => |matches| {
+                            state.cursor.?.deinit();
+                            state.cursor = null;
+                            if (matches) return .duplicate_key;
+                            state.slot = (state.slot + 1) & (table.len - 1);
+                            return .pending;
+                        },
+                    }
+                }
+                return .pending;
+            },
+            .keys => |*materializer| switch (try materializer.advance(budget)) {
+                .pending => return .pending,
+                .complete => |item| {
+                    self.state = .{ .vals = .{
+                        .keys = item,
+                        .materializer = .init(self.allocator, self.vals),
+                    } };
+                    return .pending;
+                },
+            },
+            .vals => |*state| switch (try state.materializer.advance(budget)) {
+                .pending => return .pending,
+                .complete => |item| {
+                    self.state = .{ .hashes = .{
+                        .keys = state.keys,
+                        .vals = item,
+                        .materializer = .init(self.allocator, self.hashes),
+                    } };
+                    return .pending;
+                },
+            },
+            .hashes => |*state| switch (try state.materializer.advance(budget)) {
+                .pending => return .pending,
+                .complete => |item| {
+                    self.state = .{ .finish = .{
+                        .keys = state.keys,
+                        .vals = state.vals,
+                        .hashes = item,
+                    } };
+                    continue;
+                },
+            },
+            .finish => |state| {
+                var builder = try heap.DictBuilder.init(self.allocator, self.source_keys.len);
+                const header = builder.finish(.{
+                    .keys = state.keys.list,
+                    .vals = state.vals.list,
+                    .hashes = state.hashes.list,
+                }, self.table);
+                self.table = null;
+                self.state = .complete;
+                return .{ .complete = .{ .dict = header } };
+            },
+            .complete => unreachable,
+        };
+    }
+};
+
+fn allocateIndex(allocator: std.mem.Allocator, count: usize) error{OutOfMemory}!?[]u32 {
+    if (count < index_threshold) return null;
+    var table_len: usize = 32;
+    const minimum = std.math.mul(usize, count, 2) catch return error.OutOfMemory;
+    while (table_len < minimum)
+        table_len = std.math.mul(usize, table_len, 2) catch return error.OutOfMemory;
+    return try allocator.alloc(u32, table_len);
+}
+
+pub const FindProgress = poll.Progress(?Value);
+
+/// The single structural lookup traversal for indexed and small dictionaries.
+pub const FindCursor = struct {
+    allocator: std.mem.Allocator,
+    header: *DictHandle,
+    key: Value,
+    key_hash: ?u64 = null,
+    hash_cursor: ?equal.HashCursor = null,
+    match_cursor: ?equal.MatchCursor = null,
+    candidate: usize = 0,
+    slot: ?usize = null,
+    slots_checked: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator, dictionary: Value, key: Value) error{NotADict}!FindCursor {
+        return initHeader(allocator, try dictHeader(dictionary), key);
+    }
+    pub fn initHeader(allocator: std.mem.Allocator, header: *DictHandle, key: Value) FindCursor {
+        return .{ .allocator = allocator, .header = header, .key = key };
+    }
+    pub fn deinit(self: *FindCursor) void {
+        if (self.hash_cursor) |*cursor| cursor.deinit();
+        if (self.match_cursor) |*cursor| cursor.deinit();
+        self.* = undefined;
+    }
+    pub fn foundIndex(self: *const FindCursor) ?usize {
+        return if (self.candidate < @as(usize, @intCast(self.header.length()))) self.candidate else null;
+    }
+    pub fn advance(self: *FindCursor, budget: usize) error{OutOfMemory}!FindProgress {
+        std.debug.assert(budget != 0);
+        if (self.key_hash == null) {
+            if (equal.scalarHash(self.key)) |computed| {
+                self.key_hash = computed;
+                return .pending;
+            }
+            if (self.hash_cursor == null) self.hash_cursor = try .init(self.allocator, self.key);
+            switch (try self.hash_cursor.?.advance(budget)) {
+                .pending => return .pending,
+                .complete => |computed| {
+                    self.hash_cursor.?.deinit();
+                    self.hash_cursor = null;
+                    self.key_hash = computed;
+                    return .pending;
+                },
+            }
+        }
+        const count: usize = @intCast(self.header.length());
+        const table = heap.dictStorageConst(self.header).index();
+        if (table == null) return self.advanceLinear(count, budget);
+        if (self.slot == null) self.slot = @intCast(self.key_hash.? & (table.?.len - 1));
+        var remaining = budget;
+        while (remaining != 0 and self.slots_checked != table.?.len) {
+            const encoded = table.?[self.slot.?];
+            if (encoded == empty_index) return self.notFound(count);
+            self.candidate = encoded - 1;
+            if (hashAt(self.header, self.candidate) == self.key_hash.?) {
+                if (try self.matchCandidate(remaining)) |matches| {
+                    if (matches) return .{ .complete = valueAt(self.header, self.candidate) };
+                    self.slot = (self.slot.? + 1) & (table.?.len - 1);
+                    self.slots_checked += 1;
+                    return .pending;
+                } else return .pending;
+            }
+            self.slot = (self.slot.? + 1) & (table.?.len - 1);
+            self.slots_checked += 1;
+            remaining -= 1;
+        }
+        return if (self.slots_checked == table.?.len) self.notFound(count) else .pending;
+    }
+    fn advanceLinear(self: *FindCursor, count: usize, budget: usize) error{OutOfMemory}!FindProgress {
+        var remaining = budget;
+        while (remaining != 0 and self.candidate != count) {
+            if (hashAt(self.header, self.candidate) == self.key_hash.?) {
+                if (try self.matchCandidate(remaining)) |matches| {
+                    if (matches) return .{ .complete = valueAt(self.header, self.candidate) };
+                    self.candidate += 1;
+                    return .pending;
+                } else return .pending;
+            }
+            self.candidate += 1;
+            remaining -= 1;
+        }
+        return if (self.candidate == count) .{ .complete = null } else .pending;
+    }
+    /// Null means a structural comparison consumed the remainder of this
+    /// poll. A boolean is a completed scalar or structural comparison.
+    fn matchCandidate(self: *FindCursor, budget: usize) error{OutOfMemory}!?bool {
+        if (equal.matchWithoutStructure(keyAt(self.header, self.candidate), self.key)) |matches|
+            return matches;
+        if (self.match_cursor == null) self.match_cursor = try .init(
+            self.allocator,
+            keyAt(self.header, self.candidate),
+            self.key,
+        );
+        return switch (try self.match_cursor.?.advance(budget)) {
+            .pending => null,
+            .complete => |matches| result: {
+                self.match_cursor.?.deinit();
+                self.match_cursor = null;
+                break :result matches;
+            },
+        };
+    }
+    fn notFound(self: *FindCursor, count: usize) FindProgress {
+        self.candidate = count;
+        return .{ .complete = null };
+    }
+};
+
 pub fn fromPairs(
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
     pairs: []const Pair,
 ) error{ OutOfMemory, DuplicateKey }!Value {
-    if (pairs.len >= std.math.maxInt(u32)) return error.OutOfMemory;
-    const keys = try allocator.alloc(Value, pairs.len);
-    defer allocator.free(keys);
-    const vals = try allocator.alloc(Value, pairs.len);
-    defer allocator.free(vals);
-    const hashes = try allocator.alloc(i64, pairs.len);
-    defer allocator.free(hashes);
-
-    for (pairs, 0..) |pair, index| {
-        const key_hash = try equal.hashWithAllocator(allocator, pair[0]);
-        for (keys[0..index], 0..) |prior, prior_index| {
-            if (@as(u64, @bitCast(hashes[prior_index])) != key_hash) continue;
-            if (try equal.matchWithAllocator(allocator, prior, pair[0])) return error.DuplicateKey;
-        }
-        keys[index] = pair[0];
-        vals[index] = pair[1];
-        hashes[index] = @bitCast(key_hash);
-    }
-
-    var keys_value = heap.OwnedValue.init(releases, try list.fromValues(allocator, keys));
-    defer keys_value.deinit();
-    var vals_value = heap.OwnedValue.init(releases, try list.fromValues(allocator, vals));
-    defer vals_value.deinit();
-    var hashes_value = heap.OwnedValue.init(releases, try list.fromI64Slice(allocator, hashes));
-    defer hashes_value.deinit();
-
-    var index = if (pairs.len >= index_threshold)
-        try buildIndex(allocator, hashes)
-    else
-        null;
-    defer if (index) |owned_index| allocator.free(owned_index);
-
-    var builder = try heap.DictBuilder.init(allocator, pairs.len);
-    defer builder.retirePartial(releases);
-    const header = builder.finish(.{
-        .keys = keys_value.borrow().list,
-        .vals = vals_value.borrow().list,
-        .hashes = hashes_value.borrow().list,
-    }, index);
-    _ = keys_value.take();
-    _ = vals_value.take();
-    _ = hashes_value.take();
-    index = null;
-    return .{ .dict = header };
+    var materializer = try Materializer.init(allocator, pairs, true);
+    var completed = false;
+    defer if (!completed) materializer.retire(releases);
+    while (true) switch (try materializer.advance(std.math.maxInt(usize))) {
+        .pending => {},
+        .duplicate_key => return error.DuplicateKey,
+        .complete => |dictionary| {
+            materializer.deinit();
+            completed = true;
+            return dictionary;
+        },
+    };
 }
 
 /// `fromPairs` for call sites whose keys are distinct by construction.
@@ -73,9 +452,17 @@ pub fn fromUniquePairs(
     releases: *heap.ReleaseDomain,
     pairs: []const Pair,
 ) error{OutOfMemory}!Value {
-    return fromPairs(allocator, releases, pairs) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.DuplicateKey => unreachable,
+    var materializer = try Materializer.init(allocator, pairs, false);
+    var completed = false;
+    defer if (!completed) materializer.retire(releases);
+    while (true) switch (try materializer.advance(std.math.maxInt(usize))) {
+        .pending => {},
+        .duplicate_key => unreachable,
+        .complete => |dictionary| {
+            materializer.deinit();
+            completed = true;
+            return dictionary;
+        },
     };
 }
 
@@ -116,86 +503,6 @@ pub fn symbolField(
     };
 }
 
-/// Inputs remain owned by their callers. The result tag states whether the
-/// existing owner was updated or an additional root was returned.
-pub fn put(
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
-    dictionary: Value,
-    key: Value,
-    new_value: Value,
-) error{ OutOfMemory, NotADict }!heap.UpdateResult {
-    const header = try dictHeader(dictionary);
-    const found = try findWithAllocator(allocator, header, key);
-    const old_len: usize = @intCast(header.length());
-    const new_len = old_len + @intFromBool(found == null);
-    const pairs = try allocator.alloc(Pair, new_len);
-    defer allocator.free(pairs);
-    for (0..old_len) |index| pairs[index] = .{ keyAt(header, index), valueAt(header, index) };
-    if (found) |index| {
-        pairs[index][1] = new_value;
-    } else {
-        pairs[old_len] = .{ key, new_value };
-    }
-    const replacement = try fromUniquePairs(allocator, releases, pairs);
-    return installReplacement(releases, dictionary, replacement);
-}
-
-/// Uses the same functional-update ownership contract as `put`.
-pub fn del(
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
-    dictionary: Value,
-    key: Value,
-) error{ OutOfMemory, NotADict }!heap.UpdateResult {
-    const header = try dictHeader(dictionary);
-    const found = try findWithAllocator(allocator, header, key) orelse
-        return .{ .in_place = dictionary };
-    const old_len: usize = @intCast(header.length());
-    const pairs = try allocator.alloc(Pair, old_len - 1);
-    defer allocator.free(pairs);
-    var dest: usize = 0;
-    for (0..old_len) |index| {
-        if (index == found) continue;
-        pairs[dest] = .{ keyAt(header, index), valueAt(header, index) };
-        dest += 1;
-    }
-    const replacement = try fromUniquePairs(allocator, releases, pairs);
-    return installReplacement(releases, dictionary, replacement);
-}
-
-/// Uses `put`'s ownership contract for `left`; `right` is always unchanged.
-pub fn merge(
-    allocator: std.mem.Allocator,
-    releases: *heap.ReleaseDomain,
-    left: Value,
-    right: Value,
-) error{ OutOfMemory, NotADict }!heap.UpdateResult {
-    const left_header = try dictHeader(left);
-    const right_header = try dictHeader(right);
-    const left_len: usize = @intCast(left_header.length());
-    const right_len: usize = @intCast(right_header.length());
-    const pairs = try allocator.alloc(Pair, left_len + right_len);
-    defer allocator.free(pairs);
-    var count = left_len;
-    for (0..left_len) |index| pairs[index] = .{
-        keyAt(left_header, index),
-        valueAt(left_header, index),
-    };
-    for (0..right_len) |right_index| {
-        const right_key = keyAt(right_header, right_index);
-        const found = try findWithAllocator(allocator, left_header, right_key);
-        if (found) |index| {
-            pairs[index][1] = valueAt(right_header, right_index);
-        } else {
-            pairs[count] = .{ right_key, valueAt(right_header, right_index) };
-            count += 1;
-        }
-    }
-    const replacement = try fromUniquePairs(allocator, releases, pairs[0..count]);
-    return installReplacement(releases, left, replacement);
-}
-
 pub fn keysOf(header: *DictHandle) Value {
     return .{ .list = heap.dictStorageConst(header).payload().keys };
 }
@@ -229,64 +536,10 @@ fn findWithAllocator(
     header: *DictHandle,
     key: Value,
 ) error{OutOfMemory}!?usize {
-    const count: usize = @intCast(header.length());
-    const key_hash = try equal.hashWithAllocator(allocator, key);
-    const storage = heap.dictStorageConst(header);
-    const maybe_index = storage.index();
-    if (count < index_threshold or maybe_index == null) {
-        for (0..count) |index| {
-            if (hashAt(header, index) != key_hash) continue;
-            if (try equal.matchWithAllocator(allocator, keyAt(header, index), key)) return index;
-        }
-        return null;
-    }
-
-    const table = maybe_index.?;
-    var slot: usize = @intCast(key_hash & (table.len - 1));
-    for (0..table.len) |_| {
-        const encoded = table[slot];
-        if (encoded == empty_index) return null;
-        const index = encoded - 1;
-        if (hashAt(header, index) == key_hash and
-            try equal.matchWithAllocator(allocator, keyAt(header, index), key)) return index;
-        slot = (slot + 1) & (table.len - 1);
-    }
-    return null;
-}
-
-fn buildIndex(
-    allocator: std.mem.Allocator,
-    hashes: []const i64,
-) error{OutOfMemory}![]u32 {
-    var table_len: usize = 32;
-    const minimum = std.math.mul(usize, hashes.len, 2) catch return error.OutOfMemory;
-    while (table_len < minimum) {
-        table_len = std.math.mul(usize, table_len, 2) catch return error.OutOfMemory;
-    }
-    const table = try allocator.alloc(u32, table_len);
-    @memset(table, empty_index);
-    for (hashes, 0..) |signed_hash, index| {
-        const key_hash: u64 = @bitCast(signed_hash);
-        var slot: usize = @intCast(key_hash & (table.len - 1));
-        while (table[slot] != empty_index) slot = (slot + 1) & (table.len - 1);
-        table[slot] = @intCast(index + 1);
-    }
-    return table;
-}
-
-/// Consumes the owned `replacement`. A unique `original` adopts it and keeps
-/// its identity; a shared `original` is untouched and the replacement's owned
-/// reference is returned to the caller.
-fn installReplacement(
-    releases: *heap.ReleaseDomain,
-    original: Value,
-    replacement: Value,
-) heap.UpdateResult {
-    const destination = heap.claimUniqueDict(original.dict) orelse
-        return .{ .replacement = replacement };
-    const source = heap.claimUniqueDict(replacement.dict) orelse unreachable;
-    heap.adoptDictRepresentationDeferred(releases, destination, source);
-    return .{ .in_place = original };
+    var cursor = FindCursor.initHeader(allocator, header, key);
+    defer cursor.deinit();
+    _ = try poll.driveFallible(?Value, &cursor, .{std.math.maxInt(usize)});
+    return cursor.foundIndex();
 }
 
 fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
@@ -298,20 +551,24 @@ fn constructionFailureProbe(allocator: std.mem.Allocator) !void {
         .{ .{ .float = 2.5 }, .{ .word = .{ .name = 20 } } },
     });
     cleanup.releaseValue(dictionary);
+
+    var pairs: [index_threshold]Pair = undefined;
+    for (&pairs, 0..) |*pair, index| pair.* = .{ .{ .int = @intCast(index) }, .{ .int = @intCast(index * 2) } };
+    const indexed = try fromPairs(allocator, releases, &pairs);
+    cleanup.releaseValue(indexed);
 }
 
-fn putFailureProbe(allocator: std.mem.Allocator) !void {
+fn lookupFailureProbe(allocator: std.mem.Allocator) !void {
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
     const releases = cleanup.domain();
-    var dictionary = try fromPairs(allocator, releases, &.{.{ .{ .int = 1 }, .{ .word = .{ .name = 10 } } }});
+    const stored_key = try list.fromValuesGeneric(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
+    defer cleanup.releaseValue(stored_key);
+    const query_key = try list.fromValuesGeneric(allocator, &.{ .{ .int = 1 }, .{ .int = 2 } });
+    defer cleanup.releaseValue(query_key);
+    const dictionary = try fromPairs(allocator, releases, &.{.{ stored_key, .{ .word = .{ .name = 10 } } }});
     defer cleanup.releaseValue(dictionary);
-    _ = try getWithAllocator(allocator, dictionary, .{ .int = 1 });
-    dictionary = (try put(allocator, releases, dictionary, .{ .int = 2 }, .{ .word = .{ .name = 20 } })).value();
-    dictionary = (try del(allocator, releases, dictionary, .{ .int = 1 })).value();
-    const right = try fromPairs(allocator, releases, &.{.{ .{ .int = 2 }, .{ .word = .{ .name = 30 } } }});
-    defer cleanup.releaseValue(right);
-    dictionary = (try merge(allocator, releases, dictionary, right)).value();
+    _ = try getWithAllocator(allocator, dictionary, query_key);
 }
 
 test "dict allocation paths are exhaustive and leak-free" {
@@ -322,7 +579,49 @@ test "dict allocation paths are exhaustive and leak-free" {
     );
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
-        putFailureProbe,
+        lookupFailureProbe,
         .{},
     );
+}
+
+test "blocking and resumable dictionary APIs share construction and lookup" {
+    const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    const releases = cleanup.domain();
+
+    var pairs: [20]Pair = undefined;
+    for (&pairs, 0..) |*pair, index| pair.* = .{
+        .{ .int = @intCast(index) },
+        .{ .int = @intCast(index * 10) },
+    };
+    var materializer = try Materializer.init(allocator, &pairs, true);
+    var pending: usize = 0;
+    const dictionary = while (true) switch (try materializer.advance(1)) {
+        .pending => pending += 1,
+        .duplicate_key => return error.UnexpectedDuplicateKey,
+        .complete => |result| break result,
+    };
+    materializer.deinit();
+    defer cleanup.releaseValue(dictionary);
+    try std.testing.expect(pending > pairs.len);
+
+    for (pairs, 0..) |pair, index| {
+        try std.testing.expectEqual(pair[0], keyAt(dictionary.dict, index));
+        try std.testing.expectEqual(pair[1], (try getWithAllocator(allocator, dictionary, pair[0])).?);
+    }
+    try std.testing.expect((try getWithAllocator(allocator, dictionary, .{ .int = 99 })) == null);
+
+    const duplicates = [_]Pair{
+        .{ .{ .int = 1 }, .{ .int = 10 } },
+        .{ .{ .int = 1 }, .{ .int = 20 } },
+    };
+    try std.testing.expectError(error.DuplicateKey, fromPairs(allocator, releases, &duplicates));
+    var duplicate_cursor = try Materializer.init(allocator, &duplicates, true);
+    defer duplicate_cursor.retire(releases);
+    while (true) switch (try duplicate_cursor.advance(1)) {
+        .pending => {},
+        .duplicate_key => break,
+        .complete => return error.ExpectedDuplicateKey,
+    };
 }
