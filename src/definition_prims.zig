@@ -585,75 +585,167 @@ fn see(evaluator: *Machine) MachineError!void {
 const SeeDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     requested: u32,
-    resolution: ?heap.Owned(machine.ResolutionCursor),
-    resolved: ?heap.Owned(machine.Resolution) = null,
-    annotation_items: ?heap.Owned([]Value) = null,
-    annotation_index: usize = 0,
-    annotation_materializer: ?heap.Owned(kernel_storage.ValueMaterializer) = null,
-    annotation: ?heap.Owned(Value) = null,
     actions: heap.Owned(reflection.ActionPlan),
-    plan_ready: bool = false,
-    rendered: ?heap.Owned([]u8) = null,
+    state: heap.Owned(State),
+
+    const Context = struct {
+        resolved: heap.Owned(machine.Resolution),
+        annotation: ?heap.Owned(Value),
+
+        fn deinit(
+            self: *Context,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            if (self.annotation) |*annotation| annotation.deinit(releases, allocator);
+            self.resolved.deinit(releases, allocator);
+        }
+    };
+    const AnnotationBuild = struct {
+        resolved: heap.Owned(machine.Resolution),
+        items: heap.Owned([]Value),
+        effect_count: usize,
+        index: usize,
+    };
+    const State = union(enum) {
+        resolve: heap.Owned(machine.ResolutionCursor),
+        annotation_allocate: heap.Owned(machine.Resolution),
+        annotation_copy: AnnotationBuild,
+        annotation_materialize: struct {
+            resolved: heap.Owned(machine.Resolution),
+            items: heap.Owned([]Value),
+            materializer: heap.Owned(kernel_storage.ValueMaterializer),
+        },
+        plan: struct {
+            context: Context,
+            step: u8,
+            requirement_index: usize,
+            requirement_separator: bool,
+        },
+        render: Context,
+        format: struct { context: Context, source: heap.Owned([]u8) },
+        write: struct { context: Context, rendered: heap.Owned([]u8) },
+
+        pub fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .resolve => |*cursor| cursor.deinit(releases, allocator),
+                .annotation_allocate => |*resolved| resolved.deinit(releases, allocator),
+                .annotation_copy => |*annotation| {
+                    annotation.items.deinit(releases, allocator);
+                    annotation.resolved.deinit(releases, allocator);
+                },
+                .annotation_materialize => |*annotation| {
+                    annotation.materializer.deinit(releases, allocator);
+                    annotation.items.deinit(releases, allocator);
+                    annotation.resolved.deinit(releases, allocator);
+                },
+                .plan => |*plan| plan.context.deinit(releases, allocator),
+                .render => |*context| context.deinit(releases, allocator),
+                .format => |*format_state| {
+                    format_state.source.deinit(releases, allocator);
+                    format_state.context.deinit(releases, allocator);
+                },
+                .write => |*write| {
+                    write.rendered.deinit(releases, allocator);
+                    write.context.deinit(releases, allocator);
+                },
+            }
+        }
+    };
 
     fn init(evaluator: *Machine, requested: u32) SeeDriver {
         return .{
             .requested = requested,
-            .resolution = .init(machine.ResolutionCursor.initAtCurrent(evaluator, requested)),
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
+            .state = .init(.{ .resolve = .init(
+                machine.ResolutionCursor.initAtCurrent(evaluator, requested),
+            ) }),
         };
     }
     fn add(self: *SeeDriver, action: reflection.Action) error{OutOfMemory}!void {
         try self.actions.borrowMut().add(action);
     }
 
-    fn buildPlan(self: *SeeDriver) error{OutOfMemory}!void {
-        if (self.annotation) |*annotation| {
-            try self.add(.{ .value = annotation.borrow() });
-            try self.add(.{ .bytes = " " });
-        } else if (self.resolved.?.borrow().lease.effect) |effect| {
-            try self.add(.{ .value = .{ .list = effect.header() } });
-            try self.add(.{ .bytes = " " });
-        }
-        switch (self.resolved.?.borrow().lease.binding) {
-            .word => |word_body| if (self.resolved.?.borrow().lease.source) |source|
-                try self.add(.{ .bytes = source.bytes() })
-            else
-                try self.add(.{ .value = .{ .list = env.quotationHeader(word_body) } }),
-            .builtin, .seed => try self.add(.{ .bytes = "<primitive>" }),
-            .native => {
-                try self.add(.{ .bytes = "<native:" });
-                try self.add(.{ .trace_word = self.resolved.?.borrow().trace_word });
-                try self.add(.{ .bytes = ">" });
+    fn advancePlan(
+        self: *SeeDriver,
+        plan: *@FieldType(State, "plan"),
+    ) error{OutOfMemory}!void {
+        const resolved = plan.context.resolved.borrow();
+        switch (plan.step) {
+            0 => if (plan.context.annotation) |*annotation|
+                try self.add(.{ .value = annotation.borrow() })
+            else if (resolved.lease.effect) |effect|
+                try self.add(.{ .value = .{ .list = effect.header() } }),
+            1 => if (plan.context.annotation != null or resolved.lease.effect != null)
+                try self.add(.{ .bytes = " " }),
+            2 => switch (resolved.lease.binding) {
+                .word => |word_body| if (resolved.lease.source) |source|
+                    try self.add(.{ .bytes = source.bytes() })
+                else
+                    try self.add(.{ .value = .{ .list = env.quotationHeader(word_body) } }),
+                .builtin, .seed => try self.add(.{ .bytes = "<primitive>" }),
+                .native => try self.add(.{ .bytes = "<native:" }),
             },
-        }
-        switch (self.resolved.?.borrow().lease.binding) {
-            .native => |callable| {
-                try self.add(.{ .bytes = " requires " });
-                for (callable.instance.requirements(), 0..) |requirement, index| {
-                    if (index != 0) try self.add(.{ .bytes = ", " });
-                    try self.add(.{ .bytes = native_module.capabilityName(requirement.id) });
+            3 => switch (resolved.lease.binding) {
+                .native => try self.add(.{ .trace_word = resolved.trace_word }),
+                else => {},
+            },
+            4 => switch (resolved.lease.binding) {
+                .native => try self.add(.{ .bytes = ">" }),
+                else => {},
+            },
+            5 => switch (resolved.lease.binding) {
+                .native => try self.add(.{ .bytes = " requires " }),
+                else => {},
+            },
+            6 => {
+                const requirements = switch (resolved.lease.binding) {
+                    .native => |callable| callable.instance.requirements(),
+                    else => &.{},
+                };
+                if (plan.requirement_index != requirements.len) {
+                    if (plan.requirement_index != 0 and !plan.requirement_separator) {
+                        try self.add(.{ .bytes = ", " });
+                        plan.requirement_separator = true;
+                        return;
+                    }
+                    try self.add(.{ .bytes = native_module.capabilityName(
+                        requirements[plan.requirement_index].id,
+                    ) });
+                    plan.requirement_index += 1;
+                    plan.requirement_separator = false;
+                    return;
                 }
             },
-            else => {},
+            7 => try self.add(.{ .bytes = " '" }),
+            8 => try self.add(.{ .trace_word = resolved.trace_word }),
+            9 => try self.add(.{ .bytes = switch (resolved.lease.binding) {
+                .word => if (resolved.lease.visibility == .private) " defp\n" else " def\n",
+                .builtin, .seed, .native => " def\n",
+            } }),
+            10 => {
+                self.actions.borrowMut().seal();
+                const context = plan.context;
+                self.state.borrowMut().* = .{ .render = context };
+                return;
+            },
+            else => unreachable,
         }
-        try self.add(.{ .bytes = " '" });
-        try self.add(.{ .trace_word = self.resolved.?.borrow().trace_word });
-        try self.add(.{ .bytes = switch (self.resolved.?.borrow().lease.binding) {
-            .word => if (self.resolved.?.borrow().lease.visibility == .private) " defp\n" else " def\n",
-            .builtin, .seed, .native => " def\n",
-        } });
-        self.actions.borrowMut().seal();
-        self.plan_ready = true;
+        plan.step += 1;
     }
 
     pub fn advance(evaluator: *Machine, self: *SeeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        if (self.resolved == null) {
-            var budget: usize = machine.kernel_poll_quantum;
-            while (budget != 0) : (budget -= 1) switch (self.resolution.?.borrowMut().advance()) {
+        var budget: usize = machine.kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+            .resolve => |*cursor| switch (cursor.borrowMut().advance()) {
                 .pending => {},
                 .complete => |outcome| {
-                    self.resolved = .init(switch (try resolveForReflection(
+                    const resolved = switch (try resolveForReflection(
                         evaluator,
                         self,
                         self.requested,
@@ -661,77 +753,114 @@ const SeeDriver = struct {
                     )) {
                         .retry => |progress| return progress,
                         .resolved => |resolution| resolution,
-                    });
-                    self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.resolution = null;
-                    break;
+                    };
+                    cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.state.borrowMut().* = if (resolved.lease.doc != null)
+                        .{ .annotation_allocate = .init(resolved) }
+                    else
+                        .{ .plan = .{
+                            .context = .{ .resolved = .init(resolved), .annotation = null },
+                            .step = 0,
+                            .requirement_index = 0,
+                            .requirement_separator = false,
+                        } };
                 },
-            };
-            if (self.resolved == null) return .yielded;
-        }
-        const document = self.resolved.?.borrow().lease.doc;
-        if (!self.plan_ready and document != null) {
-            const effect_count: usize = if (self.resolved.?.borrow().lease.effect) |effect|
-                @intCast(effect.header().length())
-            else
-                0;
-            if (self.annotation_items == null) self.annotation_items = .init(try evaluator.allocator().alloc(
-                Value,
-                effect_count + 2,
-            ));
-            const end = @min(
-                self.annotation_index + machine.kernel_poll_quantum,
-                effect_count,
-            );
-            while (self.annotation_index != end) : (self.annotation_index += 1) {
-                self.annotation_items.?.borrow()[self.annotation_index] = list.atUnchecked(
-                    .{ .list = self.resolved.?.borrow().lease.effect.?.header() },
-                    self.annotation_index,
+            },
+            .annotation_allocate => |*resolved| {
+                const effect_count: usize = if (resolved.borrow().lease.effect) |effect|
+                    @intCast(effect.header().length())
+                else
+                    0;
+                const items = try evaluator.allocator().alloc(Value, effect_count + 2);
+                self.state.borrowMut().* = .{ .annotation_copy = .{
+                    .resolved = .init(resolved.take()),
+                    .items = .init(items),
+                    .effect_count = effect_count,
+                    .index = 0,
+                } };
+            },
+            .annotation_copy => |*annotation| {
+                if (annotation.index != annotation.effect_count) {
+                    annotation.items.borrow()[annotation.index] = list.atUnchecked(
+                        .{ .list = annotation.resolved.borrow().lease.effect.?.header() },
+                        annotation.index,
+                    );
+                    annotation.index += 1;
+                    continue;
+                }
+                annotation.items.borrow()[annotation.effect_count] = .{ .word = .{ .name = try intern.intern(":") } };
+                annotation.items.borrow()[annotation.effect_count + 1] = .{
+                    .list = env.documentationHeader(annotation.resolved.borrow().lease.doc.?),
+                };
+                const materializer = kernel_storage.ValueMaterializer.init(
+                    evaluator.allocator(),
+                    annotation.items.borrow(),
                 );
-            }
-            if (self.annotation_index != effect_count) return .yielded;
-            self.annotation_items.?.borrow()[effect_count] = .{ .word = .{ .name = try intern.intern(":") } };
-            self.annotation_items.?.borrow()[effect_count + 1] = .{
-                .list = env.documentationHeader(document.?),
-            };
-            if (self.annotation_materializer == null) self.annotation_materializer = .init(kernel_storage.ValueMaterializer.init(
-                evaluator.allocator(),
-                self.annotation_items.?.borrow(),
-            ));
-            switch (try self.annotation_materializer.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+                self.state.borrowMut().* = .{ .annotation_materialize = .{
+                    .resolved = .init(annotation.resolved.take()),
+                    .items = .init(annotation.items.take()),
+                    .materializer = .init(materializer),
+                } };
+            },
+            .annotation_materialize => |*annotation| switch (try annotation.materializer.borrowMut().advance(1)) {
                 .pending => return .yielded,
-                .complete => |annotation| {
-                    self.annotation_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.annotation_materializer = null;
-                    self.annotation = .init(annotation);
-                    try self.buildPlan();
-                    return .yielded;
+                .complete => |annotation_value| {
+                    const resolved = annotation.resolved.take();
+                    annotation.materializer.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    annotation.items.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.state.borrowMut().* = .{ .plan = .{
+                        .context = .{
+                            .resolved = .init(resolved),
+                            .annotation = .init(annotation_value),
+                        },
+                        .step = 0,
+                        .requirement_index = 0,
+                        .requirement_separator = false,
+                    } };
                 },
-            }
-        }
-        if (!self.plan_ready) try self.buildPlan();
-        if (self.rendered == null) switch (try self.actions.borrowMut().advance(machine.kernel_poll_quantum)) {
-            .pending => return .yielded,
-            .complete => |source| {
-                defer evaluator.allocator().free(source);
-                self.rendered = .init(formatter.format(evaluator.allocator(), source) catch |err| switch (err) {
+            },
+            .plan => |*plan| try self.advancePlan(plan),
+            .render => |*context| switch (try self.actions.borrowMut().advance(1)) {
+                .pending => {},
+                .complete => |source| {
+                    const moved = context.*;
+                    self.state.borrowMut().* = .{ .format = .{
+                        .context = moved,
+                        .source = .init(source),
+                    } };
+                },
+            },
+            .format => |*format_state| {
+                const rendered = formatter.format(
+                    evaluator.allocator(),
+                    format_state.source.borrow(),
+                ) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     // The reflection plan emits only reader-valid canonical
                     // values and fixed definition syntax. Failure here is an
                     // internal disagreement between those two production
                     // boundaries, not a user program error.
                     error.InvalidUtf8, error.InvalidSource => unreachable,
-                });
+                };
+                const context = format_state.context;
+                format_state.source.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.state.borrowMut().* = .{ .write = .{
+                    .context = context,
+                    .rendered = .init(rendered),
+                } };
+            },
+            .write => |*write| {
+                if (evaluator.unit.inherited.console) |console| {
+                    console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
+                    return .completed;
+                }
+                const output = try outputWriter(evaluator);
+                output.writeAll(write.rendered.borrow()) catch return writeFailure(evaluator);
+                output.flush() catch return evaluator.fail(.io, "standard output flush failed");
+                return .completed;
             },
         };
-        if (evaluator.unit.inherited.console) |console| {
-            console.writeOutput(self.rendered.?.borrow(), false) catch return writeFailure(evaluator);
-            return .completed;
-        }
-        const output = try outputWriter(evaluator);
-        output.writeAll(self.rendered.?.borrow()) catch return writeFailure(evaluator);
-        output.flush() catch return evaluator.fail(.io, "standard output flush failed");
-        return .completed;
+        return .yielded;
     }
 };
 
