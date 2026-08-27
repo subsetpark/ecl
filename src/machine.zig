@@ -4572,40 +4572,59 @@ pub const Machine = struct {
         try self.startDriver(StandardInputDriver{ .allocator = self.unit.allocator });
     }
     const StandardInputDriver = struct {
+        const State = union(enum) {
+            open,
+            read: std.Io.File.Reader,
+            text: heap.Owned(kernel_storage.Utf8Materializer),
+            complete,
+
+            fn deinit(
+                self: *State,
+                releases: *heap.ReleaseDomain,
+                storage_allocator: std.mem.Allocator,
+            ) void {
+                switch (self.*) {
+                    .text => |*text| text.deinit(releases, storage_allocator),
+                    .open, .read, .complete => {},
+                }
+            }
+        };
+
         retirement: heap.ReleaseDomain.Retirement = .{},
         allocator: std.mem.Allocator,
         buffer: std.ArrayList(u8) = .empty,
-        reader: ?std.Io.File.Reader = null,
         // SAFETY: only ever read through the prefix a read call just filled.
         chunk: [read_chunk]u8 = undefined,
-        text: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
-        phase: enum { read, text } = .read,
+        state: State = .open,
 
         const read_chunk: usize = 8192;
 
         pub fn advance(evaluator: *Machine, self: *StandardInputDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
-            switch (self.phase) {
-                .read => {
-                    if (self.reader == null)
-                        self.reader = std.Io.File.stdin().reader(
-                            evaluator.unit.inherited.host_io.?,
-                            &.{},
-                        );
-                    const amount = self.reader.?.interface.readSliceShort(&self.chunk) catch {
-                        const name = if (self.reader.?.err) |err| @errorName(err) else "ReadFailed";
+            switch (self.state) {
+                .open => {
+                    self.state = .{ .read = std.Io.File.stdin().reader(
+                        evaluator.unit.inherited.host_io.?,
+                        &.{},
+                    ) };
+                    return .yielded;
+                },
+                .read => |*file_reader| {
+                    const amount = file_reader.interface.readSliceShort(&self.chunk) catch {
+                        const name = if (file_reader.err) |err| @errorName(err) else "ReadFailed";
                         return evaluator.failFmt(.io, "cannot read standard input: {s}", .{name});
                     };
                     if (amount == 0) {
-                        self.reader = null;
-                        self.text = .init(.init(self.allocator, self.buffer.items));
-                        self.phase = .text;
+                        self.state = .{ .text = .init(.init(
+                            self.allocator,
+                            self.buffer.items,
+                        )) };
                         return .yielded;
                     }
                     try self.buffer.appendSlice(self.allocator, self.chunk[0..amount]);
                     return .yielded;
                 },
-                .text => switch (self.text.?.borrowMut().advance(kernel_poll_quantum) catch |err| switch (err) {
+                .text => |*text| switch (text.borrowMut().advance(kernel_poll_quantum) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidUtf8 => return evaluator.fail(
                         .io,
@@ -4613,12 +4632,13 @@ pub const Machine = struct {
                     ),
                 }) {
                     .pending => return .yielded,
-                    .complete => |text| {
-                        self.text.?.borrowMut().deinit();
-                        self.text = null;
-                        return .{ .output = text };
+                    .complete => |text_value| {
+                        text.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.state = .complete;
+                        return .{ .output = text_value };
                     },
                 },
+                .complete => unreachable,
             }
         }
         pub fn advanceRetirement(
@@ -4626,8 +4646,7 @@ pub const Machine = struct {
             storage_allocator: std.mem.Allocator,
             self: *StandardInputDriver,
         ) bool {
-            if (self.text) |*text| text.deinit(releases, storage_allocator);
-            self.text = null;
+            self.state.deinit(releases, storage_allocator);
             self.buffer.deinit(self.allocator);
             storage_allocator.destroy(self);
             return true;
