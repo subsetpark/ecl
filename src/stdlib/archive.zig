@@ -305,7 +305,6 @@ const UnpackDriver = struct {
     state: State,
 
     result_inputs: ResultInputs = .none,
-    free_iterator: ?EntryList.ReverseIterator = null,
 
     const Staged = struct {
         result: Value,
@@ -365,12 +364,6 @@ const UnpackDriver = struct {
             values: []Value,
             built: usize = 0,
         },
-        retiring: struct {
-            values: []Value,
-            built: usize,
-            index: usize = 0,
-        },
-        retired,
     };
     const PathWork = union(enum) {
         next,
@@ -497,6 +490,15 @@ const UnpackDriver = struct {
         },
         root,
     };
+    const CleanupWork = union(enum) {
+        entries: EntryList.ReverseIterator,
+        results: struct {
+            values: []Value,
+            built: usize,
+            index: usize = 0,
+        },
+        finish,
+    };
     const State = union(enum) {
         parsing: Parsing,
         active: Active,
@@ -511,7 +513,7 @@ const UnpackDriver = struct {
             work: RollbackWork,
         },
         cleanup_archive: Archive,
-        cleanup_unparsed,
+        cleanup: CleanupWork,
     };
 
     pub fn advance(evaluator: *Machine, self: *UnpackDriver) MachineError!machine.WorkProgress {
@@ -519,7 +521,7 @@ const UnpackDriver = struct {
         return switch (self.state) {
             .parsing => |*parsing| self.advanceParsing(evaluator, parsing),
             .active => |*active| self.advanceActive(evaluator, active),
-            .rollback_reopen, .rollback, .cleanup_archive, .cleanup_unparsed => unreachable,
+            .rollback_reopen, .rollback, .cleanup_archive, .cleanup => unreachable,
         };
     }
 
@@ -1765,7 +1767,9 @@ const UnpackDriver = struct {
         switch (self.state) {
             .parsing => |*parsing| {
                 retireParsing(parsing, releases, allocator);
-                self.state = .cleanup_unparsed;
+                self.state = .{ .cleanup = .{
+                    .entries = self.entries.borrow().reverseIterator(),
+                } };
                 return false;
             },
             .active => |*active| {
@@ -1792,35 +1796,41 @@ const UnpackDriver = struct {
             .rollback => |*rollback| return self.advanceRollback(releases, allocator, rollback),
             .cleanup_archive => |*archive| {
                 retireArchive(archive, releases, allocator);
-                self.state = .cleanup_unparsed;
-                return false;
-            },
-            .cleanup_unparsed => {},
-        }
-        if (self.free_iterator == null) self.free_iterator = self.entries.borrow().reverseIterator();
-        if (self.free_iterator.?.next()) |entry| {
-            allocator.free(entry.path);
-            return false;
-        }
-        switch (self.result_inputs) {
-            .none => self.result_inputs = .retired,
-            .owned => |owned| {
-                self.result_inputs = .{ .retiring = .{
-                    .values = owned.values,
-                    .built = owned.built,
+                self.state = .{ .cleanup = .{
+                    .entries = self.entries.borrow().reverseIterator(),
                 } };
                 return false;
             },
-            .retiring => |*retiring| {
-                if (retiring.index != retiring.built) {
-                    releases.releaseValue(retiring.values[retiring.index]);
-                    retiring.index += 1;
+            .cleanup => |*cleanup| switch (cleanup.*) {
+                .entries => |*iterator| {
+                    if (iterator.next()) |entry| {
+                        allocator.free(entry.path);
+                        return false;
+                    }
+                    switch (self.result_inputs) {
+                        .none => self.state = .{ .cleanup = .finish },
+                        .owned => |owned| {
+                            self.result_inputs = .none;
+                            self.state = .{ .cleanup = .{ .results = .{
+                                .values = owned.values,
+                                .built = owned.built,
+                            } } };
+                        },
+                    }
                     return false;
-                }
-                allocator.free(retiring.values);
-                self.result_inputs = .retired;
+                },
+                .results => |*results| {
+                    if (results.index != results.built) {
+                        releases.releaseValue(results.values[results.index]);
+                        results.index += 1;
+                        return false;
+                    }
+                    allocator.free(results.values);
+                    self.state = .{ .cleanup = .finish };
+                    return false;
+                },
+                .finish => {},
             },
-            .retired => {},
         }
         self.bytes_value.deinit(releases, allocator);
         switch (self.source) {
