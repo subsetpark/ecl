@@ -507,7 +507,7 @@ test "native: the static transport publishes a linked descriptor through the sam
             return error.UnexpectedNativeLoadFailure;
         },
     };
-    defer if (!loader.done) loader.deinit();
+    defer loader.deinit();
     const loaded = while (true) switch (try loader.advance(7)) {
         .pending => {},
         .loaded => |instance| break instance,

@@ -85,9 +85,15 @@ pub const Loading = union(enum) {
 /// One `advance` performs at most the caller's explicit validation budget.
 pub const LoadCursor = struct {
     loader: *Loader,
-    image: ?ImagePin,
-    validator: ?descriptor_api.ValidateCursor,
-    done: bool = false,
+    state: State,
+
+    const State = union(enum) {
+        validating: struct {
+            image: ImagePin,
+            validator: descriptor_api.ValidateCursor,
+        },
+        complete,
+    };
 
     fn init(
         loader: *Loader,
@@ -97,32 +103,38 @@ pub const LoadCursor = struct {
     ) LoadCursor {
         return .{
             .loader = loader,
-            .image = image,
-            .validator = descriptor_api.ValidateCursor.init(
-                loader.state().host,
-                requested,
-                descriptor,
-            ),
+            .state = .{ .validating = .{
+                .image = image,
+                .validator = descriptor_api.ValidateCursor.init(
+                    loader.state().host,
+                    requested,
+                    descriptor,
+                ),
+            } },
         };
     }
 
     pub fn deinit(self: *LoadCursor) void {
-        if (self.validator) |*validator| validator.deinit();
-        self.validator = null;
-        if (self.image) |*image_pin| image_pin.close();
-        self.image = null;
-        self.done = true;
+        switch (self.state) {
+            .validating => |*validating| {
+                validating.validator.deinit();
+                validating.image.close();
+            },
+            .complete => {},
+        }
+        self.state = .complete;
     }
 
     pub fn advance(self: *LoadCursor, budget: usize) error{OutOfMemory}!LoadProgress {
-        std.debug.assert(!self.done and budget != 0);
-        const progress = self.validator.?.advance(budget) catch |err| switch (err) {
+        std.debug.assert(self.state == .validating and budget != 0);
+        const validating = &self.state.validating;
+        const progress = validating.validator.advance(budget) catch |err| switch (err) {
             error.OutOfMemory => {
                 self.deinit();
                 return error.OutOfMemory;
             },
             else => {
-                const failing_definition = self.validator.?.failingDefinition();
+                const failing_definition = validating.validator.failingDefinition();
                 const failure: LoadFailure = if (failing_definition) |index|
                     .init(
                         "native descriptor rejected: {s} at definition {d}",
@@ -137,14 +149,13 @@ pub const LoadCursor = struct {
         return switch (progress) {
             .pending => .pending,
             .complete => |descriptor| complete: {
-                self.validator = null;
+                const image = validating.image;
+                self.state = .complete;
                 const validated: Loading = .{ .validated = .{
                     .loader = self.loader,
-                    .image = self.image.?,
+                    .image = image,
                     .descriptor = descriptor,
                 } };
-                self.image = null;
-                self.done = true;
                 const initialized = initialize(validated);
                 const published = publish(initialized) catch return error.OutOfMemory;
                 break :complete .{ .loaded = published.published };
