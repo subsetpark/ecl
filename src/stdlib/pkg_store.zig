@@ -1024,8 +1024,10 @@ fn startWriteDriver(evaluator: *Machine, mode: PublicationMode) MachineError!voi
         .io = io,
         .text_value = .init(text_value.take()),
         .path_value = .init(path_value.take()),
-        .text_encoder = .init(text_encoder),
-        .path_encoder = .init(path_encoder),
+        .state = .{ .encode_text = .{
+            .text = .init(text_encoder),
+            .path = .init(path_encoder),
+        } },
     });
 }
 
@@ -1040,47 +1042,119 @@ const WriteLockDriver = struct {
     io: std.Io,
     text_value: heap.Owned(Value),
     path_value: heap.Owned(Value),
-    text_encoder: heap.Owned(storage.ToUtf8Cursor),
-    path_encoder: heap.Owned(storage.ToUtf8Cursor),
-    text: ?heap.Owned([]u8) = null,
-    path: ?heap.Owned([]u8) = null,
-    temp_path: ?heap.Owned([]u8) = null,
-    file: ?std.Io.File = null,
-    offset: usize = 0,
-    temp_created: bool = false,
-    published: bool = false,
-    phase: enum { encode_text, encode_path, inspect, create, write, sync_close, recheck, publish } = .encode_text,
+    state: State,
+
+    const Paths = struct {
+        text: heap.Owned([]u8),
+        path: heap.Owned([]u8),
+
+        fn deinit(self: *Paths, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+            self.path.deinit(releases, allocator);
+            self.text.deinit(releases, allocator);
+        }
+    };
+    const Temporary = struct {
+        paths: Paths,
+        temp_path: heap.Owned([]u8),
+
+        fn deinit(self: *Temporary, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+            self.temp_path.deinit(releases, allocator);
+            self.paths.deinit(releases, allocator);
+        }
+    };
+    const OpenTemporary = struct {
+        temporary: Temporary,
+        file: std.Io.File,
+        offset: usize,
+    };
+    const State = union(enum) {
+        encode_text: struct {
+            text: heap.Owned(storage.ToUtf8Cursor),
+            path: heap.Owned(storage.ToUtf8Cursor),
+        },
+        encode_path: struct {
+            text: heap.Owned([]u8),
+            path: heap.Owned(storage.ToUtf8Cursor),
+        },
+        inspect_initial: Paths,
+        make_temp: Paths,
+        temp_ready: Temporary,
+        write: OpenTemporary,
+        sync_close: OpenTemporary,
+        recheck: Temporary,
+        publish: Temporary,
+        published: Temporary,
+        cleanup: Temporary,
+
+        fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+        ) void {
+            switch (self.*) {
+                .encode_text => |*encode| {
+                    encode.path.deinit(releases, allocator);
+                    encode.text.deinit(releases, allocator);
+                },
+                .encode_path => |*encode| {
+                    encode.path.deinit(releases, allocator);
+                    encode.text.deinit(releases, allocator);
+                },
+                .inspect_initial, .make_temp => |*paths| paths.deinit(releases, allocator),
+                .temp_ready, .recheck, .publish, .published, .cleanup => |*temporary| temporary.deinit(releases, allocator),
+                .write, .sync_close => |*open| {
+                    open.file.close(io);
+                    open.temporary.deinit(releases, allocator);
+                },
+            }
+        }
+    };
 
     pub fn advance(evaluator: *Machine, self: *WriteLockDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.phase) {
-            .encode_text => self.encodeText(evaluator),
-            .encode_path => self.encodePath(evaluator),
-            .inspect => self.inspectTarget(evaluator, .create),
-            .create => self.createTemp(evaluator),
-            .write => self.writeChunk(evaluator),
-            .sync_close => self.syncClose(evaluator),
-            .recheck => self.inspectTarget(evaluator, .publish),
-            .publish => self.publish(evaluator),
+        return switch (self.state) {
+            .encode_text => |*encode| self.encodeText(evaluator, encode),
+            .encode_path => |*encode| self.encodePath(evaluator, encode),
+            .inspect_initial => |*paths| self.inspectInitial(evaluator, paths),
+            .make_temp => |*paths| self.makeTemp(paths),
+            .temp_ready => |*temporary| self.createTemp(evaluator, temporary),
+            .write => |*open| self.writeChunk(evaluator, open),
+            .sync_close => |*open| self.syncClose(evaluator, open),
+            .recheck => |*temporary| self.recheck(evaluator, temporary),
+            .publish => |*temporary| self.publish(evaluator, temporary),
+            .published, .cleanup => unreachable,
         };
     }
 
-    fn encodeText(self: *WriteLockDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        switch (self.text_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+    fn encodeText(
+        self: *WriteLockDriver,
+        evaluator: *Machine,
+        encode: *@FieldType(State, "encode_text"),
+    ) MachineError!machine.WorkProgress {
+        switch (encode.text.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failDomain(evaluator, "project file text contains an invalid Unicode scalar"),
         }) {
             .pending => return .yielded,
             .complete => |text| {
-                self.text = .init(text);
-                self.phase = .encode_path;
+                const path_encoder = encode.path.take();
+                encode.text.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.state = .{ .encode_path = .{
+                    .text = .init(text),
+                    .path = .init(path_encoder),
+                } };
                 return .yielded;
             },
         }
     }
 
-    fn encodePath(self: *WriteLockDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        switch (self.path_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+    fn encodePath(
+        self: *WriteLockDriver,
+        evaluator: *Machine,
+        encode: *@FieldType(State, "encode_path"),
+    ) MachineError!machine.WorkProgress {
+        switch (encode.path.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failDomain(evaluator, "project file path contains an invalid Unicode scalar"),
         }) {
@@ -1090,88 +1164,150 @@ const WriteLockDriver = struct {
                     self.allocator.free(path);
                     return self.failDomain(evaluator, "project file path is empty");
                 }
-                self.path = .init(path);
-                self.phase = .inspect;
+                const text = encode.text.take();
+                encode.path.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.state = .{ .inspect_initial = .{
+                    .text = .init(text),
+                    .path = .init(path),
+                } };
                 return .yielded;
             },
         }
     }
 
-    fn inspectTarget(
+    fn inspectInitial(
         self: *WriteLockDriver,
         evaluator: *Machine,
-        next: @TypeOf(self.phase),
+        paths: *Paths,
     ) MachineError!machine.WorkProgress {
         const info = std.Io.Dir.cwd().statFile(
             self.io,
-            self.path.?.borrow(),
+            paths.path.borrow(),
             .{ .follow_symlinks = false },
         ) catch |err| switch (err) {
             error.FileNotFound => {
-                self.phase = next;
+                const moved = paths.*;
+                self.state = .{ .make_temp = moved };
                 return .yielded;
             },
             else => return self.failIo(evaluator, "cannot inspect project file target", err),
         };
         if (info.kind != .file) return self.failNotRegular(evaluator);
         if (self.mode == .create) return self.failAlreadyExists(evaluator);
-        self.phase = next;
+        const moved = paths.*;
+        self.state = .{ .make_temp = moved };
         return .yielded;
     }
 
-    fn createTemp(self: *WriteLockDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        if (self.temp_path == null) {
-            const identity = next_lock_identity.fetchAdd(1, .monotonic);
-            const path = self.path.?.borrow();
-            const parent = std.fs.path.dirname(path) orelse ".";
-            self.temp_path = .init(try std.fmt.allocPrint(
-                self.allocator,
-                "{s}{c}.ecl-lock-{x}-{s}",
-                .{ parent, std.fs.path.sep, identity, std.fs.path.basename(path) },
-            ));
-        }
-        self.file = std.Io.Dir.cwd().createFile(self.io, self.temp_path.?.borrow(), .{ .exclusive = true }) catch |err| switch (err) {
+    fn makeTemp(
+        self: *WriteLockDriver,
+        paths: *Paths,
+    ) error{OutOfMemory}!machine.WorkProgress {
+        const identity = next_lock_identity.fetchAdd(1, .monotonic);
+        const path = paths.path.borrow();
+        const parent = std.fs.path.dirname(path) orelse ".";
+        const temp_path = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}{c}.ecl-lock-{x}-{s}",
+            .{ parent, std.fs.path.sep, identity, std.fs.path.basename(path) },
+        );
+        const moved = paths.*;
+        self.state = .{ .temp_ready = .{
+            .paths = moved,
+            .temp_path = .init(temp_path),
+        } };
+        return .yielded;
+    }
+
+    fn createTemp(
+        self: *WriteLockDriver,
+        evaluator: *Machine,
+        temporary: *Temporary,
+    ) MachineError!machine.WorkProgress {
+        const file = std.Io.Dir.cwd().createFile(self.io, temporary.temp_path.borrow(), .{ .exclusive = true }) catch |err| switch (err) {
             error.PathAlreadyExists => {
-                self.temp_path.?.deinit(evaluator.releaseDomain(), self.allocator);
-                self.temp_path = null;
+                const paths = temporary.paths;
+                temporary.temp_path.deinit(evaluator.releaseDomain(), self.allocator);
+                self.state = .{ .make_temp = paths };
                 return .yielded;
             },
             else => return self.failIo(evaluator, "cannot create project temporary file", err),
         };
-        self.temp_created = true;
-        self.phase = .write;
+        const moved = temporary.*;
+        self.state = .{ .write = .{
+            .temporary = moved,
+            .file = file,
+            .offset = 0,
+        } };
         return .yielded;
     }
 
-    fn writeChunk(self: *WriteLockDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const text = self.text.?.borrow();
-        if (self.offset != text.len) {
-            const end = @min(self.offset + work_quantum, text.len);
-            self.file.?.writePositionalAll(self.io, text[self.offset..end], self.offset) catch |err|
+    fn writeChunk(
+        self: *WriteLockDriver,
+        evaluator: *Machine,
+        open: *OpenTemporary,
+    ) MachineError!machine.WorkProgress {
+        const text = open.temporary.paths.text.borrow();
+        if (open.offset != text.len) {
+            const end = @min(open.offset + work_quantum, text.len);
+            open.file.writePositionalAll(self.io, text[open.offset..end], open.offset) catch |err|
                 return self.failIo(evaluator, "cannot write project temporary file", err);
-            self.offset = end;
+            open.offset = end;
             return .yielded;
         }
-        self.phase = .sync_close;
+        const moved = open.*;
+        self.state = .{ .sync_close = moved };
         return .yielded;
     }
 
-    fn syncClose(self: *WriteLockDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        self.file.?.sync(self.io) catch |err|
+    fn syncClose(
+        self: *WriteLockDriver,
+        evaluator: *Machine,
+        open: *OpenTemporary,
+    ) MachineError!machine.WorkProgress {
+        open.file.sync(self.io) catch |err|
             return self.failIo(evaluator, "cannot synchronize project temporary file", err);
-        self.file.?.close(self.io);
-        self.file = null;
-        self.phase = .recheck;
+        const temporary = open.temporary;
+        open.file.close(self.io);
+        self.state = .{ .recheck = temporary };
         return .yielded;
     }
 
-    fn publish(self: *WriteLockDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const path = self.path.?.borrow();
+    fn recheck(
+        self: *WriteLockDriver,
+        evaluator: *Machine,
+        temporary: *Temporary,
+    ) MachineError!machine.WorkProgress {
+        const info = std.Io.Dir.cwd().statFile(
+            self.io,
+            temporary.paths.path.borrow(),
+            .{ .follow_symlinks = false },
+        ) catch |err| switch (err) {
+            error.FileNotFound => {
+                const moved = temporary.*;
+                self.state = .{ .publish = moved };
+                return .yielded;
+            },
+            else => return self.failIo(evaluator, "cannot inspect project file target", err),
+        };
+        if (info.kind != .file) return self.failNotRegular(evaluator);
+        if (self.mode == .create) return self.failAlreadyExists(evaluator);
+        const moved = temporary.*;
+        self.state = .{ .publish = moved };
+        return .yielded;
+    }
+
+    fn publish(
+        self: *WriteLockDriver,
+        evaluator: *Machine,
+        temporary: *Temporary,
+    ) MachineError!machine.WorkProgress {
+        const path = temporary.paths.path.borrow();
         const parent_path = std.fs.path.dirname(path) orelse ".";
         var parent = std.Io.Dir.cwd().openDir(self.io, parent_path, .{ .follow_symlinks = false }) catch |err|
             return self.failIo(evaluator, "cannot open project file parent", err);
         defer parent.close(self.io);
-        const old_name = std.fs.path.basename(self.temp_path.?.borrow());
+        const old_name = std.fs.path.basename(temporary.temp_path.borrow());
         const new_name = std.fs.path.basename(path);
         switch (self.mode) {
             .replace => parent.rename(old_name, parent, new_name, self.io) catch |err|
@@ -1181,8 +1317,8 @@ const WriteLockDriver = struct {
                 else => return self.failIo(evaluator, "cannot publish project file", err),
             },
         }
-        self.published = true;
-        self.temp_created = false;
+        const moved = temporary.*;
+        self.state = .{ .published = moved };
         return .completed;
     }
 
@@ -1201,7 +1337,7 @@ const WriteLockDriver = struct {
         const failure = evaluator.failFmt(
             .io,
             "project file `{s}` already exists",
-            .{self.path.?.borrow()},
+            .{self.pathBytes()},
         );
         evaluator.addErrorPath(self.path_value.borrow());
         return failure;
@@ -1211,10 +1347,19 @@ const WriteLockDriver = struct {
         const failure = evaluator.failFmt(
             .io,
             "project file `{s}` is not a regular file",
-            .{self.path.?.borrow()},
+            .{self.pathBytes()},
         );
         evaluator.addErrorPath(self.path_value.borrow());
         return failure;
+    }
+
+    fn pathBytes(self: *WriteLockDriver) []const u8 {
+        return switch (self.state) {
+            .inspect_initial, .make_temp => |*paths| paths.path.borrow(),
+            .temp_ready, .recheck, .publish, .published, .cleanup => |*temporary| temporary.paths.path.borrow(),
+            .write, .sync_close => |*open| open.temporary.paths.path.borrow(),
+            .encode_text, .encode_path => unreachable,
+        };
     }
 
     pub fn advanceRetirement(
@@ -1222,21 +1367,30 @@ const WriteLockDriver = struct {
         allocator: std.mem.Allocator,
         self: *WriteLockDriver,
     ) bool {
-        if (self.file) |file| file.close(self.io);
-        self.file = null;
-        if (!self.published and self.temp_created) {
-            std.Io.Dir.cwd().deleteFile(self.io, self.temp_path.?.borrow()) catch |err| switch (err) {
-                error.FileNotFound => {},
-                else => std.log.err("project file rollback could not remove its temporary file: {s}", .{@errorName(err)}),
-            };
-            self.temp_created = false;
-            return false;
+        switch (self.state) {
+            .write, .sync_close => |*open| {
+                const temporary = open.temporary;
+                open.file.close(self.io);
+                self.state = .{ .cleanup = temporary };
+                return false;
+            },
+            .recheck, .publish => |*temporary| {
+                const moved = temporary.*;
+                self.state = .{ .cleanup = moved };
+                return false;
+            },
+            .cleanup => |*temporary| {
+                const moved = temporary.*;
+                std.Io.Dir.cwd().deleteFile(self.io, temporary.temp_path.borrow()) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => std.log.err("project file rollback could not remove its temporary file: {s}", .{@errorName(err)}),
+                };
+                self.state = .{ .published = moved };
+                return false;
+            },
+            else => {},
         }
-        if (self.temp_path) |*path| path.deinit(releases, allocator);
-        if (self.path) |*path| path.deinit(releases, allocator);
-        if (self.text) |*text| text.deinit(releases, allocator);
-        self.text_encoder.deinit(releases, allocator);
-        self.path_encoder.deinit(releases, allocator);
+        self.state.deinit(releases, allocator, self.io);
         self.text_value.deinit(releases, allocator);
         self.path_value.deinit(releases, allocator);
         allocator.destroy(self);
