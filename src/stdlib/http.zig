@@ -87,6 +87,7 @@ fn begin(evaluator: *Machine, method: std.http.Method, response_mode: ResponseMo
         evaluator.addErrorPath(url.borrow());
         return failure;
     }
+    const url_encoder = kernel_storage.StringEncoder.init(evaluator.allocator(), url.borrow());
     try evaluator.startDriver(RequestDriver{
         .allocator = evaluator.allocator(),
         .method = method,
@@ -95,6 +96,7 @@ fn begin(evaluator: *Machine, method: std.http.Method, response_mode: ResponseMo
         .url_value = .init(url.take()),
         .headers_value = .init(headers.take()),
         .body_value = if (body) |*owned| .init(owned.take()) else null,
+        .state = .{ .url = url_encoder },
     });
 }
 
@@ -102,23 +104,6 @@ fn begin(evaluator: *Machine, method: std.http.Method, response_mode: ResponseMo
 const Field = struct {
     name: []u8,
     value: []u8,
-};
-
-const Phase = enum {
-    /// Encode the url to bytes.
-    url,
-    /// Encode each request header name and value to bytes.
-    request_headers,
-    /// Encode the request body to bytes.
-    request_body,
-    /// Perform the whole exchange. This is the blocking step.
-    exchange,
-    /// Materialize response header names and values as strings.
-    response_headers,
-    /// Materialize the response body as a string.
-    response_body,
-    /// Assemble the response dict.
-    finish,
 };
 
 const RequestDriver = struct {
@@ -131,159 +116,427 @@ const RequestDriver = struct {
     url_value: heap.Owned(Value),
     headers_value: heap.Owned(Value),
     body_value: ?heap.Owned(Value),
-    phase: Phase = .url,
+    state: State,
 
-    /// Encoding an ECL string to bytes is resumable, one string at a time.
-    encoder: ?kernel_storage.StringEncoder = null,
-    url: ?[]u8 = null,
-    request_body: ?[]u8 = null,
-    request_fields: std.ArrayList(Field) = .empty,
-    pending_name: ?[]u8 = null,
-    field_index: usize = 0,
-    encoding_value: bool = false,
-
-    status: u16 = 0,
-    response_fields: std.ArrayList(Field) = .empty,
-    response_body: std.ArrayList(u8) = .empty,
-
-    /// Materializing a string or a dict is resumable too.
-    text: ?kernel_storage.TextMaterializer = null,
-    bytes: ?kernel_storage.ByteListMaterializer = null,
-    pairs: std.ArrayList(dict.Pair) = .empty,
-    pair_key: ?Value = null,
-    dictionary: ?kernel_storage.DictMaterializer = null,
-    headers_result: ?Value = null,
-    body_result: ?Value = null,
-    outer: ?[]dict.Pair = null,
+    const RequestData = struct {
+        url: []u8,
+        body: ?[]u8 = null,
+        fields: std.ArrayList(Field) = .empty,
+    };
+    const ExchangeData = struct {
+        request: RequestData,
+        status: u16 = 0,
+        fields: std.ArrayList(Field) = .empty,
+        body: std.ArrayList(u8) = .empty,
+    };
+    const HeaderBuild = struct {
+        exchange: ExchangeData,
+        pairs: std.ArrayList(dict.Pair) = .empty,
+        index: usize = 0,
+    };
+    const Results = struct {
+        exchange: ExchangeData,
+        headers: Value,
+        body: Value,
+    };
+    const FinishKeys = struct {
+        status: u32,
+        headers: u32,
+        body: u32,
+    };
+    const State = union(enum) {
+        url: kernel_storage.StringEncoder,
+        request_headers: struct { request: RequestData, index: usize = 0 },
+        request_header_name: struct {
+            request: RequestData,
+            index: usize,
+            encoder: kernel_storage.StringEncoder,
+        },
+        request_header_value: struct {
+            request: RequestData,
+            index: usize,
+            name: []u8,
+            encoder: kernel_storage.StringEncoder,
+        },
+        request_header_append: struct {
+            request: RequestData,
+            index: usize,
+            name: []u8,
+            value: []u8,
+        },
+        request_body: struct {
+            request: RequestData,
+            encoder: kernel_storage.StringEncoder,
+        },
+        exchange: ExchangeData,
+        response_headers: HeaderBuild,
+        response_header_name: struct {
+            build: HeaderBuild,
+            text: kernel_storage.TextMaterializer,
+        },
+        response_header_value: struct {
+            build: HeaderBuild,
+            key: Value,
+            text: kernel_storage.TextMaterializer,
+        },
+        response_header_append: struct {
+            build: HeaderBuild,
+            key: Value,
+            value: Value,
+        },
+        headers_dictionary_prepare: HeaderBuild,
+        headers_dictionary: struct {
+            build: HeaderBuild,
+            dictionary: kernel_storage.DictMaterializer,
+        },
+        release_header_pairs: struct { build: HeaderBuild, headers: Value },
+        response_body_text: struct {
+            exchange: ExchangeData,
+            headers: Value,
+            text: kernel_storage.TextMaterializer,
+        },
+        response_body_bytes: struct {
+            exchange: ExchangeData,
+            headers: Value,
+            bytes: kernel_storage.ByteListMaterializer,
+        },
+        finish_status: Results,
+        finish_headers: struct { results: Results, status_key: u32 },
+        finish_body: struct { results: Results, status_key: u32, headers_key: u32 },
+        finish_allocate: struct { results: Results, keys: FinishKeys },
+        finish_dictionary_prepare: struct {
+            results: Results,
+            slots: []dict.Pair,
+        },
+        finish_dictionary: struct {
+            results: Results,
+            slots: []dict.Pair,
+            dictionary: kernel_storage.DictMaterializer,
+        },
+        output: Results,
+        cleanup_pairs: HeaderBuild,
+        cleanup_headers: struct { exchange: ExchangeData, headers: Value },
+        cleanup_results_headers: Results,
+        cleanup_results_body: struct { exchange: ExchangeData, body: Value },
+        cleanup_exchange: ExchangeData,
+        cleanup_request: RequestData,
+        cleanup_url_value,
+        cleanup_headers_value,
+        cleanup_body_value,
+        cleanup_destroy,
+    };
 
     pub fn advance(evaluator: *Machine, self: *RequestDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        switch (self.phase) {
-            .url => {
-                const bytes = try self.encode(evaluator, self.url_value.borrow()) orelse
-                    return .yielded;
-                self.url = bytes;
-                self.phase = .request_headers;
-                return .yielded;
+        switch (self.state) {
+            .url => |*encoder| switch (try advanceEncoder(evaluator, encoder)) {
+                .pending => {},
+                .complete => |bytes| {
+                    encoder.deinit();
+                    self.state = .{ .request_headers = .{
+                        .request = .{ .url = bytes },
+                    } };
+                },
             },
-            .request_headers => return self.advanceRequestHeaders(evaluator),
-            .request_body => {
-                const bytes = try self.encode(evaluator, self.body_value.?.borrow()) orelse
-                    return .yielded;
-                self.request_body = bytes;
-                self.phase = .exchange;
-                return .yielded;
-            },
-            .exchange => {
-                try self.exchange(evaluator);
-                self.phase = .response_headers;
-                return .yielded;
-            },
-            .response_headers => return self.advanceResponseHeaders(evaluator),
-            .response_body => {
-                switch (self.response_mode) {
-                    .text => {
-                        if (self.text == null)
-                            self.text = .init(self.allocator, self.response_body.items);
-                        switch (try self.text.?.advance(machine.kernel_poll_quantum)) {
-                            .pending => return .yielded,
-                            .complete => |text| {
-                                self.text.?.deinit();
-                                self.text = null;
-                                self.body_result = text;
-                            },
-                        }
-                    },
-                    .bytes => {
-                        if (self.bytes == null)
-                            self.bytes = .init(self.allocator, self.response_body.items);
-                        switch (try self.bytes.?.advance(machine.kernel_poll_quantum)) {
-                            .pending => return .yielded,
-                            .complete => |bytes| {
-                                self.bytes.?.deinit();
-                                self.bytes = null;
-                                self.body_result = bytes;
-                            },
-                        }
-                    },
+            .request_headers => |*headers| {
+                const header_dict = self.headers_value.borrow().dict;
+                const count: usize = @intCast(dict.keysOf(header_dict).list.length());
+                if (headers.index == count) {
+                    const request = headers.request;
+                    if (self.body_value) |*body| self.state = .{ .request_body = .{
+                        .request = request,
+                        .encoder = .init(self.allocator, body.borrow()),
+                    } } else self.state = .{ .exchange = .{ .request = request } };
+                } else {
+                    const key = dict.keyAt(header_dict, headers.index);
+                    if (!key.isString())
+                        return evaluator.typeError("request header names to be strings");
+                    const request = headers.request;
+                    const index = headers.index;
+                    self.state = .{ .request_header_name = .{
+                        .request = request,
+                        .index = index,
+                        .encoder = .init(self.allocator, key),
+                    } };
                 }
-                self.phase = .finish;
-                return .yielded;
             },
-            .finish => return self.finish(evaluator),
+            .request_header_name => |*header| switch (try advanceEncoder(evaluator, &header.encoder)) {
+                .pending => {},
+                .complete => |name| {
+                    const item = dict.valueAt(self.headers_value.borrow().dict, header.index);
+                    if (!item.isString()) {
+                        self.allocator.free(name);
+                        return evaluator.typeError("request header values to be strings");
+                    }
+                    header.encoder.deinit();
+                    const request = header.request;
+                    const index = header.index;
+                    self.state = .{ .request_header_value = .{
+                        .request = request,
+                        .index = index,
+                        .name = name,
+                        .encoder = .init(self.allocator, item),
+                    } };
+                },
+            },
+            .request_header_value => |*header| switch (try advanceEncoder(evaluator, &header.encoder)) {
+                .pending => {},
+                .complete => |value_bytes| {
+                    header.encoder.deinit();
+                    const request = header.request;
+                    const index = header.index;
+                    const name = header.name;
+                    self.state = .{ .request_header_append = .{
+                        .request = request,
+                        .index = index,
+                        .name = name,
+                        .value = value_bytes,
+                    } };
+                },
+            },
+            .request_header_append => |*header| {
+                try header.request.fields.append(self.allocator, .{
+                    .name = header.name,
+                    .value = header.value,
+                });
+                const request = header.request;
+                const index = header.index + 1;
+                self.state = .{ .request_headers = .{ .request = request, .index = index } };
+            },
+            .request_body => |*body| switch (try advanceEncoder(evaluator, &body.encoder)) {
+                .pending => {},
+                .complete => |bytes| {
+                    body.encoder.deinit();
+                    var request = body.request;
+                    request.body = bytes;
+                    self.state = .{ .exchange = .{ .request = request } };
+                },
+            },
+            .exchange => |*exchange_state| {
+                try self.exchange(evaluator, exchange_state);
+                const exchange_data = exchange_state.*;
+                self.state = .{ .response_headers = .{ .exchange = exchange_data } };
+            },
+            .response_headers => |*headers| {
+                if (headers.index == headers.exchange.fields.items.len) {
+                    const moved = headers.*;
+                    self.state = .{ .headers_dictionary_prepare = moved };
+                } else {
+                    const moved = headers.*;
+                    self.state = .{ .response_header_name = .{
+                        .build = moved,
+                        .text = .init(self.allocator, moved.exchange.fields.items[moved.index].name),
+                    } };
+                }
+            },
+            .response_header_name => |*header| switch (try header.text.advance(machine.kernel_poll_quantum)) {
+                .pending => {},
+                .complete => |key| {
+                    header.text.deinit();
+                    const build = header.build;
+                    self.state = .{ .response_header_value = .{
+                        .build = build,
+                        .key = key,
+                        .text = .init(self.allocator, build.exchange.fields.items[build.index].value),
+                    } };
+                },
+            },
+            .response_header_value => |*header| switch (try header.text.advance(machine.kernel_poll_quantum)) {
+                .pending => {},
+                .complete => |value_text| {
+                    header.text.deinit();
+                    const build = header.build;
+                    const key = header.key;
+                    self.state = .{ .response_header_append = .{
+                        .build = build,
+                        .key = key,
+                        .value = value_text,
+                    } };
+                },
+            },
+            .response_header_append => |*header| {
+                try header.build.pairs.append(self.allocator, .{ header.key, header.value });
+                var build = header.build;
+                build.index += 1;
+                self.state = .{ .response_headers = build };
+            },
+            .headers_dictionary_prepare => |*headers| {
+                const dictionary = try kernel_storage.DictMaterializer.init(
+                    self.allocator,
+                    headers.pairs.items,
+                    true,
+                );
+                const build = headers.*;
+                self.state = .{ .headers_dictionary = .{
+                    .build = build,
+                    .dictionary = dictionary,
+                } };
+            },
+            .headers_dictionary => |*headers| switch (try headers.dictionary.advance(machine.kernel_poll_quantum)) {
+                .pending => {},
+                .duplicate_key => unreachable,
+                .complete => |built| {
+                    headers.dictionary.deinit();
+                    const build = headers.build;
+                    self.state = .{ .release_header_pairs = .{
+                        .build = build,
+                        .headers = built,
+                    } };
+                },
+            },
+            .release_header_pairs => |*release| {
+                if (release.build.pairs.pop()) |pair| {
+                    evaluator.releaseDomain().releaseValue(pair[0]);
+                    evaluator.releaseDomain().releaseValue(pair[1]);
+                    return .yielded;
+                }
+                release.build.pairs.deinit(self.allocator);
+                const exchange_data = release.build.exchange;
+                const built = release.headers;
+                self.state = switch (self.response_mode) {
+                    .text => .{ .response_body_text = .{
+                        .exchange = exchange_data,
+                        .headers = built,
+                        .text = .init(self.allocator, exchange_data.body.items),
+                    } },
+                    .bytes => .{ .response_body_bytes = .{
+                        .exchange = exchange_data,
+                        .headers = built,
+                        .bytes = .init(self.allocator, exchange_data.body.items),
+                    } },
+                };
+            },
+            .response_body_text => |*body| switch (try body.text.advance(machine.kernel_poll_quantum)) {
+                .pending => {},
+                .complete => |built| {
+                    body.text.deinit();
+                    const exchange_data = body.exchange;
+                    const headers = body.headers;
+                    self.state = .{ .finish_status = .{
+                        .exchange = exchange_data,
+                        .headers = headers,
+                        .body = built,
+                    } };
+                },
+            },
+            .response_body_bytes => |*body| switch (try body.bytes.advance(machine.kernel_poll_quantum)) {
+                .pending => {},
+                .complete => |built| {
+                    body.bytes.deinit();
+                    const exchange_data = body.exchange;
+                    const headers = body.headers;
+                    self.state = .{ .finish_status = .{
+                        .exchange = exchange_data,
+                        .headers = headers,
+                        .body = built,
+                    } };
+                },
+            },
+            .finish_status => |*results| {
+                const status_key = try intern.intern("status");
+                const moved = results.*;
+                self.state = .{ .finish_headers = .{ .results = moved, .status_key = status_key } };
+            },
+            .finish_headers => |*finish| {
+                const headers_key = try intern.intern("headers");
+                const results = finish.results;
+                const status_key = finish.status_key;
+                self.state = .{ .finish_body = .{
+                    .results = results,
+                    .status_key = status_key,
+                    .headers_key = headers_key,
+                } };
+            },
+            .finish_body => |*finish| {
+                const body_key = try intern.intern("body");
+                const results = finish.results;
+                self.state = .{ .finish_allocate = .{
+                    .results = results,
+                    .keys = .{
+                        .status = finish.status_key,
+                        .headers = finish.headers_key,
+                        .body = body_key,
+                    },
+                } };
+            },
+            .finish_allocate => |*finish| {
+                const slots = try self.allocator.alloc(dict.Pair, 3);
+                slots[0] = .{
+                    .{ .symbol = finish.keys.status },
+                    .{ .int = @intCast(finish.results.exchange.status) },
+                };
+                slots[1] = .{ .{ .symbol = finish.keys.headers }, finish.results.headers };
+                slots[2] = .{ .{ .symbol = finish.keys.body }, finish.results.body };
+                const results = finish.results;
+                self.state = .{ .finish_dictionary_prepare = .{
+                    .results = results,
+                    .slots = slots,
+                } };
+            },
+            .finish_dictionary_prepare => |*finish| {
+                const dictionary = try kernel_storage.DictMaterializer.init(
+                    self.allocator,
+                    finish.slots,
+                    true,
+                );
+                const results = finish.results;
+                const slots = finish.slots;
+                self.state = .{ .finish_dictionary = .{
+                    .results = results,
+                    .slots = slots,
+                    .dictionary = dictionary,
+                } };
+            },
+            .finish_dictionary => |*finish| switch (try finish.dictionary.advance(machine.kernel_poll_quantum)) {
+                .pending => {},
+                .duplicate_key => return evaluator.fail(.domain, "http response keys collided"),
+                .complete => |built| {
+                    finish.dictionary.deinit();
+                    self.allocator.free(finish.slots);
+                    const results = finish.results;
+                    self.state = .{ .output = results };
+                    return .{ .output = built };
+                },
+            },
+            .output,
+            .cleanup_pairs,
+            .cleanup_headers,
+            .cleanup_results_headers,
+            .cleanup_results_body,
+            .cleanup_exchange,
+            .cleanup_request,
+            .cleanup_url_value,
+            .cleanup_headers_value,
+            .cleanup_body_value,
+            .cleanup_destroy,
+            => unreachable,
         }
+        return .yielded;
     }
 
-    /// Drives one string's encoding, returning null until it completes.
-    fn encode(
-        self: *RequestDriver,
+    fn advanceEncoder(
         evaluator: *Machine,
-        item: Value,
-    ) MachineError!?[]u8 {
-        if (self.encoder == null) self.encoder = .init(self.allocator, item);
-        return switch (self.encoder.?.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
+        encoder: *kernel_storage.StringEncoder,
+    ) MachineError!kernel_storage.StringEncodeResult {
+        return encoder.advance(machine.kernel_poll_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return evaluator.fail(
                 .domain,
                 "a request string contains an invalid Unicode scalar",
             ),
-        }) {
-            .pending => null,
-            .complete => |bytes| bytes: {
-                self.encoder.?.deinit();
-                self.encoder = null;
-                break :bytes bytes;
-            },
         };
     }
 
-    fn advanceRequestHeaders(
+    fn failIo(
         self: *RequestDriver,
         evaluator: *Machine,
-    ) MachineError!machine.WorkProgress {
-        const header_dict = self.headers_value.borrow().dict;
-        const count: usize = @intCast(dict.keysOf(header_dict).list.length());
-        if (self.field_index == count) {
-            // Response-header materialization starts its own traversal after
-            // the exchange. Do not let the number of request headers skip
-            // that many response headers.
-            self.field_index = 0;
-            self.phase = if (self.body_value == null) .exchange else .request_body;
-            return .yielded;
-        }
-        if (!self.encoding_value) {
-            const key = dict.keyAt(header_dict, self.field_index);
-            if (!key.isString())
-                return evaluator.typeError("request header names to be strings");
-            const bytes = try self.encode(evaluator, key) orelse return .yielded;
-            self.pending_name = bytes;
-            self.encoding_value = true;
-            return .yielded;
-        }
-        const item = dict.valueAt(header_dict, self.field_index);
-        if (!item.isString())
-            return evaluator.typeError("request header values to be strings");
-        const bytes = try self.encode(evaluator, item) orelse return .yielded;
-        self.request_fields.append(self.allocator, .{
-            .name = self.pending_name.?,
-            .value = bytes,
-        }) catch |err| {
-            // `pending_name` is still owned by the driver; the value just
-            // encoded is not, so a failed append frees it here.
-            self.allocator.free(bytes);
-            return err;
-        };
-        self.pending_name = null;
-        self.encoding_value = false;
-        self.field_index += 1;
-        return .yielded;
-    }
-
-    fn failIo(self: *RequestDriver, evaluator: *Machine, name: []const u8) MachineError {
+        url: []const u8,
+        name: []const u8,
+    ) MachineError {
         const failure = evaluator.failFmt(
             .io,
             "cannot reach `{s}`: {s}",
-            .{ self.url.?, name },
+            .{ url, name },
         );
         evaluator.addErrorPath(self.url_value.borrow());
         return failure;
@@ -292,13 +545,17 @@ const RequestDriver = struct {
     /// The whole exchange in one scheduler step: this is the documented
     /// blocking exception. Response headers are copied before the body stream
     /// is initialized, because that invalidates them.
-    fn exchange(self: *RequestDriver, evaluator: *Machine) MachineError!void {
+    fn exchange(
+        self: *RequestDriver,
+        evaluator: *Machine,
+        exchange_data: *ExchangeData,
+    ) MachineError!void {
         const io = evaluator.unit.inherited.host_io.?;
-        const uri = std.Uri.parse(self.url.?) catch
-            return self.failIo(evaluator, "InvalidUrl");
-        const extra = try self.allocator.alloc(std.http.Header, self.request_fields.items.len);
+        const uri = std.Uri.parse(exchange_data.request.url) catch
+            return self.failIo(evaluator, exchange_data.request.url, "InvalidUrl");
+        const extra = try self.allocator.alloc(std.http.Header, exchange_data.request.fields.items.len);
         defer self.allocator.free(extra);
-        for (self.request_fields.items, extra) |field, *header|
+        for (exchange_data.request.fields.items, extra) |field, *header|
             header.* = .{ .name = field.name, .value = field.value };
 
         var client: std.http.Client = .{ .allocator = self.allocator, .io = io };
@@ -312,33 +569,33 @@ const RequestDriver = struct {
                 trust.ca_file,
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return self.failIo(evaluator, @errorName(err)),
+                else => return self.failIo(evaluator, exchange_data.request.url, @errorName(err)),
             };
         }
-        const sends_body = self.request_body != null;
+        const sends_body = exchange_data.request.body != null;
         var request = client.request(self.method, uri, .{
             .redirect_behavior = if (sends_body) .unhandled else @enumFromInt(3),
             .extra_headers = extra,
-        }) catch |err| return self.failIo(evaluator, @errorName(err));
+        }) catch |err| return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
         defer request.deinit();
 
-        if (self.request_body) |payload| {
+        if (exchange_data.request.body) |payload| {
             request.transfer_encoding = .{ .content_length = payload.len };
             var body = request.sendBodyUnflushed(&.{}) catch |err|
-                return self.failIo(evaluator, @errorName(err));
+                return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
             body.writer.writeAll(payload) catch |err|
-                return self.failIo(evaluator, @errorName(err));
-            body.end() catch |err| return self.failIo(evaluator, @errorName(err));
+                return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
+            body.end() catch |err| return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
             request.connection.?.flush() catch |err|
-                return self.failIo(evaluator, @errorName(err));
+                return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
         } else request.sendBodiless() catch |err|
-            return self.failIo(evaluator, @errorName(err));
+            return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
 
         const redirect_buffer = try self.allocator.alloc(u8, redirect_buffer_bytes);
         defer self.allocator.free(redirect_buffer);
         var response = request.receiveHead(redirect_buffer) catch |err|
-            return self.failIo(evaluator, @errorName(err));
-        self.status = @intFromEnum(response.head.status);
+            return self.failIo(evaluator, exchange_data.request.url, @errorName(err));
+        exchange_data.status = @intFromEnum(response.head.status);
 
         var iterator = response.head.iterateHeaders();
         while (iterator.next()) |header| {
@@ -350,14 +607,14 @@ const RequestDriver = struct {
             // legal. The value-level API exposes a dict, so retain the last
             // occurrence under its spelling instead of asking the dict
             // materializer to reject a duplicate.
-            for (self.response_fields.items) |*field| {
+            for (exchange_data.fields.items) |*field| {
                 if (std.ascii.eqlIgnoreCase(field.name, name)) {
                     self.allocator.free(field.name);
                     self.allocator.free(field.value);
                     field.* = .{ .name = name, .value = item };
                     break;
                 }
-            } else try self.response_fields.append(
+            } else try exchange_data.fields.append(
                 self.allocator,
                 .{ .name = name, .value = item },
             );
@@ -367,7 +624,11 @@ const RequestDriver = struct {
             .identity => 0,
             .zstd => std.compress.zstd.default_window_len,
             .deflate, .gzip => std.compress.flate.max_window_len,
-            .compress => return self.failIo(evaluator, "UnsupportedCompressionMethod"),
+            .compress => return self.failIo(
+                evaluator,
+                exchange_data.request.url,
+                "UnsupportedCompressionMethod",
+            ),
         };
         const decompress_buffer = try self.allocator.alloc(u8, decompress_bytes);
         defer self.allocator.free(decompress_buffer);
@@ -383,94 +644,126 @@ const RequestDriver = struct {
         var collected = std.Io.Writer.Allocating.init(self.allocator);
         defer collected.deinit();
         _ = reader.streamRemaining(&collected.writer) catch
-            return self.failIo(evaluator, "ReadFailed");
-        self.response_body.deinit(self.allocator);
-        self.response_body = .empty;
-        try self.response_body.appendSlice(self.allocator, collected.written());
+            return self.failIo(evaluator, exchange_data.request.url, "ReadFailed");
+        exchange_data.body.deinit(self.allocator);
+        exchange_data.body = .empty;
+        try exchange_data.body.appendSlice(self.allocator, collected.written());
     }
 
-    fn advanceResponseHeaders(
-        self: *RequestDriver,
-        evaluator: *Machine,
-    ) MachineError!machine.WorkProgress {
-        if (self.field_index < self.response_fields.items.len) {
-            const field = self.response_fields.items[self.field_index];
-            const source = if (self.pair_key == null) field.name else field.value;
-            if (self.text == null) self.text = .init(self.allocator, source);
-            switch (try self.text.?.advance(machine.kernel_poll_quantum)) {
-                .pending => return .yielded,
-                .complete => |text| {
-                    self.text.?.deinit();
-                    self.text = null;
-                    if (self.pair_key == null) {
-                        self.pair_key = text;
-                        return .yielded;
-                    }
-                    self.pairs.append(self.allocator, .{ self.pair_key.?, text }) catch |err| {
-                        evaluator.releaseDomain().releaseValue(text);
-                        return err;
-                    };
-                    self.pair_key = null;
-                    self.field_index += 1;
-                    return .yielded;
-                },
-            }
-        }
-        if (self.dictionary == null)
-            self.dictionary = try .init(self.allocator, self.pairs.items, true);
-        switch (try self.dictionary.?.advance(machine.kernel_poll_quantum)) {
-            .pending => return .yielded,
-            // `exchange` coalesces case-insensitive HTTP field names before
-            // they reach this ordinary, case-sensitive ECL dictionary.
-            .duplicate_key => unreachable,
-            .complete => |built| {
-                self.dictionary.?.deinit();
-                self.dictionary = null;
-                self.headers_result = built;
-                self.releasePairs(evaluator.releaseDomain());
-                self.phase = .response_body;
-                return .yielded;
+    fn beginRetirement(self: *RequestDriver, releases: *heap.ReleaseDomain) void {
+        switch (self.state) {
+            .url => |*encoder| {
+                encoder.deinit();
+                self.state = .cleanup_url_value;
             },
-        }
-    }
-
-    fn releasePairs(self: *RequestDriver, releases: *heap.ReleaseDomain) void {
-        // The materializer retained what it copied, so this driver's own
-        // references to the header strings are released here.
-        for (self.pairs.items) |pair| {
-            releases.releaseValue(pair[0]);
-            releases.releaseValue(pair[1]);
-        }
-        self.pairs.clearRetainingCapacity();
-    }
-
-    fn finish(self: *RequestDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        if (self.outer == null) {
-            const slots = try self.allocator.alloc(dict.Pair, 3);
-            slots[0] = .{
-                .{ .symbol = try intern.intern("status") },
-                .{ .int = @intCast(self.status) },
-            };
-            slots[1] = .{
-                .{ .symbol = try intern.intern("headers") },
-                self.headers_result.?,
-            };
-            slots[2] = .{
-                .{ .symbol = try intern.intern("body") },
-                self.body_result.?,
-            };
-            self.outer = slots;
-            self.dictionary = try .init(self.allocator, slots, true);
-        }
-        return switch (try self.dictionary.?.advance(machine.kernel_poll_quantum)) {
-            .pending => .yielded,
-            .duplicate_key => evaluator.fail(.domain, "http response keys collided"),
-            .complete => |built| output: {
-                self.dictionary.?.deinit();
-                self.dictionary = null;
-                break :output .{ .output = built };
+            .request_headers => |*headers| {
+                const request = headers.request;
+                self.state = .{ .cleanup_request = request };
             },
-        };
+            .request_header_name => |*header| {
+                header.encoder.deinit();
+                const request = header.request;
+                self.state = .{ .cleanup_request = request };
+            },
+            .request_header_value => |*header| {
+                header.encoder.deinit();
+                self.allocator.free(header.name);
+                const request = header.request;
+                self.state = .{ .cleanup_request = request };
+            },
+            .request_header_append => |*header| {
+                self.allocator.free(header.value);
+                self.allocator.free(header.name);
+                const request = header.request;
+                self.state = .{ .cleanup_request = request };
+            },
+            .request_body => |*body| {
+                body.encoder.deinit();
+                const request = body.request;
+                self.state = .{ .cleanup_request = request };
+            },
+            .exchange => |*exchange_data| {
+                const moved = exchange_data.*;
+                self.state = .{ .cleanup_exchange = moved };
+            },
+            .response_headers => |*headers| self.beginHeaderCleanup(headers),
+            .response_header_name => |*header| {
+                header.text.retire(releases);
+                self.beginHeaderCleanup(&header.build);
+            },
+            .response_header_value => |*header| {
+                header.text.retire(releases);
+                releases.releaseValue(header.key);
+                self.beginHeaderCleanup(&header.build);
+            },
+            .response_header_append => |*header| {
+                releases.releaseValue(header.key);
+                releases.releaseValue(header.value);
+                self.beginHeaderCleanup(&header.build);
+            },
+            .headers_dictionary_prepare => |*headers| self.beginHeaderCleanup(headers),
+            .headers_dictionary => |*headers| {
+                headers.dictionary.retire(releases);
+                self.beginHeaderCleanup(&headers.build);
+            },
+            .release_header_pairs => |*release| {
+                releases.releaseValue(release.headers);
+                self.beginHeaderCleanup(&release.build);
+            },
+            .response_body_text => |*body| {
+                body.text.retire(releases);
+                const exchange_data = body.exchange;
+                const headers = body.headers;
+                self.state = .{ .cleanup_headers = .{
+                    .exchange = exchange_data,
+                    .headers = headers,
+                } };
+            },
+            .response_body_bytes => |*body| {
+                body.bytes.retire(releases);
+                const exchange_data = body.exchange;
+                const headers = body.headers;
+                self.state = .{ .cleanup_headers = .{
+                    .exchange = exchange_data,
+                    .headers = headers,
+                } };
+            },
+            .finish_status => |*results| self.beginResultsCleanup(results),
+            .finish_headers => |*finish| self.beginResultsCleanup(&finish.results),
+            .finish_body => |*finish| self.beginResultsCleanup(&finish.results),
+            .finish_allocate => |*finish| self.beginResultsCleanup(&finish.results),
+            .finish_dictionary_prepare => |*finish| {
+                self.allocator.free(finish.slots);
+                self.beginResultsCleanup(&finish.results);
+            },
+            .finish_dictionary => |*finish| {
+                finish.dictionary.retire(releases);
+                self.allocator.free(finish.slots);
+                self.beginResultsCleanup(&finish.results);
+            },
+            .output => |*results| self.beginResultsCleanup(results),
+            .cleanup_pairs,
+            .cleanup_headers,
+            .cleanup_results_headers,
+            .cleanup_results_body,
+            .cleanup_exchange,
+            .cleanup_request,
+            .cleanup_url_value,
+            .cleanup_headers_value,
+            .cleanup_body_value,
+            .cleanup_destroy,
+            => unreachable,
+        }
+    }
+
+    fn beginHeaderCleanup(self: *RequestDriver, build: *HeaderBuild) void {
+        const moved = build.*;
+        self.state = .{ .cleanup_pairs = moved };
+    }
+
+    fn beginResultsCleanup(self: *RequestDriver, results: *Results) void {
+        const moved = results.*;
+        self.state = .{ .cleanup_results_headers = moved };
     }
 
     pub fn advanceRetirement(
@@ -478,49 +771,111 @@ const RequestDriver = struct {
         storage_allocator: std.mem.Allocator,
         self: *RequestDriver,
     ) bool {
-        if (self.encoder) |*encoder| encoder.deinit();
-        self.encoder = null;
-        if (self.text) |*text| text.retire(releases);
-        self.text = null;
-        if (self.bytes) |*bytes| bytes.retire(releases);
-        self.bytes = null;
-        if (self.dictionary) |*dictionary| dictionary.retire(releases);
-        self.dictionary = null;
-        if (self.pair_key) |key| releases.releaseValue(key);
-        self.pair_key = null;
-        for (self.pairs.items) |pair| {
-            releases.releaseValue(pair[0]);
-            releases.releaseValue(pair[1]);
-        }
-        self.pairs.deinit(self.allocator);
-        if (self.headers_result) |built| releases.releaseValue(built);
-        self.headers_result = null;
-        if (self.body_result) |built| releases.releaseValue(built);
-        self.body_result = null;
-        if (self.outer) |slots| self.allocator.free(slots);
-        self.outer = null;
-        if (self.url) |bytes| self.allocator.free(bytes);
-        self.url = null;
-        if (self.request_body) |bytes| self.allocator.free(bytes);
-        self.request_body = null;
-        if (self.pending_name) |bytes| self.allocator.free(bytes);
-        self.pending_name = null;
-        for (self.request_fields.items) |field| {
-            self.allocator.free(field.name);
-            self.allocator.free(field.value);
-        }
-        self.request_fields.deinit(self.allocator);
-        for (self.response_fields.items) |field| {
-            self.allocator.free(field.name);
-            self.allocator.free(field.value);
-        }
-        self.response_fields.deinit(self.allocator);
-        self.response_body.deinit(self.allocator);
-        self.url_value.deinit(releases, storage_allocator);
-        self.headers_value.deinit(releases, storage_allocator);
-        if (self.body_value) |*owned| owned.deinit(releases, storage_allocator);
-        self.body_value = null;
-        storage_allocator.destroy(self);
-        return true;
+        return switch (self.state) {
+            .url,
+            .request_headers,
+            .request_header_name,
+            .request_header_value,
+            .request_header_append,
+            .request_body,
+            .exchange,
+            .response_headers,
+            .response_header_name,
+            .response_header_value,
+            .response_header_append,
+            .headers_dictionary_prepare,
+            .headers_dictionary,
+            .release_header_pairs,
+            .response_body_text,
+            .response_body_bytes,
+            .finish_status,
+            .finish_headers,
+            .finish_body,
+            .finish_allocate,
+            .finish_dictionary_prepare,
+            .finish_dictionary,
+            .output,
+            => result: {
+                self.beginRetirement(releases);
+                break :result false;
+            },
+            .cleanup_pairs => |*cleanup| result: {
+                if (cleanup.pairs.pop()) |pair| {
+                    releases.releaseValue(pair[0]);
+                    releases.releaseValue(pair[1]);
+                    break :result false;
+                }
+                cleanup.pairs.deinit(self.allocator);
+                const exchange_data = cleanup.exchange;
+                self.state = .{ .cleanup_exchange = exchange_data };
+                break :result false;
+            },
+            .cleanup_headers => |*cleanup| result: {
+                releases.releaseValue(cleanup.headers);
+                const exchange_data = cleanup.exchange;
+                self.state = .{ .cleanup_exchange = exchange_data };
+                break :result false;
+            },
+            .cleanup_results_headers => |*cleanup| result: {
+                releases.releaseValue(cleanup.headers);
+                const exchange_data = cleanup.exchange;
+                const body = cleanup.body;
+                self.state = .{ .cleanup_results_body = .{
+                    .exchange = exchange_data,
+                    .body = body,
+                } };
+                break :result false;
+            },
+            .cleanup_results_body => |*cleanup| result: {
+                releases.releaseValue(cleanup.body);
+                const exchange_data = cleanup.exchange;
+                self.state = .{ .cleanup_exchange = exchange_data };
+                break :result false;
+            },
+            .cleanup_exchange => |*cleanup| result: {
+                if (cleanup.fields.pop()) |field| {
+                    self.allocator.free(field.name);
+                    self.allocator.free(field.value);
+                    break :result false;
+                }
+                cleanup.fields.deinit(self.allocator);
+                cleanup.body.deinit(self.allocator);
+                const request = cleanup.request;
+                self.state = .{ .cleanup_request = request };
+                break :result false;
+            },
+            .cleanup_request => |*cleanup| result: {
+                if (cleanup.fields.pop()) |field| {
+                    self.allocator.free(field.name);
+                    self.allocator.free(field.value);
+                    break :result false;
+                }
+                cleanup.fields.deinit(self.allocator);
+                if (cleanup.body) |body| self.allocator.free(body);
+                self.allocator.free(cleanup.url);
+                self.state = .cleanup_url_value;
+                break :result false;
+            },
+            .cleanup_url_value => result: {
+                self.url_value.deinit(releases, storage_allocator);
+                self.state = .cleanup_headers_value;
+                break :result false;
+            },
+            .cleanup_headers_value => result: {
+                self.headers_value.deinit(releases, storage_allocator);
+                self.state = .cleanup_body_value;
+                break :result false;
+            },
+            .cleanup_body_value => result: {
+                if (self.body_value) |*owned| owned.deinit(releases, storage_allocator);
+                self.body_value = null;
+                self.state = .cleanup_destroy;
+                break :result false;
+            },
+            .cleanup_destroy => {
+                storage_allocator.destroy(self);
+                return true;
+            },
+        };
     }
 };
