@@ -25,7 +25,6 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
-const kernel_storage = @import("kernel_storage.zig");
 const poll_api = @import("poll.zig");
 const support = @import("kernel_support.zig");
 const flat = @import("kernel_flat.zig");
@@ -107,7 +106,7 @@ fn stateValue(evaluator: *Machine, state: State) error{OutOfMemory}!Value {
         .{ .int = @bitCast(state.key) },
         .{ .int = @bitCast(state.counter) },
     };
-    var materializer = kernel_storage.ValueMaterializer.init(evaluator.allocator(), &items);
+    var materializer = list.ValueMaterializer.init(evaluator.allocator(), &items);
     defer materializer.retire(evaluator.releaseDomain());
     return poll_api.driveFallible(Value, &materializer, .{2});
 }

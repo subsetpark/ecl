@@ -399,7 +399,7 @@ const GradeDriver = struct {
         prepare_values: struct { index: usize, values: heap.Owned([]Value) },
         materialize_values: struct {
             values: heap.Owned([]Value),
-            materializer: heap.Owned(storage.ValueMaterializer),
+            materializer: heap.Owned(list.ValueMaterializer),
         },
         prepare_indices: struct {
             index: usize,
@@ -511,7 +511,7 @@ const GradeDriver = struct {
                     values[prepare.index] = list.atUnchecked(self.collection.borrow(), indices[prepare.index]);
                 budget -= prepared;
                 if (prepare.index == indices.len) {
-                    const materializer = storage.ValueMaterializer.init(
+                    const materializer = list.ValueMaterializer.init(
                         evaluator.allocator(),
                         values,
                     );
@@ -659,7 +659,7 @@ const DistinctDriver = struct {
     item_index: usize = 0,
     candidate: usize = 0,
     matcher: ?heap.Owned(equal.MatchCursor) = null,
-    materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *DistinctDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -676,7 +676,7 @@ const DistinctDriver = struct {
                 };
             }
             if (self.item_index == self.results.borrow().len) {
-                self.materializer = .init(storage.ValueMaterializer.init(
+                self.materializer = .init(list.ValueMaterializer.init(
                     evaluator.allocator(),
                     self.results.borrow()[0..self.result_count],
                 ));

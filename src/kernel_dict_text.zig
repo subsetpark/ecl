@@ -361,7 +361,7 @@ const ListPutDriver = struct {
     replace_index: usize,
     values: heap.Owned([]Value),
     index: usize = 0,
-    materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *ListPutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -377,7 +377,7 @@ const ListPutDriver = struct {
                     list.atUnchecked(self.collection.borrow(), self.index);
             budget -= copied;
             if (self.index != values.len) return .yielded;
-            self.materializer = .init(storage.ValueMaterializer.init(evaluator.allocator(), values));
+            self.materializer = .init(list.ValueMaterializer.init(evaluator.allocator(), values));
         }
         if (budget == 0) return .yielded;
         return switch (try self.materializer.?.borrowMut().advance(budget)) {
@@ -804,7 +804,7 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
         codepoint_index: usize = 0,
         part_max_codepoint: u32 = 0,
         part_writer: ?heap.Owned(kernel_flat.CodepointWriter) = null,
-        result_materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+        result_materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
         fn beginPart(self: *Self, start: usize, end: usize) void {
             self.part_start = start;
@@ -1130,7 +1130,7 @@ const FormatDriver = struct {
         fill: Fill,
         materialize: struct {
             output: heap.Owned([]u32),
-            materializer: heap.Owned(storage.CodepointMaterializer),
+            materializer: heap.Owned(list.CodepointMaterializer),
         },
         complete: heap.Owned([]u32),
 
@@ -1277,7 +1277,7 @@ const FormatDriver = struct {
                 const count: usize = @intCast(self.template.borrow().list.length());
                 if (fill.cursor == count) {
                     std.debug.assert(fill.output_index == fill.output.borrow().len);
-                    const materializer = storage.CodepointMaterializer.init(
+                    const materializer = list.CodepointMaterializer.init(
                         evaluator.allocator(),
                         fill.output.borrow(),
                     );

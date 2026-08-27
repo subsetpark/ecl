@@ -8,7 +8,6 @@ const lexer = @import("lexer.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const native_module = @import("native_module.zig");
-const kernel_storage = @import("kernel_storage.zig");
 const reflection = @import("reflection.zig");
 const formatter = @import("formatter.zig");
 const doc_text = @import("doc.zig");
@@ -188,7 +187,7 @@ const DefineDriver = struct {
         materialize_effect: struct {
             context: AnnotationContext,
             items: heap.Owned([]Value),
-            materializer: heap.Owned(kernel_storage.ValueMaterializer),
+            materializer: heap.Owned(list.ValueMaterializer),
         },
         validate_name: intern.NamespaceCursor,
         source: struct {
@@ -359,7 +358,7 @@ const DefineDriver = struct {
             },
             .copy_effect => |*copy| {
                 if (copy.index == copy.context.effect_end) {
-                    const materializer = kernel_storage.ValueMaterializer.init(
+                    const materializer = list.ValueMaterializer.init(
                         evaluator.allocator(),
                         copy.items.borrow(),
                     );
@@ -794,7 +793,7 @@ const SeeDriver = struct {
         annotation_materialize: struct {
             resolved: heap.Owned(machine.Resolution),
             items: heap.Owned([]Value),
-            materializer: heap.Owned(kernel_storage.ValueMaterializer),
+            materializer: heap.Owned(list.ValueMaterializer),
         },
         plan: struct {
             context: Context,
@@ -972,7 +971,7 @@ const SeeDriver = struct {
                 annotation.items.borrow()[annotation.effect_count + 1] = .{
                     .list = env.documentationHeader(annotation.resolved.borrow().lease.doc.?),
                 };
-                const materializer = kernel_storage.ValueMaterializer.init(
+                const materializer = list.ValueMaterializer.init(
                     evaluator.allocator(),
                     annotation.items.borrow(),
                 );

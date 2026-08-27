@@ -16,6 +16,24 @@ fn retireReadCursor(cursor: *reader.ReadCursor, releases: *heap.ReleaseDomain) v
     while (!cursor.advanceRetirement()) _ = releases.advance(256);
 }
 
+fn materializeRoot(
+    archive: *const spans.SpanArchive,
+    releases: *heap.ReleaseDomain,
+    values: []const list.Value,
+) !list.Value {
+    var materializer = archive.rootMaterializer(values);
+    var completed = false;
+    defer if (!completed) materializer.retire(releases);
+    while (true) switch (try materializer.advance(2)) {
+        .pending => {},
+        .complete => |root| {
+            materializer.deinit();
+            completed = true;
+            return root;
+        },
+    };
+}
+
 test "empty binder lowering rejects before acquiring storage" {
     var host = heap.HostOwner.init(std.testing.allocator);
     defer host.cleanup().drain();
@@ -51,7 +69,7 @@ test "span archive rejects a substitutable provenance issuer" {
         heap.assignCodeIdentity(unrelated, quotation, @enumFromInt(1)),
     );
 
-    var root = heap.OwnedValue.init(host.domain(), try archive.codeRoot(parsed.values()));
+    var root = heap.OwnedValue.init(host.domain(), try materializeRoot(&archive, host.domain(), parsed.values()));
     defer root.deinit();
     var absorption = archive.absorbCursor(parsed.borrow(), root.borrow());
     while ((try absorption.advance()) == .pending) {}
@@ -121,7 +139,7 @@ test "span archive cancellation keeps committed location storage alive" {
     var parsed_live = true;
     defer if (parsed_live) parsed.deinit();
     const quotation = parsed.values()[0].list;
-    var root = heap.OwnedValue.init(host.domain(), try archive.codeRoot(parsed.values()));
+    var root = heap.OwnedValue.init(host.domain(), try materializeRoot(&archive, host.domain(), parsed.values()));
     var root_live = true;
     defer if (root_live) root.deinit();
 

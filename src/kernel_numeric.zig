@@ -163,7 +163,7 @@ pub const PervadeCursor = struct {
         values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
-        materializer: ?storage.ValueMaterializer = null,
+        materializer: ?list.ValueMaterializer = null,
         result: ?Value = null,
 
         fn deinit(self: *ListFrame, releases: *heap.ReleaseDomain) void {

@@ -37,7 +37,7 @@ const ListBuild = struct {
         },
         materializing: struct {
             source: heap.ListBuilder(.generic_spine),
-            materializer: storage.ValueMaterializer,
+            materializer: list.ValueMaterializer,
         },
         complete: Value,
 
@@ -82,7 +82,7 @@ const ListBuild = struct {
                 if (building.appended != self.expected) return null;
                 const appended = building.appended;
                 const source = building.source;
-                const materializer = storage.ValueMaterializer.init(
+                const materializer = list.ValueMaterializer.init(
                     call.allocator,
                     source.items()[0..appended],
                 );

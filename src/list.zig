@@ -3,6 +3,7 @@
 const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
+const poll = @import("poll.zig");
 
 pub const Value = value.Value;
 pub const Header = value.Header;
@@ -26,20 +27,339 @@ const Profile = struct {
     max_codepoint: u32 = 0,
 };
 
+pub const MaterializeResult = poll.Progress(Value);
+
+/// Exact-size resumable construction for a typed leaf. The source remains
+/// caller-owned until completion; the destination never relocates.
+fn ExactSliceMaterializer(comptime Source: type, comptime kind: HeapKind) type {
+    return struct {
+        const Self = @This();
+        pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+        allocator: std.mem.Allocator,
+        source: []const Source,
+        builder: ?heap.ListBuilder(kind) = null,
+        index: usize = 0,
+        complete: bool = false,
+
+        pub fn init(allocator: std.mem.Allocator, source: []const Source) Self {
+            return .{ .allocator = allocator, .source = source };
+        }
+        pub fn deinit(self: *Self) void {
+            std.debug.assert(self.builder == null);
+            self.* = undefined;
+        }
+        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
+            if (self.builder) |*builder| builder.retirePartial(releases);
+        }
+        pub fn advance(self: *Self, budget: usize) error{OutOfMemory}!MaterializeResult {
+            std.debug.assert(budget != 0 and !self.complete);
+            if (self.builder == null)
+                self.builder = try .init(
+                    self.allocator,
+                    self.source.len,
+                    initialCapacity(self.source.len),
+                );
+            const end = @min(self.index + budget, self.source.len);
+            @memcpy(self.builder.?.items()[self.index..end], self.source[self.index..end]);
+            self.index = end;
+            if (self.index != self.source.len) return .pending;
+            const header = self.builder.?.finish();
+            self.builder = null;
+            self.complete = true;
+            return .{ .complete = .{ .list = header } };
+        }
+    };
+}
+
+pub const ByteListMaterializer = ExactSliceMaterializer(u8, .leaf_u8);
+pub const I64Materializer = ExactSliceMaterializer(i64, .leaf_i64);
+pub const F64Materializer = ExactSliceMaterializer(f64, .leaf_f64);
+pub const SymbolMaterializer = ExactSliceMaterializer(u32, .leaf_symbol);
+
+pub const CodepointMaterializer = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    allocator: std.mem.Allocator,
+    source: []const u32,
+    phase: enum { profile, fill, complete } = .profile,
+    index: usize = 0,
+    max_codepoint: u32 = 0,
+    provenance_namespace: heap.CodeProvenanceNamespace = .none,
+    builder: ?heap.AnyListBuilder = null,
+
+    pub fn init(allocator: std.mem.Allocator, source: []const u32) CodepointMaterializer {
+        return .{ .allocator = allocator, .source = source };
+    }
+    pub fn initCode(
+        allocator: std.mem.Allocator,
+        source: []const u32,
+        provenance_namespace: heap.CodeProvenanceNamespace,
+    ) CodepointMaterializer {
+        return .{
+            .allocator = allocator,
+            .source = source,
+            .provenance_namespace = provenance_namespace,
+        };
+    }
+    pub fn deinit(self: *CodepointMaterializer) void {
+        std.debug.assert(self.builder == null);
+        self.* = undefined;
+    }
+    pub fn retire(self: *CodepointMaterializer, releases: *heap.ReleaseDomain) void {
+        if (self.builder) |*builder| builder.retirePartial(releases);
+    }
+    pub fn advance(self: *CodepointMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
+        std.debug.assert(budget != 0 and self.phase != .complete);
+        var remaining = budget;
+        while (remaining != 0) switch (self.phase) {
+            .profile => {
+                if (self.index == self.source.len) {
+                    const kind: HeapKind = if (self.max_codepoint <= std.math.maxInt(u8))
+                        .leaf_char1
+                    else if (self.max_codepoint <= std.math.maxInt(u16))
+                        .leaf_char2
+                    else
+                        .leaf_char4;
+                    self.builder = try .initCode(
+                        self.allocator,
+                        kind,
+                        self.source.len,
+                        initialCapacity(self.source.len),
+                        self.provenance_namespace,
+                    );
+                    self.phase = .fill;
+                    self.index = 0;
+                    continue;
+                }
+                self.max_codepoint = @max(self.max_codepoint, self.source[self.index]);
+                self.index += 1;
+                remaining -= 1;
+            },
+            .fill => {
+                const end = @min(self.index + remaining, self.source.len);
+                while (self.index != end) : (self.index += 1)
+                    self.builder.?.writeCodepoint(self.index, self.source[self.index]);
+                if (self.index != self.source.len) return .pending;
+                const header = self.builder.?.finish();
+                self.builder = null;
+                self.phase = .complete;
+                return .{ .complete = .{ .list = header } };
+            },
+            .complete => unreachable,
+        };
+        return .pending;
+    }
+};
+
+/// The single specialization traversal for ordinary value lists. Blocking
+/// constructors and scheduler drivers differ only in who supplies the budget.
+pub const ValueMaterializer = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    allocator: std.mem.Allocator,
+    source: []const Value,
+    phase: enum { profile, fill, complete } = .profile,
+    index: usize = 0,
+    item_profile: Profile = .{ .kind = .empty },
+    provenance_namespace: heap.CodeProvenanceNamespace = .none,
+    builder: ?heap.AnyListBuilder = null,
+
+    pub fn init(allocator: std.mem.Allocator, source: []const Value) ValueMaterializer {
+        return .{ .allocator = allocator, .source = source };
+    }
+    pub fn initCode(
+        allocator: std.mem.Allocator,
+        source: []const Value,
+        provenance_namespace: heap.CodeProvenanceNamespace,
+    ) ValueMaterializer {
+        return .{
+            .allocator = allocator,
+            .source = source,
+            .provenance_namespace = provenance_namespace,
+        };
+    }
+    pub fn deinit(self: *ValueMaterializer) void {
+        std.debug.assert(self.builder == null);
+        self.* = undefined;
+    }
+    pub fn retire(self: *ValueMaterializer, releases: *heap.ReleaseDomain) void {
+        if (self.builder) |*builder| builder.retirePartial(releases);
+    }
+    pub fn takePartial(self: *ValueMaterializer) ?Value {
+        if (self.builder == null) return null;
+        const header = self.builder.?.finish();
+        self.builder = null;
+        return .{ .list = header };
+    }
+    pub fn advance(self: *ValueMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
+        std.debug.assert(budget != 0 and self.phase != .complete);
+        var remaining = budget;
+        while (remaining != 0) switch (self.phase) {
+            .profile => {
+                if (self.index == self.source.len) {
+                    try self.beginFill();
+                    continue;
+                }
+                self.profileOne(self.source[self.index]);
+                self.index += 1;
+                remaining -= 1;
+                if (self.item_profile.kind == .mixed) self.index = self.source.len;
+            },
+            .fill => {
+                if (self.index == self.source.len) return self.finish();
+                self.builder.?.writeValue(self.index, self.source[self.index]);
+                self.index += 1;
+                remaining -= 1;
+            },
+            .complete => unreachable,
+        };
+        if (self.phase == .profile and self.index == self.source.len) try self.beginFill();
+        if (self.phase == .fill and self.index == self.source.len) return self.finish();
+        return .pending;
+    }
+    fn profileOne(self: *ValueMaterializer, item: Value) void {
+        if (self.index == 0) {
+            self.item_profile = switch (item) {
+                .int => |integer| .{
+                    .kind = if (integer >= 0 and integer <= std.math.maxInt(u8)) .all_byte else .all_int,
+                },
+                .float => .{ .kind = .all_float },
+                .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
+                .symbol => .{ .kind = .all_symbol },
+                .word, .list, .dict, .task, .module, .unit_plan => .{ .kind = .mixed },
+            };
+            return;
+        }
+        switch (self.item_profile.kind) {
+            .empty => unreachable,
+            .all_byte => {
+                if (item == .int) {
+                    if (item.int < 0 or item.int > std.math.maxInt(u8))
+                        self.item_profile.kind = .all_int;
+                } else self.item_profile.kind = .mixed;
+            },
+            .all_int => {
+                if (item != .int) self.item_profile.kind = .mixed;
+            },
+            .all_float => {
+                if (item != .float) self.item_profile.kind = .mixed;
+            },
+            .all_char => {
+                if (item == .char) {
+                    self.item_profile.max_codepoint = @max(self.item_profile.max_codepoint, item.char);
+                } else self.item_profile.kind = .mixed;
+            },
+            .all_symbol => {
+                if (item != .symbol) self.item_profile.kind = .mixed;
+            },
+            .mixed => {},
+        }
+    }
+    fn beginFill(self: *ValueMaterializer) error{OutOfMemory}!void {
+        const kind: HeapKind = switch (self.item_profile.kind) {
+            .empty, .mixed => .generic_spine,
+            .all_byte => .leaf_u8,
+            .all_int => .leaf_i64,
+            .all_float => .leaf_f64,
+            .all_char => if (self.item_profile.max_codepoint <= std.math.maxInt(u8))
+                .leaf_char1
+            else if (self.item_profile.max_codepoint <= std.math.maxInt(u16))
+                .leaf_char2
+            else
+                .leaf_char4,
+            .all_symbol => .leaf_symbol,
+        };
+        var builder = try heap.AnyListBuilder.initCode(
+            self.allocator,
+            kind,
+            self.source.len,
+            initialCapacity(self.source.len),
+            self.provenance_namespace,
+        );
+        if (kind == .generic_spine) switch (builder) {
+            .generic => |*generic| generic.setLen(0),
+            else => unreachable,
+        };
+        self.builder = builder;
+        self.phase = .fill;
+        self.index = 0;
+    }
+    fn finish(self: *ValueMaterializer) MaterializeResult {
+        const header = self.builder.?.finish();
+        self.builder = null;
+        self.phase = .complete;
+        return .{ .complete = .{ .list = header } };
+    }
+};
+
+/// Representation-sensitive generic-spine construction for code roots.
+pub const GenericValueMaterializer = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+    allocator: std.mem.Allocator,
+    source: []const Value,
+    provenance_namespace: heap.CodeProvenanceNamespace,
+    builder: ?heap.ListBuilder(.generic_spine) = null,
+    index: usize = 0,
+    complete: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator, source: []const Value) GenericValueMaterializer {
+        return initCode(allocator, source, .none);
+    }
+    pub fn initCode(
+        allocator: std.mem.Allocator,
+        source: []const Value,
+        provenance_namespace: heap.CodeProvenanceNamespace,
+    ) GenericValueMaterializer {
+        return .{
+            .allocator = allocator,
+            .source = source,
+            .provenance_namespace = provenance_namespace,
+        };
+    }
+    pub fn deinit(self: *GenericValueMaterializer) void {
+        std.debug.assert(self.builder == null);
+        self.* = undefined;
+    }
+    pub fn retire(self: *GenericValueMaterializer, releases: *heap.ReleaseDomain) void {
+        if (self.builder) |*builder| builder.retirePartial(releases);
+    }
+    pub fn advance(self: *GenericValueMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
+        std.debug.assert(budget != 0 and !self.complete);
+        if (self.builder == null) {
+            var builder = try heap.ListBuilder(.generic_spine).initCode(
+                self.allocator,
+                self.source.len,
+                initialCapacity(self.source.len),
+                self.provenance_namespace,
+            );
+            builder.setLen(0);
+            self.builder = builder;
+        }
+        const end = @min(self.index + budget, self.source.len);
+        while (self.index != end) : (self.index += 1) {
+            const item = self.source[self.index];
+            heap.retainValue(item);
+            self.builder.?.items()[self.index] = item;
+            self.builder.?.setLen(self.index + 1);
+        }
+        if (self.index != self.source.len) return .pending;
+        const header = self.builder.?.finish();
+        self.builder = null;
+        self.complete = true;
+        return .{ .complete = .{ .list = header } };
+    }
+};
+
 pub fn fromValues(
     allocator: std.mem.Allocator,
     source: []const Value,
 ) error{OutOfMemory}!Value {
-    const element_profile = profile(source);
-    return switch (element_profile.kind) {
-        .empty => fromGenericValues(allocator, source),
-        .all_byte => fromByteValues(allocator, source),
-        .all_int => fromIntValues(allocator, source),
-        .all_float => fromFloatValues(allocator, source),
-        .all_char => fromCharValues(allocator, source, element_profile.max_codepoint),
-        .all_symbol => fromSymbolValues(allocator, source),
-        .mixed => fromGenericValues(allocator, source),
-    };
+    var cursor = ValueMaterializer.init(allocator, source);
+    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    cursor.deinit();
+    return result;
 }
 
 /// Test and tooling hook for constructing a logically ordinary list without
@@ -48,7 +368,10 @@ pub fn fromValuesGeneric(
     allocator: std.mem.Allocator,
     source: []const Value,
 ) error{OutOfMemory}!Value {
-    return fromGenericValues(allocator, source);
+    var cursor = GenericValueMaterializer.init(allocator, source);
+    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    cursor.deinit();
+    return result;
 }
 
 pub fn fromValuesGenericCode(
@@ -56,66 +379,50 @@ pub fn fromValuesGenericCode(
     source: []const Value,
     provenance_namespace: heap.CodeProvenanceNamespace,
 ) error{OutOfMemory}!Value {
-    var builder = try heap.ListBuilder(.generic_spine).initCode(
-        allocator,
-        source.len,
-        initialCapacity(source.len),
-        provenance_namespace,
-    );
-    for (source, 0..) |item, index| {
-        heap.retainValue(item);
-        builder.items()[index] = item;
-    }
-    return .{ .list = builder.finish() };
+    var cursor = GenericValueMaterializer.initCode(allocator, source, provenance_namespace);
+    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    cursor.deinit();
+    return result;
 }
 
 pub fn fromI64Slice(
     allocator: std.mem.Allocator,
     source: []const i64,
 ) error{OutOfMemory}!Value {
-    var builder = try heap.ListBuilder(.leaf_i64).init(allocator, source.len, initialCapacity(source.len));
-    @memcpy(builder.items()[0..source.len], source);
-    return .{ .list = builder.finish() };
+    var cursor = I64Materializer.init(allocator, source);
+    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    cursor.deinit();
+    return result;
 }
 
 pub fn fromU8Slice(
     allocator: std.mem.Allocator,
     source: []const u8,
 ) error{OutOfMemory}!Value {
-    var builder = try heap.ListBuilder(.leaf_u8).init(allocator, source.len, initialCapacity(source.len));
-    @memcpy(builder.items()[0..source.len], source);
-    return .{ .list = builder.finish() };
+    var cursor = ByteListMaterializer.init(allocator, source);
+    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    cursor.deinit();
+    return result;
 }
 
 pub fn fromF64Slice(
     allocator: std.mem.Allocator,
     source: []const f64,
 ) error{OutOfMemory}!Value {
-    var builder = try heap.ListBuilder(.leaf_f64).init(allocator, source.len, initialCapacity(source.len));
-    @memcpy(builder.items()[0..source.len], source);
-    return .{ .list = builder.finish() };
+    var cursor = F64Materializer.init(allocator, source);
+    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    cursor.deinit();
+    return result;
 }
 
 pub fn fromCodepoints(
     allocator: std.mem.Allocator,
     source: []const u32,
 ) error{OutOfMemory}!Value {
-    var max_codepoint: u32 = 0;
-    for (source) |codepoint| max_codepoint = @max(max_codepoint, codepoint);
-    const cap = initialCapacity(source.len);
-    if (max_codepoint <= std.math.maxInt(u8)) {
-        var builder = try heap.ListBuilder(.leaf_char1).init(allocator, source.len, cap);
-        for (source, 0..) |codepoint, index| builder.items()[index] = @intCast(codepoint);
-        return .{ .list = builder.finish() };
-    }
-    if (max_codepoint <= std.math.maxInt(u16)) {
-        var builder = try heap.ListBuilder(.leaf_char2).init(allocator, source.len, cap);
-        for (source, 0..) |codepoint, index| builder.items()[index] = @intCast(codepoint);
-        return .{ .list = builder.finish() };
-    }
-    var builder = try heap.ListBuilder(.leaf_char4).init(allocator, source.len, cap);
-    @memcpy(builder.items()[0..source.len], source);
-    return .{ .list = builder.finish() };
+    var cursor = CodepointMaterializer.init(allocator, source);
+    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    cursor.deinit();
+    return result;
 }
 
 pub fn emptyLike(
@@ -130,9 +437,10 @@ pub fn fromSymbolIds(
     allocator: std.mem.Allocator,
     source: []const u32,
 ) error{OutOfMemory}!Value {
-    var builder = try heap.ListBuilder(.leaf_symbol).init(allocator, source.len, initialCapacity(source.len));
-    @memcpy(builder.items()[0..source.len], source);
-    return .{ .list = builder.finish() };
+    var cursor = SymbolMaterializer.init(allocator, source);
+    const result = try poll.driveFallible(Value, &cursor, .{std.math.maxInt(usize)});
+    cursor.deinit();
+    return result;
 }
 
 pub fn len(collection: Value) error{NotAList}!usize {
@@ -228,89 +536,6 @@ fn listHeader(collection: Value) error{NotAList}!*ListHandle {
     };
 }
 
-fn profile(source: []const Value) Profile {
-    if (source.len == 0) return .{ .kind = .empty };
-    var result: Profile = switch (source[0]) {
-        .int => |integer| .{ .kind = if (integer >= 0 and integer <= std.math.maxInt(u8)) .all_byte else .all_int },
-        .float => .{ .kind = .all_float },
-        .char => |codepoint| .{ .kind = .all_char, .max_codepoint = codepoint },
-        .symbol => .{ .kind = .all_symbol },
-        .word, .list, .dict, .task, .module, .unit_plan => .{ .kind = .mixed },
-    };
-    for (source[1..]) |item| switch (result.kind) {
-        .empty => unreachable,
-        .all_byte => if (item == .int) {
-            if (item.int < 0 or item.int > std.math.maxInt(u8)) result.kind = .all_int;
-        } else return .{ .kind = .mixed },
-        .all_int => if (item != .int) return .{ .kind = .mixed },
-        .all_float => if (item != .float) return .{ .kind = .mixed },
-        .all_char => if (item == .char) {
-            result.max_codepoint = @max(result.max_codepoint, item.char);
-        } else return .{ .kind = .mixed },
-        .all_symbol => if (item != .symbol) return .{ .kind = .mixed },
-        .mixed => return result,
-    };
-    return result;
-}
-
-fn fromByteValues(allocator: std.mem.Allocator, source: []const Value) !Value {
-    var builder = try heap.ListBuilder(.leaf_u8).init(allocator, source.len, initialCapacity(source.len));
-    for (source, 0..) |item, index| builder.items()[index] = @intCast(item.int);
-    return .{ .list = builder.finish() };
-}
-
-fn fromIntValues(allocator: std.mem.Allocator, source: []const Value) !Value {
-    var builder = try heap.ListBuilder(.leaf_i64).init(allocator, source.len, initialCapacity(source.len));
-    for (source, 0..) |item, index| builder.items()[index] = item.int;
-    return .{ .list = builder.finish() };
-}
-
-fn fromFloatValues(allocator: std.mem.Allocator, source: []const Value) !Value {
-    var builder = try heap.ListBuilder(.leaf_f64).init(allocator, source.len, initialCapacity(source.len));
-    for (source, 0..) |item, index| builder.items()[index] = item.float;
-    return .{ .list = builder.finish() };
-}
-
-fn fromCharValues(
-    allocator: std.mem.Allocator,
-    source: []const Value,
-    max_codepoint: u32,
-) !Value {
-    const cap = initialCapacity(source.len);
-    if (max_codepoint <= std.math.maxInt(u8)) {
-        var builder = try heap.ListBuilder(.leaf_char1).init(allocator, source.len, cap);
-        for (source, 0..) |item, index| builder.items()[index] = @intCast(item.char);
-        return .{ .list = builder.finish() };
-    }
-    if (max_codepoint <= std.math.maxInt(u16)) {
-        var builder = try heap.ListBuilder(.leaf_char2).init(allocator, source.len, cap);
-        for (source, 0..) |item, index| builder.items()[index] = @intCast(item.char);
-        return .{ .list = builder.finish() };
-    }
-    var builder = try heap.ListBuilder(.leaf_char4).init(allocator, source.len, cap);
-    for (source, 0..) |item, index| builder.items()[index] = item.char;
-    return .{ .list = builder.finish() };
-}
-
-fn fromSymbolValues(allocator: std.mem.Allocator, source: []const Value) !Value {
-    var builder = try heap.ListBuilder(.leaf_symbol).init(allocator, source.len, initialCapacity(source.len));
-    for (source, 0..) |item, index| builder.items()[index] = item.symbol;
-    return .{ .list = builder.finish() };
-}
-
-fn fromGenericValues(allocator: std.mem.Allocator, source: []const Value) !Value {
-    var builder = try heap.ListBuilder(.generic_spine).init(
-        allocator,
-        source.len,
-        initialCapacity(source.len),
-    );
-    for (source, 0..) |item, index| {
-        heap.retainValue(item);
-        builder.items()[index] = item;
-    }
-    return .{ .list = builder.finish() };
-}
-
 fn rebuildWithItem(
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
@@ -384,4 +609,35 @@ test "constructors and append exhaust allocation failures" {
         appendFailureProbe,
         .{},
     );
+}
+
+test "blocking and resumable list construction share specialization behavior" {
+    const allocator = std.testing.allocator;
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    const source = [_]Value{
+        .{ .int = 1 },
+        .{ .float = 2.5 },
+        .{ .char = 'x' },
+        .{ .symbol = 7 },
+        .{ .word = .{ .name = 9 } },
+    };
+
+    const blocking = try fromValues(allocator, &source);
+    defer cleanup.releaseValue(blocking);
+    var cursor = ValueMaterializer.init(allocator, &source);
+    var pending: usize = 0;
+    const resumed = while (true) switch (try cursor.advance(1)) {
+        .pending => pending += 1,
+        .complete => |result| break result,
+    };
+    cursor.deinit();
+    defer cleanup.releaseValue(resumed);
+
+    try std.testing.expect(pending > source.len);
+    try std.testing.expectEqual(try len(blocking), try len(resumed));
+    for (source, 0..) |expected, index| {
+        try std.testing.expectEqual(expected, try at(blocking, index));
+        try std.testing.expectEqual(expected, try at(resumed, index));
+    }
 }

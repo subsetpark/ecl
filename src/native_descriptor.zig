@@ -8,6 +8,7 @@ const heap = @import("heap.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const storage = @import("kernel_storage.zig");
+const list = @import("list.zig");
 const value = @import("value.zig");
 
 const max_module_name_bytes = 256;
@@ -213,7 +214,7 @@ const EffectBuild = struct {
         inputs: SlotState,
         separator,
         outputs: SlotState,
-        materialize: storage.GenericValueMaterializer,
+        materialize: list.GenericValueMaterializer,
         materialized: value.Value,
         complete: env.ValidatedEffect,
         failed,

@@ -6,7 +6,6 @@ const list = @import("list.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
-const storage = @import("kernel_storage.zig");
 const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
 const sequence = @import("kernel_sequence.zig");
@@ -671,7 +670,7 @@ const PervadeEachDriver = struct {
     consumed: usize,
     index: usize = 0,
     cursor: ?heap.Owned(numeric.PervadeCursor) = null,
-    materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     fn install(
         evaluator: *Machine,
@@ -803,7 +802,7 @@ const ReductionDriver = struct {
     results: ?heap.Owned(heap.OwnedValueBuffer),
     initialized: usize = 0,
     materializing: bool = false,
-    materializer: ?heap.Owned(storage.ValueMaterializer),
+    materializer: ?heap.Owned(list.ValueMaterializer),
     cursor: ?heap.Owned(numeric.PervadeCursor) = null,
 
     pub fn advance(

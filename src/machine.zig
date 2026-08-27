@@ -286,7 +286,7 @@ const OrdinaryErrorCursor = struct {
         trace_build: struct {
             message: Value,
             items: []Value,
-            builder: kernel_storage.ValueMaterializer,
+            builder: list.ValueMaterializer,
         },
         data: struct {
             base: BaseValues,
@@ -625,7 +625,7 @@ const RaisedErrorCursor = struct {
         trace_copy: struct { items: []Value, index: usize },
         trace_build: struct {
             items: []Value,
-            builder: kernel_storage.ValueMaterializer,
+            builder: list.ValueMaterializer,
         },
         data_fields: usize,
         data_field_find: struct { index: usize, cursor: kernel_storage.DictFindCursor },
@@ -6491,7 +6491,7 @@ fn finishTaskJoin(self: *Machine) MachineError!void {
     };
     state.* = .{
         .join = join,
-        .materializer = kernel_storage.ValueMaterializer.init(
+        .materializer = list.ValueMaterializer.init(
             self.unit.allocator,
             join.results.values(),
         ),
@@ -6503,7 +6503,7 @@ const JoinMaterializeDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .self_owned;
     join: ?TaskJoinState,
-    materializer: kernel_storage.ValueMaterializer,
+    materializer: list.ValueMaterializer,
 
     fn beginTeardown(
         self: *JoinMaterializeDriver,
@@ -7847,7 +7847,7 @@ fn finishAttempt(self: *Machine, base: u32) MachineError!void {
 const AttemptResultDriver = struct {
     allocator: std.mem.Allocator,
     base: usize,
-    materializer: heap.Owned(kernel_storage.ValueMaterializer),
+    materializer: heap.Owned(list.ValueMaterializer),
     results: ?heap.Owned(Value) = null,
     phase: enum { materialize, release, outcome } = .materialize,
 

@@ -129,7 +129,7 @@ const ConcatDriver = struct {
     values: heap.Owned([]Value),
     index: usize = 0,
     materializing: bool = false,
-    materializer: heap.Owned(kernel_storage.ValueMaterializer),
+    materializer: heap.Owned(list.ValueMaterializer),
 
     fn init(
         allocator: std.mem.Allocator,

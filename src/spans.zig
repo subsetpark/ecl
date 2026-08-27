@@ -6,7 +6,6 @@ const list = @import("list.zig");
 const lexer = @import("lexer.zig");
 const reader = @import("reader.zig");
 const poll = @import("poll.zig");
-const storage = @import("kernel_storage.zig");
 const dict = @import("dict.zig");
 
 pub const LocatedSpan = struct {
@@ -971,17 +970,10 @@ pub const SpanArchive = enum(usize) {
         );
     }
 
-    pub fn codeRoot(
-        self: *const SpanArchive,
-        values: []const value.Value,
-    ) error{OutOfMemory}!value.Value {
-        return list.fromValuesGenericCode(self.allocator(), values, self.provenanceNamespace());
-    }
-
     pub fn rootMaterializer(
         self: *const SpanArchive,
         values: []const value.Value,
-    ) storage.GenericValueMaterializer {
+    ) list.GenericValueMaterializer {
         return .initCode(self.allocator(), values, self.provenanceNamespace());
     }
 
@@ -1144,7 +1136,7 @@ pub const SpanArchive = enum(usize) {
         };
         const Materializing = struct {
             parsed: reader.Parsed,
-            materializer: storage.GenericValueMaterializer,
+            materializer: list.GenericValueMaterializer,
         };
         const Absorbing = struct {
             parsed: reader.Parsed,
@@ -1550,10 +1542,10 @@ const ArchiveFixture = struct {
     /// A code value in this archive's construction namespace that the reader
     /// never produced, which is what every generic reconstruction is.
     fn rebuilt(self: *ArchiveFixture) !heap.OwnedValue {
-        return .init(
-            heap.hostDomain(self.owner.cleanup()),
-            try self.archive.codeRoot(&.{.{ .int = 1 }}),
-        );
+        var materializer = self.archive.rootMaterializer(&.{.{ .int = 1 }});
+        const root = try poll.driveFallible(value.Value, &materializer, .{1});
+        materializer.deinit();
+        return .init(heap.hostDomain(self.owner.cleanup()), root);
     }
 };
 
