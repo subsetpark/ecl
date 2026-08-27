@@ -74,41 +74,106 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
         .mode = mode,
         .scope = scope,
         .name = name,
-        .binding_validation = .init(name),
         .item = .init(item.take()),
-        .annotation_candidate = annotation_candidate,
         .separator = separator,
         .colon = colon,
-        .phase = if (annotation_candidate == null) .validate_name else .scan_annotation,
         .annotation = .init(.{}),
+        .state = .init(if (annotation_candidate) |*candidate| .{ .scan_annotation = .{
+            .candidate = .init(candidate.take()),
+        } } else .{ .validate_name = .init(name) }),
     });
 }
 
 const DefineDriver = struct {
-    const Phase = enum { scan_annotation, validate_annotation, validate_name, normalize_doc, copy_effect, materialize_effect, source, publish };
     mode: Mode,
     scope: *env.Scope,
     name: u32,
-    binding_validation: intern.NamespaceCursor,
-    binding_name: ?intern.BindingName = null,
-    item: ?heap.Owned(Value),
-    annotation_candidate: ?heap.Owned(Value) = null,
-    annotation_source: ?heap.Owned(Value) = null,
+    item: heap.Owned(Value),
     separator: u32,
     colon: u32,
-    phase: Phase,
-    index: usize = 0,
-    separator_at: ?usize = null,
-    colon_at: ?usize = null,
-    effect_end: usize = 0,
     annotation: heap.Owned(Annotation),
-    document: ?Value = null,
-    normalizer: ?heap.Owned(doc_text.NormalizeCursor) = null,
-    effect_items: ?heap.Owned([]Value) = null,
-    effect_materializer: ?heap.Owned(kernel_storage.ValueMaterializer) = null,
-    publisher: ?heap.Owned(env.Environment.BindCursor) = null,
-    source_cursor: ?@import("spans.zig").SpanArchive.SourceCursor = null,
-    source: ?heap.Owned(reader_types.SourceSlice) = null,
+    state: heap.Owned(State),
+
+    const AnnotationScan = struct {
+        candidate: heap.Owned(Value),
+        index: usize = 0,
+        separator_at: ?usize = null,
+        colon_at: ?usize = null,
+    };
+    const AnnotationContext = struct {
+        source: heap.Owned(Value),
+        separator_at: ?usize,
+        effect_end: usize,
+    };
+    const State = union(enum) {
+        scan_annotation: AnnotationScan,
+        validate_annotation: struct {
+            context: AnnotationContext,
+            document: ?Value,
+            index: usize = 0,
+        },
+        normalize_doc: struct {
+            context: AnnotationContext,
+            normalizer: heap.Owned(doc_text.NormalizeCursor),
+        },
+        prepare_effect: AnnotationContext,
+        copy_effect: struct {
+            context: AnnotationContext,
+            items: heap.Owned([]Value),
+            index: usize = 0,
+        },
+        materialize_effect: struct {
+            context: AnnotationContext,
+            items: heap.Owned([]Value),
+            materializer: heap.Owned(kernel_storage.ValueMaterializer),
+        },
+        validate_name: intern.NamespaceCursor,
+        source: struct {
+            binding_name: intern.BindingName,
+            cursor: @import("spans.zig").SpanArchive.SourceCursor,
+        },
+        prepare_publish: struct {
+            binding_name: intern.BindingName,
+            source: ?heap.Owned(reader_types.SourceSlice),
+        },
+        publishing: struct {
+            source: ?heap.Owned(reader_types.SourceSlice),
+            publisher: heap.Owned(env.Environment.BindCursor),
+        },
+
+        pub fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .scan_annotation => |*scan| scan.candidate.deinit(releases, allocator),
+                .validate_annotation => |*validation| validation.context.source.deinit(releases, allocator),
+                .normalize_doc => |*normalization| {
+                    normalization.normalizer.deinit(releases, allocator);
+                    normalization.context.source.deinit(releases, allocator);
+                },
+                .prepare_effect => |*context| context.source.deinit(releases, allocator),
+                .copy_effect => |*copy| {
+                    copy.items.deinit(releases, allocator);
+                    copy.context.source.deinit(releases, allocator);
+                },
+                .materialize_effect => |*materialization| {
+                    materialization.materializer.deinit(releases, allocator);
+                    materialization.items.deinit(releases, allocator);
+                    materialization.context.source.deinit(releases, allocator);
+                },
+                .prepare_publish => |*publication| {
+                    if (publication.source) |*source| source.deinit(releases, allocator);
+                },
+                .publishing => |*publication| {
+                    publication.publisher.deinit(releases, allocator);
+                    if (publication.source) |*source| source.deinit(releases, allocator);
+                },
+                .validate_name, .source => {},
+            }
+        }
+    };
 
     fn malformed(evaluator: *Machine) MachineError {
         return evaluator.fail(.domain, "malformed definition annotation");
@@ -117,161 +182,213 @@ const DefineDriver = struct {
     pub fn advance(evaluator: *Machine, self: *DefineDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.phase) {
-            .scan_annotation => {
-                const count: usize = @intCast(self.annotation_candidate.?.borrow().list.length());
-                if (self.index == count) {
-                    if (self.separator_at == null and self.colon_at == null) {
-                        self.annotation_candidate.?.deinit(
+        while (budget != 0) switch (self.state.borrowMut().*) {
+            .scan_annotation => |*scan| {
+                const count: usize = @intCast(scan.candidate.borrow().list.length());
+                if (scan.index == count) {
+                    if (scan.separator_at == null and scan.colon_at == null) {
+                        scan.candidate.deinit(
                             evaluator.releaseDomain(),
                             evaluator.allocator(),
                         );
-                        self.annotation_candidate = null;
-                        self.phase = .validate_name;
-                        self.index = 0;
+                        self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                         continue;
                     }
-                    self.annotation_source = .init(self.annotation_candidate.?.take());
-                    self.annotation_candidate = null;
-                    evaluator.discard(1);
-                    if (self.separator_at != null and self.colon_at != null and
-                        self.separator_at.? > self.colon_at.?) return malformed(evaluator);
-                    self.effect_end = self.colon_at orelse count;
-                    if (self.separator_at == null and self.colon_at.? != 0)
+                    if (scan.separator_at != null and scan.colon_at != null and
+                        scan.separator_at.? > scan.colon_at.?) return malformed(evaluator);
+                    const effect_end = scan.colon_at orelse count;
+                    if (scan.separator_at == null and scan.colon_at.? != 0)
                         return malformed(evaluator);
-                    if (self.colon_at) |doc_at| {
+                    const document = if (scan.colon_at) |doc_at| document: {
                         if (count != doc_at + 2) return malformed(evaluator);
-                        const document = list.atUnchecked(self.annotation_source.?.borrow(), doc_at + 1);
-                        if (!document.isString()) return malformed(evaluator);
-                        self.document = document;
-                    }
-                    self.index = 0;
-                    self.phase = .validate_annotation;
+                        const value_at = list.atUnchecked(scan.candidate.borrow(), doc_at + 1);
+                        if (!value_at.isString()) return malformed(evaluator);
+                        break :document value_at;
+                    } else null;
+                    evaluator.discard(1);
+                    const source = scan.candidate.take();
+                    self.state.borrowMut().* = .{ .validate_annotation = .{
+                        .context = .{
+                            .source = .init(source),
+                            .separator_at = scan.separator_at,
+                            .effect_end = effect_end,
+                        },
+                        .document = document,
+                    } };
                     continue;
                 }
-                const item = list.atUnchecked(self.annotation_candidate.?.borrow(), self.index);
+                const item = list.atUnchecked(scan.candidate.borrow(), scan.index);
                 if (item == .word and item.word.name == self.separator) {
-                    if (self.separator_at != null) return malformed(evaluator);
-                    self.separator_at = self.index;
+                    if (scan.separator_at != null) return malformed(evaluator);
+                    scan.separator_at = scan.index;
                 } else if (item == .word and item.word.name == self.colon) {
-                    if (self.colon_at != null) return malformed(evaluator);
-                    self.colon_at = self.index;
+                    if (scan.colon_at != null) return malformed(evaluator);
+                    scan.colon_at = scan.index;
                 }
-                self.index += 1;
+                scan.index += 1;
                 budget -= 1;
             },
-            .validate_annotation => {
-                if (self.separator_at) |split| {
-                    if (self.index != self.effect_end) {
-                        const slot = list.atUnchecked(self.annotation_source.?.borrow(), self.index);
-                        if (self.index != split and slot != .word)
+            .validate_annotation => |*validation| {
+                if (validation.context.separator_at) |split| {
+                    if (validation.index != validation.context.effect_end) {
+                        const slot = list.atUnchecked(
+                            validation.context.source.borrow(),
+                            validation.index,
+                        );
+                        if (validation.index != split and slot != .word)
                             return malformed(evaluator);
                         // The after portion is all named slots or exactly the
                         // row token; the before portion never names a row.
                         if (slot == .word and
                             std.mem.eql(u8, intern.get(slot.word.name), lexer.row_token) and
-                            (self.index <= split or self.effect_end != split + 2))
+                            (validation.index <= split or validation.context.effect_end != split + 2))
                             return malformed(evaluator);
-                        self.index += 1;
+                        validation.index += 1;
                         budget -= 1;
                         continue;
                     }
                 }
-                self.index = 0;
-                if (self.document) |document| {
-                    self.normalizer = .init(try .init(evaluator.allocator(), document));
-                    self.phase = .normalize_doc;
-                } else if (self.separator_at != null) {
-                    self.effect_items = .init(try evaluator.allocator().alloc(Value, self.effect_end));
-                    self.phase = .copy_effect;
-                } else self.phase = .validate_name;
+                if (validation.document) |document| {
+                    const normalizer = try doc_text.NormalizeCursor.init(evaluator.allocator(), document);
+                    const context = validation.context;
+                    self.state.borrowMut().* = .{ .normalize_doc = .{
+                        .context = context,
+                        .normalizer = .init(normalizer),
+                    } };
+                } else if (validation.context.separator_at != null) {
+                    const context = validation.context;
+                    self.state.borrowMut().* = .{ .prepare_effect = context };
+                } else {
+                    validation.context.source.deinit(
+                        evaluator.releaseDomain(),
+                        evaluator.allocator(),
+                    );
+                    self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
+                }
             },
-            .normalize_doc => switch (try self.normalizer.?.borrowMut().advance(budget)) {
+            .normalize_doc => |*normalization| switch (try normalization.normalizer.borrowMut().advance(budget)) {
                 .pending => return .yielded,
                 .complete => |normalized| {
-                    self.normalizer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.normalizer = null;
                     self.annotation.borrowMut().doc_source = normalized;
                     self.annotation.borrowMut().doc_value = env.documentation(normalized.list) orelse
                         return malformed(evaluator);
-                    if (self.separator_at != null) {
-                        self.effect_items = .init(try evaluator.allocator().alloc(Value, self.effect_end));
-                        self.phase = .copy_effect;
-                    } else self.phase = .validate_name;
+                    normalization.normalizer.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    if (normalization.context.separator_at != null) {
+                        const context = normalization.context;
+                        self.state.borrowMut().* = .{ .prepare_effect = context };
+                    } else {
+                        normalization.context.source.deinit(
+                            evaluator.releaseDomain(),
+                            evaluator.allocator(),
+                        );
+                        self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
+                    }
                     return .yielded;
                 },
             },
-            .copy_effect => {
-                if (self.index == self.effect_end) {
-                    self.effect_materializer = .init(.init(
+            .prepare_effect => |*context| {
+                const items = try evaluator.allocator().alloc(Value, context.effect_end);
+                const moved = context.*;
+                self.state.borrowMut().* = .{ .copy_effect = .{
+                    .context = moved,
+                    .items = .init(items),
+                } };
+            },
+            .copy_effect => |*copy| {
+                if (copy.index == copy.context.effect_end) {
+                    const materializer = kernel_storage.ValueMaterializer.init(
                         evaluator.allocator(),
-                        self.effect_items.?.borrow(),
-                    ));
-                    self.phase = .materialize_effect;
+                        copy.items.borrow(),
+                    );
+                    const context = copy.context;
+                    const items = copy.items.take();
+                    self.state.borrowMut().* = .{ .materialize_effect = .{
+                        .context = context,
+                        .items = .init(items),
+                        .materializer = .init(materializer),
+                    } };
                     continue;
                 }
-                self.effect_items.?.borrow()[self.index] = list.atUnchecked(
-                    self.annotation_source.?.borrow(),
-                    self.index,
+                copy.items.borrow()[copy.index] = list.atUnchecked(
+                    copy.context.source.borrow(),
+                    copy.index,
                 );
-                self.index += 1;
+                copy.index += 1;
                 budget -= 1;
             },
-            .materialize_effect => switch (try self.effect_materializer.?.borrowMut().advance(budget)) {
+            .materialize_effect => |*materialization| switch (try materialization.materializer.borrowMut().advance(budget)) {
                 .pending => return .yielded,
                 .complete => |effect_value| {
-                    self.effect_materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.effect_materializer = null;
                     self.annotation.borrowMut().effect_value = effect_value;
                     self.annotation.borrowMut().effect = env.ValidatedEffect.fromValidated(
                         effect_value.list,
-                        self.separator_at.?,
+                        materialization.context.separator_at.?,
                     );
-                    self.phase = .validate_name;
-                    self.index = 0;
+                    materialization.materializer.deinit(
+                        evaluator.releaseDomain(),
+                        evaluator.allocator(),
+                    );
+                    materialization.items.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    materialization.context.source.deinit(
+                        evaluator.releaseDomain(),
+                        evaluator.allocator(),
+                    );
+                    self.state.borrowMut().* = .{ .validate_name = .init(self.name) };
                     return .yielded;
                 },
             },
-            .validate_name => {
-                switch (self.binding_validation.advance()) {
+            .validate_name => |*validation| {
+                switch (validation.advance()) {
                     .pending => {
                         budget -= 1;
                         continue;
                     },
-                    .complete => |name| self.binding_name = name orelse return evaluator.fail(
-                        .domain,
-                        "def/set requires an unqualified, non-reserved name",
-                    ),
+                    .complete => |name| {
+                        const binding_name = name orelse return evaluator.fail(
+                            .domain,
+                            "def/set requires an unqualified, non-reserved name",
+                        );
+                        if (self.item.borrow() != .list)
+                            return evaluator.fail(.type, "def expected a list body; use set for values");
+                        self.state.borrowMut().* = .{ .source = .{
+                            .binding_name = binding_name,
+                            .cursor = evaluator.sourceCursor(self.item.borrow().list),
+                        } };
+                    },
                 }
-                if (self.item.?.borrow() != .list)
-                    return evaluator.fail(.type, "def expected a list body; use set for values");
-                self.source_cursor = evaluator.sourceCursor(self.item.?.borrow().list);
-                self.phase = .source;
             },
-            .source => switch (self.source_cursor.?.advance()) {
+            .source => |*source_state| switch (source_state.cursor.advance()) {
                 .pending => budget -= 1,
                 .complete => |source| {
-                    if (source) |owned_source| self.source = .init(owned_source);
-                    self.source_cursor = null;
                     // A module definition records only its own name. The
                     // qualified spelling belongs to whichever registration a call
                     // reaches it through, so there is nothing to intern here.
-                    self.phase = .publish;
+                    self.state.borrowMut().* = .{ .prepare_publish = .{
+                        .binding_name = source_state.binding_name,
+                        .source = if (source) |owned_source| .init(owned_source) else null,
+                    } };
                 },
             },
-            .publish => {
+            .prepare_publish => |*publication| {
                 const private = self.mode == .defp;
-                const name = self.binding_name.?;
                 const visibility: env.Visibility = if (private) .private else .public;
-                if (self.publisher == null) self.publisher = .init(try self.scope.publishWordCursor(name, .{
-                    .body = env.quotation(self.item.?.borrow().list) orelse
+                const publisher = try self.scope.publishWordCursor(publication.binding_name, .{
+                    .body = env.quotation(self.item.borrow().list) orelse
                         return evaluator.fail(.domain, "definition body has an invalid heap representation"),
-                    .source = if (self.source) |*source| source.borrow() else null,
+                    .source = if (publication.source) |*source| source.borrow() else null,
                     .visibility = visibility,
                     .effect = self.annotation.borrow().effect,
                     .doc = self.annotation.borrow().doc_value,
-                }));
-                switch (self.publisher.?.borrowMut().advance() catch |err| switch (err) {
+                });
+                const source: ?heap.Owned(reader_types.SourceSlice) =
+                    if (publication.source) |*owned| .init(owned.take()) else null;
+                self.state.borrowMut().* = .{ .publishing = .{
+                    .source = source,
+                    .publisher = .init(publisher),
+                } };
+            },
+            .publishing => |*publication| {
+                switch (publication.publisher.borrowMut().advance() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Frozen => return evaluator.fail(
                         .domain,
