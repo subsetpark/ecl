@@ -596,6 +596,7 @@ fn collectGarbage(evaluator: *Machine) MachineError!void {
         },
         .retained_value = .init(retained_value.take()),
         .retained = std.StringHashMap(void).init(evaluator.allocator()),
+        .state = .keys_capacity,
     });
 }
 
@@ -617,248 +618,317 @@ const GcDriver = struct {
     retained_value: heap.Owned(Value),
     retained: std.StringHashMap(void),
     retained_keys: std.ArrayList([]u8) = .empty,
-    retained_index: usize = 0,
-    retained_capacity_ready: bool = false,
-    key_cursor: ?storage.ToUtf8Cursor = null,
-    environ_cursor: ?machine.Environ.LookupCursor = null,
-    root_path: ?[]u8 = null,
-    root_dir: ?std.Io.Dir = null,
-    iterator: ?std.Io.Dir.Iterator = null,
-    candidate_source: ?[]u8 = null,
-    candidate_trash: ?[]u8 = null,
-    delete_frame: ?*GcDeleteFrame = null,
     removed: usize = 0,
-    retire_index: usize = 0,
-    retire_phase: enum { resources, delete_frames, retained, finish } = .resources,
-    phase: enum {
-        keys,
-        env_ecl_cache,
-        env_xdg_cache,
-        env_home,
-        open_root,
-        scan,
-        detach_candidate,
-        open_candidate,
-        delete_tree,
-        delete_root,
-        finish,
-    } = .keys,
+    state: State,
+
+    const Root = struct { path: []u8, dir: std.Io.Dir };
+    const Scan = struct { root: Root, iterator: std.Io.Dir.Iterator };
+    const CleanupRoot = union(enum) {
+        none,
+        path: []u8,
+        root: Root,
+    };
+    const State = union(enum) {
+        keys_capacity,
+        keys: usize,
+        key: struct { index: usize, cursor: storage.ToUtf8Cursor },
+        env_ecl_start,
+        env_ecl: machine.Environ.LookupCursor,
+        env_xdg_start,
+        env_xdg: machine.Environ.LookupCursor,
+        env_home_start,
+        env_home: machine.Environ.LookupCursor,
+        open_root: []u8,
+        scan: Scan,
+        detach: struct { scan: Scan, source: []u8 },
+        open_candidate: struct { scan: Scan, trash: []u8 },
+        delete_tree: struct { scan: Scan, trash: []u8, frame: *GcDeleteFrame },
+        delete_root: struct { scan: Scan, trash: []u8 },
+        complete_path: []u8,
+        complete_root: Root,
+        no_environment,
+        cleanup_frame: struct { root: CleanupRoot, frame: *GcDeleteFrame },
+        cleanup_root: CleanupRoot,
+        cleanup_keys: usize,
+        cleanup_value,
+        cleanup_destroy,
+    };
 
     pub fn advance(evaluator: *Machine, self: *GcDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.phase) {
-            .keys => self.encodeKeys(evaluator),
-            .env_ecl_cache => self.lookupEnvironment(evaluator, "ECL_CACHE", .env_xdg_cache, .direct),
-            .env_xdg_cache => self.lookupEnvironment(evaluator, "XDG_CACHE_HOME", .env_home, .xdg),
-            .env_home => self.lookupEnvironment(evaluator, "HOME", .finish, .home),
-            .open_root => self.openRoot(evaluator),
-            .scan => self.scan(evaluator),
-            .detach_candidate => self.detachCandidate(evaluator),
-            .open_candidate => self.openCandidate(evaluator),
-            .delete_tree => self.deleteTree(evaluator),
-            .delete_root => self.deleteRoot(evaluator),
-            .finish => if (self.root_path == null)
-                evaluator.fail(
-                    .io,
-                    "pkg.store.gc needs ECL_CACHE, XDG_CACHE_HOME, or HOME to select a package store",
-                )
-            else
-                .{ .output = .{ .int = @intCast(self.removed) } },
-        };
-    }
-
-    fn encodeKeys(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const count: usize = @intCast(self.retained_value.borrow().list.length());
-        if (!self.retained_capacity_ready) {
-            try self.retained.ensureTotalCapacity(@intCast(count));
-            try self.retained_keys.ensureTotalCapacity(self.allocator, count);
-            self.retained_capacity_ready = true;
-            return .yielded;
-        }
-        if (self.retained_index == count) {
-            self.phase = .env_ecl_cache;
-            return .yielded;
-        }
-        if (self.key_cursor == null) {
-            const item = list.atUnchecked(self.retained_value.borrow(), self.retained_index);
-            if (!item.isString())
-                return evaluator.failAtIndex(
-                    .type,
-                    "pkg.store.gc expects string store keys",
-                    self.retained_index,
-                );
-            self.key_cursor = .init(self.allocator, item);
-        }
-        return switch (self.key_cursor.?.advance(work_quantum) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidCodepoint => return evaluator.failAtIndex(
-                .domain,
-                "a retained package store key contains an invalid Unicode scalar",
-                self.retained_index,
-            ),
-        }) {
-            .pending => .yielded,
-            .complete => |key| complete: {
-                self.key_cursor.?.deinit();
-                self.key_cursor = null;
-                if (!validStoreKey(key)) {
-                    self.allocator.free(key);
-                    return evaluator.failAtIndex(
-                        .domain,
-                        "pkg.store.gc expects canonical name-version-hash store keys",
-                        self.retained_index,
-                    );
-                }
-                if (self.retained.contains(key)) {
-                    self.allocator.free(key);
-                } else {
-                    self.retained.putAssumeCapacityNoClobber(key, {});
-                    self.retained_keys.appendAssumeCapacity(key);
-                }
-                self.retained_index += 1;
-                break :complete .yielded;
+        switch (self.state) {
+            .keys_capacity => {
+                const count: usize = @intCast(self.retained_value.borrow().list.length());
+                try self.retained.ensureTotalCapacity(@intCast(count));
+                try self.retained_keys.ensureTotalCapacity(self.allocator, count);
+                self.state = .{ .keys = 0 };
             },
-        };
+            .keys => |index| {
+                const count: usize = @intCast(self.retained_value.borrow().list.length());
+                if (index == count) {
+                    self.state = .env_ecl_start;
+                } else {
+                    const item = list.atUnchecked(self.retained_value.borrow(), index);
+                    if (!item.isString())
+                        return evaluator.failAtIndex(
+                            .type,
+                            "pkg.store.gc expects string store keys",
+                            index,
+                        );
+                    self.state = .{ .key = .{
+                        .index = index,
+                        .cursor = .init(self.allocator, item),
+                    } };
+                }
+            },
+            .key => |*key_state| switch (key_state.cursor.advance(work_quantum) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidCodepoint => return evaluator.failAtIndex(
+                    .domain,
+                    "a retained package store key contains an invalid Unicode scalar",
+                    key_state.index,
+                ),
+            }) {
+                .pending => {},
+                .complete => |key| {
+                    key_state.cursor.deinit();
+                    const index = key_state.index;
+                    if (!validStoreKey(key)) {
+                        self.allocator.free(key);
+                        return evaluator.failAtIndex(
+                            .domain,
+                            "pkg.store.gc expects canonical name-version-hash store keys",
+                            index,
+                        );
+                    }
+                    if (self.retained.contains(key)) {
+                        self.allocator.free(key);
+                    } else {
+                        self.retained.putAssumeCapacityNoClobber(key, {});
+                        self.retained_keys.appendAssumeCapacity(key);
+                    }
+                    self.state = .{ .keys = index + 1 };
+                },
+            },
+            .env_ecl_start => self.state = .{ .env_ecl = evaluator.environLookup("ECL_CACHE") },
+            .env_ecl => |*cursor| return self.lookupEnvironment(
+                cursor,
+                .env_xdg_start,
+                .direct,
+            ),
+            .env_xdg_start => self.state = .{ .env_xdg = evaluator.environLookup("XDG_CACHE_HOME") },
+            .env_xdg => |*cursor| return self.lookupEnvironment(
+                cursor,
+                .env_home_start,
+                .xdg,
+            ),
+            .env_home_start => self.state = .{ .env_home = evaluator.environLookup("HOME") },
+            .env_home => |*cursor| return self.lookupEnvironment(
+                cursor,
+                .no_environment,
+                .home,
+            ),
+            .open_root => |path| {
+                const directory = std.Io.Dir.cwd().openDir(self.io, path, .{
+                    .follow_symlinks = false,
+                    .iterate = true,
+                }) catch |err| switch (err) {
+                    error.FileNotFound => {
+                        self.state = .{ .complete_path = path };
+                        return .yielded;
+                    },
+                    else => return self.failIo(
+                        evaluator,
+                        path,
+                        "cannot open package store for garbage collection",
+                        err,
+                    ),
+                };
+                self.state = .{ .scan = .{
+                    .root = .{ .path = path, .dir = directory },
+                    .iterator = directory.iterate(),
+                } };
+            },
+            .scan => |*scan_state| {
+                const entry = scan_state.iterator.next(self.io) catch |err|
+                    return self.failIo(
+                        evaluator,
+                        scan_state.root.path,
+                        "cannot enumerate package store for garbage collection",
+                        err,
+                    );
+                if (entry == null) {
+                    const root = scan_state.root;
+                    self.state = .{ .complete_root = root };
+                } else if (entry.?.kind == .directory) {
+                    const stale = std.mem.startsWith(u8, entry.?.name, ".ecl-gc-");
+                    if (stale or (validStoreKey(entry.?.name) and !self.retained.contains(entry.?.name))) {
+                        const name = try self.allocator.dupe(u8, entry.?.name);
+                        const scan = scan_state.*;
+                        self.state = if (stale)
+                            .{ .open_candidate = .{ .scan = scan, .trash = name } }
+                        else
+                            .{ .detach = .{ .scan = scan, .source = name } };
+                    }
+                }
+            },
+            .detach => |*candidate| {
+                const identity = next_gc_identity.fetchAdd(1, .monotonic);
+                const trash_name = try std.fmt.allocPrint(
+                    self.allocator,
+                    ".ecl-gc-{x}-{s}",
+                    .{ identity, candidate.source },
+                );
+                candidate.scan.root.dir.rename(
+                    candidate.source,
+                    candidate.scan.root.dir,
+                    trash_name,
+                    self.io,
+                ) catch |err| {
+                    self.allocator.free(trash_name);
+                    switch (err) {
+                        error.DirNotEmpty => return .yielded,
+                        error.FileNotFound => {
+                            self.allocator.free(candidate.source);
+                            const scan = candidate.scan;
+                            self.state = .{ .scan = scan };
+                            return .yielded;
+                        },
+                        else => return self.failIo(
+                            evaluator,
+                            candidate.scan.root.path,
+                            "cannot detach unreferenced package store entry",
+                            err,
+                        ),
+                    }
+                };
+                self.allocator.free(candidate.source);
+                const scan = candidate.scan;
+                self.removed += 1;
+                self.state = .{ .open_candidate = .{
+                    .scan = scan,
+                    .trash = trash_name,
+                } };
+            },
+            .open_candidate => |*candidate| {
+                const directory = candidate.scan.root.dir.openDir(self.io, candidate.trash, .{
+                    .follow_symlinks = false,
+                    .iterate = true,
+                }) catch |err| switch (err) {
+                    error.FileNotFound => {
+                        self.allocator.free(candidate.trash);
+                        var scan = candidate.scan;
+                        scan.iterator = scan.root.dir.iterate();
+                        self.state = .{ .scan = scan };
+                        return .yielded;
+                    },
+                    else => return self.failIo(
+                        evaluator,
+                        candidate.scan.root.path,
+                        "cannot open detached package store entry",
+                        err,
+                    ),
+                };
+                const frame = self.allocator.create(GcDeleteFrame) catch |err| {
+                    directory.close(self.io);
+                    return err;
+                };
+                frame.* = .{
+                    .parent = null,
+                    .dir = directory,
+                    .iterator = directory.iterate(),
+                    .name = null,
+                };
+                const scan = candidate.scan;
+                const trash = candidate.trash;
+                self.state = .{ .delete_tree = .{
+                    .scan = scan,
+                    .trash = trash,
+                    .frame = frame,
+                } };
+            },
+            .delete_tree => |*deletion| return self.deleteTree(evaluator, deletion),
+            .delete_root => |*candidate| {
+                candidate.scan.root.dir.deleteDir(self.io, candidate.trash) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => return self.failIo(
+                        evaluator,
+                        candidate.scan.root.path,
+                        "cannot remove detached package store entry",
+                        err,
+                    ),
+                };
+                self.allocator.free(candidate.trash);
+                var scan = candidate.scan;
+                scan.iterator = scan.root.dir.iterate();
+                self.state = .{ .scan = scan };
+            },
+            .complete_path, .complete_root => return .{ .output = .{ .int = @intCast(self.removed) } },
+            .no_environment => return evaluator.fail(
+                .io,
+                "pkg.store.gc needs ECL_CACHE, XDG_CACHE_HOME, or HOME to select a package store",
+            ),
+            .cleanup_frame,
+            .cleanup_root,
+            .cleanup_keys,
+            .cleanup_value,
+            .cleanup_destroy,
+            => unreachable,
+        }
+        return .yielded;
     }
 
     const RootKind = enum { direct, xdg, home };
 
     fn lookupEnvironment(
         self: *GcDriver,
-        evaluator: *Machine,
-        name: []const u8,
-        missing: @TypeOf(self.phase),
+        cursor: *machine.Environ.LookupCursor,
+        missing: State,
         kind: RootKind,
     ) MachineError!machine.WorkProgress {
-        if (self.environ_cursor == null) self.environ_cursor = evaluator.environLookup(name);
-        return switch (self.environ_cursor.?.advance(work_quantum)) {
+        return switch (cursor.advance(work_quantum)) {
             .pending => .yielded,
             .complete => |raw| complete: {
-                self.environ_cursor = null;
                 const bytes = raw orelse "";
                 if (bytes.len == 0) {
-                    self.phase = missing;
+                    self.state = missing;
                     break :complete .yielded;
                 }
-                self.root_path = switch (kind) {
+                const path = switch (kind) {
                     .direct => try self.allocator.dupe(u8, bytes),
                     .xdg => std.fs.path.join(self.allocator, &.{ bytes, "ecl", "pkg" }) catch
                         return error.OutOfMemory,
                     .home => std.fs.path.join(self.allocator, &.{ bytes, ".cache", "ecl", "pkg" }) catch
                         return error.OutOfMemory,
                 };
-                self.phase = .open_root;
+                self.state = .{ .open_root = path };
                 break :complete .yielded;
             },
         };
     }
-
-    fn openRoot(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        self.root_dir = std.Io.Dir.cwd().openDir(self.io, self.root_path.?, .{
-            .follow_symlinks = false,
-            .iterate = true,
-        }) catch |err| switch (err) {
-            error.FileNotFound => {
-                self.phase = .finish;
-                return .yielded;
-            },
-            else => return self.failIo(evaluator, "cannot open package store for garbage collection", err),
-        };
-        self.iterator = self.root_dir.?.iterate();
-        self.phase = .scan;
-        return .yielded;
-    }
-
-    fn scan(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const entry = self.iterator.?.next(self.io) catch |err|
-            return self.failIo(evaluator, "cannot enumerate package store for garbage collection", err);
-        if (entry == null) {
-            self.iterator = null;
-            self.phase = .finish;
-            return .yielded;
-        }
-        if (entry.?.kind != .directory) return .yielded;
-        const stale = std.mem.startsWith(u8, entry.?.name, ".ecl-gc-");
-        if (!stale and (!validStoreKey(entry.?.name) or self.retained.contains(entry.?.name)))
-            return .yielded;
-        if (stale) {
-            self.candidate_trash = try self.allocator.dupe(u8, entry.?.name);
-            self.phase = .open_candidate;
-        } else {
-            self.candidate_source = try self.allocator.dupe(u8, entry.?.name);
-            self.phase = .detach_candidate;
-        }
-        return .yielded;
-    }
-
-    fn detachCandidate(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const identity = next_gc_identity.fetchAdd(1, .monotonic);
-        const trash_name = try std.fmt.allocPrint(
-            self.allocator,
-            ".ecl-gc-{x}-{s}",
-            .{ identity, self.candidate_source.? },
-        );
-        self.root_dir.?.rename(self.candidate_source.?, self.root_dir.?, trash_name, self.io) catch |err| {
-            self.allocator.free(trash_name);
-            switch (err) {
-                // Keep the candidate phase: the next bounded advance mints a
-                // new monotonic identity, so a stale trash-name collision
-                // cannot repeat the same rename indefinitely.
-                error.DirNotEmpty => return .yielded,
-                error.FileNotFound => {
-                    self.allocator.free(self.candidate_source.?);
-                    self.candidate_source = null;
-                    self.phase = .scan;
-                    return .yielded;
-                },
-                else => {
-                    return self.failIo(evaluator, "cannot detach unreferenced package store entry", err);
-                },
-            }
-        };
-        self.allocator.free(self.candidate_source.?);
-        self.candidate_source = null;
-        self.candidate_trash = trash_name;
-        self.removed += 1;
-        self.phase = .open_candidate;
-        return .yielded;
-    }
-
-    fn openCandidate(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const directory = self.root_dir.?.openDir(self.io, self.candidate_trash.?, .{
-            .follow_symlinks = false,
-            .iterate = true,
-        }) catch |err| switch (err) {
-            error.FileNotFound => {
-                self.finishCandidate();
-                return .yielded;
-            },
-            else => return self.failIo(evaluator, "cannot open detached package store entry", err),
-        };
-        const frame = self.allocator.create(GcDeleteFrame) catch |err| {
-            directory.close(self.io);
-            return err;
-        };
-        frame.* = .{
-            .parent = null,
-            .dir = directory,
-            .iterator = directory.iterate(),
-            .name = null,
-        };
-        self.delete_frame = frame;
-        self.phase = .delete_tree;
-        return .yielded;
-    }
-
-    fn deleteTree(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const frame = self.delete_frame.?;
+    fn deleteTree(
+        self: *GcDriver,
+        evaluator: *Machine,
+        deletion: *@FieldType(State, "delete_tree"),
+    ) MachineError!machine.WorkProgress {
+        const frame = deletion.frame;
         const entry = frame.iterator.next(self.io) catch |err|
-            return self.failIo(evaluator, "cannot enumerate detached package store entry", err);
+            return self.failIo(
+                evaluator,
+                deletion.scan.root.path,
+                "cannot enumerate detached package store entry",
+                err,
+            );
         if (entry) |item| {
             if (item.kind != .directory) {
                 frame.dir.?.deleteFile(self.io, item.name) catch |err| switch (err) {
                     error.FileNotFound => {},
-                    else => return self.failIo(evaluator, "cannot remove detached package file", err),
+                    else => return self.failIo(
+                        evaluator,
+                        deletion.scan.root.path,
+                        "cannot remove detached package file",
+                        err,
+                    ),
                 };
                 return .yielded;
             }
@@ -868,7 +938,12 @@ const GcDriver = struct {
                 .iterate = true,
             }) catch |err| {
                 self.allocator.free(name);
-                return self.failIo(evaluator, "cannot open detached package directory", err);
+                return self.failIo(
+                    evaluator,
+                    deletion.scan.root.path,
+                    "cannot open detached package directory",
+                    err,
+                );
             };
             const child = self.allocator.create(GcDeleteFrame) catch |err| {
                 directory.close(self.io);
@@ -881,7 +956,7 @@ const GcDriver = struct {
                 .iterator = directory.iterate(),
                 .name = name,
             };
-            self.delete_frame = child;
+            deletion.frame = child;
             return .yielded;
         }
 
@@ -890,37 +965,93 @@ const GcDriver = struct {
         if (frame.parent) |parent| {
             parent.dir.?.deleteDir(self.io, frame.name.?) catch |err| switch (err) {
                 error.FileNotFound => {},
-                else => return self.failIo(evaluator, "cannot remove detached package directory", err),
+                else => return self.failIo(
+                    evaluator,
+                    deletion.scan.root.path,
+                    "cannot remove detached package directory",
+                    err,
+                ),
             };
             self.allocator.free(frame.name.?);
-            self.delete_frame = parent;
+            deletion.frame = parent;
             self.allocator.destroy(frame);
             return .yielded;
         }
-        self.delete_frame = null;
         self.allocator.destroy(frame);
-        self.phase = .delete_root;
+        const scan = deletion.scan;
+        const trash = deletion.trash;
+        self.state = .{ .delete_root = .{ .scan = scan, .trash = trash } };
         return .yielded;
     }
 
-    fn deleteRoot(self: *GcDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        self.root_dir.?.deleteDir(self.io, self.candidate_trash.?) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return self.failIo(evaluator, "cannot remove detached package store entry", err),
-        };
-        self.finishCandidate();
-        return .yielded;
+    fn failIo(
+        self: *GcDriver,
+        evaluator: *Machine,
+        path: []const u8,
+        message: []const u8,
+        err: anyerror,
+    ) MachineError {
+        _ = self;
+        return evaluator.failFmt(.io, "{s} `{s}`: {s}", .{ message, path, @errorName(err) });
     }
 
-    fn finishCandidate(self: *GcDriver) void {
-        if (self.candidate_trash) |name| self.allocator.free(name);
-        self.candidate_trash = null;
-        self.iterator = self.root_dir.?.iterate();
-        self.phase = .scan;
-    }
-
-    fn failIo(self: *GcDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
-        return evaluator.failFmt(.io, "{s} `{s}`: {s}", .{ message, self.root_path orelse "", @errorName(err) });
+    fn beginRetirement(self: *GcDriver) void {
+        switch (self.state) {
+            .keys_capacity,
+            .keys,
+            .env_ecl_start,
+            .env_ecl,
+            .env_xdg_start,
+            .env_xdg,
+            .env_home_start,
+            .env_home,
+            .no_environment,
+            => self.state = .{ .cleanup_root = .none },
+            .key => |*key_state| {
+                key_state.cursor.deinit();
+                self.state = .{ .cleanup_root = .none };
+            },
+            .open_root, .complete_path => |path| {
+                self.state = .{ .cleanup_root = .{ .path = path } };
+            },
+            .scan => |*scan| {
+                const root = scan.root;
+                self.state = .{ .cleanup_root = .{ .root = root } };
+            },
+            .detach => |*candidate| {
+                self.allocator.free(candidate.source);
+                const root = candidate.scan.root;
+                self.state = .{ .cleanup_root = .{ .root = root } };
+            },
+            .open_candidate => |*candidate| {
+                self.allocator.free(candidate.trash);
+                const root = candidate.scan.root;
+                self.state = .{ .cleanup_root = .{ .root = root } };
+            },
+            .delete_tree => |*deletion| {
+                self.allocator.free(deletion.trash);
+                const root = deletion.scan.root;
+                const frame = deletion.frame;
+                self.state = .{ .cleanup_frame = .{
+                    .root = .{ .root = root },
+                    .frame = frame,
+                } };
+            },
+            .delete_root => |*candidate| {
+                self.allocator.free(candidate.trash);
+                const root = candidate.scan.root;
+                self.state = .{ .cleanup_root = .{ .root = root } };
+            },
+            .complete_root => |root| {
+                self.state = .{ .cleanup_root = .{ .root = root } };
+            },
+            .cleanup_frame,
+            .cleanup_root,
+            .cleanup_keys,
+            .cleanup_value,
+            .cleanup_destroy,
+            => unreachable,
+        }
     }
 
     pub fn advanceRetirement(
@@ -928,51 +1059,76 @@ const GcDriver = struct {
         allocator: std.mem.Allocator,
         self: *GcDriver,
     ) bool {
-        switch (self.retire_phase) {
-            .resources => {
-                if (self.root_dir) |directory| directory.close(self.io);
-                self.root_dir = null;
-                if (self.key_cursor) |*cursor| cursor.deinit();
-                self.key_cursor = null;
-                if (self.root_path) |path| allocator.free(path);
-                self.root_path = null;
-                if (self.candidate_source) |name| allocator.free(name);
-                self.candidate_source = null;
-                if (self.candidate_trash) |name| allocator.free(name);
-                self.candidate_trash = null;
+        return switch (self.state) {
+            .keys_capacity,
+            .keys,
+            .key,
+            .env_ecl_start,
+            .env_ecl,
+            .env_xdg_start,
+            .env_xdg,
+            .env_home_start,
+            .env_home,
+            .open_root,
+            .scan,
+            .detach,
+            .open_candidate,
+            .delete_tree,
+            .delete_root,
+            .complete_path,
+            .complete_root,
+            .no_environment,
+            => result: {
+                self.beginRetirement();
+                break :result false;
+            },
+            .cleanup_frame => |*cleanup| result: {
+                const frame = cleanup.frame;
+                const parent = frame.parent;
+                if (frame.dir) |directory| directory.close(self.io);
+                if (frame.name) |name| allocator.free(name);
+                allocator.destroy(frame);
+                if (parent) |next| {
+                    cleanup.frame = next;
+                } else {
+                    const root = cleanup.root;
+                    self.state = .{ .cleanup_root = root };
+                }
+                break :result false;
+            },
+            .cleanup_root => |*cleanup| result: {
+                switch (cleanup.*) {
+                    .none => {},
+                    .path => |path| allocator.free(path),
+                    .root => |root| {
+                        root.dir.close(self.io);
+                        allocator.free(root.path);
+                    },
+                }
                 self.retained.deinit();
-                self.retire_phase = .delete_frames;
-                self.retire_index = 0;
-                return false;
+                self.state = .{ .cleanup_keys = 0 };
+                break :result false;
             },
-            .delete_frames => {
-                if (self.delete_frame) |frame| {
-                    self.delete_frame = frame.parent;
-                    if (frame.dir) |directory| directory.close(self.io);
-                    if (frame.name) |name| allocator.free(name);
-                    allocator.destroy(frame);
-                    return false;
+            .cleanup_keys => |index| result: {
+                if (index != self.retained_keys.items.len) {
+                    allocator.free(self.retained_keys.items[index]);
+                    self.state = .{ .cleanup_keys = index + 1 };
+                } else {
+                    self.retained_keys.deinit(allocator);
+                    self.state = .cleanup_value;
                 }
-                self.retire_phase = .retained;
-                self.retire_index = 0;
-                return false;
+                break :result false;
             },
-            .retained => {
-                if (self.retire_index != self.retained_keys.items.len) {
-                    allocator.free(self.retained_keys.items[self.retire_index]);
-                    self.retire_index += 1;
-                    return false;
-                }
-                self.retained_keys.deinit(allocator);
+            .cleanup_value => result: {
                 self.retained_value.deinit(releases, allocator);
-                self.retire_phase = .finish;
-                return false;
+                self.state = .cleanup_destroy;
+                break :result false;
             },
-            .finish => {
+            .cleanup_destroy => {
                 allocator.destroy(self);
                 return true;
             },
-        }
+        };
     }
 };
 
