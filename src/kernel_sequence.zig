@@ -3,11 +3,11 @@ const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
+const dict = @import("dict.zig");
 const equal = @import("equal.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const support = @import("kernel_support.zig");
-const storage = @import("kernel_storage.zig");
 const kernel_flat = @import("kernel_flat.zig");
 const poll = @import("poll.zig");
 
@@ -91,10 +91,10 @@ fn atPrimitive(evaluator: *Machine) MachineError!void {
     // A dict has one key to find and nothing to descend into, so it needs the
     // find cursor and not the index cursor's frame stack -- which is sized by
     // its widest frame and costs a chunk allocation per lookup to hold one
-    // entry. `DictFindCursor` allocates nothing for a key without structure,
+    // entry. `dict.FindCursor` allocates nothing for a key without structure,
     // and falls back to its own worklists for one that has some.
     if (collection.borrow() == .dict) {
-        const find = storage.DictFindCursor.initHeader(
+        const find = dict.FindCursor.initHeader(
             evaluator.allocator(),
             collection.borrow().dict,
             index.borrow(),
@@ -140,7 +140,7 @@ const DictAtDriver = struct {
     pub const inline_driver = true;
     collection: heap.Owned(Value),
     key: heap.Owned(Value),
-    cursor: heap.Owned(storage.DictFindCursor),
+    cursor: heap.Owned(dict.FindCursor),
     pub fn advance(evaluator: *Machine, self: *DictAtDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (try self.cursor.borrowMut().advance(machine.kernel_poll_quantum)) {
@@ -165,7 +165,7 @@ const IndexCursor = struct {
         values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
-        materializer: ?storage.ValueMaterializer = null,
+        materializer: ?list.ValueMaterializer = null,
         result: ?Value = null,
     };
     const Frame = union(enum) { node: Node, build: Build };
@@ -694,7 +694,7 @@ const MembershipCursor = struct {
         values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
-        materializer: ?storage.ValueMaterializer = null,
+        materializer: ?list.ValueMaterializer = null,
         result: ?Value = null,
     };
     const Frame = union(enum) { node: Node, search: Search, build: Build };
@@ -867,7 +867,7 @@ const RazeDriver = struct {
     total: usize = 0,
     values: ?heap.Owned([]Value) = null,
     destination: usize = 0,
-    materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *RazeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -890,7 +890,7 @@ const RazeDriver = struct {
             },
             .fill => {
                 if (self.index == count) {
-                    self.materializer = .init(storage.ValueMaterializer.init(
+                    self.materializer = .init(list.ValueMaterializer.init(
                         evaluator.allocator(),
                         self.values.?.borrow(),
                     ));
@@ -1000,7 +1000,7 @@ fn takePrimitive(evaluator: *Machine) MachineError!void {
         .values = .init(values),
         .source_index = start,
         .source_count = source_count,
-        .materializer = .init(storage.ValueMaterializer.init(evaluator.allocator(), values)),
+        .materializer = .init(list.ValueMaterializer.init(evaluator.allocator(), values)),
     });
 }
 
@@ -1012,7 +1012,7 @@ const TakeDriver = struct {
     source_index: usize,
     source_count: usize,
     materializing: bool = false,
-    materializer: heap.Owned(storage.ValueMaterializer),
+    materializer: heap.Owned(list.ValueMaterializer),
 
     pub fn advance(
         evaluator: *Machine,
@@ -1080,7 +1080,7 @@ const ListCopyDriver = struct {
     reverse: bool = false,
     values: heap.Owned([]Value),
     index: usize = 0,
-    materializer: heap.Owned(storage.ValueMaterializer),
+    materializer: heap.Owned(list.ValueMaterializer),
 
     fn installOne(
         evaluator: *Machine,
@@ -1345,8 +1345,8 @@ const FlipDriver = struct {
     cells: ?heap.Owned([]Value) = null,
     column: usize = 0,
     row: usize = 0,
-    inner: ?heap.Owned(storage.ValueMaterializer) = null,
-    outer: ?heap.Owned(storage.ValueMaterializer) = null,
+    inner: ?heap.Owned(list.ValueMaterializer) = null,
+    outer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *FlipDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -1524,7 +1524,7 @@ const ReshapeBuildCursor = struct {
         values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
-        materializer: ?storage.ValueMaterializer = null,
+        materializer: ?list.ValueMaterializer = null,
         result: ?Value = null,
     };
     releases: *heap.ReleaseDomain,

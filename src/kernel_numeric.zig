@@ -9,7 +9,6 @@ const env = @import("env.zig");
 const machine = @import("machine.zig");
 const poll = @import("poll.zig");
 const support = @import("kernel_support.zig");
-const storage = @import("kernel_storage.zig");
 const flat = @import("kernel_flat.zig");
 
 const Value = value.Value;
@@ -163,7 +162,7 @@ pub const PervadeCursor = struct {
         values: heap.OwnedValueBuffer,
         index: usize = 0,
         waiting: bool = false,
-        materializer: ?storage.ValueMaterializer = null,
+        materializer: ?list.ValueMaterializer = null,
         result: ?Value = null,
 
         fn deinit(self: *ListFrame, releases: *heap.ReleaseDomain) void {
@@ -191,7 +190,7 @@ pub const PervadeCursor = struct {
         pair_count: usize = 0,
         waiting: bool = false,
         match_cursor: ?equal.MatchCursor = null,
-        materializer: ?storage.DictMaterializer = null,
+        materializer: ?dict.Materializer = null,
         result: ?Value = null,
 
         fn deinit(self: *DictFrame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {

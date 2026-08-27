@@ -7,7 +7,6 @@ const dict = @import("dict.zig");
 const env = @import("env.zig");
 const heap = @import("heap.zig");
 const intern = @import("intern.zig");
-const storage = @import("kernel_storage.zig");
 const list = @import("list.zig");
 const machine = @import("machine.zig");
 const native_module = @import("native_module.zig");
@@ -37,7 +36,7 @@ const ListBuild = struct {
         },
         materializing: struct {
             source: heap.ListBuilder(.generic_spine),
-            materializer: storage.ValueMaterializer,
+            materializer: list.ValueMaterializer,
         },
         complete: Value,
 
@@ -82,7 +81,7 @@ const ListBuild = struct {
                 if (building.appended != self.expected) return null;
                 const appended = building.appended;
                 const source = building.source;
-                const materializer = storage.ValueMaterializer.init(
+                const materializer = list.ValueMaterializer.init(
                     call.allocator,
                     source.items()[0..appended],
                 );
@@ -132,7 +131,7 @@ const DictBuild = struct {
         materializing: struct {
             keys: heap.ListBuilder(.generic_spine),
             values: heap.ListBuilder(.generic_spine),
-            materializer: storage.DictMaterializer,
+            materializer: dict.Materializer,
         },
         complete: Value,
         rejected,
@@ -196,7 +195,7 @@ const DictBuild = struct {
                 const appended = building.appended;
                 const keys = building.keys;
                 const values = building.values;
-                const materializer = try storage.DictMaterializer.initSlices(
+                const materializer = try dict.Materializer.initSlices(
                     call.allocator,
                     keys.items()[0..appended],
                     values.items()[0..appended],

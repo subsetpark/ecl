@@ -10,6 +10,7 @@ const heap = @import("../heap.zig");
 const env = @import("../env.zig");
 const machine = @import("../machine.zig");
 const storage = @import("../kernel_storage.zig");
+const list = @import("../list.zig");
 const poll = @import("../poll.zig");
 
 const Value = value.Value;
@@ -412,7 +413,7 @@ const UnpackDriver = struct {
         },
         materialize_result: struct {
             inputs: ResultInputs,
-            materializer: storage.ValueMaterializer,
+            materializer: list.ValueMaterializer,
         },
         release_result_inputs: struct {
             release: ResultRelease,

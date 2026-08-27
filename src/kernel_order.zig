@@ -8,7 +8,6 @@ const equal = @import("equal.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
 const support = @import("kernel_support.zig");
-const storage = @import("kernel_storage.zig");
 const poll = @import("poll.zig");
 const kernel_flat = @import("kernel_flat.zig");
 
@@ -399,7 +398,7 @@ const GradeDriver = struct {
         prepare_values: struct { index: usize, values: heap.Owned([]Value) },
         materialize_values: struct {
             values: heap.Owned([]Value),
-            materializer: heap.Owned(storage.ValueMaterializer),
+            materializer: heap.Owned(list.ValueMaterializer),
         },
         prepare_indices: struct {
             index: usize,
@@ -511,7 +510,7 @@ const GradeDriver = struct {
                     values[prepare.index] = list.atUnchecked(self.collection.borrow(), indices[prepare.index]);
                 budget -= prepared;
                 if (prepare.index == indices.len) {
-                    const materializer = storage.ValueMaterializer.init(
+                    const materializer = list.ValueMaterializer.init(
                         evaluator.allocator(),
                         values,
                     );
@@ -659,7 +658,7 @@ const DistinctDriver = struct {
     item_index: usize = 0,
     candidate: usize = 0,
     matcher: ?heap.Owned(equal.MatchCursor) = null,
-    materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *DistinctDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -676,7 +675,7 @@ const DistinctDriver = struct {
                 };
             }
             if (self.item_index == self.results.borrow().len) {
-                self.materializer = .init(storage.ValueMaterializer.init(
+                self.materializer = .init(list.ValueMaterializer.init(
                     evaluator.allocator(),
                     self.results.borrow()[0..self.result_count],
                 ));
@@ -753,7 +752,7 @@ fn TypedGroupDriver(comptime kind: value.HeapKind) type {
         index: usize = 0,
         group_writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
         group_cursor: kernel_flat.FlatCursor = .{ .length = 0 },
-        dict_materializer: ?heap.Owned(storage.DictMaterializer) = null,
+        dict_materializer: ?heap.Owned(dict.Materializer) = null,
         group_values: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
         fn allocate(self: *Self, evaluator: *Machine) error{OutOfMemory}!void {
@@ -776,7 +775,7 @@ fn TypedGroupDriver(comptime kind: value.HeapKind) type {
 
             if (self.phase == .groups) {
                 if (self.index == self.key_count) {
-                    self.dict_materializer = .init(try storage.DictMaterializer.init(
+                    self.dict_materializer = .init(try dict.Materializer.init(
                         evaluator.allocator(),
                         self.pairs.?.borrow()[0..self.key_count],
                         false,
@@ -931,7 +930,7 @@ const GroupDriver = struct {
     matcher: ?heap.Owned(equal.MatchCursor) = null,
     group_writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
     group_fill: usize = 0,
-    dict_materializer: ?heap.Owned(storage.DictMaterializer) = null,
+    dict_materializer: ?heap.Owned(dict.Materializer) = null,
     group_values: ?heap.Owned(heap.OwnedValueBuffer) = null,
 
     fn allocate(self: *GroupDriver, evaluator: *Machine) error{OutOfMemory}!void {
@@ -1030,7 +1029,7 @@ const GroupDriver = struct {
             },
             .groups => {
                 if (self.index == self.key_count) {
-                    self.dict_materializer = .init(try storage.DictMaterializer.init(
+                    self.dict_materializer = .init(try dict.Materializer.init(
                         evaluator.allocator(),
                         self.pairs.?.borrow()[0..self.key_count],
                         false,

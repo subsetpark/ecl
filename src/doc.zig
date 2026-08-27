@@ -4,7 +4,6 @@ const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
 const lexer = @import("lexer.zig");
-const storage = @import("kernel_storage.zig");
 const poll = @import("poll.zig");
 
 const Value = value.Value;
@@ -64,7 +63,7 @@ pub const NormalizeCursor = struct {
     output_count: usize = 0,
     output: ?[]u32 = null,
     output_index: usize = 0,
-    materializer: ?storage.CodepointMaterializer = null,
+    materializer: ?list.CodepointMaterializer = null,
 
     pub fn init(allocator: std.mem.Allocator, document: Value) error{OutOfMemory}!NormalizeCursor {
         std.debug.assert(document.isString());

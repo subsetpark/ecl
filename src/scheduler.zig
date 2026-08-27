@@ -3,7 +3,6 @@ const std = @import("std");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
-const kernel_storage = @import("kernel_storage.zig");
 const machine = @import("machine.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
@@ -65,7 +64,7 @@ const FinishingWork = union(enum) {
     out_of_memory,
     language_error,
     success_unstarted,
-    success_materializing: kernel_storage.ValueMaterializer,
+    success_materializing: list.ValueMaterializer,
     ready: TerminalState,
 };
 
@@ -1562,7 +1561,7 @@ pub const WorkerScheduler = enum(usize) {
             },
             .success_unstarted => {
                 work.* = .{
-                    .success_materializing = kernel_storage.ValueMaterializer.init(
+                    .success_materializing = list.ValueMaterializer.init(
                         self.allocator(),
                         execution.unit.stack.items,
                     ),

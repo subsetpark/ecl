@@ -87,8 +87,8 @@ const ParseDriver = struct {
     /// container exists — on the success path and on teardown alike.
     const Building = struct {
         target: union(enum) {
-            values: kernel_storage.ValueMaterializer,
-            pairs: kernel_storage.DictMaterializer,
+            values: list.ValueMaterializer,
+            pairs: dict.Materializer,
             text: kernel_storage.TextMaterializer,
         },
         values: ?[]Value = null,
@@ -196,7 +196,7 @@ const ParseDriver = struct {
                     frame.values.items[index * 2],
                     frame.values.items[index * 2 + 1],
                 };
-                const materializer = kernel_storage.DictMaterializer.init(
+                const materializer = dict.Materializer.init(
                     self.allocator,
                     pairs,
                     true,

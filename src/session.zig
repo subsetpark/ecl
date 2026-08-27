@@ -955,23 +955,18 @@ fn materializeCompletion(
     qualifier: ?[]const u8,
 ) error{OutOfMemory}!CompletionSet {
     if (found.count == 0) return .empty;
-    const names = try allocator.alloc(u32, found.count);
-    defer allocator.free(names);
-    var iterator = found.iterator();
-    var index: usize = 0;
-    while (iterator.next()) |name| : (index += 1) names[index] = name.*;
-    if (names.len > 1) {
-        var sorter = try reflection.NameSortCursor.init(allocator, names);
-        defer sorter.deinit();
-        while (sorter.advance(256) == .pending) {}
-    }
-    var unique_count: usize = 0;
+    var cursor = try reflection.SortedUniqueNameCursor.init(allocator, found);
+    defer cursor.deinit();
+    var sorted = try poll.driveFallible(
+        reflection.SortedUniqueNames,
+        &cursor,
+        .{256},
+    );
+    defer sorted.deinit(allocator);
+    const names = sorted.items();
+
     var byte_count: usize = 0;
-    var previous: ?u32 = null;
     for (names) |name| {
-        if (previous != null and previous.? == name) continue;
-        previous = name;
-        unique_count += 1;
         byte_count = std.math.add(usize, byte_count, intern.get(name).len) catch
             return error.OutOfMemory;
         if (qualifier) |namespace| {
@@ -981,16 +976,12 @@ fn materializeCompletion(
     }
     const backing = try allocator.create(CompletionBacking);
     errdefer allocator.destroy(backing);
-    const candidates = try allocator.alloc([]const u8, unique_count);
+    const candidates = try allocator.alloc([]const u8, names.len);
     errdefer allocator.free(candidates);
     const bytes = try allocator.alloc(u8, byte_count);
     errdefer allocator.free(bytes);
     var written: usize = 0;
-    var candidate_index: usize = 0;
-    previous = null;
-    for (names) |name| {
-        if (previous != null and previous.? == name) continue;
-        previous = name;
+    for (names, 0..) |name, candidate_index| {
         const start = written;
         if (qualifier) |namespace| {
             @memcpy(bytes[written..][0..namespace.len], namespace);
@@ -1002,7 +993,6 @@ fn materializeCompletion(
         @memcpy(bytes[written..][0..atom.len], atom);
         written += atom.len;
         candidates[candidate_index] = bytes[start..written];
-        candidate_index += 1;
     }
     backing.* = .{ .allocator = allocator, .candidates = candidates, .bytes = bytes };
     return .fromBacking(backing);

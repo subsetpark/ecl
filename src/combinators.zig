@@ -7,7 +7,6 @@ const intern = @import("intern.zig");
 const env = @import("env.zig");
 const modules = @import("modules.zig");
 const machine = @import("machine.zig");
-const storage = @import("kernel_storage.zig");
 const poll = @import("poll.zig");
 
 const Value = value.Value;
@@ -664,7 +663,7 @@ const IterationState = struct {
 
 const CollectedDriver = struct {
     values: heap.Owned(heap.OwnedValueBuffer),
-    materializer: heap.Owned(storage.ValueMaterializer),
+    materializer: heap.Owned(list.ValueMaterializer),
     result: ?heap.Owned(Value) = null,
 
     pub fn advance(evaluator: *Machine, self: *CollectedDriver) MachineError!machine.WorkProgress {
@@ -716,7 +715,7 @@ const StencilBootstrapDriver = struct {
     window_values: heap.Owned(heap.OwnedValueBuffer),
     stack: machine.StackReservation,
     fill_index: usize = 0,
-    materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(
         evaluator: *Machine,
@@ -1088,7 +1087,7 @@ fn unfold(evaluator: *Machine) MachineError!void {
 
 const InfraResultDriver = struct {
     base: usize,
-    materializer: heap.Owned(storage.ValueMaterializer),
+    materializer: heap.Owned(list.ValueMaterializer),
     result: ?heap.Owned(Value) = null,
 
     fn install(evaluator: *Machine, base: usize) error{OutOfMemory}!void {

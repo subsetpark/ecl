@@ -170,7 +170,7 @@ const VerifyDriver = struct {
         materialize: struct {
             paths: Paths,
             contents: heap.Owned([]u8),
-            materializer: heap.Owned(storage.ByteListMaterializer),
+            materializer: heap.Owned(list.ByteListMaterializer),
         },
         complete: struct { paths: Paths, contents: heap.Owned([]u8) },
 

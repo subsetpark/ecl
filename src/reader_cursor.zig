@@ -11,6 +11,7 @@ const poll = @import("poll.zig");
 const reader = @import("reader_types.zig");
 const storage = @import("kernel_storage.zig");
 const dict = @import("dict.zig");
+const list = @import("list.zig");
 const text_buffer = @import("text_buffer.zig");
 
 const Value = value.Value;
@@ -575,7 +576,7 @@ const StringBuilder = struct {
         materialize: struct {
             codepoints: []u32,
             spans: []Span,
-            materializer: storage.CodepointMaterializer,
+            materializer: list.CodepointMaterializer,
         },
         spans: struct {
             spans: []Span,
@@ -791,7 +792,7 @@ const StringBuilder = struct {
             } else result: {
                 const codepoints = copy.codepoints;
                 const spans = copy.spans;
-                const materializer = storage.CodepointMaterializer.initCode(
+                const materializer = list.CodepointMaterializer.initCode(
                     self.allocator,
                     codepoints,
                     self.provenance_namespace,
@@ -1058,7 +1059,7 @@ const CollectionBuilder = struct {
             forms: Forms,
             values: []Value,
             spans: []Span,
-            materializer: storage.ValueMaterializer,
+            materializer: list.ValueMaterializer,
         },
         list_spans: struct {
             spans: []Span,
@@ -1074,7 +1075,7 @@ const CollectionBuilder = struct {
         materialize_dict: struct {
             body: []binder.SpannedValue,
             pairs: []dict.Pair,
-            materializer: storage.DictMaterializer,
+            materializer: dict.Materializer,
         },
         complete,
 
@@ -1378,7 +1379,7 @@ const CollectionBuilder = struct {
                     copy.index += 1;
                     break :result .pending;
                 }
-                const materializer = try storage.DictMaterializer.init(self.allocator, copy.pairs, true);
+                const materializer = try dict.Materializer.init(self.allocator, copy.pairs, true);
                 const body = copy.body;
                 const pairs = copy.pairs;
                 self.state = .{ .materialize_dict = .{

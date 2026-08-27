@@ -147,7 +147,7 @@ fn hasPrimitive(evaluator: *Machine) MachineError!void {
     defer key.deinit();
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
-    const cursor = storage.DictFindCursor.initHeader(
+    const cursor = dict.FindCursor.initHeader(
         evaluator.allocator(),
         dictionary.borrow().dict,
         key.borrow(),
@@ -162,13 +162,13 @@ fn hasPrimitive(evaluator: *Machine) MachineError!void {
 const HasDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     /// Searching a dict is bounded work over however many entries it has, so
-    /// the driver is earned; its creation is not. `DictFindCursor` already
+    /// the driver is earned; its creation is not. `dict.FindCursor` already
     /// allocates nothing for a key without structure, which left this as the
     /// only cost of asking whether a dict holds a symbol.
     pub const inline_driver = true;
     dictionary: heap.Owned(Value),
     key: heap.Owned(Value),
-    cursor: heap.Owned(storage.DictFindCursor),
+    cursor: heap.Owned(dict.FindCursor),
 
     pub fn advance(evaluator: *Machine, self: *HasDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -189,7 +189,7 @@ fn putPrimitive(evaluator: *Machine) MachineError!void {
     defer collection.deinit();
     switch (collection.borrow()) {
         .dict => {
-            const finder = storage.DictFindCursor.initHeader(
+            const finder = dict.FindCursor.initHeader(
                 evaluator.allocator(),
                 collection.borrow().dict,
                 key.borrow(),
@@ -361,7 +361,7 @@ const ListPutDriver = struct {
     replace_index: usize,
     values: heap.Owned([]Value),
     index: usize = 0,
-    materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *ListPutDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -377,7 +377,7 @@ const ListPutDriver = struct {
                     list.atUnchecked(self.collection.borrow(), self.index);
             budget -= copied;
             if (self.index != values.len) return .yielded;
-            self.materializer = .init(storage.ValueMaterializer.init(evaluator.allocator(), values));
+            self.materializer = .init(list.ValueMaterializer.init(evaluator.allocator(), values));
         }
         if (budget == 0) return .yielded;
         return switch (try self.materializer.?.borrowMut().advance(budget)) {
@@ -400,8 +400,8 @@ const ListPutDriver = struct {
 const RebuildPhase = union(enum) {
     pub const owned_disposal: heap.OwnedDisposal = .retire;
 
-    finding: storage.DictFindCursor,
-    materializing: storage.DictMaterializer,
+    finding: dict.FindCursor,
+    materializing: dict.Materializer,
     between,
 
     pub fn retire(self: *RebuildPhase, releases: *heap.ReleaseDomain) void {
@@ -510,7 +510,7 @@ const ToDictDriver = struct {
     values: heap.Owned(Value),
     pairs: heap.Owned([]dict.Pair),
     index: usize = 0,
-    materializer: ?heap.Owned(storage.DictMaterializer) = null,
+    materializer: ?heap.Owned(dict.Materializer) = null,
 
     pub fn advance(evaluator: *Machine, self: *ToDictDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
@@ -545,7 +545,7 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
     defer key.deinit();
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
-    const finder = storage.DictFindCursor.initHeader(
+    const finder = dict.FindCursor.initHeader(
         evaluator.allocator(),
         dictionary.borrow().dict,
         key.borrow(),
@@ -669,7 +669,7 @@ const MergeDriver = struct {
             .merge_right => {
                 const count: usize = @intCast(self.right.borrow().dict.length());
                 if (self.index == count) {
-                    self.work.borrowMut().* = .{ .materializing = try storage.DictMaterializer.init(
+                    self.work.borrowMut().* = .{ .materializing = try dict.Materializer.init(
                         evaluator.allocator(),
                         self.pairs.borrow()[0..self.pair_count],
                         false,
@@ -679,7 +679,7 @@ const MergeDriver = struct {
                 }
                 const key = dict.keyAt(self.right.borrow().dict, self.index);
                 if (self.work.borrowMut().* != .finding) self.work.borrowMut().* = .{
-                    .finding = storage.DictFindCursor.initHeader(
+                    .finding = dict.FindCursor.initHeader(
                         evaluator.allocator(),
                         self.left.borrow().dict,
                         key,
@@ -804,7 +804,7 @@ fn SplitDriver(comptime text_kind: value.HeapKind, comptime separator_kind: valu
         codepoint_index: usize = 0,
         part_max_codepoint: u32 = 0,
         part_writer: ?heap.Owned(kernel_flat.CodepointWriter) = null,
-        result_materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+        result_materializer: ?heap.Owned(list.ValueMaterializer) = null,
 
         fn beginPart(self: *Self, start: usize, end: usize) void {
             self.part_start = start;
@@ -1130,7 +1130,7 @@ const FormatDriver = struct {
         fill: Fill,
         materialize: struct {
             output: heap.Owned([]u32),
-            materializer: heap.Owned(storage.CodepointMaterializer),
+            materializer: heap.Owned(list.CodepointMaterializer),
         },
         complete: heap.Owned([]u32),
 
@@ -1277,7 +1277,7 @@ const FormatDriver = struct {
                 const count: usize = @intCast(self.template.borrow().list.length());
                 if (fill.cursor == count) {
                     std.debug.assert(fill.output_index == fill.output.borrow().len);
-                    const materializer = storage.CodepointMaterializer.init(
+                    const materializer = list.CodepointMaterializer.init(
                         evaluator.allocator(),
                         fill.output.borrow(),
                     );

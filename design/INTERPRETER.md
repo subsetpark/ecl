@@ -617,6 +617,9 @@ primitives, operationalized as two rules:
   namespace enumeration likewise owns one Directory lease while yielding
   canonical module and alias names. `Session.completionCandidates` drives
   those observation cursors inside a retirement-settling blocking turn.
+  Its producer and scheduled `words` both finish through
+  `SortedUniqueNameCursor`, which owns exact chunk materialization, stable
+  lexical sorting, and in-place duplicate compaction as one resumable state.
   Dotted prefixes use non-mutating intern lookup plus a public-export
   cursor; arbitrary input is never inserted into the process intern table.
   The public `CompletionSet` contains only sorted, duplicate-free rendered
@@ -764,16 +767,42 @@ allocation failure interrupt it at bounded intervals.
   sorting is one parameterized `MergeSortCursor`; reflection name ordering
   and language `grade` supply only their payload and resumable comparator,
   so resumption and stability have one implementation.
+- **Aggregate algorithms belong to their value owner.** `list.zig` owns
+  specialization plus generic, codepoint, byte, integer, float, and symbol
+  materializers. Every blocking list constructor drives one of those same
+  cursors, while scheduler drivers store the cursor itself; there is no
+  construction implementation in `kernel_storage.zig`. `dict.zig` likewise
+  owns one `Materializer` and one `FindCursor`. The materializer alone defines
+  the index threshold, checks small dictionaries linearly for duplicates, and
+  builds the retained index at the same threshold that `FindCursor` probes.
+  Blocking dictionary construction and lookup drive those cursors. Dictionary
+  update semantics remain only in the scheduler-visible language kernels;
+  there is no unused synchronous `put`/`del`/`merge` family.
+- **Composite name work remains composite while suspended.** An unknown
+  qualified module prefix installs one `InternModuleNameCursor` that owns both
+  insertion and module-name validation, then transfers the validated brand to
+  loading. Dispatch, reflective retry, and import retry preserve that cursor
+  in `QualifiedLoadPreparationDriver`; none can synchronously intern a
+  runtime-sized prefix inside a scheduler step. Reflection producers remain
+  distinct, but both `words` and completion hand their collected chunks to
+  `SortedUniqueNameCursor`, the one materialize/sort/deduplicate pipeline.
+- **Blocking drives are boundary-specific, not alternate production APIs.**
+  Session completion and bootstrap/tool constructors may drive a production
+  cursor to completion. Registry registration/alias blocking drives exist
+  only in the test-only `modules.testing` namespace, where host tests genuinely
+  need to mint turn authority. Environment, binder, and span tests drive the
+  same direct lookup, name, lowering, and code-root cursors used at runtime;
+  their former production-visible blocking facades do not exist.
 - **Construction has two approved shapes.** A known-size result is
   allocated exactly once and initialized through a work cursor. An
   unknown-size result uses linked fixed chunks, then materializes exactly
   once through a work cursor. Reader forms, binder output, string
   provenance, span tables, and the session span archive use this
   substrate; none grows by relocating accumulated state or by automatic
-  hash-table rehashing. Homogeneous fill phases share
-  `ChunkedMaterializer`; action-producing reflection drivers accumulate
-  through `ActionPlan`, which owns counting, exact allocation, filling,
-  and rendering.
+  hash-table rehashing. List-owned typed materializers share exact leaf
+  allocation and bounded fill policy; action-producing reflection drivers
+  accumulate through `ActionPlan`, which owns counting, exact allocation,
+  filling, and rendering.
 - **Stateful list combinators use those same shapes.** `stencil` computes
   its result count up front, owns one exact result buffer, and stages and
   materializes only the current overlapping window before its isolated

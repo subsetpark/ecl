@@ -21,6 +21,7 @@ const intern = @import("../intern.zig");
 const env = @import("../env.zig");
 const machine = @import("../machine.zig");
 const kernel_storage = @import("../kernel_storage.zig");
+const list = @import("../list.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
@@ -187,7 +188,7 @@ const RequestDriver = struct {
         headers_dictionary_prepare: HeaderBuild,
         headers_dictionary: struct {
             build: HeaderBuild,
-            dictionary: kernel_storage.DictMaterializer,
+            dictionary: dict.Materializer,
         },
         release_header_pairs: struct { build: HeaderBuild, headers: Value },
         response_body_text: struct {
@@ -198,7 +199,7 @@ const RequestDriver = struct {
         response_body_bytes: struct {
             exchange: ExchangeData,
             headers: Value,
-            bytes: kernel_storage.ByteListMaterializer,
+            bytes: list.ByteListMaterializer,
         },
         finish_status: Results,
         finish_headers: struct { results: Results, status_key: u32 },
@@ -211,7 +212,7 @@ const RequestDriver = struct {
         finish_dictionary: struct {
             results: Results,
             slots: []dict.Pair,
-            dictionary: kernel_storage.DictMaterializer,
+            dictionary: dict.Materializer,
         },
         output: Results,
         cleanup_pairs: HeaderBuild,
@@ -361,7 +362,7 @@ const RequestDriver = struct {
                 self.state = .{ .response_headers = build };
             },
             .headers_dictionary_prepare => |*headers| {
-                const dictionary = try kernel_storage.DictMaterializer.init(
+                const dictionary = try dict.Materializer.init(
                     self.allocator,
                     headers.pairs.items,
                     true,
@@ -474,7 +475,7 @@ const RequestDriver = struct {
                 } };
             },
             .finish_dictionary_prepare => |*finish| {
-                const dictionary = try kernel_storage.DictMaterializer.init(
+                const dictionary = try dict.Materializer.init(
                     self.allocator,
                     finish.slots,
                     true,
