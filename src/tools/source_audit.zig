@@ -211,6 +211,13 @@ const repository_verification_files = [_][]const u8{
     "test/native/negative/unknown_capability.zig",
     "test/native/negative/duplicate_word.zig",
     "test/native/negative/empty_doc.zig",
+    "test/comptime/negative/missing_advance.zig",
+    "test/comptime/negative/wrong_receiver.zig",
+    "test/comptime/negative/wrong_progress_payload.zig",
+    "test/comptime/negative/missing_fallibility.zig",
+    "test/comptime/negative/unexpected_fallibility.zig",
+    "test/comptime/negative/generic_parameter.zig",
+    "test/comptime/negative/malformed_comparator.zig",
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
 };

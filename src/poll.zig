@@ -51,9 +51,108 @@ pub const WorkBudget = struct {
     }
 };
 
+/// Validate the finite-cursor protocol at the generic driver that consumes it.
+/// This is deliberately structural rather than a global cursor registry: each
+/// call supplies the exact result and argument tuple its boundary requires.
+fn validateFiniteCursor(
+    comptime boundary: []const u8,
+    comptime T: type,
+    comptime Cursor: type,
+    comptime Args: type,
+    comptime fallible: bool,
+) void {
+    const args = switch (@typeInfo(Args)) {
+        .@"struct" => |info| info,
+        else => @compileError(boundary ++ ": arguments must be supplied as a concrete tuple"),
+    };
+    if (!args.is_tuple)
+        @compileError(boundary ++ ": arguments must be supplied as a concrete tuple");
+    switch (@typeInfo(Cursor)) {
+        .@"struct", .@"union", .@"enum", .@"opaque" => {},
+        else => @compileError(boundary ++ ": cursor must be a container type with an advance declaration"),
+    }
+    if (!@hasDecl(Cursor, "advance"))
+        @compileError(boundary ++ ": cursor must declare advance");
+    const advance = switch (@typeInfo(@TypeOf(Cursor.advance))) {
+        .@"fn" => |info| info,
+        else => @compileError(boundary ++ ": cursor advance must be a function"),
+    };
+    if (advance.is_generic or advance.is_var_args)
+        @compileError(boundary ++ ": cursor advance must be non-generic and non-variadic");
+    if (advance.params.len != args.fields.len + 1)
+        @compileError(boundary ++ ": cursor advance parameter count must match the supplied argument tuple");
+    if (advance.params[0].type == null or advance.params[0].type.? != *Cursor)
+        @compileError(boundary ++ ": cursor advance receiver must be *Cursor");
+    inline for (advance.params[1..], 1..) |parameter, index| {
+        if (parameter.is_generic or parameter.type == null)
+            @compileError(boundary ++ ": cursor advance parameter " ++
+                std.fmt.comptimePrint("{d}", .{index}) ++ " must have a concrete type");
+    }
+    const actual = advance.return_type orelse
+        @compileError(boundary ++ ": cursor advance must have a concrete return type");
+    const Expected = Progress(T);
+    if (fallible) {
+        const payload = switch (@typeInfo(actual)) {
+            .error_union => |info| info.payload,
+            else => @compileError(boundary ++
+                ": cursor advance must return an error union with payload poll.Progress(T)"),
+        };
+        if (payload != Expected)
+            @compileError(boundary ++
+                ": cursor advance must return an error union with payload poll.Progress(T)");
+    } else if (actual != Expected) {
+        @compileError(boundary ++ ": cursor advance must return poll.Progress(T)");
+    }
+}
+
+fn validateMergeSortComparator(comptime T: type, comptime Comparator: type) void {
+    const boundary = "poll.MergeSortCursor";
+    if (@typeInfo(Comparator) != .@"struct")
+        @compileError(boundary ++ ": comparator must be a struct spec");
+    if (!@hasDecl(Comparator, "Context"))
+        @compileError(boundary ++ ": comparator must declare Context");
+    if (!@hasDecl(Comparator, "Cursor"))
+        @compileError(boundary ++ ": comparator must declare Cursor");
+    if (@TypeOf(Comparator.Context) != type)
+        @compileError(boundary ++ ": comparator Context must be a type");
+    if (@TypeOf(Comparator.Cursor) != type)
+        @compileError(boundary ++ ": comparator Cursor must be a type");
+    const Context = Comparator.Context;
+    const Cursor = Comparator.Cursor;
+    if (!@hasDecl(Comparator, "init"))
+        @compileError(boundary ++ ": comparator must declare init");
+    const init = switch (@typeInfo(@TypeOf(Comparator.init))) {
+        .@"fn" => |info| info,
+        else => @compileError(boundary ++ ": comparator init must be a function"),
+    };
+    if (init.is_generic or init.is_var_args or init.params.len != 3 or
+        init.params[0].type == null or init.params[0].type.? != Context or
+        init.params[1].type == null or init.params[1].type.? != T or
+        init.params[2].type == null or init.params[2].type.? != T or
+        init.return_type == null or init.return_type.? != Cursor)
+    {
+        @compileError(boundary ++ ": comparator init must have signature fn (Context, T, T) Cursor");
+    }
+    if (!@hasDecl(Comparator, "advance"))
+        @compileError(boundary ++ ": comparator must declare advance");
+    const advance = switch (@typeInfo(@TypeOf(Comparator.advance))) {
+        .@"fn" => |info| info,
+        else => @compileError(boundary ++ ": comparator advance must be a function"),
+    };
+    if (advance.is_generic or advance.is_var_args or advance.params.len != 2 or
+        advance.params[0].type == null or advance.params[0].type.? != *Cursor or
+        advance.params[1].type == null or advance.params[1].type.? != usize or
+        advance.return_type == null or advance.return_type.? != Progress(std.math.Order))
+    {
+        @compileError(boundary ++
+            ": comparator advance must have signature fn (*Cursor, usize) poll.Progress(std.math.Order)");
+    }
+}
+
 /// Drive a non-failing finite cursor to its observable result.
 pub fn drive(comptime T: type, cursor: anytype, args: anytype) T {
     const Cursor = @TypeOf(cursor.*);
+    comptime validateFiniteCursor("poll.drive", T, Cursor, @TypeOf(args), false);
     while (true) switch (@call(.auto, Cursor.advance, .{cursor} ++ args)) {
         .pending => {},
         .complete => |result| return result,
@@ -63,6 +162,7 @@ pub fn drive(comptime T: type, cursor: anytype, args: anytype) T {
 /// Drive a fallible finite cursor to its observable result.
 pub fn driveFallible(comptime T: type, cursor: anytype, args: anytype) !T {
     const Cursor = @TypeOf(cursor.*);
+    comptime validateFiniteCursor("poll.driveFallible", T, Cursor, @TypeOf(args), true);
     while (true) switch (try @call(.auto, Cursor.advance, .{cursor} ++ args)) {
         .pending => {},
         .complete => |result| return result,
@@ -71,11 +171,13 @@ pub fn driveFallible(comptime T: type, cursor: anytype, args: anytype) !T {
 
 pub fn driveVoid(cursor: anytype, args: anytype) void {
     const Cursor = @TypeOf(cursor.*);
+    comptime validateFiniteCursor("poll.driveVoid", void, Cursor, @TypeOf(args), false);
     while (@call(.auto, Cursor.advance, .{cursor} ++ args) == .pending) {}
 }
 
 pub fn driveVoidFallible(cursor: anytype, args: anytype) !void {
     const Cursor = @TypeOf(cursor.*);
+    comptime validateFiniteCursor("poll.driveVoidFallible", void, Cursor, @TypeOf(args), true);
     while (try @call(.auto, Cursor.advance, .{cursor} ++ args) == .pending) {}
 }
 
@@ -83,6 +185,7 @@ pub fn driveVoidFallible(cursor: anytype, args: anytype) !void {
 /// resumable. `Comparator` supplies `Context`, `Cursor`, `init`, and
 /// `advance`; the latter returns `Progress(std.math.Order)`.
 pub fn MergeSortCursor(comptime T: type, comptime Comparator: type) type {
+    comptime validateMergeSortComparator(T, Comparator);
     return struct {
         const Self = @This();
 
@@ -626,4 +729,97 @@ pub fn ChunkList(comptime T: type) type {
             return .{ .chunk = self.last, .index = if (self.last) |last| last.len else 0 };
         }
     };
+}
+
+test "poll: finite driver observes pending and completion" {
+    const Cursor = struct {
+        current: u32 = 0,
+
+        pub fn advance(self: *@This(), amount: u32) Progress(u32) {
+            if (self.current == 3) return .{ .complete = self.current };
+            self.current += amount;
+            return .pending;
+        }
+    };
+    var cursor = Cursor{};
+    try std.testing.expectEqual(@as(u32, 3), drive(u32, &cursor, .{@as(u32, 1)}));
+}
+
+test "poll: fixed map stream observes pending items and completion" {
+    const Key = enum(u32) { first = 1, second = 2 };
+    const Map = FixedMap(Key, u8);
+    var initializer = Map.initCursor(std.testing.allocator, 2);
+    defer initializer.deinit();
+    var map = try driveFallible(Map, &initializer, .{});
+    defer map.deinit();
+
+    var first = map.putCursor(.first, 10);
+    try std.testing.expect(drive(bool, &first, .{}));
+    var second = map.putCursor(.second, 20);
+    try std.testing.expect(drive(bool, &second, .{}));
+
+    var entries = map.rawEntries();
+    var pending_count: usize = 0;
+    var item_count: usize = 0;
+    var value_total: usize = 0;
+    while (true) switch (entries.advance()) {
+        .pending => pending_count += 1,
+        .item => |entry| {
+            item_count += 1;
+            value_total += entry.value;
+        },
+        .complete => break,
+    };
+    try std.testing.expect(pending_count != 0);
+    try std.testing.expectEqual(@as(usize, 2), item_count);
+    try std.testing.expectEqual(@as(usize, 30), value_total);
+}
+
+test "poll: merge sort consumes a resumable stable comparator" {
+    const Item = struct { key: u8, sequence: u8 };
+    const Stats = struct { initialized: usize = 0, advanced: usize = 0 };
+    const Comparator = struct {
+        pub const Context = *Stats;
+        pub const Cursor = struct {
+            stats: *Stats,
+            left: Item,
+            right: Item,
+            pending: bool = true,
+        };
+
+        pub fn init(stats: Context, left: Item, right: Item) Cursor {
+            stats.initialized += 1;
+            return .{ .stats = stats, .left = left, .right = right };
+        }
+
+        pub fn advance(cursor: *Cursor, budget: usize) Progress(std.math.Order) {
+            std.debug.assert(budget != 0);
+            cursor.stats.advanced += 1;
+            if (cursor.pending) {
+                cursor.pending = false;
+                return .pending;
+            }
+            return .{ .complete = std.math.order(cursor.left.key, cursor.right.key) };
+        }
+    };
+    const Sort = MergeSortCursor(Item, Comparator);
+    var stats = Stats{};
+    var items = [_]Item{
+        .{ .key = 2, .sequence = 0 },
+        .{ .key = 1, .sequence = 1 },
+        .{ .key = 2, .sequence = 2 },
+        .{ .key = 1, .sequence = 3 },
+    };
+    var sort = try Sort.init(std.testing.allocator, &items, &stats);
+    defer sort.deinit();
+    driveVoid(&sort, .{@as(usize, 1)});
+
+    try std.testing.expectEqualSlices(Item, &.{
+        .{ .key = 1, .sequence = 1 },
+        .{ .key = 1, .sequence = 3 },
+        .{ .key = 2, .sequence = 0 },
+        .{ .key = 2, .sequence = 2 },
+    }, &items);
+    try std.testing.expect(stats.initialized != 0);
+    try std.testing.expectEqual(stats.initialized * 2, stats.advanced);
 }

@@ -767,7 +767,21 @@ allocation failure interrupt it at bounded intervals.
   blocking facades use the shared `drive` helpers. Stable bottom-up
   sorting is one parameterized `MergeSortCursor`; reflection name ordering
   and language `grade` supply only their payload and resumable comparator,
-  so resumption and stability have one implementation.
+  so resumption and stability have one implementation. The generic consumers
+  own compile-time protocol validation: every `drive` instantiation requires
+  an exact mutable receiver, a concrete argument list, the selected
+  fallibility, and the corresponding `Progress` payload, while
+  `MergeSortCursor` requires exact `Context`, `Cursor`, `init`, and `advance`
+  declarations from its comparator spec. Malformed implementations therefore
+  fail at the polling boundary even if Zig would otherwise leave their method
+  bodies lazily unanalyzed. These structural checks prove signatures, not the
+  behavioral promise that an advance spends only its caller-provided budget;
+  runtime tests and scheduler acceptance continue to prove bounded progress.
+  The post-unification generic consumers are exactly the four finite `drive`
+  variants and `MergeSortCursor`. `StreamProgress` currently has no generic
+  driver: concrete environment, module, reflection, and fixed-map state
+  machines consume those streams directly, so there is no reflective stream
+  boundary to validate or global cursor registry to maintain.
 - **Aggregate algorithms belong to their value owner.** `list.zig` owns
   specialization plus generic, codepoint, byte, integer, float, and symbol
   materializers. Every blocking list constructor drives one of those same

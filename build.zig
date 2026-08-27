@@ -165,6 +165,48 @@ pub fn build(b: *std.Build) void {
         native_negative_step.dependOn(&negative.step);
     }
 
+    // First-party comptime protocols fail at the production boundary that
+    // consumes them. Keep these fixtures separate from the public native SDK
+    // suite so later internal factories can extend one general contract gate.
+    const comptime_contract_cases = [_]struct { file: []const u8, message: []const u8 }{
+        .{ .file = "missing_advance", .message = "poll.drive: cursor must declare advance" },
+        .{ .file = "wrong_receiver", .message = "poll.drive: cursor advance receiver must be *Cursor" },
+        .{ .file = "wrong_progress_payload", .message = "poll.drive: cursor advance must return poll.Progress(T)" },
+        .{ .file = "missing_fallibility", .message = "poll.driveFallible: cursor advance must return an error union with payload poll.Progress(T)" },
+        .{ .file = "unexpected_fallibility", .message = "poll.drive: cursor advance must return poll.Progress(T)" },
+        .{ .file = "generic_parameter", .message = "poll.drive: cursor advance must be non-generic and non-variadic" },
+        .{ .file = "malformed_comparator", .message = "poll.MergeSortCursor: comparator advance must have signature fn (*Cursor, usize) poll.Progress(std.math.Order)" },
+    };
+    const poll_contract_module = b.createModule(.{
+        .root_source_file = b.path("src/poll.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const comptime_contract_step = b.step(
+        "test-comptime-contracts",
+        "Check first-party comptime protocols and their positive runtime consumers",
+    );
+    for (comptime_contract_cases) |case| {
+        const negative_module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("test/comptime/negative/{s}.zig", .{case.file})),
+            .target = target,
+            .optimize = optimize,
+        });
+        negative_module.addImport("ecl-poll", poll_contract_module);
+        const negative = b.addObject(.{
+            .name = b.fmt("comptime-contract-negative-{s}", .{case.file}),
+            .root_module = negative_module,
+        });
+        negative.expect_errors = .{ .contains = case.message };
+        comptime_contract_step.dependOn(&negative.step);
+    }
+    const poll_contract_tests = b.addTest(.{
+        .root_module = poll_contract_module,
+        .filters = &.{"poll:"},
+    });
+    const run_poll_contract_tests = b.addRunArtifact(poll_contract_tests);
+    comptime_contract_step.dependOn(&run_poll_contract_tests.step);
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -807,6 +849,7 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(b.getInstallStep());
     precommit_step.dependOn(analysis_step);
     precommit_step.dependOn(&run_precommit_tests.step);
+    precommit_step.dependOn(comptime_contract_step);
 }
 
 fn addCapturedTestRun(
