@@ -122,7 +122,11 @@ pub const LowerCursor = struct {
         body: []const SpannedValue,
         binder_span: Span,
         diag: *Diag,
-    ) error{OutOfMemory}!LowerCursor {
+    ) Error!LowerCursor {
+        if (names.len == 0) {
+            diag.set(binder_span, "a binder must contain at least one name");
+            return error.Parse;
+        }
         const local_indices = try allocator.alloc(?usize, body.len);
         return .{
             .allocator = allocator,
@@ -382,10 +386,6 @@ pub const LowerCursor = struct {
             .locals_init => |*cursor| switch (try cursor.advance()) {
                 .pending => .pending,
                 .complete => |locals| result: {
-                    if (self.names.len == 0) {
-                        self.diag.set(self.binder_span, "a binder must contain at least one name");
-                        return error.Parse;
-                    }
                     cursor.deinit();
                     self.state = .{ .names = .{
                         .locals = locals,

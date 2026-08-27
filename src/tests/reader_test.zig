@@ -7,12 +7,25 @@ const equal = @import("../equal.zig");
 const list = @import("../list.zig");
 const printer = @import("../print.zig");
 const lexer = @import("../lexer.zig");
+const binder = @import("../binder.zig");
 const reader = @import("../reader.zig");
 const spans = @import("../spans.zig");
 const testgen = @import("testgen.zig");
 
 fn retireReadCursor(cursor: *reader.ReadCursor, releases: *heap.ReleaseDomain) void {
     while (!cursor.advanceRetirement()) _ = releases.advance(256);
+}
+
+test "empty binder lowering rejects before acquiring storage" {
+    var host = heap.HostOwner.init(std.testing.allocator);
+    defer host.cleanup().drain();
+    var diag: lexer.Diag = .{};
+
+    try std.testing.expectError(
+        error.Parse,
+        binder.lower(host.cleanup(), &.{}, &.{}, .{}, &diag),
+    );
+    try std.testing.expectEqualStrings("a binder must contain at least one name", diag.text());
 }
 
 test "span archive rejects a substitutable provenance issuer" {
