@@ -250,29 +250,125 @@ pub const EclErr = struct {
 
 const ErrorValueProgress = poll_api.Progress(Value);
 const OrdinaryErrorCursor = struct {
+    const BaseValues = struct {
+        message: Value,
+        trace: Value,
+
+        fn retire(self: *BaseValues, releases: *heap.ReleaseDomain) void {
+            releases.releaseValue(self.trace);
+            releases.releaseValue(self.message);
+        }
+    };
+    const CompletedValues = struct {
+        base: BaseValues,
+        source: ?Value,
+        data: Value,
+
+        fn retire(self: *CompletedValues, releases: *heap.ReleaseDomain) void {
+            releases.releaseValue(self.data);
+            if (self.source) |source| releases.releaseValue(source);
+            self.base.retire(releases);
+        }
+    };
+    const State = union(enum) {
+        names: usize,
+        name_insert: struct {
+            index: usize,
+            cursor: intern.InternInsertionCursor,
+        },
+        message: kernel_storage.TextMaterializer,
+        trace_allocate: Value,
+        trace_copy: struct {
+            message: Value,
+            items: []Value,
+            index: usize,
+        },
+        trace_build: struct {
+            message: Value,
+            items: []Value,
+            builder: kernel_storage.ValueMaterializer,
+        },
+        data: struct {
+            base: BaseValues,
+            index: usize,
+        },
+        data_insert: struct {
+            base: BaseValues,
+            index: usize,
+            cursor: intern.InternInsertionCursor,
+        },
+        source: struct {
+            base: BaseValues,
+            index: usize,
+            builder: kernel_storage.TextMaterializer,
+        },
+        data_prepare: struct {
+            base: BaseValues,
+            index: usize,
+            source: ?Value,
+        },
+        data_build: struct {
+            base: BaseValues,
+            source: ?Value,
+            builder: kernel_storage.DictMaterializer,
+        },
+        outer_prepare: CompletedValues,
+        outer: struct {
+            values: CompletedValues,
+            builder: kernel_storage.DictMaterializer,
+        },
+        complete: CompletedValues,
+
+        fn retire(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .names, .name_insert => {},
+                .message => |*builder| builder.retire(releases),
+                .trace_allocate => |message| releases.releaseValue(message),
+                .trace_copy => |*trace| {
+                    allocator.free(trace.items);
+                    releases.releaseValue(trace.message);
+                },
+                .trace_build => |*trace| {
+                    trace.builder.retire(releases);
+                    allocator.free(trace.items);
+                    releases.releaseValue(trace.message);
+                },
+                .data => |*data| data.base.retire(releases),
+                .data_insert => |*data| data.base.retire(releases),
+                .source => |*source| {
+                    source.builder.retire(releases);
+                    source.base.retire(releases);
+                },
+                .data_prepare => |*data| {
+                    if (data.source) |source| releases.releaseValue(source);
+                    data.base.retire(releases);
+                },
+                .data_build => |*data| {
+                    data.builder.retire(releases);
+                    if (data.source) |source| releases.releaseValue(source);
+                    data.base.retire(releases);
+                },
+                .outer_prepare, .complete => |*values| values.retire(releases),
+                .outer => |*outer| {
+                    outer.builder.retire(releases);
+                    outer.values.retire(releases);
+                },
+            }
+        }
+    };
+
     allocator: std.mem.Allocator,
     failure: *EclErr,
     resolved: ResolvedTrace,
     location: ?spans.LocatedSpan,
     names: [9]u32 = .{0} ** 9,
-    name_index: usize = 0,
-    inserter: ?intern.InternInsertionCursor = null,
-    message_builder: ?kernel_storage.TextMaterializer = null,
-    message_value: ?Value = null,
-    trace_items: ?[]Value = null,
-    trace_index: usize = 0,
-    trace_builder: ?kernel_storage.ValueMaterializer = null,
-    trace_value: ?Value = null,
     data_pairs: [8]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 8,
-    data_index: usize = 0,
-    data_inserter: ?intern.InternInsertionCursor = null,
-    source_builder: ?kernel_storage.TextMaterializer = null,
-    source_value: ?Value = null,
-    data_builder: ?kernel_storage.DictMaterializer = null,
-    data_value: ?Value = null,
     outer_pairs: [5]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }} ** 5,
-    outer_builder: ?kernel_storage.DictMaterializer = null,
-    phase: enum { names, message, trace_allocate, trace_copy, trace_build, data, source, data_build, outer, complete } = .names,
+    state: State = .{ .names = 0 },
 
     fn init(
         allocator: std.mem.Allocator,
@@ -288,19 +384,10 @@ const OrdinaryErrorCursor = struct {
         };
     }
     fn retire(self: *OrdinaryErrorCursor, releases: *heap.ReleaseDomain) void {
-        if (self.message_builder) |*builder| builder.retire(releases);
-        if (self.trace_builder) |*builder| builder.retire(releases);
-        if (self.source_builder) |*builder| builder.retire(releases);
-        if (self.data_builder) |*builder| builder.retire(releases);
-        if (self.outer_builder) |*builder| builder.retire(releases);
-        if (self.message_value) |item| releases.releaseValue(item);
-        if (self.trace_value) |item| releases.releaseValue(item);
-        if (self.source_value) |item| releases.releaseValue(item);
-        if (self.data_value) |item| releases.releaseValue(item);
-        if (self.trace_items) |items| self.allocator.free(items);
+        self.state.retire(releases, self.allocator);
     }
-    fn nameBytes(self: *const OrdinaryErrorCursor) []const u8 {
-        return switch (self.name_index) {
+    fn nameBytes(self: *const OrdinaryErrorCursor, index: usize) []const u8 {
+        return switch (index) {
             0 => self.failure.kind.symbol(),
             1 => "kind",
             2 => "msg",
@@ -313,139 +400,191 @@ const OrdinaryErrorCursor = struct {
             else => unreachable,
         };
     }
-    fn advanceNames(self: *OrdinaryErrorCursor) error{OutOfMemory}!ErrorValueProgress {
-        if (self.name_index == self.names.len) {
-            self.message_builder = .init(self.allocator, self.failure.text());
-            self.phase = .message;
-            return .pending;
-        }
-        if (self.inserter == null) self.inserter = intern.insertionCursor(self.nameBytes());
-        return switch (try self.inserter.?.advance()) {
-            .pending => .pending,
-            .complete => |id| result: {
-                self.names[self.name_index] = id;
-                self.name_index += 1;
-                self.inserter = null;
-                break :result .pending;
-            },
-        };
-    }
-    fn advanceData(self: *OrdinaryErrorCursor) error{OutOfMemory}!ErrorValueProgress {
-        if (self.data_index != self.failure.data_len) {
-            const entry = self.failure.data[self.data_index];
-            if (self.data_inserter == null)
-                self.data_inserter = intern.insertionCursor(@tagName(entry.key));
-            return switch (try self.data_inserter.?.advance()) {
-                .pending => .pending,
-                .complete => |key| result: {
-                    self.data_pairs[self.data_index] = .{ .{ .symbol = key }, entry.value };
-                    self.data_index += 1;
-                    self.data_inserter = null;
-                    break :result .pending;
-                },
-            };
-        }
-        if (self.location) |located| {
-            self.source_builder = .init(self.allocator, located.source_name);
-            self.phase = .source;
-        } else {
-            self.data_builder = try .init(self.allocator, self.data_pairs[0..self.data_index], false);
-            self.phase = .data_build;
-        }
-        return .pending;
-    }
-    fn beginOuter(self: *OrdinaryErrorCursor) error{OutOfMemory}!void {
+    fn beginOuter(
+        self: *OrdinaryErrorCursor,
+        values: *CompletedValues,
+    ) error{OutOfMemory}!void {
         var count: usize = 0;
         self.outer_pairs[count] = .{ .{ .symbol = self.names[1] }, .{ .symbol = self.names[0] } };
         count += 1;
-        self.outer_pairs[count] = .{ .{ .symbol = self.names[2] }, self.message_value.? };
+        self.outer_pairs[count] = .{ .{ .symbol = self.names[2] }, values.base.message };
         count += 1;
         if (self.resolved.word) |word| {
             self.outer_pairs[count] = .{ .{ .symbol = self.names[3] }, .{ .symbol = word } };
             count += 1;
         }
-        self.outer_pairs[count] = .{ .{ .symbol = self.names[4] }, self.trace_value.? };
+        self.outer_pairs[count] = .{ .{ .symbol = self.names[4] }, values.base.trace };
         count += 1;
-        self.outer_pairs[count] = .{ .{ .symbol = self.names[5] }, self.data_value.? };
+        self.outer_pairs[count] = .{ .{ .symbol = self.names[5] }, values.data };
         count += 1;
-        self.outer_builder = try .init(self.allocator, self.outer_pairs[0..count], false);
-        self.phase = .outer;
+        const builder = try kernel_storage.DictMaterializer.init(
+            self.allocator,
+            self.outer_pairs[0..count],
+            false,
+        );
+        const moved = values.*;
+        self.state = .{ .outer = .{
+            .values = moved,
+            .builder = builder,
+        } };
     }
     pub fn advance(self: *OrdinaryErrorCursor) error{OutOfMemory}!ErrorValueProgress {
-        return switch (self.phase) {
-            .names => try self.advanceNames(),
-            .message => switch (try self.message_builder.?.advance(1)) {
+        return switch (self.state) {
+            .names => |index| result: {
+                if (index == self.names.len) {
+                    self.state = .{ .message = .init(self.allocator, self.failure.text()) };
+                } else self.state = .{ .name_insert = .{
+                    .index = index,
+                    .cursor = intern.insertionCursor(self.nameBytes(index)),
+                } };
+                break :result .pending;
+            },
+            .name_insert => |*insertion| switch (try insertion.cursor.advance()) {
                 .pending => .pending,
-                .complete => |item| result: {
-                    self.message_builder.?.deinit();
-                    self.message_builder = null;
-                    self.message_value = item;
-                    self.phase = .trace_allocate;
+                .complete => |id| result: {
+                    self.names[insertion.index] = id;
+                    self.state = .{ .names = insertion.index + 1 };
                     break :result .pending;
                 },
             },
-            .trace_allocate => result: {
-                self.trace_items = try self.allocator.alloc(Value, self.resolved.trace.len);
-                self.phase = .trace_copy;
+            .message => |*builder| switch (try builder.advance(1)) {
+                .pending => .pending,
+                .complete => |item| result: {
+                    builder.deinit();
+                    self.state = .{ .trace_allocate = item };
+                    break :result .pending;
+                },
+            },
+            .trace_allocate => |message| result: {
+                const items = try self.allocator.alloc(Value, self.resolved.trace.len);
+                self.state = .{ .trace_copy = .{
+                    .message = message,
+                    .items = items,
+                    .index = 0,
+                } };
                 break :result .pending;
             },
-            .trace_copy => result: {
-                if (self.trace_index != self.resolved.trace.len) {
-                    self.trace_items.?[self.trace_index] = .{ .symbol = self.resolved.trace[self.trace_index] };
-                    self.trace_index += 1;
+            .trace_copy => |*trace| result: {
+                if (trace.index != self.resolved.trace.len) {
+                    trace.items[trace.index] = .{ .symbol = self.resolved.trace[trace.index] };
+                    trace.index += 1;
                 } else {
-                    self.trace_builder = .init(self.allocator, self.trace_items.?);
-                    self.phase = .trace_build;
+                    const next = @FieldType(State, "trace_build"){
+                        .message = trace.message,
+                        .items = trace.items,
+                        .builder = .init(self.allocator, trace.items),
+                    };
+                    self.state = .{ .trace_build = next };
                 }
                 break :result .pending;
             },
-            .trace_build => switch (try self.trace_builder.?.advance(1)) {
+            .trace_build => |*trace| switch (try trace.builder.advance(1)) {
                 .pending => .pending,
                 .complete => |item| result: {
-                    self.trace_builder.?.deinit();
-                    self.trace_builder = null;
-                    self.trace_value = item;
-                    self.phase = .data;
+                    const message = trace.message;
+                    const items = trace.items;
+                    trace.builder.deinit();
+                    self.allocator.free(items);
+                    self.state = .{ .data = .{
+                        .base = .{ .message = message, .trace = item },
+                        .index = 0,
+                    } };
                     break :result .pending;
                 },
             },
-            .data => try self.advanceData(),
-            .source => switch (try self.source_builder.?.advance(1)) {
+            .data => |*data| result: {
+                if (data.index != self.failure.data_len) {
+                    self.state = .{ .data_insert = .{
+                        .base = data.base,
+                        .index = data.index,
+                        .cursor = intern.insertionCursor(@tagName(self.failure.data[data.index].key)),
+                    } };
+                } else if (self.location) |located| {
+                    self.state = .{ .source = .{
+                        .base = data.base,
+                        .index = data.index,
+                        .builder = .init(self.allocator, located.source_name),
+                    } };
+                } else self.state = .{ .data_prepare = .{
+                    .base = data.base,
+                    .index = data.index,
+                    .source = null,
+                } };
+                break :result .pending;
+            },
+            .data_insert => |*insertion| switch (try insertion.cursor.advance()) {
+                .pending => .pending,
+                .complete => |key| result: {
+                    const entry = self.failure.data[insertion.index];
+                    self.data_pairs[insertion.index] = .{ .{ .symbol = key }, entry.value };
+                    self.state = .{ .data = .{
+                        .base = insertion.base,
+                        .index = insertion.index + 1,
+                    } };
+                    break :result .pending;
+                },
+            },
+            .source => |*source| switch (try source.builder.advance(1)) {
                 .pending => .pending,
                 .complete => |item| result: {
-                    self.source_builder.?.deinit();
-                    self.source_builder = null;
-                    self.source_value = item;
+                    const base = source.base;
+                    const source_index = source.index;
+                    source.builder.deinit();
                     const located = self.location.?;
-                    self.data_pairs[self.data_index] = .{ .{ .symbol = self.names[6] }, item };
-                    self.data_index += 1;
-                    self.data_pairs[self.data_index] = .{ .{ .symbol = self.names[7] }, .{ .int = located.span.line } };
-                    self.data_index += 1;
-                    self.data_pairs[self.data_index] = .{ .{ .symbol = self.names[8] }, .{ .int = located.span.col } };
-                    self.data_index += 1;
-                    self.data_builder = try .init(self.allocator, self.data_pairs[0..self.data_index], false);
-                    self.phase = .data_build;
+                    var index = source_index;
+                    self.data_pairs[index] = .{ .{ .symbol = self.names[6] }, item };
+                    index += 1;
+                    self.data_pairs[index] = .{ .{ .symbol = self.names[7] }, .{ .int = located.span.line } };
+                    index += 1;
+                    self.data_pairs[index] = .{ .{ .symbol = self.names[8] }, .{ .int = located.span.col } };
+                    index += 1;
+                    self.state = .{ .data_prepare = .{
+                        .base = base,
+                        .index = index,
+                        .source = item,
+                    } };
                     break :result .pending;
                 },
             },
-            .data_build => switch (try self.data_builder.?.advance(1)) {
+            .data_prepare => |*data| result: {
+                const builder = try kernel_storage.DictMaterializer.init(
+                    self.allocator,
+                    self.data_pairs[0..data.index],
+                    false,
+                );
+                self.state = .{ .data_build = .{
+                    .base = data.base,
+                    .source = data.source,
+                    .builder = builder,
+                } };
+                break :result .pending;
+            },
+            .data_build => |*data| switch (try data.builder.advance(1)) {
                 .pending => .pending,
                 .duplicate_key => unreachable,
                 .complete => |item| result: {
-                    self.data_builder.?.deinit();
-                    self.data_builder = null;
-                    self.data_value = item;
-                    try self.beginOuter();
+                    const base = data.base;
+                    const source = data.source;
+                    data.builder.deinit();
+                    self.state = .{ .outer_prepare = .{
+                        .base = base,
+                        .source = source,
+                        .data = item,
+                    } };
                     break :result .pending;
                 },
             },
-            .outer => switch (try self.outer_builder.?.advance(1)) {
+            .outer_prepare => |*values| result: {
+                try self.beginOuter(values);
+                break :result .pending;
+            },
+            .outer => |*outer| switch (try outer.builder.advance(1)) {
                 .pending => .pending,
                 .duplicate_key => unreachable,
                 .complete => |item| result: {
-                    self.outer_builder.?.deinit();
-                    self.outer_builder = null;
-                    self.phase = .complete;
+                    const values = outer.values;
+                    outer.builder.deinit();
+                    self.state = .{ .complete = values };
                     break :result .{ .complete = item };
                 },
             },
