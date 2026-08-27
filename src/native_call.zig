@@ -28,46 +28,84 @@ const CandidateEntry = struct {
 
 const ListBuild = struct {
     expected: usize,
-    appended: usize = 0,
-    source: ?heap.ListBuilder(.generic_spine),
-    materializer: ?storage.ValueMaterializer = null,
-    result: ?Value = null,
+    state: State,
+
+    const State = union(enum) {
+        building: struct {
+            appended: usize,
+            source: heap.ListBuilder(.generic_spine),
+        },
+        materializing: struct {
+            source: heap.ListBuilder(.generic_spine),
+            materializer: storage.ValueMaterializer,
+        },
+        complete: Value,
+
+        fn retire(self: *State, releases: *heap.ReleaseDomain) void {
+            switch (self.*) {
+                .building => |*building| building.source.retirePartial(releases),
+                .materializing => |*materializing| {
+                    materializing.materializer.retire(releases);
+                    materializing.source.retirePartial(releases);
+                },
+                .complete => |result| releases.releaseValue(result),
+            }
+        }
+    };
 
     fn init(allocator: std.mem.Allocator, expected: usize) error{OutOfMemory}!ListBuild {
         var source = try heap.ListBuilder(.generic_spine).init(allocator, expected, expected);
         source.setLen(0);
-        return .{ .expected = expected, .source = source };
+        return .{ .expected = expected, .state = .{ .building = .{
+            .appended = 0,
+            .source = source,
+        } } };
     }
 
     fn append(self: *ListBuild, item: Value) bool {
-        if (self.materializer != null or self.result != null or self.appended == self.expected)
-            return false;
+        const building = switch (self.state) {
+            .building => |*building| building,
+            .materializing, .complete => return false,
+        };
+        if (building.appended == self.expected) return false;
         heap.retainValue(item);
-        self.source.?.items()[self.appended] = item;
-        self.appended += 1;
-        self.source.?.setLen(self.appended);
+        building.source.items()[building.appended] = item;
+        building.appended += 1;
+        building.source.setLen(building.appended);
         return true;
     }
 
     fn advance(self: *ListBuild, call: *Transaction) error{OutOfMemory}!?Value {
-        if (self.result) |result| return result;
-        if (self.appended != self.expected) return null;
-        if (self.materializer == null)
-            self.materializer = .init(call.allocator, self.source.?.items()[0..self.appended]);
+        switch (self.state) {
+            .complete => |result| return result,
+            .building => |*building| {
+                if (building.appended != self.expected) return null;
+                const appended = building.appended;
+                const source = building.source;
+                const materializer = storage.ValueMaterializer.init(
+                    call.allocator,
+                    source.items()[0..appended],
+                );
+                self.state = .{ .materializing = .{
+                    .source = source,
+                    .materializer = materializer,
+                } };
+            },
+            .materializing => {},
+        }
         if (call.budget == 0) {
             call.yield_requested = true;
             return null;
         }
         while (call.budget != 0) {
             call.budget -= 1;
-            switch (try self.materializer.?.advance(1)) {
+            const materializing = &self.state.materializing;
+            switch (try materializing.materializer.advance(1)) {
                 .pending => {},
                 .complete => |result| {
-                    self.materializer.?.deinit();
-                    self.materializer = null;
-                    self.source.?.retirePartial(call.releases);
-                    self.source = null;
-                    self.result = result;
+                    materializing.materializer.deinit();
+                    materializing.source.retirePartial(call.releases);
+                    self.state = .{ .complete = result };
                     return result;
                 },
             }
@@ -77,20 +115,44 @@ const ListBuild = struct {
     }
 
     fn retire(self: *ListBuild, releases: *heap.ReleaseDomain) void {
-        if (self.materializer) |*materializer| materializer.retire(releases);
-        if (self.source) |*source| source.retirePartial(releases);
-        if (self.result) |result| releases.releaseValue(result);
+        self.state.retire(releases);
     }
 };
 
 const DictBuild = struct {
     expected: usize,
-    appended: usize = 0,
-    keys: ?heap.ListBuilder(.generic_spine),
-    values: ?heap.ListBuilder(.generic_spine),
-    materializer: ?storage.DictMaterializer = null,
-    result: ?Value = null,
-    rejected: bool = false,
+    state: State,
+
+    const State = union(enum) {
+        building: struct {
+            appended: usize,
+            keys: heap.ListBuilder(.generic_spine),
+            values: heap.ListBuilder(.generic_spine),
+        },
+        materializing: struct {
+            keys: heap.ListBuilder(.generic_spine),
+            values: heap.ListBuilder(.generic_spine),
+            materializer: storage.DictMaterializer,
+        },
+        complete: Value,
+        rejected,
+
+        fn retire(self: *State, releases: *heap.ReleaseDomain) void {
+            switch (self.*) {
+                .building => |*building| {
+                    building.keys.retirePartial(releases);
+                    building.values.retirePartial(releases);
+                },
+                .materializing => |*materializing| {
+                    materializing.materializer.retire(releases);
+                    materializing.keys.retirePartial(releases);
+                    materializing.values.retirePartial(releases);
+                },
+                .complete => |result| releases.releaseValue(result),
+                .rejected => {},
+            }
+        }
+    };
 
     fn init(
         allocator: std.mem.Allocator,
@@ -102,57 +164,73 @@ const DictBuild = struct {
         errdefer keys.retirePartial(releases);
         var values = try heap.ListBuilder(.generic_spine).init(allocator, expected, expected);
         values.setLen(0);
-        return .{ .expected = expected, .keys = keys, .values = values };
+        return .{ .expected = expected, .state = .{ .building = .{
+            .appended = 0,
+            .keys = keys,
+            .values = values,
+        } } };
     }
 
     fn append(self: *DictBuild, key: Value, item: Value) bool {
-        if (self.materializer != null or self.result != null or self.rejected or
-            self.appended == self.expected) return false;
+        const building = switch (self.state) {
+            .building => |*building| building,
+            .materializing, .complete, .rejected => return false,
+        };
+        if (building.appended == self.expected) return false;
         heap.retainValue(key);
         heap.retainValue(item);
-        self.keys.?.items()[self.appended] = key;
-        self.values.?.items()[self.appended] = item;
-        self.appended += 1;
-        self.keys.?.setLen(self.appended);
-        self.values.?.setLen(self.appended);
+        building.keys.items()[building.appended] = key;
+        building.values.items()[building.appended] = item;
+        building.appended += 1;
+        building.keys.setLen(building.appended);
+        building.values.setLen(building.appended);
         return true;
     }
 
     fn advance(self: *DictBuild, call: *Transaction) error{OutOfMemory}!?Value {
-        if (self.result) |result| return result;
-        if (self.rejected or self.appended != self.expected) return null;
-        if (self.materializer == null) self.materializer = try .initSlices(
-            call.allocator,
-            self.keys.?.items()[0..self.appended],
-            self.values.?.items()[0..self.appended],
-            true,
-        );
+        switch (self.state) {
+            .complete => |result| return result,
+            .rejected => return null,
+            .building => |*building| {
+                if (building.appended != self.expected) return null;
+                const appended = building.appended;
+                const keys = building.keys;
+                const values = building.values;
+                const materializer = try storage.DictMaterializer.initSlices(
+                    call.allocator,
+                    keys.items()[0..appended],
+                    values.items()[0..appended],
+                    true,
+                );
+                self.state = .{ .materializing = .{
+                    .keys = keys,
+                    .values = values,
+                    .materializer = materializer,
+                } };
+            },
+            .materializing => {},
+        }
         if (call.budget == 0) {
             call.yield_requested = true;
             return null;
         }
         while (call.budget != 0) {
             call.budget -= 1;
-            switch (try self.materializer.?.advance(1)) {
+            const materializing = &self.state.materializing;
+            switch (try materializing.materializer.advance(1)) {
                 .pending => {},
                 .duplicate_key => {
-                    self.materializer.?.retire(call.releases);
-                    self.materializer = null;
-                    self.keys.?.retirePartial(call.releases);
-                    self.values.?.retirePartial(call.releases);
-                    self.keys = null;
-                    self.values = null;
-                    self.rejected = true;
+                    materializing.materializer.retire(call.releases);
+                    materializing.keys.retirePartial(call.releases);
+                    materializing.values.retirePartial(call.releases);
+                    self.state = .rejected;
                     return null;
                 },
                 .complete => |result| {
-                    self.materializer.?.deinit();
-                    self.materializer = null;
-                    self.keys.?.retirePartial(call.releases);
-                    self.values.?.retirePartial(call.releases);
-                    self.keys = null;
-                    self.values = null;
-                    self.result = result;
+                    materializing.materializer.deinit();
+                    materializing.keys.retirePartial(call.releases);
+                    materializing.values.retirePartial(call.releases);
+                    self.state = .{ .complete = result };
                     return result;
                 },
             }
@@ -162,10 +240,7 @@ const DictBuild = struct {
     }
 
     fn retire(self: *DictBuild, releases: *heap.ReleaseDomain) void {
-        if (self.materializer) |*materializer| materializer.retire(releases);
-        if (self.keys) |*keys| keys.retirePartial(releases);
-        if (self.values) |*values| values.retirePartial(releases);
-        if (self.result) |result| releases.releaseValue(result);
+        self.state.retire(releases);
     }
 };
 
