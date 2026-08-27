@@ -416,8 +416,8 @@ const NameComparator = struct {
 };
 
 const InternNameMergeSort = poll.MergeSortCursor(u32, NameComparator);
-pub const NameSortProgress = poll.Progress(void);
-pub const NameSortCursor = struct {
+const NameSortProgress = poll.Progress(void);
+const NameSortCursor = struct {
     sort: InternNameMergeSort,
 
     pub fn init(allocator: std.mem.Allocator, names: []u32) error{OutOfMemory}!NameSortCursor {
@@ -431,3 +431,123 @@ pub const NameSortCursor = struct {
         return self.sort.advance(budget);
     }
 };
+
+/// Owned sorted/unique names. `storage` retains the original exact allocation
+/// while `items` exposes only the compacted prefix.
+pub const SortedUniqueNames = struct {
+    pub const owned_disposal: heap.OwnedDisposal = .deinit;
+
+    storage: []u32,
+    unique_len: usize,
+
+    pub fn items(self: *const SortedUniqueNames) []const u32 {
+        return self.storage[0..self.unique_len];
+    }
+    pub fn deinit(self: *SortedUniqueNames, allocator: std.mem.Allocator) void {
+        allocator.free(self.storage);
+        self.* = undefined;
+    }
+};
+
+pub const SortedUniqueNameProgress = poll.Progress(SortedUniqueNames);
+
+/// Common post-collection traversal for reflection names: exact
+/// materialization, lexical sort, and in-place deduplication.
+pub const SortedUniqueNameCursor = struct {
+    allocator: std.mem.Allocator,
+    iterator: poll.ChunkList(u32).Iterator,
+    storage: ?[]u32,
+    phase: enum { materialize, sort, unique, complete } = .materialize,
+    index: usize = 0,
+    unique_len: usize = 0,
+    previous: ?u32 = null,
+    sorter: ?NameSortCursor = null,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        found: *const poll.ChunkList(u32),
+    ) error{OutOfMemory}!SortedUniqueNameCursor {
+        return .{
+            .allocator = allocator,
+            .iterator = found.iterator(),
+            .storage = try allocator.alloc(u32, found.count),
+        };
+    }
+    pub fn deinit(self: *SortedUniqueNameCursor) void {
+        if (self.sorter) |*sorter| sorter.deinit();
+        if (self.storage) |storage| self.allocator.free(storage);
+        self.* = undefined;
+    }
+    pub fn advance(
+        self: *SortedUniqueNameCursor,
+        budget: usize,
+    ) error{OutOfMemory}!SortedUniqueNameProgress {
+        std.debug.assert(budget != 0 and self.phase != .complete);
+        var remaining = budget;
+        while (remaining != 0) switch (self.phase) {
+            .materialize => if (self.iterator.next()) |name| {
+                self.storage.?[self.index] = name.*;
+                self.index += 1;
+                remaining -= 1;
+            } else {
+                self.sorter = try .init(self.allocator, self.storage.?);
+                self.phase = .sort;
+                return .pending;
+            },
+            .sort => switch (self.sorter.?.advance(remaining)) {
+                .pending => return .pending,
+                .complete => {
+                    self.sorter.?.deinit();
+                    self.sorter = null;
+                    self.phase = .unique;
+                    self.index = 0;
+                    return .pending;
+                },
+            },
+            .unique => {
+                if (self.index == self.storage.?.len) {
+                    const storage = self.storage.?;
+                    const unique_len = self.unique_len;
+                    self.storage = null;
+                    self.phase = .complete;
+                    return .{ .complete = .{
+                        .storage = storage,
+                        .unique_len = unique_len,
+                    } };
+                }
+                const name = self.storage.?[self.index];
+                self.index += 1;
+                remaining -= 1;
+                if (self.previous != null and self.previous.? == name) continue;
+                self.storage.?[self.unique_len] = name;
+                self.unique_len += 1;
+                self.previous = name;
+            },
+            .complete => unreachable,
+        };
+        return .pending;
+    }
+};
+
+test "sorted unique names share one resumable post-collection pipeline" {
+    const allocator = std.testing.allocator;
+    var found = poll.ChunkList(u32).init(allocator);
+    defer found.deinit();
+    const alpha = try intern.intern("sorted-alpha");
+    const beta = try intern.intern("sorted-beta");
+    try found.append(beta);
+    try found.append(alpha);
+    try found.append(beta);
+
+    var cursor = try SortedUniqueNameCursor.init(allocator, &found);
+    defer cursor.deinit();
+    var pending: usize = 0;
+    var names = while (true) switch (try cursor.advance(1)) {
+        .pending => pending += 1,
+        .complete => |result| break result,
+    };
+    defer names.deinit(allocator);
+
+    try std.testing.expect(pending > found.count);
+    try std.testing.expectEqualSlices(u32, &.{ alpha, beta }, names.items());
+}
