@@ -1149,7 +1149,7 @@ pub const WorkerScheduler = enum(usize) {
             _ = self.releaseDomain().advance(machine.kernel_poll_quantum);
             switch (status) {
                 .completed => {
-                    if (unit.exit_status != null)
+                    if (unit.hasRequestedExit())
                         while (!unit.advanceSchedulerTeardown(machine.kernel_poll_quantum).complete) {
                             _ = self.releaseDomain().tryAdvance(machine.kernel_poll_quantum);
                         };

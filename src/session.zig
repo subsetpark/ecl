@@ -542,7 +542,7 @@ pub const Session = enum(usize) {
         core.stack = unit.takeStack();
         core.last_max_frames = unit.max_frames;
         core.last_polls = unit.polls;
-        core.requested_exit = unit.exit_status;
+        core.requested_exit = unit.exitStatus();
         core.last_idiom_hits = unit.idiom_hits;
         unit.deinit();
     }

@@ -1915,6 +1915,24 @@ comptime {
 }
 
 pub const Unit = struct {
+    const TerminalState = union(enum) {
+        evaluating,
+        pending: EclErr,
+        unwinding,
+        failed: Value,
+        incomplete: reader.Incomplete,
+        exit: u8,
+
+        fn deinit(self: *TerminalState, releases: *heap.ReleaseDomain) void {
+            switch (self.*) {
+                .pending => |*failure| failure.retire(releases),
+                .failed => |item| releases.releaseValue(item),
+                .evaluating, .unwinding, .incomplete, .exit => {},
+            }
+            self.* = .evaluating;
+        }
+    };
+
     const LifetimeGuard = struct {
         const State = union(enum) {
             active: std.ArrayList(modules.GenerationPin),
@@ -2046,10 +2064,7 @@ pub const Unit = struct {
     /// The innermost active source effect check. Effect-check frames form an
     /// intrusive chain so nested checks restore their predecessor exactly.
     effect_check_index: ?EffectCheckIndex = null,
-    pending: ?EclErr = null,
-    last_error: ?Value = null,
-    source_incomplete: ?reader.Incomplete = null,
-    exit_status: ?u8 = null,
+    terminal: TerminalState = .evaluating,
     idiom_hits: u64 = 0,
     scheduler: ?*const anyopaque = null,
     task_scope: ?*anyopaque = null,
@@ -2166,14 +2181,72 @@ pub const Unit = struct {
         return result;
     }
     pub fn takeError(self: *Unit) ?Value {
-        const result = self.last_error;
-        self.last_error = null;
-        return result;
+        return switch (self.terminal) {
+            .failed => |item| result: {
+                self.terminal = .evaluating;
+                break :result item;
+            },
+            else => null,
+        };
     }
     pub fn takeSourceIncomplete(self: *Unit) ?reader.Incomplete {
-        const result = self.source_incomplete;
-        self.source_incomplete = null;
-        return result;
+        return switch (self.terminal) {
+            .incomplete => |value_incomplete| result: {
+                self.terminal = .evaluating;
+                break :result value_incomplete;
+            },
+            else => null,
+        };
+    }
+    pub fn exitStatus(self: *const Unit) ?u8 {
+        return switch (self.terminal) {
+            .exit => |status| status,
+            else => null,
+        };
+    }
+    pub fn hasRequestedExit(self: *const Unit) bool {
+        return self.terminal == .exit;
+    }
+    fn pendingFailureOptional(self: *Unit) ?*EclErr {
+        return switch (self.terminal) {
+            .pending => |*failure| failure,
+            else => null,
+        };
+    }
+    fn pendingFailure(self: *Unit) *EclErr {
+        return self.pendingFailureOptional() orelse unreachable;
+    }
+    fn hasPendingFailure(self: *const Unit) bool {
+        return self.terminal == .pending;
+    }
+    fn installPendingFailure(self: *Unit, failure: EclErr) void {
+        std.debug.assert(self.terminal == .evaluating);
+        self.terminal = .{ .pending = failure };
+    }
+    fn takePendingForUnwind(self: *Unit) EclErr {
+        return switch (self.terminal) {
+            .pending => |failure| result: {
+                self.terminal = .unwinding;
+                break :result failure;
+            },
+            else => unreachable,
+        };
+    }
+    fn finishUnwindCaught(self: *Unit) void {
+        std.debug.assert(self.terminal == .unwinding);
+        self.terminal = .evaluating;
+    }
+    fn finishUnwindFailed(self: *Unit, error_value: Value) void {
+        std.debug.assert(self.terminal == .unwinding);
+        self.terminal = .{ .failed = error_value };
+    }
+    fn finishIncomplete(self: *Unit, value_incomplete: reader.Incomplete) void {
+        std.debug.assert(self.terminal == .evaluating);
+        self.terminal = .{ .incomplete = value_incomplete };
+    }
+    fn requestExit(self: *Unit, status: u8) void {
+        std.debug.assert(self.terminal == .evaluating);
+        self.terminal = .{ .exit = status };
     }
     pub fn hasParkRequest(self: *const Unit) bool {
         return self.native == .park_request or self.native == .task_join_request;
@@ -2391,17 +2464,13 @@ pub const Unit = struct {
                 consumed += 1;
                 continue;
             }
-            if (self.pending) |*pending| {
-                pending.retire(self.releases);
-                self.pending = null;
-                consumed += 1;
-                continue;
-            }
-            if (self.last_error) |item| {
-                self.releases.releaseValue(item);
-                self.last_error = null;
-                consumed += 1;
-                continue;
+            switch (self.terminal) {
+                .pending, .failed => {
+                    self.terminal.deinit(self.releases);
+                    consumed += 1;
+                    continue;
+                },
+                .evaluating, .unwinding, .incomplete, .exit => {},
             }
             if (!self.lifetime.advanceTeardown(self.releases, self.allocator)) {
                 consumed += 1;
@@ -2480,8 +2549,7 @@ pub const Unit = struct {
         self.frames.deinit(self.allocator);
         for (self.stack.items) |item| self.releases.releaseValue(item);
         self.stack.deinit(self.allocator);
-        if (self.pending) |*pending| pending.retire(self.releases);
-        if (self.last_error) |item| self.releases.releaseValue(item);
+        self.terminal.deinit(self.releases);
         switch (self.native) {
             .idle, .yielded => {},
             .work => |driver| driver.deinit(self.releases, self.allocator),
@@ -3164,7 +3232,7 @@ pub const Machine = struct {
                                 "cannot access module file `{s}`: {s}",
                                 .{ self.candidate.?.borrow(), name },
                             );
-                            evaluator.unit.pending.?.addData(.path, path_value);
+                            evaluator.unit.pendingFailure().addData(.path, path_value);
                             return failure;
                         }
                         self.phase = .transfer;
@@ -3246,7 +3314,7 @@ pub const Machine = struct {
             const loader = switch (loader_authority.startStatic(self.name, descriptor)) {
                 .failure => |failure| {
                     const failed = evaluator.fail(.io, failure.text());
-                    evaluator.unit.pending.?.addData(.path, self.path_value.?.borrow());
+                    evaluator.unit.pendingFailure().addData(.path, self.path_value.?.borrow());
                     return failed;
                 },
                 .loading => |loading| loading,
@@ -3274,7 +3342,7 @@ pub const Machine = struct {
             const loader = switch (start) {
                 .failure => |failure| {
                     const failed = evaluator.fail(.io, failure.text());
-                    evaluator.unit.pending.?.addData(.path, self.path_value.?.borrow());
+                    evaluator.unit.pendingFailure().addData(.path, self.path_value.?.borrow());
                     return failed;
                 },
                 .loading => |loading| loading,
@@ -3367,7 +3435,7 @@ pub const Machine = struct {
 
         fn failLoad(self: *NativeLoadDriver, evaluator: *Machine, message: []const u8) MachineError {
             const failure = evaluator.fail(.io, message);
-            evaluator.unit.pending.?.addData(.path, self.path.borrow());
+            evaluator.unit.pendingFailure().addData(.path, self.path.borrow());
             return failure;
         }
 
@@ -3559,7 +3627,7 @@ pub const Machine = struct {
                             .complete => |root_header| self.state = .{ .activating = root_header },
                             .incomplete => |value_incomplete| switch (self.completion.borrowMut().*) {
                                 .session => {
-                                    evaluator.unit.source_incomplete = value_incomplete;
+                                    evaluator.unit.finishIncomplete(value_incomplete);
                                     return .completed;
                                 },
                                 else => return evaluator.failAtSource(
@@ -3671,9 +3739,9 @@ pub const Machine = struct {
         if (self.unit.inherited.host_io == null) {
             const failure = self.fail(.io, "filesystem access is unavailable");
             if (path_value) |item|
-                self.unit.pending.?.addData(.path, item)
+                self.unit.pendingFailure().addData(.path, item)
             else if (transfer.diagnosticPath()) |item|
-                self.unit.pending.?.addData(.path, item);
+                self.unit.pendingFailure().addData(.path, item);
             self.unit.allocator.free(path);
             if (path_value) |item| self.releaseDomain().releaseValue(item);
             var transfer_cleanup = transfer;
@@ -3739,7 +3807,7 @@ pub const Machine = struct {
         }
         fn failIo(self: *FileSourceDriver, evaluator: *Machine, message: []const u8) MachineError {
             const failure = evaluator.fail(.io, message);
-            if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
+            if (self.diagnosticPath()) |item| evaluator.unit.pendingFailure().addData(.path, item);
             return failure;
         }
         pub fn advance(evaluator: *Machine, self: *FileSourceDriver) MachineError!WorkProgress {
@@ -3753,7 +3821,7 @@ pub const Machine = struct {
                             "cannot read `{s}`: {s}",
                             .{ self.path.borrow(), @errorName(err) },
                         );
-                        if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
+                        if (self.diagnosticPath()) |item| evaluator.unit.pendingFailure().addData(.path, item);
                         return failure;
                     };
                     self.open_file = .init(.{ .io = io, .file = file });
@@ -3768,7 +3836,7 @@ pub const Machine = struct {
                             "cannot read `{s}`: {s}",
                             .{ self.path.borrow(), @errorName(err) },
                         );
-                        if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
+                        if (self.diagnosticPath()) |item| evaluator.unit.pendingFailure().addData(.path, item);
                         return failure;
                     };
                     if (stat.size > std.math.maxInt(usize))
@@ -3790,7 +3858,7 @@ pub const Machine = struct {
                                 "cannot read `{s}`: {s}",
                                 .{ self.path.borrow(), name },
                             );
-                            if (self.diagnosticPath()) |item| evaluator.unit.pending.?.addData(.path, item);
+                            if (self.diagnosticPath()) |item| evaluator.unit.pendingFailure().addData(.path, item);
                             return failure;
                         };
                         if (amount == 0) return self.failIo(evaluator, "source file changed while being read");
@@ -3851,7 +3919,7 @@ pub const Machine = struct {
     ) MachineError!void {
         if (self.unit.inherited.host_io == null) {
             const failure = self.fail(.io, "filesystem access is unavailable");
-            self.unit.pending.?.addData(.path, path_value);
+            self.unit.pendingFailure().addData(.path, path_value);
             self.unit.allocator.free(path);
             self.unit.allocator.free(contents);
             self.releaseDomain().releaseValue(path_value);
@@ -3881,7 +3949,7 @@ pub const Machine = struct {
                 "cannot write `{s}`: {s}",
                 .{ self.path.borrow(), name },
             );
-            evaluator.unit.pending.?.addData(.path, self.path_value.borrow());
+            evaluator.unit.pendingFailure().addData(.path, self.path_value.borrow());
             return failure;
         }
         pub fn advance(evaluator: *Machine, self: *FileWriteDriver) MachineError!WorkProgress {
@@ -3996,12 +4064,12 @@ pub const Machine = struct {
     /// the shape every host-IO error reports. Keeps `ErrorDataKey` private
     /// while letting a builtin module attach the one datum it owns.
     pub fn addErrorPath(self: *Machine, path: Value) void {
-        self.unit.pending.?.addData(.path, path);
+        self.unit.pendingFailure().addData(.path, path);
     }
     /// Tags the one absent-only publication conflict that an immutable
     /// package caller may recover after independently confirming the winner.
     pub fn addErrorDestinationExists(self: *Machine) void {
-        self.unit.pending.?.addData(.@"destination-exists", .{ .int = 1 });
+        self.unit.pendingFailure().addData(.@"destination-exists", .{ .int = 1 });
     }
     /// The one absence-is-absence failure for `getenv`: an unset variable is
     /// an error carrying the requested name, never an empty string.
@@ -4011,7 +4079,7 @@ pub const Machine = struct {
         name_value: Value,
     ) MachineError {
         const failure = self.failFmt(.io, "environment variable `{s}` is not set", .{name});
-        self.unit.pending.?.addData(.name, name_value);
+        self.unit.pendingFailure().addData(.name, name_value);
         return failure;
     }
     /// Resolves one environment variable against the session snapshot.
@@ -4022,7 +4090,7 @@ pub const Machine = struct {
     }
     pub fn undefinedModule(self: *Machine, name: u32) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined module `{s}`", .{intern.get(name)});
-        self.unit.pending.?.addData(.name, .{ .symbol = name });
+        self.unit.pendingFailure().addData(.name, .{ .symbol = name });
         return failure;
     }
     /// The dispatcher's miss. Every resolution miss reports the reference the
@@ -4035,7 +4103,7 @@ pub const Machine = struct {
     /// somewhere other than the running activation's own chain.
     pub fn undefinedWordIn(self: *Machine, word: u32, chain: LookupChain) MachineError {
         const failure = self.failFmt(.undefined_word, "undefined word `{s}`", .{intern.get(word)});
-        self.unit.pending.?.addData(.name, .{ .symbol = word });
+        self.unit.pendingFailure().addData(.name, .{ .symbol = word });
         self.addLookupChain(chain) catch return error.OutOfMemory;
         return failure;
     }
@@ -4054,7 +4122,7 @@ pub const Machine = struct {
     }
     fn addLookupChain(self: *Machine, chain: LookupChain) error{OutOfMemory}!void {
         const named = try intern.intern(chain.spelling());
-        self.unit.pending.?.addData(.scope, .{ .symbol = named });
+        self.unit.pendingFailure().addData(.scope, .{ .symbol = named });
     }
     /// What the running activation would have searched, for the callers that
     /// have no word in hand — reflection, and a miss reported before a word's
@@ -4103,9 +4171,9 @@ pub const Machine = struct {
                 self.available(),
             },
         );
-        self.unit.pending.?.addData(.needed, .{ .int = @intCast(count) });
-        self.unit.pending.?.addData(.available, .{ .int = @intCast(self.available()) });
-        if (isolation) |guidance| self.unit.pending.?.addData(
+        self.unit.pendingFailure().addData(.needed, .{ .int = @intCast(count) });
+        self.unit.pendingFailure().addData(.available, .{ .int = @intCast(self.available()) });
+        if (isolation) |guidance| self.unit.pendingFailure().addData(
             .isolation,
             .{ .word = .{ .name = intern.intern(guidance.constructor) catch return failure } },
         );
@@ -4284,7 +4352,8 @@ pub const Machine = struct {
         self.unit.active_word = word;
     }
     pub fn setFailureSite(self: *Machine, code: *Header, index: u32) void {
-        if (self.unit.pending) |*pending| pending.site = .{ .token = .{ .code = code, .index = index } };
+        if (self.unit.pendingFailureOptional()) |pending|
+            pending.site = .{ .token = .{ .code = code, .index = index } };
     }
     pub fn setWorkDriverSite(self: *Machine, code: *Header, index: u32) void {
         if (self.unit.workDriver()) |driver| driver.site = .{ .code = code, .index = index };
@@ -4368,18 +4437,18 @@ pub const Machine = struct {
         return parent;
     }
     pub fn setFailureTraceParent(self: *Machine, word: intern.TraceWord) void {
-        if (self.unit.pending) |*pending| pending.trace_parent = word;
+        if (self.unit.pendingFailureOptional()) |pending| pending.trace_parent = word;
     }
     pub fn takePrimitiveFailure(self: *Machine) ?EclErr {
-        const failure = self.unit.pending;
-        self.unit.pending = null;
+        if (!self.unit.hasPendingFailure()) return null;
+        const failure = self.unit.takePendingForUnwind();
+        self.unit.finishUnwindCaught();
         return failure;
     }
     fn installPrimitiveFailure(self: *Machine, failure_value: EclErr) MachineError {
-        std.debug.assert(self.unit.pending == null);
-        self.unit.pending = failure_value;
-        if (self.unit.pending.?.word == null and self.unit.active_word != no_word) {
-            self.unit.pending.?.word = self.unit.active_word;
+        self.unit.installPendingFailure(failure_value);
+        if (self.unit.pendingFailure().word == null and self.unit.active_word != no_word) {
+            self.unit.pendingFailure().word = self.unit.active_word;
         }
         return error.Ecl;
     }
@@ -4397,9 +4466,8 @@ pub const Machine = struct {
         return self.unit.active_word.render(&self.unit.word_scratch);
     }
     pub fn fail(self: *Machine, kind: ErrorKind, message: []const u8) MachineError {
-        std.debug.assert(self.unit.pending == null);
-        self.unit.pending = EclErr.init(kind, message);
-        if (self.unit.active_word != no_word) self.unit.pending.?.word = self.unit.active_word;
+        self.unit.installPendingFailure(EclErr.init(kind, message));
+        if (self.unit.active_word != no_word) self.unit.pendingFailure().word = self.unit.active_word;
         return error.Ecl;
     }
     fn failAtSource(
@@ -4411,7 +4479,7 @@ pub const Machine = struct {
         const owned_source_name = self.unit.allocator.dupe(u8, source_name) catch
             return error.OutOfMemory;
         const failure = self.fail(.parse, message);
-        self.unit.pending.?.site = .{ .explicit_location = .{
+        self.unit.pendingFailure().site = .{ .explicit_location = .{
             .source_name = owned_source_name,
             .span = span,
         } };
@@ -4423,9 +4491,8 @@ pub const Machine = struct {
         comptime format: []const u8,
         args: anytype,
     ) MachineError {
-        std.debug.assert(self.unit.pending == null);
-        self.unit.pending = EclErr.initFmt(kind, format, args);
-        if (self.unit.active_word != no_word) self.unit.pending.?.word = self.unit.active_word;
+        self.unit.installPendingFailure(EclErr.initFmt(kind, format, args));
+        if (self.unit.active_word != no_word) self.unit.pendingFailure().word = self.unit.active_word;
         return error.Ecl;
     }
     pub fn typeError(self: *Machine, expected: []const u8) MachineError {
@@ -4444,7 +4511,7 @@ pub const Machine = struct {
         index: usize,
     ) MachineError {
         const failure = self.fail(kind, message);
-        self.unit.pending.?.addData(.index, .{ .int = @intCast(index) });
+        self.unit.pendingFailure().addData(.index, .{ .int = @intCast(index) });
         return failure;
     }
     /// Reports the two leading-axis lengths that failed to conform.
@@ -4454,8 +4521,8 @@ pub const Machine = struct {
             "{s} cannot conform leading axes {d} and {d}",
             .{ self.activeWordName(), left, right },
         );
-        self.unit.pending.?.addData(.left, .{ .int = @intCast(left) });
-        self.unit.pending.?.addData(.right, .{ .int = @intCast(right) });
+        self.unit.pendingFailure().addData(.left, .{ .int = @intCast(left) });
+        self.unit.pendingFailure().addData(.right, .{ .int = @intCast(right) });
         return failure;
     }
     pub fn applicationContractError(
@@ -4491,14 +4558,14 @@ pub const Machine = struct {
                     depths.observed,
                 },
             );
-        self.unit.pending.?.addData(.expected, expected);
-        self.unit.pending.?.addData(.seeded, .{ .int = @intCast(depths.seeded) });
-        self.unit.pending.?.addData(.observed, .{ .int = @intCast(depths.observed) });
+        self.unit.pendingFailure().addData(.expected, expected);
+        self.unit.pendingFailure().addData(.seeded, .{ .int = @intCast(depths.seeded) });
+        self.unit.pendingFailure().addData(.observed, .{ .int = @intCast(depths.observed) });
         if (index) |element_index| {
-            self.unit.pending.?.addData(.index, .{ .int = @intCast(element_index) });
+            self.unit.pendingFailure().addData(.index, .{ .int = @intCast(element_index) });
         }
         const site: *ApplicationSelection = @ptrCast(@alignCast(opaque_site));
-        self.unit.pending.?.site = .{ .contract_quotation = site.takeFailureSite(quotation) };
+        self.unit.pendingFailure().site = .{ .contract_quotation = site.takeFailureSite(quotation) };
         return failure;
     }
     /// Kernel safe point. A flat loop calls this between bounded chunks;
@@ -5225,10 +5292,9 @@ pub const Machine = struct {
     }
 
     pub fn raiseOwned(self: *Machine, raised: Value) MachineError {
-        std.debug.assert(self.unit.pending == null);
-        self.unit.pending = EclErr.init(.user, "raised error");
-        if (self.unit.active_word != no_word) self.unit.pending.?.word = self.unit.active_word;
-        self.unit.pending.?.raised = raised;
+        self.unit.installPendingFailure(EclErr.init(.user, "raised error"));
+        if (self.unit.active_word != no_word) self.unit.pendingFailure().word = self.unit.active_word;
+        self.unit.pendingFailure().raised = raised;
         return error.Ecl;
     }
     fn beginAttemptOwned(
@@ -5458,7 +5524,7 @@ pub const InitialStack = union(enum) {
 
 pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error{OutOfMemory}!void {
     std.debug.assert(unit.frames.items.len == 0);
-    std.debug.assert(unit.pending == null and unit.last_error == null);
+    std.debug.assert(unit.terminal == .evaluating);
     std.debug.assert(unit.current == null);
     const element: ?Value, const seeds: ?*Header = switch (initial_stack) {
         .empty => .{ null, null },
@@ -5559,11 +5625,11 @@ fn loop(self: *Machine) MachineError!RunStatus {
         if (self.unit.workDriver()) |driver_ptr| {
             const driver = driver_ptr.*;
             const progress = driver.advance(self) catch |err| {
-                if (err == error.Ecl and self.unit.pending.?.site == null) {
-                    if (driver.site) |site| self.unit.pending.?.site = .{ .token = site };
+                if (err == error.Ecl and self.unit.pendingFailure().site == null) {
+                    if (driver.site) |site| self.unit.pendingFailure().site = .{ .token = site };
                 }
-                if (err == error.Ecl and self.unit.pending.?.trace_parent == null) {
-                    self.unit.pending.?.trace_parent = driver.trace_parent;
+                if (err == error.Ecl and self.unit.pendingFailure().trace_parent == null) {
+                    self.unit.pendingFailure().trace_parent = driver.trace_parent;
                 }
                 clearWorkDriver(self.unit);
                 switch (err) {
@@ -5599,7 +5665,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
                 },
             }
         }
-        if (self.unit.exit_status != null) {
+        if (self.unit.hasRequestedExit()) {
             return .completed;
         }
         if (self.unit.current == null) {
@@ -5631,7 +5697,7 @@ fn loop(self: *Machine) MachineError!RunStatus {
             self.unit.fuel = fuel_quantum;
             if (self.unit.cancelled.load(.acquire)) {
                 self.unit.active_word = no_word;
-                self.unit.pending = EclErr.init(.cancelled, "unit cancelled");
+                self.unit.installPendingFailure(EclErr.init(.cancelled, "unit cancelled"));
                 try startFailure(self);
                 continue;
             }
@@ -5650,8 +5716,8 @@ fn loop(self: *Machine) MachineError!RunStatus {
         dispatch(self, form) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
-                if (self.unit.pending.?.site == null and self.unit.current != null) {
-                    self.unit.pending.?.site = .{ .token = .{
+                if (self.unit.pendingFailure().site == null and self.unit.current != null) {
+                    self.unit.pendingFailure().site = .{ .token = .{
                         .code = self.unit.current.?.code,
                         .index = self.unit.active_index,
                     } };
@@ -5719,7 +5785,7 @@ fn resumePark(self: *Machine) MachineError!void {
             try resumeTaskJoinOutOfMemory(self)
         else
             return error.OutOfMemory,
-        .scope_closed => |status| self.unit.exit_status = status,
+        .scope_closed => |status| self.unit.requestExit(status),
     }
 }
 
@@ -6118,7 +6184,7 @@ const QualifiedRegistrationDriver = struct {
                     "loading module `{s}` registered nothing under that name",
                     .{intern.get(intern.moduleId(self.name))},
                 );
-                evaluator.unit.pending.?.addData(.path, self.path.borrow());
+                evaluator.unit.pendingFailure().addData(.path, self.path.borrow());
                 return failure;
             },
         }
@@ -6942,8 +7008,8 @@ fn prepareEffectCheck(
             "{s} declared {d} input{s}, but found {d}",
             .{ self.activeWordName(), declared.inputs, if (declared.inputs == 1) "" else "s", available },
         );
-        self.unit.pending.?.addData(.seeded, .{ .int = available });
-        self.unit.pending.?.addData(.observed, .{ .int = available });
+        self.unit.pendingFailure().addData(.seeded, .{ .int = available });
+        self.unit.pendingFailure().addData(.observed, .{ .int = available });
         return failure;
     }
     return .{
@@ -7081,10 +7147,10 @@ pub fn finishEffectCheck(self: *Machine, check: *EffectCheck) MachineError!void 
         "{s} declared ({d} -- {d}); seeded {d}, observed {d}",
         .{ self.activeWordName(), check.inputs, check.outputs, check.entry_depth, observed_relative },
     );
-    self.unit.pending.?.addData(.seeded, .{ .int = check.entry_depth });
-    self.unit.pending.?.addData(.observed, .{ .int = @intCast(observed_relative) });
+    self.unit.pendingFailure().addData(.seeded, .{ .int = check.entry_depth });
+    self.unit.pendingFailure().addData(.observed, .{ .int = @intCast(observed_relative) });
     if (check.takeCandidate()) |candidate|
-        self.unit.pending.?.site = .{ .contract_quotation = candidate };
+        self.unit.pendingFailure().site = .{ .contract_quotation = candidate };
     return failure;
 }
 fn finishAttempt(self: *Machine, base: u32) MachineError!void {
@@ -7595,7 +7661,7 @@ pub fn outcomeDict(
     return dict.fromUniquePairs(allocator, releases, &.{.{ .{ .symbol = key }, payload }});
 }
 fn startFailure(self: *Machine) error{OutOfMemory}!void {
-    std.debug.assert(!self.unit.hasWorkDriver() and self.unit.pending != null);
+    std.debug.assert(!self.unit.hasWorkDriver() and self.unit.hasPendingFailure());
     const capacity = std.math.add(usize, self.unit.frames.items.len, 3) catch
         return error.OutOfMemory;
     const trace = try self.unit.allocator.alloc(intern.TraceWord, capacity);
@@ -7605,13 +7671,12 @@ fn startFailure(self: *Machine) error{OutOfMemory}!void {
     const driver = try self.unit.allocator.create(FailureDriver);
     driver.* = .{
         .allocator = self.unit.allocator,
-        .failure = self.unit.pending.?,
+        .failure = self.unit.takePendingForUnwind(),
         .trace = trace,
         .resolved = resolved,
         .frame_index = self.unit.frames.items.len,
         .boundary_index = self.unit.boundary_index,
     };
-    self.unit.pending = null;
     driver.appendInitial(self);
     self.adoptDriver(driver);
 }
@@ -7817,7 +7882,7 @@ const FailureDriver = struct {
                 evaluator.unit.stack_base = self.previous_base;
                 evaluator.unit.boundary_index = self.previous_boundary;
                 if (self.attempt_index == null) {
-                    evaluator.unit.last_error = self.error_value.?;
+                    evaluator.unit.finishUnwindFailed(self.error_value.?);
                     self.error_value = null;
                     self.phase = .finish;
                 } else {
@@ -7839,6 +7904,7 @@ const FailureDriver = struct {
                 .complete => |outcome| {
                     self.outcome_builder.?.deinit();
                     self.outcome_builder = null;
+                    evaluator.unit.finishUnwindCaught();
                     return .{ .output = outcome };
                 },
             },
