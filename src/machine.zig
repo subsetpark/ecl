@@ -7263,10 +7263,14 @@ fn finishModule(self: *Machine, boundary: Boundary) MachineError!void {
     try image.reserveTemplate(observed);
     const driver = try self.unit.allocator.create(ModuleCompletionDriver);
     driver.* = .{
-        .image = .init(image.move()),
-        .validation = if (owned.registration) |symbol| .init(symbol) else null,
-        .cursor = null,
-        .captured = observed,
+        .state = .init(.{ .capture = .{
+            .image = .init(image.move()),
+            .remaining = observed,
+            .completion = if (owned.registration) |symbol|
+                .{ .named = .init(symbol) }
+            else
+                .value,
+        } }),
     };
     self.adoptDriver(driver);
 }
@@ -7641,53 +7645,95 @@ const ModuleRegisterDriver = struct {
 /// the boundary carried or hand it to the program as a value.
 const ModuleCompletionDriver = struct {
     pub const address_stable_driver = {};
-    image: heap.Owned(modules.OwnedImage),
-    /// The same image once construction is over. Sealing consumes `image`, so
-    /// no template write or definition can reach it after this point.
-    sealed: ?heap.Owned(modules.SealedImage) = null,
-    /// Absent for `@module`, which hands the image to the program instead.
-    validation: ?intern.ModuleNameCursor,
-    cursor: ?heap.Owned(modules.Registry.RegistrationCursor),
-    /// Construction-stack values still to move into the image template,
-    /// counted from the top of the residual window down.
-    captured: usize,
-    phase: enum { capture, validate, publish } = .capture,
+    state: heap.Owned(State),
+
+    const State = union(enum) {
+        capture: struct {
+            image: heap.Owned(modules.OwnedImage),
+            /// Construction-stack values still to move into the image
+            /// template, counted from the top of the residual window down.
+            remaining: usize,
+            completion: union(enum) {
+                value,
+                named: intern.ModuleNameCursor,
+            },
+        },
+        value: heap.Owned(modules.SealedImage),
+        validate: struct {
+            sealed: heap.Owned(modules.SealedImage),
+            cursor: intern.ModuleNameCursor,
+        },
+        publish: struct {
+            sealed: heap.Owned(modules.SealedImage),
+            cursor: heap.Owned(modules.Registry.RegistrationCursor),
+        },
+
+        pub fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            storage_allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .capture => |*capture| capture.image.deinit(releases, storage_allocator),
+                .value => |*sealed| sealed.deinit(releases, storage_allocator),
+                .validate => |*validate| validate.sealed.deinit(releases, storage_allocator),
+                .publish => |*publish| {
+                    publish.cursor.deinit(releases, storage_allocator);
+                    publish.sealed.deinit(releases, storage_allocator);
+                },
+            }
+            self.* = undefined;
+        }
+    };
+
     pub fn advance(evaluator: *Machine, self: *ModuleCompletionDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.phase) {
-            .capture => {
-                if (self.captured != 0) {
-                    self.captured -= 1;
-                    self.image.borrow().placeTemplate(
-                        self.captured,
+        while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+            .capture => |*capture| {
+                if (capture.remaining != 0) {
+                    capture.remaining -= 1;
+                    capture.image.borrow().placeTemplate(
+                        capture.remaining,
                         evaluator.unit.takeStackOwned().?,
                     );
                     continue;
                 }
-                self.sealed = .init(self.image.borrowMut().seal());
-                if (self.validation == null) {
-                    const item = try self.sealed.?.borrowMut().intoValue(evaluator.unit.allocator);
-                    return .{ .output = item };
+                const completion = capture.completion;
+                var sealed = heap.Owned(modules.SealedImage).init(capture.image.borrowMut().seal());
+                capture.image.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                switch (completion) {
+                    .value => self.state.borrowMut().* = .{ .value = .init(sealed.take()) },
+                    .named => |validation| self.state.borrowMut().* = .{ .validate = .{
+                        .sealed = .init(sealed.take()),
+                        .cursor = validation,
+                    } },
                 }
-                self.phase = .validate;
             },
-            .validate => switch (self.validation.?.advance()) {
+            .value => |*sealed| {
+                const item = try sealed.borrowMut().intoValue(evaluator.unit.allocator);
+                sealed.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                return .{ .output = item };
+            },
+            .validate => |*validate| switch (validate.cursor.advance()) {
                 .pending => {},
                 .complete => |maybe_name| {
                     const name = maybe_name orelse return evaluator.fail(
                         .domain,
                         "@defm requires a valid module name",
                     );
-                    self.cursor = .init(evaluator.unit.inherited.registry.?.registrationCursor(
-                        self.sealed.?.borrow().ref(),
+                    const registration = evaluator.unit.inherited.registry.?.registrationCursor(
+                        validate.sealed.borrow().ref(),
                         name,
                         &evaluator.unit.turn_authority,
-                    ));
-                    self.phase = .publish;
+                    );
+                    self.state.borrowMut().* = .{ .publish = .{
+                        .sealed = .init(validate.sealed.take()),
+                        .cursor = .init(registration),
+                    } };
                 },
             },
-            .publish => return advanceRegistration(evaluator, self.cursor.?.borrowMut()),
+            .publish => |*publish| return advanceRegistration(evaluator, publish.cursor.borrowMut()),
         };
         return .yielded;
     }
