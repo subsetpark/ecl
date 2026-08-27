@@ -952,8 +952,8 @@ Any change to this machinery must preserve:
   directly to that `SpanArchiveState`, which contains only the release domain
   and lineage/index runtime and is not parent-recoverable as an embedded field.
   The owner exclusively holds registration, synchronous host reading,
-  and teardown; the view exposes only bounded reader cursors, admission,
-  re-scoping, and location operations. `requireOpaqueWorkerFacade` checks the
+  and teardown; the view exposes only bounded reader/source-ingestion cursors,
+  admission, re-scoping, and location operations. `requireOpaqueWorkerFacade` checks the
   runtime backing, and no cleanup capability or view upgrades back to
   `HostOwner`. Their constructors derive both
   the allocator and retirement domain from the private capability, and
@@ -976,7 +976,25 @@ Any change to this machinery must preserve:
   `HostParsed.deinit` derives and drains its issuing owner, while cursor
   and scheduler code receive `Parsed`, whose API exposes only
   `RetireCursor` — blocking versus resumable parsed teardown is selected
-  by type. Copy-on-write replacement swaps the destination's old
+  by type. Reader-to-archive publication has one further protocol:
+  `SpanArchive.SourceIngestCursor` owns bounded reading, exact root
+  materialization, absorption, and temporary retirement. One exhaustive tagged
+  state owns exactly the reader/read outcome, materializer, absorber/root, or
+  parsed-retirement capability valid at that point; abandonment consumes those
+  same variants rather than consulting correlated nullable fields. The public
+  cursor is a movable opaque owner of heap-stable backing, so its consuming
+  `take` operation may relocate the handle between advances without invalidating
+  internal absorber or parsed-retirement borrows. Its internal
+  adoption transition determines whether abandonment releases the root locally
+  or leaves it with the archive. `SourceDriver` is only the scheduled shell around
+  that cursor; `Session.runUnit` installs it before source reading begins. The
+  embedded prelude is the sole synchronous shell and drives the same cursor
+  while `BuildingEnv` is unfinished, so synchronous bootstrap and resumable
+  runtime ingestion cannot diverge in source semantics or ownership. The
+  archive exposes no blocking absorption adapter. Parser errors carry their
+  complete source name in an owned `explicit_location` failure-site variant;
+  no fixed diagnostic buffer truncates provenance, and driver retirement cannot
+  invalidate it before error materialization. Copy-on-write replacement swaps the destination's old
   representation into the consumed source wrapper and retires that wrapper
   through the caller's shared domain; representation adoption has no
   allocator-only blocking adapter. Driver destruction is selected by the

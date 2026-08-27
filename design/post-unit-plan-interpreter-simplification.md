@@ -28,6 +28,35 @@ minimal admitted `@defm` operation. It exhausts every allocation in that
 operation, including pending `ConstructionDriver` allocation after the cursor
 owns its source.
 
+## Source-ingestion alignment
+
+Implemented as a follow-up on the completed simplification base:
+
+- `SpanArchive.SourceIngestCursor` is the single bounded read, root
+  materialization, absorption, and temporary-retirement protocol;
+- its exhaustive state union owns exactly the boxed reader, read outcome,
+  materializer, absorber/root pair, or parsed-retirement capability valid in
+  that phase; normal progress and abandonment consume the same variants;
+- its public cursor is a movable opaque owner of heap-stable backing, and its
+  consuming `take` operation permits relocation between any two advances
+  without invalidating the absorber or parsed-retirement self-borrows;
+- its adoption transition is the ownership authority on every exit, so an
+  allocation failure after publication cannot leave the caller holding the
+  archive-owned root;
+- `SourceDriver` owns only its source storage, completion policy, and the
+  archive cursor, and Session source enters the root scheduler before reading;
+- embedded-prelude bootstrap remains the sole synchronous shell and drives the
+  same cursor while `BuildingEnv` is unfinished;
+- the former blocking `SpanArchive.absorb` adapter is gone, while the lower
+  absorption cursor remains the archive phase used by ingestion and focused
+  provenance tests; and
+- the component allocation-failure sweep covers every ingestion allocation on
+  both sides of archive adoption, while the initialized-Session sweep covers
+  the prelude and scheduled public source paths; and
+- parser failures use an owned `explicit_location` failure-site variant, so
+  source provenance is neither borrowed from retiring driver storage nor
+  truncated to an inline diagnostic buffer.
+
 ## Execution barrier
 
 These instructions describe a follow-up change. Do not implement them in the

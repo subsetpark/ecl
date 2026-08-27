@@ -50,28 +50,30 @@ pub fn installSource(
     var diag: reader.Diag = .{};
     // Core alone is the chain for a primitive or an embedded prelude
     // definition, so every word this text contains carries the core scope.
-    const result = archive_owner.read(
+    var ingestion = try archive.sourceIngestCursor(
         source_name,
         source,
         &diag,
         @intFromEnum(environment.coreScopeId()),
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.Parse => return error.InvalidPrelude,
+    );
+    defer {
+        while (!ingestion.advanceRetirement())
+            _ = release_domain.advance(machine.kernel_poll_quantum);
+        host.drain();
+    }
+    const root_header = while (true) {
+        switch (ingestion.advance() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Parse => return error.InvalidPrelude,
+            error.InvalidProvenance => @panic("archive-bound prelude reader produced foreign provenance"),
+        }) {
+            .pending => _ = release_domain.advance(machine.kernel_poll_quantum),
+            .complete => |result| switch (result) {
+                .complete => |header| break header,
+                .incomplete => return error.InvalidPrelude,
+            },
+        }
     };
-    var parsed = switch (result) {
-        .complete => |complete| complete,
-        .incomplete => return error.InvalidPrelude,
-    };
-    defer parsed.deinit();
-    var root = heap.OwnedValue.init(release_domain, try archive.codeRoot(parsed.values()));
-    defer root.deinit();
-    const root_header = root.borrow().list;
-    archive.absorb(parsed.borrow(), root.borrow()) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.InvalidProvenance => @panic("archive-bound prelude reader produced foreign provenance"),
-    };
-    _ = root.take();
     var arguments = heap.OwnedValue.init(release_domain, try list.fromValuesGeneric(allocator, &.{}));
     defer arguments.deinit();
     var unit = machine.Unit.init(

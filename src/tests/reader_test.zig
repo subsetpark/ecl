@@ -40,7 +40,12 @@ test "span archive rejects a substitutable provenance issuer" {
 
     var root = heap.OwnedValue.init(host.domain(), try archive.codeRoot(parsed.values()));
     defer root.deinit();
-    try archive.absorb(parsed.borrow(), root.borrow());
+    var absorption = archive.absorbCursor(parsed.borrow(), root.borrow());
+    while ((try absorption.advance()) == .pending) {}
+    try std.testing.expectEqual(
+        spans.SpanArchive.AbsorbCursor.ArtifactOwnership.archive_owned,
+        absorption.deinit(),
+    );
     _ = root.take();
 
     var location_cursor = archive.locateQuotationCursor(quotation);
@@ -73,12 +78,18 @@ test "span archive fails closed on unbound publication artifacts" {
     );
     defer root.deinit();
 
-    archive.absorb(parsed.borrow(), root.borrow()) catch |err| {
+    var absorption = archive.absorbCursor(parsed.borrow(), root.borrow());
+    while (true) switch (absorption.advance() catch |err| {
         try std.testing.expectEqual(error.InvalidProvenance, err);
+        try std.testing.expectEqual(
+            spans.SpanArchive.AbsorbCursor.ArtifactOwnership.caller_owned,
+            absorption.deinit(),
+        );
         return;
+    }) {
+        .pending => {},
+        .complete => return error.ExpectedInvalidProvenance,
     };
-    _ = root.take();
-    return error.ExpectedInvalidProvenance;
 }
 
 test "span archive cancellation keeps committed location storage alive" {

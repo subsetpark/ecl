@@ -12,7 +12,6 @@ const native_call = @import("native_call.zig");
 const native_module = @import("native_module.zig");
 const native_abi = @import("native-abi");
 const reader = @import("reader.zig");
-const reader_cursor = @import("reader_cursor.zig");
 const poll_api = @import("poll.zig");
 const stdlib = @import("stdlib.zig");
 const kernel_storage = @import("kernel_storage.zig");
@@ -153,11 +152,16 @@ pub const ApplicationDepths = struct {
 const FailureSite = union(enum) {
     token: ErrorSite,
     contract_quotation: OwnedCode,
+    explicit_location: struct {
+        source_name: []u8,
+        span: reader.Span,
+    },
 
     fn deinit(self: *FailureSite, releases: *heap.ReleaseDomain) void {
         switch (self.*) {
             .token => {},
             .contract_quotation => |*candidate| candidate.deinit(releases),
+            .explicit_location => |location| releases.allocator.free(location.source_name),
         }
         self.* = undefined;
     }
@@ -196,10 +200,6 @@ pub const EclErr = struct {
     data: [5]ErrorData = .{empty_error_data} ** 5,
     data_len: usize = 0,
     raised: ?Value = null,
-    source: [384]u8 = [_]u8{0} ** 384,
-    source_len: usize = 0,
-    source_line: u32 = 0,
-    source_col: u32 = 0,
     pub fn init(kind: ErrorKind, message: []const u8) EclErr {
         var result = EclErr{ .kind = kind };
         result.setMessage(message);
@@ -246,13 +246,6 @@ pub const EclErr = struct {
         if (self.site) |*site| site.deinit(releases);
         self.site = null;
     }
-    pub fn setLocation(self: *EclErr, source_name: []const u8, span: @import("lexer.zig").Span) void {
-        const selected = source_name[0..@min(source_name.len, self.source.len)];
-        @memcpy(self.source[0..selected.len], selected);
-        self.source_len = selected.len;
-        self.source_line = span.line;
-        self.source_col = span.col;
-    }
 };
 
 const ErrorValueProgress = poll_api.Progress(Value);
@@ -291,10 +284,7 @@ const OrdinaryErrorCursor = struct {
             .allocator = allocator,
             .failure = failure,
             .resolved = resolved,
-            .location = if (failure.source_len > 0) .{
-                .source_name = failure.source[0..failure.source_len],
-                .span = .{ .line = failure.source_line, .col = failure.source_col },
-            } else location,
+            .location = location,
         };
     }
     fn retire(self: *OrdinaryErrorCursor, releases: *heap.ReleaseDomain) void {
@@ -526,10 +516,7 @@ const RaisedErrorCursor = struct {
             .allocator = allocator,
             .failure = failure,
             .resolved = resolved,
-            .location = if (failure.source_len > 0) .{
-                .source_name = failure.source[0..failure.source_len],
-                .span = .{ .line = failure.source_line, .col = failure.source_col },
-            } else location,
+            .location = location,
         };
     }
     fn retire(self: *RaisedErrorCursor, releases: *heap.ReleaseDomain) void {
@@ -2061,6 +2048,7 @@ pub const Unit = struct {
     effect_check_index: ?EffectCheckIndex = null,
     pending: ?EclErr = null,
     last_error: ?Value = null,
+    source_incomplete: ?reader.Incomplete = null,
     exit_status: ?u8 = null,
     idiom_hits: u64 = 0,
     scheduler: ?*const anyopaque = null,
@@ -2180,6 +2168,11 @@ pub const Unit = struct {
     pub fn takeError(self: *Unit) ?Value {
         const result = self.last_error;
         self.last_error = null;
+        return result;
+    }
+    pub fn takeSourceIncomplete(self: *Unit) ?reader.Incomplete {
+        const result = self.source_incomplete;
+        self.source_incomplete = null;
         return result;
     }
     pub fn hasParkRequest(self: *const Unit) bool {
@@ -3444,15 +3437,14 @@ pub const Machine = struct {
             return err;
         };
         try self.startDriver(SourceDriver{
-            .allocator = self.unit.allocator,
-            .source_name = .init(source_name),
-            .source = .init(source),
+            .text = .init(.{ .owned = .{ .source_name = source_name, .source = source } }),
             .completion = .init(.push),
         });
     }
     const SourceCompletion = union(enum) {
         push,
         call,
+        session,
         /// Registration only: the source runs, then the loading lease and
         /// tagged qualified operation transfer to the return frame.
         register: struct {
@@ -3464,10 +3456,37 @@ pub const Machine = struct {
 
         pub fn deinit(self: *SourceCompletion, releases: *heap.ReleaseDomain) void {
             switch (self.*) {
-                .push, .call => {},
+                .push, .call, .session => {},
                 .register => |*register| {
                     if (register.loading) |*loading| loading.deinit();
                     if (register.path) |path| releases.releaseValue(path);
+                },
+            }
+            self.* = undefined;
+        }
+    };
+    const SourceText = union(enum) {
+        borrowed: struct { source_name: []const u8, source: []const u8 },
+        owned: struct { source_name: []u8, source: []u8 },
+
+        fn sourceName(self: SourceText) []const u8 {
+            return switch (self) {
+                .borrowed => |text| text.source_name,
+                .owned => |text| text.source_name,
+            };
+        }
+        fn source(self: SourceText) []const u8 {
+            return switch (self) {
+                .borrowed => |text| text.source,
+                .owned => |text| text.source,
+            };
+        }
+        pub fn deinit(self: *SourceText, storage_allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .borrowed => {},
+                .owned => |text| {
+                    storage_allocator.free(text.source);
+                    storage_allocator.free(text.source_name);
                 },
             }
             self.* = undefined;
@@ -3480,106 +3499,91 @@ pub const Machine = struct {
         completion: SourceCompletion,
     ) error{OutOfMemory}!void {
         try self.startDriver(SourceDriver{
-            .allocator = self.unit.allocator,
-            .source_name = .init(source_name),
-            .source = .init(source),
+            .text = .init(.{ .owned = .{ .source_name = source_name, .source = source } }),
             .completion = .init(completion),
         });
     }
+    fn sourceBorrowed(
+        self: *Machine,
+        source_name: []const u8,
+        source: []const u8,
+    ) error{OutOfMemory}!void {
+        try self.startDriver(SourceDriver{
+            .text = .init(.{ .borrowed = .{ .source_name = source_name, .source = source } }),
+            .completion = .init(.session),
+        });
+    }
     const SourceDriver = struct {
+        const State = union(enum) {
+            start,
+            ingesting: spans.SpanArchive.SourceIngestCursor,
+            activating: *Header,
+            storage,
+        };
+
         retirement: heap.ReleaseDomain.Retirement = .{},
-        allocator: std.mem.Allocator,
-        source_name: heap.Owned([]u8),
-        source: heap.Owned([]u8),
+        text: heap.Owned(SourceText),
         completion: heap.Owned(SourceCompletion),
         diag: reader.Diag = .{},
-        reader_state: ?reader_cursor.ReadCursor = null,
-        parsed: ?reader.Parsed = null,
-        materializer: ?kernel_storage.GenericValueMaterializer = null,
-        root: ?Value = null,
-        root_header: ?*Header = null,
-        absorber: ?spans.SpanArchive.AbsorbCursor = null,
-        phase: enum { read, retire_reader, materialize, absorb, activate } = .read,
-        parsed_retirement: ?reader.Parsed.RetireCursor = null,
-        retirement_phase: enum { prepare, reader, parsed, storage } = .prepare,
+        state: State = .start,
 
         pub fn advance(evaluator: *Machine, self: *SourceDriver) MachineError!WorkProgress {
-            try evaluator.pollKernel();
+            // Preserve the established pre-cancelled-unit behavior for a
+            // source that fits in its first bounded slice: activate it first,
+            // so evaluation can attach cancellation to the responsible word.
+            // A source that needs another slice observes cancellation before
+            // doing any more ingestion work.
+            if (self.state != .start) try evaluator.pollKernel();
             var budget: usize = kernel_poll_quantum;
-            while (budget != 0) : (budget -= 1) switch (self.phase) {
-                .read => {
-                    if (self.reader_state == null) self.reader_state = evaluator.unit.archive.readCursor(
-                        self.source_name.borrow(),
-                        self.source.borrow(),
-                        &self.diag,
-                        @intFromEnum(try evaluator.unit.environment.scopeIdFor(
-                            evaluator.unit.lexicalScope(),
-                        )),
-                    );
-                    switch (self.reader_state.?.advance() catch |err| switch (err) {
+            while (budget != 0) : (budget -= 1) switch (self.state) {
+                .start => self.state = .{ .ingesting = try evaluator.unit.archive.sourceIngestCursor(
+                    self.text.borrow().sourceName(),
+                    self.text.borrow().source(),
+                    &self.diag,
+                    @intFromEnum(try evaluator.unit.environment.scopeIdFor(
+                        evaluator.unit.lexicalScope(),
+                    )),
+                ) },
+                .ingesting => |*ingestion| {
+                    switch (ingestion.advance() catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        error.Parse => {
-                            const failure = evaluator.fail(.parse, self.diag.text());
-                            evaluator.unit.pending.?.setLocation(self.source_name.borrow(), self.diag.span);
-                            return failure;
-                        },
+                        error.Parse => return evaluator.failAtSource(
+                            self.diag.text(),
+                            self.text.borrow().sourceName(),
+                            self.diag.span,
+                        ),
+                        error.InvalidProvenance => @panic("archive-bound source reader produced foreign provenance"),
                     }) {
                         .pending => {},
-                        .complete => |read_result| {
-                            self.parsed = switch (read_result) {
-                                .complete => |parsed| parsed,
-                                .incomplete => |value_incomplete| {
-                                    const failure = evaluator.fail(.parse, value_incomplete.message);
-                                    evaluator.unit.pending.?.setLocation(self.source_name.borrow(), value_incomplete.span);
-                                    return failure;
+                        .complete => |result| switch (result) {
+                            .complete => |root_header| self.state = .{ .activating = root_header },
+                            .incomplete => |value_incomplete| switch (self.completion.borrowMut().*) {
+                                .session => {
+                                    evaluator.unit.source_incomplete = value_incomplete;
+                                    return .completed;
                                 },
-                            };
-                            self.phase = .retire_reader;
+                                else => return evaluator.failAtSource(
+                                    value_incomplete.message,
+                                    self.text.borrow().sourceName(),
+                                    value_incomplete.span,
+                                ),
+                            },
                         },
                     }
                 },
-                .retire_reader => {
-                    if (!self.reader_state.?.advanceRetirement()) continue;
-                    self.reader_state = null;
-                    self.materializer = evaluator.unit.archive.rootMaterializer(self.parsed.?.values());
-                    self.phase = .materialize;
-                },
-                .materialize => switch (try self.materializer.?.advance(1)) {
-                    .pending => {},
-                    .complete => |root| {
-                        self.materializer.?.deinit();
-                        self.materializer = null;
-                        self.root = root;
-                        self.root_header = root.list;
-                        self.absorber = evaluator.unit.archive.absorbCursor(&self.parsed.?, root);
-                        self.phase = .absorb;
-                    },
-                },
-                .absorb => switch (self.absorber.?.advance() catch |err| switch (err) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.InvalidProvenance => @panic("archive-bound source reader produced foreign provenance"),
-                }) {
-                    .pending => {},
-                    .complete => {
-                        std.debug.assert(self.absorber.?.deinit() == .archive_owned);
-                        self.absorber = null;
-                        self.root = null;
-                        self.phase = .activate;
-                    },
-                },
-                .activate => {
+                .activating => |root_header| {
                     switch (self.completion.borrowMut().*) {
-                        .push => try evaluator.pushBorrowed(.{ .list = self.root_header.? }),
-                        .call => {
-                            heap.incRef(self.root_header.?);
-                            try evaluator.callOwned(self.root_header.?);
+                        .push => try evaluator.pushBorrowed(.{ .list = root_header }),
+                        .call, .session => {
+                            heap.incRef(root_header);
+                            try evaluator.callOwned(root_header);
                         },
                         .register => |*register| {
                             const site = ExecutionSite.inheriting(
                                 evaluator.unit.current.?,
                                 evaluator.unit.current.?.scope(),
                             );
-                            heap.incRef(self.root_header.?);
+                            heap.incRef(root_header);
                             const preserves_caller = switch (register.request.continuation) {
                                 .replay, .dispatch => true,
                                 .load_only => false,
@@ -3588,7 +3592,7 @@ pub const Machine = struct {
                                 evaluator.suspendCurrentForQualifiedLoad()
                             else
                                 evaluator.suspendCurrent()) catch {
-                                evaluator.releaseDomain().releaseHeader(self.root_header.?);
+                                evaluator.releaseDomain().releaseHeader(root_header);
                                 return error.OutOfMemory;
                             };
                             var continuation = OwnedFrame.init(.{ .qualified_after_load = .{
@@ -3597,15 +3601,15 @@ pub const Machine = struct {
                                 .path = register.path.?,
                                 .request = register.request,
                             } });
-                            defer continuation.deinit(evaluator.releaseDomain(), self.allocator);
+                            defer continuation.deinit(evaluator.releaseDomain(), evaluator.allocator());
                             register.loading = null;
                             register.path = null;
                             evaluator.appendFrame(&continuation) catch {
-                                evaluator.releaseDomain().releaseHeader(self.root_header.?);
+                                evaluator.releaseDomain().releaseHeader(root_header);
                                 return error.OutOfMemory;
                             };
                             evaluator.unit.current = .{
-                                .code = self.root_header.?,
+                                .code = root_header,
                                 .ip = 0,
                                 .site = site,
                                 .traced_word = no_word,
@@ -3614,6 +3618,7 @@ pub const Machine = struct {
                     }
                     return .completed;
                 },
+                .storage => unreachable,
             };
             return .yielded;
         }
@@ -3622,44 +3627,19 @@ pub const Machine = struct {
             storage_allocator: std.mem.Allocator,
             self: *SourceDriver,
         ) bool {
-            return switch (self.retirement_phase) {
-                .prepare => result: {
-                    if (self.absorber) |*absorber| {
-                        if (absorber.deinit() == .archive_owned) self.root = null;
-                    }
-                    self.absorber = null;
-                    if (self.materializer) |*materializer| materializer.retire(releases);
-                    self.materializer = null;
-                    if (self.root) |root| releases.releaseValue(root);
-                    self.root = null;
-                    self.completion.deinit(releases, storage_allocator);
-                    self.retirement_phase = .reader;
+            return switch (self.state) {
+                .start, .activating => result: {
+                    self.state = .storage;
                     break :result false;
                 },
-                .reader => if (self.reader_state) |*state| result: {
-                    if (!state.advanceRetirement()) break :result false;
-                    self.reader_state = null;
-                    self.retirement_phase = .parsed;
-                    break :result false;
-                } else result: {
-                    self.retirement_phase = .parsed;
-                    break :result false;
-                },
-                .parsed => if (self.parsed) |*parsed| result: {
-                    if (self.parsed_retirement == null)
-                        self.parsed_retirement = .init(parsed);
-                    if (!self.parsed_retirement.?.advance()) break :result false;
-                    self.parsed_retirement = null;
-                    self.parsed = null;
-                    self.retirement_phase = .storage;
-                    break :result false;
-                } else result: {
-                    self.retirement_phase = .storage;
+                .ingesting => |*ingestion| result: {
+                    if (!ingestion.advanceRetirement()) break :result false;
+                    self.state = .storage;
                     break :result false;
                 },
                 .storage => {
-                    self.source.deinit(releases, storage_allocator);
-                    self.source_name.deinit(releases, storage_allocator);
+                    self.completion.deinit(releases, storage_allocator);
+                    self.text.deinit(releases, storage_allocator);
                     storage_allocator.destroy(self);
                     return true;
                 },
@@ -3727,7 +3707,7 @@ pub const Machine = struct {
             return switch (self) {
                 .source => |completion| switch (completion) {
                     .register => |register| register.path,
-                    .push, .call => null,
+                    .push, .call, .session => null,
                 },
                 .text => null,
             };
@@ -4421,6 +4401,21 @@ pub const Machine = struct {
         self.unit.pending = EclErr.init(kind, message);
         if (self.unit.active_word != no_word) self.unit.pending.?.word = self.unit.active_word;
         return error.Ecl;
+    }
+    fn failAtSource(
+        self: *Machine,
+        message: []const u8,
+        source_name: []const u8,
+        span: reader.Span,
+    ) MachineError {
+        const owned_source_name = self.unit.allocator.dupe(u8, source_name) catch
+            return error.OutOfMemory;
+        const failure = self.fail(.parse, message);
+        self.unit.pending.?.site = .{ .explicit_location = .{
+            .source_name = owned_source_name,
+            .span = span,
+        } };
+        return failure;
     }
     pub fn failFmt(
         self: *Machine,
@@ -5495,6 +5490,24 @@ pub fn initialize(unit: *Unit, code: *Header, initial_stack: InitialStack) error
         .site = .root(unit),
         .traced_word = no_word,
     };
+}
+
+/// Installs one borrowed Session source as the root unit's first scheduled
+/// work. The source bytes need only remain live until `runInitializedRoot`
+/// returns; driver teardown is completed before that blocking call exits.
+pub fn initializeSource(
+    unit: *Unit,
+    source_name: []const u8,
+    source: []const u8,
+) error{OutOfMemory}!void {
+    var empty = heap.OwnedValue.init(
+        unit.releases,
+        try list.fromValuesGeneric(unit.allocator, &.{}),
+    );
+    defer empty.deinit();
+    try initialize(unit, empty.borrow().list, .empty);
+    var evaluator = Machine{ .unit = unit };
+    try evaluator.sourceBorrowed(source_name, source);
 }
 
 pub fn runSlice(unit: *Unit) MachineError!RunStatus {
@@ -7660,11 +7673,23 @@ const FailureDriver = struct {
     }
     fn beginLocation(self: *FailureDriver, evaluator: *Machine) void {
         if (self.failure.site) |site| {
-            self.location_cursor = switch (site) {
-                .token => |token| evaluator.unit.archive.locateCursor(token.code, token.index),
-                .contract_quotation => |candidate| evaluator.unit.archive.locateQuotationCursor(candidate.borrow()),
-            };
-            self.phase = .locate;
+            switch (site) {
+                .token => |token| {
+                    self.location_cursor = evaluator.unit.archive.locateCursor(token.code, token.index);
+                    self.phase = .locate;
+                },
+                .contract_quotation => |candidate| {
+                    self.location_cursor = evaluator.unit.archive.locateQuotationCursor(candidate.borrow());
+                    self.phase = .locate;
+                },
+                .explicit_location => |location| {
+                    self.location = .{
+                        .source_name = location.source_name,
+                        .span = location.span,
+                    };
+                    self.beginValue();
+                },
+            }
         } else self.beginValue();
     }
     fn beginValue(self: *FailureDriver) void {

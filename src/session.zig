@@ -479,64 +479,17 @@ pub const Session = enum(usize) {
         defer mutation_turn.deinit();
         if (core.root_scope == null)
             core.root_scope = try core.environment.createSessionRoot(core.allocator());
-        var diag: reader.Diag = .{};
-        // The unit that read this text is the scope its words were written in.
-        const unit_scope = try core.environment.scopeIdFor(core.root_scope.?);
-        const read_result = core.archive_owner.read(
-            source_name,
-            source,
-            &diag,
-            @intFromEnum(unit_scope),
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.Parse => {
-                var parse_error = machine.EclErr.init(.parse, diag.text());
-                defer parse_error.retire(core.releaseDomain());
-                const location = spans.LocatedSpan{
-                    .source_name = source_name,
-                    .span = diag.span,
-                };
-                return .{ .err = try machine.errorValue(
-                    core.allocator(),
-                    core.releaseDomain(),
-                    &parse_error,
-                    .{},
-                    location,
-                ) };
-            },
-        };
-        switch (read_result) {
-            .incomplete => |incomplete| return .{ .incomplete = incomplete },
-            .complete => |complete| {
-                var parsed = complete;
-                defer parsed.deinit();
-                return self.executeParsed(parsed.borrow());
-            },
-        }
-    }
-    fn executeParsed(
-        self: *Session,
-        parsed: *reader.Parsed,
-    ) error{OutOfMemory}!UnitOutcome {
-        const core = self.coreState();
-        var root = heap.OwnedValue.init(
-            core.releaseDomain(),
-            try core.archive.codeRoot(parsed.values()),
-        );
-        defer root.deinit();
-        const root_header = root.borrow().list;
-        core.archive.absorb(parsed, root.borrow()) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidProvenance => @panic("archive-bound reader produced foreign provenance"),
-        };
-        _ = root.take();
         var checkpoint = try heap.OwnedValueBuffer.init(core.releaseDomain(), core.stack.items.len);
         defer checkpoint.deinit();
         for (core.stack.items) |item| checkpoint.appendBorrowed(item);
         var unit = initRootUnit(core);
         core.stack = .empty;
         defer finishRootUnit(core, &unit);
-        core.scheduler.runRoot(&unit, root_header) catch |err| switch (err) {
+        machine.initializeSource(&unit, source_name, source) catch {
+            restoreCheckpoint(&unit, checkpoint.values());
+            return error.OutOfMemory;
+        };
+        core.scheduler.runInitializedRoot(&unit) catch |err| switch (err) {
             error.OutOfMemory => {
                 restoreCheckpoint(&unit, checkpoint.values());
                 return error.OutOfMemory;
@@ -546,6 +499,8 @@ pub const Session = enum(usize) {
                 return .{ .err = unit.takeError().? };
             },
         };
+        if (unit.takeSourceIncomplete()) |incomplete|
+            return .{ .incomplete = incomplete };
         return .ok;
     }
 
@@ -1113,6 +1068,20 @@ test "parse diagnostics become parse error dicts" {
     const error_value = (try session.runUnit("broken.ecl", "1 ]")).err;
     defer session.release(error_value);
     try std.testing.expectEqualStrings("parse", try dictSymbol(allocator, error_value, "kind"));
+}
+test "parse diagnostics preserve source names beyond the inline error budget" {
+    const allocator = std.testing.allocator;
+    var session = try Session.init(allocator, &.{});
+    defer session.deinit();
+    const source_name = [_]u8{'p'} ** 512;
+    const error_value = switch (try session.runUnit(&source_name, "1 ]")) {
+        .err => |failure| failure,
+        .ok, .incomplete => return error.ExpectedParseFailure,
+    };
+    defer session.release(error_value);
+    const rendered = try printer.toOwnedString(allocator, error_value);
+    defer allocator.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, &source_name) != null);
 }
 test "source-defined failures retain provenance after their unit" {
     const allocator = std.testing.allocator;

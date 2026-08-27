@@ -986,21 +986,8 @@ pub const SpanArchive = enum(usize) {
     }
 
     /// Moves `parsed`'s provenance and source name into the archive and takes
-    /// ownership of `root`. The caller still owns both on every failure.
+    /// ownership of `root` at the cursor's explicit adoption transition.
     pub const AbsorbError = error{ OutOfMemory, InvalidProvenance };
-    pub fn absorb(
-        self: *SpanArchive,
-        parsed: *reader.Parsed,
-        root: value.Value,
-    ) AbsorbError!void {
-        var cursor = self.absorbCursor(parsed, root);
-        while (cursor.advance() catch |err| {
-            std.debug.assert(cursor.deinit() == .caller_owned);
-            return err;
-        } == .pending) {}
-        std.debug.assert(cursor.deinit() == .archive_owned);
-    }
-
     pub const AbsorbProgress = poll.Progress(void);
     pub const AbsorbCursor = struct {
         pub const ArtifactOwnership = enum { caller_owned, archive_owned };
@@ -1140,6 +1127,295 @@ pub const SpanArchive = enum(usize) {
         return .init(self, parsed, root);
     }
 
+    /// The complete bounded source-ingestion pipeline. It borrows the input
+    /// bytes for its lifetime and owns every reader, materialization, and
+    /// absorption artifact until the archive adopts the finished root. Both
+    /// synchronous bootstrap and scheduler drivers advance this same cursor.
+    pub const SourceIngestResult = union(enum) {
+        complete: *value.ListHandle,
+        incomplete: reader.Incomplete,
+    };
+    pub const SourceIngestProgress = poll.Progress(SourceIngestResult);
+    pub const SourceIngestError = error{ OutOfMemory, Parse, InvalidProvenance };
+    const SourceIngestBacking = struct {
+        const ReadOutcome = union(enum) {
+            parsed: reader.Parsed,
+            incomplete: reader.Incomplete,
+        };
+        const Materializing = struct {
+            parsed: reader.Parsed,
+            materializer: storage.GenericValueMaterializer,
+        };
+        const Absorbing = struct {
+            parsed: reader.Parsed,
+            root: value.Value,
+            absorber: AbsorbCursor,
+        };
+        const RetirementOutcome = union(enum) {
+            publish: *value.ListHandle,
+            abandon,
+        };
+        const ParsedRetirement = union(enum) {
+            ready: reader.Parsed,
+            active: struct {
+                parsed: reader.Parsed,
+                cursor: reader.Parsed.RetireCursor,
+            },
+
+            fn advance(self: *ParsedRetirement) bool {
+                return switch (self.*) {
+                    .ready => |parsed| result: {
+                        // SAFETY: the cursor is initialized immediately after
+                        // its address-stable parsed owner is installed.
+                        self.* = .{ .active = .{
+                            .parsed = parsed,
+                            .cursor = undefined,
+                        } };
+                        self.active.cursor = .init(&self.active.parsed);
+                        break :result false;
+                    },
+                    .active => |*active| active.cursor.advance(),
+                };
+            }
+        };
+        const State = union(enum) {
+            reading: *reader.ReadCursor,
+            retiring_reader: struct {
+                cursor: *reader.ReadCursor,
+                outcome: ReadOutcome,
+            },
+            materializing: Materializing,
+            absorbing: Absorbing,
+            releasing_root: struct {
+                parsed: reader.Parsed,
+                root: value.Value,
+            },
+            retiring_parsed: struct {
+                retirement: ParsedRetirement,
+                outcome: RetirementOutcome,
+            },
+            complete: SourceIngestResult,
+            retired,
+        };
+
+        archive: *SpanArchive,
+        state: State,
+
+        pub fn init(
+            archive: *SpanArchive,
+            source_name: []const u8,
+            source: []const u8,
+            diag: *reader.Diag,
+            word_scope: u32,
+        ) error{OutOfMemory}!SourceIngestBacking {
+            const cursor = try archive.allocator().create(reader.ReadCursor);
+            cursor.* = archive.readCursor(source_name, source, diag, word_scope);
+            return .{
+                .archive = archive,
+                .state = .{ .reading = cursor },
+            };
+        }
+
+        fn retireParsed(
+            self: *SourceIngestBacking,
+            parsed: reader.Parsed,
+            outcome: RetirementOutcome,
+        ) void {
+            self.state = .{ .retiring_parsed = .{
+                .retirement = .{ .ready = parsed },
+                .outcome = outcome,
+            } };
+        }
+
+        /// Performs one bounded ingestion operation. Completion means the
+        /// archive owns the returned root and all temporary parsed ownership
+        /// has already entered bounded retirement.
+        fn advance(self: *SourceIngestBacking) SourceIngestError!SourceIngestProgress {
+            return switch (self.state) {
+                .reading => |cursor| switch (try cursor.advance()) {
+                    .pending => .pending,
+                    .complete => |read_result| result: {
+                        self.state = .{ .retiring_reader = .{
+                            .cursor = cursor,
+                            .outcome = switch (read_result) {
+                                .complete => |parsed| .{ .parsed = parsed },
+                                .incomplete => |incomplete| .{ .incomplete = incomplete },
+                            },
+                        } };
+                        break :result .pending;
+                    },
+                },
+                .retiring_reader => |*retiring| result: {
+                    if (!retiring.cursor.advanceRetirement()) break :result .pending;
+                    self.archive.allocator().destroy(retiring.cursor);
+                    switch (retiring.outcome) {
+                        .parsed => |parsed| self.state = .{ .materializing = .{
+                            .materializer = self.archive.rootMaterializer(parsed.values()),
+                            .parsed = parsed,
+                        } },
+                        .incomplete => |incomplete| {
+                            const completed: SourceIngestResult = .{ .incomplete = incomplete };
+                            self.state = .{ .complete = completed };
+                            break :result .{ .complete = completed };
+                        },
+                    }
+                    break :result .pending;
+                },
+                .materializing => |*materializing| switch (try materializing.materializer.advance(1)) {
+                    .pending => .pending,
+                    .complete => |root| result: {
+                        materializing.materializer.deinit();
+                        const parsed = materializing.parsed;
+                        // SAFETY: the absorber is initialized immediately
+                        // after its address-stable parsed owner is installed.
+                        self.state = .{ .absorbing = .{
+                            .parsed = parsed,
+                            .root = root,
+                            .absorber = undefined,
+                        } };
+                        self.state.absorbing.absorber = self.archive.absorbCursor(
+                            &self.state.absorbing.parsed,
+                            root,
+                        );
+                        break :result .pending;
+                    },
+                },
+                .absorbing => |*absorbing| switch (try absorbing.absorber.advance()) {
+                    .pending => .pending,
+                    .complete => result: {
+                        std.debug.assert(absorbing.absorber.deinit() == .archive_owned);
+                        const parsed = absorbing.parsed;
+                        const root_header = absorbing.root.list;
+                        self.retireParsed(parsed, .{ .publish = root_header });
+                        break :result .pending;
+                    },
+                },
+                .retiring_parsed => |*retiring| result: {
+                    if (!retiring.retirement.advance()) break :result .pending;
+                    const root_header = switch (retiring.outcome) {
+                        .publish => |header| header,
+                        .abandon => unreachable,
+                    };
+                    const completed: SourceIngestResult = .{ .complete = root_header };
+                    self.state = .{ .complete = completed };
+                    break :result .{ .complete = completed };
+                },
+                .releasing_root, .complete, .retired => unreachable,
+            };
+        }
+
+        /// Bounded abandonment. The absorber is the ownership authority: an
+        /// error after adoption clears the local root before any local release,
+        /// while an earlier error leaves that release with this cursor.
+        fn advanceRetirement(self: *SourceIngestBacking) bool {
+            return switch (self.state) {
+                .reading => |cursor| result: {
+                    if (!cursor.advanceRetirement()) break :result false;
+                    self.archive.allocator().destroy(cursor);
+                    self.state = .retired;
+                    break :result false;
+                },
+                .retiring_reader => |*retiring| result: {
+                    if (!retiring.cursor.advanceRetirement()) break :result false;
+                    self.archive.allocator().destroy(retiring.cursor);
+                    switch (retiring.outcome) {
+                        .parsed => |parsed| self.retireParsed(parsed, .abandon),
+                        .incomplete => self.state = .retired,
+                    }
+                    break :result false;
+                },
+                .materializing => |*materializing| result: {
+                    materializing.materializer.retire(self.archive.releaseDomain());
+                    const parsed = materializing.parsed;
+                    self.retireParsed(parsed, .abandon);
+                    break :result false;
+                },
+                .absorbing => |*absorbing| result: {
+                    const ownership = absorbing.absorber.deinit();
+                    const parsed = absorbing.parsed;
+                    const root = absorbing.root;
+                    switch (ownership) {
+                        .caller_owned => self.state = .{ .releasing_root = .{
+                            .parsed = parsed,
+                            .root = root,
+                        } },
+                        .archive_owned => self.retireParsed(parsed, .abandon),
+                    }
+                    break :result false;
+                },
+                .releasing_root => |releasing| result: {
+                    self.archive.releaseDomain().releaseValue(releasing.root);
+                    self.retireParsed(releasing.parsed, .abandon);
+                    break :result false;
+                },
+                .retiring_parsed => |*retiring| result: {
+                    if (!retiring.retirement.advance()) break :result false;
+                    self.state = .retired;
+                    break :result false;
+                },
+                .complete => result: {
+                    self.state = .retired;
+                    break :result false;
+                },
+                .retired => true,
+            };
+        }
+    };
+
+    /// Movable ownership handle for heap-stable ingestion state. `take` is the
+    /// only relocation operation: it consumes the old handle so cursor backing
+    /// still has one destroyer while internal cursors safely borrow it.
+    pub const SourceIngestCursor = enum(usize) {
+        consumed = 0,
+        _,
+
+        fn fromBacking(owned: *SourceIngestBacking) SourceIngestCursor {
+            return @enumFromInt(@intFromPtr(owned));
+        }
+        fn backing(self: *const SourceIngestCursor) *SourceIngestBacking {
+            std.debug.assert(self.* != .consumed);
+            return @ptrFromInt(@intFromEnum(self.*));
+        }
+        pub fn take(self: *SourceIngestCursor) SourceIngestCursor {
+            const moved = self.*;
+            std.debug.assert(moved != .consumed);
+            self.* = .consumed;
+            return moved;
+        }
+        pub fn advance(self: *SourceIngestCursor) SourceIngestError!SourceIngestProgress {
+            const state = self.backing();
+            const progress = try state.advance();
+            if (progress == .complete) {
+                const storage_allocator = state.archive.allocator();
+                storage_allocator.destroy(state);
+                self.* = .consumed;
+            }
+            return progress;
+        }
+        pub fn advanceRetirement(self: *SourceIngestCursor) bool {
+            if (self.* == .consumed) return true;
+            const state = self.backing();
+            if (!state.advanceRetirement()) return false;
+            const storage_allocator = state.archive.allocator();
+            storage_allocator.destroy(state);
+            self.* = .consumed;
+            return true;
+        }
+    };
+
+    pub fn sourceIngestCursor(
+        self: *SpanArchive,
+        source_name: []const u8,
+        source: []const u8,
+        diag: *reader.Diag,
+        word_scope: u32,
+    ) error{OutOfMemory}!SourceIngestCursor {
+        const backing = try self.allocator().create(SourceIngestBacking);
+        errdefer self.allocator().destroy(backing);
+        backing.* = try .init(self, source_name, source, diag, word_scope);
+        return .fromBacking(backing);
+    }
+
     pub fn locate(
         self: *const SpanArchive,
         header: *value.ListHandle,
@@ -1252,18 +1528,23 @@ const ArchiveFixture = struct {
     /// Reads one source and absorbs it, returning the archive-owned root.
     fn absorbSource(self: *ArchiveFixture, source: []const u8) !*value.ListHandle {
         var diag: reader.Diag = .{};
-        var parsed = switch (try self.archive_owner.read("spans-test.ecl", source, &diag, 0)) {
-            .complete => |complete| complete,
-            .incomplete => return error.UnexpectedIncomplete,
-        };
-        defer parsed.deinit();
-        var root = heap.OwnedValue.init(
-            heap.hostDomain(self.owner.cleanup()),
-            try self.archive.codeRoot(parsed.values()),
+        var ingestion = try self.archive.sourceIngestCursor(
+            "spans-test.ecl",
+            source,
+            &diag,
+            0,
         );
-        defer root.deinit();
-        try self.archive.absorb(parsed.borrow(), root.borrow());
-        return root.take().list;
+        defer {
+            while (!ingestion.advanceRetirement())
+                _ = self.owner.domain().advance(256);
+        }
+        while (true) switch (try ingestion.advance()) {
+            .pending => _ = self.owner.domain().advance(256),
+            .complete => |result| return switch (result) {
+                .complete => |header| header,
+                .incomplete => error.UnexpectedIncomplete,
+            },
+        };
     }
 
     /// A code value in this archive's construction namespace that the reader
@@ -1311,6 +1592,101 @@ fn admittedForTest(
             return error.ExpectedAdmission;
         },
     };
+}
+
+fn sourceIngestAllocationProbe(allocator: std.mem.Allocator) !void {
+    var host = heap.HostOwner.init(allocator);
+    defer host.cleanup().drain();
+    var archive_owner = try SpanArchiveOwner.init(&host);
+    defer archive_owner.deinit();
+    var archive = archive_owner.view();
+    var diag: reader.Diag = .{};
+    var ingestion = try archive.sourceIngestCursor(
+        "spans-ingest-oom.ecl",
+        "(1) 'one def",
+        &diag,
+        0,
+    );
+    defer {
+        while (!ingestion.advanceRetirement())
+            _ = host.domain().advance(256);
+    }
+    while (true) switch (try ingestion.advance()) {
+        .pending => _ = host.domain().advance(256),
+        .complete => |result| switch (result) {
+            .complete => return,
+            .incomplete => return error.UnexpectedIncomplete,
+        },
+    };
+}
+
+test "spans: source ingestion propagates every allocation failure across adoption" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        sourceIngestAllocationProbe,
+        .{},
+    );
+}
+
+test "spans: public source ingestion handle relocates between advances" {
+    var fixture: ArchiveFixture = undefined;
+    try fixture.init(std.testing.allocator);
+    defer fixture.deinit();
+    var diag: reader.Diag = .{};
+    var ingestion = try fixture.archive.sourceIngestCursor(
+        "spans-relocated-ingest.ecl",
+        "(1) 'one def",
+        &diag,
+        0,
+    );
+    var live = true;
+    defer {
+        if (live) while (true) {
+            ingestion = ingestion.take();
+            if (ingestion.advanceRetirement()) break;
+            _ = fixture.owner.domain().advance(256);
+        };
+    }
+
+    var advances: usize = 0;
+    const root = while (true) : (advances += 1) {
+        ingestion = ingestion.take();
+        switch (try ingestion.advance()) {
+            .pending => _ = fixture.owner.domain().advance(256),
+            .complete => |result| switch (result) {
+                .complete => |header| break header,
+                .incomplete => return error.UnexpectedIncomplete,
+            },
+        }
+    };
+    live = false;
+
+    var abandoned = try fixture.archive.sourceIngestCursor(
+        "spans-relocated-abandon.ecl",
+        "(2) 'two def",
+        &diag,
+        0,
+    );
+    var abandoned_live = true;
+    defer {
+        if (abandoned_live) while (true) {
+            abandoned = abandoned.take();
+            if (abandoned.advanceRetirement()) break;
+            _ = fixture.owner.domain().advance(256);
+        };
+    }
+    abandoned = abandoned.take();
+    try std.testing.expect((try abandoned.advance()) == .pending);
+    while (true) {
+        abandoned = abandoned.take();
+        if (abandoned.advanceRetirement()) break;
+        _ = fixture.owner.domain().advance(256);
+    }
+    abandoned_live = false;
+    try std.testing.expect(advances != 0);
+    const prepared = try prepareForTest(&fixture, root);
+    try std.testing.expect(prepared == .admitted);
+    prepared.admitted.deinit();
 }
 
 test "spans: only the reader's own text is admitted" {
