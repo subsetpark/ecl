@@ -1,8 +1,9 @@
 //! Slow, exhaustive allocation-failure coverage across initialized sessions.
 //!
-//! Two coarse probes keep the established core and the M12 data/host surfaces
-//! separate. Each still shares one embedded-prelude bootstrap across all of
-//! its related paths instead of bootstrapping once per word.
+//! Four coarse probes keep the established core, general standard-library and
+//! host surfaces, package synchronization, and package CLI separate. Each
+//! still shares one embedded-prelude bootstrap across related paths instead
+//! of bootstrapping once per word.
 //!
 //! Component-level probes elsewhere inject failures into a directly
 //! constructed subject (`list.zig`, `dict.zig`, `env.zig`, `equal.zig`, the
@@ -20,7 +21,10 @@
 //! Keep additions short and reaching, not exhaustive — one line through a
 //! path is coverage; a hundred lines through it is the same coverage, slower.
 //! Snippets must leave the stack clean (`pop` what they push) and propagate
-//! errors, or the sweep silently stops testing what follows.
+//! errors, or the sweep silently stops testing what follows. Each coarse probe
+//! partitions those ordinals between two workers, preserving exhaustive
+//! failure injection while bounding release-candidate wall time on four-core
+//! runners.
 const std = @import("std");
 const session = @import("../session.zig");
 const native_fixture = @import("native_fixture_options");
@@ -68,6 +72,16 @@ fn packageStoreSource(
     return allocator.dupe(u8, source.written());
 }
 
+fn packageInstallSource(allocator: std.mem.Allocator, destination: []const u8) ![]u8 {
+    var source = std.Io.Writer.Allocating.init(allocator);
+    defer source.deinit();
+    try appendFixtureBytes(&source.writer, archive_fixtures.package_valid);
+    try source.writer.writeAll(" \"a\" ");
+    try appendQuoted(&source.writer, destination);
+    try source.writer.writeAll(" pkg.store.install pop");
+    return allocator.dupe(u8, source.written());
+}
+
 fn packageSyncSource(allocator: std.mem.Allocator, project: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
@@ -89,6 +103,43 @@ fn packageCliSource(allocator: std.mem.Allocator, project: []const u8) ![]u8 {
     try source.writer.writeAll("] pkg.cli.tree");
     return allocator.dupe(u8, source.written());
 }
+
+const PackageScratch = struct {
+    directory: std.testing.TmpDir,
+    path: [:0]u8,
+
+    fn init() !PackageScratch {
+        const allocator = std.testing.allocator;
+        var directory = std.testing.tmpDir(.{});
+        errdefer directory.cleanup();
+        const path = try directory.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+        errdefer allocator.free(path);
+        const lock_probe_hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "ecl.pkg",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {}}\n",
+        });
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "ecl.lock",
+            .data = "{'format 1 'root \"root\" 'packages {\"lockprobe\" {'version \"1.0.0\" 'url \"https://e.com/p.tgz\" 'hash \"sha256-" ++ lock_probe_hash ++ "\"}} 'requires {\"root\" {\"lockprobe\" \"1.0.0\"}}}\n",
+        });
+        try directory.dir.createDir(
+            std.testing.io,
+            "lockprobe-1.0.0-" ++ lock_probe_hash,
+            .default_dir,
+        );
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/lockprobe.ecl",
+            .data = "((42) 'answer def) 'lockprobe @defm\n",
+        });
+        return .{ .directory = directory, .path = path };
+    }
+
+    fn deinit(self: *PackageScratch) void {
+        std.testing.allocator.free(self.path);
+        self.directory.cleanup();
+    }
+};
 
 fn appendFixtureBytes(writer: *std.Io.Writer, encoded: []const u8) !void {
     try writer.writeByte('[');
@@ -211,6 +262,90 @@ fn runOk(runtime: *session.Session, name: []const u8, source: []const u8) !void 
         .incomplete => return error.UnexpectedIncomplete,
         .err => |failure| return reportUnexpectedFailure(runtime, name, failure),
     }
+}
+
+const allocation_failure_shard_count = 2;
+
+fn checkAllocationFailureShard(
+    backing_allocator: std.mem.Allocator,
+    comptime probe: anytype,
+    needed_alloc_count: usize,
+    shard_index: usize,
+) !void {
+    var fail_index = shard_index;
+    while (fail_index < needed_alloc_count) : (fail_index += allocation_failure_shard_count) {
+        var failing = std.testing.FailingAllocator.init(backing_allocator, .{
+            .fail_index = fail_index,
+        });
+
+        if (probe(failing.allocator())) |_| {
+            if (failing.has_induced_failure) {
+                return error.SwallowedOutOfMemoryError;
+            }
+            return error.NondeterministicMemoryUsage;
+        } else |err| switch (err) {
+            error.OutOfMemory => {
+                if (failing.allocated_bytes != failing.freed_bytes) {
+                    std.debug.print(
+                        "\nfail_index: {d}/{d}\nallocated bytes: {d}\nfreed bytes: {d}\nallocations: {d}\ndeallocations: {d}\n",
+                        .{
+                            fail_index,
+                            needed_alloc_count,
+                            failing.allocated_bytes,
+                            failing.freed_bytes,
+                            failing.allocations,
+                            failing.deallocations,
+                        },
+                    );
+                    return error.MemoryLeakDetected;
+                }
+            },
+            else => |unexpected| return unexpected,
+        }
+    }
+}
+
+fn checkAllAllocationFailuresParallel(
+    backing_allocator: std.mem.Allocator,
+    comptime probe: anytype,
+) !void {
+    var baseline = std.testing.FailingAllocator.init(backing_allocator, .{});
+    try probe(baseline.allocator());
+
+    const Context = struct {
+        backing_allocator: std.mem.Allocator,
+        needed_alloc_count: usize,
+        shard_index: usize,
+        result: ?anyerror = null,
+
+        fn run(context: *@This()) void {
+            checkAllocationFailureShard(
+                context.backing_allocator,
+                probe,
+                context.needed_alloc_count,
+                context.shard_index,
+            ) catch |err| {
+                context.result = err;
+            };
+        }
+    };
+
+    var contexts: [allocation_failure_shard_count]Context = undefined;
+    var threads: [allocation_failure_shard_count]std.Thread = undefined;
+    var started: usize = 0;
+    errdefer for (threads[0..started]) |thread| thread.join();
+
+    for (&contexts, 0..) |*context, shard_index| {
+        context.* = .{
+            .backing_allocator = backing_allocator,
+            .needed_alloc_count = baseline.alloc_index,
+            .shard_index = shard_index,
+        };
+        threads[shard_index] = try std.Thread.spawn(.{}, Context.run, .{context});
+        started += 1;
+    }
+    for (threads) |thread| thread.join();
+    for (contexts) |context| if (context.result) |err| return err;
 }
 
 fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
@@ -430,36 +565,13 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
 fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     var locked_allocator = LockedAllocator{ .child = allocator };
     const thread_safe_allocator = locked_allocator.allocator();
-    var scratch = std.testing.tmpDir(.{});
-    defer scratch.cleanup();
+    var scratch = try PackageScratch.init();
+    defer scratch.deinit();
     // Paths and source strings are borrowed test scaffolding, not values the
     // Session owns. Keep their construction outside the injected allocator so
     // the sweep enumerates live Session paths rather than this helper's writer.
     const scaffold_allocator = std.testing.allocator;
-    const scratch_path = try scratch.dir.realPathFileAlloc(
-        std.testing.io,
-        ".",
-        scaffold_allocator,
-    );
-    defer scaffold_allocator.free(scratch_path);
-    const lock_probe_hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    try scratch.dir.writeFile(std.testing.io, .{
-        .sub_path = "ecl.pkg",
-        .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {}}\n",
-    });
-    try scratch.dir.writeFile(std.testing.io, .{
-        .sub_path = "ecl.lock",
-        .data = "{'format 1 'root \"root\" 'packages {\"lockprobe\" {'version \"1.0.0\" 'url \"https://e.com/p.tgz\" 'hash \"sha256-" ++ lock_probe_hash ++ "\"}} 'requires {\"root\" {\"lockprobe\" \"1.0.0\"}}}\n",
-    });
-    try scratch.dir.createDir(
-        std.testing.io,
-        "lockprobe-1.0.0-" ++ lock_probe_hash,
-        .default_dir,
-    );
-    try scratch.dir.writeFile(std.testing.io, .{
-        .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/lockprobe.ecl",
-        .data = "((42) 'answer def) 'lockprobe @defm\n",
-    });
+    const scratch_path = scratch.path;
     var output_buffer: [16384]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     var diagnostics_buffer: [1024]u8 = undefined;
@@ -487,11 +599,11 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     // materialization, and ordinary source publication.
     try runOk(&runtime, "oom-lock-tier.ecl", "lockprobe.answer pop");
 
-    // M12's embedded modules and host effects form a second coarse Session
-    // bundle. checkAllAllocationFailures is quadratic in one probe's total
-    // allocation count; keeping these paths in the older core bundle creates
-    // an enormous cross-product between unrelated ordinals. Two bundles still
-    // share one bootstrap across every related surface rather than starting a
+    // M12's general embedded modules and host effects form one coarse Session
+    // bundle. Package synchronization and CLI have independent probes below:
+    // their allocation counts dominate this gate, and combining them creates
+    // a quadratic cross-product between unrelated ordinals. Each bundle still
+    // shares one bootstrap across related surfaces rather than starting a
     // Session per word.
     // `rng` reaches the vector-draw driver, which builds its result across
     // resumptions, and the state list each primitive returns.
@@ -518,12 +630,7 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[\"r\"] [[\"t\" \"v\" (sum)]] table.aggregate pop " ++
             "{\"id\" [1 2]} {\"cid\" [2] \"n\" [9]} [[\"id\" \"cid\"]] " ++
             "{\"n\" 0} table.left-join-with pop " ++
-            "[97] archive.sha256 pop " ++
-            "{'format 1 'name \"r\" 'version \"0.1.0\" 'requires " ++
-            "{\"a\" {'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
-            "'hash \"sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}}} " ++
-            "{\"a\" {\"1.0.0\" {'format 1 'name \"a\" 'version \"1.0.0\" 'requires {}}}} " ++
-            "pkg.mvs.resolve pop",
+            "[97] archive.sha256 pop",
     );
 
     // The host scripting words allocate on the read buffer, the decoded
@@ -572,15 +679,6 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-pkg-gc.ecl",
         "[\"a-1.0.0-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\"] pkg.store.gc pop",
     );
-    // The present one-package graph reaches sync discovery, MVS, the
-    // selected-entry skip, canonical rendering, and lock replacement without
-    // introducing an ambient network read into the allocation sweep.
-    const sync_source = try packageSyncSource(scaffold_allocator, scratch_path);
-    defer scaffold_allocator.free(sync_source);
-    try runOk(&runtime, "oom-pkg-sync.ecl", sync_source);
-    const cli_source = try packageCliSource(scaffold_allocator, scratch_path);
-    defer scaffold_allocator.free(cli_source);
-    try runOk(&runtime, "oom-pkg-cli.ecl", cli_source);
     const host_io_source = try std.fmt.allocPrint(
         scaffold_allocator,
         "1 \"probe\" io.debug pop " ++
@@ -610,11 +708,88 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     );
 }
 
+fn packageSyncSessionAllocationProbe(allocator: std.mem.Allocator) !void {
+    var locked_allocator = LockedAllocator{ .child = allocator };
+    const thread_safe_allocator = locked_allocator.allocator();
+    var scratch = try PackageScratch.init();
+    defer scratch.deinit();
+    const scaffold_allocator = std.testing.allocator;
+    var output_buffer: [16384]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    var diagnostics_buffer: [1024]u8 = undefined;
+    var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+    var runtime = try session.Session.initWithHostConfig(
+        thread_safe_allocator,
+        &.{"argument"},
+        .{
+            .io = std.testing.io,
+            .output = &output,
+            .diagnostics = &diagnostics,
+            .project_start = scratch.path,
+            .environ = &.{
+                .{ .name = "ECL_OOM_PROBE", .value = "probe" },
+                .{ .name = "ECL_CACHE", .value = scratch.path },
+            },
+            .standard_input = .program_source,
+        },
+        .cooperative,
+    );
+    defer runtime.deinit();
+
+    // The installed one-package fixture keeps synchronization offline while
+    // the injected run still crosses discovery, pkg.mvs.resolve, the selected
+    // entry skip, canonical rendering, and atomic lock replacement.
+    const package_destination = try std.fmt.allocPrint(
+        scaffold_allocator,
+        "{s}{c}a-1.0.0-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9",
+        .{ scratch.path, std.fs.path.sep },
+    );
+    defer scaffold_allocator.free(package_destination);
+    const install_source = try packageInstallSource(scaffold_allocator, package_destination);
+    defer scaffold_allocator.free(install_source);
+    try runOk(&runtime, "oom-pkg-sync-install.ecl", install_source);
+    const sync_source = try packageSyncSource(scaffold_allocator, scratch.path);
+    defer scaffold_allocator.free(sync_source);
+    try runOk(&runtime, "oom-pkg-sync.ecl", sync_source);
+}
+
+fn packageCliSessionAllocationProbe(allocator: std.mem.Allocator) !void {
+    var locked_allocator = LockedAllocator{ .child = allocator };
+    const thread_safe_allocator = locked_allocator.allocator();
+    var scratch = try PackageScratch.init();
+    defer scratch.deinit();
+    const scaffold_allocator = std.testing.allocator;
+    var output_buffer: [16384]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    var diagnostics_buffer: [1024]u8 = undefined;
+    var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+    var runtime = try session.Session.initWithHostConfig(
+        thread_safe_allocator,
+        &.{"argument"},
+        .{
+            .io = std.testing.io,
+            .output = &output,
+            .diagnostics = &diagnostics,
+            .project_start = scratch.path,
+            .environ = &.{
+                .{ .name = "ECL_OOM_PROBE", .value = "probe" },
+                .{ .name = "ECL_CACHE", .value = scratch.path },
+            },
+            .standard_input = .program_source,
+        },
+        .cooperative,
+    );
+    defer runtime.deinit();
+
+    const cli_source = try packageCliSource(scaffold_allocator, scratch.path);
+    defer scaffold_allocator.free(cli_source);
+    try runOk(&runtime, "oom-pkg-cli.ecl", cli_source);
+}
+
 test "oom: full-session surfaces propagate every allocation failure" {
-    try std.testing.checkAllAllocationFailures(
+    try checkAllAllocationFailuresParallel(
         std.heap.smp_allocator,
         fullSessionAllocationProbe,
-        .{},
     );
 }
 
@@ -663,9 +838,16 @@ test "oom: admitted construction driver allocation failure transfers its cursor 
 }
 
 test "oom: standard-library and host surfaces propagate every allocation failure" {
-    try std.testing.checkAllAllocationFailures(
+    try checkAllAllocationFailuresParallel(
         std.heap.smp_allocator,
         stdlibSessionAllocationProbe,
-        .{},
+    );
+    try checkAllAllocationFailuresParallel(
+        std.heap.smp_allocator,
+        packageSyncSessionAllocationProbe,
+    );
+    try checkAllAllocationFailuresParallel(
+        std.heap.smp_allocator,
+        packageCliSessionAllocationProbe,
     );
 }

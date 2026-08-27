@@ -58,8 +58,20 @@ jobs:
     name: Linux x86_64 / ${{ inputs.optimize }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    env:
+      OPTIMIZE: ${{ inputs.optimize }}
 
     steps:
+      - name: Validate optimization mode
+        run: |
+          case "$OPTIMIZE" in
+            Debug|ReleaseSafe|ReleaseFast) ;;
+            *)
+              echo "Unsupported optimization mode: $OPTIMIZE" >&2
+              exit 1
+              ;;
+          esac
+
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -70,7 +82,7 @@ jobs:
           docker run --detach --name ecl-ci --platform linux/amd64 \
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             alpine:latest tail -f /dev/null
-          docker exec ecl-ci sh -euxc '
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
             apk add --no-cache curl xz linux-headers expect python3 git
             curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
             echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
@@ -84,7 +96,7 @@ jobs:
       - name: Install zlint
         if: inputs.run_precommit || inputs.run_quality
         run: |
-          docker exec ecl-ci sh -euxc '
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
             curl -fsSLo /usr/local/bin/zlint https://github.com/DonIsaac/zlint/releases/download/v0.9.1/zlint-linux-x86_64
             echo "3290bd511d37e4f6ccca3621b9894cd6c378195cdaac27520d0bd894058b2b9b  /usr/local/bin/zlint" | sha256sum -c -
             chmod +x /usr/local/bin/zlint
@@ -93,35 +105,35 @@ jobs:
       - name: Precommit tier
         if: inputs.run_precommit
         run: >-
-          docker exec ecl-ci sh -euxc
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 10m zig build precommit
-          -Doptimize=${{ inputs.optimize }} --summary all --test-timeout 5m < /dev/null'
+          -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m < /dev/null'
 
       - name: Quality gates
         if: inputs.run_quality
         run: |
-          docker exec ecl-ci sh -euxc '
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
             cd /build
             timeout 2m zig fmt --check . < /dev/null
-            timeout 10m zig build check-ecl source-audit -Doptimize=${{ inputs.optimize }} --summary all --test-timeout 5m < /dev/null
+            timeout 10m zig build check-ecl source-audit -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m < /dev/null
             git ls-files "*.zig" | timeout 5m zlint -S --deny-warnings
           '
 
       - name: Full suite
         if: inputs.run_full_suite
         run: >-
-          docker exec ecl-ci sh -euxc
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 20m zig build test
-          -Doptimize=${{ inputs.optimize }} --summary all --test-timeout 10m < /dev/null'
+          -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m < /dev/null'
 
       # check-ecl validates the same corpus in-process. This additionally
       # exercises the installed formatter through its public CLI surface.
       - name: Check ECL formatting through installed binary
         if: inputs.run_public_ecl_format
         run: |
-          docker exec ecl-ci sh -euxc '
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
             cd /build
-            timeout 10m zig build -Doptimize=${{ inputs.optimize }} --summary all < /dev/null
+            timeout 10m zig build -Doptimize="$OPTIMIZE" --summary all < /dev/null
             formatted="$(mktemp)"
             trap "rm -f \"$formatted\"" EXIT
             git ls-files "*.ecl" ":!:test/acceptance/load-parse-error.ecl" |
@@ -138,70 +150,70 @@ jobs:
       - name: Native SDK compile-time rejections
         if: inputs.run_native_negative
         run: >-
-          docker exec ecl-ci sh -euxc
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 10m zig build test-native-sdk-negative
-          -Doptimize=${{ inputs.optimize }} --summary all < /dev/null'
+          -Doptimize="$OPTIMIZE" --summary all < /dev/null'
 
       - name: REPL under a PTY
         if: inputs.run_repl
         run: >-
-          docker exec ecl-ci sh -euxc
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 10m zig build test-repl
-          -Doptimize=${{ inputs.optimize }} --summary all < /dev/null'
+          -Doptimize="$OPTIMIZE" --summary all < /dev/null'
 
       # The filtered native tests in src/root.zig are already part of the full
       # suite. Only run the standalone CLI acceptance root here.
       - name: Standalone native acceptance
         if: inputs.run_native_acceptance
         run: >-
-          docker exec ecl-ci sh -euxc
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 10m zig build test-native-acceptance
-          -Doptimize=${{ inputs.optimize }} --summary all --test-timeout 5m < /dev/null'
+          -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m < /dev/null'
 
       - name: Fuzz campaigns
         if: inputs.run_fuzz
         run: |
-          docker exec ecl-ci sh -euxc '
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
             cd /build
             for target in reader formatter editor completion history pending scheduler native-descriptor native-call; do
-              timeout 10m zig build "fuzz-$target" -Doptimize=${{ inputs.optimize }} --summary all --test-timeout 5m --fuzz=100 < /dev/null
+              timeout 10m zig build "fuzz-$target" -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m --fuzz=100 < /dev/null
             done
           '
 
       - name: Eight-worker concurrency
         if: inputs.run_workers_eight
         run: >-
-          docker exec ecl-ci sh -euxc
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 15m zig build test-workers-8
-          -Doptimize=${{ inputs.optimize }} --summary all --test-timeout 10m < /dev/null'
+          -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m < /dev/null'
 
       - name: Idiom differential
         if: inputs.run_differential
         run: >-
-          docker exec ecl-ci sh -euxc
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 10m zig build differential
-          -Doptimize=${{ inputs.optimize }} --summary all --test-timeout 5m < /dev/null'
+          -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m < /dev/null'
 
       - name: ThreadSanitizer
         if: inputs.run_tsan
         run: >-
-          docker exec ecl-ci sh -euxc
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 20m zig build test-tsan
-          -Doptimize=${{ inputs.optimize }} --summary all --test-timeout 10m < /dev/null'
+          -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m < /dev/null'
 
       - name: Reference snapshots
         if: inputs.run_snapshots
         run: >-
-          docker exec ecl-ci sh -euxc
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 10m zig build test-snapshots
-          -Doptimize=${{ inputs.optimize }} --summary all --test-timeout 5m < /dev/null'
+          -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m < /dev/null'
 
       - name: Initialized-Session OOM sweep
         if: inputs.run_oom
         run: >-
-          docker exec ecl-ci sh -euxc
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 30m zig build test-oom
-          -Doptimize=${{ inputs.optimize }} --summary all --test-timeout 25m < /dev/null'
+          -Doptimize="$OPTIMIZE" --summary all --test-timeout 25m < /dev/null'
 
       - name: Stop Alpine container
         if: always()

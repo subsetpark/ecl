@@ -2058,17 +2058,24 @@ the same gate is part of `zig build test`.
 
 **Allocation-failure topology.** Focused constructors and other low-level
 allocation paths use exhaustive failure injection in the ordinary
-`zig build test` suite. Initialized-Session coverage is two coarse probes in
-the separate ReleaseSafe `zig build test-oom` release-candidate gate; its
-quadratic ordinal replay is intentionally not part of per-push CI. The
-established core bundle crosses kernels, primitives, session services,
-reflection, source and native loading, native call transactions, modules, and
-definition replacement in one deterministic lifetime. The M12 bundle crosses
-its embedded data modules and host IO surfaces in another. The build schedules
-the two filtered test artifacts independently, so their exhaustive ordinal
-replays run in parallel while each bundle remains deterministic. This removes
-the quadratic cross-product between two large allocation sets while still
-paying for one embedded-prelude bootstrap per bundle rather than per word.
+`zig build test` suite. Initialized-Session coverage is four coarse probes in
+the separate ReleaseSafe `zig build test-oom` release-candidate gate; each
+probe partitions its exhaustive ordinal replay between two workers. The
+quadratic sweep is intentionally not part of per-push CI. The established core
+bundle crosses kernels, primitives, session services, reflection, source and
+native loading, native call transactions, modules, and definition replacement
+in one deterministic lifetime. Three M12 bundles independently cross general
+embedded data modules and host IO, package synchronization, and package CLI.
+Synchronization itself executes `pkg.mvs.resolve`; a second direct MVS call
+would duplicate that expensive production path rather than reach another
+failure site. At introduction the three-way M12 partition measured 21,235,
+56,632, and 23,739 ReleaseSafe allocation ordinals, reducing the theoretical
+prefix replay from 4.73 billion allocator calls for one 97,245-ordinal probe to
+2.11 billion. The build schedules the core and M12 test artifacts
+independently, and ordinal shards within each active probe also run in parallel
+while every replay remains deterministic. This bounds release-candidate wall
+time while still paying for one embedded-prelude bootstrap per related bundle
+rather than per word.
 Native fixture code uses the real generated descriptor and public loader. The probes' tagged
 cooperative scheduler mode executes the same queue, wait-set, native
 continuation, cancellation, publication, and reclamation transitions on
@@ -2078,10 +2085,11 @@ a thread race; the 1/N-worker suites and TSan separately validate the
 threaded executor. `checkAllAllocationFailures` supplies exact
 allocated/freed accounting over the standard backing allocator; the debug
 test allocator is deliberately not nested underneath this already
-exhaustive wrapper. Within the M12 bundle, expensive fixed-work fixtures are
-ordered at the tail: embedded data modules precede host filesystem IO, and the
-attempted HTTP call is last. This changes no failure site or Session lifetime;
-it prevents unrelated later ordinals from repeatedly paying for earlier IO.
+exhaustive wrapper. Within the general M12 bundle, expensive fixed-work
+fixtures are ordered at the tail: embedded data modules precede host filesystem
+IO, and the attempted HTTP call is last. This changes no failure site or
+Session lifetime; it prevents unrelated later ordinals from repeatedly paying
+for earlier IO.
 Reaching
 snippets use the smallest collection that enters each path, because additional
 elements add work but no allocation site.
