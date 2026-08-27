@@ -313,14 +313,8 @@ const UnpackDriver = struct {
     tar: ?heap.Owned([]u8) = null,
 
     slots: ?heap.Owned([]?*Entry) = null,
-    result_values: ?[]Value = null,
-    result_values_built: usize = 0,
-    result_iterator: ?EntryList.Iterator = null,
-    current_result_path: ?[]const u8 = null,
-    text_materializer: ?storage.Utf8Materializer = null,
-    result_materializer: ?storage.ValueMaterializer = null,
+    result_inputs: ResultInputs = .none,
     free_iterator: ?EntryList.ReverseIterator = null,
-    result_release_index: usize = 0,
 
     const Staged = struct {
         result: Value,
@@ -360,6 +354,23 @@ const UnpackDriver = struct {
         end: usize,
         next_offset: usize,
     };
+    const ResultInputs = union(enum) {
+        none,
+        owned: struct {
+            values: []Value,
+            built: usize = 0,
+        },
+        retiring: struct {
+            values: []Value,
+            built: usize,
+            index: usize = 0,
+        },
+        retired,
+    };
+    const PathWork = union(enum) {
+        next,
+        text: storage.Utf8Materializer,
+    };
     const ScanWork = union(enum) {
         tar_header,
         insert_member: struct {
@@ -377,9 +388,14 @@ const UnpackDriver = struct {
         },
         trailing_zeroes,
         materialize_manifest,
+        materialize_manifest_text: storage.Utf8Materializer,
         allocate_results,
-        materialize_paths,
-        materialize_result,
+        materialize_paths: struct {
+            iterator: EntryList.Iterator,
+            work: PathWork = .next,
+        },
+        materialize_result: storage.ValueMaterializer,
+        complete,
     };
     const Scanning = struct {
         context: ScanContext = .{},
@@ -512,9 +528,15 @@ const UnpackDriver = struct {
                 .scan_pax => |*scan| self.scanPaxRecord(evaluator, scanning, scan),
                 .trailing_zeroes => self.trailingZeroes(evaluator, scanning),
                 .materialize_manifest => self.materializeManifest(evaluator, scanning),
+                .materialize_manifest_text => |*materializer| self.materializeManifestText(
+                    evaluator,
+                    scanning,
+                    materializer,
+                ),
                 .allocate_results => self.allocateResults(scanning),
-                .materialize_paths => self.materializePaths(evaluator, scanning),
-                .materialize_result => self.materializeResult(scanning),
+                .materialize_paths => |*paths| self.materializePaths(evaluator, scanning, paths),
+                .materialize_result => |*materializer| self.materializeResult(scanning, materializer),
+                .complete => unreachable,
             },
         };
     }
@@ -1049,19 +1071,31 @@ const UnpackDriver = struct {
     ) MachineError!machine.WorkProgress {
         const manifest = scanning.context.manifest_data orelse
             return self.failDomain(evaluator, "package archive has no root ecl.pkg manifest");
-        if (self.text_materializer == null) {
-            const tar = self.tar.?.borrow();
-            self.text_materializer = .init(self.allocator, tar[manifest.offset .. manifest.offset + manifest.size]);
-        }
-        return switch (self.text_materializer.?.advance(work_quantum) catch |err| switch (err) {
+        const tar = self.tar.?.borrow();
+        scanning.work = .{ .materialize_manifest_text = .init(
+            self.allocator,
+            tar[manifest.offset .. manifest.offset + manifest.size],
+        ) };
+        return .yielded;
+    }
+
+    fn materializeManifestText(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        scanning: *Scanning,
+        materializer: *storage.Utf8Materializer,
+    ) MachineError!machine.WorkProgress {
+        return switch (materializer.advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidUtf8 => return self.failDomain(evaluator, "package root ecl.pkg is not valid UTF-8"),
         }) {
             .pending => .yielded,
             .complete => |text| result: {
-                self.text_materializer.?.deinit();
-                self.text_materializer = null;
-                if (self.mode == .package_inspect) break :result .{ .output = text };
+                materializer.deinit();
+                if (self.mode == .package_inspect) {
+                    scanning.work = .complete;
+                    break :result .{ .output = text };
+                }
                 evaluator.releaseDomain().releaseValue(text);
                 scanning.work = .allocate_results;
                 break :result .yielded;
@@ -1070,9 +1104,11 @@ const UnpackDriver = struct {
     }
 
     fn allocateResults(self: *UnpackDriver, scanning: *Scanning) MachineError!machine.WorkProgress {
-        self.result_values = try self.allocator.alloc(Value, scanning.context.file_count);
-        self.result_iterator = self.entries.borrow().iterator();
-        scanning.work = .materialize_paths;
+        const values = try self.allocator.alloc(Value, scanning.context.file_count);
+        self.result_inputs = .{ .owned = .{ .values = values } };
+        scanning.work = .{ .materialize_paths = .{
+            .iterator = self.entries.borrow().iterator(),
+        } };
         return .yielded;
     }
 
@@ -1080,43 +1116,49 @@ const UnpackDriver = struct {
         self: *UnpackDriver,
         evaluator: *Machine,
         scanning: *Scanning,
+        paths: *@FieldType(ScanWork, "materialize_paths"),
     ) MachineError!machine.WorkProgress {
-        if (self.text_materializer) |*materializer| switch (materializer.advance(work_quantum) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidUtf8 => return self.failDomain(evaluator, "tar member path is not valid UTF-8"),
-        }) {
-            .pending => return .yielded,
-            .complete => |path_value| {
-                materializer.deinit();
-                self.text_materializer = null;
-                self.result_values.?[self.result_values_built] = path_value;
-                self.result_values_built += 1;
-                self.current_result_path = null;
-                return .yielded;
+        switch (paths.work) {
+            .text => |*materializer| switch (materializer.advance(work_quantum) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidUtf8 => return self.failDomain(evaluator, "tar member path is not valid UTF-8"),
+            }) {
+                .pending => return .yielded,
+                .complete => |path_value| {
+                    materializer.deinit();
+                    const results = &self.result_inputs.owned;
+                    results.values[results.built] = path_value;
+                    results.built += 1;
+                    paths.work = .next;
+                    return .yielded;
+                },
             },
-        };
+            .next => {},
+        }
         var remaining = work_quantum;
         while (remaining != 0) : (remaining -= 1) {
-            const entry = self.result_iterator.?.next() orelse {
-                self.result_materializer = .init(self.allocator, self.result_values.?);
-                scanning.work = .materialize_result;
+            const entry = paths.iterator.next() orelse {
+                const values = self.result_inputs.owned.values;
+                scanning.work = .{ .materialize_result = .init(self.allocator, values) };
                 return .yielded;
             };
             if (entry.kind == .directory) continue;
-            self.current_result_path = entry.path;
-            self.text_materializer = .init(self.allocator, entry.path);
+            paths.work = .{ .text = .init(self.allocator, entry.path) };
             return .yielded;
         }
         return .yielded;
     }
 
-    fn materializeResult(self: *UnpackDriver, scanning: *Scanning) MachineError!machine.WorkProgress {
+    fn materializeResult(
+        self: *UnpackDriver,
+        scanning: *Scanning,
+        materializer: *storage.ValueMaterializer,
+    ) MachineError!machine.WorkProgress {
         _ = scanning;
-        return switch (try self.result_materializer.?.advance(work_quantum)) {
+        return switch (try materializer.advance(work_quantum)) {
             .pending => .yielded,
             .complete => |result| result: {
-                self.result_materializer.?.deinit();
-                self.result_materializer = null;
+                materializer.deinit();
                 self.state = .{ .publication = .{ .destination_check = result } };
                 break :result .yielded;
             },
@@ -1584,6 +1626,12 @@ const UnpackDriver = struct {
             .scanning => |*scanning| {
                 switch (scanning.work) {
                     .insert_member => |insertion| allocator.free(insertion.entry.path),
+                    .materialize_manifest_text => |*materializer| materializer.retire(releases),
+                    .materialize_paths => |*paths| switch (paths.work) {
+                        .text => |*materializer| materializer.retire(releases),
+                        .next => {},
+                    },
+                    .materialize_result => |*materializer| materializer.retire(releases),
                     else => {},
                 }
                 if (scanning.context.pending_path) |*path| path.deinit(releases, allocator);
@@ -1620,19 +1668,26 @@ const UnpackDriver = struct {
             allocator.free(entry.path);
             return false;
         }
-        if (self.result_values) |items| {
-            if (self.result_release_index != self.result_values_built) {
-                releases.releaseValue(items[self.result_release_index]);
-                self.result_release_index += 1;
+        switch (self.result_inputs) {
+            .none => self.result_inputs = .retired,
+            .owned => |owned| {
+                self.result_inputs = .{ .retiring = .{
+                    .values = owned.values,
+                    .built = owned.built,
+                } };
                 return false;
-            }
-            allocator.free(items);
-            self.result_values = null;
+            },
+            .retiring => |*retiring| {
+                if (retiring.index != retiring.built) {
+                    releases.releaseValue(retiring.values[retiring.index]);
+                    retiring.index += 1;
+                    return false;
+                }
+                allocator.free(retiring.values);
+                self.result_inputs = .retired;
+            },
+            .retired => {},
         }
-        if (self.text_materializer) |*materializer| materializer.retire(releases);
-        self.text_materializer = null;
-        if (self.result_materializer) |*materializer| materializer.retire(releases);
-        self.result_materializer = null;
         if (self.slots) |*slots| slots.deinit(releases, allocator);
         self.slots = null;
         if (self.tar) |*tar| tar.deinit(releases, allocator);
