@@ -57,6 +57,57 @@ Implemented as a follow-up on the completed simplification base:
   source provenance is neither borrowed from retiring driver storage nor
   truncated to an inline diagnostic buffer.
 
+## Ownership-typestate remediation
+
+Implemented 2026-08-27 as a dependency-ordered follow-up to the unified
+source-ingestion path. The audit applied one rule throughout: persistent
+context remains beside an exhaustive tagged state, while every phase variant
+owns exactly the cursors, leases, builders, provisional artifacts, files, and
+rollback metadata valid in that phase. Transitions consume the outgoing
+variant, and abandonment switches over the same state rather than maintaining
+an independent retirement phase.
+
+The converted surfaces are:
+
+- evaluator outcomes, ordinary/raised error construction, failure unwind, and
+  construction;
+- WaitSet setup, cancellation, activation, delivery, discard, and completion;
+- registry removal, alias publication, acquisition, and loading reservation;
+- automatic, native, module-completion, descriptor-validation, and native
+  module loading;
+- reader string/collection construction, reader lifecycle, binder lowering,
+  definitions, reflection plans, `which`, `see`, and module-word reflection;
+- file/stdin source drivers, HTTP, package verification and garbage
+  collection;
+- documentation/effect, format, grade, and native list/dictionary
+  materialization; and
+- package-lock publication plus archive input encoding, gzip decoding, tar/PAX
+  scanning, result construction, staging, publication, rollback, and bounded
+  cleanup.
+
+`UnpackDriver` is deliberately nested: its source target, pre-decode parser,
+decoded archive context, active scan/publication work, rollback, retained
+results, and cleanup are separate tagged owners. A decoded archive cannot be
+represented before decoding succeeds, rollback retains the same archive
+context needed to remove staged work, and cleanup releases at most one entry
+or retained result per turn.
+
+The audit did not convert optionals whose absence is independent rather than a
+phase discriminator. Binding effect, documentation, compiled quotation, and
+source metadata may coexist; `GroupDriver` arrays belong to one simultaneous
+operation; `TaskJoinTeardown` inputs are simultaneously owned and merely
+retired in bounded order; intrusive links, caches, and observational metadata
+represent genuine optional data.
+
+Behavioral proof remains at public boundaries: Session complete, incomplete,
+failure, rollback, definition persistence, prelude, source/native loading,
+registry, wait, package, and archive paths remain in the normal suite. The
+long parse-provenance regression reads the public error dictionary's
+`'data 'source` field and requires exact equality with a 512-byte name. The
+component source-ingestion allocation sweep crosses archive adoption, and the
+initialized-Session release-candidate sweep remains the allocation proof for
+the live runtime surfaces.
+
 ## Execution barrier
 
 These instructions describe a follow-up change. Do not implement them in the

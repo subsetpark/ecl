@@ -1003,6 +1003,29 @@ Any change to this machinery must preserve:
   represent directly, including unsafe casts that could forge
   `HostCleanup` or `ExecutionAccess` and casts at the owned erased
   callback seams.
+- **Resumable phase ownership is represented by typestate, not correlated
+  optionals.** Every continuation revised by the 2026-08-27 ingestion audit
+  keeps only genuinely persistent context outside an exhaustive `union(enum)`;
+  each variant owns the cursors, leases, builders, provisional values, files,
+  or rollback metadata valid in that phase, and every transition consumes the
+  outgoing owner before constructing the next variant. This rule covers Unit
+  terminal outcomes and failure unwind; WaitSet setup, activation, delivery,
+  discard, and completion; registry removal, alias, acquisition, and loading;
+  source, native, automatic, and module-completion loading; reader/lowering,
+  definition, reflection, error, construction, formatting, ordering, native
+  aggregate, HTTP, package verification, and package-GC cursors. Filesystem
+  mutation uses the same rule: package-lock writing and archive decoding,
+  scanning, result construction, staging, publication, rollback, and cleanup
+  each have one state-owned resource set. Archive retirement advances one
+  entry or retained result per turn, and its decoded storage exists only in
+  active, rollback, or cleanup variants. Exhaustive retirement switches are
+  therefore the ownership proof in every build mode; nullable fields no longer
+  coordinate phase handoffs. Optionals remain where absence is independent of
+  phase: binding effect/documentation/source metadata may coexist in any
+  combination, `GroupDriver` arrays are allocated for one simultaneous
+  operation, `TaskJoinTeardown` owns simultaneous inputs released in bounded
+  order, and intrusive links, caches, and observational metadata model genuine
+  optional data rather than continuation state.
 - **Observation and execution capabilities do not expose host ownership.**
   `Env` returns a copyable opaque `EnvironmentView`, never a mutable
   `*Environment`; its API is limited to snapshot leases, lookup/name

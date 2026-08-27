@@ -4381,3 +4381,39 @@ script in CI.
    - **Expected**: the audit names the file and the function and fails.
    - **Traces to**: the scoping review that produced `invoke`, the
      parameterization rule, and core-only prelude resolution.
+
+24. **Continuation phases own their artifacts through exhaustive typestate**
+   (established 2026-08-27 by the source-ingestion remediation). A phase enum,
+   nullable cursors, side-band completion flags, and an independent retirement
+   phase permit combinations no operation can safely interpret. Resumable
+   evaluators, wait delivery, registry mutation, loading, reader/lowering,
+   reflection, error construction, I/O, mechanical materialization, and
+   filesystem publication now use tagged states whose variants own exactly the
+   artifacts valid in that phase. Transitions consume the outgoing variant;
+   cancellation and normal progress switch over the same state.
+   - **Constraint**: keep persistent context outside the union only when it is
+     valid throughout the continuation. A phase-owned lease, builder,
+     provisional value, open file, staging path, rollback cursor, or partially
+     built result belongs in the active variant. Raising a frame-size ceiling
+     is preferable to making ownership implicit again.
+   - **Constraint**: do not convert independent optional data merely for
+     uniformity. Binding metadata may coexist, `GroupDriver` arrays and
+     `TaskJoinTeardown` inputs are simultaneous ownership, and intrusive links,
+     caches, and observations represent genuine absence rather than phases.
+   - **Constraint**: retirement remains bounded. The archive protocol, for
+     example, carries decoded storage through scan, publication, rollback, and
+     cleanup typestates while freeing at most one staged entry or retained
+     result per retirement turn.
+   - **Verify by** `cmd`: `zig build precommit` after every patch; the prescribed
+     Linux/x86_64 Docker `test-tsan` gate for WaitSet lifetime changes; and the
+     initialized-Session `zig build test-oom` sweep once for the release
+     candidate. Public tests cover exact 512-byte parse provenance, ingestion
+     adoption/abandonment, registry retries, wait arbitration, and filesystem
+     success/collision/rollback paths.
+   - **Expected**: every named continuation has one exhaustive ownership state;
+     all public outcomes remain unchanged; cancellation reaches one owner for
+     every resource; delayed cleanup remains scheduler-bounded; the local and
+     focused gates exit zero.
+   - **Traces to**: `design/typestate-remediation-prompt.md`, the source-ingestion
+     alignment in `design/post-unit-plan-interpreter-simplification.md`, and the
+     ownership protocol in `design/INTERPRETER.md`.
