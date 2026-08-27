@@ -172,6 +172,44 @@ test "module names: branded factories enforce the reader symbol grammar" {
     _ = try intern.internModuleName("valid.module-name");
 }
 
+test "module names: intern and validation share one resumable cursor" {
+    const allocator = std.testing.allocator;
+    const spelling = try allocator.alloc(u8, 70_000);
+    defer allocator.free(spelling);
+    @memset(spelling, 'v');
+    try expectInternMissing(spelling);
+
+    var cursor = intern.internModuleNameCursor(spelling);
+    var pending: usize = 0;
+    const name = while (true) switch (try cursor.advance()) {
+        .pending => pending += 1,
+        .complete => |maybe_name| break maybe_name.?,
+    };
+    try std.testing.expect(pending > 256);
+    try std.testing.expectEqualStrings(spelling, intern.get(intern.moduleId(name)));
+}
+
+test "module: an unknown long module prefix remains cancellable while it is interned" {
+    const allocator = std.testing.allocator;
+    const prefix = try allocator.alloc(u8, 70_000);
+    defer allocator.free(prefix);
+    @memset(prefix, 'u');
+    try expectInternMissing(prefix);
+
+    const qualified_bytes = try allocator.alloc(u8, prefix.len + ".missing".len);
+    defer allocator.free(qualified_bytes);
+    @memcpy(qualified_bytes[0..prefix.len], prefix);
+    @memcpy(qualified_bytes[prefix.len..], ".missing");
+    const qualified = try intern.intern(qualified_bytes);
+
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+    try runtime.pushOwned(.{ .symbol = qualified });
+    runtime.requestCancellation();
+    try expectErrorContains(&runtime, "execute", &.{"unit cancelled"});
+    try std.testing.expect(runtime.lastPolls() >= 1);
+}
+
 test "env: creating and removing names bump the shape generation and rebinding does not" {
     var host = heap.HostOwner.init(std.testing.allocator);
     const releases = host.domain();

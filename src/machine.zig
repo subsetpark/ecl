@@ -3052,22 +3052,27 @@ pub const Machine = struct {
     ) MachineError!WorkProgress {
         if (self.unit.current == null or self.unit.inherited.registry == null)
             return self.undefinedNameIn(requested, .qualified);
-        const name = switch (outcome) {
-            .unknown_module_prefix => |prefix| intern.internModuleName(prefix) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidName => return self.undefinedNameIn(requested, .qualified),
+        switch (outcome) {
+            .unknown_module_prefix => |prefix| {
+                try self.startDriver(QualifiedLoadPreparationDriver.init(
+                    prefix,
+                    .{ .qualified = requested, .continuation = .replay },
+                    .{ .operand = requested },
+                ));
+                return .detached;
             },
-            .unregistered_module => |name| name,
+            .unregistered_module => |name| {
+                try self.pushBorrowed(.{ .symbol = requested });
+                self.unit.current.?.ip = self.unit.active_index;
+                try self.autoLoadModule(name, .{
+                    .qualified = requested,
+                    .continuation = .replay,
+                });
+                return .detached;
+            },
             .unresolved => |chain| return self.undefinedNameIn(requested, chain),
             .resolved => unreachable,
-        };
-        try self.pushBorrowed(.{ .symbol = requested });
-        self.unit.current.?.ip = self.unit.active_index;
-        try self.autoLoadModule(name, .{
-            .qualified = requested,
-            .continuation = .replay,
-        });
-        return .detached;
+        }
     }
     /// An import consumes two symbols before discovering a cold qualified
     /// module. Restore them in source order, rewind the primitive, and share
@@ -3080,23 +3085,28 @@ pub const Machine = struct {
     ) MachineError!WorkProgress {
         if (self.unit.current == null or self.unit.inherited.registry == null)
             return self.undefinedNameIn(original, .qualified);
-        const name = switch (outcome) {
-            .unknown_module_prefix => |prefix| intern.internModuleName(prefix) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                error.InvalidName => return self.undefinedNameIn(original, .qualified),
+        switch (outcome) {
+            .unknown_module_prefix => |prefix| {
+                try self.startDriver(QualifiedLoadPreparationDriver.init(
+                    prefix,
+                    .{ .qualified = original, .continuation = .replay },
+                    .{ .import = .{ .binding = binding, .original = original } },
+                ));
+                return .detached;
             },
-            .unregistered_module => |name| name,
+            .unregistered_module => |name| {
+                try self.pushBorrowed(.{ .symbol = original });
+                try self.pushBorrowed(.{ .symbol = binding });
+                self.unit.current.?.ip = self.unit.active_index;
+                try self.autoLoadModule(name, .{
+                    .qualified = original,
+                    .continuation = .replay,
+                });
+                return .detached;
+            },
             .unresolved => |chain| return self.undefinedNameIn(original, chain),
             .resolved => unreachable,
-        };
-        try self.pushBorrowed(.{ .symbol = original });
-        try self.pushBorrowed(.{ .symbol = binding });
-        self.unit.current.?.ip = self.unit.active_index;
-        try self.autoLoadModule(name, .{
-            .qualified = original,
-            .continuation = .replay,
-        });
-        return .detached;
+        }
     }
     /// A completed auto-load registers the module before resuming the tagged
     /// qualified operation. The requested spelling also identifies a
@@ -6601,11 +6611,12 @@ const DispatchDriver = struct {
                     // A qualified dispatch carries its exact word and
                     // provenance through loading, including dynamic execute.
                     .unknown_module_prefix => |prefix| {
-                        const name = intern.internModuleName(prefix) catch |err| switch (err) {
-                            error.OutOfMemory => return error.OutOfMemory,
-                            error.InvalidName => return self_machine.undefinedActiveWord(),
-                        };
-                        return continueDispatchAfterLoad(self_machine, name, request);
+                        try self_machine.startDriver(QualifiedLoadPreparationDriver.init(
+                            prefix,
+                            request,
+                            .none,
+                        ));
+                        return .detached;
                     },
                     .unregistered_module => |name| return continueDispatchAfterLoad(self_machine, name, request),
                     .unresolved => |chain| return self_machine.undefinedWordIn(request.qualified, chain),
@@ -6616,6 +6627,71 @@ const DispatchDriver = struct {
     }
 
     pub const ownership: heap.DriverOwnership = .fields;
+};
+
+/// Resumable boundary between a qualified miss and module loading. A prefix
+/// absent from the intern table is external, runtime-sized input; preserving
+/// this cursor as its own driver keeps both insertion and module-name
+/// validation inside scheduler safe points.
+const QualifiedLoadPreparationDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+
+    const Restore = union(enum) {
+        none,
+        operand: u32,
+        import: struct { binding: u32, original: u32 },
+    };
+
+    cursor: intern.InternModuleNameCursor,
+    request: QualifiedLoadRequest,
+    restore: Restore,
+
+    fn init(
+        prefix: []const u8,
+        request: QualifiedLoadRequest,
+        restore: Restore,
+    ) QualifiedLoadPreparationDriver {
+        return .{
+            .cursor = intern.internModuleNameCursor(prefix),
+            .request = request,
+            .restore = restore,
+        };
+    }
+
+    pub fn advance(
+        evaluator: *Machine,
+        self: *QualifiedLoadPreparationDriver,
+    ) MachineError!WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = kernel_poll_quantum;
+        while (budget != 0) : (budget -= 1) switch (try self.cursor.advance()) {
+            .pending => {},
+            .complete => |maybe_name| {
+                const name = maybe_name orelse return switch (self.restore) {
+                    .none => evaluator.undefinedWordIn(self.request.qualified, .qualified),
+                    .operand, .import => evaluator.undefinedNameIn(self.request.qualified, .qualified),
+                };
+                const request = self.request;
+                const restore = self.restore;
+                switch (restore) {
+                    .none => {},
+                    .operand => |requested| {
+                        try evaluator.pushBorrowed(.{ .symbol = requested });
+                        evaluator.unit.current.?.ip = evaluator.unit.active_index;
+                    },
+                    .import => |operands| {
+                        try evaluator.pushBorrowed(.{ .symbol = operands.original });
+                        try evaluator.pushBorrowed(.{ .symbol = operands.binding });
+                        evaluator.unit.current.?.ip = evaluator.unit.active_index;
+                    },
+                }
+                evaluator.retireDriver(self);
+                try evaluator.autoLoadModule(name, request);
+                return .detached;
+            },
+        };
+        return .yielded;
+    }
 };
 
 /// Dispatches one export of an image reached as a value.
