@@ -112,7 +112,7 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
         .allocator = evaluator.allocator(),
         .io = io,
         .bytes_value = .init(bytes_value.take()),
-        .source = .{ .unpack = .{ .destination = .init(destination.take()) } },
+        .source = .init(.{ .unpack = .{ .destination = .init(destination.take()) } }),
         .entries = .init(entries),
         .state = .{ .parsing = .{ .encode_bytes = .{
             .byte = .init(byte_encoder),
@@ -139,7 +139,7 @@ pub fn inspectPackage(evaluator: *Machine) MachineError!void {
         .allocator = evaluator.allocator(),
         .io = null,
         .bytes_value = .init(bytes_value.take()),
-        .source = .{ .inspect = .{ .package = .init(package.take()) } },
+        .source = .init(.{ .inspect = .{ .package = .init(package.take()) } }),
         .entries = .init(entries),
         .state = .{ .parsing = .{ .encode_bytes = .{
             .byte = .init(byte_encoder),
@@ -174,10 +174,10 @@ pub fn installPackage(evaluator: *Machine) MachineError!void {
         .allocator = evaluator.allocator(),
         .io = io,
         .bytes_value = .init(bytes_value.take()),
-        .source = .{ .install = .{
+        .source = .init(.{ .install = .{
             .package = .init(package.take()),
             .destination = .init(destination.take()),
-        } },
+        } }),
         .entries = .init(entries),
         .state = .{ .parsing = .{ .encode_bytes = .{
             .byte = .init(byte_encoder),
@@ -300,7 +300,7 @@ const UnpackDriver = struct {
     allocator: std.mem.Allocator,
     io: ?std.Io,
     bytes_value: heap.Owned(Value),
-    source: SourceTarget,
+    source: heap.Owned(SourceTarget),
     entries: heap.Owned(EntryList),
     state: State,
 
@@ -311,12 +311,29 @@ const UnpackDriver = struct {
         path: heap.Owned([]u8),
     };
     const SourceTarget = union(enum) {
+        pub const owned_disposal: heap.OwnedDisposal = .deinit;
+
         unpack: struct { destination: heap.Owned(Value) },
         inspect: struct { package: heap.Owned(Value) },
         install: struct {
             package: heap.Owned(Value),
             destination: heap.Owned(Value),
         },
+
+        pub fn deinit(
+            self: *SourceTarget,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .unpack => |*source| source.destination.deinit(releases, allocator),
+                .inspect => |*source| source.package.deinit(releases, allocator),
+                .install => |*source| {
+                    source.package.deinit(releases, allocator);
+                    source.destination.deinit(releases, allocator);
+                },
+            }
+        }
     };
     const EncodeTarget = union(enum) {
         unpack: heap.Owned(storage.ToUtf8Cursor),
@@ -630,7 +647,7 @@ const UnpackDriver = struct {
     }
 
     fn operationMode(self: *const UnpackDriver) Mode {
-        return switch (self.source) {
+        return switch (self.source.borrow()) {
             .unpack => .unpack,
             .inspect => .package_inspect,
             .install => .package_install,
@@ -638,7 +655,7 @@ const UnpackDriver = struct {
     }
 
     fn sourceDestination(self: *const UnpackDriver) Value {
-        return switch (self.source) {
+        return switch (self.source.borrow()) {
             .unpack => |*source| source.destination.borrow(),
             .install => |*source| source.destination.borrow(),
             .inspect => unreachable,
@@ -1833,14 +1850,7 @@ const UnpackDriver = struct {
             },
         }
         self.bytes_value.deinit(releases, allocator);
-        switch (self.source) {
-            .unpack => |*source| source.destination.deinit(releases, allocator),
-            .inspect => |*source| source.package.deinit(releases, allocator),
-            .install => |*source| {
-                source.package.deinit(releases, allocator);
-                source.destination.deinit(releases, allocator);
-            },
-        }
+        self.source.deinit(releases, allocator);
         self.entries.deinit(releases, allocator);
         allocator.destroy(self);
         return true;
