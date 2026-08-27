@@ -1,7 +1,6 @@
-# Tier 2 of three. Tier 1 is `zig build precommit`, the ~80-second gate a
-# developer runs before every commit. Tier 3 is the release-candidate matrix:
-# the exhaustive initialized-Session `zig build test-oom` sweep and the
-# complete ReleaseFast suite.
+# Tier 2 of three. Pull requests run the local Debug tier plus one complete
+# ReleaseSafe suite. Merges and manual runs add the broad per-build-type
+# matrix. Tier 3 lives in release-candidate.yml.
 name: CI
 
 on:
@@ -15,124 +14,35 @@ permissions:
   contents: read
 
 jobs:
-  ci:
-    name: Linux x86_64
-    runs-on: ubuntu-24.04
-    timeout-minutes: 300
+  debug:
+    name: Debug tiers
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: Debug
+      run_precommit: ${{ github.event_name == 'pull_request' }}
+      run_quality: ${{ github.event_name != 'pull_request' }}
+      run_full_suite: ${{ github.event_name != 'pull_request' }}
+      run_public_ecl_format: true
+      run_native_negative: true
+      run_repl: ${{ github.event_name != 'pull_request' }}
+      run_fuzz: ${{ github.event_name != 'pull_request' }}
+      run_differential: ${{ github.event_name != 'pull_request' }}
+      run_tsan: ${{ github.event_name != 'pull_request' }}
 
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
+  release-safe:
+    name: ReleaseSafe tiers
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: ReleaseSafe
+      run_full_suite: true
+      run_repl: true
+      run_native_acceptance: true
+      run_workers_eight: ${{ github.event_name != 'pull_request' }}
 
-      # Keep every gate in the same Linux/x86_64 Alpine environment as the old
-      # SourceHut manifest. The checkout is mounted read-only and copied into
-      # the container because tests create temporary directories below the
-      # working tree. One long-lived container lets sequential gates reuse Zig
-      # caches and build artifacts while GitHub still reports each gate as its
-      # own step.
-      - name: Set up Alpine and Zig
-        run: |
-          docker run --detach --name ecl-ci --platform linux/amd64 \
-            --volume "$GITHUB_WORKSPACE:/work:ro" \
-            alpine:latest tail -f /dev/null
-          docker exec ecl-ci sh -euxc '
-            apk add --no-cache curl xz linux-headers expect python3 git
-            curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
-            echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
-            mkdir -p /opt/zig /build /root/.cache/zig/tmp
-            tar -C /opt/zig --strip-components=1 -xf /tmp/zig.tar.xz
-            ln -s /opt/zig/zig /usr/local/bin/zig
-            cp -a /work/. /build/
-            git config --global --add safe.directory /build
-          '
-
-      - name: Check Zig formatting
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 2m zig fmt --check . < /dev/null'
-
-      # `zig build check-ecl` makes the same assertion in-process for the
-      # precommit tier. This step additionally checks the installed binary's
-      # public `fmt` surface.
-      - name: Check ECL formatting
-        run: |
-          docker exec ecl-ci sh -euxc '
-            cd /build
-            timeout 10m zig build < /dev/null
-            formatted="$(mktemp)"
-            trap "rm -f \"$formatted\"" EXIT
-            git ls-files "*.ecl" ":!:test/acceptance/load-parse-error.ecl" |
-              while IFS= read -r source; do
-                timeout 30s ./zig-out/bin/ecl fmt "$source" < /dev/null > "$formatted"
-                if ! cmp -s "$source" "$formatted"; then
-                  diff -u "$source" "$formatted" || true
-                  echo "ecl fmt check failed: $source" >&2
-                  exit 1
-                fi
-              done
-          '
-
-      - name: Test (Debug)
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 15m zig build test < /dev/null'
-
-      - name: Test (ReleaseSafe)
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 15m zig build test -Doptimize=ReleaseSafe < /dev/null'
-
-      # ReleaseFast removes checks rather than adding an analysis, and is not
-      # the distributed mode. The full ReleaseFast suite remains a release-
-      # candidate gate.
-      - name: Smoke test (ReleaseFast)
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 10m zig build test-snapshots -Doptimize=ReleaseFast < /dev/null'
-
-      - name: Test REPL (Debug)
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 10m zig build test-repl < /dev/null'
-
-      - name: Test REPL (ReleaseSafe)
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 10m zig build test-repl -Doptimize=ReleaseSafe < /dev/null'
-
-      - name: Build native fixture
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 10m zig build native-fixture < /dev/null'
-
-      - name: Test native SDK rejections
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 10m zig build test-native-sdk-negative < /dev/null'
-
-      - name: Test native runtime (Debug)
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 10m zig build test-native-runtime < /dev/null'
-
-      - name: Test native runtime (ReleaseSafe)
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 10m zig build test-native-runtime -Doptimize=ReleaseSafe < /dev/null'
-
-      - name: Fuzz campaigns
-        run: |
-          docker exec ecl-ci sh -euxc '
-            cd /build
-            for target in reader formatter editor completion history pending scheduler native-descriptor native-call; do
-              timeout 10m zig build "fuzz-$target" --fuzz=100 < /dev/null
-            done
-          '
-
-      - name: Test worker counts
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 15m zig build test-workers -Doptimize=ReleaseSafe < /dev/null'
-
-      - name: Test idiom differential
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 10m zig build differential < /dev/null'
-
-      - name: Test with ThreadSanitizer
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 20m zig build test-tsan < /dev/null'
-
-      - name: Lint Zig
-        run: |
-          docker exec ecl-ci sh -euxc '
-            curl -fsSLo /tmp/zlint https://github.com/DonIsaac/zlint/releases/download/v0.9.1/zlint-linux-x86_64
-            echo "3290bd511d37e4f6ccca3621b9894cd6c378195cdaac27520d0bd894058b2b9b  /tmp/zlint" | sha256sum -c -
-            chmod +x /tmp/zlint
-            cd /build
-            git ls-files "*.zig" | timeout 5m /tmp/zlint -S --deny-warnings
-          '
-
-      - name: Terminal acceptance
-        run: docker exec ecl-ci sh -euxc 'cd /build; timeout 10m zig build acceptance -Doptimize=ReleaseSafe < /dev/null'
-
-      - name: Stop Alpine container
-        if: always()
-        run: docker rm --force ecl-ci || true
+  release-fast:
+    name: ReleaseFast smoke
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: ReleaseFast
+      run_snapshots: true

@@ -270,6 +270,11 @@ pub fn build(b: *std.Build) void {
     const native_acceptance_tests = b.addTest(.{ .root_module = native_acceptance_mod });
     const run_native_acceptance = b.addRunArtifact(native_acceptance_tests);
     run_native_acceptance.step.dependOn(&fixture_files.step);
+    const native_acceptance_step = b.step(
+        "test-native-acceptance",
+        "Run the standalone native CLI acceptance tests",
+    );
+    native_acceptance_step.dependOn(&run_native_acceptance.step);
     native_runtime_step.dependOn(&run_native_acceptance.step);
 
     const fuzz_targets = [_]struct {
@@ -486,6 +491,10 @@ pub fn build(b: *std.Build) void {
     kernel_slice_step.dependOn(&run_kernel_slice_tests.step);
 
     const worker_step = b.step("test-workers", "Run worker-sensitive Session tests at one and eight workers");
+    const worker_eight_step = b.step(
+        "test-workers-8",
+        "Run worker-sensitive Session tests with eight workers",
+    );
     for ([_]usize{ 1, 8 }) |worker_count| {
         const worker_test_mod = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
@@ -513,6 +522,7 @@ pub fn build(b: *std.Build) void {
         const run_worker_tests = b.addRunArtifact(worker_tests);
         run_worker_tests.step.dependOn(&fixture_files.step);
         worker_step.dependOn(&run_worker_tests.step);
+        if (worker_count == 8) worker_eight_step.dependOn(&run_worker_tests.step);
     }
 
     // Keep TSan focused on genuinely threaded behavior. The ordinary suite owns
@@ -630,9 +640,10 @@ pub fn build(b: *std.Build) void {
     // cross-home effect/TCO walk, the maximum-nesting formatter case, and the
     // twenty-thousand-deep recursion. None of those is the check that catches
     // an ordinary edit. This tier is what a developer runs on every commit
-    // instead; CI (`.github/workflows/ci.yml`) owns the complete matrix, and the
-    // release-candidate matrix owns the exhaustive initialized-Session OOM
-    // sweep plus the full ReleaseFast suite.
+    // instead. Pull-request CI runs this tier in Debug and one complete
+    // ReleaseSafe suite. The broader per-build-type matrix runs after merge,
+    // and the release-candidate matrix owns the exhaustive initialized-Session
+    // OOM sweep plus the full ReleaseFast suite.
     //
     // The tier deliberately separates *analysis* from *execution*. Every test
     // root is semantically analyzed with codegen suppressed, so a stale API

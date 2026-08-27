@@ -1989,9 +1989,10 @@ preceding material by one empty line.
 cost, because a gate nobody runs proves nothing. `zig build precommit` is the
 local tier: Zig and ECL formatting, the source-architecture audit, the binary,
 whole-tree semantic analysis, and the fast core of the suite, in about eighty
-seconds after a source change. Per-push CI owns the complete matrix, and the
-release-candidate matrix owns the exhaustive initialized-Session OOM sweep and
-the complete ReleaseFast suite.
+seconds after a source change. Pull-request CI pairs that Debug tier with one
+complete ReleaseSafe suite. Master and manual CI own the broader matrix, and
+the release-candidate workflow owns the exhaustive initialized-Session OOM
+sweep and the complete ReleaseFast suite.
 
 The local tier separates *analysis* from *execution*, and that separation is
 the load-bearing part. `zig build check` builds every test root — the in-process
@@ -2034,10 +2035,10 @@ checking shows up as a failing test rather than as silence.
 
 **The stateful-module suite.** `src/tests/stateful_module_test.zig` pins
 the Milestone 11 contracts one test per obligation. Its tests carrying the
-`concurrency: ` name prefix are routed by the build file into
-`test-workers` (1 and 8) and `test-tsan` automatically, so every new
+`concurrency: ` name prefix are routed by the build file into `test-workers`
+(1 and 8), `test-workers-8`, and `test-tsan` automatically, so every new
 concurrent surface — arbiter ordering, the reload barrier, and the removal
-close edge — enters those gates without a second manifest. The
+close edge — enters the broad post-merge gates without a second manifest. The
 initialized-Session OOM sweep reaches construction stacks, transactional
 updates, a mid-draft failure, and removal. Lifecycle coverage keeps
 superseded code alive across removal and unrelated module creation,
@@ -2086,21 +2087,22 @@ snippets use the smallest collection that enters each path, because additional
 elements add work but no allocation site.
 
 **Terminal acceptance topology.** `zig build acceptance` rejects Debug builds
-and owns only the M13-specific ReleaseSafe assertions: the public
-definition/module retention soak, the installed-binary soul check, bounded
-display rendering, and the source architecture audit. The GitHub Actions workflow
-runs it last. Earlier sequential tasks remain the owners of the general
-behavioral, PTY, native, worker-count, fuzz, differential, TSan, and lint
-evidence; terminal acceptance does not replay those matrices. The exhaustive
+and provides a focused entry point for the M13-specific release assertions:
+the public definition/module retention soak, the installed-binary soul check,
+bounded display rendering, and the source architecture audit. Those same tests
+are already members of the complete ReleaseSafe suite, so CI does not compile a
+second filtered artifact merely to replay them. The exhaustive
 initialized-Session OOM gate runs once for a release candidate rather than on
 every pushed commit; focused component OOM probes remain in the ordinary test
 task.
-The complete behavioral suite runs per push in Debug and in the distributed
-ReleaseSafe mode. ReleaseFast disables checks rather than adding a detector,
-and ecl does not distribute that configuration, so its per-push gate compiles
-the real binary and runs the broad promoted CLI snapshot instead of replaying
-every internal test. The complete ReleaseFast suite remains a release-candidate
-matrix entry, where mode-specific optimized code generation is still checked.
+The complete behavioral suite runs on every pull request in the distributed
+ReleaseSafe mode. The Debug precommit tier supplies fast feedback there; the
+complete Debug suite and specialized matrices run after merge and on manual CI.
+ReleaseFast disables checks rather than adding a detector, and ecl does not
+distribute that configuration, so master and manual CI compile the real binary
+and run the broad promoted CLI snapshot instead of replaying every internal
+test. The complete ReleaseFast suite remains a release-candidate matrix entry,
+where mode-specific optimized code generation is still checked.
 Repository verification classification includes every native SDK
 compile-negative input, including the fixture proving that native effects
 cannot declare the source-only `...` after-row.
@@ -2120,9 +2122,9 @@ nine seed corpora as ordinary tests; bounded campaigns invoke
 `fuzz-reader`, `fuzz-formatter`, `fuzz-editor`, `fuzz-completion`,
 `fuzz-history`, `fuzz-pending`, `fuzz-scheduler`,
 `fuzz-native-descriptor`, and `fuzz-native-call` separately, because Zig's
-coverage-guided runner selects one fuzz entry point per invocation. CI
-therefore cannot report validation of a model or metadata parser as
-coverage for the real dynamic loader, generated adapter, scheduler
+coverage-guided runner selects one fuzz entry point per invocation. Broad
+post-merge CI therefore cannot report validation of a model or metadata parser
+as coverage for the real dynamic loader, generated adapter, scheduler
 continuation, and retirement path.
 
 Every coverage-guided test artifact explicitly selects LLVM: Zig 0.16's
