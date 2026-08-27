@@ -6,6 +6,6 @@
 3.5 type io.pp
 3.5 type {'float (42) 'int (0)} swap at call io.pp
 [1 2 3] 1 9 put io.pp
-['a 'b] [1 2] to-dict io.pp
+['a 'b] [1 2] dict.from-lists io.pp
 [1 2] 5 take io.pp
 [2 0 3] where io.pp

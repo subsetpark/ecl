@@ -1,7 +1,8 @@
 # ECL authoring guide
 
 This guide records conventions for first-party ECL source. It is not the
-language specification: [`SPEC.md`](SPEC.md) defines behavior, and
+language specification: [`SPEC.md`](SPEC.md) defines behavior,
+[`STDLIB.md`](STDLIB.md) enumerates the shipped vocabulary, and
 [`INTERPRETER.md`](INTERPRETER.md) defines implementation invariants. Rules
 enforced by `check-ecl` or the source audit are identified as requirements;
 the rest are review conventions that may evolve as the vocabulary does.
@@ -186,7 +187,7 @@ state wrap
  'root state ['root 'name] at-path
  'packages state selected-packages
  'requires state resolved-requires)
-infra dict-of
+infra dict.from-flat
 ```
 
 This is preferable to a raw sentinel: the quotation supplies a lexical
@@ -195,10 +196,13 @@ it. Use `pair` for two values and `pack` when a literal count is itself the
 clearest description; do not retain a distant count solely to delimit a long
 computed region.
 
-Use `to-dict` when keys and values already exist as parallel lists. Use
-`dict-of` when the natural intermediate form is alternating key and value
-entries. Use literal dictionaries for inert fixed data, not for expressions
-that must execute.
+Use `dict.from-lists` when keys and values already exist as parallel lists. Use
+`dict.from-flat` when the natural intermediate form is alternating key and value
+entries. Use `dict.from-pairs` when the natural form is a list of `[key value]`
+associations. Use literal dictionaries for inert fixed data, not for
+expressions that must execute. Dictionary observation and transformation words
+such as `dict.keys`, `dict.has?`, and `dict.merge` stay qualified; `put` and
+`del` remain bare because both are polymorphic over lists and dictionaries.
 
 ## Names should expose structure
 

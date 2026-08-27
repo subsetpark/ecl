@@ -22,7 +22,7 @@
 # Core reflection is honest: a table is a dict and behaves as one.
 sales type io.pp
 sales valid? io.pp
-sales keys io.pp
+sales dict.keys io.pp
 sales "id" at io.pp
 sales {"id" [1 2 3] "city" ["Oslo" "Lima" "Oslo"]} match? io.pp
 sales str io.pp

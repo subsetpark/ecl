@@ -180,12 +180,8 @@ pub const OrderOp = enum {
 };
 
 pub const TextOp = enum {
-    keys,
     put,
-    to_dict,
     del,
-    merge,
-    has,
     split,
     join,
     str,
@@ -193,12 +189,8 @@ pub const TextOp = enum {
 
     pub fn spelling(self: TextOp) []const u8 {
         return switch (self) {
-            .keys => "keys",
             .put => "put",
-            .to_dict => "to-dict",
             .del => "del",
-            .merge => "merge",
-            .has => "has?",
             .split => "split",
             .join => "join",
             .str => "str",
@@ -215,10 +207,10 @@ pub const RandomOp = enum {
 
     pub fn spelling(self: RandomOp) []const u8 {
         return switch (self) {
-            .rand_int => "rand-int",
-            .rand_ints => "rand-ints",
-            .rand_float => "rand-float",
-            .entropy => "entropy",
+            .rand_int => "rand.int",
+            .rand_ints => "rand.ints",
+            .rand_float => "rand.float",
+            .entropy => "rand.entropy",
         };
     }
 };

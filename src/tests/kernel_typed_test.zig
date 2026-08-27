@@ -380,7 +380,7 @@ test "typed differential: sequence order text and random operation parity across
         "dup in?",
         "distinct",
         "grade",
-        "group keys",
+        "group dict.keys",
         "0 (+) fold",
         "raze",
         "len",
@@ -427,7 +427,7 @@ test "typed differential: sequence order text and random operation parity across
         try expectParity(&runtime, case.inputs, case.absent);
         try expectParity(&runtime, case.inputs, "dup in?");
         try expectParity(&runtime, case.inputs, "5 wrap reshape");
-        try expectParity(&runtime, case.inputs, "group keys");
+        try expectParity(&runtime, case.inputs, "group dict.keys");
         try expectParity(&runtime, case.inputs, "distinct");
     }
     for ([_]Inputs{
@@ -480,7 +480,7 @@ test "typed differential: sequence order text and random operation parity across
         try expectParity(&runtime, .{ .ints = numbers }, "grade");
 
         @memset(numbers, 1);
-        try expectParity(&runtime, .{ .ints = numbers }, "group keys");
+        try expectParity(&runtime, .{ .ints = numbers }, "group dict.keys");
         try expectParity(&runtime, .{ .ints = numbers }, "distinct");
     }
 
@@ -488,18 +488,18 @@ test "typed differential: sequence order text and random operation parity across
     // to the sequence this word has always produced, including the zero-length
     // case whose empty representation the value layer chose long ago.
     const draws = [_][]const u8{
-        "[3 1] 5 6 rand-ints",
-        "[3 1] 0 6 rand-ints",
-        "[3 1] 1 2 rand-ints",
-        "[7 9] 300 1000 rand-ints 0 (+) fold",
-        "[7 9] 300 1000 rand-ints distinct len",
+        "[3 1] 5 6 rand.ints",
+        "[3 1] 0 6 rand.ints",
+        "[3 1] 1 2 rand.ints",
+        "[7 9] 300 1000 rand.ints 0 (+) fold",
+        "[7 9] 300 1000 rand.ints distinct len",
     };
     for (draws) |source| {
         const rendered = try outcome(&runtime, &.{}, source);
         defer allocator.free(rendered);
         try std.testing.expect(rendered.len != 0);
     }
-    const seeded = try outcome(&runtime, &.{}, "[3 1] 5 6 rand-ints");
+    const seeded = try outcome(&runtime, &.{}, "[3 1] 5 6 rand.ints");
     defer allocator.free(seeded);
     try std.testing.expectEqualStrings("[3 6] [3 3 5 0 1]", seeded);
 

@@ -92,6 +92,7 @@ test {
     _ = @import("tests/stdlib_test.zig");
     _ = @import("tests/hostio_test.zig");
     _ = @import("tests/error_test.zig");
+    _ = @import("tests/dict_module_test.zig");
     _ = @import("tests/result_test.zig");
     _ = @import("tests/str_test.zig");
     _ = @import("tests/csv_test.zig");

@@ -36,7 +36,6 @@ const entries = [_]Metadata{
     .{ .name = "parse", .effect = "string -- quotation", .text = "Parse source text into an unevaluated quotation." },
     .{ .name = "parse-int", .effect = "string -- integer", .text = "Parse one ECL integer literal without evaluating source text." },
     .{ .name = "parse-float", .effect = "string -- float", .text = "Parse one ECL numeric literal and return its floating-point value." },
-    .{ .name = "dict-of", .effect = "entries -- dict", .text = "Build a dictionary from a flat list of adjacent key and value entries." },
     .{ .name = "@attempt", .effect = "unit-input -- result", .text = "Run a quotation or unit plan in a fresh unit and return an ok or error result dictionary; observationally `@spawn await`." },
     .{ .name = "seed", .effect = "values quotation -- unit-plan", .text = "Seal a values list and a construction body into one immutable unit plan, holding both separately." },
     .{ .name = "unseed", .effect = "unit-plan -- values quotation", .text = "Return the exact values list and construction body a unit plan holds." },
@@ -114,11 +113,6 @@ const entries = [_]Metadata{
     .{ .name = "bnot", .effect = "x -- y", .text = "Invert every bit of an integer pattern pervasively." },
     .{ .name = "bsl", .effect = "x count -- y", .text = "Shift an integer pattern left, truncating bits off the top." },
     .{ .name = "bsr", .effect = "x count -- y", .text = "Shift an integer pattern right, filling zeros from the top." },
-    .{ .name = "rand-int", .effect = "state bound -- state result", .text = "Draw one uniform integer below a positive bound from a generator state." },
-    .{ .name = "rand-ints", .effect = "state count bound -- state results", .text = "Draw a vector of uniform integers below a positive bound from a generator state." },
-    .{ .name = "rand-float", .effect = "state -- state result", .text = "Draw one uniform float in the unit interval from a generator state." },
-    .{ .name = "entropy", .effect = "-- result", .text = "Read one integer of host entropy, the only nondeterministic word." },
-
     .{ .name = "at", .effect = "collection key -- value", .text = "Select a list index or dictionary key, pervading over list indices." },
     .{ .name = "where", .effect = "counts -- indices", .text = "Expand integer counts into their replicated zero-based indices." },
     .{ .name = "in?", .effect = "value list -- bool", .text = "Test whole-value membership, pervading over the sought value and never into the list." },
@@ -136,16 +130,11 @@ const entries = [_]Metadata{
     .{ .name = "grade", .effect = "list -- indices", .text = "Return the stable ascending sort permutation of a comparable list." },
     .{ .name = "group", .effect = "list -- dict", .text = "Group equal list values into a dictionary of zero-based index lists." },
 
-    .{ .name = "keys", .effect = "dict -- keys", .text = "Return a dictionary's keys in insertion order." },
     .{ .name = "put", .effect = "collection key value -- collection", .text = "Functionally update a list index or dictionary key." },
-    .{ .name = "to-dict", .effect = "keys values -- dict", .text = "Build a dictionary from conforming key and value lists." },
-    .{ .name = "del", .effect = "dict key -- dict", .text = "Functionally remove a key from a dictionary." },
-    .{ .name = "merge", .effect = "left right -- dict", .text = "Merge two dictionaries, with right-hand values winning." },
-    .{ .name = "has?", .effect = "dict key -- bool", .text = "Return whether a dictionary contains a whole-value key." },
+    .{ .name = "del", .effect = "collection key -- collection", .text = "Functionally remove an in-bounds list index or a dictionary key; a missing dictionary key is unchanged." },
     .{ .name = "split", .effect = "string separator -- parts", .text = "Split a string at every occurrence of a separator; an empty separator yields its Unicode scalar strings." },
     .{ .name = "join", .effect = "strings separator -- string", .text = "Join a list of strings with a separator string." },
     .{ .name = "str", .effect = "value -- string", .text = "Return the canonical printed representation of a value as a string." },
-    .{ .name = "format", .effect = "values template -- string", .text = "Interpolate strings directly and other values canonically into a template's positional placeholders." },
 };
 
 comptime {

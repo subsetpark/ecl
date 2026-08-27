@@ -61,7 +61,7 @@ test "native runtime: spawned units inherit native loading context" {
 
 test "native runtime: aggregates larger than one quantum complete" {
     var result = try run(
-        "100000 sample.large-list len 70000 sample.large-dict keys len",
+        "100000 sample.large-list len 70000 sample.large-dict dict.keys len",
         "1",
         false,
     );

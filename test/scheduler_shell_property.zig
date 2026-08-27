@@ -148,7 +148,7 @@ fn runShellScenario(encoded: u16) !void {
         .raise_fairness => {
             try source_buffer.writer.writeAll(
                 "['x] 200000 take 'trace-value set " ++
-                    "(('kind 'custom 'trace trace-value 4 pack dict-of raise) @attempt) @spawn " ++
+                    "(('kind 'custom 'trace trace-value 4 pack dict.from-flat raise) @attempt) @spawn " ++
                     "(7) @spawn pair await-any pop",
             );
             try expected_buffer.writer.writeAll("1\n");
@@ -212,7 +212,7 @@ fn runShellScenario(encoded: u16) !void {
                 if (index != 0) try source_buffer.writer.writeByte(' ');
                 try source_buffer.writer.print("{d}", .{index % 3});
             }
-            try source_buffer.writer.writeAll("] dup group keys len swap 1 pack \"{}\" format pop");
+            try source_buffer.writer.writeAll("] dup group dict.keys len swap 1 pack \"{}\" str.format pop");
             try expected_buffer.writer.print("{d}\n", .{@min(scenario.width, 3)});
         },
     }

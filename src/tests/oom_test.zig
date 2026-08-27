@@ -401,7 +401,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "[[1 2] [3 4]] flip pop [1 2 3] [2 3] reshape pop " ++
             "[[1 2] [3]] raze pop [1 2] 5 take pop [2 0 3] where pop " ++
             // The typed copy and gather capabilities, and the typed draw fill.
-            "[1 2] reverse pop [1 2] [0 1] at pop [3 1] 2 4 rand-ints pop pop " ++
+            "[1 2] reverse pop [1 2] [0 1] at pop [3 1] 2 4 rand.ints pop pop " ++
             // Scalar and flat-list needles reach both typed membership drivers.
             "1 [1 2] in? pop [1 3] [1 2] in? pop [1 2] dup 0 9 put pop pop " ++
             "[1 2] [3] reshape pop " ++
@@ -419,10 +419,10 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-dict-text.ecl",
-        "{'a 1} 'b 2 put keys pop [\"a\" \"b\"] \"—\" join \"—\" split pop " ++
-            "['a 'b] [1 2] to-dict keys pop ['c 3] dict-of keys pop " ++
-            "[1 2 3] 1 9 put pop \"ab\" reverse 0 \\λ put pop " ++
-            "['a 1] str [1] \"{}\" format pop [\"raw\"] \"{}\" format pop",
+        "{'a 1} 'b 2 put dict.keys pop [\"a\" \"b\"] \"—\" join \"—\" split pop " ++
+            "['a 'b] [1 2] dict.from-lists dict.keys pop ['c 3] dict.from-flat dict.keys pop " ++
+            "[1 2 3] 1 9 put pop [1 2] 0 del pop \"ab\" reverse 0 \\λ put pop " ++
+            "['a 1] str [1] \"{}\" str.format pop [\"raw\"] \"{}\" str.format pop",
     );
     try runOk(
         &runtime,
@@ -612,7 +612,7 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-random.ecl",
         "'rng.seed 'seed import 'rng.deal 'deal import 'rng.shuffle 'shuffle import " ++
             "'rng.ints 'ints import 'rng.float 'float import 42 seed 2 4 deal shuffle pop 2 6 ints pop float pop " ++
-            "[7 0] 2 6 rand-ints nip pop",
+            "[7 0] 2 6 rand.ints nip pop",
     );
     // Each stdlib module has its own Session-reachable load path: embedded
     // source, a linked native descriptor, and a builtin word table. One short
@@ -620,7 +620,15 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-stdlib.ecl",
-        "'io error.new \"read failed\" error.with-message {'path \"p\"} error.with-data " ++
+        "[['a 1] ['b 2]] dict.from-pairs dup dict.keys pop dup dict.vals pop " ++
+            "dup 'a dict.has? pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
+            "dup ['a 'b] dict.keys-exactly? pop dup 'a (1 +) dict.update " ++
+            "dup 'c 0 (1 +) dict.update-or dup (nip) dict.map dup (1 +) dict.map-values " ++
+            "dup (nip 1) dict.filter dup (nip 0) dict.reject dup ['a] dict.take " ++
+            "dup ['a] dict.drop dup ['a] dict.split pop pop " ++
+            "{'a 2} (|key left right| key pop left right +) dict.merge-with pop " ++
+            "['a 'b] 0 dict.from-keys pop " ++
+            "'io error.new \"read failed\" error.with-message {'path \"p\"} error.with-data " ++
             "dup error.valid? pop dup 'io error.kind? pop ['io 'timeout] error.kind-in? pop " ++
             "[1 2] result.ok (+) result.and-then result.or-raise pop " ++
             "\"  hi  \" str.trim str.upper pop " ++

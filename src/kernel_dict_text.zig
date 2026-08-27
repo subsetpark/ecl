@@ -15,27 +15,28 @@ const Value = value.Value;
 const Machine = support.Machine;
 const MachineError = support.MachineError;
 
-/// The sized-operation taxonomy lives in `kernel_support` so the registry in
-/// `kernels.zig` classifies exactly the operations this installer publishes.
+/// The sized-operation taxonomy also includes the hosted `str.format` idiom;
+/// every other text operation is installed directly in core.
 const Op = support.TextOp;
 
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     inline for (std.meta.fields(Op)) |field| {
         const operation: Op = @enumFromInt(field.value);
+        if (operation == .format) continue;
         try support.installPrimitive(core, operation.spelling(), bind(operation));
     }
+}
+
+pub fn formatForIdiom(evaluator: *Machine) MachineError!void {
+    return formatPrimitive(evaluator);
 }
 
 fn bind(comptime operation: Op) env.PrimitiveImpl {
     return struct {
         fn run(evaluator: *Machine) MachineError!void {
             return switch (operation) {
-                .keys => keysPrimitive(evaluator),
                 .put => putPrimitive(evaluator),
-                .to_dict => toDictPrimitive(evaluator),
                 .del => delPrimitive(evaluator),
-                .merge => mergePrimitive(evaluator),
-                .has => hasPrimitive(evaluator),
                 .split => splitPrimitive(evaluator),
                 .join => joinPrimitive(evaluator),
                 .str => strPrimitive(evaluator),
@@ -130,6 +131,16 @@ fn keysPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.pushBorrowed(keys);
 }
 
+pub fn keysForModule(evaluator: *Machine) MachineError!void {
+    return keysPrimitive(evaluator);
+}
+
+pub fn sizeForModule(evaluator: *Machine) MachineError!void {
+    var dictionary = try evaluator.popDict();
+    defer dictionary.deinit();
+    try evaluator.pushOwned(.{ .int = @intCast(dictionary.borrow().dict.length()) });
+}
+
 fn valsPrimitive(evaluator: *Machine) MachineError!void {
     var dictionary = try evaluator.popDict();
     defer dictionary.deinit();
@@ -137,7 +148,7 @@ fn valsPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.pushBorrowed(values);
 }
 
-pub fn valsForIdiom(evaluator: *Machine) MachineError!void {
+pub fn valsForModule(evaluator: *Machine) MachineError!void {
     return valsPrimitive(evaluator);
 }
 
@@ -157,6 +168,10 @@ fn hasPrimitive(evaluator: *Machine) MachineError!void {
         .key = .init(key.take()),
         .cursor = .init(cursor),
     });
+}
+
+pub fn hasForModule(evaluator: *Machine) MachineError!void {
+    return hasPrimitive(evaluator);
 }
 
 const HasDriver = struct {
@@ -483,7 +498,7 @@ const DictPutDriver = struct {
     }
 };
 
-fn toDictPrimitive(evaluator: *Machine) MachineError!void {
+pub fn fromListsForModule(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     var values = try evaluator.popValue();
     defer values.deinit();
@@ -492,17 +507,17 @@ fn toDictPrimitive(evaluator: *Machine) MachineError!void {
     if (keys.borrow() != .list or values.borrow() != .list) return evaluator.typeError("two lists");
     const count: usize = @intCast(keys.borrow().list.length());
     if (values.borrow().list.length() != keys.borrow().list.length()) {
-        return evaluator.fail(.shape, "to-dict requires equal key and value lengths");
+        return evaluator.fail(.shape, "dict.from-lists requires equal key and value lengths");
     }
     const pairs = try evaluator.allocator().alloc(dict.Pair, count);
-    try evaluator.startDriver(ToDictDriver{
+    try evaluator.startDriver(FromListsDriver{
         .keys = .init(keys.take()),
         .values = .init(values.take()),
         .pairs = .init(pairs),
     });
 }
 
-const ToDictDriver = struct {
+const FromListsDriver = struct {
     /// One dict built from two lists, then it publishes.
     pub const inline_driver = true;
     pub const ownership: heap.DriverOwnership = .fields;
@@ -512,7 +527,7 @@ const ToDictDriver = struct {
     index: usize = 0,
     materializer: ?heap.Owned(dict.Materializer) = null,
 
-    pub fn advance(evaluator: *Machine, self: *ToDictDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Machine, self: *FromListsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         if (self.materializer == null) {
@@ -529,7 +544,7 @@ const ToDictDriver = struct {
         }
         return switch (try self.materializer.?.borrowMut().advance(budget)) {
             .pending => .yielded,
-            .duplicate_key => evaluator.fail(.domain, "to-dict keys must be distinct"),
+            .duplicate_key => evaluator.fail(.domain, "dict.from-lists keys must be distinct"),
             .complete => |result| completed: {
                 self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                 self.materializer = null;
@@ -543,21 +558,84 @@ fn delPrimitive(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     var key = try evaluator.popValue();
     defer key.deinit();
-    var dictionary = try evaluator.popDict();
-    defer dictionary.deinit();
-    const finder = dict.FindCursor.initHeader(
-        evaluator.allocator(),
-        dictionary.borrow().dict,
-        key.borrow(),
-    );
-    try evaluator.startDriver(DelDriver{
-        .dictionary = .init(dictionary.take()),
-        .key = .init(key.take()),
-        .work = .init(.{ .finding = finder }),
-    });
+    var collection = try evaluator.popValue();
+    defer collection.deinit();
+    switch (collection.borrow()) {
+        .dict => {
+            const finder = dict.FindCursor.initHeader(
+                evaluator.allocator(),
+                collection.borrow().dict,
+                key.borrow(),
+            );
+            try evaluator.startDriver(DictDelDriver{
+                .dictionary = .init(collection.take()),
+                .key = .init(key.take()),
+                .work = .init(.{ .finding = finder }),
+            });
+        },
+        .list => {
+            if (key.borrow() != .int) return evaluator.typeError("an integer list index");
+            if (key.borrow().int < 0) return evaluator.fail(.domain, "del index is negative");
+            const index = std.math.cast(usize, key.borrow().int) orelse
+                return evaluator.fail(.domain, "del index is out of bounds");
+            const count: usize = @intCast(collection.borrow().list.length());
+            if (index >= count) return evaluator.fail(.domain, "del index is out of bounds");
+            const values = try evaluator.allocator().alloc(Value, count - 1);
+            try evaluator.startDriver(ListDelDriver{
+                .collection = .init(collection.take()),
+                .key = .init(key.take()),
+                .removed_index = index,
+                .values = .init(values),
+            });
+        },
+        .int, .float, .char, .symbol, .word, .task, .module, .unit_plan => return evaluator.typeError("a list or dict"),
+    }
 }
 
-const DelDriver = struct {
+const ListDelDriver = struct {
+    /// One list rebuilt without an indexed element, then it publishes.
+    pub const inline_driver = true;
+    pub const ownership: heap.DriverOwnership = .fields;
+    collection: heap.Owned(Value),
+    key: heap.Owned(Value),
+    removed_index: usize,
+    values: heap.Owned([]Value),
+    source_index: usize = 0,
+    destination_index: usize = 0,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
+
+    pub fn advance(evaluator: *Machine, self: *ListDelDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        var budget: usize = machine.kernel_poll_quantum;
+        if (self.materializer == null) {
+            const count: usize = @intCast(self.collection.borrow().list.length());
+            while (budget != 0 and self.source_index != count) : (self.source_index += 1) {
+                if (self.source_index != self.removed_index) {
+                    self.values.borrow()[self.destination_index] =
+                        list.atUnchecked(self.collection.borrow(), self.source_index);
+                    self.destination_index += 1;
+                }
+                budget -= 1;
+            }
+            if (self.source_index != count) return .yielded;
+            self.materializer = .init(list.ValueMaterializer.init(
+                evaluator.allocator(),
+                self.values.borrow(),
+            ));
+        }
+        if (budget == 0) return .yielded;
+        return switch (try self.materializer.?.borrowMut().advance(budget)) {
+            .pending => .yielded,
+            .complete => |result| completed: {
+                self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.materializer = null;
+                break :completed .{ .output = result };
+            },
+        };
+    }
+};
+
+const DictDelDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
     /// One dict rebuild, then it publishes: short-lived, so it takes the slot
     /// without holding it across anything else.
@@ -570,7 +648,7 @@ const DelDriver = struct {
     source_index: usize = 0,
     destination_index: usize = 0,
 
-    pub fn advance(evaluator: *Machine, self: *DelDriver) MachineError!machine.WorkProgress {
+    pub fn advance(evaluator: *Machine, self: *DictDelDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         if (self.work.borrowMut().* == .finding) switch (try self.work.borrowMut().finding.advance(budget)) {
@@ -633,6 +711,10 @@ fn mergePrimitive(evaluator: *Machine) MachineError!void {
         .pairs = .init(pairs),
         .pair_count = left_count,
     });
+}
+
+pub fn mergeForModule(evaluator: *Machine) MachineError!void {
+    return mergePrimitive(evaluator);
 }
 
 const MergeDriver = struct {

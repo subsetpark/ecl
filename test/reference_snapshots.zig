@@ -53,15 +53,15 @@ const cases = [_]Case{
     .{ .name = "grade", .source = "[2 1 2 1] grade" },
     .{ .name = "sort", .source = "[2 1 2 1] sort" },
     .{ .name = "distinct", .source = "[2 1 2 1] distinct" },
-    .{ .name = "keys", .source = "{'a 1 'b 2} keys" },
-    .{ .name = "vals", .source = "{'a 1 'b 2} vals" },
+    .{ .name = "dict.keys", .source = "{'a 1 'b 2} dict.keys" },
+    .{ .name = "dict.vals", .source = "{'a 1 'b 2} dict.vals" },
     .{ .name = "put", .source = "{'a 1} 'b 2 put" },
     .{ .name = "del", .source = "{'a 1 'b 2} 'a del" },
-    .{ .name = "merge", .source = "{'a 1 'b 2} {'b 20 'c 3} merge" },
-    .{ .name = "has?", .source = "{\"ab\" 9} \"ab\" has? {[1 2] 9} [1 2] has?" },
+    .{ .name = "dict.merge", .source = "{'a 1 'b 2} {'b 20 'c 3} dict.merge" },
+    .{ .name = "dict.has?", .source = "{\"ab\" 9} \"ab\" dict.has? {[1 2] 9} [1 2] dict.has?" },
     .{ .name = "split", .source = "\"a—b—\" \"—\" split first" },
     .{ .name = "join", .source = "[\"a\" 2] \"-\" join" },
-    .{ .name = "format", .source = "[3.14 2] \"pi={} n={}\" format" },
+    .{ .name = "str.format", .source = "[3.14 2] \"pi={} n={}\" str.format" },
     .{ .name = "parse", .source = "\"42\" parse first" },
     .{ .name = "parse-int", .source = "\"42\" parse-int" },
     .{ .name = "parse-float", .source = "\"3.5\" parse-float" },
@@ -145,10 +145,10 @@ const cases = [_]Case{
     .{ .name = "bsr", .source = "-1 1 bsr" },
     .{ .name = "bnot", .source = "[0 5] bnot" },
     .{ .name = "bsl overshift", .source = "1 64 bsl" },
-    .{ .name = "rand-int", .source = "[7 0] 6 rand-int" },
-    .{ .name = "rand-ints", .source = "[7 0] 4 6 rand-ints" },
-    .{ .name = "rand-float", .source = "[7 0] rand-float" },
-    .{ .name = "rand-int empty range", .source = "[7 0] 0 rand-int" },
+    .{ .name = "rand.int", .source = "[7 0] 6 rand.int" },
+    .{ .name = "rand.ints", .source = "[7 0] 4 6 rand.ints" },
+    .{ .name = "rand.float", .source = "[7 0] rand.float" },
+    .{ .name = "rand.int empty range", .source = "[7 0] 0 rand.int" },
     .{ .name = "rng deal", .source = "'rng.deal 'deal import 3 10 deal" },
     // The unit-constructor convention: the guided boundary error and the
     // seeding composition that replaced the `-with` family.
@@ -488,15 +488,15 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\[2 1]
         \\stderr:
         \\<empty>
-        \\=== keys ===
-        \\source: {'a 1 'b 2} keys
+        \\=== dict.keys ===
+        \\source: {'a 1 'b 2} dict.keys
         \\exit: 0
         \\stdout:
         \\['a 'b]
         \\stderr:
         \\<empty>
-        \\=== vals ===
-        \\source: {'a 1 'b 2} vals
+        \\=== dict.vals ===
+        \\source: {'a 1 'b 2} dict.vals
         \\exit: 0
         \\stdout:
         \\[1 2]
@@ -516,15 +516,15 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\{'b 2}
         \\stderr:
         \\<empty>
-        \\=== merge ===
-        \\source: {'a 1 'b 2} {'b 20 'c 3} merge
+        \\=== dict.merge ===
+        \\source: {'a 1 'b 2} {'b 20 'c 3} dict.merge
         \\exit: 0
         \\stdout:
         \\{'a 1 'b 20 'c 3}
         \\stderr:
         \\<empty>
-        \\=== has? ===
-        \\source: {"ab" 9} "ab" has? {[1 2] 9} [1 2] has?
+        \\=== dict.has? ===
+        \\source: {"ab" 9} "ab" dict.has? {[1 2] 9} [1 2] dict.has?
         \\exit: 0
         \\stdout:
         \\1 1
@@ -544,8 +544,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\<empty>
         \\stderr:
         \\{'kind 'type 'msg "join expected a list of strings" 'word 'join 'trace ['join] 'data {'index 1 'source "<command>" 'line 1 'col 13}}
-        \\=== format ===
-        \\source: [3.14 2] "pi={} n={}" format
+        \\=== str.format ===
+        \\source: [3.14 2] "pi={} n={}" str.format
         \\exit: 0
         \\stdout:
         \\"pi=3.14 n=2"
@@ -715,7 +715,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 333 'col 47}}
+        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 313 'col 54}}
         \\=== result.ok? ===
         \\source: (2 3 +) @attempt result.ok?
         \\exit: 0
@@ -821,7 +821,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 358 'col 20}}
+        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 338 'col 20}}
         \\=== qualify execute ===
         \\source: ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute
         \\exit: 0
@@ -926,7 +926,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 364 'col 14}}
+        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 344 'col 14}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0
@@ -940,7 +940,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'str.index-of] 'data {'source "prelude.ecl" 'line 364 'col 14}}
+        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'str.index-of] 'data {'source "prelude.ecl" 'line 344 'col 14}}
         \\=== csv parse ===
         \\source: "a,,c
         \\d" csv.parse
@@ -1011,7 +1011,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 364 'col 14}}
+        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 344 'col 14}}
         \\=== getenv unset ===
         \\source: "ECL_SNAPSHOT_ABSENT" getenv
         \\exit: 1
@@ -1082,34 +1082,34 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\<empty>
         \\stderr:
         \\{'kind 'domain 'msg "a shift count must be from 0 to 63" 'word 'bsl 'trace ['bsl] 'data {'source "<command>" 'line 1 'col 6}}
-        \\=== rand-int ===
-        \\source: [7 0] 6 rand-int
+        \\=== rand.int ===
+        \\source: [7 0] 6 rand.int
         \\exit: 0
         \\stdout:
         \\[7 1] 3
         \\stderr:
         \\<empty>
-        \\=== rand-ints ===
-        \\source: [7 0] 4 6 rand-ints
+        \\=== rand.ints ===
+        \\source: [7 0] 4 6 rand.ints
         \\exit: 0
         \\stdout:
         \\[7 4] [3 0 0 3]
         \\stderr:
         \\<empty>
-        \\=== rand-float ===
-        \\source: [7 0] rand-float
+        \\=== rand.float ===
+        \\source: [7 0] rand.float
         \\exit: 0
         \\stdout:
         \\[7 1] 0.3898297483912715
         \\stderr:
         \\<empty>
-        \\=== rand-int empty range ===
-        \\source: [7 0] 0 rand-int
+        \\=== rand.int empty range ===
+        \\source: [7 0] 0 rand.int
         \\exit: 1
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "rand-int expected a positive bound, not 0" 'word 'rand-int 'trace ['rand-int] 'data {'source "<command>" 'line 1 'col 9}}
+        \\{'kind 'domain 'msg "rand.int expected a positive bound, not 0" 'word 'rand.int 'trace ['rand.int] 'data {'source "<command>" 'line 1 'col 9}}
         \\=== rng deal ===
         \\source: 'rng.deal 'deal import 3 10 deal
         \\exit: 0

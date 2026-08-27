@@ -1,6 +1,8 @@
 //! Closed installer and closed classification registry for the kernel surface.
 //!
-//! Two artifacts live here. `install` publishes every kernel family's words.
+//! Two artifacts live here. `install` publishes the core kernel families;
+//! module-backed random draws and hosted idioms enter the same closed registry
+//! through their qualified exports.
 //! `registry` classifies every sized kernel operation against every operand
 //! shape it can meet at dispatch, exactly once, and `comptime` validation makes
 //! a missing or duplicated classification a compile error rather than a silent
@@ -39,7 +41,6 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try sequence.install(core);
     try order.install(core);
     try dict_text.install(core);
-    try random.install(core);
 }
 
 /// How an operation executes for one operand shape.
@@ -68,7 +69,7 @@ pub const Operand = union(enum) {
 };
 
 /// How many operands take part in representation dispatch. Operations whose
-/// extra arguments are scalars — `put`'s key and value, `rand-ints`' count and
+/// extra arguments are scalars — `put`'s key and value, `rand.ints`' count and
 /// bound, `take`'s count — dispatch on one shape; the count is documented per
 /// operation rather than derived from the word's stack effect.
 pub const Arity = enum { one, two };
@@ -103,10 +104,10 @@ pub const Operation = union(enum) {
                 .grade, .group => .one,
             },
             .text => |operation| switch (operation) {
-                // `split`, `join`, `format`, and `merge` read two sized
-                // operands; the rest dispatch on their collection alone.
-                .split, .join, .format, .merge => .two,
-                .keys, .put, .to_dict, .del, .has, .str => .one,
+                // `split`, `join`, and `format` read two sized operands; the
+                // rest dispatch on their collection alone.
+                .split, .join, .format => .two,
+                .put, .del, .str => .one,
             },
             .random => .one,
         };
@@ -718,10 +719,7 @@ const text_rows = [_]Row{
         // canonical rendering follows whole values and may descend through any representation
     },
     .{
-        .operations = only(.{
-            Operation{ .text = .format },
-            Operation{ .text = .merge },
-        }),
+        .operations = only(.{Operation{ .text = .format }}),
         .left = any_operand,
         .right = any_operand,
         .class = .generic_fallback,
@@ -741,12 +739,7 @@ const text_rows = [_]Row{
         // a boxed spine or a keyed collection stores through the generic path
     },
     .{
-        .operations = only(.{
-            Operation{ .text = .keys },
-            Operation{ .text = .to_dict },
-            Operation{ .text = .del },
-            Operation{ .text = .has },
-        }),
+        .operations = only(.{Operation{ .text = .del }}),
         .left = any_aggregate,
         .class = .generic_fallback,
         // dict identity hashing and key order are whole-value properties
@@ -814,7 +807,8 @@ fn rowNames(row: Row, operation: Operation) bool {
     return false;
 }
 
-/// Every operation the installers publish, in one comptime list.
+/// Every operation reachable through a core installer, stdlib export, or
+/// hosted idiom, in one comptime list.
 pub const all_operations = all_binary ++ all_unary ++
     operations(support.SequenceOp, "sequence") ++
     operations(support.OrderOp, "order") ++

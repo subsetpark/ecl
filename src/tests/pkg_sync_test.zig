@@ -389,7 +389,7 @@ test "pkg sync: explicit project root, not ambient discovery, selects store mode
     defer allocator.free(target);
     const cache = try scratch.pathFor("cache");
     defer allocator.free(cache);
-    const source = try syncSource(target_manifest, target, " 'store has?");
+    const source = try syncSource(target_manifest, target, " 'store dict.has?");
     defer allocator.free(source);
     const environ: []const machine.Environ.Entry = &.{.{ .name = "ECL_CACHE", .value = cache }};
     try expectHostStackEnvironProject(source, "0", false, environ, ambient);
@@ -827,7 +827,7 @@ test "pkg sync: resolves transitive MVS and writes canonical lock" {
     const source = try syncSource(
         fixture.root_manifest,
         project,
-        " dup 'packages at keys sort swap ['packages \"c\" 'version] at-path",
+        " dup 'packages at dict.keys sort swap ['packages \"c\" 'version] at-path",
     );
     defer allocator.free(source);
     try expectHostStackEnviron(source, "(\"a\" \"b\" \"c\") \"1.5.0\"", true, environ);

@@ -31,7 +31,7 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         .{
             .name = "migrated sequence and dictionary words",
             .source = "[1 2 3] first [1 2 3] rest [1 2 3] reverse " ++
-                "[1 2 1 3 2] distinct {'a 1 'b 2} vals",
+                "[1 2 1 3 2] distinct {'a 1 'b 2} dict.vals",
             .expected = "1 [2 3] [3 2 1] [1 2 3] [1 2]",
         },
         .{ .name = "partition", .source = "[1 2 3 4] (2 >) partition", .expected = "[3 4] [1 2]" },
@@ -101,15 +101,15 @@ test "embedded prelude exposes source bodies and derived dataflow" {
         },
         .{
             .name = "selection and aggregation",
-            .source = "{'a 1 'b 2} pairs [1 2 3 4] (2 >) filter [0 0 1] (0 >) any? " ++
+            .source = "{'a 1 'b 2} dict.pairs [1 2 3 4] (2 >) filter [0 0 1] (0 >) any? " ++
                 "[1 1 0] (0 >) all? [1 2 3] mean",
             .expected = "(('a 1) ('b 2)) [3 4] 1 0 2.0",
         },
         .{
             .name = "exact dictionary keys",
-            .source = "{'a 1 'b 2} ['b 'a] keys-exactly? " ++
-                "{'a 1} ['a 'b] keys-exactly? {'a 1 'b 2} ['a] keys-exactly? " ++
-                "{'a 1 'b 2} ['a 'a] keys-exactly?",
+            .source = "{'a 1 'b 2} ['b 'a] dict.keys-exactly? " ++
+                "{'a 1} ['a 'b] dict.keys-exactly? {'a 1 'b 2} ['a] dict.keys-exactly? " ++
+                "{'a 1 'b 2} ['a 'a] dict.keys-exactly?",
             .expected = "1 0 0 0",
         },
         .{
@@ -148,18 +148,17 @@ test "embedded prelude exposes source bodies and derived dataflow" {
 
 test "all embedded vocabulary entries expose nonempty documentation" {
     const names = [_][]const u8{
-        "compose",      "first",     "wrap",          "literal", "dip",      "over",
-        "partial",      "with",      "mod",           "neg",     "abs",      "<>",
-        "<=",           ">=",        "and",           "or",      "nip",      "keep",
-        "bi",           "tri",       "bi2",           "both",    "when",     "unless",
-        "case",         "signum",    "clamp",         "last",    "pair",     "pack",
-        "append",       "rest",      "reverse",       "uncons",  "unappend", "empty?",
-        "zip",          "lex-cmp",   "min-of",        "max-of",  "sort",     "distinct",
-        "at-path",      "vals",      "keys-exactly?", "at-or",   "pairs",    "filter",
-        "partition",    "any?",      "all?",          "sum",     "prod",     "mean",
-        "fail",         "find",      "await-all",     "set",     "setp",     "assert",
-        "rotate",       "windows",   "each-prior",    "fold1",   "scan1",    "iterations",
-        "while-values", "converges", "converge",
+        "compose", "first",   "wrap",       "literal",      "dip",       "over",
+        "partial", "with",    "mod",        "neg",          "abs",       "<>",
+        "<=",      ">=",      "and",        "or",           "nip",       "keep",
+        "bi",      "tri",     "bi2",        "both",         "when",      "unless",
+        "case",    "signum",  "clamp",      "last",         "pair",      "pack",
+        "append",  "rest",    "reverse",    "uncons",       "unappend",  "empty?",
+        "zip",     "lex-cmp", "min-of",     "max-of",       "sort",      "distinct",
+        "at-path", "at-or",   "filter",     "partition",    "any?",      "all?",
+        "sum",     "prod",    "mean",       "fail",         "find",      "await-all",
+        "set",     "setp",    "assert",     "rotate",       "windows",   "each-prior",
+        "fold1",   "scan1",   "iterations", "while-values", "converges", "converge",
     };
     for (names) |name| {
         const source = try std.fmt.allocPrint(
@@ -241,7 +240,7 @@ test "embedded definitions retain provenance and deferred words stay absent" {
         },
         .{ .name = "case shape", .source = "1 [] case", .kind = "shape" },
         .{ .name = "case type", .source = "1 2 case", .kind = "type" },
-        .{ .name = "at-or propagates type", .source = "1 0 9 at-or", .kind = "type", .word = "has?" },
+        .{ .name = "at-or propagates type", .source = "1 0 9 at-or", .kind = "type", .word = "dict.has?" },
         .{ .name = "at-path propagates lookup failure", .source = "{'a [1]} ['a 4] at-path", .kind = "domain", .word = "at" },
         .{ .name = "pack negative", .source = "1 -1 pack", .kind = "domain", .word = "times" },
         .{ .name = "pack type", .source = "1 1.0 pack", .kind = "type", .word = "times" },

@@ -254,7 +254,7 @@
 
 ### def distinct
 (list -- list : "Return the first occurrence of each distinct list value in input order.")
-(group keys)
+(group dict.keys)
 'distinct def
 
 ### def at-path
@@ -262,31 +262,11 @@
 (swap (at) fold)
 'at-path def
 
-### def vals
-(dict -- values : "Return a dictionary's values in insertion order.")
-(dup keys swap (swap at) partial each)
-'vals def
-
-### def keys-exactly?
-(candidate declared -- bool : "Test whether a dict has exactly the declared keys, in any order.")
-(|candidate declared|
- candidate keys len declared len =
- declared distinct len declared len =
- and
- declared candidate (swap has?) partial all?
- and)
-'keys-exactly? def
-
 ### def at-or
 (collection key default -- value :
  "Look up a key or index, returning a fallback value when lookup fails.")
-(|d k default| d k default d k has? (pop at) (nip nip) if)
+(|d k default| d k default d k dict.has? (pop at) (nip nip) if)
 'at-or def
-
-### def pairs
-(dict -- pairs : "Return a dictionary's entries as key/value pairs in dictionary order.")
-(dup keys swap vals zip)
-'pairs def
 
 ### def filter
 (sequence predicate -- matches :
@@ -330,7 +310,7 @@
 
 ### def fail
 (: "Raise a user-kind error whose message is the supplied value.")
-(wrap ('kind 'user 'msg) swap compose dict-of raise)
+(wrap ('kind 'user 'msg) swap compose dict.from-flat raise)
 'fail def
 
 ### def find

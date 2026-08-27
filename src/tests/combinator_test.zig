@@ -348,9 +348,6 @@ test "idioms: automatic hits and forced generic preserves behavior" {
     try expectStack(&automatic, "pop [1 2 3] reverse", "[3 2 1]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
 
-    try expectStack(&automatic, "pop {'a 1 'b 2} vals", "[1 2]");
-    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
-
     // The literal-capture shape `((v) first)` that `partial` builds reaches
     // the same constant-operand kernels a bare constant does, in both operand
     // orders. A wrapper that is not a one-element list is not a capture: it

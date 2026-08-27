@@ -4,7 +4,7 @@
  ### defp inert?
  (value -- bool : "Return 1 when a value recursively contains no executable words.")
  ([(type 'word match?) (pop 0)
-   (type 'dict match?) (vals (inert?) all?)
+   (type 'dict match?) (dict.vals (inert?) all?)
    (type 'list match?) ((inert?) all?)
    (pop 1)]
   cond)
@@ -14,7 +14,7 @@
  (key -- : "Raise an inert-data error for a dict entry.")
  (|key|
   'domain error.new "a manifest or lock holds only inert data" error.with-message
-  'key key pair dict-of
+  'key key pair dict.from-flat
   error.with-data
   raise)
  'offending defp
@@ -42,6 +42,6 @@
 
  ### def sorted-entries
  (holder -- pairs : "Return a dict's entries in ascending key order.")
- (|holder| holder keys sort holder (entry-of) partial each)
+ (|holder| holder dict.keys sort holder (entry-of) partial each)
  'sorted-entries def
  ) 'pkg.data @defm

@@ -207,13 +207,16 @@ cannot be replaced accidentally by a file with the same name.
 
 | Modules | Purpose |
 |---|---|
+| `dict` | Immutable map construction, observation, transformation, selection, and merging |
+| `error` | Structured error construction and inspection |
 | `result` | Validated success and error envelopes |
-| `str` | Text search, replacement, case, trimming, and padding |
+| `str` | Text formatting, search, replacement, case, trimming, and padding |
 | `io` | Terminal, stdin, and UTF-8 file operations |
 | `csv`, `json` | External data formats |
 | `table` | Column-oriented tables represented as ordinary dictionaries |
 | `http` | HTTP GET and POST |
-| `rng` | Explicit-state and module-state random generation |
+| `rand` | Explicit-state random draws and host entropy |
+| `rng` | Durable module-state random generation |
 | `archive` | SHA-256 and atomic validated `.tgz` extraction |
 | `pkg.*` | Package names, versions, manifests, locks, and minimal-version resolution |
 
@@ -221,6 +224,7 @@ Use a qualified word directly:
 
 ```sh
 ecl '"hello" str.upper'                    # "HELLO"
+ecl "[['a 1] ['b 2]] dict.from-pairs"     # {'a 1 'b 2}
 ecl '"a,b\nc,d" csv.parse'                 # (("a" "b") ("c" "d"))
 ecl '"{\"a\":[1,null]}" json.parse'       # {"a" (1 'null)}
 ```
@@ -283,8 +287,10 @@ native modules.
 
 ## Documentation
 
-- [`design/SPEC.md`](design/SPEC.md) is the authority on syntax, semantics,
-  errors, modules, and the complete vocabulary.
+- [`design/SPEC.md`](design/SPEC.md) is the authority on language syntax,
+  semantics, errors, and modules.
+- [`design/STDLIB.md`](design/STDLIB.md) is the exhaustive reference for the
+  shipped core, prelude, and standard-library vocabulary.
 - [`design/ECL_STYLE.md`](design/ECL_STYLE.md) is the authoring guide for
   first-party ECL source.
 - [`design/INTERPRETER.md`](design/INTERPRETER.md) describes the runtime

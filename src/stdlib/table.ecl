@@ -21,15 +21,15 @@
  (candidate -- table : "Validate and return a table candidate.")
  (dup type 'dict match?
   'type error.new "a table must be a dict of columns" error.with-message assert
-  dup keys len 0 >
+  dup dict.keys len 0 >
   'shape error.new "a table must have at least one column" error.with-message assert
-  dup keys (string?) all?
+  dup dict.keys (string?) all?
   'type error.new "table column names must be strings" error.with-message assert
-  dup keys (len 0 >) all?
+  dup dict.keys (len 0 >) all?
   'domain error.new "table column names must not be empty" error.with-message assert
-  dup vals (type 'list match?) all?
+  dup dict.vals (type 'list match?) all?
   'type error.new "table columns must be lists" error.with-message assert
-  dup vals (len) each distinct len 2 <
+  dup dict.vals (len) each distinct len 2 <
   'shape error.new "table columns must share one length" error.with-message assert)
  'checked defp
 
@@ -48,12 +48,12 @@
 
  ### def names
  (table -- names : "Return the column names in column order.")
- (checked keys)
+ (checked dict.keys)
  'names def
 
  ### def height
  (table -- count : "Return the number of rows.")
- (checked vals first len)
+ (checked dict.vals first len)
  'height def
 
  ### def from-columns
@@ -83,7 +83,7 @@
   'type error.new "table.from-rows expects every row to be a list" error.with-message assert
   rows names (len swap len =) partial all?
   'shape error.new "every row must have one cell per column name" error.with-message assert
-  names rows names len transpose to-dict)
+  names rows names len transpose dict.from-lists)
  'from-rows def
 
  ### def from-header-rows
@@ -113,39 +113,39 @@
   assert
   records (type 'dict match?) all?
   'type error.new "table.from-records expects every record to be a dict" error.with-message assert
-  records first keys (string?) all?
+  records first dict.keys (string?) all?
   'type error.new "table column names must be strings" error.with-message assert
-  records first keys (len 0 >) all?
+  records first dict.keys (len 0 >) all?
   'domain error.new "table column names must not be empty" error.with-message assert
-  records records first keys (keys-exactly?) partial all?
+  records records first dict.keys (dict.keys-exactly?) partial all?
   'domain error.new "every record must carry exactly the first record's keys" error.with-message
   assert
-  records first keys
-  records first keys records (record-column) partial each
-  to-dict)
+  records first dict.keys
+  records first dict.keys records (record-column) partial each
+  dict.from-lists)
  'from-records def
 
  ### def rows
  (table -- rows : "Return the data rows in row and column order.")
- (checked dup vals swap height transpose)
+ (checked dup dict.vals swap height transpose)
  'rows def
 
  ### def header-rows
  (table -- rows : "Return the column-name row followed by the data rows.")
- (checked dup keys swap rows cons)
+ (checked dup dict.keys swap rows cons)
  'header-rows def
 
  ### def records
  (table -- records :
   "Return one record per row, with keys in column order. A zero-row table returns an empty list.")
- (checked dup keys swap rows swap (swap to-dict) partial each)
+ (checked dup dict.keys swap rows swap (swap dict.from-lists) partial each)
  'records def
 
  ### def column
  (table name -- column : "Return a column by name.")
  (|table name|
   table checked pop
-  table name has?
+  table name dict.has?
   'domain error.new "table.column requires an existing column name" error.with-message assert
   table name at)
  'column def
@@ -161,11 +161,11 @@
   spec type 'dict match?
   'type error.new "table.cast expects a dict from column name to quotation" error.with-message
   assert
-  spec keys table (swap has?) partial all?
+  spec dict.keys table (swap dict.has?) partial all?
   'domain error.new "table.cast requires existing column names" error.with-message assert
-  spec vals (type 'list match?) all?
+  spec dict.vals (type 'list match?) all?
   'type error.new "table.cast expects a quotation for every named column" error.with-message assert
-  spec pairs table (cast-column) fold)
+  spec dict.pairs table (cast-column) fold)
  'cast def
 
  ### defp cast-column
@@ -185,11 +185,11 @@
   'shape error.new "a table must have at least one column" error.with-message assert
   names distinct len names len =
   'domain error.new "table.select rejects duplicate column names" error.with-message assert
-  names table (swap has?) partial all?
+  names table (swap dict.has?) partial all?
   'domain error.new "table.select requires existing column names" error.with-message assert
   names
   names table (swap at) partial each
-  to-dict)
+  dict.from-lists)
  'select def
 
  ### def rename
@@ -198,16 +198,16 @@
   table checked pop
   mapping type 'dict match?
   'type error.new "table.rename expects a dict from old name to new name" error.with-message assert
-  mapping keys table (swap has?) partial all?
+  mapping dict.keys table (swap dict.has?) partial all?
   'domain error.new "table.rename requires existing column names" error.with-message assert
-  mapping vals (string?) all?
+  mapping dict.vals (string?) all?
   'type error.new "table column names must be strings" error.with-message assert
-  mapping vals (len 0 >) all?
+  mapping dict.vals (len 0 >) all?
   'domain error.new "table column names must not be empty" error.with-message assert
-  table keys mapping (swap dup at-or) partial each
+  table dict.keys mapping (swap dup at-or) partial each
   dup distinct len over len =
   'domain error.new "table.rename would collide two columns onto one name" error.with-message assert
-  table vals to-dict)
+  table dict.vals dict.from-lists)
  'rename def
 
  ### def with-column
@@ -246,13 +246,13 @@
 
  ### defp name-set
  (names -- set : "Build a dictionary for whole-name membership tests.")
- (|names| names names (pop 1) each to-dict)
+ (|names| names names (pop 1) each dict.from-lists)
  'name-set defp
 
  ### defp exclude
  (names excluded -- names : "Remove excluded names while preserving the order of the input names.")
  (|names excluded|
-  names excluded name-set (swap has? not) partial filter)
+  names excluded name-set (swap dict.has? not) partial filter)
  'exclude defp
 
  ### def where
@@ -266,9 +266,9 @@
   'type error.new "a table mask holds only 0 and 1" error.with-message assert
   mask len table height =
   'shape error.new "a table mask must match the table's row count" error.with-message assert
-  table keys
-  table vals mask selected (at) partial each
-  to-dict)
+  table dict.keys
+  table dict.vals mask selected (at) partial each
+  dict.from-lists)
  'where def
 
  # --- grouping, aggregation, and joins -------------------------------------
@@ -299,7 +299,7 @@
 
  ### defp global-group
  (table -- groups : "Return one group containing every row index.")
- (|table| [] wrap table height range wrap to-dict)
+ (|table| [] wrap table height range wrap dict.from-lists)
  'global-group defp
 
  ### def group-by
@@ -314,7 +314,7 @@
   'type error.new "table.group-by expects a list of column names" error.with-message assert
   names (string?) all?
   'type error.new "table column names must be strings" error.with-message assert
-  names table (swap has?) partial all?
+  names table (swap dict.has?) partial all?
   'domain error.new "table.group-by requires existing column names" error.with-message assert
   names distinct len names len =
   'domain error.new "table.group-by rejects duplicate column names" error.with-message assert
@@ -339,18 +339,18 @@
 
  ### defp aggregate-column
  (spec table groups -- column : "Return one aggregate value per group.")
- (|spec table groups| groups vals table spec (group-value) partial partial each)
+ (|spec table groups| groups dict.vals table spec (group-value) partial partial each)
  'aggregate-column defp
 
  ### defp key-component
  (position groups -- column : "Return one component from every composite group key.")
- (|position groups| groups keys position (at) partial each)
+ (|position groups| groups dict.keys position (at) partial each)
  'key-component defp
 
  ### defp key-columns
  (groups names -- columns : "Return grouping-key columns in name order.")
  (|groups names| names len 1 =
-  groups (keys wrap) partial
+  groups (dict.keys wrap) partial
   groups names (composite-key-columns) partial partial
   if)
  'key-columns defp
@@ -378,7 +378,7 @@
   groups names key-columns
   specs table groups (aggregate-column) partial partial each
   cat
-  to-dict)
+  dict.from-lists)
  'aggregate-build defp
 
  ### def aggregate
@@ -393,7 +393,7 @@
   'type error.new "table.aggregate expects a list of column names" error.with-message assert
   names (string?) all?
   'type error.new "table column names must be strings" error.with-message assert
-  names table (swap has?) partial all?
+  names table (swap dict.has?) partial all?
   'domain error.new "table.aggregate requires existing column names" error.with-message assert
   names distinct len names len =
   'domain error.new "table.aggregate rejects duplicate column names" error.with-message assert
@@ -403,7 +403,7 @@
   'type error.new "each aggregate specification is [output-name input-name quotation]"
   error.with-message
   assert
-  specs (1 at) each table (swap has?) partial all?
+  specs (1 at) each table (swap dict.has?) partial all?
   'domain error.new "table.aggregate requires existing input column names" error.with-message assert
   names specs (first) each cat dup distinct len swap len =
   'domain error.new "aggregate output names must not collide with each other or a key"
@@ -422,7 +422,7 @@
 
  ### defp table-row
  (index table -- row : "Return one row in column order.")
- (|index table| table vals index (at) partial each)
+ (|index table| table dict.vals index (at) partial each)
  'table-row defp
 
  ### defp named-row
@@ -493,16 +493,16 @@
   'domain error.new "a join needs at least one key pair" error.with-message assert
   pairs (pair-shaped?) all?
   'type error.new "join keys are a list of [left-name right-name] pairs" error.with-message assert
-  pairs (first) each left (swap has?) partial all?
+  pairs (first) each left (swap dict.has?) partial all?
   'domain error.new "join keys must name existing left columns" error.with-message assert
-  pairs (1 at) each right (swap has?) partial all?
+  pairs (1 at) each right (swap dict.has?) partial all?
   'domain error.new "join keys must name existing right columns" error.with-message assert
   pairs (first) each dup distinct len swap len =
   'domain error.new "a join may not repeat a left column" error.with-message assert
   pairs (1 at) each dup distinct len swap len =
   'domain error.new "a join may not repeat a right column" error.with-message assert
-  right keys pairs (1 at) each exclude
-  dup left keys name-set (swap has?) partial any? not
+  right dict.keys pairs (1 at) each exclude
+  dup left dict.keys name-set (swap dict.has?) partial any? not
   'domain error.new "a join may not collide non-key column names; rename one first"
   error.with-message
   assert)
@@ -523,7 +523,7 @@
  (left right pairs extra fill step -- table :
   "Build a join result by applying a step to each left row.")
  (|left right pairs extra fill step|
-  left keys extra cat
+  left dict.keys extra cat
   left height range
   []
   left right pairs extra fill join-context step partial
@@ -550,9 +550,9 @@
  ### defp left-join-checked
  (left right pairs fill extra -- table : "Build a left join from validated fill values.")
  (|left right pairs fill extra|
-  extra fill (swap has?) partial all?
+  extra fill (swap dict.has?) partial all?
   'domain error.new "a fill must cover every appended right column" error.with-message assert
-  extra len fill keys len =
+  extra len fill dict.keys len =
   'domain error.new "a fill must cover exactly the appended right columns" error.with-message assert
   left right pairs extra
   extra fill (swap at) partial each
