@@ -330,16 +330,15 @@ always applies it. Values are bound by capturing them in a body.
 - `(body) 'name def` binds a word: reference applies the body. The body
   must be a list (a non-list is an error directing to `set`); a list of
   plain data is legal and yields a multi-value constant word.
-- `annotation? value 'name set` binds a constant. It is sugar, defined in ecl
-  as `swap literal swap def`: the value is captured with `literal`, so the
+- `annotation? value 'name set` binds a constant. The value is captured with
+  the same representation as `literal`, so the
   published body is `((value) first)`. Reference applies that body and
   pushes exactly the captured value, quotations included — the capture is
-  inert, so nothing in it executes or resolves. `v 'name set` is therefore
-  observationally `v literal 'name def`, exactly: the sugar synthesizes no
-  annotation of its own, while an annotation beneath `v` is preserved for
-  `def` to consume. `which` and `see` report the resulting public `def`; an
-  unannotated `set` has no effect or documentation, and nothing distinguishes
-  it from the corresponding `literal` plus `def` spelling. `set` is
+  inert, so nothing in it executes or resolves. The executable body is
+  observationally the same as `v literal 'name def`, but publication also
+  retains the defining form and captured value: `which` reports `set`, and
+  `see` emits re-readable `v 'name set` source with a `### set` navigation
+  header. An unannotated `set` has no effect or documentation. `set` is
   environment assignment, not a lexical binding form. For ordinary local
   values, prefer stack flow or binder locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
@@ -352,10 +351,8 @@ always applies it. Values are bound by capturing them in a body.
   under the same namespace validation as `def`.
 - `defp`/`setp` are the private forms, legal only inside a module body
   (see Modules); at top level they are errors.
-- Because `set`/`setp` are sugar, their failures are raised by the words
-  they call: an underflowing `set` is `'underflow` from `swap`, and a
-  non-symbol or reserved name is raised by `def`/`defp`. The error kind is
-  unchanged; the trace names `set`/`setp` as the parent.
+- `set`/`setp` validate the same namespace and annotation contracts as
+  `def`/`defp`; failures name the defining word that was invoked.
 
 ### Definition annotations
 
@@ -376,10 +373,9 @@ one marker of each kind, `--` before `:`, only words around `--`, and
 exactly one string after `:`. A malformed recognized annotation is a
 `'domain` error. The quotation adjacent to the name is unconditionally the
 body; only the value beneath it is considered for annotation recognition.
-`set`/`setp` capture their value with `literal` before `def`/`defp` sees it,
-so marker words belonging to the captured value sit nested inside the body
-and remain inert. A separate annotation beneath that value is still visible
-to `def`/`defp`, giving constants the same optional metadata as words.
+`set`/`setp` inspect only the separate annotation beneath the value. Marker
+words belonging to the captured value remain data, while constants retain the
+same optional metadata as words.
 
 Annotations are optional everywhere. Module `def`/`defp` accept the same
 four forms as top-level `def`: no annotation, effect only, documentation
@@ -2046,10 +2042,9 @@ on a form's first word. Specifics:
   preceding a body and `'name def`/`defp` is refilled paragraph-aware (semantics
   unchanged — `doc` canonicalization already ignores soft wrapping).
 - Every structurally literal definition block is introduced by a navigation
-  comment: `### def <name>` for `def`/`set`, and `### defp <name>` for
-  `defp`/`setp`. It is preceded by exactly one empty line (omitted at the start
-  of a file or container).
-  Existing `# def`/`### def`/`# defp`/`### defp` comments are canonicalized
-  from the structural terminator rather than trusted; recognition is purely
-  structural — never evaluation — and is disabled for words directly
-  contained by dict literals.
+  comment matching its defining form: `### def <name>`, `### defp <name>`,
+  `### set <name>`, or `### setp <name>`. It is preceded by exactly one empty
+  line (omitted at the start of a file or container). Existing short or
+  navigation headers for all four forms are canonicalized from the structural
+  terminator rather than trusted; recognition is purely structural — never
+  evaluation — and is disabled for words directly contained by dict literals.

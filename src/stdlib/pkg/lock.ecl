@@ -1,12 +1,12 @@
 ### module pkg.lock
 # Validate, read, and canonically render package locks.
 (
- ### defp lock-keys
+ ### setp lock-keys
  # Required cache-lock keys.
  ['format 'root 'packages 'requires]
  'lock-keys setp
 
- ### defp vendor-lock-keys
+ ### setp vendor-lock-keys
  # Required project-vendor lock keys.
  ['format 'root 'store 'packages 'requires]
  'vendor-lock-keys setp

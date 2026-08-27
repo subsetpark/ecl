@@ -183,13 +183,13 @@ test "definitions: module def and defp accept all four annotation forms" {
     );
 }
 
-test "definitions: set and setp publish exact literal captures without synthesized metadata" {
+test "definitions: set and setp preserve their reflected form without synthesized metadata" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
-    // The equivalence is exact in the body and in the absent metadata: both
-    // spellings reflect as the same unannotated public def.
+    // The executable bodies are equivalent and neither spelling synthesizes
+    // metadata, but reflection preserves which defining form introduced each.
     try expectStack(
         &runtime,
         "42 'answer set 42 literal 'spelled def answer spelled match?",
@@ -197,21 +197,25 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     );
     try expectOk(&runtime, "'answer see 'spelled see 'answer which");
     try std.testing.expectEqualStrings(
-        "### def answer\n" ++
-            "([42] first) 'answer def\n" ++
+        "### set answer\n" ++
+            "42 'answer set\n" ++
             "### def spelled\n" ++
             "([42] first) 'spelled def\n" ++
-            "answer -> answer def public\n",
+            "answer -> answer set public\n",
         output.written(),
     );
     try expectErrorContains(&runtime, "'answer doc", &.{ "'kind 'domain", "documentation" });
     // `setp` carries the same simplification into a module root, where the
     // published constant needs no effect declaration to register.
-    try expectOk(&runtime, "(7 'x set 8 'h setp (h) 'peek def) 'm @defm");
+    try expectOk(&runtime, "(7 'x set 8 'h setp (h) 'peek def ('h see) 'show-private def) 'm @defm");
     try expectStack(&runtime, "m.x m.peek", "7 8");
     output.clearRetainingCapacity();
-    try expectOk(&runtime, "'m.x see");
-    try std.testing.expectEqualStrings("### def m.x\n([7] first) 'm.x def\n", output.written());
+    try expectOk(&runtime, "'m.x see m.show-private");
+    try std.testing.expectEqualStrings(
+        "### set m.x\n7 'm.x set\n" ++
+            "### setp m.h\n8 'm.h setp\n",
+        output.written(),
+    );
 }
 
 test "modules: a nonempty construction stack becomes the durable initial stack once per slot" {

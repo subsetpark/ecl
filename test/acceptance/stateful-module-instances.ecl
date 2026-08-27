@@ -1,6 +1,6 @@
 ### One body quotation, two independently seeded counter slots.
 
-### def counter-body
+### set counter-body
 (
  ### def add
  ((swap + dup without) partial within) 'add def

@@ -264,15 +264,13 @@ test "nested and quoted markers remain body data" {
 test "reserved namespace names reject every binding surface but remain readable" {
     try support.expectErrors(&.{
         .{ .name = "definition", .source = "(1) '-- def", .kind = "domain", .word = "def" },
-        // set is prelude sugar, so the reserved-name check raises from the
-        // def it calls, with set as the trace parent.
-        .{ .name = "value", .source = "1 ': set", .kind = "domain", .word = "def" },
+        .{ .name = "value", .source = "1 ': set", .kind = "domain", .word = "set" },
         .{ .name = "local separator", .source = "1 (|--| --)", .kind = "parse" },
         .{ .name = "local colon", .source = "1 (|:| :)", .kind = "parse" },
         .{ .name = "@defm", .source = "() '-- @defm", .kind = "domain", .word = "@defm" },
         .{ .name = "alias", .source = "() 'm @defm '-- 'm alias", .kind = "domain", .word = "alias" },
         .{ .name = "public export", .source = "((-- x) (1) '-- def) 'm @defm", .kind = "domain", .word = "def" },
-        .{ .name = "private value", .source = "(1 ': setp) 'm @defm", .kind = "domain", .word = "defp" },
+        .{ .name = "private value", .source = "(1 ': setp) 'm @defm", .kind = "domain", .word = "setp" },
         .{ .name = "unset separator", .source = "'-- unset", .kind = "domain", .word = "unset" },
         .{ .name = "undef qualified", .source = "'m.x undef", .kind = "domain", .word = "undef" },
         .{ .name = "bare reserved word is readable", .source = "--", .kind = "undefined-word", .word = "--" },
@@ -392,26 +390,25 @@ test "definitions: set publishes a literal-capture word with no synthesized meta
     try support.expectStack("3 'x set 4 'x set x", "4");
 }
 
-test "definitions: which and see render set bindings as public defs" {
+test "definitions: which and see preserve set bindings" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
-    // Reflection reports what is stored: one kind, and no metadata, because
-    // the sugar supplies none. There is no `set` label to report, and `see`
-    // does not reconstruct the `set` spelling from the capture shape.
+    // Execution still has one binding representation, but reflection retains
+    // the source form that introduced it and emits re-readable set syntax.
     try expectOk(&runtime, "3 'x set 'x which 'x see");
     try std.testing.expectEqualStrings(
-        "x -> x def public\n" ++
-            "### def x\n" ++
-            "([3] first) 'x def\n",
+        "x -> x set public\n" ++
+            "### set x\n" ++
+            "3 'x set\n",
         output.written(),
     );
 
     // The rendering is source: reading it back reproduces the binding.
     var reread = try session.Session.init(std.testing.allocator, &.{});
     defer reread.deinit();
-    try expectOk(&reread, "([3] first) 'x def x");
+    try expectOk(&reread, "3 'x set x");
     var display = try reread.stackDisplay();
     defer display.deinit();
     try std.testing.expectEqualStrings("3", display.bytes());
@@ -440,15 +437,14 @@ test "definitions: set distinguishes binding annotations from captured data" {
     });
 }
 
-test "definitions: top-level setp fails through defp's module-root check" {
-    // Privacy is still checked dynamically against the unit's current scope;
-    // the sugar just relocates the raiser to the primitive it calls.
+test "definitions: top-level setp fails its module-root check" {
+    // Privacy is checked dynamically against the unit's current scope.
     try support.expectErrors(&.{
         .{
             .name = "top-level setp",
             .source = "1 'x setp",
             .kind = "domain",
-            .word = "defp",
+            .word = "setp",
             .message = "defp/setp are legal only in a module root",
         },
         .{
@@ -458,16 +454,14 @@ test "definitions: top-level setp fails through defp's module-root check" {
             .name = "setp inside an isolated child",
             .source = "([1] (pop 1 'x setp) each) 'm @defm",
             .kind = "domain",
-            .word = "defp",
+            .word = "setp",
         },
     });
 }
 
 test "definitions: def inside a word body writes the caller's scope" {
-    // The invariant licensing prelude placement of set/setp: a word whose
-    // body calls def publishes into the *unit's current scope*, never the
-    // executing frame's resolution environment (core is frozen after prelude
-    // installation).
+    // A word whose body calls def publishes into the *unit's current scope*,
+    // never the executing frame's resolution environment.
 
     // At top level the definition lands in the session environment and
     // outlives the helper that made it.
@@ -506,16 +500,16 @@ test "definitions: body is not a word and one binding kind needs no extraction" 
         .{ .name = "builtin", .source = "'def body", .kind = "undefined-word", .word = "body" },
     });
     // The invariant `body` used to observe is unchanged and still observable.
-    // `see` renders the stored body verbatim, so a constant is visibly a word
-    // whose body is the literal capture, and a definition visibly is not.
+    // `see` renders the defining form while both bindings execute their stored
+    // bodies through the same application path.
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
     try expectOk(&runtime, "3 'x set 'x see (dup *) 'sq def 'sq see");
     try std.testing.expectEqualStrings(
-        "### def x\n" ++
-            "([3] first) 'x def\n" ++
+        "### set x\n" ++
+            "3 'x set\n" ++
             "### def sq\n" ++
             "(dup *) 'sq def\n",
         output.written(),

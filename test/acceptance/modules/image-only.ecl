@@ -1,6 +1,6 @@
 ### module image-only
 (
- ### def answer
+ ### set answer
  7 'answer set)
 @module
 pop

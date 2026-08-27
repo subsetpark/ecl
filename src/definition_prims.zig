@@ -15,7 +15,7 @@ const reader_types = @import("reader_types.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-const Mode = enum { def, defp };
+const Mode = enum { def, set, defp, setp };
 const Definition = struct { name: []const u8, primitive: env.PrimitiveImpl };
 
 fn bind(comptime mode: Mode) env.PrimitiveImpl {
@@ -29,7 +29,9 @@ fn bind(comptime mode: Mode) env.PrimitiveImpl {
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]Definition{
         .{ .name = "def", .primitive = bind(.def) },
+        .{ .name = "set", .primitive = bind(.set) },
         .{ .name = "defp", .primitive = bind(.defp) },
+        .{ .name = "setp", .primitive = bind(.setp) },
         .{ .name = "unset", .primitive = unbind },
         .{ .name = "undef", .primitive = unbind },
         .{ .name = "doc", .primitive = doc },
@@ -54,7 +56,8 @@ const Annotation = struct {
 
 fn define(evaluator: *Machine, mode: Mode) MachineError!void {
     try evaluator.require(2);
-    const private = mode == .defp;
+    const word_form = mode == .def or mode == .defp;
+    const private = mode == .defp or mode == .setp;
     const scope = evaluator.currentScope();
     if (private and scope.publisher() != .module)
         return evaluator.fail(.domain, "defp/setp are legal only in a module root");
@@ -64,12 +67,17 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
     const separator = try intern.intern("--");
     const colon = try intern.intern(":");
     var annotation_candidate: ?heap.Owned(Value) = null;
-    if (item.borrow() == .list and evaluator.available() != 0) {
+    if ((!word_form or item.borrow() == .list) and evaluator.available() != 0) {
         const candidate = evaluator.visibleOperandBorrowed(evaluator.available() - 1);
         if (candidate == .list) {
             heap.retainValue(candidate);
             annotation_candidate = .init(candidate);
         }
+    }
+    if (!word_form) {
+        const captured = try literalCapture(evaluator, item.borrow());
+        item.deinit();
+        item = .init(evaluator.releaseDomain(), captured);
     }
     try evaluator.startDriver(DefineDriver{
         .mode = mode,
@@ -83,6 +91,21 @@ fn define(evaluator: *Machine, mode: Mode) MachineError!void {
             .candidate = .init(candidate.take()),
         } } else .{ .validate_name = .init(name) }),
     });
+}
+
+fn literalCapture(evaluator: *Machine, item: Value) error{OutOfMemory}!Value {
+    const first = try intern.intern("first");
+    const wrapped = try list.fromValuesGeneric(evaluator.allocator(), &.{item});
+    errdefer evaluator.releaseDomain().releaseValue(wrapped);
+    const body = try list.fromValuesGeneric(evaluator.allocator(), &.{
+        wrapped,
+        .{ .word = .{
+            .name = first,
+            .scope = @intFromEnum(evaluator.unit.environment.coreScopeId()),
+        } },
+    });
+    evaluator.releaseDomain().releaseValue(wrapped);
+    return body;
 }
 
 fn unbind(evaluator: *Machine) MachineError!void {
@@ -432,11 +455,20 @@ const DefineDriver = struct {
                 },
             },
             .prepare_publish => |*publication| {
-                const private = self.mode == .defp;
+                const private = self.mode == .defp or self.mode == .setp;
                 const visibility: env.Visibility = if (private) .private else .public;
+                const body = env.quotation(self.item.borrow().list) orelse
+                    return evaluator.fail(.domain, "definition body has an invalid heap representation");
+                const form: env.DefinitionForm = switch (self.mode) {
+                    .def, .defp => .def,
+                    .set, .setp => .{ .set = list.atUnchecked(
+                        list.atUnchecked(.{ .list = env.quotationHeader(body) }, 0),
+                        0,
+                    ) },
+                };
                 const publisher = try self.scope.publishWordCursor(publication.binding_name, .{
-                    .body = env.quotation(self.item.borrow().list) orelse
-                        return evaluator.fail(.domain, "definition body has an invalid heap representation"),
+                    .body = body,
+                    .form = form,
                     .source = if (publication.source) |*source| source.borrow() else null,
                     .visibility = visibility,
                     .effect = self.annotation.borrow().effect,
@@ -629,7 +661,7 @@ const WhichDriver = struct {
             2 => try self.add(.{ .trace_word = resolved.trace_word }),
             3 => try self.add(.{ .bytes = " " }),
             4 => try self.add(.{ .bytes = switch (resolved.lease.binding) {
-                .word => "def",
+                .word => @tagName(resolved.lease.form),
                 .builtin, .seed => "primitive",
                 .native => "native",
             } }),
@@ -862,10 +894,13 @@ const SeeDriver = struct {
             1 => if (plan.context.annotation != null or resolved.lease.effect != null)
                 try self.add(.{ .bytes = " " }),
             2 => switch (resolved.lease.binding) {
-                .word => |word_body| if (resolved.lease.source) |source|
-                    try self.add(.{ .bytes = source.bytes() })
-                else
-                    try self.add(.{ .value = .{ .list = env.quotationHeader(word_body) } }),
+                .word => |word_body| switch (resolved.lease.form) {
+                    .set => |item| try self.add(.{ .value = item }),
+                    .def => if (resolved.lease.source) |source|
+                        try self.add(.{ .bytes = source.bytes() })
+                    else
+                        try self.add(.{ .value = .{ .list = env.quotationHeader(word_body) } }),
+                },
                 .builtin, .seed => try self.add(.{ .bytes = "<primitive>" }),
                 .native => try self.add(.{ .bytes = "<native:" }),
             },
@@ -903,7 +938,10 @@ const SeeDriver = struct {
             7 => try self.add(.{ .bytes = " '" }),
             8 => try self.add(.{ .trace_word = resolved.trace_word }),
             9 => try self.add(.{ .bytes = switch (resolved.lease.binding) {
-                .word => if (resolved.lease.visibility == .private) " defp\n" else " def\n",
+                .word => switch (resolved.lease.form) {
+                    .def => if (resolved.lease.visibility == .private) " defp\n" else " def\n",
+                    .set => if (resolved.lease.visibility == .private) " setp\n" else " set\n",
+                },
                 .builtin, .seed, .native => " def\n",
             } }),
             10 => {

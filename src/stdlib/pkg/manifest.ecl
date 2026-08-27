@@ -1,12 +1,12 @@
 ### module pkg.manifest
 # Validate and read package manifests.
 (
- ### defp manifest-keys
+ ### setp manifest-keys
  # Required manifest keys.
  ['format 'name 'version 'requires]
  'manifest-keys setp
 
- ### defp requirement-keys
+ ### setp requirement-keys
  # Required package-requirement keys.
  ['version 'url 'hash]
  'requirement-keys setp

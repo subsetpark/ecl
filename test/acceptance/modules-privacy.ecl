@@ -1,6 +1,6 @@
 ### module m
 (
- ### defp s
+ ### setp s
  40 's setp
 
  ### def f

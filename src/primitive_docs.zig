@@ -59,7 +59,9 @@ const entries = [_]Metadata{
     .{ .name = "infra", .effect = "list quotation -- list", .text = "Run a quotation with a list's elements as its isolated stack and collect the results." },
 
     .{ .name = "def", .effect = null, .text = "Bind a quotation to a public word, with optional effect and documentation metadata." },
+    .{ .name = "set", .effect = null, .text = "Bind a value to a public constant word, with optional effect and documentation metadata." },
     .{ .name = "defp", .effect = null, .text = "Bind a quotation to a private module word, with optional effect and documentation metadata." },
+    .{ .name = "setp", .effect = null, .text = "Bind a value to a private module constant word, with optional effect and documentation metadata." },
     .{ .name = "unset", .effect = "name --", .text = "Remove a binding from the current scope; do nothing when that scope does not bind the name." },
     .{ .name = "undef", .effect = "name --", .text = "Remove a binding from the current scope; an alias of unset." },
     .{ .name = "doc", .effect = "name -- string", .text = "Return the canonical documentation string of a resolved binding." },

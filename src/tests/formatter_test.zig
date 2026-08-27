@@ -175,9 +175,9 @@ test "formatter owns canonical definition section comments" {
             "(-- n)\n(1)\n'public def\n\n" ++
             "### defp private\n" ++
             "[-- n]\n(2)\n'private defp\n" ++
-            "\n### defp constant\n" ++
+            "\n### setp constant\n" ++
             "\"secret\" 'constant setp\n" ++
-            "\n### def answer\n" ++
+            "\n### set answer\n" ++
             "42 'answer set\n" ++
             "### overview\n\n" ++
             "### def letters\n" ++
@@ -409,4 +409,26 @@ test "formatter synthesizes and normalizes module navigation headers" {
     try expectParseEquivalent(seeded);
     try expectParseEquivalent(composed);
     try expectParseEquivalent("((1) 'x def) @module 'stats register\n");
+}
+
+test "formatter navigation headers preserve form and visibility" {
+    try expectFormat(
+        "1 'public-value set 2 'private-value setp (3) 'public-word def (4) 'private-word defp\n",
+        "### set public-value\n" ++
+            "1 'public-value set\n\n" ++
+            "### setp private-value\n" ++
+            "2 'private-value setp\n\n" ++
+            "### def public-word\n" ++
+            "(3) 'public-word def\n\n" ++
+            "### defp private-word\n" ++
+            "(4) 'private-word defp\n",
+    );
+    try expectFormat(
+        "### def stale\n1 'public-value set\n" ++
+            "### defp stale\n2 'private-value setp\n",
+        "### set public-value\n" ++
+            "1 'public-value set\n\n" ++
+            "### setp private-value\n" ++
+            "2 'private-value setp\n",
+    );
 }

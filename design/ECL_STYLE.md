@@ -69,8 +69,8 @@ The following rules are enforced for checked-in first-party source:
 - A standard module's terminal form is `@defm`.
 - Every prelude definition begins with the exact `### def <name>` navigation
   header, and the name matches its terminal quoted definition name. Standard
-  modules use `### def <name>` for `def`/`set` and `### defp <name>` for
-  `defp`/`setp`.
+  modules use the defining form verbatim: `### def <name>`, `### defp <name>`,
+  `### set <name>`, or `### setp <name>`.
 - Every `def`/`defp` definition has a meaningful nonempty annotation
   docstring. State a fixed successful stack effect when one can be expressed.
   `set`/`setp` accept the same annotation-before-value position; an

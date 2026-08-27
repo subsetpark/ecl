@@ -652,12 +652,12 @@ accumulators from reducing its remainder. Defined in ecl over `scan`.
 
 ### see
 `( 'name -- )` — Print a re-readable definition through the standard source
-formatter, including its width-aware layout and matching `### def` or
-`### defp` navigation header when the reflected form is an ordinary source
-definition. The definition has one combined annotation, omitting each portion
-that was not supplied. What
-prints is what is stored: a name bound by `set` prints its capture body ending
-in `'name def`, with no annotation, not the `set` spelling that produced it.
+formatter, including its width-aware layout and matching `### def`,
+`### defp`, `### set`, or `### setp` navigation header when the reflected form
+is an ordinary source definition. The definition has one combined annotation,
+omitting each portion that was not supplied. A name bound by `set` or `setp`
+prints its retained captured value and defining form rather than exposing the
+literal-capture body used for execution.
 Reader-built bodies retain a shared slice of their source unit, so head binders
 print with their authored local names even though execution uses the lowered
 `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source
@@ -674,16 +674,15 @@ constructs no unit. See [Seeding a unit](SPEC.md#seeding-a-unit).
 ### set
 `( annotation? value 'name -- )` — Bind a value as a constant word in the current
 environment. Reference applies the constant's body and pushes the exact
-captured value, quotations included. Defined in ecl as
-`swap literal swap def`, so `v 'name set` is observationally
-`v literal 'name def`: the stored body is `((v) first)`. An optional
+captured value, quotations included. Its stored body is the same `((v) first)`
+literal capture produced by `literal`, while reflection retains and displays
+the `set` form. An optional
 annotation beneath `v` is published as the constant's metadata; marker words
-inside `v` are nested by `literal` and remain captured data.
+inside `v` remain captured data.
 
 ### setp
-`( annotation? value 'name -- )` — Bind a private module constant. Defined in ecl as
-`swap literal swap defp`. A top-level `setp` is an error, raised by the
-`defp` it calls.
+`( annotation? value 'name -- )` — Bind a private module constant. A top-level
+`setp` is an error.
 
 ### shape
 `( list -- shape )` — The dimensions of rectangular data; `'shape` error

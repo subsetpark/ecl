@@ -792,25 +792,23 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: 3 'x set 'x which
         \\exit: 0
         \\stdout:
-        \\x -> x def public
+        \\x -> x set public
         \\stderr:
         \\<empty>
         \\=== see ===
         \\source: 3 'x set 'x see
         \\exit: 0
         \\stdout:
-        \\### def x
-        \\([3] first) 'x def
+        \\### set x
+        \\3 'x set
         \\stderr:
         \\<empty>
         \\=== see set ===
         \\source: 'set see
         \\exit: 0
         \\stdout:
-        \\### def set
-        \\(: "Bind a value as a constant word in the current scope; an optional annotation may precede the
-        \\    value.")
-        \\(swap literal swap def)
+        \\(: "Bind a value to a public constant word, with optional effect and documentation metadata.")
+        \\<primitive>
         \\'set
         \\def
         \\stderr:
@@ -821,7 +819,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 338 'col 20}}
+        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'setp 'trace ['setp] 'data {'source "<command>" 'line 1 'col 6}}
         \\=== qualify execute ===
         \\source: ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute
         \\exit: 0
@@ -926,7 +924,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 344 'col 14}}
+        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 333 'col 14}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0
@@ -940,7 +938,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'str.index-of] 'data {'source "prelude.ecl" 'line 344 'col 14}}
+        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'str.index-of] 'data {'source "prelude.ecl" 'line 333 'col 14}}
         \\=== csv parse ===
         \\source: "a,,c
         \\d" csv.parse
@@ -1011,7 +1009,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 344 'col 14}}
+        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 333 'col 14}}
         \\=== getenv unset ===
         \\source: "ECL_SNAPSHOT_ABSENT" getenv
         \\exit: 1

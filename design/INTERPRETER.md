@@ -643,10 +643,14 @@ primitives, operationalized as two rules:
   `which`, and `see` resolve through ordinary leased bindings; `see` combines
   effect and documentation back into one quotation, materializes that source
   through the poll-aware reflection plan, and sends it through the same
-  canonical layout as `ecl fmt`. Every parsed unit owns one ref-counted source
-  buffer; provenance records the byte range and opening-delimiter span of each
-  reader-built quotation, and a published binding retains only that slice
-  handle. `see` can therefore
+  canonical layout as `ecl fmt`. Word publication also carries a tagged
+  `DefinitionForm`: `def` stores no extra payload, while `set` owns the captured
+  value alongside its ordinary literal-capture execution body. `which` and
+  `see` therefore preserve the `def`/`set` axis independently of public/private
+  visibility without guessing from body shape. Every parsed unit owns one
+  ref-counted source buffer; provenance records the byte range and
+  opening-delimiter span of each reader-built quotation, and a published
+  binding retains only that slice handle. `see` can therefore
   render authored binder names while dispatch continues to use the lowered
   executable quotation, with no duplicated source body per binding.
   `doc.zig` normalizes documentation with an
@@ -2032,7 +2036,8 @@ boundaries remain hard. Only binders and structurally recognized
 definition annotations receive syntax-specific layout; doc paragraphs use
 fill rather than one all-or-nothing group. Structurally literal
 `def`/`defp`/`set`/`setp` blocks receive matching canonical
-`### def <name>` / `### defp <name>` section comments, separated from
+`### def <name>` / `### defp <name>` / `### set <name>` / `### setp <name>`
+section comments, separated from
 preceding material by one empty line.
 
 ## Verification

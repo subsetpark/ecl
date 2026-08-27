@@ -808,12 +808,11 @@ test "reflection: which and see expose home shadow and effect" {
     try expectOk(&runtime, "(40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm.f 'f import " ++
         "'m.f see 9 'f set 'f which 'f see words");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- n) (s 2 +) 'm.f def") != null);
-    // One binding kind: a session constant reports as a public def with no
-    // metadata, because the sugar supplies none, and `see` prints the stored
-    // literal capture rather than reconstructing the `set` spelling.
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f def public") != null);
+    // One executable binding kind, with the defining form retained for
+    // reflection independently of its absent metadata.
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f set public") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "shadows m.f") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "([9] first) 'f def") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "9 'f set") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " f ") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " s ") == null);
 }
@@ -977,8 +976,8 @@ test "modules: module set and setp publish unannotated constants" {
     var runtime = try session.Session.initWithOutput(backing.allocator(), &.{}, &output.writer);
     defer runtime.deinit();
     // Registration succeeding is itself the proof that a module definition
-    // may carry no effect at all: `set` publishes the bare literal capture,
-    // so constants need no value exception and no synthesized metadata.
+    // may carry no effect at all: `set` publishes a literal-capture body, so
+    // constants need no value exception and no synthesized metadata.
     try expectOk(&runtime, "(7 'x set 8 'h setp (-- n) (h) 'peek def) 'm @defm");
     try expectOk(&runtime, "m.x m.peek");
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
@@ -987,9 +986,9 @@ test "modules: module set and setp publish unannotated constants" {
     // reflection exactly as a hand-written one would be.
     try expectErrorContains(&runtime, "m.h", &.{ "'kind 'undefined-word", "'word 'm.h" });
     try expectOk(&runtime, "'m.x which 'm.x see");
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "m.x -> m.x def public") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "m.x -> m.x set public") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- value)") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "([7] first) 'm.x def") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "7 'm.x set") != null);
 }
 
 test "modules: cross-home constant references cross unchecked while declared effects still bind" {

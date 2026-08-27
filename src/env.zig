@@ -73,6 +73,27 @@ pub const Binding = union(enum) {
     }
 };
 pub const Visibility = enum { public, private };
+/// The source-level form that introduced an executable word body. `set`
+/// stores the captured value alongside the ordinary literal-capture body so
+/// reflection never has to guess from implementation shape.
+pub const DefinitionForm = union(enum) {
+    def,
+    set: value.Value,
+
+    fn retain(self: DefinitionForm) void {
+        switch (self) {
+            .def => {},
+            .set => |item| heap.retainValue(item),
+        }
+    }
+
+    fn retire(self: DefinitionForm, releases: *heap.ReleaseDomain) void {
+        switch (self) {
+            .def => {},
+            .set => |item| releases.releaseValue(item),
+        }
+    }
+};
 /// Where a definition was published. A module definition records only its own
 /// module-local name: the image it belongs to has no canonical name, and the
 /// registration through which a call reached it is what supplies the qualified
@@ -160,6 +181,7 @@ pub const Effect = ValidatedEffect;
 pub const TopPublication = union(enum) {
     word: struct {
         body: *Quotation,
+        form: DefinitionForm = .def,
         source: ?reader_types.SourceSlice = null,
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
@@ -185,6 +207,7 @@ pub const BuiltinWord = struct {
 pub const ModulePublication = union(enum) {
     word: struct {
         body: *Quotation,
+        form: DefinitionForm = .def,
         source: ?reader_types.SourceSlice = null,
         visibility: Visibility,
         effect: ?ValidatedEffect = null,
@@ -209,6 +232,7 @@ pub const ModulePublication = union(enum) {
 
 const BindingSpec = struct {
     binding: Binding,
+    form: DefinitionForm = .def,
     visibility: Visibility = .public,
     origin: BindingOrigin = .top,
     effect: ?ValidatedEffect = null,
@@ -219,6 +243,7 @@ const BindingSpec = struct {
         return switch (publication) {
             .word => |word| .{
                 .binding = .{ .word = word.body },
+                .form = word.form,
                 .source = word.source,
                 .effect = word.effect,
                 .doc = word.doc,
@@ -233,6 +258,7 @@ const BindingSpec = struct {
         return switch (publication) {
             .word => |word| .{
                 .binding = .{ .word = word.body },
+                .form = word.form,
                 .source = word.source,
                 .visibility = word.visibility,
                 .origin = origin,
@@ -257,6 +283,7 @@ const BindingSpec = struct {
     }
     fn retain(self: BindingSpec) void {
         self.binding.retain();
+        self.form.retain();
         if (self.effect) |effect| effect.retain();
         if (self.doc) |doc| heap.incRef(documentationHeader(doc));
         if (self.compiled) |compiled| heap.incRef(quotationHeader(compiled));
@@ -264,6 +291,7 @@ const BindingSpec = struct {
     }
     fn retire(self: BindingSpec, releases: *heap.ReleaseDomain) void {
         self.binding.retire(releases);
+        self.form.retire(releases);
         if (self.effect) |effect| effect.retire(releases);
         if (self.doc) |doc| releases.releaseHeader(documentationHeader(doc));
         if (self.compiled) |compiled| releases.releaseHeader(quotationHeader(compiled));
@@ -341,6 +369,7 @@ const BindingSnapshot = struct {
 pub const BindingLease = struct {
     releases: *heap.ReleaseDomain,
     binding: Binding,
+    form: DefinitionForm,
     visibility: Visibility,
     origin: BindingOrigin,
     effect: ?ValidatedEffect,
@@ -352,6 +381,7 @@ pub const BindingLease = struct {
         return .{
             .releases = releases,
             .binding = spec.binding,
+            .form = spec.form,
             .visibility = spec.visibility,
             .origin = spec.origin,
             .effect = spec.effect,
@@ -364,6 +394,7 @@ pub const BindingLease = struct {
     pub fn deinit(self: *BindingLease) void {
         const spec = BindingSpec{
             .binding = self.binding,
+            .form = self.form,
             .visibility = self.visibility,
             .origin = self.origin,
             .effect = self.effect,
@@ -1412,6 +1443,7 @@ pub const Scope = struct {
     /// One word definition, in the shape both publication kinds accept.
     pub const WordDefinition = struct {
         body: *Quotation,
+        form: DefinitionForm = .def,
         source: ?reader_types.SourceSlice = null,
         visibility: Visibility = .public,
         effect: ?ValidatedEffect = null,
@@ -1475,6 +1507,7 @@ pub const Scope = struct {
         return switch (self.publisher()) {
             .module => |module| module.cursor(name, .{ .word = .{
                 .body = definition.body,
+                .form = definition.form,
                 .source = definition.source,
                 .visibility = definition.visibility,
                 .effect = definition.effect,
@@ -1482,6 +1515,7 @@ pub const Scope = struct {
             } }),
             .top => |top| top.cursor(name, .{ .word = .{
                 .body = definition.body,
+                .form = definition.form,
                 .source = definition.source,
                 .effect = definition.effect,
                 .doc = definition.doc,

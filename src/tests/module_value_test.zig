@@ -464,13 +464,13 @@ test "module loader: observation and dispatch require the requested registration
     // `which`, `see`, and `doc` all consume a name, and a name is exactly what
     // a registration is. Invocation also accepts a module value — see
     // `module values: invoke calls a public export of a nameless image` — and
-    // that path has no name for these words to take. `see` renders the stored
-    // body, which is how one binding kind stays observable without any
-    // operation that lifts a body out of its home.
+    // that path has no name for these words to take. `see` renders the
+    // retained defining form without lifting the executable body out of its
+    // home.
     output.clearRetainingCapacity();
     try expectOk(&runtime, "'register-style.answer see");
     try std.testing.expectEqualStrings(
-        "### def register-style.answer\n([7] first) 'register-style.answer def\n",
+        "### set register-style.answer\n7 'register-style.answer set\n",
         output.written(),
     );
 }

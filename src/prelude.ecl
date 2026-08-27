@@ -327,17 +327,6 @@
 ((await) each)
 'await-all def
 
-### def set
-(: "Bind a value as a constant word in the current scope; an optional annotation may precede the
-    value.")
-(swap literal swap def)
-'set def
-
-### def setp
-(: "Bind a private module value as a constant word; an optional annotation may precede the value.")
-(swap literal swap defp)
-'setp def
-
 ### def assert
 (bool error -- :
  "Raise an error dict unless the condition is the boolean 1, discarding the dict when it holds.")
