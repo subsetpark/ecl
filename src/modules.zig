@@ -2830,161 +2830,278 @@ pub const Registry = enum(usize) {
         registry: *Registry,
         short: intern.BindingName,
         target: intern.ModuleName,
-        directory: ?DirectoryLease = null,
-        old: ?*const Directory = null,
-        lookup: ?Directory.ModuleMap.RawLookupCursor = null,
-        alias_lookup: ?Directory.AliasMap.RawLookupCursor = null,
-        canonical_target: ?intern.ModuleName = null,
-        existing_short: ?intern.ModuleName = null,
-        modules_cloner: ?Directory.ModuleMap.CloneCursor = null,
-        modules_map: ?Directory.ModuleMap = null,
-        aliases_cloner: ?Directory.AliasMap.CloneCursor = null,
-        aliases_map: ?Directory.AliasMap = null,
-        insertion: ?Directory.AliasMap.PutCursor = null,
-        phase: enum { snapshot, short_module, target_module, target_alias, short_alias, modules_map, aliases_map, insert, commit, complete } = .snapshot,
+        state: State = .snapshot,
+
+        const State = union(enum) {
+            snapshot,
+            short_module: struct {
+                directory: DirectoryLease,
+                lookup: Directory.ModuleMap.RawLookupCursor,
+            },
+            target_module: struct {
+                directory: DirectoryLease,
+                lookup: Directory.ModuleMap.RawLookupCursor,
+            },
+            target_alias: struct {
+                directory: DirectoryLease,
+                lookup: Directory.AliasMap.RawLookupCursor,
+            },
+            short_alias: struct {
+                directory: DirectoryLease,
+                canonical_target: intern.ModuleName,
+                lookup: Directory.AliasMap.RawLookupCursor,
+            },
+            modules_map: struct {
+                directory: DirectoryLease,
+                canonical_target: intern.ModuleName,
+                alias_capacity: usize,
+                cloner: Directory.ModuleMap.CloneCursor,
+            },
+            aliases_map: struct {
+                directory: DirectoryLease,
+                canonical_target: intern.ModuleName,
+                modules: Directory.ModuleMap,
+                cloner: Directory.AliasMap.CloneCursor,
+            },
+            candidate: struct {
+                directory: DirectoryLease,
+                canonical_target: intern.ModuleName,
+                modules: Directory.ModuleMap,
+                aliases: Directory.AliasMap,
+            },
+            insert: struct {
+                directory: DirectoryLease,
+                candidate: *Directory,
+                insertion: Directory.AliasMap.PutCursor,
+            },
+            commit: struct {
+                directory: DirectoryLease,
+                candidate: *Directory,
+            },
+            failed: DirectoryLease,
+            complete,
+        };
 
         pub fn init(registry: *Registry, short: intern.BindingName, target: intern.ModuleName) AliasCursor {
             return .{ .registry = registry, .short = short, .target = target };
         }
         pub fn deinit(self: *AliasCursor) void {
-            if (self.directory) |*directory| directory.deinit();
-            self.resetMaps();
+            switch (self.state) {
+                .snapshot, .complete => {},
+                .short_module => |*state| state.directory.deinit(),
+                .target_module => |*state| state.directory.deinit(),
+                .target_alias => |*state| state.directory.deinit(),
+                .short_alias => |*state| state.directory.deinit(),
+                .modules_map => |*state| {
+                    state.cloner.deinit();
+                    state.directory.deinit();
+                },
+                .aliases_map => |*state| {
+                    state.cloner.deinit();
+                    state.modules.deinit();
+                    state.directory.deinit();
+                },
+                .candidate => |*state| {
+                    state.modules.deinit();
+                    state.aliases.deinit();
+                    state.directory.deinit();
+                },
+                .insert => |*state| {
+                    self.destroyCandidate(state.candidate);
+                    state.directory.deinit();
+                },
+                .commit => |*state| {
+                    self.destroyCandidate(state.candidate);
+                    state.directory.deinit();
+                },
+                .failed => |*directory| directory.deinit(),
+            }
             self.* = undefined;
         }
-        fn resetMaps(self: *AliasCursor) void {
-            if (self.modules_cloner) |*cursor| cursor.deinit();
-            self.modules_cloner = null;
-            if (self.modules_map) |*map| map.deinit();
-            self.modules_map = null;
-            if (self.aliases_cloner) |*cursor| cursor.deinit();
-            self.aliases_cloner = null;
-            if (self.aliases_map) |*map| map.deinit();
-            self.aliases_map = null;
-            self.insertion = null;
-        }
-        fn retry(self: *AliasCursor) void {
-            self.resetMaps();
-            self.directory.?.deinit();
-            self.directory = null;
-            self.old = null;
-            self.lookup = null;
-            self.alias_lookup = null;
-            self.existing_short = null;
-            self.phase = .snapshot;
+        fn destroyCandidate(self: *AliasCursor, candidate: *Directory) void {
+            candidate.modules.deinit();
+            candidate.aliases.deinit();
+            self.registry.allocator().destroy(candidate);
         }
         pub fn advance(self: *AliasCursor) AliasError!AliasProgress {
-            return switch (self.phase) {
+            return switch (self.state) {
                 .snapshot => result: {
-                    self.directory = self.registry.acquireDirectory();
-                    self.old = self.directory.?.directory orelse return error.MissingModule;
-                    self.lookup = self.old.?.modules.rawLookup(intern.moduleNameFromBinding(self.short));
-                    self.phase = .short_module;
+                    const directory = self.registry.acquireDirectory();
+                    const old = directory.directory orelse {
+                        self.state = .{ .failed = directory };
+                        return error.MissingModule;
+                    };
+                    self.state = .{ .short_module = .{
+                        .directory = directory,
+                        .lookup = old.modules.rawLookup(intern.moduleNameFromBinding(self.short)),
+                    } };
                     break :result .pending;
                 },
-                .short_module => switch (self.lookup.?.advance()) {
-                    .pending => .pending,
-                    .complete => |slot| result: {
-                        if (slot != null) return error.NameConflict;
-                        self.lookup = self.old.?.modules.rawLookup(self.target);
-                        self.phase = .target_module;
-                        break :result .pending;
-                    },
-                },
-                .target_module => switch (self.lookup.?.advance()) {
+                .short_module => |*short_module| switch (short_module.lookup.advance()) {
                     .pending => .pending,
                     .complete => |slot| result: {
                         if (slot != null) {
-                            self.canonical_target = self.target;
-                            self.alias_lookup = self.old.?.aliases.rawLookup(self.short);
-                            self.phase = .short_alias;
+                            const directory = short_module.directory;
+                            self.state = .{ .failed = directory };
+                            return error.NameConflict;
+                        }
+                        const directory = short_module.directory;
+                        self.state = .{ .target_module = .{
+                            .directory = directory,
+                            .lookup = directory.directory.?.modules.rawLookup(self.target),
+                        } };
+                        break :result .pending;
+                    },
+                },
+                .target_module => |*target_module| switch (target_module.lookup.advance()) {
+                    .pending => .pending,
+                    .complete => |slot| result: {
+                        if (slot != null) {
+                            const directory = target_module.directory;
+                            self.state = .{ .short_alias = .{
+                                .directory = directory,
+                                .canonical_target = self.target,
+                                .lookup = directory.directory.?.aliases.rawLookup(self.short),
+                            } };
                         } else {
                             if (intern.moduleBindingName(self.target)) |alias_name| {
-                                self.alias_lookup = self.old.?.aliases.rawLookup(alias_name);
-                                self.phase = .target_alias;
-                            } else return error.MissingModule;
+                                const directory = target_module.directory;
+                                self.state = .{ .target_alias = .{
+                                    .directory = directory,
+                                    .lookup = directory.directory.?.aliases.rawLookup(alias_name),
+                                } };
+                            } else {
+                                const directory = target_module.directory;
+                                self.state = .{ .failed = directory };
+                                return error.MissingModule;
+                            }
                         }
                         break :result .pending;
                     },
                 },
-                .target_alias => switch (self.alias_lookup.?.advance()) {
+                .target_alias => |*target_alias| switch (target_alias.lookup.advance()) {
                     .pending => .pending,
                     .complete => |canonical_name| result: {
-                        self.canonical_target = canonical_name orelse return error.MissingModule;
-                        self.alias_lookup = self.old.?.aliases.rawLookup(self.short);
-                        self.phase = .short_alias;
+                        const canonical_target = canonical_name orelse {
+                            const directory = target_alias.directory;
+                            self.state = .{ .failed = directory };
+                            return error.MissingModule;
+                        };
+                        const directory = target_alias.directory;
+                        self.state = .{ .short_alias = .{
+                            .directory = directory,
+                            .canonical_target = canonical_target,
+                            .lookup = directory.directory.?.aliases.rawLookup(self.short),
+                        } };
                         break :result .pending;
                     },
                 },
-                .short_alias => switch (self.alias_lookup.?.advance()) {
+                .short_alias => |*short_alias| switch (short_alias.lookup.advance()) {
                     .pending => .pending,
                     .complete => |existing| result: {
-                        self.existing_short = existing;
-                        if (existing != null and existing == self.canonical_target) {
-                            self.phase = .complete;
+                        if (existing != null and existing == short_alias.canonical_target) {
+                            short_alias.directory.deinit();
+                            self.state = .complete;
                             break :result .complete;
                         }
-                        self.modules_cloner = self.old.?.modules.cloneCursor(0);
-                        self.phase = .modules_map;
+                        const directory = short_alias.directory;
+                        const canonical_target = short_alias.canonical_target;
+                        const alias_capacity: usize = @intFromBool(existing == null);
+                        const cloner = directory.directory.?.modules.cloneCursor(0);
+                        self.state = .{ .modules_map = .{
+                            .directory = directory,
+                            .canonical_target = canonical_target,
+                            .alias_capacity = alias_capacity,
+                            .cloner = cloner,
+                        } };
                         break :result .pending;
                     },
                 },
-                .modules_map => switch (try self.modules_cloner.?.advance()) {
+                .modules_map => |*modules_state| switch (try modules_state.cloner.advance()) {
                     .pending => .pending,
                     .complete => |map| result: {
-                        self.modules_cloner.?.deinit();
-                        self.modules_cloner = null;
-                        self.modules_map = map;
-                        self.aliases_cloner = self.old.?.aliases.cloneCursor(
-                            @intFromBool(self.existing_short == null),
-                        );
-                        self.phase = .aliases_map;
+                        const directory = modules_state.directory;
+                        const canonical_target = modules_state.canonical_target;
+                        const alias_capacity = modules_state.alias_capacity;
+                        modules_state.cloner.deinit();
+                        const cloner = directory.directory.?.aliases.cloneCursor(alias_capacity);
+                        self.state = .{ .aliases_map = .{
+                            .directory = directory,
+                            .canonical_target = canonical_target,
+                            .modules = map,
+                            .cloner = cloner,
+                        } };
                         break :result .pending;
                     },
                 },
-                .aliases_map => switch (try self.aliases_cloner.?.advance()) {
+                .aliases_map => |*aliases_state| switch (try aliases_state.cloner.advance()) {
                     .pending => .pending,
                     .complete => |map| result: {
-                        self.aliases_cloner.?.deinit();
-                        self.aliases_cloner = null;
-                        self.aliases_map = map;
-                        self.insertion = self.aliases_map.?.putCursor(
-                            self.short,
-                            self.canonical_target.?,
-                        );
-                        self.phase = .insert;
+                        const directory = aliases_state.directory;
+                        const canonical_target = aliases_state.canonical_target;
+                        const modules = aliases_state.modules;
+                        aliases_state.cloner.deinit();
+                        self.state = .{ .candidate = .{
+                            .directory = directory,
+                            .canonical_target = canonical_target,
+                            .modules = modules,
+                            .aliases = map,
+                        } };
                         break :result .pending;
                     },
                 },
-                .insert => switch (self.insertion.?.advance()) {
+                .candidate => |*candidate_state| result: {
+                    const candidate = try self.registry.allocator().create(Directory);
+                    const directory = candidate_state.directory;
+                    const canonical_target = candidate_state.canonical_target;
+                    const modules = candidate_state.modules;
+                    const aliases = candidate_state.aliases;
+                    candidate.* = .{
+                        .modules = modules,
+                        .aliases = aliases,
+                        .previous = @constCast(directory.directory),
+                    };
+                    const insertion = candidate.aliases.putCursor(
+                        self.short,
+                        canonical_target,
+                    );
+                    self.state = .{ .insert = .{
+                        .directory = directory,
+                        .candidate = candidate,
+                        .insertion = insertion,
+                    } };
+                    break :result .pending;
+                },
+                .insert => |*insert| switch (insert.insertion.advance()) {
                     .pending => .pending,
                     .complete => result: {
-                        self.insertion = null;
-                        self.phase = .commit;
+                        const directory = insert.directory;
+                        const candidate = insert.candidate;
+                        self.state = .{ .commit = .{
+                            .directory = directory,
+                            .candidate = candidate,
+                        } };
                         break :result .pending;
                     },
                 },
-                .commit => result: {
-                    const next = try self.registry.allocator().create(Directory);
+                .commit => |*commit| result: {
                     self.registry.lockBlocking();
-                    if (!self.registry.privateState().directories.isCurrent(self.old)) {
+                    if (!self.registry.privateState().directories.isCurrent(commit.directory.directory)) {
                         self.registry.unlock();
-                        self.registry.allocator().destroy(next);
-                        self.retry();
+                        const candidate = commit.candidate;
+                        var directory = commit.directory;
+                        self.state = .snapshot;
+                        self.destroyCandidate(candidate);
+                        directory.deinit();
                         break :result .pending;
                     }
-                    next.* = .{
-                        .modules = self.modules_map.?,
-                        .aliases = self.aliases_map.?,
-                        .previous = @constCast(self.old),
-                    };
-                    self.modules_map = null;
-                    self.aliases_map = null;
-                    self.registry.privateState().directories.publish(next);
+                    self.registry.privateState().directories.publish(commit.candidate);
                     self.registry.unlock();
-                    self.phase = .complete;
+                    commit.directory.deinit();
+                    self.state = .complete;
                     break :result .complete;
                 },
-                .complete => unreachable,
+                .failed, .complete => unreachable,
             };
         }
     };
