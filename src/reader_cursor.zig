@@ -1705,17 +1705,131 @@ pub const ReadCursor = struct {
     word_scope: u32,
     tokens: TokenList,
     spans: reader.SpanTable,
-    tokenizer: Tokenizer,
-    parser: ?ParserCursor = null,
-    phase: enum { tokenize, parse, allocate, copy, source_name, source, finish, complete } = .tokenize,
-    forms: ?heap.OwnedValueBuffer = null,
-    top_spans: ?[]Span = null,
-    owned_source_name: ?[]u8 = null,
-    owned_source: ?[]u8 = null,
-    form_iterator: ?FormList.Iterator = null,
-    copy_index: usize = 0,
-    span_retirement: ?reader.SpanTable.RetireCursor = null,
-    retirement_phase: enum { parser, tokens, spans, owned, complete } = .parser,
+    state: State,
+
+    const Partial = union(enum) {
+        none,
+        forms: heap.OwnedValueBuffer,
+        spans: struct { forms: heap.OwnedValueBuffer, top: []Span },
+        name: struct { forms: heap.OwnedValueBuffer, top: []Span, name: []u8 },
+        source: struct {
+            forms: heap.OwnedValueBuffer,
+            top: []Span,
+            name: []u8,
+            source: []u8,
+        },
+
+        fn retire(self: *Partial, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .none => {},
+                .forms => |*forms| forms.deinit(),
+                .spans => |*partial| {
+                    allocator.free(partial.top);
+                    partial.forms.deinit();
+                },
+                .name => |*partial| {
+                    allocator.free(partial.name);
+                    allocator.free(partial.top);
+                    partial.forms.deinit();
+                },
+                .source => |*partial| {
+                    allocator.free(partial.source);
+                    allocator.free(partial.name);
+                    allocator.free(partial.top);
+                    partial.forms.deinit();
+                },
+            }
+        }
+    };
+    const ParserOwner = struct {
+        allocator: std.mem.Allocator,
+        cursor: *ParserCursor,
+
+        fn init(
+            allocator: std.mem.Allocator,
+            releases: *heap.ReleaseDomain,
+            tokens: *const TokenList,
+            spans: *reader.SpanTable,
+            diag: *reader.Diag,
+            provenance_namespace: heap.CodeProvenanceNamespace,
+            word_scope: u32,
+        ) error{OutOfMemory}!ParserOwner {
+            const cursor = try allocator.create(ParserCursor);
+            errdefer allocator.destroy(cursor);
+            cursor.* = try ParserCursor.init(
+                allocator,
+                releases,
+                tokens,
+                spans,
+                diag,
+                provenance_namespace,
+                word_scope,
+            );
+            return .{ .allocator = allocator, .cursor = cursor };
+        }
+        fn deinit(self: *ParserOwner) void {
+            self.cursor.deinit();
+            self.allocator.destroy(self.cursor);
+        }
+        fn retireCompleted(self: *ParserOwner) void {
+            self.cursor.retireCompleted();
+            self.allocator.destroy(self.cursor);
+        }
+        fn advanceRetirement(self: *ParserOwner) bool {
+            if (!self.cursor.advanceRetirement()) return false;
+            self.allocator.destroy(self.cursor);
+            return true;
+        }
+    };
+    const CompleteBuild = struct {
+        parser: ParserOwner,
+        forms: heap.OwnedValueBuffer,
+        top: []Span,
+        name: []u8,
+        source: []u8,
+    };
+    const State = union(enum) {
+        tokenize: Tokenizer,
+        parse: ParserOwner,
+        allocate_forms: ParserOwner,
+        allocate_spans: struct { parser: ParserOwner, forms: heap.OwnedValueBuffer },
+        allocate_name: struct {
+            parser: ParserOwner,
+            forms: heap.OwnedValueBuffer,
+            top: []Span,
+        },
+        allocate_source: struct {
+            parser: ParserOwner,
+            forms: heap.OwnedValueBuffer,
+            top: []Span,
+            name: []u8,
+        },
+        copy_forms: struct {
+            build: CompleteBuild,
+            iterator: FormList.Iterator,
+            index: usize = 0,
+        },
+        copy_name: struct { build: CompleteBuild, index: usize = 0 },
+        copy_source: struct { build: CompleteBuild, index: usize = 0 },
+        finish: CompleteBuild,
+        source_consumed: struct {
+            parser: ParserOwner,
+            forms: heap.OwnedValueBuffer,
+            top: []Span,
+            name: []u8,
+        },
+        incomplete_tokens,
+        incomplete_parser: ParserOwner,
+        completed,
+        retire_parser: struct { parser: ParserOwner, partial: Partial },
+        retire_tokens: Partial,
+        retire_spans: struct {
+            partial: Partial,
+            cursor: reader.SpanTable.RetireCursor,
+        },
+        retire_owned: Partial,
+        retired,
+    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1746,76 +1860,158 @@ pub const ReadCursor = struct {
             .diag = diag,
             .provenance_namespace = provenance_namespace,
             .word_scope = word_scope,
-            .tokenizer = .init(source, null),
             .tokens = tokens,
             .spans = .init(allocator),
+            .state = .{ .tokenize = .init(source, null) },
         };
     }
     fn deinitHost(self: *ReadCursor) void {
-        if (self.parser) |*parser| parser.deinit();
-        self.tokens.retire(self.releases);
-        var spans_cursor = reader.SpanTable.RetireCursor.init(&self.spans);
-        while (spans_cursor.advance(self.releases) == .pending) {}
-        if (self.forms) |*forms| forms.deinit();
-        if (self.top_spans) |spans| self.allocator.free(spans);
-        if (self.owned_source_name) |name| self.allocator.free(name);
-        if (self.owned_source) |source| self.allocator.free(source);
+        while (!self.advanceRetirement()) {}
+    }
+    fn beginRetirement(self: *ReadCursor) void {
+        switch (self.state) {
+            .tokenize, .incomplete_tokens, .completed => {
+                self.state = .{ .retire_tokens = .none };
+            },
+            .parse, .allocate_forms, .incomplete_parser => |*parser| {
+                const moved = parser.*;
+                self.state = .{ .retire_parser = .{
+                    .parser = moved,
+                    .partial = .none,
+                } };
+            },
+            .allocate_spans => |*allocation| {
+                const parser = allocation.parser;
+                const forms = allocation.forms.take();
+                self.state = .{ .retire_parser = .{
+                    .parser = parser,
+                    .partial = .{ .forms = forms },
+                } };
+            },
+            .allocate_name => |*allocation| {
+                const parser = allocation.parser;
+                const forms = allocation.forms.take();
+                const top = allocation.top;
+                self.state = .{ .retire_parser = .{
+                    .parser = parser,
+                    .partial = .{ .spans = .{ .forms = forms, .top = top } },
+                } };
+            },
+            .allocate_source => |*allocation| {
+                const parser = allocation.parser;
+                const forms = allocation.forms.take();
+                const top = allocation.top;
+                const name = allocation.name;
+                self.state = .{ .retire_parser = .{
+                    .parser = parser,
+                    .partial = .{ .name = .{
+                        .forms = forms,
+                        .top = top,
+                        .name = name,
+                    } },
+                } };
+            },
+            .copy_forms => |*copy| self.beginCompleteBuildRetirement(&copy.build),
+            .copy_name => |*copy| self.beginCompleteBuildRetirement(&copy.build),
+            .copy_source => |*copy| self.beginCompleteBuildRetirement(&copy.build),
+            .finish => |*build| self.beginCompleteBuildRetirement(build),
+            .source_consumed => |*consumed| {
+                const parser = consumed.parser;
+                const forms = consumed.forms.take();
+                const top = consumed.top;
+                const name = consumed.name;
+                self.state = .{ .retire_parser = .{
+                    .parser = parser,
+                    .partial = .{ .name = .{
+                        .forms = forms,
+                        .top = top,
+                        .name = name,
+                    } },
+                } };
+            },
+            .retire_parser, .retire_tokens, .retire_spans, .retire_owned, .retired => unreachable,
+        }
+    }
+    fn beginCompleteBuildRetirement(self: *ReadCursor, build: *CompleteBuild) void {
+        const parser = build.parser;
+        const forms = build.forms.take();
+        const top = build.top;
+        const name = build.name;
+        const source = build.source;
+        self.state = .{ .retire_parser = .{
+            .parser = parser,
+            .partial = .{ .source = .{
+                .forms = forms,
+                .top = top,
+                .name = name,
+                .source = source,
+            } },
+        } };
     }
     pub fn advanceRetirement(self: *ReadCursor) bool {
-        return switch (self.retirement_phase) {
-            .parser => if (self.parser) |*parser| result: {
-                if (!parser.advanceRetirement()) break :result false;
-                self.parser = null;
-                self.retirement_phase = .tokens;
-                break :result false;
-            } else result: {
-                self.retirement_phase = .tokens;
+        return switch (self.state) {
+            .tokenize,
+            .parse,
+            .allocate_forms,
+            .allocate_spans,
+            .allocate_name,
+            .allocate_source,
+            .copy_forms,
+            .copy_name,
+            .copy_source,
+            .finish,
+            .source_consumed,
+            .incomplete_tokens,
+            .incomplete_parser,
+            .completed,
+            => result: {
+                self.beginRetirement();
                 break :result false;
             },
-            .tokens => result: {
+            .retire_parser => |*retirement| result: {
+                if (!retirement.parser.advanceRetirement()) break :result false;
+                const partial = retirement.partial;
+                self.state = .{ .retire_tokens = partial };
+                break :result false;
+            },
+            .retire_tokens => |*partial| result: {
                 self.tokens.retire(self.releases);
-                self.retirement_phase = .spans;
+                const moved = partial.*;
+                self.state = .{ .retire_spans = .{
+                    .partial = moved,
+                    .cursor = .init(&self.spans),
+                } };
                 break :result false;
             },
-            .spans => result: {
-                if (self.span_retirement == null)
-                    self.span_retirement = .init(&self.spans);
-                switch (self.span_retirement.?.advance(self.releases)) {
-                    .pending => break :result false,
-                    .complete => {
-                        self.span_retirement = null;
-                        self.retirement_phase = .owned;
-                        break :result false;
-                    },
-                }
+            .retire_spans => |*retirement| switch (retirement.cursor.advance(self.releases)) {
+                .pending => false,
+                .complete => result: {
+                    const partial = retirement.partial;
+                    self.state = .{ .retire_owned = partial };
+                    break :result false;
+                },
             },
-            .owned => result: {
-                if (self.forms) |*forms| forms.deinit();
-                self.forms = null;
-                if (self.top_spans) |spans| self.allocator.free(spans);
-                self.top_spans = null;
-                if (self.owned_source_name) |name| self.allocator.free(name);
-                self.owned_source_name = null;
-                if (self.owned_source) |source| self.allocator.free(source);
-                self.owned_source = null;
-                self.retirement_phase = .complete;
+            .retire_owned => |*partial| result: {
+                partial.retire(self.allocator);
+                self.state = .retired;
                 break :result true;
             },
-            .complete => unreachable,
+            .retired => unreachable,
         };
     }
-    fn incomplete(self: *ReadCursor, value_incomplete: reader.Incomplete) ReadProgress {
-        self.phase = .complete;
-        return .{ .complete = .{ .incomplete = value_incomplete } };
-    }
     pub fn advance(self: *ReadCursor) (error{ OutOfMemory, Parse })!ReadProgress {
-        if (self.tokenizer.tokens == null) self.tokenizer.tokens = &self.tokens;
-        return switch (self.phase) {
-            .tokenize => switch (try self.tokenizer.advance(self.diag)) {
+        return switch (self.state) {
+            .tokenize => |*tokenizer| switch (try tokenizer: {
+                tokenizer.tokens = &self.tokens;
+                break :tokenizer tokenizer.advance(self.diag);
+            }) {
                 .pending => .pending,
-                .incomplete => |value_incomplete| self.incomplete(value_incomplete),
+                .incomplete => |value_incomplete| result: {
+                    self.state = .incomplete_tokens;
+                    break :result .{ .complete = .{ .incomplete = value_incomplete } };
+                },
                 .complete => result: {
-                    self.parser = try .init(
+                    const parser = try ParserOwner.init(
                         self.allocator,
                         self.releases,
                         &self.tokens,
@@ -1824,82 +2020,147 @@ pub const ReadCursor = struct {
                         self.provenance_namespace,
                         self.word_scope,
                     );
-                    self.phase = .parse;
+                    self.state = .{ .parse = parser };
                     break :result .pending;
                 },
             },
-            .parse => switch (try self.parser.?.advance()) {
+            .parse => |*parser| switch (try parser.cursor.advance()) {
                 .pending => .pending,
-                .incomplete => |value_incomplete| self.incomplete(value_incomplete),
+                .incomplete => |value_incomplete| result: {
+                    const moved = parser.*;
+                    self.state = .{ .incomplete_parser = moved };
+                    break :result .{ .complete = .{ .incomplete = value_incomplete } };
+                },
                 .complete => result: {
-                    self.phase = .allocate;
+                    const moved = parser.*;
+                    self.state = .{ .allocate_forms = moved };
                     break :result .pending;
                 },
             },
-            .allocate => result: {
-                const count = self.parser.?.output.?.count;
-                self.forms = try .init(self.releases, count);
-                self.top_spans = try self.allocator.alloc(Span, count);
-                self.owned_source_name = try self.allocator.alloc(u8, self.source_name.len);
-                self.owned_source = try self.allocator.alloc(u8, self.source.len);
-                self.form_iterator = self.parser.?.output.?.iterator();
-                self.phase = .copy;
+            .allocate_forms => |*parser| result: {
+                const count = parser.cursor.output.?.count;
+                const forms = try heap.OwnedValueBuffer.init(self.releases, count);
+                const moved = parser.*;
+                self.state = .{ .allocate_spans = .{
+                    .parser = moved,
+                    .forms = forms,
+                } };
                 break :result .pending;
             },
-            .copy => if (self.form_iterator.?.next()) |form| result: {
-                self.forms.?.appendBorrowed(form.value);
-                self.top_spans.?[self.copy_index] = form.span;
-                self.copy_index += 1;
+            .allocate_spans => |*allocation| result: {
+                const top = try self.allocator.alloc(Span, allocation.forms.capacity());
+                const parser = allocation.parser;
+                const forms = allocation.forms.take();
+                self.state = .{ .allocate_name = .{
+                    .parser = parser,
+                    .forms = forms,
+                    .top = top,
+                } };
+                break :result .pending;
+            },
+            .allocate_name => |*allocation| result: {
+                const name = try self.allocator.alloc(u8, self.source_name.len);
+                const parser = allocation.parser;
+                const forms = allocation.forms.take();
+                const top = allocation.top;
+                self.state = .{ .allocate_source = .{
+                    .parser = parser,
+                    .forms = forms,
+                    .top = top,
+                    .name = name,
+                } };
+                break :result .pending;
+            },
+            .allocate_source => |*allocation| result: {
+                const source = try self.allocator.alloc(u8, self.source.len);
+                const parser = allocation.parser;
+                const forms = allocation.forms.take();
+                const top = allocation.top;
+                const name = allocation.name;
+                self.state = .{ .copy_forms = .{
+                    .build = .{
+                        .parser = parser,
+                        .forms = forms,
+                        .top = top,
+                        .name = name,
+                        .source = source,
+                    },
+                    .iterator = parser.cursor.output.?.iterator(),
+                } };
+                break :result .pending;
+            },
+            .copy_forms => |*copy| if (copy.iterator.next()) |form| result: {
+                copy.build.forms.appendBorrowed(form.value);
+                copy.build.top[copy.index] = form.span;
+                copy.index += 1;
                 break :result .pending;
             } else result: {
-                self.copy_index = 0;
-                self.phase = .source_name;
+                const build = copy.build;
+                self.state = .{ .copy_name = .{ .build = build } };
                 break :result .pending;
             },
-            .source_name => result: {
-                if (self.copy_index != self.source_name.len) {
-                    self.owned_source_name.?[self.copy_index] = self.source_name[self.copy_index];
-                    self.copy_index += 1;
+            .copy_name => |*copy| result: {
+                if (copy.index != self.source_name.len) {
+                    copy.build.name[copy.index] = self.source_name[copy.index];
+                    copy.index += 1;
                 } else {
-                    self.copy_index = 0;
-                    self.phase = .source;
+                    const build = copy.build;
+                    self.state = .{ .copy_source = .{ .build = build } };
                 }
                 break :result .pending;
             },
-            .source => result: {
-                if (self.copy_index != self.source.len) {
-                    self.owned_source.?[self.copy_index] = self.source[self.copy_index];
-                    self.copy_index += 1;
-                } else self.phase = .finish;
+            .copy_source => |*copy| result: {
+                if (copy.index != self.source.len) {
+                    copy.build.source[copy.index] = self.source[copy.index];
+                    copy.index += 1;
+                } else {
+                    const build = copy.build;
+                    self.state = .{ .finish = build };
+                }
                 break :result .pending;
             },
-            .finish => result: {
-                var output = self.parser.?.output.?;
-                self.parser.?.output = null;
-                output.retire(self.releases);
-                self.parser.?.retireCompleted();
-                self.parser = null;
-                self.tokens.retire(self.releases);
-                self.spans.top = self.top_spans.?;
-                self.top_spans = null;
-                const source_bytes = self.owned_source.?;
-                self.owned_source = null;
+            .finish => |*build| result: {
+                const parser = build.parser;
+                const forms = build.forms.take();
+                const top = build.top;
+                const name = build.name;
+                const source_bytes = build.source;
+                self.state = .{ .source_consumed = .{
+                    .parser = parser,
+                    .forms = forms,
+                    .top = top,
+                    .name = name,
+                } };
                 const source_slice = try reader.SourceSlice.initOwned(self.allocator, source_bytes);
+                const consumed = &self.state.source_consumed;
+                var output = consumed.parser.cursor.output.?;
+                consumed.parser.cursor.output = null;
+                output.retire(self.releases);
+                consumed.parser.retireCompleted();
+                self.tokens.retire(self.releases);
+                self.spans.top = consumed.top;
                 const parsed: reader.Parsed = .{
                     .allocator = self.allocator,
-                    .forms = self.forms.?.take(),
+                    .forms = consumed.forms.take(),
                     .releases = self.releases,
                     .spans = self.spans,
-                    .source_name = self.owned_source_name.?,
+                    .source_name = consumed.name,
                     .source = source_slice,
                 };
-                self.forms = null;
-                self.owned_source_name = null;
                 self.spans = .init(self.allocator);
-                self.phase = .complete;
+                self.state = .completed;
                 break :result .{ .complete = .{ .complete = parsed } };
             },
-            .complete => unreachable,
+            .source_consumed,
+            .incomplete_tokens,
+            .incomplete_parser,
+            .completed,
+            .retire_parser,
+            .retire_tokens,
+            .retire_spans,
+            .retire_owned,
+            .retired,
+            => unreachable,
         };
     }
 };
