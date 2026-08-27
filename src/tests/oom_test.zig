@@ -537,33 +537,33 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     defer scaffold_allocator.free(archive_source);
     try runOk(&runtime, "oom-archive.ecl", archive_source);
     const package_destination = try std.fmt.allocPrint(
-        thread_safe_allocator,
+        scaffold_allocator,
         "{s}{c}a-1.0.0-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9",
         .{ scratch_path, std.fs.path.sep },
     );
-    defer thread_safe_allocator.free(package_destination);
+    defer scaffold_allocator.free(package_destination);
     const lock_path = try std.fmt.allocPrint(
-        thread_safe_allocator,
+        scaffold_allocator,
         "{s}{c}ecl.lock",
         .{ scratch_path, std.fs.path.sep },
     );
-    defer thread_safe_allocator.free(lock_path);
+    defer scaffold_allocator.free(lock_path);
     // `pkg.store.write-new` refuses an existing destination, so its probe
     // needs a path this scaffolding has not already written. The scratch
     // directory's own `ecl.pkg` belongs to the lock-tier snippet above.
     const manifest_path = try std.fmt.allocPrint(
-        thread_safe_allocator,
+        scaffold_allocator,
         "{s}{c}created.pkg",
         .{ scratch_path, std.fs.path.sep },
     );
-    defer thread_safe_allocator.free(manifest_path);
+    defer scaffold_allocator.free(manifest_path);
     const package_source = try packageStoreSource(
-        thread_safe_allocator,
+        scaffold_allocator,
         package_destination,
         lock_path,
         manifest_path,
     );
-    defer thread_safe_allocator.free(package_source);
+    defer scaffold_allocator.free(package_source);
     try runOk(&runtime, "oom-pkg-store.ecl", package_source);
     try runOk(
         &runtime,
@@ -573,11 +573,11 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     // The present one-package graph reaches sync discovery, MVS, the
     // selected-entry skip, canonical rendering, and lock replacement without
     // introducing an ambient network read into the allocation sweep.
-    const sync_source = try packageSyncSource(thread_safe_allocator, scratch_path);
-    defer thread_safe_allocator.free(sync_source);
+    const sync_source = try packageSyncSource(scaffold_allocator, scratch_path);
+    defer scaffold_allocator.free(sync_source);
     try runOk(&runtime, "oom-pkg-sync.ecl", sync_source);
-    const cli_source = try packageCliSource(thread_safe_allocator, scratch_path);
-    defer thread_safe_allocator.free(cli_source);
+    const cli_source = try packageCliSource(scaffold_allocator, scratch_path);
+    defer scaffold_allocator.free(cli_source);
     try runOk(&runtime, "oom-pkg-cli.ecl", cli_source);
     const host_io_source = try std.fmt.allocPrint(
         scaffold_allocator,
