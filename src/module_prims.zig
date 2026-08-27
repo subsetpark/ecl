@@ -413,30 +413,65 @@ fn words(evaluator: *Machine) MachineError!void {
 
 const WordsDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    const Phase = enum { visible, materialize, unique, actions, render, write };
     allocator: std.mem.Allocator,
-    visible: heap.Owned(reflection.VisibleNameCursor),
-    phase: Phase = .visible,
     found: heap.Owned(poll_api.ChunkList(u32)),
-    names: ?heap.Owned([]u32) = null,
-    found_iterator: ?poll_api.ChunkList(u32).Iterator = null,
-    materialize_index: usize = 0,
-    sorter: ?heap.Owned(reflection.NameSortCursor) = null,
-    scan_index: usize = 0,
     actions: heap.Owned(reflection.ActionPlan),
-    action_index: usize = 0,
-    previous: ?u32 = null,
-    rendered: ?heap.Owned([]u8) = null,
+    state: heap.Owned(State),
+
+    const State = union(enum) {
+        visible: heap.Owned(reflection.VisibleNameCursor),
+        materialize: struct {
+            names: heap.Owned([]u32),
+            iterator: poll_api.ChunkList(u32).Iterator,
+            index: usize,
+        },
+        unique: struct {
+            names: heap.Owned([]u32),
+            sorter: heap.Owned(reflection.NameSortCursor),
+        },
+        actions: struct {
+            names: heap.Owned([]u32),
+            scan_index: usize,
+            action_index: usize,
+            previous: ?u32,
+        },
+        render: heap.Owned([]u32),
+        write: struct {
+            names: heap.Owned([]u32),
+            rendered: heap.Owned([]u8),
+        },
+
+        pub fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .visible => |*visible| visible.deinit(releases, allocator),
+                .materialize => |*materialize| materialize.names.deinit(releases, allocator),
+                .unique => |*unique| {
+                    unique.sorter.deinit(releases, allocator);
+                    unique.names.deinit(releases, allocator);
+                },
+                .actions => |*actions| actions.names.deinit(releases, allocator),
+                .render => |*names| names.deinit(releases, allocator),
+                .write => |*write| {
+                    write.rendered.deinit(releases, allocator);
+                    write.names.deinit(releases, allocator);
+                },
+            }
+        }
+    };
 
     fn init(evaluator: *Machine) WordsDriver {
         return .{
             .allocator = evaluator.allocator(),
-            .visible = .init(reflection.VisibleNameCursor.init(
-                .{ .scope = evaluator.currentScope() },
-                evaluator.currentEnv().coreView(),
-            )),
             .found = .init(poll_api.ChunkList(u32).init(evaluator.allocator())),
             .actions = .init(reflection.ActionPlan.init(evaluator.allocator())),
+            .state = .init(.{ .visible = .init(reflection.VisibleNameCursor.init(
+                .{ .scope = evaluator.currentScope() },
+                evaluator.currentEnv().coreView(),
+            )) }),
         };
     }
     fn append(self: *WordsDriver, name: u32) error{OutOfMemory}!void {
@@ -445,63 +480,77 @@ const WordsDriver = struct {
     pub fn advance(evaluator: *Machine, self: *WordsDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.phase) {
-            .visible => switch (self.visible.borrowMut().advance()) {
+        while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+            .visible => |*visible| switch (visible.borrowMut().advance()) {
                 .pending => {},
                 .complete => {
-                    self.names = .init(try self.allocator.alloc(u32, self.found.borrow().count));
-                    self.found_iterator = self.found.borrow().iterator();
-                    self.phase = .materialize;
+                    const names = try self.allocator.alloc(u32, self.found.borrow().count);
+                    const iterator = self.found.borrow().iterator();
+                    visible.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.state.borrowMut().* = .{ .materialize = .{
+                        .names = .init(names),
+                        .iterator = iterator,
+                        .index = 0,
+                    } };
                 },
                 .item => |name| try self.append(name),
             },
-            .materialize => if (self.found_iterator.?.next()) |name| {
-                self.names.?.borrow()[self.materialize_index] = name.*;
-                self.materialize_index += 1;
+            .materialize => |*materialize| if (materialize.iterator.next()) |name| {
+                materialize.names.borrow()[materialize.index] = name.*;
+                materialize.index += 1;
             } else {
-                self.sorter = .init(try .init(self.allocator, self.names.?.borrow()));
-                self.phase = .unique;
+                const sorter = try reflection.NameSortCursor.init(
+                    self.allocator,
+                    materialize.names.borrow(),
+                );
+                self.state.borrowMut().* = .{ .unique = .{
+                    .names = .init(materialize.names.take()),
+                    .sorter = .init(sorter),
+                } };
             },
-            .unique => if (self.sorter.?.borrowMut().advance(1) == .complete) {
-                self.sorter.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.sorter = null;
-                self.scan_index = 0;
-                self.previous = null;
-                self.phase = .actions;
+            .unique => |*unique| if (unique.sorter.borrowMut().advance(1) == .complete) {
+                unique.sorter.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.state.borrowMut().* = .{ .actions = .{
+                    .names = .init(unique.names.take()),
+                    .scan_index = 0,
+                    .action_index = 0,
+                    .previous = null,
+                } };
             },
-            .actions => {
-                if (self.scan_index != self.names.?.borrow().len) {
-                    const name = self.names.?.borrow()[self.scan_index];
-                    self.scan_index += 1;
-                    if (self.previous != null and self.previous.? == name) continue;
-                    if (self.action_index != 0) {
+            .actions => |*actions| {
+                if (actions.scan_index != actions.names.borrow().len) {
+                    const name = actions.names.borrow()[actions.scan_index];
+                    actions.scan_index += 1;
+                    if (actions.previous != null and actions.previous.? == name) continue;
+                    if (actions.action_index != 0) {
                         try self.actions.borrowMut().add(.{ .bytes = " " });
-                        self.action_index += 1;
+                        actions.action_index += 1;
                     }
                     try self.actions.borrowMut().add(.{ .name = name });
-                    self.action_index += 1;
-                    self.previous = name;
+                    actions.action_index += 1;
+                    actions.previous = name;
                     continue;
                 }
                 try self.actions.borrowMut().add(.{ .bytes = "\n" });
-                self.action_index += 1;
                 self.actions.borrowMut().seal();
-                self.phase = .render;
+                self.state.borrowMut().* = .{ .render = .init(actions.names.take()) };
             },
-            .render => switch (try self.actions.borrowMut().advance(1)) {
+            .render => |*names| switch (try self.actions.borrowMut().advance(1)) {
                 .pending => {},
                 .complete => |bytes| {
-                    self.rendered = .init(bytes);
-                    self.phase = .write;
+                    self.state.borrowMut().* = .{ .write = .{
+                        .names = .init(names.take()),
+                        .rendered = .init(bytes),
+                    } };
                 },
             },
-            .write => {
+            .write => |*write| {
                 if (evaluator.unit.inherited.console) |console| {
-                    console.writeOutput(self.rendered.?.borrow(), false) catch return writeFailure(evaluator);
+                    console.writeOutput(write.rendered.borrow(), false) catch return writeFailure(evaluator);
                     return .completed;
                 }
                 const output = try outputWriter(evaluator);
-                output.writeAll(self.rendered.?.borrow()) catch return writeFailure(evaluator);
+                output.writeAll(write.rendered.borrow()) catch return writeFailure(evaluator);
                 output.flush() catch return evaluator.fail(.io, "standard output flush failed");
                 return .completed;
             },
