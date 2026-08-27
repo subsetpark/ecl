@@ -2875,74 +2875,151 @@ pub const Machine = struct {
         try self.startDriver(AutoLoadDriver{
             .name = name,
             .request = request,
-            .cursor = registry.beginLoadingCursor(name, .of(self.unit)),
+            .state = .init(.{ .begin = registry.beginLoadingCursor(name, .of(self.unit)) }),
         });
     }
     const AutoLoadDriver = struct {
         const FileKind = enum { source, native };
-        const FilenameTarget = enum { component_start, candidate, locked_candidate };
+        const CandidateOrigin = union(enum) {
+            legacy: struct {
+                component_start: usize,
+                component_end: usize,
+                next_search: usize,
+            },
+            locked: struct {
+                package: []const u8,
+                store: []const u8,
+            },
+        };
+        const FilenameTarget = union(enum) {
+            component_start: usize,
+            candidate: CandidateOrigin,
+        };
+        const FilenameState = struct {
+            loading: heap.Owned(modules.LoadingLease),
+            filename: heap.Owned([]u8),
+            index: usize = 0,
+            kind: FileKind,
+            target: FilenameTarget,
+        };
+        const CandidateState = struct {
+            loading: heap.Owned(modules.LoadingLease),
+            filename: heap.Owned([]u8),
+            kind: FileKind,
+            origin: CandidateOrigin,
+            candidate: heap.Owned([]u8),
+            index: usize = 0,
+            separator: bool,
+        };
+        const Disposition = union(enum) {
+            source,
+            native,
+            embedded: stdlib.Entry,
+            fail: []const u8,
+        };
+        const State = union(enum) {
+            begin: modules.Registry.BeginLoadingCursor,
+            registered: struct {
+                loading: heap.Owned(modules.LoadingLease),
+                cursor: heap.Owned(modules.Registry.AcquireCursor),
+            },
+            lock_lookup: struct {
+                loading: heap.Owned(modules.LoadingLease),
+                cursor: heap.Owned(pkg_lock.LookupCursor),
+            },
+            locked_store: struct {
+                loading: heap.Owned(modules.LoadingLease),
+                package: []const u8,
+                store: []const u8,
+            },
+            filename: FilenameState,
+            component_start: struct {
+                loading: heap.Owned(modules.LoadingLease),
+                filename: heap.Owned([]u8),
+                kind: FileKind,
+                search_index: usize,
+            },
+            component_end: struct {
+                loading: heap.Owned(modules.LoadingLease),
+                filename: heap.Owned([]u8),
+                kind: FileKind,
+                search_index: usize,
+                component_start: usize,
+            },
+            candidate: CandidateState,
+            access: CandidateState,
+            path_value: struct {
+                loading: heap.Owned(modules.LoadingLease),
+                candidate: heap.Owned([]u8),
+                materializer: heap.Owned(kernel_storage.Utf8Materializer),
+                disposition: Disposition,
+            },
+            transfer: struct {
+                loading: heap.Owned(modules.LoadingLease),
+                candidate: heap.Owned([]u8),
+                path: heap.Owned(Value),
+                disposition: Disposition,
+            },
+
+            pub fn deinit(
+                self: *State,
+                releases: *heap.ReleaseDomain,
+                storage_allocator: std.mem.Allocator,
+            ) void {
+                switch (self.*) {
+                    .begin => |*cursor| cursor.deinit(),
+                    .registered => |*registered| {
+                        registered.cursor.deinit(releases, storage_allocator);
+                        registered.loading.deinit(releases, storage_allocator);
+                    },
+                    .lock_lookup => |*lookup| {
+                        lookup.cursor.deinit(releases, storage_allocator);
+                        lookup.loading.deinit(releases, storage_allocator);
+                    },
+                    .locked_store => |*locked| locked.loading.deinit(releases, storage_allocator),
+                    .filename => |*filename| {
+                        filename.filename.deinit(releases, storage_allocator);
+                        filename.loading.deinit(releases, storage_allocator);
+                    },
+                    .component_start => |*component| {
+                        component.filename.deinit(releases, storage_allocator);
+                        component.loading.deinit(releases, storage_allocator);
+                    },
+                    .component_end => |*component| {
+                        component.filename.deinit(releases, storage_allocator);
+                        component.loading.deinit(releases, storage_allocator);
+                    },
+                    .candidate, .access => |*candidate| {
+                        candidate.candidate.deinit(releases, storage_allocator);
+                        candidate.filename.deinit(releases, storage_allocator);
+                        candidate.loading.deinit(releases, storage_allocator);
+                    },
+                    .path_value => |*path| {
+                        path.materializer.deinit(releases, storage_allocator);
+                        path.candidate.deinit(releases, storage_allocator);
+                        path.loading.deinit(releases, storage_allocator);
+                    },
+                    .transfer => |*transfer| {
+                        transfer.path.deinit(releases, storage_allocator);
+                        transfer.candidate.deinit(releases, storage_allocator);
+                        transfer.loading.deinit(releases, storage_allocator);
+                    },
+                }
+                self.* = undefined;
+            }
+        };
 
         name: intern.ModuleName,
         request: QualifiedLoadRequest,
-        cursor: modules.Registry.BeginLoadingCursor,
-        embedded: ?stdlib.Entry = null,
-        loading: ?heap.Owned(modules.LoadingLease) = null,
-        lock_lookup: ?heap.Owned(pkg_lock.LookupCursor) = null,
-        locked_package: ?[]const u8 = null,
-        locked_store: ?[]const u8 = null,
-        locked_candidate: bool = false,
-        filename: ?heap.Owned([]u8) = null,
-        filename_index: usize = 0,
-        file_kind: FileKind = .source,
-        filename_target: FilenameTarget = .component_start,
-        search_index: usize = 0,
-        component_start: usize = 0,
-        component_end: usize = 0,
-        candidate: ?heap.Owned([]u8) = null,
-        candidate_index: usize = 0,
-        separator: bool = false,
-        path_materializer: ?heap.Owned(kernel_storage.Utf8Materializer) = null,
-        path_value: ?heap.Owned(Value) = null,
-        access_error: ?[]const u8 = null,
-        registration: ?heap.Owned(modules.Registry.AcquireCursor) = null,
-        phase: enum {
-            begin,
-            registered,
-            lock_lookup,
-            locked_store,
-            filename,
-            component_start,
-            component_end,
-            candidate,
-            access,
-            path_value,
-            transfer,
-        } = .begin,
+        state: heap.Owned(State),
 
-        fn resetCandidate(self: *AutoLoadDriver, evaluator: *Machine) void {
-            if (self.candidate) |*candidate| candidate.deinit(
-                evaluator.releaseDomain(),
-                evaluator.allocator(),
-            );
-            self.candidate = null;
-            self.candidate_index = 0;
-            self.separator = false;
-            self.access_error = null;
-        }
-        fn beginFilename(
+        fn makeFilename(
             self: *AutoLoadDriver,
             evaluator: *Machine,
+            loading: *heap.Owned(modules.LoadingLease),
             kind: FileKind,
             target: FilenameTarget,
-        ) error{OutOfMemory}!void {
-            if (self.filename) |*filename| filename.deinit(
-                evaluator.releaseDomain(),
-                evaluator.allocator(),
-            );
-            self.filename = null;
-            self.filename_index = 0;
-            self.file_kind = kind;
-            self.filename_target = target;
+        ) error{OutOfMemory}!FilenameState {
             const module_name = intern.get(intern.moduleId(self.name));
             const extension = switch (kind) {
                 .source => ".ecl",
@@ -2950,23 +3027,42 @@ pub const Machine = struct {
             };
             const length = std.math.add(usize, module_name.len, extension.len) catch
                 return error.OutOfMemory;
-            self.filename = .init(try evaluator.unit.allocator.alloc(u8, length));
-            self.phase = .filename;
-        }
-        fn beginCandidate(self: *AutoLoadDriver, evaluator: *Machine) error{OutOfMemory}!void {
-            const directory = if (self.locked_candidate)
-                self.locked_store.?
-            else legacy: {
-                const search = evaluator.unit.inherited.ecl_path.?;
-                break :legacy search[self.component_start..self.component_end];
+            const filename = try evaluator.unit.allocator.alloc(u8, length);
+            return .{
+                .loading = .init(loading.take()),
+                .filename = .init(filename),
+                .kind = kind,
+                .target = target,
             };
-            self.separator = directory.len != 0 and !std.fs.path.isSep(directory[directory.len - 1]);
-            var length = std.math.add(usize, directory.len, self.filename.?.borrow().len) catch
+        }
+        fn makeCandidate(
+            evaluator: *Machine,
+            loading: *heap.Owned(modules.LoadingLease),
+            filename: *heap.Owned([]u8),
+            kind: FileKind,
+            origin: CandidateOrigin,
+        ) error{OutOfMemory}!CandidateState {
+            const directory = switch (origin) {
+                .locked => |locked| locked.store,
+                .legacy => |legacy| legacy_directory: {
+                    const search = evaluator.unit.inherited.ecl_path.?;
+                    break :legacy_directory search[legacy.component_start..legacy.component_end];
+                },
+            };
+            const separator = directory.len != 0 and !std.fs.path.isSep(directory[directory.len - 1]);
+            var length = std.math.add(usize, directory.len, filename.borrow().len) catch
                 return error.OutOfMemory;
-            if (self.separator) length = std.math.add(usize, length, 1) catch
+            if (separator) length = std.math.add(usize, length, 1) catch
                 return error.OutOfMemory;
-            self.candidate = .init(try evaluator.unit.allocator.alloc(u8, length));
-            self.phase = .candidate;
+            const candidate = try evaluator.unit.allocator.alloc(u8, length);
+            return .{
+                .loading = .init(loading.take()),
+                .filename = .init(filename.take()),
+                .kind = kind,
+                .origin = origin,
+                .candidate = .init(candidate),
+                .separator = separator,
+            };
         }
         /// Embedded modules reuse the candidate slot for their provenance
         /// name, so the existing `.path_value` phase materializes exactly the
@@ -2974,44 +3070,53 @@ pub const Machine = struct {
         fn beginEmbedded(
             self: *AutoLoadDriver,
             evaluator: *Machine,
+            loading: *heap.Owned(modules.LoadingLease),
             entry: stdlib.Entry,
         ) error{OutOfMemory}!void {
             const provenance = switch (entry) {
                 .source => |source| source.name,
                 .native, .builtin => intern.get(intern.moduleId(self.name)),
             };
-            self.candidate = .init(try evaluator.unit.allocator.dupe(u8, provenance));
-            self.embedded = entry;
-            self.path_materializer = .init(.init(
+            var candidate = heap.Owned([]u8).init(try evaluator.unit.allocator.dupe(u8, provenance));
+            const materializer = kernel_storage.Utf8Materializer.init(
                 evaluator.unit.allocator,
-                self.candidate.?.borrow(),
-            ));
-            self.phase = .path_value;
+                candidate.borrow(),
+            );
+            self.state.borrowMut().* = .{ .path_value = .{
+                .loading = .init(loading.take()),
+                .candidate = .init(candidate.take()),
+                .materializer = .init(materializer),
+                .disposition = .{ .embedded = entry },
+            } };
         }
         /// The module is already registered, so this driver publishes nothing.
         fn finishWithoutLoading(
             self: *AutoLoadDriver,
             evaluator: *Machine,
+            loading: *heap.Owned(modules.LoadingLease),
         ) MachineError!WorkProgress {
-            self.loading.?.borrowMut().finish();
+            loading.borrowMut().finish();
             return continueQualifiedRequest(evaluator, self, self.request);
         }
         fn notFound(self: *AutoLoadDriver, evaluator: *Machine) MachineError {
             return evaluator.undefinedWordIn(self.request.qualified, .qualified);
         }
-        fn sourceCompletion(self: *AutoLoadDriver) SourceCompletion {
+        fn sourceCompletion(
+            self: *AutoLoadDriver,
+            transfer: *@FieldType(State, "transfer"),
+        ) SourceCompletion {
             return .{ .register = .{
-                .loading = self.loading.?.borrowMut().move(),
+                .loading = transfer.loading.borrowMut().move(),
                 .name = self.name,
-                .path = self.path_value.?.take(),
+                .path = transfer.path.take(),
                 .request = self.request,
             } };
         }
         pub fn advance(evaluator: *Machine, self: *AutoLoadDriver) MachineError!WorkProgress {
             try evaluator.pollKernel();
             var budget: usize = kernel_poll_quantum;
-            while (budget != 0) : (budget -= 1) switch (self.phase) {
-                .begin => switch (try self.cursor.advance()) {
+            work: while (budget != 0) : (budget -= 1) switch (self.state.borrowMut().*) {
+                .begin => |*cursor| switch (try cursor.advance()) {
                     .pending => {},
                     .complete => |outcome| switch (outcome) {
                         .cycle => return evaluator.failFmt(
@@ -3023,64 +3128,74 @@ pub const Machine = struct {
                         // rather than publishing a second copy; the recheck
                         // below is what makes the winner's work count.
                         .contended => {
-                            self.cursor.deinit();
-                            self.cursor = evaluator.unit.inherited.registry.?.beginLoadingCursor(
+                            cursor.deinit();
+                            self.state.borrowMut().* = .{ .begin = evaluator.unit.inherited.registry.?.beginLoadingCursor(
                                 self.name,
                                 .of(evaluator.unit),
-                            );
+                            ) };
                             return .yielded;
                         },
                         .granted => |lease| {
-                            self.loading = .init(lease);
-                            self.registration = .init(
-                                evaluator.unit.inherited.registry.?.acquireCursor(self.name),
-                            );
-                            self.phase = .registered;
+                            cursor.deinit();
+                            self.state.borrowMut().* = .{ .registered = .{
+                                .loading = .init(lease),
+                                .cursor = .init(evaluator.unit.inherited.registry.?.acquireCursor(self.name)),
+                            } };
                         },
                     },
                 },
                 // A load that raced a winner has nothing left to publish: its
                 // tagged operation resumes against the winner's module.
-                .registered => switch (self.registration.?.borrowMut().advance()) {
+                .registered => |*registered| switch (registered.cursor.borrowMut().advance()) {
                     .pending => {},
                     .complete => |maybe_generation| {
-                        self.registration.?.deinit(
+                        var loading = heap.Owned(modules.LoadingLease).init(registered.loading.take());
+                        defer loading.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        registered.cursor.deinit(
                             evaluator.releaseDomain(),
                             evaluator.allocator(),
                         );
-                        self.registration = null;
                         if (maybe_generation) |generation| {
                             var lease = generation;
                             lease.deinit();
-                            return self.finishWithoutLoading(evaluator);
+                            return self.finishWithoutLoading(evaluator, &loading);
                         }
                         // The embedded manifest is consulted before the
                         // search path: a stdlib name resolves with no host IO
                         // and no ECL_PATH, and no path module can shadow one.
                         if (stdlib.find(intern.get(intern.moduleId(self.name)))) |entry| {
-                            try self.beginEmbedded(evaluator, entry);
+                            try self.beginEmbedded(evaluator, &loading, entry);
                             continue;
                         }
                         if (evaluator.unit.inherited.project_lock) |project_lock| {
-                            self.lock_lookup = .init(project_lock.lookupCursor(
-                                intern.get(intern.moduleId(self.name)),
-                            ));
-                            self.phase = .lock_lookup;
+                            self.state.borrowMut().* = .{ .lock_lookup = .{
+                                .loading = .init(loading.take()),
+                                .cursor = .init(project_lock.lookupCursor(
+                                    intern.get(intern.moduleId(self.name)),
+                                )),
+                            } };
                             continue;
                         }
                         if (evaluator.unit.inherited.host_io == null or evaluator.unit.inherited.ecl_path == null)
                             return self.notFound(evaluator);
-                        try self.beginFilename(evaluator, .source, .component_start);
+                        const filename = try self.makeFilename(
+                            evaluator,
+                            &loading,
+                            .source,
+                            .{ .component_start = 0 },
+                        );
+                        self.state.borrowMut().* = .{ .filename = filename };
                     },
                 },
-                .lock_lookup => switch (self.lock_lookup.?.borrowMut().advance()) {
+                .lock_lookup => |*lookup| switch (lookup.cursor.borrowMut().advance()) {
                     .pending => {},
                     .complete => |outcome| {
-                        self.lock_lookup.?.deinit(
+                        var loading = heap.Owned(modules.LoadingLease).init(lookup.loading.take());
+                        defer loading.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        lookup.cursor.deinit(
                             evaluator.releaseDomain(),
                             evaluator.allocator(),
                         );
-                        self.lock_lookup = null;
                         switch (outcome) {
                             .invalid => |message| return evaluator.fail(.io, message),
                             .unmatched => {
@@ -3089,166 +3204,260 @@ pub const Machine = struct {
                                 {
                                     return self.notFound(evaluator);
                                 }
-                                try self.beginFilename(evaluator, .source, .component_start);
+                                const filename = try self.makeFilename(
+                                    evaluator,
+                                    &loading,
+                                    .source,
+                                    .{ .component_start = 0 },
+                                );
+                                self.state.borrowMut().* = .{ .filename = filename };
                             },
                             .matched => |match| {
-                                self.locked_package = match.package;
-                                self.locked_store = match.store_dir;
                                 if (match.store_dir == null) return evaluator.failFmt(
                                     .io,
                                     "locked package `{s}` has no package store; set ECL_CACHE, XDG_CACHE_HOME, or HOME before running `ecl pkg sync`",
                                     .{match.package},
                                 );
-                                self.phase = .locked_store;
+                                self.state.borrowMut().* = .{ .locked_store = .{
+                                    .loading = .init(loading.take()),
+                                    .package = match.package,
+                                    .store = match.store_dir.?,
+                                } };
                             },
                         }
                     },
                 },
-                .locked_store => {
+                .locked_store => |*locked| {
                     const info = std.Io.Dir.cwd().statFile(
                         evaluator.unit.inherited.host_io.?,
-                        self.locked_store.?,
+                        locked.store,
                         .{ .follow_symlinks = false },
                     ) catch |err| switch (err) {
                         error.FileNotFound => return evaluator.failFmt(
                             .io,
                             "locked package `{s}` is missing from the package store; run `ecl pkg sync`",
-                            .{self.locked_package.?},
+                            .{locked.package},
                         ),
                         else => return evaluator.failFmt(
                             .io,
                             "cannot inspect locked package `{s}` in the package store: {s}; run `ecl pkg sync`",
-                            .{ self.locked_package.?, @errorName(err) },
+                            .{ locked.package, @errorName(err) },
                         ),
                     };
                     if (info.kind != .directory) return evaluator.failFmt(
                         .io,
                         "locked package `{s}` is not a real package-store directory; run `ecl pkg sync`",
-                        .{self.locked_package.?},
+                        .{locked.package},
                     );
-                    self.locked_candidate = true;
-                    try self.beginFilename(evaluator, .source, .locked_candidate);
+                    var loading = heap.Owned(modules.LoadingLease).init(locked.loading.take());
+                    defer loading.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    const origin: CandidateOrigin = .{ .locked = .{
+                        .package = locked.package,
+                        .store = locked.store,
+                    } };
+                    const filename = try self.makeFilename(
+                        evaluator,
+                        &loading,
+                        .source,
+                        .{ .candidate = origin },
+                    );
+                    self.state.borrowMut().* = .{ .filename = filename };
                 },
-                .filename => {
+                .filename => |*filename| {
                     const module_name = intern.get(intern.moduleId(self.name));
-                    const extension = switch (self.file_kind) {
+                    const extension = switch (filename.kind) {
                         .source => ".ecl",
                         .native => ".eclmod",
                     };
-                    if (self.filename_index != self.filename.?.borrow().len) {
-                        self.filename.?.borrow()[self.filename_index] = if (self.filename_index < module_name.len)
-                            module_name[self.filename_index]
+                    if (filename.index != filename.filename.borrow().len) {
+                        filename.filename.borrow()[filename.index] = if (filename.index < module_name.len)
+                            module_name[filename.index]
                         else
-                            extension[self.filename_index - module_name.len];
-                        self.filename_index += 1;
-                    } else switch (self.filename_target) {
-                        .component_start => self.phase = .component_start,
-                        .candidate, .locked_candidate => try self.beginCandidate(evaluator),
+                            extension[filename.index - module_name.len];
+                        filename.index += 1;
+                    } else switch (filename.target) {
+                        .component_start => |search_index| {
+                            const next = @FieldType(State, "component_start"){
+                                .loading = .init(filename.loading.take()),
+                                .filename = .init(filename.filename.take()),
+                                .kind = filename.kind,
+                                .search_index = search_index,
+                            };
+                            self.state.borrowMut().* = .{ .component_start = next };
+                        },
+                        .candidate => |origin| {
+                            const candidate = try makeCandidate(
+                                evaluator,
+                                &filename.loading,
+                                &filename.filename,
+                                filename.kind,
+                                origin,
+                            );
+                            self.state.borrowMut().* = .{ .candidate = candidate };
+                        },
                     }
                 },
-                .component_start => {
+                .component_start => |*component| {
                     const search = evaluator.unit.inherited.ecl_path.?;
-                    if (self.search_index == search.len) return self.notFound(evaluator);
-                    if (search[self.search_index] == std.fs.path.delimiter) {
-                        self.search_index += 1;
+                    if (component.search_index == search.len) return self.notFound(evaluator);
+                    if (search[component.search_index] == std.fs.path.delimiter) {
+                        component.search_index += 1;
                     } else {
-                        self.component_start = self.search_index;
-                        self.phase = .component_end;
+                        const next = @FieldType(State, "component_end"){
+                            .loading = .init(component.loading.take()),
+                            .filename = .init(component.filename.take()),
+                            .kind = component.kind,
+                            .search_index = component.search_index,
+                            .component_start = component.search_index,
+                        };
+                        self.state.borrowMut().* = .{ .component_end = next };
                     }
                 },
-                .component_end => {
+                .component_end => |*component| {
                     const search = evaluator.unit.inherited.ecl_path.?;
-                    if (self.search_index == search.len or
-                        search[self.search_index] == std.fs.path.delimiter)
+                    if (component.search_index == search.len or
+                        search[component.search_index] == std.fs.path.delimiter)
                     {
-                        self.component_end = self.search_index;
-                        if (self.search_index != search.len) self.search_index += 1;
-                        try self.beginCandidate(evaluator);
-                    } else self.search_index += 1;
+                        const component_end = component.search_index;
+                        var next_search = component.search_index;
+                        if (next_search != search.len) next_search += 1;
+                        const origin: CandidateOrigin = .{ .legacy = .{
+                            .component_start = component.component_start,
+                            .component_end = component_end,
+                            .next_search = next_search,
+                        } };
+                        const candidate = try makeCandidate(
+                            evaluator,
+                            &component.loading,
+                            &component.filename,
+                            component.kind,
+                            origin,
+                        );
+                        self.state.borrowMut().* = .{ .candidate = candidate };
+                    } else component.search_index += 1;
                 },
-                .candidate => {
-                    const directory = if (self.locked_candidate)
-                        self.locked_store.?
-                    else legacy: {
-                        const search = evaluator.unit.inherited.ecl_path.?;
-                        break :legacy search[self.component_start..self.component_end];
+                .candidate => |*candidate| {
+                    const directory = switch (candidate.origin) {
+                        .locked => |locked| locked.store,
+                        .legacy => |legacy| legacy_directory: {
+                            const search = evaluator.unit.inherited.ecl_path.?;
+                            break :legacy_directory search[legacy.component_start..legacy.component_end];
+                        },
                     };
-                    if (self.candidate_index != self.candidate.?.borrow().len) {
-                        self.candidate.?.borrow()[self.candidate_index] = if (self.candidate_index < directory.len)
-                            directory[self.candidate_index]
-                        else if (self.separator and self.candidate_index == directory.len)
+                    if (candidate.index != candidate.candidate.borrow().len) {
+                        candidate.candidate.borrow()[candidate.index] = if (candidate.index < directory.len)
+                            directory[candidate.index]
+                        else if (candidate.separator and candidate.index == directory.len)
                             std.fs.path.sep
                         else
-                            self.filename.?.borrow()[self.candidate_index - directory.len - @intFromBool(self.separator)];
-                        self.candidate_index += 1;
-                    } else self.phase = .access;
+                            candidate.filename.borrow()[candidate.index - directory.len - @intFromBool(candidate.separator)];
+                        candidate.index += 1;
+                    } else {
+                        const next = CandidateState{
+                            .loading = .init(candidate.loading.take()),
+                            .filename = .init(candidate.filename.take()),
+                            .kind = candidate.kind,
+                            .origin = candidate.origin,
+                            .candidate = .init(candidate.candidate.take()),
+                            .index = candidate.index,
+                            .separator = candidate.separator,
+                        };
+                        self.state.borrowMut().* = .{ .access = next };
+                    }
                 },
-                .access => {
+                .access => |*access| {
+                    var disposition: Disposition = switch (access.kind) {
+                        .source => .source,
+                        .native => .native,
+                    };
                     std.Io.Dir.cwd().access(
                         evaluator.unit.inherited.host_io.?,
-                        self.candidate.?.borrow(),
+                        access.candidate.borrow(),
                         .{ .read = true },
                     ) catch |err| switch (err) {
                         error.FileNotFound => {
-                            if (self.locked_candidate) return evaluator.failFmt(
-                                .undefined_word,
-                                "locked module `{s}` is absent from package `{s}`",
-                                .{
-                                    intern.get(intern.moduleId(self.name)),
-                                    self.locked_package.?,
+                            const origin = access.origin;
+                            switch (origin) {
+                                .locked => |locked| return evaluator.failFmt(
+                                    .undefined_word,
+                                    "locked module `{s}` is absent from package `{s}`",
+                                    .{
+                                        intern.get(intern.moduleId(self.name)),
+                                        locked.package,
+                                    },
+                                ),
+                                .legacy => |legacy| {
+                                    const kind: FileKind = if (access.kind == .source) .native else .source;
+                                    const target: FilenameTarget = if (access.kind == .source)
+                                        .{ .candidate = origin }
+                                    else
+                                        .{ .component_start = legacy.next_search };
+                                    const filename = try self.makeFilename(
+                                        evaluator,
+                                        &access.loading,
+                                        kind,
+                                        target,
+                                    );
+                                    access.candidate.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                                    access.filename.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                                    self.state.borrowMut().* = .{ .filename = filename };
+                                    continue :work;
                                 },
-                            );
-                            self.resetCandidate(evaluator);
-                            if (self.file_kind == .source) {
-                                try self.beginFilename(evaluator, .native, .candidate);
-                            } else {
-                                try self.beginFilename(evaluator, .source, .component_start);
                             }
-                            continue;
                         },
-                        else => self.access_error = @errorName(err),
+                        else => disposition = .{ .fail = @errorName(err) },
                     };
-                    self.path_materializer = .init(.init(
+                    const materializer = kernel_storage.Utf8Materializer.init(
                         evaluator.unit.allocator,
-                        self.candidate.?.borrow(),
-                    ));
-                    self.phase = .path_value;
+                        access.candidate.borrow(),
+                    );
+                    access.filename.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    const next = @FieldType(State, "path_value"){
+                        .loading = .init(access.loading.take()),
+                        .candidate = .init(access.candidate.take()),
+                        .materializer = .init(materializer),
+                        .disposition = disposition,
+                    };
+                    self.state.borrowMut().* = .{ .path_value = next };
                 },
-                .path_value => switch (self.path_materializer.?.borrowMut().advance(1) catch |err| switch (err) {
+                .path_value => |*path| switch (path.materializer.borrowMut().advance(1) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.InvalidUtf8 => return evaluator.fail(.io, "module path is not valid UTF-8"),
                 }) {
                     .pending => {},
                     .complete => |path_value| {
-                        self.path_materializer.?.deinit(
+                        path.materializer.deinit(
                             evaluator.releaseDomain(),
                             evaluator.allocator(),
                         );
-                        self.path_materializer = null;
-                        self.path_value = .init(path_value);
-                        if (self.access_error) |name| {
-                            const failure = evaluator.failFmt(
-                                .io,
-                                "cannot access module file `{s}`: {s}",
-                                .{ self.candidate.?.borrow(), name },
-                            );
-                            evaluator.unit.pendingFailure().addData(.path, path_value);
-                            return failure;
-                        }
-                        self.phase = .transfer;
+                        const next = @FieldType(State, "transfer"){
+                            .loading = .init(path.loading.take()),
+                            .candidate = .init(path.candidate.take()),
+                            .path = .init(path_value),
+                            .disposition = path.disposition,
+                        };
+                        self.state.borrowMut().* = .{ .transfer = next };
                     },
                 },
-                .transfer => {
-                    if (self.embedded) |entry| return self.transferEmbedded(evaluator, entry);
-                    if (self.file_kind == .native) return self.transferNative(evaluator);
-                    const candidate = self.candidate.?.take();
-                    const completion = self.sourceCompletion();
-                    self.candidate = null;
-                    self.loading = null;
-                    self.path_value = null;
-                    evaluator.retireDriver(self);
-                    try evaluator.fileSourceOwned(candidate, null, completion);
-                    return .detached;
+                .transfer => |*transfer| switch (transfer.disposition) {
+                    .fail => |name| {
+                        const failure = evaluator.failFmt(
+                            .io,
+                            "cannot access module file `{s}`: {s}",
+                            .{ transfer.candidate.borrow(), name },
+                        );
+                        evaluator.unit.pendingFailure().addData(.path, transfer.path.borrow());
+                        return failure;
+                    },
+                    .embedded => |entry| return self.transferEmbedded(evaluator, transfer, entry),
+                    .native => return self.transferNative(evaluator, transfer),
+                    .source => {
+                        const candidate = transfer.candidate.take();
+                        const completion = self.sourceCompletion(transfer);
+                        evaluator.retireDriver(self);
+                        try evaluator.fileSourceOwned(candidate, null, completion);
+                        return .detached;
+                    },
                 },
             };
             return .yielded;
@@ -3261,18 +3470,16 @@ pub const Machine = struct {
         fn transferEmbedded(
             self: *AutoLoadDriver,
             evaluator: *Machine,
+            transfer: *@FieldType(State, "transfer"),
             entry: stdlib.Entry,
         ) MachineError!WorkProgress {
             const text = switch (entry) {
                 .source => |source| try evaluator.unit.allocator.dupe(u8, source.text),
-                .native => |descriptor| return self.transferStatic(evaluator, descriptor),
-                .builtin => |words| return self.transferBuiltin(evaluator, words),
+                .native => |descriptor| return self.transferStatic(evaluator, transfer, descriptor),
+                .builtin => |words| return self.transferBuiltin(evaluator, transfer, words),
             };
-            const source_name = self.candidate.?.take();
-            const completion = self.sourceCompletion();
-            self.candidate = null;
-            self.loading = null;
-            self.path_value = null;
+            const source_name = transfer.candidate.take();
+            const completion = self.sourceCompletion(transfer);
             evaluator.retireDriver(self);
             try evaluator.sourceOwned(source_name, text, completion);
             return .detached;
@@ -3280,6 +3487,7 @@ pub const Machine = struct {
         fn transferBuiltin(
             self: *AutoLoadDriver,
             evaluator: *Machine,
+            transfer: *@FieldType(State, "transfer"),
             words: []const env.BuiltinWord,
         ) MachineError!WorkProgress {
             // The candidate is created before ownership moves: struct-literal
@@ -3294,12 +3502,10 @@ pub const Machine = struct {
             const next = BuiltinLoadDriver{
                 .name = self.name,
                 .request = self.request,
-                .loading = .init(self.loading.?.take()),
-                .path = .init(self.path_value.?.take()),
+                .loading = .init(transfer.loading.take()),
+                .path = .init(transfer.path.take()),
                 .publication = .init(publication),
             };
-            self.loading = null;
-            self.path_value = null;
             evaluator.retireDriver(self);
             try evaluator.startDriver(next);
             return .detached;
@@ -3307,6 +3513,7 @@ pub const Machine = struct {
         fn transferStatic(
             self: *AutoLoadDriver,
             evaluator: *Machine,
+            transfer: *@FieldType(State, "transfer"),
             descriptor: *const native_abi.Descriptor,
         ) MachineError!WorkProgress {
             const loader_authority = evaluator.unit.inherited.native_loader orelse
@@ -3314,7 +3521,7 @@ pub const Machine = struct {
             const loader = switch (loader_authority.startStatic(self.name, descriptor)) {
                 .failure => |failure| {
                     const failed = evaluator.fail(.io, failure.text());
-                    evaluator.unit.pendingFailure().addData(.path, self.path_value.?.borrow());
+                    evaluator.unit.pendingFailure().addData(.path, transfer.path.borrow());
                     return failed;
                 },
                 .loading => |loading| loading,
@@ -3322,27 +3529,29 @@ pub const Machine = struct {
             const next = NativeLoadDriver{
                 .name = self.name,
                 .request = self.request,
-                .loading = .init(self.loading.?.take()),
-                .path = .init(self.path_value.?.take()),
+                .loading = .init(transfer.loading.take()),
+                .path = .init(transfer.path.take()),
                 .state = .init(.{ .validate = .init(loader) }),
             };
-            self.loading = null;
-            self.path_value = null;
             evaluator.retireDriver(self);
             try evaluator.startDriver(next);
             return .detached;
         }
-        fn transferNative(self: *AutoLoadDriver, evaluator: *Machine) MachineError!WorkProgress {
+        fn transferNative(
+            self: *AutoLoadDriver,
+            evaluator: *Machine,
+            transfer: *@FieldType(State, "transfer"),
+        ) MachineError!WorkProgress {
             const loader_authority = evaluator.unit.inherited.native_loader orelse
                 return evaluator.fail(.io, "native module loader is unavailable");
             const start = try loader_authority.startDynamic(
                 self.name,
-                self.candidate.?.borrow(),
+                transfer.candidate.borrow(),
             );
             const loader = switch (start) {
                 .failure => |failure| {
                     const failed = evaluator.fail(.io, failure.text());
-                    evaluator.unit.pendingFailure().addData(.path, self.path_value.?.borrow());
+                    evaluator.unit.pendingFailure().addData(.path, transfer.path.borrow());
                     return failed;
                 },
                 .loading => |loading| loading,
@@ -3350,8 +3559,8 @@ pub const Machine = struct {
             const next = NativeLoadDriver{
                 .name = self.name,
                 .request = self.request,
-                .loading = .init(self.loading.?.take()),
-                .path = .init(self.path_value.?.take()),
+                .loading = .init(transfer.loading.take()),
+                .path = .init(transfer.path.take()),
                 .state = .init(.{ .validate = .init(loader) }),
             };
             evaluator.retireDriver(self);
