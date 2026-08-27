@@ -1079,9 +1079,20 @@ test "parse diagnostics preserve source names beyond the inline error budget" {
         .ok, .incomplete => return error.ExpectedParseFailure,
     };
     defer session.release(error_value);
-    const rendered = try printer.toOwnedString(allocator, error_value);
+    const dict = @import("dict.zig");
+    const data_key = try intern.intern("data");
+    const data_value = (try dict.symbolField(allocator, error_value, data_key)).?;
+    const source_key = try intern.intern("source");
+    const source_value = (try dict.symbolField(
+        allocator,
+        data_value,
+        source_key,
+    )).?;
+    const rendered = try printer.toOwnedString(allocator, source_value);
     defer allocator.free(rendered);
-    try std.testing.expect(std.mem.indexOf(u8, rendered, &source_name) != null);
+    const expected = try std.fmt.allocPrint(allocator, "\"{s}\"", .{source_name});
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, rendered);
 }
 test "source-defined failures retain provenance after their unit" {
     const allocator = std.testing.allocator;
