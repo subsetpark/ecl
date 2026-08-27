@@ -502,24 +502,3 @@ pub const LowerCursor = struct {
         };
     }
 };
-
-/// Borrows `body` and returns a newly-owned slice whose heap values each own
-/// one reference. The caller frees the slice and releases those values.
-pub fn lower(
-    host: *const heap.HostCleanup,
-    names: []const Name,
-    body: []const SpannedValue,
-    binder_span: Span,
-    diag: *Diag,
-) Error![]SpannedValue {
-    const allocator = host.allocator();
-    const releases = heap.hostDomain(host);
-    defer host.drain();
-    var cursor = try LowerCursor.init(allocator, releases, names, body, binder_span, diag);
-    defer cursor.deinit();
-    const completed = try poll.driveFallible(Lowered, &cursor, .{});
-    for (completed.forms) |form| heap.retainValue(form.value);
-    var values = completed.values;
-    values.deinit();
-    return completed.forms;
-}

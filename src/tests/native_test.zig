@@ -526,7 +526,7 @@ test "native: the static transport publishes a linked descriptor through the sam
     defer candidate.deinit();
     var candidate_sealed = candidate.seal();
     defer candidate_sealed.deinit();
-    _ = try registry.register(candidate_sealed.ref(), requested);
+    _ = try modules.testing.register(&registry, candidate_sealed.ref(), requested);
     var generation = modules.testing.acquire(&registry, requested).?;
     defer generation.deinit();
     const increment = try intern.internNamespace("increment");

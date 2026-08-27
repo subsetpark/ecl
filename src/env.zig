@@ -632,23 +632,12 @@ pub const EnvironmentView = enum(usize) {
         return self.target().directLookupCursor(id);
     }
 
-    pub fn resolveDirect(self: EnvironmentView, id: u32) ?BindingLease {
-        return self.target().resolveDirect(id);
-    }
-
     /// How many times this environment published a new *shape* — a name was
     /// created or removed. Rebinding an existing name replaces its cell in
     /// place and deliberately does not bump this, so it is not a mutation
     /// counter and must not be read as one.
     pub fn shapeGeneration(self: EnvironmentView) u64 {
         return self.target().shapeGeneration();
-    }
-
-    pub fn namesOwned(
-        self: EnvironmentView,
-        allocator: std.mem.Allocator,
-    ) error{OutOfMemory}![]u32 {
-        return self.target().namesOwned(allocator);
     }
 };
 comptime {
@@ -1098,11 +1087,6 @@ pub const Environment = struct {
         return .init(self, name);
     }
 
-    pub fn resolveDirect(self: *const Environment, id: u32) ?BindingLease {
-        var cursor = self.directLookupCursor(id);
-        defer cursor.deinit();
-        return poll.drive(?BindingLease, &cursor, .{});
-    }
     /// The mutation authority for a module image's own environment. An image
     /// owns this environment outright, so it publishes and freezes directly
     /// rather than routing through the scope it also owns.
@@ -1111,28 +1095,6 @@ pub const Environment = struct {
     }
     pub fn shapeGeneration(self: *const Environment) u64 {
         return self.shape_generation.load(.acquire);
-    }
-    pub fn namesOwned(
-        self: *const Environment,
-        allocator: std.mem.Allocator,
-    ) error{OutOfMemory}![]u32 {
-        var cursor = self.nameCursor();
-        defer cursor.deinit();
-        const result = try allocator.alloc(u32, cursor.shape.nameCount());
-        errdefer allocator.free(result);
-        var index: usize = 0;
-        while (true) switch (cursor.advance()) {
-            .pending => {},
-            .complete => break,
-            .item => |entry| {
-                var lease = entry.lease;
-                lease.deinit();
-                result[index] = entry.name;
-                index += 1;
-            },
-        };
-        std.debug.assert(index == result.len);
-        return result;
     }
     fn freeze(self: *Environment) void {
         self.lockBlocking();

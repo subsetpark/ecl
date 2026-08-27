@@ -3304,30 +3304,6 @@ pub const Registry = enum(usize) {
         };
     }
 
-    /// Publishes one borrowed image under `name`. The borrow need only be valid
-    /// for this call: the cursor retains its own reference, and a successful
-    /// registration holds a third, independent one.
-    pub fn register(
-        self: *Registry,
-        image: ImageRef,
-        name: intern.ModuleName,
-    ) CommitError!u64 {
-        var authority: TurnAuthority = .available;
-        var cursor = self.registrationCursor(image, name, &authority);
-        defer cursor.deinit();
-        return poll.driveFallible(u64, &cursor, .{});
-    }
-
-    pub fn alias(
-        self: *Registry,
-        short: intern.BindingName,
-        target: intern.ModuleName,
-    ) AliasError!void {
-        var cursor = self.aliasCursor(short, target);
-        defer cursor.deinit();
-        return poll.driveVoidFallible(&cursor, .{});
-    }
-
     pub const BeginLoadingProgress = poll.Progress(LoadingOutcome);
     pub const BeginLoadingCursor = struct {
         registry: *Registry,
@@ -3477,5 +3453,26 @@ pub const testing = if (builtin.is_test) struct {
         var cursor = registry.acquireCursor(name);
         defer cursor.deinit();
         return poll.drive(?GenerationLease, &cursor, .{});
+    }
+
+    pub fn register(
+        registry: *Registry,
+        image: ImageRef,
+        name: intern.ModuleName,
+    ) CommitError!u64 {
+        var authority: TurnAuthority = .available;
+        var cursor = registry.registrationCursor(image, name, &authority);
+        defer cursor.deinit();
+        return poll.driveFallible(u64, &cursor, .{});
+    }
+
+    pub fn alias(
+        registry: *Registry,
+        short: intern.BindingName,
+        target: intern.ModuleName,
+    ) AliasError!void {
+        var cursor = registry.aliasCursor(short, target);
+        defer cursor.deinit();
+        return poll.driveVoidFallible(&cursor, .{});
     }
 } else struct {};

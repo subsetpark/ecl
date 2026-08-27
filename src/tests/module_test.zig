@@ -62,6 +62,31 @@ fn unpublish(scope: *env.Scope, name: intern.NamespaceName) env.BindError!bool {
     };
 }
 
+fn resolveDirect(environment: anytype, id: u32) ?env.BindingLease {
+    var cursor = environment.directLookupCursor(id);
+    defer cursor.deinit();
+    while (true) switch (cursor.advance()) {
+        .pending => {},
+        .complete => |lease| return lease,
+    };
+}
+
+fn namesOwned(environment: anytype, allocator: std.mem.Allocator) ![]u32 {
+    var cursor = environment.nameCursor();
+    defer cursor.deinit();
+    var names: std.ArrayList(u32) = .empty;
+    errdefer names.deinit(allocator);
+    while (true) switch (cursor.advance()) {
+        .pending => {},
+        .complete => return names.toOwnedSlice(allocator),
+        .item => |entry| {
+            var lease = entry.lease;
+            lease.deinit();
+            try names.append(allocator, entry.name);
+        },
+    };
+}
+
 fn errorField(allocator: std.mem.Allocator, error_value: value.Value, name: []const u8) !?value.Value {
     return dict.symbolField(allocator, error_value, try intern.intern(name));
 }
@@ -137,7 +162,7 @@ fn commitEmptyModule(registry: *modules.Registry, name: intern.ModuleName) !void
     defer candidate.deinit();
     var sealed = candidate.seal();
     defer sealed.deinit();
-    _ = try registry.register(sealed.ref(), name);
+    _ = try modules.testing.register(registry, sealed.ref(), name);
 }
 
 test "module names: branded factories enforce the reader symbol grammar" {
@@ -238,7 +263,7 @@ test "env: creating and removing names bump the shape generation and rebinding d
     try std.testing.expectEqual(@as(u64, 3), environment.shapeGeneration());
     try std.testing.expect(!(try unpublish(&scope, first)));
     try std.testing.expectEqual(@as(u64, 3), environment.shapeGeneration());
-    const names = try environment.namesOwned(std.testing.allocator);
+    const names = try namesOwned(&environment, std.testing.allocator);
     defer std.testing.allocator.free(names);
     std.mem.sort(u32, names, {}, std.sort.asc(u32));
     var expected = [_]u32{intern.namespaceId(second)};
@@ -408,7 +433,8 @@ fn envWorker(context: EnvThreadContext) void {
             context.failed.store(true, .release);
             return;
         };
-        var lease = (context.environment.resolveDirect(
+        var lease = (resolveDirect(
+            context.environment,
             intern.namespaceId(context.name),
         )) orelse {
             context.failed.store(true, .release);
@@ -655,7 +681,7 @@ test "env: concurrent readers writers and retirement reclaim production snapshot
     writer_thread.join();
     reclaimer_thread.join();
     try std.testing.expect(!failed.load(.acquire));
-    var current = container.sessionView().resolveDirect(intern.namespaceId(name)).?;
+    var current = resolveDirect(container.sessionView(), intern.namespaceId(name)).?;
     defer current.deinit();
     try std.testing.expectEqual(env.quotation(binding.body.list).?, current.binding.word);
 }
@@ -717,9 +743,10 @@ test "environment and registry retirement stays bounded after a delayed reader d
         // that history; the shared domain reclaims it one record per turn.
         try commitEmptyModule(&registry, module_name);
         try commitEmptyModule(&registry, alternate_module);
-        try registry.alias(alias_name, module_name);
+        try modules.testing.alias(&registry, alias_name, module_name);
         var delayed_directory = registry.acquireCursor(module_name);
-        for (0..512) |index| try registry.alias(
+        for (0..512) |index| try modules.testing.alias(
+            &registry,
             alias_name,
             if (index & 1 == 0) alternate_module else module_name,
         );
@@ -740,7 +767,8 @@ test "environment and registry retirement stays bounded after a delayed reader d
             try std.testing.expect(try unpublish(&scope, binding_name));
             _ = try scope.publisher().top.publish(binding_name, binding.top());
             try commitEmptyModule(&registry, module_name);
-            try registry.alias(
+            try modules.testing.alias(
+                &registry,
                 alias_name,
                 if (index & 1 == 0) module_name else alternate_module,
             );
@@ -757,7 +785,8 @@ test "environment and registry retirement stays bounded after a delayed reader d
             try std.testing.expect(try unpublish(&scope, binding_name));
             _ = try scope.publisher().top.publish(binding_name, binding.top());
             try commitEmptyModule(&registry, module_name);
-            try registry.alias(
+            try modules.testing.alias(
+                &registry,
                 alias_name,
                 if (index & 1 == 0) module_name else alternate_module,
             );
@@ -865,7 +894,7 @@ test "env: a replaced interior remains valid only through its binding lease" {
         .effect = effect,
         .doc = env.documentation(document.list).?,
     } });
-    var old = (environment.sessionView().resolveDirect(intern.namespaceId(name))).?;
+    var old = resolveDirect(environment.sessionView(), intern.namespaceId(name)).?;
     // The replacement deliberately shares nothing with the original body, so
     // the old lease is the only thing still holding it.
     const replacement = try TestBinding.init(std.testing.allocator);
@@ -890,7 +919,7 @@ fn commitCandidate(context: RegistryThreadContext, name: intern.ModuleName) bool
     defer candidate.deinit();
     var sealed = candidate.seal();
     defer sealed.deinit();
-    _ = context.registry.register(sealed.ref(), name) catch return false;
+    _ = modules.testing.register(context.registry, sealed.ref(), name) catch return false;
     return true;
 }
 
@@ -979,13 +1008,13 @@ test "registry: old generation leases survive reload and reclaim after release" 
     } });
     var first_sealed = first.seal();
     defer first_sealed.deinit();
-    _ = try registry.register(first_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, first_sealed.ref(), module_name);
     var old = modules.testing.acquire(&registry, module_name).?;
     var second = try registry.createImage();
     defer second.deinit();
     var second_sealed = second.seal();
     defer second_sealed.deinit();
-    _ = try registry.register(second_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, second_sealed.ref(), module_name);
     try std.testing.expectEqual(@as(u64, 1), old.generationNumber());
     try std.testing.expectEqual(@as(u32, 2), heap.refCount(body.list));
     old.deinit();
@@ -1021,7 +1050,7 @@ test "registry: generation cursors independently pin their snapshot" {
     _ = try first.publishDefinition(value_name, binding.module(effect.effect, .public));
     var first_sealed = first.seal();
     defer first_sealed.deinit();
-    _ = try registry.register(first_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, first_sealed.ref(), module_name);
 
     var lease = modules.testing.acquire(&registry, module_name).?;
     var lookup = lease.resolveCursor(intern.namespaceId(value_name));
@@ -1031,7 +1060,7 @@ test "registry: generation cursors independently pin their snapshot" {
     defer second.deinit();
     var second_sealed = second.seal();
     defer second_sealed.deinit();
-    _ = try registry.register(second_sealed.ref(), module_name);
+    _ = try modules.testing.register(&registry, second_sealed.ref(), module_name);
     for (0..64) |_| _ = releases.advance(1);
 
     const old = while (true) switch (lookup.advance()) {
@@ -1111,12 +1140,12 @@ fn environmentAllocationProbe(allocator: std.mem.Allocator) !void {
     _ = try scope.publisher().top.publish(first, .{ .word = .{
         .body = env.quotation(body.list).?,
     } });
-    var lease = (environment.sessionView().resolveDirect(intern.namespaceId(first))).?;
+    var lease = resolveDirect(environment.sessionView(), intern.namespaceId(first)).?;
     defer lease.deinit();
     _ = try scope.publisher().top.publish(first, .{ .word = .{ .body = env.quotation(body.list).? } });
     _ = try scope.publisher().top.publish(second, .{ .word = .{ .body = env.quotation(body.list).? } });
     _ = try scope.publisher().top.publish(third, .{ .word = .{ .body = env.quotation(body.list).? } });
-    const names = try environment.sessionView().namesOwned(allocator);
+    const names = try namesOwned(environment.sessionView(), allocator);
     allocator.free(names);
 }
 
@@ -1157,8 +1186,8 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var first_sealed = first.seal();
     defer first_sealed.deinit();
-    _ = try registry.register(first_sealed.ref(), first_name);
-    try registry.alias(alias_name, first_name);
+    _ = try modules.testing.register(&registry, first_sealed.ref(), first_name);
+    try modules.testing.alias(&registry, alias_name, first_name);
     var lease = modules.testing.acquire(&registry, try intern.internModuleName("allocation-alias")).?;
     defer lease.deinit();
     var second = try registry.createImage();
@@ -1171,7 +1200,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     } });
     var second_sealed = second.seal();
     defer second_sealed.deinit();
-    _ = try registry.register(second_sealed.ref(), first_name);
+    _ = try modules.testing.register(&registry, second_sealed.ref(), first_name);
     var third = try registry.createImage();
     defer third.deinit();
     const constant = try TestBinding.init(allocator);
@@ -1179,7 +1208,7 @@ fn registryAllocationProbe(allocator: std.mem.Allocator) !void {
     _ = try third.publishDefinition(word_name, constant.module(effect, .public));
     var third_sealed = third.seal();
     defer third_sealed.deinit();
-    _ = try registry.register(third_sealed.ref(), second_name);
+    _ = try modules.testing.register(&registry, third_sealed.ref(), second_name);
 }
 
 test "environment and registry APIs propagate every allocation failure" {

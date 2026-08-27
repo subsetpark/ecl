@@ -41,7 +41,14 @@ test "empty binder lowering rejects before acquiring storage" {
 
     try std.testing.expectError(
         error.Parse,
-        binder.lower(host.cleanup(), &.{}, &.{}, .{}, &diag),
+        binder.LowerCursor.init(
+            std.testing.allocator,
+            host.domain(),
+            &.{},
+            &.{},
+            .{},
+            &diag,
+        ),
     );
     try std.testing.expectEqualStrings("a binder must contain at least one name", diag.text());
 }
