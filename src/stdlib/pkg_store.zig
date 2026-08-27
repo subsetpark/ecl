@@ -98,9 +98,11 @@ fn startSealDriver(evaluator: *Machine, mode: SealMode) MachineError!void {
         .destination_value = .init(destination_value.take()),
         .package_value = .init(package_value.take()),
         .hash_value = .init(hash_value.take()),
-        .destination_encoder = .init(destination_encoder),
-        .package_encoder = .init(package_encoder),
-        .hash_encoder = .init(hash_encoder),
+        .state = .{ .encode_destination = .{
+            .destination = .init(destination_encoder),
+            .package = .init(package_encoder),
+            .hash = .init(hash_encoder),
+        } },
         // SAFETY: each hashed slice is fully initialized by readPositionalAll before use.
         .buffer = undefined,
     });
@@ -116,40 +118,133 @@ const VerifyDriver = struct {
     destination_value: heap.Owned(Value),
     package_value: heap.Owned(Value),
     hash_value: heap.Owned(Value),
-    destination_encoder: heap.Owned(storage.ToUtf8Cursor),
-    package_encoder: heap.Owned(storage.ToUtf8Cursor),
-    hash_encoder: heap.Owned(storage.ToUtf8Cursor),
-    destination: ?heap.Owned([]u8) = null,
-    package: ?heap.Owned([]u8) = null,
-    hash: ?heap.Owned([]u8) = null,
-    seal_path: ?heap.Owned([]u8) = null,
-    file: ?std.Io.File = null,
-    size: u64 = 0,
-    offset: u64 = 0,
-    contents: ?heap.Owned([]u8) = null,
-    materializer: ?heap.Owned(storage.ByteListMaterializer) = null,
+    state: State,
     buffer: [work_quantum]u8,
     hasher: std.crypto.hash.sha2.Sha256 = .init(.{}),
     digest: [32]u8 = @splat(0),
     rendered: [64]u8 = @splat(0),
-    phase: enum { encode_destination, encode_package, encode_hash, open, stat, read, compare, materialize } = .encode_destination,
+    const Paths = struct {
+        destination: heap.Owned([]u8),
+        package: heap.Owned([]u8),
+        hash: heap.Owned([]u8),
+        seal: heap.Owned([]u8),
+
+        fn deinit(self: *Paths, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
+            self.seal.deinit(releases, allocator);
+            self.hash.deinit(releases, allocator);
+            self.package.deinit(releases, allocator);
+            self.destination.deinit(releases, allocator);
+        }
+    };
+    const State = union(enum) {
+        encode_destination: struct {
+            destination: heap.Owned(storage.ToUtf8Cursor),
+            package: heap.Owned(storage.ToUtf8Cursor),
+            hash: heap.Owned(storage.ToUtf8Cursor),
+        },
+        encode_package: struct {
+            destination: heap.Owned([]u8),
+            package: heap.Owned(storage.ToUtf8Cursor),
+            hash: heap.Owned(storage.ToUtf8Cursor),
+        },
+        encode_hash: struct {
+            destination: heap.Owned([]u8),
+            package: heap.Owned([]u8),
+            hash: heap.Owned(storage.ToUtf8Cursor),
+        },
+        prepare_open: struct {
+            destination: heap.Owned([]u8),
+            package: heap.Owned([]u8),
+            hash: heap.Owned([]u8),
+        },
+        open: Paths,
+        stat: struct { paths: Paths, file: std.Io.File },
+        read: struct {
+            paths: Paths,
+            file: std.Io.File,
+            size: u64,
+            offset: u64,
+            contents: ?heap.Owned([]u8),
+        },
+        compare: struct { paths: Paths, contents: ?heap.Owned([]u8) },
+        materialize: struct {
+            paths: Paths,
+            contents: heap.Owned([]u8),
+            materializer: heap.Owned(storage.ByteListMaterializer),
+        },
+        complete: struct { paths: Paths, contents: heap.Owned([]u8) },
+
+        fn deinit(self: *State, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator, io: std.Io) void {
+            switch (self.*) {
+                .encode_destination => |*encode| {
+                    encode.hash.deinit(releases, allocator);
+                    encode.package.deinit(releases, allocator);
+                    encode.destination.deinit(releases, allocator);
+                },
+                .encode_package => |*encode| {
+                    encode.hash.deinit(releases, allocator);
+                    encode.package.deinit(releases, allocator);
+                    encode.destination.deinit(releases, allocator);
+                },
+                .encode_hash => |*encode| {
+                    encode.hash.deinit(releases, allocator);
+                    encode.package.deinit(releases, allocator);
+                    encode.destination.deinit(releases, allocator);
+                },
+                .prepare_open => |*prepare| {
+                    prepare.hash.deinit(releases, allocator);
+                    prepare.package.deinit(releases, allocator);
+                    prepare.destination.deinit(releases, allocator);
+                },
+                .open => |*paths| paths.deinit(releases, allocator),
+                .stat => |*stat_state| {
+                    stat_state.file.close(io);
+                    stat_state.paths.deinit(releases, allocator);
+                },
+                .read => |*read_state| {
+                    read_state.file.close(io);
+                    if (read_state.contents) |*contents| contents.deinit(releases, allocator);
+                    read_state.paths.deinit(releases, allocator);
+                },
+                .compare => |*compare_state| {
+                    if (compare_state.contents) |*contents| contents.deinit(releases, allocator);
+                    compare_state.paths.deinit(releases, allocator);
+                },
+                .materialize => |*materialize_state| {
+                    materialize_state.materializer.deinit(releases, allocator);
+                    materialize_state.contents.deinit(releases, allocator);
+                    materialize_state.paths.deinit(releases, allocator);
+                },
+                .complete => |*complete| {
+                    complete.contents.deinit(releases, allocator);
+                    complete.paths.deinit(releases, allocator);
+                },
+            }
+        }
+    };
 
     pub fn advance(evaluator: *Machine, self: *VerifyDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.phase) {
-            .encode_destination => self.encodeDestination(evaluator),
-            .encode_package => self.encodePackage(evaluator),
-            .encode_hash => self.encodeHash(evaluator),
-            .open => self.open(evaluator),
-            .stat => self.stat(evaluator),
-            .read => self.read(evaluator),
-            .compare => self.compare(evaluator),
-            .materialize => self.materialize(evaluator),
+        return switch (self.state) {
+            .encode_destination => |*encode| self.encodeDestination(evaluator, encode),
+            .encode_package => |*encode| self.encodePackage(evaluator, encode),
+            .encode_hash => |*encode| self.encodeHash(evaluator, encode),
+            .prepare_open => |*prepare| self.prepareOpen(prepare),
+            .open => |*paths| self.open(evaluator, paths),
+            .stat => |*stat_state| self.stat(evaluator, stat_state),
+            .read => |*read_state| self.read(evaluator, read_state),
+            .compare => |*compare_state| self.compare(evaluator, compare_state),
+            .materialize => |*materialize_state| self.materialize(evaluator, materialize_state),
+            .complete => unreachable,
         };
     }
 
-    fn encodeDestination(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        switch (self.destination_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+    fn encodeDestination(
+        self: *VerifyDriver,
+        evaluator: *Machine,
+        encode: *@FieldType(State, "encode_destination"),
+    ) MachineError!machine.WorkProgress {
+        switch (encode.destination.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failDomain(evaluator, "package destination contains an invalid Unicode scalar"),
         }) {
@@ -159,15 +254,25 @@ const VerifyDriver = struct {
                     self.allocator.free(destination);
                     return self.failDomain(evaluator, "package destination is empty");
                 }
-                self.destination = .init(destination);
-                self.phase = .encode_package;
+                const package_encoder = encode.package.take();
+                const hash_encoder = encode.hash.take();
+                encode.destination.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.state = .{ .encode_package = .{
+                    .destination = .init(destination),
+                    .package = .init(package_encoder),
+                    .hash = .init(hash_encoder),
+                } };
                 return .yielded;
             },
         }
     }
 
-    fn encodePackage(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        switch (self.package_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+    fn encodePackage(
+        self: *VerifyDriver,
+        evaluator: *Machine,
+        encode: *@FieldType(State, "encode_package"),
+    ) MachineError!machine.WorkProgress {
+        switch (encode.package.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failDomain(evaluator, "package name contains an invalid Unicode scalar"),
         }) {
@@ -177,15 +282,25 @@ const VerifyDriver = struct {
                     self.allocator.free(package);
                     return self.failDomain(evaluator, "package name is empty");
                 }
-                self.package = .init(package);
-                self.phase = .encode_hash;
+                const destination = encode.destination.take();
+                const hash_encoder = encode.hash.take();
+                encode.package.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.state = .{ .encode_hash = .{
+                    .destination = .init(destination),
+                    .package = .init(package),
+                    .hash = .init(hash_encoder),
+                } };
                 return .yielded;
             },
         }
     }
 
-    fn encodeHash(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        switch (self.hash_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+    fn encodeHash(
+        self: *VerifyDriver,
+        evaluator: *Machine,
+        encode: *@FieldType(State, "encode_hash"),
+    ) MachineError!machine.WorkProgress {
+        switch (encode.hash.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failDomain(evaluator, "package hash contains an invalid Unicode scalar"),
         }) {
@@ -195,77 +310,145 @@ const VerifyDriver = struct {
                     self.allocator.free(hash);
                     return self.failDomain(evaluator, "a package hash is sha256- and 64 lowercase hex digits");
                 }
-                self.hash = .init(hash);
-                self.seal_path = .init(try std.fs.path.join(self.allocator, &.{
-                    self.destination.?.borrow(),
-                    archive.package_seal_name,
-                }));
-                self.phase = .open;
+                const destination = encode.destination.take();
+                const package = encode.package.take();
+                encode.hash.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.state = .{ .prepare_open = .{
+                    .destination = .init(destination),
+                    .package = .init(package),
+                    .hash = .init(hash),
+                } };
                 return .yielded;
             },
         }
     }
 
-    fn open(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        self.file = std.Io.Dir.cwd().openFile(self.io, self.seal_path.?.borrow(), .{}) catch |err|
-            return self.failIo(evaluator, "cannot open installed package archive seal", err);
-        self.phase = .stat;
+    fn prepareOpen(
+        self: *VerifyDriver,
+        prepare: *@FieldType(State, "prepare_open"),
+    ) error{OutOfMemory}!machine.WorkProgress {
+        const seal = try std.fs.path.join(self.allocator, &.{
+            prepare.destination.borrow(),
+            archive.package_seal_name,
+        });
+        self.state = .{ .open = .{
+            .destination = .init(prepare.destination.take()),
+            .package = .init(prepare.package.take()),
+            .hash = .init(prepare.hash.take()),
+            .seal = .init(seal),
+        } };
         return .yielded;
     }
 
-    fn stat(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const info = self.file.?.stat(self.io) catch |err|
+    fn open(
+        self: *VerifyDriver,
+        evaluator: *Machine,
+        paths: *Paths,
+    ) MachineError!machine.WorkProgress {
+        const file = std.Io.Dir.cwd().openFile(self.io, paths.seal.borrow(), .{}) catch |err|
+            return self.failIo(evaluator, "cannot open installed package archive seal", err);
+        const moved_paths = paths.*;
+        self.state = .{ .stat = .{ .paths = moved_paths, .file = file } };
+        return .yielded;
+    }
+
+    fn stat(
+        self: *VerifyDriver,
+        evaluator: *Machine,
+        stat_state: *@FieldType(State, "stat"),
+    ) MachineError!machine.WorkProgress {
+        const info = stat_state.file.stat(self.io) catch |err|
             return self.failIo(evaluator, "cannot inspect installed package archive seal", err);
-        self.size = info.size;
-        if (self.mode == .read) {
+        const contents: ?heap.Owned([]u8) = if (self.mode == .read) contents: {
             const length = std.math.cast(usize, info.size) orelse
                 return self.failIoName(evaluator, "installed package archive seal is too large to materialize");
-            self.contents = .init(try self.allocator.alloc(u8, length));
-        }
-        self.phase = .read;
+            break :contents .init(try self.allocator.alloc(u8, length));
+        } else null;
+        const paths = stat_state.paths;
+        const file = stat_state.file;
+        self.state = .{ .read = .{
+            .paths = paths,
+            .file = file,
+            .size = info.size,
+            .offset = 0,
+            .contents = contents,
+        } };
         return .yielded;
     }
 
-    fn read(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        if (self.offset == self.size) {
-            self.file.?.close(self.io);
-            self.file = null;
+    fn read(
+        self: *VerifyDriver,
+        evaluator: *Machine,
+        read_state: *@FieldType(State, "read"),
+    ) MachineError!machine.WorkProgress {
+        if (read_state.offset == read_state.size) {
+            const paths = read_state.paths;
+            const contents = read_state.contents;
+            read_state.file.close(self.io);
             self.hasher.final(&self.digest);
             self.rendered = std.fmt.bytesToHex(self.digest, .lower);
-            self.phase = .compare;
+            self.state = .{ .compare = .{
+                .paths = paths,
+                .contents = contents,
+            } };
             return .yielded;
         }
-        const amount: usize = @intCast(@min(@as(u64, work_quantum), self.size - self.offset));
-        const target = if (self.contents) |contents|
-            contents.borrow()[@intCast(self.offset)..][0..amount]
+        const amount: usize = @intCast(@min(@as(u64, work_quantum), read_state.size - read_state.offset));
+        const target = if (read_state.contents) |contents|
+            contents.borrow()[@intCast(read_state.offset)..][0..amount]
         else
             self.buffer[0..amount];
-        const read_amount = self.file.?.readPositionalAll(self.io, target, self.offset) catch |err|
+        const read_amount = read_state.file.readPositionalAll(self.io, target, read_state.offset) catch |err|
             return self.failIo(evaluator, "cannot read installed package archive seal", err);
         if (read_amount != amount)
             return self.failIoName(evaluator, "installed package archive seal changed while being read");
         self.hasher.update(target);
-        self.offset += amount;
+        read_state.offset += amount;
         return .yielded;
     }
 
-    fn compare(self: *VerifyDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        if (!std.mem.eql(u8, self.hash.?.borrow()[7..], &self.rendered))
+    fn compare(
+        self: *VerifyDriver,
+        evaluator: *Machine,
+        compare_state: *@FieldType(State, "compare"),
+    ) MachineError!machine.WorkProgress {
+        if (!std.mem.eql(u8, compare_state.paths.hash.borrow()[7..], &self.rendered))
             return evaluator.failFmt(
                 .domain,
                 "package `{s}` archive seal does not match lock hash",
-                .{self.package.?.borrow()},
+                .{compare_state.paths.package.borrow()},
             );
         if (self.mode == .verify) return .completed;
-        self.materializer = .init(.init(self.allocator, self.contents.?.borrow()));
-        self.phase = .materialize;
+        const paths = compare_state.paths;
+        const contents = compare_state.contents.?.take();
+        self.state = .{ .materialize = .{
+            .paths = paths,
+            .contents = .init(contents),
+            .materializer = .init(.init(self.allocator, contents)),
+        } };
         return .yielded;
     }
 
-    fn materialize(self: *VerifyDriver, _: *Machine) MachineError!machine.WorkProgress {
-        return switch (try self.materializer.?.borrowMut().advance(work_quantum)) {
+    fn materialize(
+        self: *VerifyDriver,
+        evaluator: *Machine,
+        materialize_state: *@FieldType(State, "materialize"),
+    ) MachineError!machine.WorkProgress {
+        return switch (try materialize_state.materializer.borrowMut().advance(work_quantum)) {
             .pending => .yielded,
-            .complete => |result| .{ .output = result },
+            .complete => |result| complete: {
+                const paths = materialize_state.paths;
+                const contents = materialize_state.contents.take();
+                materialize_state.materializer.deinit(
+                    evaluator.releaseDomain(),
+                    evaluator.allocator(),
+                );
+                self.state = .{ .complete = .{
+                    .paths = paths,
+                    .contents = .init(contents),
+                } };
+                break :complete .{ .output = result };
+            },
         };
     }
 
@@ -278,16 +461,30 @@ const VerifyDriver = struct {
         const failure = evaluator.failFmt(
             .io,
             "{s} for package `{s}`: {s}",
-            .{ message, self.package.?.borrow(), @errorName(err) },
+            .{ message, self.packageBytes(), @errorName(err) },
         );
         evaluator.addErrorPath(self.destination_value.borrow());
         return failure;
     }
 
     fn failIoName(self: *VerifyDriver, evaluator: *Machine, message: []const u8) MachineError {
-        const failure = evaluator.failFmt(.io, "{s} for package `{s}`", .{ message, self.package.?.borrow() });
+        const failure = evaluator.failFmt(.io, "{s} for package `{s}`", .{ message, self.packageBytes() });
         evaluator.addErrorPath(self.destination_value.borrow());
         return failure;
+    }
+
+    fn packageBytes(self: *VerifyDriver) []const u8 {
+        return switch (self.state) {
+            .encode_hash => |*encode| encode.package.borrow(),
+            .prepare_open => |*prepare| prepare.package.borrow(),
+            .open => |*paths| paths.package.borrow(),
+            .stat => |*stat_state| stat_state.paths.package.borrow(),
+            .read => |*read_state| read_state.paths.package.borrow(),
+            .compare => |*compare_state| compare_state.paths.package.borrow(),
+            .materialize => |*materialize_state| materialize_state.paths.package.borrow(),
+            .complete => |*complete| complete.paths.package.borrow(),
+            .encode_destination, .encode_package => unreachable,
+        };
     }
 
     pub fn advanceRetirement(
@@ -295,16 +492,7 @@ const VerifyDriver = struct {
         allocator: std.mem.Allocator,
         self: *VerifyDriver,
     ) bool {
-        if (self.file) |file| file.close(self.io);
-        if (self.materializer) |*materializer| materializer.deinit(releases, allocator);
-        if (self.contents) |*contents| contents.deinit(releases, allocator);
-        if (self.seal_path) |*path| path.deinit(releases, allocator);
-        if (self.hash) |*hash| hash.deinit(releases, allocator);
-        if (self.package) |*package| package.deinit(releases, allocator);
-        if (self.destination) |*destination| destination.deinit(releases, allocator);
-        self.hash_encoder.deinit(releases, allocator);
-        self.package_encoder.deinit(releases, allocator);
-        self.destination_encoder.deinit(releases, allocator);
+        self.state.deinit(releases, allocator, self.io);
         self.hash_value.deinit(releases, allocator);
         self.package_value.deinit(releases, allocator);
         self.destination_value.deinit(releases, allocator);
