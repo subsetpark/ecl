@@ -3333,61 +3333,109 @@ pub const Registry = enum(usize) {
         registry: *Registry,
         name: intern.ModuleName,
         owner: LoadingOwner,
-        observed_head: ?*LoadingNode,
-        cursor: ?*LoadingNode,
-        reservation: ?*LoadingNode = null,
-        phase: enum { scan, reserve, commit, complete } = .scan,
+        state: State,
+
+        const Scan = struct {
+            observed_head: ?*LoadingNode,
+            cursor: ?*LoadingNode,
+        };
+        const State = union(enum) {
+            scan: Scan,
+            reserve: ?*LoadingNode,
+            scan_reserved: struct {
+                scan: Scan,
+                reservation: *LoadingNode,
+            },
+            commit: struct {
+                observed_head: ?*LoadingNode,
+                reservation: *LoadingNode,
+            },
+            complete,
+        };
 
         pub fn deinit(self: *BeginLoadingCursor) void {
-            if (self.reservation) |node| self.registry.allocator().destroy(node);
+            switch (self.state) {
+                .scan_reserved => |reserved| self.registry.allocator().destroy(reserved.reservation),
+                .commit => |commit| self.registry.allocator().destroy(commit.reservation),
+                .scan, .reserve, .complete => {},
+            }
             self.* = undefined;
         }
 
-        fn completeExisting(self: *BeginLoadingCursor, result: LoadingOutcome) BeginLoadingProgress {
-            if (self.reservation) |node| self.registry.allocator().destroy(node);
-            self.reservation = null;
-            self.phase = .complete;
+        fn completeExisting(
+            self: *BeginLoadingCursor,
+            reservation: ?*LoadingNode,
+            result: LoadingOutcome,
+        ) BeginLoadingProgress {
+            if (reservation) |node| self.registry.allocator().destroy(node);
+            self.state = .complete;
             return .{ .complete = result };
         }
 
+        fn inspectNode(
+            self: *BeginLoadingCursor,
+            node: *LoadingNode,
+            reservation: ?*LoadingNode,
+        ) ?BeginLoadingProgress {
+            if (node.name != self.name) return null;
+            const held = node.owner.cmpxchgStrong(
+                free_loading_owner,
+                self.owner.token(),
+                .acq_rel,
+                .acquire,
+            ) orelse return self.completeExisting(reservation, .{ .granted = .init(node) });
+            if (held == self.owner.token())
+                return self.completeExisting(reservation, .cycle);
+            return self.completeExisting(reservation, .contended);
+        }
+
         pub fn advance(self: *BeginLoadingCursor) error{OutOfMemory}!BeginLoadingProgress {
-            return switch (self.phase) {
-                .scan => result: {
-                    const node = self.cursor orelse {
-                        self.phase = if (self.reservation == null) .reserve else .commit;
+            return switch (self.state) {
+                .scan => |*scan| result: {
+                    const node = scan.cursor orelse {
+                        const observed_head = scan.observed_head;
+                        self.state = .{ .reserve = observed_head };
                         break :result .pending;
                     };
-                    self.cursor = node.next;
-                    if (node.name == self.name) {
-                        const held = node.owner.cmpxchgStrong(
-                            free_loading_owner,
-                            self.owner.token(),
-                            .acq_rel,
-                            .acquire,
-                        ) orelse break :result self.completeExisting(.{ .granted = .init(node) });
-                        if (held == self.owner.token())
-                            break :result self.completeExisting(.cycle);
-                        break :result self.completeExisting(.contended);
-                    }
+                    scan.cursor = node.next;
+                    if (self.inspectNode(node, null)) |complete| break :result complete;
                     break :result .pending;
                 },
-                .reserve => result: {
-                    self.reservation = try self.registry.allocator().create(LoadingNode);
-                    self.phase = .commit;
+                .reserve => |observed_head| result: {
+                    const reservation = try self.registry.allocator().create(LoadingNode);
+                    self.state = .{ .commit = .{
+                        .observed_head = observed_head,
+                        .reservation = reservation,
+                    } };
                     break :result .pending;
                 },
-                .commit => result: {
+                .scan_reserved => |*reserved| result: {
+                    const node = reserved.scan.cursor orelse {
+                        const observed_head = reserved.scan.observed_head;
+                        const reservation = reserved.reservation;
+                        self.state = .{ .commit = .{
+                            .observed_head = observed_head,
+                            .reservation = reservation,
+                        } };
+                        break :result .pending;
+                    };
+                    reserved.scan.cursor = node.next;
+                    if (self.inspectNode(node, reserved.reservation)) |complete|
+                        break :result complete;
+                    break :result .pending;
+                },
+                .commit => |commit| result: {
                     self.registry.lockBlocking();
                     defer self.registry.unlock();
                     const current = self.registry.privateState().loading.load(.acquire);
-                    if (current != self.observed_head) {
-                        self.observed_head = current;
-                        self.cursor = current;
-                        self.phase = .scan;
+                    if (current != commit.observed_head) {
+                        self.state = .{ .scan_reserved = .{
+                            .scan = .{ .observed_head = current, .cursor = current },
+                            .reservation = commit.reservation,
+                        } };
                         break :result .pending;
                     }
-                    const node = self.reservation.?;
-                    self.reservation = null;
+                    const node = commit.reservation;
                     node.* = .{
                         .registry = self.registry,
                         .name = self.name,
@@ -3395,7 +3443,7 @@ pub const Registry = enum(usize) {
                         .next = current,
                     };
                     self.registry.privateState().loading.store(node, .release);
-                    self.phase = .complete;
+                    self.state = .complete;
                     break :result .{ .complete = .{ .granted = .init(node) } };
                 },
                 .complete => unreachable,
@@ -3412,8 +3460,7 @@ pub const Registry = enum(usize) {
             .registry = self,
             .name = name,
             .owner = owner,
-            .observed_head = head,
-            .cursor = head,
+            .state = .{ .scan = .{ .observed_head = head, .cursor = head } },
         };
     }
 };
