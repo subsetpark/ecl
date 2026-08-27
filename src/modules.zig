@@ -2563,95 +2563,123 @@ pub const Registry = enum(usize) {
         registry: *Registry,
         requested: intern.ModuleName,
         authority: *TurnAuthority,
-        canonical: ?intern.ModuleName = null,
-        directory: ?DirectoryLease = null,
-        alias_lookup: ?Directory.AliasMap.RawLookupCursor = null,
-        module_lookup: ?Directory.ModuleMap.RawLookupCursor = null,
-        modules_cloner: ?Directory.ModuleMap.CloneExcludingCursor = null,
-        modules_map: ?Directory.ModuleMap = null,
-        aliases_cloner: ?Directory.AliasMap.CloneExcludingCursor = null,
-        aliases_map: ?Directory.AliasMap = null,
-        retirement: ?*RemovalRetirement = null,
-        /// Observation-only witness used to report ordinary completion after
-        /// detached retirement reaches `.retired`. Cancellation may drop it;
-        /// it owns none of the cleanup work.
-        completion: ?SlotLease = null,
-        maintenance: ?MaintenanceCursor = null,
-        phase: enum {
+        state: State = .snapshot,
+
+        const State = union(enum) {
             snapshot,
-            alias,
-            module,
-            barrier,
-            modules_map,
-            aliases_map,
-            commit,
-            transferred,
-            settle_reuse,
+            alias: struct {
+                directory: DirectoryLease,
+                lookup: Directory.AliasMap.RawLookupCursor,
+            },
+            module: struct {
+                canonical: intern.ModuleName,
+                directory: DirectoryLease,
+                lookup: Directory.ModuleMap.RawLookupCursor,
+            },
+            barrier: struct {
+                canonical: intern.ModuleName,
+                directory: DirectoryLease,
+                retirement: *RemovalRetirement,
+            },
+            modules_map: struct {
+                canonical: intern.ModuleName,
+                directory: DirectoryLease,
+                retirement: *RemovalRetirement,
+                cloner: Directory.ModuleMap.CloneExcludingCursor,
+            },
+            aliases_map: struct {
+                canonical: intern.ModuleName,
+                directory: DirectoryLease,
+                retirement: *RemovalRetirement,
+                modules: Directory.ModuleMap,
+                cloner: Directory.AliasMap.CloneExcludingCursor,
+            },
+            commit: struct {
+                canonical: intern.ModuleName,
+                directory: DirectoryLease,
+                retirement: *RemovalRetirement,
+                modules: Directory.ModuleMap,
+                aliases: Directory.AliasMap,
+            },
+            /// Observation-only witness used to report ordinary completion
+            /// after detached retirement reaches `.retired`. Cancellation may
+            /// drop it; it owns none of the cleanup work.
+            transferred: SlotLease,
+            settle_reuse: MaintenanceCursor,
+            failed: DirectoryLease,
             complete,
-        } = .snapshot,
+        };
 
         pub fn deinit(self: *RemovalCursor) void {
-            if (self.retirement) |retirement| retirement.abort();
-            if (self.completion) |*lease| lease.deinit();
-            self.resetMaps();
-            if (self.directory) |*directory| directory.deinit();
+            switch (self.state) {
+                .snapshot, .settle_reuse, .complete => {},
+                .alias => |*state| state.directory.deinit(),
+                .module => |*state| state.directory.deinit(),
+                .barrier => |*state| {
+                    state.retirement.abort();
+                    state.directory.deinit();
+                },
+                .modules_map => |*state| {
+                    state.cloner.deinit();
+                    state.retirement.abort();
+                    state.directory.deinit();
+                },
+                .aliases_map => |*state| {
+                    state.cloner.deinit();
+                    state.modules.deinit();
+                    state.retirement.abort();
+                    state.directory.deinit();
+                },
+                .commit => |*state| {
+                    state.modules.deinit();
+                    state.aliases.deinit();
+                    state.retirement.abort();
+                    state.directory.deinit();
+                },
+                .transferred => |*completion| completion.deinit(),
+                .failed => |*directory| directory.deinit(),
+            }
             self.* = undefined;
-        }
-        fn resetMaps(self: *RemovalCursor) void {
-            if (self.modules_cloner) |*cursor| cursor.deinit();
-            self.modules_cloner = null;
-            if (self.modules_map) |*map| map.deinit();
-            self.modules_map = null;
-            if (self.aliases_cloner) |*cursor| cursor.deinit();
-            self.aliases_cloner = null;
-            if (self.aliases_map) |*map| map.deinit();
-            self.aliases_map = null;
-        }
-        fn retry(self: *RemovalCursor) void {
-            self.resetMaps();
-            if (self.directory) |*directory| directory.deinit();
-            self.directory = null;
-            self.alias_lookup = null;
-            self.module_lookup = null;
-            if (self.retirement) |retirement| retirement.abort();
-            self.retirement = null;
-            if (self.completion) |*lease| lease.deinit();
-            self.completion = null;
-            self.phase = .snapshot;
         }
 
         pub fn advance(self: *RemovalCursor) RemovalError!RemovalProgress {
-            return switch (self.phase) {
+            return switch (self.state) {
                 .snapshot => result: {
-                    const directory = self.registry.acquireDirectory();
+                    var directory = self.registry.acquireDirectory();
                     const old = directory.directory orelse {
-                        var owned = directory;
-                        owned.deinit();
+                        directory.deinit();
                         return error.MissingModule;
                     };
-                    self.directory = directory;
                     if (intern.moduleBindingName(self.requested)) |alias_name| {
-                        self.alias_lookup = old.aliases.rawLookup(alias_name);
-                        self.phase = .alias;
+                        self.state = .{ .alias = .{
+                            .directory = directory,
+                            .lookup = old.aliases.rawLookup(alias_name),
+                        } };
                     } else {
-                        self.canonical = self.requested;
-                        self.module_lookup = old.modules.rawLookup(self.requested);
-                        self.phase = .module;
+                        self.state = .{ .module = .{
+                            .canonical = self.requested,
+                            .directory = directory,
+                            .lookup = old.modules.rawLookup(self.requested),
+                        } };
                     }
                     break :result .pending;
                 },
                 // Every name that can reach a module can also remove it, so a
                 // A short alias canonicalizes through the registry directory.
-                .alias => switch (self.alias_lookup.?.advance()) {
+                .alias => |*alias_state| switch (alias_state.lookup.advance()) {
                     .pending => .pending,
                     .complete => |canonical_name| result: {
-                        self.canonical = canonical_name orelse self.requested;
-                        self.module_lookup = self.directory.?.directory.?.modules.rawLookup(self.canonical.?);
-                        self.phase = .module;
+                        const canonical = canonical_name orelse self.requested;
+                        const directory = alias_state.directory;
+                        self.state = .{ .module = .{
+                            .canonical = canonical,
+                            .directory = directory,
+                            .lookup = directory.directory.?.modules.rawLookup(canonical),
+                        } };
                         break :result .pending;
                     },
                 },
-                .module => switch (self.module_lookup.?.advance()) {
+                .module => |*module| switch (module.lookup.advance()) {
                     .pending => .pending,
                     .complete => |maybe_slot| result: {
                         const found = maybe_slot orelse return error.MissingModule;
@@ -2660,111 +2688,128 @@ pub const Registry = enum(usize) {
                             .registry = self.registry,
                             .turn = .init(SlotLease.retain(found), self.authority),
                         };
-                        self.retirement = retirement;
-                        self.phase = .barrier;
+                        self.state = .{ .barrier = .{
+                            .canonical = module.canonical,
+                            .directory = module.directory,
+                            .retirement = retirement,
+                        } };
                         break :result .pending;
                     },
                 },
-                .barrier => result: {
-                    const retirement = self.retirement.?;
+                .barrier => |*barrier| result: {
+                    const retirement = barrier.retirement;
                     if (!retirement.turn.linked) {
                         retirement.turn.request() catch |err| switch (err) {
                             error.StateApplicationActive => {
+                                const directory = barrier.directory;
+                                self.state = .{ .failed = directory };
                                 retirement.abort();
-                                self.retirement = null;
                                 return error.StateApplicationActive;
                             },
                             // Another removal of the same name won the race.
                             error.ModuleRemoved => {
+                                const directory = barrier.directory;
+                                self.state = .{ .failed = directory };
                                 retirement.abort();
-                                self.retirement = null;
                                 return error.MissingModule;
                             },
                         };
                         break :result .pending;
                     }
                     if (!retirement.turn.granted()) break :result .pending;
-                    self.modules_cloner = self.directory.?.directory.?.modules
-                        .cloneExcludingCursor(self.canonical, null);
-                    self.phase = .modules_map;
+                    self.state = .{ .modules_map = .{
+                        .canonical = barrier.canonical,
+                        .directory = barrier.directory,
+                        .retirement = retirement,
+                        .cloner = barrier.directory.directory.?.modules
+                            .cloneExcludingCursor(barrier.canonical, null),
+                    } };
                     break :result .pending;
                 },
-                .modules_map => switch (try self.modules_cloner.?.advance()) {
+                .modules_map => |*modules_state| switch (try modules_state.cloner.advance()) {
                     .pending => .pending,
                     .complete => |map| result: {
-                        self.modules_cloner.?.deinit();
-                        self.modules_cloner = null;
-                        self.modules_map = map;
-                        self.aliases_cloner = self.directory.?.directory.?.aliases
-                            .cloneExcludingCursor(null, self.canonical);
-                        self.phase = .aliases_map;
+                        modules_state.cloner.deinit();
+                        self.state = .{ .aliases_map = .{
+                            .canonical = modules_state.canonical,
+                            .directory = modules_state.directory,
+                            .retirement = modules_state.retirement,
+                            .modules = map,
+                            .cloner = modules_state.directory.directory.?.aliases
+                                .cloneExcludingCursor(null, modules_state.canonical),
+                        } };
                         break :result .pending;
                     },
                 },
-                .aliases_map => switch (try self.aliases_cloner.?.advance()) {
+                .aliases_map => |*aliases_state| switch (try aliases_state.cloner.advance()) {
                     .pending => .pending,
                     .complete => |map| result: {
-                        self.aliases_cloner.?.deinit();
-                        self.aliases_cloner = null;
-                        self.aliases_map = map;
-                        self.phase = .commit;
+                        aliases_state.cloner.deinit();
+                        self.state = .{ .commit = .{
+                            .canonical = aliases_state.canonical,
+                            .directory = aliases_state.directory,
+                            .retirement = aliases_state.retirement,
+                            .modules = aliases_state.modules,
+                            .aliases = map,
+                        } };
                         break :result .pending;
                     },
                 },
                 // One publish is the close edge: concurrent resolution sees
                 // either the live module or nothing, never a half-removed
                 // entry, and every alias targeting the slot goes with it.
-                .commit => result: {
+                .commit => |*commit| result: {
                     const next = try self.registry.allocator().create(Directory);
                     self.registry.lockBlocking();
-                    if (!self.registry.privateState().directories.isCurrent(self.directory.?.directory)) {
+                    if (!self.registry.privateState().directories.isCurrent(commit.directory.directory)) {
                         self.registry.unlock();
                         self.registry.allocator().destroy(next);
-                        self.retry();
+                        var directory = commit.directory;
+                        var modules = commit.modules;
+                        var aliases = commit.aliases;
+                        const retirement = commit.retirement;
+                        self.state = .snapshot;
+                        modules.deinit();
+                        aliases.deinit();
+                        retirement.abort();
+                        directory.deinit();
                         break :result .pending;
                     }
                     next.* = .{
-                        .modules = self.modules_map.?,
-                        .aliases = self.aliases_map.?,
-                        .previous = @constCast(self.directory.?.directory),
+                        .modules = commit.modules,
+                        .aliases = commit.aliases,
+                        .previous = @constCast(commit.directory.directory),
                     };
-                    self.modules_map = null;
-                    self.aliases_map = null;
-                    const retirement = self.retirement.?;
+                    const retirement = commit.retirement;
                     const owning = retirement.turn.lease.slot();
                     closeArbiter(owning);
                     retirement.state = owning.state;
                     retirement.remaining = owning.state.len;
                     owning.state = &.{};
                     retirement.turn.detachUnitAuthority();
-                    self.completion = retirement.turn.lease.clone();
+                    const completion = retirement.turn.lease.clone();
                     self.registry.privateState().directories.publish(next);
                     self.registry.unlock();
-                    self.directory.?.deinit();
-                    self.directory = null;
-                    self.retirement = null;
+                    commit.directory.deinit();
+                    self.state = .{ .transferred = completion };
                     self.registry.releaseDomain().retire(retirement, &retirement.retirement);
-                    self.phase = .transferred;
                     break :result .detached;
                 },
-                .transferred => result: {
-                    if (self.completion.?.slot().phase.load(.acquire) != .retired)
+                .transferred => |*completion| result: {
+                    if (completion.slot().phase.load(.acquire) != .retired)
                         break :result .pending;
-                    self.completion.?.deinit();
-                    self.completion = null;
-                    self.maintenance = self.registry.maintenanceCursor();
-                    self.phase = .settle_reuse;
+                    completion.deinit();
+                    self.state = .{ .settle_reuse = self.registry.maintenanceCursor() };
                     break :result .detached;
                 },
-                .settle_reuse => switch (self.maintenance.?.advance()) {
+                .settle_reuse => |*maintenance| switch (maintenance.advance()) {
                     .pending => .pending,
                     .complete => result: {
-                        self.maintenance = null;
-                        self.phase = .complete;
+                        self.state = .complete;
                         break :result .complete;
                     },
                 },
-                .complete => unreachable,
+                .failed, .complete => unreachable,
             };
         }
     };
