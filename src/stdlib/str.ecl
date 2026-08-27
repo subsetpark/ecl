@@ -176,7 +176,7 @@
 
  ### defp format-fail
  (kind message -- : "Raise a formatting error with the supplied kind and message.")
- (error.new swap error.with-message 0 swap assert)
+ (swap error.new swap error.with-message 0 swap assert)
  'format-fail defp
 
  ### defp format-render
