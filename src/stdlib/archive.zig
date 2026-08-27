@@ -226,7 +226,7 @@ const GzipDecoder = struct {
     }
 };
 
-const Phase = enum {
+const ParsePhase = enum {
     encode_bytes,
     encode_destination,
     encode_package,
@@ -243,11 +243,6 @@ const Phase = enum {
     allocate_results,
     materialize_paths,
     materialize_result,
-    destination_check,
-    create_stage,
-    extract,
-    seal_archive,
-    commit,
 };
 
 const Mode = enum { unpack, package_inspect, package_install };
@@ -324,7 +319,7 @@ const UnpackDriver = struct {
     package_encoder: ?heap.Owned(storage.ToUtf8Cursor) = null,
     path_encoder: ?heap.Owned(storage.ToUtf8Cursor) = null,
     entries: heap.Owned(EntryList),
-    phase: Phase = .encode_bytes,
+    state: State = .{ .parsing = .encode_bytes },
 
     bytes: ?heap.Owned(storage.ByteVector) = null,
     destination: ?heap.Owned([]u8) = null,
@@ -362,52 +357,94 @@ const UnpackDriver = struct {
     current_result_path: ?[]const u8 = null,
     text_materializer: ?storage.Utf8Materializer = null,
     result_materializer: ?storage.ValueMaterializer = null,
-    result: ?Value = null,
-
-    stage_path: ?heap.Owned([]u8) = null,
-    stage_dir: ?std.Io.Dir = null,
-    stage_created: bool = false,
-    extract_iterator: ?EntryList.Iterator = null,
-    current_entry: ?*const Entry = null,
-    current_file: ?std.Io.File = null,
-    current_written: usize = 0,
-    seal_file: ?std.Io.File = null,
-    seal_written: usize = 0,
-    seal_created: bool = false,
-    created_count: usize = 0,
-    committed: bool = false,
-
-    cleanup_iterator: ?EntryList.ReverseIterator = null,
-    cleanup_skip: usize = 0,
-    cleanup_current: ?*const Entry = null,
-    cleanup_parent_end: ?usize = null,
     free_iterator: ?EntryList.ReverseIterator = null,
     result_release_index: usize = 0,
 
+    const Staged = struct {
+        result: Value,
+        path: heap.Owned([]u8),
+    };
+    const ExtractWork = union(enum) {
+        next,
+        file: struct {
+            entry: *const Entry,
+            file: std.Io.File,
+            written: usize = 0,
+        },
+    };
+    const Publication = union(enum) {
+        destination_check: Value,
+        stage_path: Value,
+        create_stage: Staged,
+        open_stage: Staged,
+        extract: struct {
+            staged: Staged,
+            dir: std.Io.Dir,
+            iterator: EntryList.Iterator,
+            created_count: usize = 0,
+            work: ExtractWork = .next,
+        },
+        seal: struct {
+            staged: Staged,
+            dir: std.Io.Dir,
+            file: std.Io.File,
+            written: usize = 0,
+            created_count: usize,
+        },
+        commit: struct { staged: Staged, created_count: usize },
+        published: heap.Owned([]u8),
+    };
+    const RollbackContext = struct {
+        path: heap.Owned([]u8),
+        created_count: usize,
+        seal_created: bool,
+    };
+    const RollbackWork = union(enum) {
+        seal,
+        skip: struct { iterator: EntryList.ReverseIterator, remaining: usize },
+        entries: EntryList.ReverseIterator,
+        parents: struct {
+            iterator: EntryList.ReverseIterator,
+            entry: *const Entry,
+            end: usize,
+        },
+        root,
+    };
+    const State = union(enum) {
+        parsing: ParsePhase,
+        publication: Publication,
+        rollback_reopen: RollbackContext,
+        rollback: struct {
+            context: RollbackContext,
+            dir: std.Io.Dir,
+            work: RollbackWork,
+        },
+        cleanup_archive,
+    };
+
     pub fn advance(evaluator: *Machine, self: *UnpackDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        return switch (self.phase) {
-            .encode_bytes => self.encodeBytes(evaluator),
-            .encode_destination => self.encodeDestination(evaluator),
-            .encode_package => self.encodePackage(evaluator),
-            .allocate_output => self.allocateOutput(evaluator),
-            .decompress => self.decompress(evaluator),
-            .verify_gzip => self.verifyGzip(evaluator),
-            .initialize_slots => self.initializeSlots(),
-            .tar_header => self.readTarHeader(evaluator),
-            .insert_member => self.insertMember(evaluator),
-            .parse_pax => self.parsePaxRecord(evaluator),
-            .scan_pax => self.scanPaxRecord(evaluator),
-            .trailing_zeroes => self.trailingZeroes(evaluator),
-            .materialize_manifest => self.materializeManifest(evaluator),
-            .allocate_results => self.allocateResults(),
-            .materialize_paths => self.materializePaths(evaluator),
-            .materialize_result => self.materializeResult(),
-            .destination_check => self.destinationCheck(evaluator),
-            .create_stage => self.createStage(evaluator),
-            .extract => self.extract(evaluator),
-            .seal_archive => self.sealArchive(evaluator),
-            .commit => self.commit(evaluator),
+        return switch (self.state) {
+            .parsing => |phase| switch (phase) {
+                .encode_bytes => self.encodeBytes(evaluator),
+                .encode_destination => self.encodeDestination(evaluator),
+                .encode_package => self.encodePackage(evaluator),
+                .allocate_output => self.allocateOutput(evaluator),
+                .decompress => self.decompress(evaluator),
+                .verify_gzip => self.verifyGzip(evaluator),
+                .initialize_slots => self.initializeSlots(),
+                .tar_header => self.readTarHeader(evaluator),
+                .insert_member => self.insertMember(evaluator),
+                .parse_pax => self.parsePaxRecord(evaluator),
+                .scan_pax => self.scanPaxRecord(evaluator),
+                .trailing_zeroes => self.trailingZeroes(evaluator),
+                .materialize_manifest => self.materializeManifest(evaluator),
+                .allocate_results => self.allocateResults(),
+                .materialize_paths => self.materializePaths(evaluator),
+                .materialize_result => self.materializeResult(),
+            },
+            .publication => |*publication| self.advancePublication(evaluator, publication),
+            .rollback_reopen, .rollback, .cleanup_archive => unreachable,
         };
     }
 
@@ -423,10 +460,10 @@ const UnpackDriver = struct {
             .pending => return .yielded,
             .complete => |bytes| {
                 self.bytes = .init(bytes);
-                self.phase = switch (self.mode) {
+                self.state = .{ .parsing = switch (self.mode) {
                     .unpack, .package_install => .encode_destination,
                     .package_inspect => .encode_package,
-                };
+                } };
                 return .yielded;
             },
         }
@@ -444,7 +481,10 @@ const UnpackDriver = struct {
                     return self.failDomain(evaluator, "destination is empty");
                 }
                 self.destination = .init(path);
-                self.phase = if (self.mode == .package_install) .encode_package else .allocate_output;
+                self.state = .{ .parsing = if (self.mode == .package_install)
+                    .encode_package
+                else
+                    .allocate_output };
                 return .yielded;
             },
         }
@@ -462,7 +502,7 @@ const UnpackDriver = struct {
                     return self.failDomain(evaluator, "package name is not canonical");
                 }
                 self.package_name = .init(name);
-                self.phase = .allocate_output;
+                self.state = .{ .parsing = .allocate_output };
                 return .yielded;
             },
         }
@@ -477,7 +517,7 @@ const UnpackDriver = struct {
             return self.failDomain(evaluator, "archive exceeds the 1 GiB uncompressed limit");
         self.tar = .init(try self.allocator.alloc(u8, expected));
         self.decoder = .init(try .init(self.allocator, compressed));
-        self.phase = .decompress;
+        self.state = .{ .parsing = .decompress };
         return .yielded;
     }
 
@@ -496,7 +536,7 @@ const UnpackDriver = struct {
             return self.failDomain(evaluator, "malformed gzip archive");
         if (read != 0 or !self.decoder.?.borrow().consumedAllInput())
             return self.failDomain(evaluator, "gzip size does not match its footer");
-        self.phase = .verify_gzip;
+        self.state = .{ .parsing = .verify_gzip };
         return .yielded;
     }
 
@@ -513,7 +553,7 @@ const UnpackDriver = struct {
         if (self.gzip_crc.final() != expected_crc)
             return self.failDomain(evaluator, "gzip checksum does not match its payload");
         self.slots = .init(try self.allocator.alloc(?*Entry, member_slots));
-        self.phase = .initialize_slots;
+        self.state = .{ .parsing = .initialize_slots };
         return .yielded;
     }
 
@@ -523,7 +563,7 @@ const UnpackDriver = struct {
         @memset(slots[self.slots_initialized..end], null);
         self.slots_initialized = end;
         if (end != slots.len) return .yielded;
-        self.phase = .tar_header;
+        self.state = .{ .parsing = .tar_header };
         return .yielded;
     }
 
@@ -531,7 +571,10 @@ const UnpackDriver = struct {
         const tar = self.tar.?.borrow();
         if (self.tar_offset == tar.len) {
             if (self.zero_blocks < 2) return self.failDomain(evaluator, "tar archive has no end marker");
-            self.phase = if (self.mode == .unpack) .allocate_results else .materialize_manifest;
+            self.state = .{ .parsing = if (self.mode == .unpack)
+                .allocate_results
+            else
+                .materialize_manifest };
             return .yielded;
         }
         if (self.tar_offset + tar_block_bytes > tar.len)
@@ -542,7 +585,7 @@ const UnpackDriver = struct {
                 return self.failDomain(evaluator, "tar extension has no following member");
             self.zero_blocks += 1;
             self.tar_offset += tar_block_bytes;
-            if (self.zero_blocks == 2) self.phase = .trailing_zeroes;
+            if (self.zero_blocks == 2) self.state = .{ .parsing = .trailing_zeroes };
             return .yielded;
         }
         if (self.zero_blocks != 0) return self.failDomain(evaluator, "tar data follows an end marker");
@@ -562,7 +605,7 @@ const UnpackDriver = struct {
             self.pax_offset = data_offset;
             self.pax_end = header_data_end;
             self.pax_next_offset = header_next;
-            self.phase = .parse_pax;
+            self.state = .{ .parsing = .parse_pax };
             return .yielded;
         }
         if (typeflag == 'L') {
@@ -614,14 +657,14 @@ const UnpackDriver = struct {
         self.pending_hash = std.hash.Wyhash.hash(0, path);
         self.pending_slot = @intCast(self.pending_hash & (member_slots - 1));
         self.pending_probes = 0;
-        self.phase = .insert_member;
+        self.state = .{ .parsing = .insert_member };
         return .yielded;
     }
 
     fn parsePaxRecord(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
         if (self.pax_offset == self.pax_end) {
             self.tar_offset = self.pax_next_offset;
-            self.phase = .tar_header;
+            self.state = .{ .parsing = .tar_header };
             return .yielded;
         }
         const tar = self.tar.?.borrow();
@@ -640,7 +683,7 @@ const UnpackDriver = struct {
         self.pax_record_end = record_end;
         self.pax_key_start = space + 1;
         self.pax_scan_offset = space + 1;
-        self.phase = .scan_pax;
+        self.state = .{ .parsing = .scan_pax };
         return .yielded;
     }
 
@@ -668,7 +711,7 @@ const UnpackDriver = struct {
                 return self.failDomain(evaluator, "PAX size is malformed");
         }
         self.pax_offset = self.pax_record_end;
-        self.phase = .parse_pax;
+        self.state = .{ .parsing = .parse_pax };
         return .yielded;
     }
 
@@ -705,7 +748,7 @@ const UnpackDriver = struct {
             slot.* = stored;
             self.pending_entry = null;
             self.tar_offset = self.pending_next_offset;
-            self.phase = .tar_header;
+            self.state = .{ .parsing = .tar_header };
             return .yielded;
         }
         return .yielded;
@@ -718,7 +761,10 @@ const UnpackDriver = struct {
             return self.failDomain(evaluator, "tar data follows its end marker");
         self.tar_offset = end;
         if (end != tar.len) return .yielded;
-        self.phase = if (self.mode == .unpack) .allocate_results else .materialize_manifest;
+        self.state = .{ .parsing = if (self.mode == .unpack)
+            .allocate_results
+        else
+            .materialize_manifest };
         return .yielded;
     }
 
@@ -765,7 +811,7 @@ const UnpackDriver = struct {
                 self.text_materializer = null;
                 if (self.mode == .package_inspect) break :result .{ .output = text };
                 evaluator.releaseDomain().releaseValue(text);
-                self.phase = .allocate_results;
+                self.state = .{ .parsing = .allocate_results };
                 break :result .yielded;
             },
         };
@@ -774,7 +820,7 @@ const UnpackDriver = struct {
     fn allocateResults(self: *UnpackDriver) MachineError!machine.WorkProgress {
         self.result_values = try self.allocator.alloc(Value, self.file_count);
         self.result_iterator = self.entries.borrow().iterator();
-        self.phase = .materialize_paths;
+        self.state = .{ .parsing = .materialize_paths };
         return .yielded;
     }
 
@@ -797,7 +843,7 @@ const UnpackDriver = struct {
         while (remaining != 0) : (remaining -= 1) {
             const entry = self.result_iterator.?.next() orelse {
                 self.result_materializer = .init(self.allocator, self.result_values.?);
-                self.phase = .materialize_result;
+                self.state = .{ .parsing = .materialize_result };
                 return .yielded;
             };
             if (entry.kind == .directory) continue;
@@ -814,156 +860,180 @@ const UnpackDriver = struct {
             .complete => |result| result: {
                 self.result_materializer.?.deinit();
                 self.result_materializer = null;
-                self.result = result;
-                self.phase = .destination_check;
+                self.state = .{ .publication = .{ .destination_check = result } };
                 break :result .yielded;
             },
         };
     }
 
-    fn destinationCheck(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
+    fn advancePublication(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        publication: *Publication,
+    ) MachineError!machine.WorkProgress {
         const io = self.io.?;
-        if (self.mode == .package_install) {
-            const parent = std.fs.path.dirname(self.destination.?.borrow()) orelse ".";
-            std.Io.Dir.cwd().createDirPath(io, parent) catch |err|
-                return self.failIo(evaluator, "cannot create package store parents", err);
-        }
-        std.Io.Dir.cwd().access(io, self.destination.?.borrow(), .{}) catch |err| switch (err) {
-            error.FileNotFound => {
-                self.phase = .create_stage;
-                return .yielded;
-            },
-            else => return self.failIo(evaluator, "cannot inspect archive destination", err),
-        };
-        return self.failDestinationExists(evaluator, "archive destination already exists");
-    }
-
-    fn createStage(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        if (self.stage_path == null) {
-            const identity = next_stage_identity.fetchAdd(1, .monotonic);
-            const destination = self.destination.?.borrow();
-            const parent = std.fs.path.dirname(destination) orelse ".";
-            const basename = std.fs.path.basename(destination);
-            self.stage_path = .init(try std.fmt.allocPrint(
-                self.allocator,
-                "{s}{c}.ecl-unpack-{x}-{s}",
-                .{ parent, std.fs.path.sep, identity, basename },
-            ));
-        }
-        const io = self.io.?;
-        std.Io.Dir.cwd().createDir(io, self.stage_path.?.borrow(), .default_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {
-                self.stage_path.?.deinit(evaluator.releaseDomain(), self.allocator);
-                self.stage_path = null;
-                return .yielded;
-            },
-            else => return self.failIo(evaluator, "cannot create archive staging directory", err),
-        };
-        self.stage_created = true;
-        self.stage_dir = std.Io.Dir.cwd().openDir(io, self.stage_path.?.borrow(), .{}) catch |err|
-            return self.failIo(evaluator, "cannot open archive staging directory", err);
-        self.extract_iterator = self.entries.borrow().iterator();
-        self.phase = .extract;
-        return .yielded;
-    }
-
-    fn extract(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const io = self.io.?;
-        if (self.current_entry == null) {
-            const entry = self.extract_iterator.?.next() orelse {
+        switch (publication.*) {
+            .destination_check => |result| {
                 if (self.mode == .package_install) {
-                    self.seal_file = self.stage_dir.?.createFile(
-                        io,
-                        package_seal_name,
-                        .{ .exclusive = true },
-                    ) catch |err| return self.failIo(evaluator, "cannot create package archive seal", err);
-                    self.seal_created = true;
-                    self.phase = .seal_archive;
-                } else {
-                    self.stage_dir.?.close(io);
-                    self.stage_dir = null;
-                    self.phase = .commit;
+                    const parent = std.fs.path.dirname(self.destination.?.borrow()) orelse ".";
+                    std.Io.Dir.cwd().createDirPath(io, parent) catch |err|
+                        return self.failIo(evaluator, "cannot create package store parents", err);
                 }
-                return .yielded;
-            };
-            self.current_entry = entry;
-            self.created_count += 1;
-            if (entry.kind == .directory) {
-                self.stage_dir.?.createDirPath(io, entry.path) catch |err|
-                    return self.failIo(evaluator, "cannot create archive directory", err);
-                self.current_entry = null;
-                return .yielded;
-            }
-            if (lastSlash(entry.path)) |slash|
-                self.stage_dir.?.createDirPath(io, entry.path[0..slash]) catch |err|
-                    return self.failIo(evaluator, "cannot create archive parent directory", err);
-            self.current_file = self.stage_dir.?.createFile(io, entry.path, .{ .exclusive = true }) catch |err|
-                return self.failIo(evaluator, "cannot create archive file", err);
-            self.current_written = 0;
-            return .yielded;
+                std.Io.Dir.cwd().access(io, self.destination.?.borrow(), .{}) catch |err| switch (err) {
+                    error.FileNotFound => {
+                        publication.* = .{ .stage_path = result };
+                        return .yielded;
+                    },
+                    else => return self.failIo(evaluator, "cannot inspect archive destination", err),
+                };
+                return self.failDestinationExists(evaluator, "archive destination already exists");
+            },
+            .stage_path => |result| {
+                const identity = next_stage_identity.fetchAdd(1, .monotonic);
+                const destination = self.destination.?.borrow();
+                const parent = std.fs.path.dirname(destination) orelse ".";
+                const basename = std.fs.path.basename(destination);
+                const path = try std.fmt.allocPrint(
+                    self.allocator,
+                    "{s}{c}.ecl-unpack-{x}-{s}",
+                    .{ parent, std.fs.path.sep, identity, basename },
+                );
+                publication.* = .{ .create_stage = .{
+                    .result = result,
+                    .path = .init(path),
+                } };
+            },
+            .create_stage => |*staged| {
+                std.Io.Dir.cwd().createDir(io, staged.path.borrow(), .default_dir) catch |err| switch (err) {
+                    error.PathAlreadyExists => {
+                        const result = staged.result;
+                        staged.path.deinit(evaluator.releaseDomain(), self.allocator);
+                        publication.* = .{ .stage_path = result };
+                        return .yielded;
+                    },
+                    else => return self.failIo(evaluator, "cannot create archive staging directory", err),
+                };
+                const moved = staged.*;
+                publication.* = .{ .open_stage = moved };
+            },
+            .open_stage => |*staged| {
+                const directory = std.Io.Dir.cwd().openDir(io, staged.path.borrow(), .{}) catch |err|
+                    return self.failIo(evaluator, "cannot open archive staging directory", err);
+                const moved = staged.*;
+                publication.* = .{ .extract = .{
+                    .staged = moved,
+                    .dir = directory,
+                    .iterator = self.entries.borrow().iterator(),
+                } };
+            },
+            .extract => |*extraction| switch (extraction.work) {
+                .next => {
+                    const entry = extraction.iterator.next() orelse {
+                        if (self.mode == .package_install) {
+                            const seal = extraction.dir.createFile(
+                                io,
+                                package_seal_name,
+                                .{ .exclusive = true },
+                            ) catch |err| return self.failIo(
+                                evaluator,
+                                "cannot create package archive seal",
+                                err,
+                            );
+                            const staged = extraction.staged;
+                            const dir = extraction.dir;
+                            const created_count = extraction.created_count;
+                            publication.* = .{ .seal = .{
+                                .staged = staged,
+                                .dir = dir,
+                                .file = seal,
+                                .created_count = created_count,
+                            } };
+                        } else {
+                            extraction.dir.close(io);
+                            const staged = extraction.staged;
+                            const created_count = extraction.created_count;
+                            publication.* = .{ .commit = .{
+                                .staged = staged,
+                                .created_count = created_count,
+                            } };
+                        }
+                        return .yielded;
+                    };
+                    extraction.created_count += 1;
+                    if (entry.kind == .directory) {
+                        extraction.dir.createDirPath(io, entry.path) catch |err|
+                            return self.failIo(evaluator, "cannot create archive directory", err);
+                        return .yielded;
+                    }
+                    if (lastSlash(entry.path)) |slash|
+                        extraction.dir.createDirPath(io, entry.path[0..slash]) catch |err|
+                            return self.failIo(evaluator, "cannot create archive parent directory", err);
+                    const file = extraction.dir.createFile(io, entry.path, .{ .exclusive = true }) catch |err|
+                        return self.failIo(evaluator, "cannot create archive file", err);
+                    extraction.work = .{ .file = .{ .entry = entry, .file = file } };
+                },
+                .file => |*file_state| {
+                    if (file_state.written != file_state.entry.size) {
+                        const end = @min(file_state.written + work_quantum, file_state.entry.size);
+                        const source = self.tar.?.borrow()[file_state.entry.data_offset + file_state.written .. file_state.entry.data_offset + end];
+                        file_state.file.writePositionalAll(io, source, file_state.written) catch |err|
+                            return self.failIo(evaluator, "cannot write archive file", err);
+                        file_state.written = end;
+                    } else {
+                        file_state.file.close(io);
+                        extraction.work = .next;
+                    }
+                },
+            },
+            .seal => |*seal| {
+                const compressed = self.bytes.?.borrow().bytes();
+                if (seal.written != compressed.len) {
+                    const end = @min(seal.written + work_quantum, compressed.len);
+                    seal.file.writePositionalAll(
+                        io,
+                        compressed[seal.written..end],
+                        seal.written,
+                    ) catch |err| return self.failIo(evaluator, "cannot write package archive seal", err);
+                    seal.written = end;
+                } else {
+                    seal.file.sync(io) catch |err|
+                        return self.failIo(evaluator, "cannot synchronize package archive seal", err);
+                    seal.file.close(io);
+                    seal.dir.close(io);
+                    const staged = seal.staged;
+                    const created_count = seal.created_count;
+                    publication.* = .{ .commit = .{
+                        .staged = staged,
+                        .created_count = created_count,
+                    } };
+                }
+            },
+            .commit => |*commit_state| {
+                const destination = self.destination.?.borrow();
+                const parent_path = std.fs.path.dirname(destination) orelse ".";
+                var parent = std.Io.Dir.cwd().openDir(io, parent_path, .{}) catch |err|
+                    return self.failIo(evaluator, "cannot open archive destination parent", err);
+                defer parent.close(io);
+                renamePreserve(
+                    parent,
+                    std.fs.path.basename(commit_state.staged.path.borrow()),
+                    std.fs.path.basename(destination),
+                    io,
+                ) catch |err| switch (err) {
+                    error.PathAlreadyExists => return self.failDestinationExists(
+                        evaluator,
+                        "archive destination already exists",
+                    ),
+                    else => return self.failIo(evaluator, "cannot publish archive destination", err),
+                };
+                const result = commit_state.staged.result;
+                const path = commit_state.staged.path.take();
+                publication.* = .{ .published = .init(path) };
+                return .{ .output = result };
+            },
+            .published => unreachable,
         }
-        const entry = self.current_entry.?;
-        if (self.current_written != entry.size) {
-            const end = @min(self.current_written + work_quantum, entry.size);
-            const source = self.tar.?.borrow()[entry.data_offset + self.current_written .. entry.data_offset + end];
-            self.current_file.?.writePositionalAll(io, source, self.current_written) catch |err|
-                return self.failIo(evaluator, "cannot write archive file", err);
-            self.current_written = end;
-            return .yielded;
-        }
-        self.current_file.?.close(io);
-        self.current_file = null;
-        self.current_entry = null;
         return .yielded;
-    }
-
-    fn sealArchive(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const io = self.io.?;
-        const compressed = self.bytes.?.borrow().bytes();
-        if (self.seal_written != compressed.len) {
-            const end = @min(self.seal_written + work_quantum, compressed.len);
-            self.seal_file.?.writePositionalAll(
-                io,
-                compressed[self.seal_written..end],
-                self.seal_written,
-            ) catch |err| return self.failIo(evaluator, "cannot write package archive seal", err);
-            self.seal_written = end;
-            return .yielded;
-        }
-        self.seal_file.?.sync(io) catch |err|
-            return self.failIo(evaluator, "cannot synchronize package archive seal", err);
-        self.seal_file.?.close(io);
-        self.seal_file = null;
-        self.stage_dir.?.close(io);
-        self.stage_dir = null;
-        self.phase = .commit;
-        return .yielded;
-    }
-
-    fn commit(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const io = self.io.?;
-        const destination = self.destination.?.borrow();
-        const parent_path = std.fs.path.dirname(destination) orelse ".";
-        var parent = std.Io.Dir.cwd().openDir(io, parent_path, .{}) catch |err|
-            return self.failIo(evaluator, "cannot open archive destination parent", err);
-        defer parent.close(io);
-        renamePreserve(
-            parent,
-            std.fs.path.basename(self.stage_path.?.borrow()),
-            std.fs.path.basename(destination),
-            io,
-        ) catch |err| switch (err) {
-            error.PathAlreadyExists => return self.failDestinationExists(
-                evaluator,
-                "archive destination already exists",
-            ),
-            else => return self.failIo(evaluator, "cannot publish archive destination", err),
-        };
-        self.committed = true;
-        self.stage_created = false;
-        const result = self.result.?;
-        self.result = null;
-        return .{ .output = result };
     }
 
     fn failDomain(self: *UnpackDriver, evaluator: *Machine, message: []const u8) MachineError {
@@ -1006,71 +1076,195 @@ const UnpackDriver = struct {
         return failure;
     }
 
+    fn beginPublicationRetirement(
+        self: *UnpackDriver,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        publication: *Publication,
+    ) void {
+        switch (publication.*) {
+            .destination_check, .stage_path => |result| {
+                releases.releaseValue(result);
+                self.state = .cleanup_archive;
+            },
+            .create_stage => |*staged| {
+                releases.releaseValue(staged.result);
+                staged.path.deinit(releases, allocator);
+                self.state = .cleanup_archive;
+            },
+            .open_stage => |*staged| {
+                releases.releaseValue(staged.result);
+                const path = staged.path.take();
+                self.state = .{ .rollback_reopen = .{
+                    .path = .init(path),
+                    .created_count = 0,
+                    .seal_created = false,
+                } };
+            },
+            .extract => |*extraction| {
+                switch (extraction.work) {
+                    .file => |file_state| file_state.file.close(self.io.?),
+                    .next => {},
+                }
+                releases.releaseValue(extraction.staged.result);
+                const path = extraction.staged.path.take();
+                const context: RollbackContext = .{
+                    .path = .init(path),
+                    .created_count = extraction.created_count,
+                    .seal_created = false,
+                };
+                const dir = extraction.dir;
+                self.state = .{ .rollback = .{
+                    .context = context,
+                    .dir = dir,
+                    .work = rollbackEntries(self, context.created_count),
+                } };
+            },
+            .seal => |*seal| {
+                seal.file.close(self.io.?);
+                releases.releaseValue(seal.staged.result);
+                const path = seal.staged.path.take();
+                const context: RollbackContext = .{
+                    .path = .init(path),
+                    .created_count = seal.created_count,
+                    .seal_created = true,
+                };
+                const dir = seal.dir;
+                self.state = .{ .rollback = .{
+                    .context = context,
+                    .dir = dir,
+                    .work = .seal,
+                } };
+            },
+            .commit => |*commit_state| {
+                releases.releaseValue(commit_state.staged.result);
+                const path = commit_state.staged.path.take();
+                self.state = .{ .rollback_reopen = .{
+                    .path = .init(path),
+                    .created_count = commit_state.created_count,
+                    .seal_created = self.mode == .package_install,
+                } };
+            },
+            .published => |*path| {
+                path.deinit(releases, allocator);
+                self.state = .cleanup_archive;
+            },
+        }
+    }
+
+    fn rollbackEntries(self: *UnpackDriver, created_count: usize) RollbackWork {
+        return .{ .skip = .{
+            .iterator = self.entries.borrow().reverseIterator(),
+            .remaining = self.entries.borrow().count - created_count,
+        } };
+    }
+
+    fn advanceRollbackReopen(
+        self: *UnpackDriver,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        context: *RollbackContext,
+    ) bool {
+        const directory = std.Io.Dir.cwd().openDir(self.io.?, context.path.borrow(), .{}) catch |open_err| {
+            observeCleanupError("reopen the stage", open_err);
+            std.Io.Dir.cwd().deleteDir(self.io.?, context.path.borrow()) catch |err|
+                observeCleanupError("remove an unopened stage", err);
+            context.path.deinit(releases, allocator);
+            self.state = .cleanup_archive;
+            return false;
+        };
+        const moved = context.*;
+        self.state = .{ .rollback = .{
+            .context = moved,
+            .dir = directory,
+            .work = if (moved.seal_created) .seal else rollbackEntries(self, moved.created_count),
+        } };
+        return false;
+    }
+
+    fn advanceRollback(
+        self: *UnpackDriver,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+        rollback: *@FieldType(State, "rollback"),
+    ) bool {
+        switch (rollback.work) {
+            .seal => {
+                rollback.dir.deleteFile(self.io.?, package_seal_name) catch |err|
+                    observeCleanupError("remove the package archive seal", err);
+                rollback.work = rollbackEntries(self, rollback.context.created_count);
+            },
+            .skip => |*skip| {
+                if (skip.remaining != 0) {
+                    _ = skip.iterator.next();
+                    skip.remaining -= 1;
+                } else {
+                    const iterator = skip.iterator;
+                    rollback.work = .{ .entries = iterator };
+                }
+            },
+            .entries => |*iterator| {
+                const entry = iterator.next() orelse {
+                    rollback.work = .root;
+                    return false;
+                };
+                switch (entry.kind) {
+                    .file => rollback.dir.deleteFile(self.io.?, entry.path) catch |err|
+                        observeCleanupError("remove a staged file", err),
+                    .directory => rollback.dir.deleteDir(self.io.?, entry.path) catch |err|
+                        observeCleanupError("remove a staged directory", err),
+                }
+                if (lastSlash(entry.path)) |end| {
+                    const moved = iterator.*;
+                    rollback.work = .{ .parents = .{
+                        .iterator = moved,
+                        .entry = entry,
+                        .end = end,
+                    } };
+                }
+            },
+            .parents => |*parents| {
+                rollback.dir.deleteDir(self.io.?, parents.entry.path[0..parents.end]) catch |err|
+                    observeCleanupError("remove an implicit parent directory", err);
+                if (lastSlash(parents.entry.path[0..parents.end])) |end| {
+                    parents.end = end;
+                } else {
+                    const iterator = parents.iterator;
+                    rollback.work = .{ .entries = iterator };
+                }
+            },
+            .root => {
+                rollback.dir.close(self.io.?);
+                std.Io.Dir.cwd().deleteDir(self.io.?, rollback.context.path.borrow()) catch |err|
+                    observeCleanupError("remove the stage root", err);
+                rollback.context.path.deinit(releases, allocator);
+                self.state = .cleanup_archive;
+            },
+        }
+        return false;
+    }
+
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
         self: *UnpackDriver,
     ) bool {
-        const io = self.io;
-        if (self.current_file) |file| file.close(io.?);
-        self.current_file = null;
-        if (self.seal_file) |file| file.close(io.?);
-        self.seal_file = null;
-        if (!self.committed and self.stage_created) {
-            if (self.stage_dir == null) {
-                self.stage_dir = std.Io.Dir.cwd().openDir(io.?, self.stage_path.?.borrow(), .{}) catch |open_err| {
-                    observeCleanupError("reopen the stage", open_err);
-                    std.Io.Dir.cwd().deleteDir(io.?, self.stage_path.?.borrow()) catch |err|
-                        observeCleanupError("remove an unopened stage", err);
-                    self.stage_created = false;
-                    return false;
-                };
-            }
-            if (self.seal_created) {
-                self.stage_dir.?.deleteFile(io.?, package_seal_name) catch |err|
-                    observeCleanupError("remove the package archive seal", err);
-                self.seal_created = false;
+        switch (self.state) {
+            .parsing => {
+                self.state = .cleanup_archive;
                 return false;
-            }
-            if (self.cleanup_iterator == null) {
-                self.cleanup_iterator = self.entries.borrow().reverseIterator();
-                self.cleanup_skip = self.entries.borrow().count - self.created_count;
-            }
-            if (self.cleanup_parent_end) |end| {
-                const entry = self.cleanup_current.?;
-                self.stage_dir.?.deleteDir(io.?, entry.path[0..end]) catch |err|
-                    observeCleanupError("remove an implicit parent directory", err);
-                self.cleanup_parent_end = lastSlash(entry.path[0..end]);
+            },
+            .publication => |*publication| {
+                self.beginPublicationRetirement(releases, allocator, publication);
                 return false;
-            }
-            if (self.cleanup_current != null) self.cleanup_current = null;
-            if (self.cleanup_skip != 0) {
-                _ = self.cleanup_iterator.?.next();
-                self.cleanup_skip -= 1;
-                return false;
-            }
-            if (self.cleanup_iterator.?.next()) |entry| {
-                self.cleanup_current = entry;
-                switch (entry.kind) {
-                    .file => {
-                        self.stage_dir.?.deleteFile(io.?, entry.path) catch |err|
-                            observeCleanupError("remove a staged file", err);
-                        self.cleanup_parent_end = lastSlash(entry.path);
-                    },
-                    .directory => {
-                        self.stage_dir.?.deleteDir(io.?, entry.path) catch |err|
-                            observeCleanupError("remove a staged directory", err);
-                        self.cleanup_parent_end = lastSlash(entry.path);
-                    },
-                }
-                return false;
-            }
-            if (self.stage_dir) |directory| directory.close(io.?);
-            self.stage_dir = null;
-            std.Io.Dir.cwd().deleteDir(io.?, self.stage_path.?.borrow()) catch |err|
-                observeCleanupError("remove the stage root", err);
-            self.stage_created = false;
-            return false;
+            },
+            .rollback_reopen => |*context| return self.advanceRollbackReopen(
+                releases,
+                allocator,
+                context,
+            ),
+            .rollback => |*rollback| return self.advanceRollback(releases, allocator, rollback),
+            .cleanup_archive => {},
         }
         if (self.free_iterator == null) self.free_iterator = self.entries.borrow().reverseIterator();
         if (self.free_iterator.?.next()) |entry| {
@@ -1090,16 +1284,10 @@ const UnpackDriver = struct {
         self.text_materializer = null;
         if (self.result_materializer) |*materializer| materializer.retire(releases);
         self.result_materializer = null;
-        if (self.result) |result| releases.releaseValue(result);
-        self.result = null;
         if (self.pending_entry) |entry| allocator.free(entry.path);
         self.pending_entry = null;
         if (self.pending_path) |*path| path.deinit(releases, allocator);
         self.pending_path = null;
-        if (self.stage_dir) |directory| directory.close(io.?);
-        self.stage_dir = null;
-        if (self.stage_path) |*path| path.deinit(releases, allocator);
-        self.stage_path = null;
         if (self.slots) |*slots| slots.deinit(releases, allocator);
         self.slots = null;
         if (self.tar) |*tar| tar.deinit(releases, allocator);
