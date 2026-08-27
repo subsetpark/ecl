@@ -46,30 +46,74 @@ pub const LowerCursor = struct {
     body: []const SpannedValue,
     binder_span: Span,
     diag: *Diag,
-    locals_init: LocalMap.InitCursor,
-    locals: ?LocalMap = null,
     local_indices: []?usize,
-    walk: poll.ChunkStack(WalkFrame),
-    phase: enum { locals_init, names, body, live, words, size, output, complete } = .locals_init,
-    name_index: usize = 0,
-    body_index: usize = 0,
-    byte_index: usize = 0,
-    classifier: ?lexer.ClassifyCursor = null,
-    symbol: ?lexer.SymbolCursor = null,
-    inserter: ?intern.InternInsertionCursor = null,
-    putter: ?LocalMap.PutCursor = null,
-    lookup: ?LocalMap.RawLookupCursor = null,
-    lookup_kind: enum { top, nested } = .top,
-    nested_active: bool = false,
-    words: [3]u32 = .{0} ** 3,
-    word_index: usize = 0,
-    output_count: usize = 4,
-    output: ?[]SpannedValue = null,
-    output_values: ?heap.OwnedValueBuffer = null,
-    output_index: usize = 0,
-    emit_body_index: usize = 0,
-    emit_step: usize = 0,
-    epilogue_step: usize = 0,
+    state: State,
+
+    const NameWork = union(enum) {
+        classify: struct { index: usize, cursor: lexer.ClassifyCursor },
+        symbol: struct { index: usize, cursor: lexer.SymbolCursor },
+        bytes: struct { index: usize, byte_index: usize = 0 },
+        intern: struct { index: usize, cursor: intern.InternInsertionCursor },
+        put: struct { index: usize, cursor: LocalMap.PutCursor },
+    };
+    const BodyWork = union(enum) {
+        top,
+        nested,
+        lookup_top: LocalMap.RawLookupCursor,
+        lookup_nested: struct {
+            name: u32,
+            cursor: LocalMap.RawLookupCursor,
+        },
+    };
+    const Words = [3]u32;
+    const Output = struct {
+        words: Words,
+        forms: []SpannedValue,
+        values: heap.OwnedValueBuffer,
+        output_index: usize = 0,
+        prefix_step: usize = 0,
+        body_index: usize = 0,
+        body_step: usize = 0,
+        epilogue_step: usize = 0,
+    };
+    const State = union(enum) {
+        locals_init: LocalMap.InitCursor,
+        names: struct { locals: LocalMap, work: NameWork },
+        body: struct {
+            locals: LocalMap,
+            walk: poll.ChunkStack(WalkFrame),
+            index: usize = 0,
+            work: BodyWork = .top,
+        },
+        word_start: struct { words: Words = .{0} ** 3, index: usize = 0 },
+        word_intern: struct {
+            words: Words,
+            index: usize,
+            cursor: intern.InternInsertionCursor,
+        },
+        size: struct { words: Words, index: usize = 0, count: usize = 4 },
+        allocate_output: struct { words: Words, count: usize },
+        allocate_values: struct { words: Words, forms: []SpannedValue },
+        output: Output,
+        complete,
+
+        fn deinit(self: *State, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .locals_init => |*cursor| cursor.deinit(),
+                .names => |*names_state| names_state.locals.deinit(),
+                .body => |*body_state| {
+                    body_state.walk.deinit();
+                    body_state.locals.deinit();
+                },
+                .allocate_values => |allocation| allocator.free(allocation.forms),
+                .output => |*output| {
+                    output.values.deinit();
+                    allocator.free(output.forms);
+                },
+                .word_start, .word_intern, .size, .allocate_output, .complete => {},
+            }
+        }
+    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -79,6 +123,7 @@ pub const LowerCursor = struct {
         binder_span: Span,
         diag: *Diag,
     ) error{OutOfMemory}!LowerCursor {
+        const local_indices = try allocator.alloc(?usize, body.len);
         return .{
             .allocator = allocator,
             .releases = releases,
@@ -86,19 +131,14 @@ pub const LowerCursor = struct {
             .body = body,
             .binder_span = binder_span,
             .diag = diag,
-            .locals_init = LocalMap.initCursor(allocator, names.len),
-            .local_indices = try allocator.alloc(?usize, body.len),
-            .walk = .init(allocator),
+            .local_indices = local_indices,
+            .state = .{ .locals_init = LocalMap.initCursor(allocator, names.len) },
         };
     }
 
     pub fn deinit(self: *LowerCursor) void {
-        self.locals_init.deinit();
-        if (self.locals) |*locals| locals.deinit();
-        if (self.output_values) |*values| values.deinit();
-        if (self.output) |output| self.allocator.free(output);
+        self.state.deinit(self.allocator);
         self.allocator.free(self.local_indices);
-        self.walk.deinit();
         self.* = undefined;
     }
 
@@ -107,115 +147,149 @@ pub const LowerCursor = struct {
         return error.Parse;
     }
 
-    fn resetName(self: *LowerCursor) void {
-        self.classifier = null;
-        self.symbol = null;
-        self.inserter = null;
-        self.putter = null;
-        self.byte_index = 0;
-        self.name_index += 1;
+    fn advanceName(
+        self: *LowerCursor,
+        names_state: *@FieldType(State, "names"),
+    ) (error{ OutOfMemory, Parse })!bool {
+        switch (names_state.work) {
+            .classify => |*classification| switch (classification.cursor.advance()) {
+                .pending => {},
+                .complete => |kind| {
+                    const name = self.names[classification.index];
+                    if (kind != .word) return self.failName(name);
+                    names_state.work = .{ .symbol = .{
+                        .index = classification.index,
+                        .cursor = .init(name.bytes),
+                    } };
+                },
+            },
+            .symbol => |*symbol| switch (symbol.cursor.advance()) {
+                .pending => {},
+                .complete => |valid| {
+                    const name = self.names[symbol.index];
+                    if (!valid or intern.isReservedWordBytes(name.bytes)) return self.failName(name);
+                    names_state.work = .{ .bytes = .{ .index = symbol.index } };
+                },
+            },
+            .bytes => |*bytes| {
+                const name = self.names[bytes.index];
+                if (bytes.byte_index != name.bytes.len) {
+                    if (name.bytes[bytes.byte_index] == '.') return self.failName(name);
+                    bytes.byte_index += 1;
+                } else names_state.work = .{ .intern = .{
+                    .index = bytes.index,
+                    .cursor = intern.insertionCursor(name.bytes),
+                } };
+            },
+            .intern => |*insertion| switch (try insertion.cursor.advance()) {
+                .pending => {},
+                .complete => |id| names_state.work = .{ .put = .{
+                    .index = insertion.index,
+                    .cursor = names_state.locals.putCursor(@enumFromInt(id), insertion.index),
+                } },
+            },
+            .put => |*put| switch (put.cursor.advance()) {
+                .pending => {},
+                .complete => |inserted| {
+                    const name = self.names[put.index];
+                    if (!inserted) {
+                        self.diag.setFmt(name.span, "duplicate binder name `{s}`", .{name.bytes});
+                        return error.Parse;
+                    }
+                    const next = put.index + 1;
+                    if (next == self.names.len) return true;
+                    names_state.work = .{ .classify = .{
+                        .index = next,
+                        .cursor = .init(self.names[next].bytes),
+                    } };
+                },
+            },
+        }
+        return false;
     }
 
-    fn advanceName(self: *LowerCursor) (error{ OutOfMemory, Parse })!LowerProgress {
-        if (self.name_index == self.names.len) {
-            self.phase = .body;
-            return .pending;
-        }
-        const name = self.names[self.name_index];
-        if (self.classifier == null) self.classifier = .init(name.bytes);
-        if (self.symbol == null) return switch (self.classifier.?.advance()) {
-            .pending => .pending,
-            .complete => |classification| result: {
-                if (classification != .word) return self.failName(name);
-                self.symbol = .init(name.bytes);
-                break :result .pending;
+    fn advanceBody(
+        self: *LowerCursor,
+        body_state: *@FieldType(State, "body"),
+    ) (error{ OutOfMemory, Parse })!bool {
+        switch (body_state.work) {
+            .lookup_top => |*lookup| switch (lookup.advance()) {
+                .pending => return false,
+                .complete => |found| {
+                    self.local_indices[body_state.index] = found;
+                    body_state.index += 1;
+                    body_state.work = .top;
+                    return false;
+                },
             },
-        };
-        if (self.byte_index == 0) return switch (self.symbol.?.advance()) {
-            .pending => .pending,
-            .complete => |valid| result: {
-                if (!valid or intern.isReservedWordBytes(name.bytes)) return self.failName(name);
-                self.byte_index = 1;
-                break :result .pending;
-            },
-        };
-        if (self.byte_index <= name.bytes.len + 1) {
-            const index = self.byte_index - 1;
-            self.byte_index += 1;
-            if (index != name.bytes.len) {
-                if (name.bytes[index] == '.') return self.failName(name);
-                return .pending;
-            }
-            self.inserter = intern.insertionCursor(name.bytes);
-            return .pending;
-        }
-        if (self.putter == null) return switch (try self.inserter.?.advance()) {
-            .pending => .pending,
-            .complete => |id| result: {
-                self.putter = self.locals.?.putCursor(@enumFromInt(id), self.name_index);
-                break :result .pending;
-            },
-        };
-        return switch (self.putter.?.advance()) {
-            .pending => .pending,
-            .complete => |inserted| result: {
-                if (!inserted) {
-                    self.diag.setFmt(name.span, "duplicate binder name `{s}`", .{name.bytes});
-                    return error.Parse;
-                }
-                self.resetName();
-                break :result .pending;
-            },
-        };
-    }
-
-    fn advanceBody(self: *LowerCursor) (error{ OutOfMemory, Parse })!LowerProgress {
-        if (self.lookup) |*lookup| return switch (lookup.advance()) {
-            .pending => .pending,
-            .complete => |found| result: {
-                const kind = self.lookup_kind;
-                const matched_id = if (kind == .nested and found != null)
-                    self.walk.topPtr().?.item.word.name
-                else
-                    0;
-                self.lookup = null;
-                if (kind == .top) {
-                    self.local_indices[self.body_index] = found;
-                    self.body_index += 1;
-                } else {
-                    _ = self.walk.pop().?;
+            .lookup_nested => |*lookup| switch (lookup.cursor.advance()) {
+                .pending => return false,
+                .complete => |found| {
+                    _ = body_state.walk.pop().?;
                     if (found != null) {
                         self.diag.setFmt(
-                            self.body[self.body_index].span,
+                            self.body[body_state.index].span,
                             "local `{s}` crosses a quotation boundary; capture it explicitly with `partial`",
-                            .{intern.get(matched_id)},
+                            .{intern.get(lookup.name)},
                         );
                         return error.Parse;
                     }
-                }
-                break :result .pending;
+                    body_state.work = .nested;
+                    return false;
+                },
             },
-        };
-        if (!self.walk.isEmpty()) {
-            const frame = self.walk.topPtr().?;
+            .nested => {},
+            .top => {
+                if (body_state.index == self.body.len) return true;
+                return switch (self.body[body_state.index].value) {
+                    .word => |id| result: {
+                        body_state.work = .{ .lookup_top = body_state.locals.rawLookup(
+                            @enumFromInt(id.name),
+                        ) };
+                        break :result false;
+                    },
+                    .list => |header| result: {
+                        self.local_indices[body_state.index] = null;
+                        try body_state.walk.push(.{ .item = .{ .list = header } });
+                        body_state.work = .nested;
+                        break :result false;
+                    },
+                    .dict => |header| result: {
+                        self.local_indices[body_state.index] = null;
+                        try body_state.walk.push(.{ .item = .{ .dict = header } });
+                        body_state.work = .nested;
+                        break :result false;
+                    },
+                    .int, .float, .char, .symbol, .task, .module, .unit_plan => result: {
+                        self.local_indices[body_state.index] = null;
+                        body_state.index += 1;
+                        break :result false;
+                    },
+                };
+            },
+        }
+        if (!body_state.walk.isEmpty()) {
+            const frame = body_state.walk.topPtr().?;
             return switch (frame.item) {
                 .word => |id| result: {
-                    self.lookup_kind = .nested;
-                    self.lookup = self.locals.?.rawLookup(@enumFromInt(id.name));
-                    break :result .pending;
+                    body_state.work = .{ .lookup_nested = .{
+                        .name = id.name,
+                        .cursor = body_state.locals.rawLookup(@enumFromInt(id.name)),
+                    } };
+                    break :result false;
                 },
                 .list => result: {
                     if (frame.next_child == null) {
                         frame.next_child = @intCast(frame.item.list.length());
-                        break :result .pending;
+                        break :result false;
                     }
                     if (frame.next_child.? == 0) {
-                        _ = self.walk.pop().?;
-                        break :result .pending;
+                        _ = body_state.walk.pop().?;
+                        break :result false;
                     }
                     frame.next_child.? -= 1;
-                    try self.walk.push(.{ .item = list.atUnchecked(frame.item, frame.next_child.?) });
-                    break :result .pending;
+                    try body_state.walk.push(.{ .item = list.atUnchecked(frame.item, frame.next_child.?) });
+                    break :result false;
                 },
                 // A dict literal is inert like every other container, so a
                 // local named inside one would silently become an ordinary
@@ -225,181 +299,204 @@ pub const LowerCursor = struct {
                     if (frame.next_child == null) {
                         const entries: usize = @intCast(dict.keysOf(header).list.length());
                         frame.next_child = entries * 2;
-                        break :result .pending;
+                        break :result false;
                     }
                     if (frame.next_child.? == 0) {
-                        _ = self.walk.pop().?;
-                        break :result .pending;
+                        _ = body_state.walk.pop().?;
+                        break :result false;
                     }
                     frame.next_child.? -= 1;
                     const child = frame.next_child.?;
                     const entry = child / 2;
-                    try self.walk.push(.{ .item = if (child % 2 == 0)
+                    try body_state.walk.push(.{ .item = if (child % 2 == 0)
                         dict.keyAt(header, entry)
                     else
                         dict.valueAt(header, entry) });
-                    break :result .pending;
+                    break :result false;
                 },
                 .int, .float, .char, .symbol, .task, .module, .unit_plan => result: {
-                    _ = self.walk.pop().?;
-                    break :result .pending;
+                    _ = body_state.walk.pop().?;
+                    break :result false;
                 },
             };
         }
-        if (self.nested_active) {
-            self.nested_active = false;
-            self.body_index += 1;
-            return .pending;
-        }
-        if (self.body_index == self.body.len) {
-            self.body_index = 0;
-            self.phase = .live;
-            return .pending;
-        }
-        return switch (self.body[self.body_index].value) {
-            .word => |id| result: {
-                self.lookup_kind = .top;
-                self.lookup = self.locals.?.rawLookup(@enumFromInt(id.name));
-                break :result .pending;
-            },
-            .list => |header| result: {
-                self.local_indices[self.body_index] = null;
-                try self.walk.push(.{ .item = .{ .list = header } });
-                self.nested_active = true;
-                break :result .pending;
-            },
-            .dict => |header| result: {
-                self.local_indices[self.body_index] = null;
-                try self.walk.push(.{ .item = .{ .dict = header } });
-                self.nested_active = true;
-                break :result .pending;
-            },
-            .int, .float, .char, .symbol, .task, .module, .unit_plan => result: {
-                self.local_indices[self.body_index] = null;
-                self.body_index += 1;
-                break :result .pending;
-            },
-        };
+        body_state.work = .top;
+        body_state.index += 1;
+        return false;
     }
 
-    fn append(self: *LowerCursor, form: SpannedValue) void {
-        self.output.?[self.output_index] = form;
-        self.output_values.?.appendOwned(form.value);
-        self.output_index += 1;
+    fn append(output: *Output, form: SpannedValue) void {
+        output.forms[output.output_index] = form;
+        output.values.appendOwned(form.value);
+        output.output_index += 1;
     }
 
-    fn atom(self: *LowerCursor, item: Value) void {
-        self.append(.{ .value = item, .span = self.binder_span });
+    fn atom(self: *LowerCursor, output: *Output, item: Value) void {
+        append(output, .{ .value = item, .span = self.binder_span });
     }
 
-    fn advanceOutput(self: *LowerCursor) (error{OutOfMemory})!LowerProgress {
-        if (self.emit_body_index == self.body.len) {
+    fn advanceOutput(self: *LowerCursor, output: *Output) LowerProgress {
+        if (output.body_index == self.body.len) {
             // `drop-locals` is the body's last act rather than something
             // threaded through it: the names never sat on the operand stack,
             // so nothing between here and the binder had to see past them.
-            switch (self.epilogue_step) {
+            switch (output.epilogue_step) {
                 0 => {
-                    self.atom(.{ .int = @intCast(self.names.len) });
-                    self.epilogue_step = 1;
+                    self.atom(output, .{ .int = @intCast(self.names.len) });
+                    output.epilogue_step = 1;
                     return .pending;
                 },
                 1 => {
-                    self.atom(.{ .word = .{ .name = self.words[2] } });
-                    self.epilogue_step = 2;
+                    self.atom(output, .{ .word = .{ .name = output.words[2] } });
+                    output.epilogue_step = 2;
                     return .pending;
                 },
                 else => {},
             }
-            const output = self.output.?;
-            self.output = null;
-            const values = self.output_values.?.take();
-            self.output_values = null;
-            self.phase = .complete;
-            return .{ .complete = .{ .forms = output, .values = values } };
+            const forms = output.forms;
+            const values = output.values.take();
+            self.state = .complete;
+            return .{ .complete = .{ .forms = forms, .values = values } };
         }
-        if (self.local_indices[self.emit_body_index]) |index| {
-            if (self.emit_step == 0) {
-                self.atom(.{ .int = @intCast(index) });
-                self.emit_step = 1;
+        if (self.local_indices[output.body_index]) |index| {
+            if (output.body_step == 0) {
+                self.atom(output, .{ .int = @intCast(index) });
+                output.body_step = 1;
                 return .pending;
             }
-            self.atom(.{ .word = .{ .name = self.words[1] } });
-            self.emit_step = 0;
-            self.emit_body_index += 1;
+            self.atom(output, .{ .word = .{ .name = output.words[1] } });
+            output.body_step = 0;
+            output.body_index += 1;
             return .pending;
         }
         // Every form that is not a local read is emitted exactly as written.
-        const form = self.body[self.emit_body_index];
+        const form = self.body[output.body_index];
         heap.retainValue(form.value);
-        self.append(form);
-        self.emit_body_index += 1;
+        append(output, form);
+        output.body_index += 1;
         return .pending;
     }
 
     pub fn advance(self: *LowerCursor) (error{ OutOfMemory, Parse })!LowerProgress {
-        return switch (self.phase) {
-            .locals_init => switch (try self.locals_init.advance()) {
+        return switch (self.state) {
+            .locals_init => |*cursor| switch (try cursor.advance()) {
                 .pending => .pending,
                 .complete => |locals| result: {
-                    self.locals = locals;
                     if (self.names.len == 0) {
                         self.diag.set(self.binder_span, "a binder must contain at least one name");
                         return error.Parse;
                     }
-                    self.phase = .names;
+                    cursor.deinit();
+                    self.state = .{ .names = .{
+                        .locals = locals,
+                        .work = .{ .classify = .{
+                            .index = 0,
+                            .cursor = .init(self.names[0].bytes),
+                        } },
+                    } };
                     break :result .pending;
                 },
             },
-            .names => try self.advanceName(),
-            .body => try self.advanceBody(),
-            .live => result: {
-                self.body_index = 0;
-                self.phase = .words;
+            .names => |*names_state| result: {
+                if (try self.advanceName(names_state)) {
+                    const locals = names_state.locals;
+                    self.state = .{ .body = .{
+                        .locals = locals,
+                        .walk = .init(self.allocator),
+                    } };
+                }
                 break :result .pending;
             },
-            .words => result: {
+            .body => |*body_state| result: {
+                if (try self.advanceBody(body_state)) {
+                    body_state.walk.deinit();
+                    body_state.locals.deinit();
+                    self.state = .{ .word_start = .{} };
+                }
+                break :result .pending;
+            },
+            .word_start => |*words_state| result: {
                 const names = [_][]const u8{ "_ll", "_gl", "_dl" };
-                if (self.inserter == null) self.inserter = intern.insertionCursor(names[self.word_index]);
-                switch (try self.inserter.?.advance()) {
+                if (words_state.index == names.len) {
+                    const words = words_state.words;
+                    self.state = .{ .size = .{ .words = words } };
+                } else {
+                    const words = words_state.words;
+                    const index = words_state.index;
+                    self.state = .{ .word_intern = .{
+                        .words = words,
+                        .index = index,
+                        .cursor = intern.insertionCursor(names[index]),
+                    } };
+                }
+                break :result .pending;
+            },
+            .word_intern => |*word_state| result: {
+                switch (try word_state.cursor.advance()) {
                     .pending => {},
                     .complete => |id| {
-                        self.words[self.word_index] = id;
-                        self.word_index += 1;
-                        self.inserter = null;
-                        if (self.word_index == names.len) self.phase = .size;
+                        var words = word_state.words;
+                        const index = word_state.index;
+                        words[index] = id;
+                        self.state = .{ .word_start = .{
+                            .words = words,
+                            .index = index + 1,
+                        } };
                     },
                 }
                 break :result .pending;
             },
-            .size => result: {
-                if (self.body_index != self.body.len) {
-                    const additional: usize = if (self.local_indices[self.body_index] != null) 2 else 1;
-                    self.output_count = std.math.add(usize, self.output_count, additional) catch
+            .size => |*size| result: {
+                if (size.index != self.body.len) {
+                    const additional: usize = if (self.local_indices[size.index] != null) 2 else 1;
+                    size.count = std.math.add(usize, size.count, additional) catch
                         return error.OutOfMemory;
-                    self.body_index += 1;
+                    size.index += 1;
                     break :result .pending;
                 }
-                self.output = try self.allocator.alloc(SpannedValue, self.output_count);
-                self.output_values = try .init(self.releases, self.output_count);
-                self.name_index = 0;
-                self.phase = .output;
+                const words = size.words;
+                const count = size.count;
+                self.state = .{ .allocate_output = .{
+                    .words = words,
+                    .count = count,
+                } };
                 break :result .pending;
             },
-            .output => result: {
-                switch (self.name_index) {
+            .allocate_output => |allocation| result: {
+                const forms = try self.allocator.alloc(SpannedValue, allocation.count);
+                const words = allocation.words;
+                self.state = .{ .allocate_values = .{
+                    .words = words,
+                    .forms = forms,
+                } };
+                break :result .pending;
+            },
+            .allocate_values => |allocation| result: {
+                const values = try heap.OwnedValueBuffer.init(self.releases, allocation.forms.len);
+                const words = allocation.words;
+                const forms = allocation.forms;
+                self.state = .{ .output = .{
+                    .words = words,
+                    .forms = forms,
+                    .values = values,
+                } };
+                break :result .pending;
+            },
+            .output => |*output| result: {
+                switch (output.prefix_step) {
                     0 => {
-                        self.atom(.{ .int = @intCast(self.names.len) });
-                        self.name_index = 1;
+                        self.atom(output, .{ .int = @intCast(self.names.len) });
+                        output.prefix_step = 1;
                         break :result .pending;
                     },
                     1 => {
-                        self.atom(.{ .word = .{ .name = self.words[0] } });
-                        self.name_index = 2;
+                        self.atom(output, .{ .word = .{ .name = output.words[0] } });
+                        output.prefix_step = 2;
                         break :result .pending;
                     },
                     else => {},
                 }
-                break :result try self.advanceOutput();
+                break :result self.advanceOutput(output);
             },
             .complete => unreachable,
         };
