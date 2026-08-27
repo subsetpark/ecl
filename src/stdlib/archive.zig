@@ -114,9 +114,11 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
         .mode = .unpack,
         .bytes_value = .init(bytes_value.take()),
         .destination_value = .init(destination.take()),
-        .byte_encoder = .init(byte_encoder),
-        .path_encoder = .init(path_encoder),
         .entries = .init(entries),
+        .state = .{ .parsing = .{ .encode_bytes = .{
+            .byte = .init(byte_encoder),
+            .target = .{ .unpack = .init(path_encoder) },
+        } } },
     });
 }
 
@@ -140,9 +142,11 @@ pub fn inspectPackage(evaluator: *Machine) MachineError!void {
         .mode = .package_inspect,
         .bytes_value = .init(bytes_value.take()),
         .package_value = .init(package.take()),
-        .byte_encoder = .init(byte_encoder),
-        .package_encoder = .init(package_encoder),
         .entries = .init(entries),
+        .state = .{ .parsing = .{ .encode_bytes = .{
+            .byte = .init(byte_encoder),
+            .target = .{ .inspect = .init(package_encoder) },
+        } } },
     });
 }
 
@@ -175,10 +179,14 @@ pub fn installPackage(evaluator: *Machine) MachineError!void {
         .bytes_value = .init(bytes_value.take()),
         .package_value = .init(package.take()),
         .destination_value = .init(destination.take()),
-        .byte_encoder = .init(byte_encoder),
-        .package_encoder = .init(package_encoder),
-        .path_encoder = .init(path_encoder),
         .entries = .init(entries),
+        .state = .{ .parsing = .{ .encode_bytes = .{
+            .byte = .init(byte_encoder),
+            .target = .{ .install = .{
+                .destination = .init(path_encoder),
+                .package = .init(package_encoder),
+            } },
+        } } },
     });
 }
 
@@ -226,14 +234,7 @@ const GzipDecoder = struct {
     }
 };
 
-const ParsePhase = enum {
-    encode_bytes,
-    encode_destination,
-    encode_package,
-    allocate_output,
-    decompress,
-    verify_gzip,
-    initialize_slots,
+const LegacyParsePhase = enum {
     tar_header,
     insert_member,
     parse_pax,
@@ -315,23 +316,15 @@ const UnpackDriver = struct {
     bytes_value: heap.Owned(Value),
     package_value: ?heap.Owned(Value) = null,
     destination_value: ?heap.Owned(Value) = null,
-    byte_encoder: heap.Owned(storage.ByteVectorEncoder),
-    package_encoder: ?heap.Owned(storage.ToUtf8Cursor) = null,
-    path_encoder: ?heap.Owned(storage.ToUtf8Cursor) = null,
     entries: heap.Owned(EntryList),
-    state: State = .{ .parsing = .encode_bytes },
+    state: State,
 
     bytes: ?heap.Owned(storage.ByteVector) = null,
     destination: ?heap.Owned([]u8) = null,
     package_name: ?heap.Owned([]u8) = null,
-    decoder: ?heap.Owned(GzipDecoder) = null,
     tar: ?heap.Owned([]u8) = null,
-    output_index: usize = 0,
-    gzip_checked_index: usize = 0,
-    gzip_crc: std.hash.crc.Crc32 = .init(),
 
     slots: ?heap.Owned([]?*Entry) = null,
-    slots_initialized: usize = 0,
     tar_offset: usize = 0,
     zero_blocks: u2 = 0,
     member_count: usize = 0,
@@ -363,6 +356,64 @@ const UnpackDriver = struct {
     const Staged = struct {
         result: Value,
         path: heap.Owned([]u8),
+    };
+    const EncodeTarget = union(enum) {
+        unpack: heap.Owned(storage.ToUtf8Cursor),
+        inspect: heap.Owned(storage.ToUtf8Cursor),
+        install: struct {
+            destination: heap.Owned(storage.ToUtf8Cursor),
+            package: heap.Owned(storage.ToUtf8Cursor),
+        },
+    };
+    const EncodedTarget = union(enum) {
+        unpack: heap.Owned([]u8),
+        inspect: heap.Owned([]u8),
+        install: struct {
+            destination: heap.Owned([]u8),
+            package: heap.Owned([]u8),
+        },
+    };
+    const EncodedInputs = struct {
+        bytes: heap.Owned(storage.ByteVector),
+        target: EncodedTarget,
+    };
+    const Parsing = union(enum) {
+        encode_bytes: struct {
+            byte: heap.Owned(storage.ByteVectorEncoder),
+            target: EncodeTarget,
+        },
+        encode_destination: struct {
+            bytes: heap.Owned(storage.ByteVector),
+            destination: heap.Owned(storage.ToUtf8Cursor),
+            package: ?heap.Owned(storage.ToUtf8Cursor),
+        },
+        encode_package: struct {
+            bytes: heap.Owned(storage.ByteVector),
+            destination: ?heap.Owned([]u8),
+            package: heap.Owned(storage.ToUtf8Cursor),
+        },
+        allocate_tar: EncodedInputs,
+        allocate_decoder: struct { inputs: EncodedInputs, tar: heap.Owned([]u8) },
+        decompress: struct {
+            inputs: EncodedInputs,
+            tar: heap.Owned([]u8),
+            decoder: heap.Owned(GzipDecoder),
+            index: usize = 0,
+        },
+        verify: struct {
+            inputs: EncodedInputs,
+            tar: heap.Owned([]u8),
+            index: usize = 0,
+            crc: std.hash.crc.Crc32 = .init(),
+        },
+        allocate_slots: struct { inputs: EncodedInputs, tar: heap.Owned([]u8) },
+        initialize_slots: struct {
+            inputs: EncodedInputs,
+            tar: heap.Owned([]u8),
+            slots: heap.Owned([]?*Entry),
+            index: usize = 0,
+        },
+        legacy: LegacyParsePhase,
     };
     const ExtractWork = union(enum) {
         next,
@@ -411,7 +462,7 @@ const UnpackDriver = struct {
         root,
     };
     const State = union(enum) {
-        parsing: ParsePhase,
+        parsing: Parsing,
         publication: Publication,
         rollback_reopen: RollbackContext,
         rollback: struct {
@@ -425,14 +476,28 @@ const UnpackDriver = struct {
     pub fn advance(evaluator: *Machine, self: *UnpackDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         return switch (self.state) {
-            .parsing => |phase| switch (phase) {
-                .encode_bytes => self.encodeBytes(evaluator),
-                .encode_destination => self.encodeDestination(evaluator),
-                .encode_package => self.encodePackage(evaluator),
-                .allocate_output => self.allocateOutput(evaluator),
-                .decompress => self.decompress(evaluator),
-                .verify_gzip => self.verifyGzip(evaluator),
-                .initialize_slots => self.initializeSlots(),
+            .parsing => |*parsing| self.advanceParsing(evaluator, parsing),
+            .publication => |*publication| self.advancePublication(evaluator, publication),
+            .rollback_reopen, .rollback, .cleanup_archive => unreachable,
+        };
+    }
+
+    fn advanceParsing(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        parsing: *Parsing,
+    ) MachineError!machine.WorkProgress {
+        return switch (parsing.*) {
+            .encode_bytes => |*encoding| self.encodeBytes(evaluator, encoding),
+            .encode_destination => |*encoding| self.encodeDestination(evaluator, encoding),
+            .encode_package => |*encoding| self.encodePackage(evaluator, encoding),
+            .allocate_tar => |*allocation| self.allocateTar(evaluator, allocation),
+            .allocate_decoder => |*allocation| self.allocateDecoder(allocation),
+            .decompress => |*decompression| self.decompress(evaluator, decompression),
+            .verify => |*verification| self.verifyGzip(evaluator, verification),
+            .allocate_slots => |*allocation| self.allocateSlots(allocation),
+            .initialize_slots => |*initialization| self.initializeSlots(initialization),
+            .legacy => |phase| switch (phase) {
                 .tar_header => self.readTarHeader(evaluator),
                 .insert_member => self.insertMember(evaluator),
                 .parse_pax => self.parsePaxRecord(evaluator),
@@ -443,34 +508,83 @@ const UnpackDriver = struct {
                 .materialize_paths => self.materializePaths(evaluator),
                 .materialize_result => self.materializeResult(),
             },
-            .publication => |*publication| self.advancePublication(evaluator, publication),
-            .rollback_reopen, .rollback, .cleanup_archive => unreachable,
         };
     }
 
-    fn encodeBytes(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        switch (self.byte_encoder.borrowMut().advance(work_quantum) catch |err| switch (err) {
+    fn takeEncodeTarget(target: *EncodeTarget) EncodeTarget {
+        return switch (target.*) {
+            .unpack => |*cursor| .{ .unpack = .init(cursor.take()) },
+            .inspect => |*cursor| .{ .inspect = .init(cursor.take()) },
+            .install => |*install| .{ .install = .{
+                .destination = .init(install.destination.take()),
+                .package = .init(install.package.take()),
+            } },
+        };
+    }
+
+    fn takeEncodedTarget(target: *EncodedTarget) EncodedTarget {
+        return switch (target.*) {
+            .unpack => |*path| .{ .unpack = .init(path.take()) },
+            .inspect => |*name| .{ .inspect = .init(name.take()) },
+            .install => |*install| .{ .install = .{
+                .destination = .init(install.destination.take()),
+                .package = .init(install.package.take()),
+            } },
+        };
+    }
+
+    fn takeEncodedInputs(inputs: *EncodedInputs) EncodedInputs {
+        return .{
+            .bytes = .init(inputs.bytes.take()),
+            .target = takeEncodedTarget(&inputs.target),
+        };
+    }
+
+    fn encodeBytes(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        encoding: *@FieldType(Parsing, "encode_bytes"),
+    ) MachineError!machine.WorkProgress {
+        switch (encoding.byte.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidByte => return evaluator.failAtIndex(
                 .domain,
                 "archive.unpack-tgz expects integers from 0 through 255",
-                self.byte_encoder.borrow().invalid_index.?,
+                encoding.byte.borrow().invalid_index.?,
             ),
         }) {
             .pending => return .yielded,
             .complete => |bytes| {
-                self.bytes = .init(bytes);
-                self.state = .{ .parsing = switch (self.mode) {
-                    .unpack, .package_install => .encode_destination,
-                    .package_inspect => .encode_package,
+                const target = takeEncodeTarget(&encoding.target);
+                encoding.byte.deinit(evaluator.releaseDomain(), self.allocator);
+                self.state = .{ .parsing = switch (target) {
+                    .unpack => |path| .{ .encode_destination = .{
+                        .bytes = .init(bytes),
+                        .destination = path,
+                        .package = null,
+                    } },
+                    .inspect => |package| .{ .encode_package = .{
+                        .bytes = .init(bytes),
+                        .destination = null,
+                        .package = package,
+                    } },
+                    .install => |install| .{ .encode_destination = .{
+                        .bytes = .init(bytes),
+                        .destination = install.destination,
+                        .package = install.package,
+                    } },
                 } };
                 return .yielded;
             },
         }
     }
 
-    fn encodeDestination(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        switch (self.path_encoder.?.borrowMut().advance(work_quantum) catch |err| switch (err) {
+    fn encodeDestination(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        encoding: *@FieldType(Parsing, "encode_destination"),
+    ) MachineError!machine.WorkProgress {
+        switch (encoding.destination.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failDomain(evaluator, "destination contains an invalid Unicode scalar"),
         }) {
@@ -480,18 +594,32 @@ const UnpackDriver = struct {
                     self.allocator.free(path);
                     return self.failDomain(evaluator, "destination is empty");
                 }
-                self.destination = .init(path);
-                self.state = .{ .parsing = if (self.mode == .package_install)
-                    .encode_package
-                else
-                    .allocate_output };
+                const bytes = encoding.bytes.take();
+                encoding.destination.deinit(evaluator.releaseDomain(), self.allocator);
+                if (encoding.package) |*package| {
+                    const package_cursor = package.take();
+                    self.state = .{ .parsing = .{ .encode_package = .{
+                        .bytes = .init(bytes),
+                        .destination = .init(path),
+                        .package = .init(package_cursor),
+                    } } };
+                } else {
+                    self.state = .{ .parsing = .{ .allocate_tar = .{
+                        .bytes = .init(bytes),
+                        .target = .{ .unpack = .init(path) },
+                    } } };
+                }
                 return .yielded;
             },
         }
     }
 
-    fn encodePackage(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        switch (self.package_encoder.?.borrowMut().advance(work_quantum) catch |err| switch (err) {
+    fn encodePackage(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        encoding: *@FieldType(Parsing, "encode_package"),
+    ) MachineError!machine.WorkProgress {
+        switch (encoding.package.borrowMut().advance(work_quantum) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCodepoint => return self.failDomain(evaluator, "package name contains an invalid Unicode scalar"),
         }) {
@@ -501,69 +629,151 @@ const UnpackDriver = struct {
                     self.allocator.free(name);
                     return self.failDomain(evaluator, "package name is not canonical");
                 }
-                self.package_name = .init(name);
-                self.state = .{ .parsing = .allocate_output };
+                const bytes = encoding.bytes.take();
+                encoding.package.deinit(evaluator.releaseDomain(), self.allocator);
+                const target: EncodedTarget = if (encoding.destination) |*destination|
+                    .{ .install = .{
+                        .destination = .init(destination.take()),
+                        .package = .init(name),
+                    } }
+                else
+                    .{ .inspect = .init(name) };
+                self.state = .{ .parsing = .{ .allocate_tar = .{
+                    .bytes = .init(bytes),
+                    .target = target,
+                } } };
                 return .yielded;
             },
         }
     }
 
-    fn allocateOutput(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const compressed = self.bytes.?.borrow().bytes();
+    fn allocateTar(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        allocation: *EncodedInputs,
+    ) MachineError!machine.WorkProgress {
+        const compressed = allocation.bytes.borrow().bytes();
         if (compressed.len < 18 or compressed[0] != 0x1f or compressed[1] != 0x8b)
             return self.failDomain(evaluator, "malformed gzip archive");
         const expected: usize = std.mem.readInt(u32, compressed[compressed.len - 4 ..][0..4], .little);
         if (expected > max_uncompressed_bytes)
             return self.failDomain(evaluator, "archive exceeds the 1 GiB uncompressed limit");
-        self.tar = .init(try self.allocator.alloc(u8, expected));
-        self.decoder = .init(try .init(self.allocator, compressed));
-        self.state = .{ .parsing = .decompress };
+        const tar = try self.allocator.alloc(u8, expected);
+        const inputs = takeEncodedInputs(allocation);
+        self.state = .{ .parsing = .{ .allocate_decoder = .{
+            .inputs = inputs,
+            .tar = .init(tar),
+        } } };
         return .yielded;
     }
 
-    fn decompress(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const output = self.tar.?.borrow();
-        if (self.output_index != output.len) {
-            const end = @min(self.output_index + work_quantum, output.len);
-            const read = self.decoder.?.borrowMut().read(output[self.output_index..end]) catch
+    fn allocateDecoder(
+        self: *UnpackDriver,
+        allocation: *@FieldType(Parsing, "allocate_decoder"),
+    ) MachineError!machine.WorkProgress {
+        const decoder = try GzipDecoder.init(self.allocator, allocation.inputs.bytes.borrow().bytes());
+        const inputs = takeEncodedInputs(&allocation.inputs);
+        const tar = allocation.tar.take();
+        self.state = .{ .parsing = .{ .decompress = .{
+            .inputs = inputs,
+            .tar = .init(tar),
+            .decoder = .init(decoder),
+        } } };
+        return .yielded;
+    }
+
+    fn decompress(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        decompression: *@FieldType(Parsing, "decompress"),
+    ) MachineError!machine.WorkProgress {
+        const output = decompression.tar.borrow();
+        if (decompression.index != output.len) {
+            const end = @min(decompression.index + work_quantum, output.len);
+            const read = decompression.decoder.borrowMut().read(output[decompression.index..end]) catch
                 return self.failDomain(evaluator, "malformed gzip archive");
             if (read == 0) return self.failDomain(evaluator, "gzip size does not match its footer");
-            self.output_index += read;
+            decompression.index += read;
             return .yielded;
         }
         var extra: [1]u8 = undefined;
-        const read = self.decoder.?.borrowMut().read(&extra) catch
+        const read = decompression.decoder.borrowMut().read(&extra) catch
             return self.failDomain(evaluator, "malformed gzip archive");
-        if (read != 0 or !self.decoder.?.borrow().consumedAllInput())
+        if (read != 0 or !decompression.decoder.borrow().consumedAllInput())
             return self.failDomain(evaluator, "gzip size does not match its footer");
-        self.state = .{ .parsing = .verify_gzip };
+        const inputs = takeEncodedInputs(&decompression.inputs);
+        const tar = decompression.tar.take();
+        decompression.decoder.deinit(evaluator.releaseDomain(), self.allocator);
+        self.state = .{ .parsing = .{ .verify = .{
+            .inputs = inputs,
+            .tar = .init(tar),
+        } } };
         return .yielded;
     }
 
-    fn verifyGzip(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
-        const output = self.tar.?.borrow();
-        if (self.gzip_checked_index != output.len) {
-            const end = @min(self.gzip_checked_index + work_quantum, output.len);
-            self.gzip_crc.update(output[self.gzip_checked_index..end]);
-            self.gzip_checked_index = end;
+    fn verifyGzip(
+        self: *UnpackDriver,
+        evaluator: *Machine,
+        verification: *@FieldType(Parsing, "verify"),
+    ) MachineError!machine.WorkProgress {
+        const output = verification.tar.borrow();
+        if (verification.index != output.len) {
+            const end = @min(verification.index + work_quantum, output.len);
+            verification.crc.update(output[verification.index..end]);
+            verification.index = end;
             return .yielded;
         }
-        const compressed = self.bytes.?.borrow().bytes();
+        const compressed = verification.inputs.bytes.borrow().bytes();
         const expected_crc = std.mem.readInt(u32, compressed[compressed.len - 8 ..][0..4], .little);
-        if (self.gzip_crc.final() != expected_crc)
+        if (verification.crc.final() != expected_crc)
             return self.failDomain(evaluator, "gzip checksum does not match its payload");
-        self.slots = .init(try self.allocator.alloc(?*Entry, member_slots));
-        self.state = .{ .parsing = .initialize_slots };
+        const inputs = takeEncodedInputs(&verification.inputs);
+        const tar = verification.tar.take();
+        self.state = .{ .parsing = .{ .allocate_slots = .{
+            .inputs = inputs,
+            .tar = .init(tar),
+        } } };
         return .yielded;
     }
 
-    fn initializeSlots(self: *UnpackDriver) MachineError!machine.WorkProgress {
-        const slots = self.slots.?.borrow();
-        const end = @min(self.slots_initialized + work_quantum, slots.len);
-        @memset(slots[self.slots_initialized..end], null);
-        self.slots_initialized = end;
+    fn allocateSlots(
+        self: *UnpackDriver,
+        allocation: *@FieldType(Parsing, "allocate_slots"),
+    ) MachineError!machine.WorkProgress {
+        const slots = try self.allocator.alloc(?*Entry, member_slots);
+        const inputs = takeEncodedInputs(&allocation.inputs);
+        const tar = allocation.tar.take();
+        self.state = .{ .parsing = .{ .initialize_slots = .{
+            .inputs = inputs,
+            .tar = .init(tar),
+            .slots = .init(slots),
+        } } };
+        return .yielded;
+    }
+
+    fn initializeSlots(
+        self: *UnpackDriver,
+        initialization: *@FieldType(Parsing, "initialize_slots"),
+    ) MachineError!machine.WorkProgress {
+        const slots = initialization.slots.borrow();
+        const end = @min(initialization.index + work_quantum, slots.len);
+        @memset(slots[initialization.index..end], null);
+        initialization.index = end;
         if (end != slots.len) return .yielded;
-        self.state = .{ .parsing = .tar_header };
+
+        var inputs = takeEncodedInputs(&initialization.inputs);
+        self.bytes = .init(inputs.bytes.take());
+        self.tar = .init(initialization.tar.take());
+        self.slots = .init(initialization.slots.take());
+        switch (inputs.target) {
+            .unpack => |path| self.destination = path,
+            .inspect => |name| self.package_name = name,
+            .install => |install| {
+                self.destination = install.destination;
+                self.package_name = install.package;
+            },
+        }
+        self.state = .{ .parsing = .{ .legacy = .tar_header } };
         return .yielded;
     }
 
@@ -571,10 +781,10 @@ const UnpackDriver = struct {
         const tar = self.tar.?.borrow();
         if (self.tar_offset == tar.len) {
             if (self.zero_blocks < 2) return self.failDomain(evaluator, "tar archive has no end marker");
-            self.state = .{ .parsing = if (self.mode == .unpack)
+            self.state = .{ .parsing = .{ .legacy = if (self.mode == .unpack)
                 .allocate_results
             else
-                .materialize_manifest };
+                .materialize_manifest } };
             return .yielded;
         }
         if (self.tar_offset + tar_block_bytes > tar.len)
@@ -585,7 +795,8 @@ const UnpackDriver = struct {
                 return self.failDomain(evaluator, "tar extension has no following member");
             self.zero_blocks += 1;
             self.tar_offset += tar_block_bytes;
-            if (self.zero_blocks == 2) self.state = .{ .parsing = .trailing_zeroes };
+            if (self.zero_blocks == 2)
+                self.state = .{ .parsing = .{ .legacy = .trailing_zeroes } };
             return .yielded;
         }
         if (self.zero_blocks != 0) return self.failDomain(evaluator, "tar data follows an end marker");
@@ -605,7 +816,7 @@ const UnpackDriver = struct {
             self.pax_offset = data_offset;
             self.pax_end = header_data_end;
             self.pax_next_offset = header_next;
-            self.state = .{ .parsing = .parse_pax };
+            self.state = .{ .parsing = .{ .legacy = .parse_pax } };
             return .yielded;
         }
         if (typeflag == 'L') {
@@ -657,14 +868,14 @@ const UnpackDriver = struct {
         self.pending_hash = std.hash.Wyhash.hash(0, path);
         self.pending_slot = @intCast(self.pending_hash & (member_slots - 1));
         self.pending_probes = 0;
-        self.state = .{ .parsing = .insert_member };
+        self.state = .{ .parsing = .{ .legacy = .insert_member } };
         return .yielded;
     }
 
     fn parsePaxRecord(self: *UnpackDriver, evaluator: *Machine) MachineError!machine.WorkProgress {
         if (self.pax_offset == self.pax_end) {
             self.tar_offset = self.pax_next_offset;
-            self.state = .{ .parsing = .tar_header };
+            self.state = .{ .parsing = .{ .legacy = .tar_header } };
             return .yielded;
         }
         const tar = self.tar.?.borrow();
@@ -683,7 +894,7 @@ const UnpackDriver = struct {
         self.pax_record_end = record_end;
         self.pax_key_start = space + 1;
         self.pax_scan_offset = space + 1;
-        self.state = .{ .parsing = .scan_pax };
+        self.state = .{ .parsing = .{ .legacy = .scan_pax } };
         return .yielded;
     }
 
@@ -711,7 +922,7 @@ const UnpackDriver = struct {
                 return self.failDomain(evaluator, "PAX size is malformed");
         }
         self.pax_offset = self.pax_record_end;
-        self.state = .{ .parsing = .parse_pax };
+        self.state = .{ .parsing = .{ .legacy = .parse_pax } };
         return .yielded;
     }
 
@@ -748,7 +959,7 @@ const UnpackDriver = struct {
             slot.* = stored;
             self.pending_entry = null;
             self.tar_offset = self.pending_next_offset;
-            self.state = .{ .parsing = .tar_header };
+            self.state = .{ .parsing = .{ .legacy = .tar_header } };
             return .yielded;
         }
         return .yielded;
@@ -761,10 +972,10 @@ const UnpackDriver = struct {
             return self.failDomain(evaluator, "tar data follows its end marker");
         self.tar_offset = end;
         if (end != tar.len) return .yielded;
-        self.state = .{ .parsing = if (self.mode == .unpack)
+        self.state = .{ .parsing = .{ .legacy = if (self.mode == .unpack)
             .allocate_results
         else
-            .materialize_manifest };
+            .materialize_manifest } };
         return .yielded;
     }
 
@@ -811,7 +1022,7 @@ const UnpackDriver = struct {
                 self.text_materializer = null;
                 if (self.mode == .package_inspect) break :result .{ .output = text };
                 evaluator.releaseDomain().releaseValue(text);
-                self.state = .{ .parsing = .allocate_results };
+                self.state = .{ .parsing = .{ .legacy = .allocate_results } };
                 break :result .yielded;
             },
         };
@@ -820,7 +1031,7 @@ const UnpackDriver = struct {
     fn allocateResults(self: *UnpackDriver) MachineError!machine.WorkProgress {
         self.result_values = try self.allocator.alloc(Value, self.file_count);
         self.result_iterator = self.entries.borrow().iterator();
-        self.state = .{ .parsing = .materialize_paths };
+        self.state = .{ .parsing = .{ .legacy = .materialize_paths } };
         return .yielded;
     }
 
@@ -843,7 +1054,7 @@ const UnpackDriver = struct {
         while (remaining != 0) : (remaining -= 1) {
             const entry = self.result_iterator.?.next() orelse {
                 self.result_materializer = .init(self.allocator, self.result_values.?);
-                self.state = .{ .parsing = .materialize_result };
+                self.state = .{ .parsing = .{ .legacy = .materialize_result } };
                 return .yielded;
             };
             if (entry.kind == .directory) continue;
@@ -1244,13 +1455,98 @@ const UnpackDriver = struct {
         return false;
     }
 
+    fn retireEncodeTarget(
+        target: *EncodeTarget,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (target.*) {
+            .unpack, .inspect => |*cursor| cursor.deinit(releases, allocator),
+            .install => |*install| {
+                install.destination.deinit(releases, allocator);
+                install.package.deinit(releases, allocator);
+            },
+        }
+    }
+
+    fn retireEncodedTarget(
+        target: *EncodedTarget,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (target.*) {
+            .unpack, .inspect => |*text| text.deinit(releases, allocator),
+            .install => |*install| {
+                install.destination.deinit(releases, allocator);
+                install.package.deinit(releases, allocator);
+            },
+        }
+    }
+
+    fn retireEncodedInputs(
+        inputs: *EncodedInputs,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        inputs.bytes.deinit(releases, allocator);
+        retireEncodedTarget(&inputs.target, releases, allocator);
+    }
+
+    fn retireParsing(
+        parsing: *Parsing,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        switch (parsing.*) {
+            .encode_bytes => |*encoding| {
+                encoding.byte.deinit(releases, allocator);
+                retireEncodeTarget(&encoding.target, releases, allocator);
+            },
+            .encode_destination => |*encoding| {
+                encoding.bytes.deinit(releases, allocator);
+                encoding.destination.deinit(releases, allocator);
+                if (encoding.package) |*package| package.deinit(releases, allocator);
+            },
+            .encode_package => |*encoding| {
+                encoding.bytes.deinit(releases, allocator);
+                if (encoding.destination) |*destination| destination.deinit(releases, allocator);
+                encoding.package.deinit(releases, allocator);
+            },
+            .allocate_tar => |*allocation| retireEncodedInputs(allocation, releases, allocator),
+            .allocate_decoder => |*allocation| {
+                retireEncodedInputs(&allocation.inputs, releases, allocator);
+                allocation.tar.deinit(releases, allocator);
+            },
+            .decompress => |*decompression| {
+                retireEncodedInputs(&decompression.inputs, releases, allocator);
+                decompression.tar.deinit(releases, allocator);
+                decompression.decoder.deinit(releases, allocator);
+            },
+            .verify => |*verification| {
+                retireEncodedInputs(&verification.inputs, releases, allocator);
+                verification.tar.deinit(releases, allocator);
+            },
+            .allocate_slots => |*allocation| {
+                retireEncodedInputs(&allocation.inputs, releases, allocator);
+                allocation.tar.deinit(releases, allocator);
+            },
+            .initialize_slots => |*initialization| {
+                retireEncodedInputs(&initialization.inputs, releases, allocator);
+                initialization.tar.deinit(releases, allocator);
+                initialization.slots.deinit(releases, allocator);
+            },
+            .legacy => {},
+        }
+    }
+
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
         self: *UnpackDriver,
     ) bool {
         switch (self.state) {
-            .parsing => {
+            .parsing => |*parsing| {
+                retireParsing(parsing, releases, allocator);
                 self.state = .cleanup_archive;
                 return false;
             },
@@ -1292,19 +1588,12 @@ const UnpackDriver = struct {
         self.slots = null;
         if (self.tar) |*tar| tar.deinit(releases, allocator);
         self.tar = null;
-        if (self.decoder) |*decoder| decoder.deinit(releases, allocator);
-        self.decoder = null;
         if (self.bytes) |*bytes| bytes.deinit(releases, allocator);
         self.bytes = null;
         if (self.destination) |*destination| destination.deinit(releases, allocator);
         self.destination = null;
         if (self.package_name) |*name| name.deinit(releases, allocator);
         self.package_name = null;
-        self.byte_encoder.deinit(releases, allocator);
-        if (self.path_encoder) |*encoder| encoder.deinit(releases, allocator);
-        self.path_encoder = null;
-        if (self.package_encoder) |*encoder| encoder.deinit(releases, allocator);
-        self.package_encoder = null;
         self.bytes_value.deinit(releases, allocator);
         if (self.destination_value) |*destination| destination.deinit(releases, allocator);
         self.destination_value = null;
