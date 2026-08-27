@@ -981,40 +981,164 @@ const CollectionBuilder = struct {
     diag: *reader.Diag,
     provenance_namespace: heap.CodeProvenanceNamespace,
     word_scope: u32,
-    phase: enum {
+    state: State = .allocate_body,
+
+    const Forms = union(enum) {
+        body: []binder.SpannedValue,
+        lowered: struct {
+            forms: []binder.SpannedValue,
+            values: heap.OwnedValueBuffer,
+        },
+
+        fn elements(self: *const Forms) []const binder.SpannedValue {
+            return switch (self.*) {
+                .body => |forms| forms,
+                .lowered => |lowered| lowered.forms,
+            };
+        }
+        fn retire(
+            self: *Forms,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            _ = releases;
+            switch (self.*) {
+                .body => |forms| allocator.free(forms),
+                .lowered => |*lowered| {
+                    lowered.values.deinit();
+                    allocator.free(lowered.forms);
+                },
+            }
+        }
+    };
+    const State = union(enum) {
         allocate_body,
-        copy_body,
-        allocate_names,
-        copy_names,
-        lower,
-        lowered_spans,
-        allocate_elements,
-        copy_elements,
-        materialize_list,
-        list_spans,
-        allocate_pairs,
-        copy_pairs,
-        materialize_dict,
+        copy_body: struct {
+            body: []binder.SpannedValue,
+            iterator: FormList.Iterator,
+            index: usize = 0,
+        },
+        allocate_names: []binder.SpannedValue,
+        copy_names: struct {
+            body: []binder.SpannedValue,
+            names: []binder.Name,
+            iterator: NameList.Iterator,
+            index: usize = 0,
+        },
+        prepare_lower: struct {
+            body: []binder.SpannedValue,
+            names: []binder.Name,
+        },
+        lowering: struct {
+            body: []binder.SpannedValue,
+            names: []binder.Name,
+            cursor: binder.LowerCursor,
+        },
+        scan_lowered_spans: struct {
+            forms: Forms,
+            index: usize = 0,
+        },
+        write_lowered_span: struct {
+            forms: Forms,
+            index: usize,
+            writer: reader.SpanTable.PutCursor,
+        },
+        allocate_elements: Forms,
+        allocate_element_spans: struct {
+            forms: Forms,
+            values: []Value,
+        },
+        copy_elements: struct {
+            forms: Forms,
+            values: []Value,
+            spans: []Span,
+            index: usize = 0,
+        },
+        materialize_list: struct {
+            forms: Forms,
+            values: []Value,
+            spans: []Span,
+            materializer: storage.ValueMaterializer,
+        },
+        list_spans: struct {
+            spans: []Span,
+            result: Value,
+            writer: reader.SpanTable.PutCursor,
+        },
+        allocate_pairs: []binder.SpannedValue,
+        copy_pairs: struct {
+            body: []binder.SpannedValue,
+            pairs: []dict.Pair,
+            index: usize = 0,
+        },
+        materialize_dict: struct {
+            body: []binder.SpannedValue,
+            pairs: []dict.Pair,
+            materializer: storage.DictMaterializer,
+        },
         complete,
-    } = .allocate_body,
-    body: ?[]binder.SpannedValue = null,
-    body_iterator: ?FormList.Iterator = null,
-    names: ?[]binder.Name = null,
-    name_iterator: ?NameList.Iterator = null,
-    lowered: ?[]binder.SpannedValue = null,
-    lowered_values: ?heap.OwnedValueBuffer = null,
-    lowerer: ?binder.LowerCursor = null,
-    lowered_span_index: usize = 0,
-    generated_span_writer: ?reader.SpanTable.PutCursor = null,
-    values: ?[]Value = null,
-    element_spans: ?[]Span = null,
-    element_index: usize = 0,
-    materializer: ?storage.ValueMaterializer = null,
-    span_writer: ?reader.SpanTable.PutCursor = null,
-    pairs: ?[]dict.Pair = null,
-    pair_index: usize = 0,
-    dict_materializer: ?storage.DictMaterializer = null,
-    result: ?Value = null,
+
+        fn retire(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .allocate_body, .complete => {},
+                .copy_body => |copy| allocator.free(copy.body),
+                .allocate_names => |body| allocator.free(body),
+                .copy_names => |copy| {
+                    allocator.free(copy.names);
+                    allocator.free(copy.body);
+                },
+                .prepare_lower => |preparation| {
+                    allocator.free(preparation.names);
+                    allocator.free(preparation.body);
+                },
+                .lowering => |*lowering| {
+                    lowering.cursor.deinit();
+                    allocator.free(lowering.names);
+                    allocator.free(lowering.body);
+                },
+                .scan_lowered_spans => |*scan| scan.forms.retire(releases, allocator),
+                .write_lowered_span => |*write| {
+                    write.writer.deinit();
+                    write.forms.retire(releases, allocator);
+                },
+                .allocate_elements => |*forms| forms.retire(releases, allocator),
+                .allocate_element_spans => |*allocated| {
+                    allocator.free(allocated.values);
+                    allocated.forms.retire(releases, allocator);
+                },
+                .copy_elements => |*copy| {
+                    allocator.free(copy.spans);
+                    allocator.free(copy.values);
+                    copy.forms.retire(releases, allocator);
+                },
+                .materialize_list => |*materialization| {
+                    materialization.materializer.retire(releases);
+                    allocator.free(materialization.spans);
+                    allocator.free(materialization.values);
+                    materialization.forms.retire(releases, allocator);
+                },
+                .list_spans => |*span_state| {
+                    span_state.writer.deinit();
+                    releases.releaseValue(span_state.result);
+                    allocator.free(span_state.spans);
+                },
+                .allocate_pairs => |body| allocator.free(body),
+                .copy_pairs => |copy| {
+                    allocator.free(copy.pairs);
+                    allocator.free(copy.body);
+                },
+                .materialize_dict => |*materialization| {
+                    materialization.materializer.retire(releases);
+                    allocator.free(materialization.pairs);
+                    allocator.free(materialization.body);
+                },
+            }
+        }
+    };
 
     fn init(
         allocator: std.mem.Allocator,
@@ -1039,193 +1163,242 @@ const CollectionBuilder = struct {
         self.retire(releases);
     }
     fn retire(self: *CollectionBuilder, releases: *heap.ReleaseDomain) void {
-        if (self.lowerer) |*lowerer| lowerer.deinit();
-        if (self.generated_span_writer) |*writer| writer.deinit();
-        if (self.materializer) |*materializer| materializer.retire(releases);
-        if (self.span_writer) |*writer| writer.deinit();
-        if (self.dict_materializer) |*materializer| materializer.retire(releases);
-        if (self.result) |item| releases.releaseValue(item);
-        if (self.lowered_values) |*values| values.deinit();
-        if (self.lowered) |forms| self.allocator.free(forms);
-        if (self.body) |forms| self.allocator.free(forms);
-        if (self.names) |names| self.allocator.free(names);
-        if (self.values) |values| self.allocator.free(values);
-        if (self.element_spans) |spans| self.allocator.free(spans);
-        if (self.pairs) |pairs| self.allocator.free(pairs);
+        self.state.retire(releases, self.allocator);
         self.context.retire(releases);
     }
-    fn elements(self: *const CollectionBuilder) []const binder.SpannedValue {
-        return self.lowered orelse self.body.?;
-    }
     fn advance(self: *CollectionBuilder) (error{ OutOfMemory, Parse })!CollectionProgress {
-        return switch (self.phase) {
+        return switch (self.state) {
             .allocate_body => result: {
-                self.body = try self.allocator.alloc(binder.SpannedValue, self.context.body.count);
-                self.body_iterator = self.context.body.iterator();
-                self.phase = .copy_body;
+                const body = try self.allocator.alloc(binder.SpannedValue, self.context.body.count);
+                self.state = .{ .copy_body = .{
+                    .body = body,
+                    .iterator = self.context.body.iterator(),
+                } };
                 break :result .pending;
             },
-            .copy_body => if (self.body_iterator.?.next()) |form| result: {
-                self.body.?[self.element_index] = form.*;
-                self.element_index += 1;
+            .copy_body => |*copy| if (copy.iterator.next()) |form| result: {
+                copy.body[copy.index] = form.*;
+                copy.index += 1;
                 break :result .pending;
             } else result: {
-                self.element_index = 0;
-                self.phase = if (self.context.hasBinder()) .allocate_names else if (self.context.kind == .dictionary)
-                    .allocate_pairs
+                const body = copy.body;
+                self.state = if (self.context.hasBinder())
+                    .{ .allocate_names = body }
+                else if (self.context.kind == .dictionary)
+                    .{ .allocate_pairs = body }
                 else
-                    .allocate_elements;
+                    .{ .allocate_elements = .{ .body = body } };
                 break :result .pending;
             },
-            .allocate_names => result: {
-                self.names = try self.allocator.alloc(binder.Name, self.context.names.count);
-                self.name_iterator = self.context.names.iterator();
-                self.phase = .copy_names;
+            .allocate_names => |body| result: {
+                const names = try self.allocator.alloc(binder.Name, self.context.names.count);
+                self.state = .{ .copy_names = .{
+                    .body = body,
+                    .names = names,
+                    .iterator = self.context.names.iterator(),
+                } };
                 break :result .pending;
             },
-            .copy_names => if (self.name_iterator.?.next()) |name| result: {
-                self.names.?[self.element_index] = name.*;
-                self.element_index += 1;
+            .copy_names => |*copy| if (copy.iterator.next()) |name| result: {
+                copy.names[copy.index] = name.*;
+                copy.index += 1;
                 break :result .pending;
             } else result: {
-                self.element_index = 0;
-                self.lowerer = try .init(
+                self.state = .{ .prepare_lower = .{
+                    .body = copy.body,
+                    .names = copy.names,
+                } };
+                break :result .pending;
+            },
+            .prepare_lower => |*preparation| result: {
+                const lowerer = try binder.LowerCursor.init(
                     self.allocator,
                     self.releases,
-                    self.names.?,
-                    self.body.?,
+                    preparation.names,
+                    preparation.body,
                     self.context.start,
                     self.diag,
                 );
-                self.phase = .lower;
+                const body = preparation.body;
+                const names = preparation.names;
+                self.state = .{ .lowering = .{
+                    .body = body,
+                    .names = names,
+                    .cursor = lowerer,
+                } };
                 break :result .pending;
             },
-            .lower => switch (try self.lowerer.?.advance()) {
+            .lowering => |*lowering| switch (try lowering.cursor.advance()) {
                 .pending => .pending,
                 .complete => |completed| result: {
-                    self.lowered = completed.forms;
-                    self.lowered_values = completed.values;
-                    self.lowerer.?.deinit();
-                    self.lowerer = null;
-                    self.phase = .lowered_spans;
+                    lowering.cursor.deinit();
+                    self.allocator.free(lowering.names);
+                    self.allocator.free(lowering.body);
+                    self.state = .{ .scan_lowered_spans = .{
+                        .forms = .{ .lowered = .{
+                            .forms = completed.forms,
+                            .values = completed.values,
+                        } },
+                    } };
                     break :result .pending;
                 },
             },
-            .lowered_spans => result: {
-                if (self.generated_span_writer) |*writer| switch (try writer.advance()) {
-                    .pending => break :result .pending,
-                    .complete => {
-                        writer.deinit();
-                        self.generated_span_writer = null;
-                        self.lowered_span_index += 1;
-                        break :result .pending;
-                    },
-                };
-                if (self.lowered_span_index == self.lowered.?.len) {
-                    self.phase = .allocate_elements;
+            .scan_lowered_spans => |*scan| result: {
+                const elements = scan.forms.elements();
+                if (scan.index == elements.len) {
+                    const forms = scan.forms;
+                    self.state = .{ .allocate_elements = forms };
                     break :result .pending;
                 }
-                const item = self.lowered.?[self.lowered_span_index].value;
+                const item = elements[scan.index].value;
                 if (item == .list) {
-                    self.generated_span_writer = .initUniform(
-                        self.spans,
-                        self.allocator,
-                        item.list,
-                        self.context.start,
-                    );
-                } else self.lowered_span_index += 1;
+                    const forms = scan.forms;
+                    self.state = .{ .write_lowered_span = .{
+                        .forms = forms,
+                        .index = scan.index,
+                        .writer = .initUniform(
+                            self.spans,
+                            self.allocator,
+                            item.list,
+                            self.context.start,
+                        ),
+                    } };
+                } else scan.index += 1;
                 break :result .pending;
             },
-            .allocate_elements => result: {
-                const count = self.elements().len;
-                self.values = try self.allocator.alloc(Value, count);
-                self.element_spans = try self.allocator.alloc(Span, count);
-                self.phase = .copy_elements;
-                break :result .pending;
-            },
-            .copy_elements => result: {
-                const source_elements = self.elements();
-                if (self.element_index != source_elements.len) {
-                    self.values.?[self.element_index] = source_elements[self.element_index].value;
-                    self.element_spans.?[self.element_index] = source_elements[self.element_index].span;
-                    self.element_index += 1;
-                    break :result .pending;
-                }
-                self.materializer = .initCode(
-                    self.allocator,
-                    self.values.?,
-                    self.provenance_namespace,
-                );
-                self.phase = .materialize_list;
-                break :result .pending;
-            },
-            .materialize_list => switch (try self.materializer.?.advance(1)) {
-                .pending => .pending,
-                .complete => |item| result: {
-                    self.materializer.?.deinit();
-                    self.materializer = null;
-                    if (self.lowered_values) |*values| values.deinit();
-                    self.lowered_values = null;
-                    self.result = item;
-                    self.span_writer = .initSource(
-                        self.spans,
-                        self.allocator,
-                        item.list,
-                        self.element_spans.?,
-                        self.context.source_start,
-                        self.context.source_end,
-                        self.context.start,
-                    );
-                    self.phase = .list_spans;
-                    break :result .pending;
-                },
-            },
-            .list_spans => switch (try self.span_writer.?.advance()) {
+            .write_lowered_span => |*write| switch (try write.writer.advance()) {
                 .pending => .pending,
                 .complete => result: {
-                    self.span_writer.?.deinit();
-                    self.span_writer = null;
-                    const item = self.result.?;
-                    self.result = null;
-                    self.phase = .complete;
+                    write.writer.deinit();
+                    const forms = write.forms;
+                    self.state = .{ .scan_lowered_spans = .{
+                        .forms = forms,
+                        .index = write.index + 1,
+                    } };
+                    break :result .pending;
+                },
+            },
+            .allocate_elements => |*forms| result: {
+                const values = try self.allocator.alloc(Value, forms.elements().len);
+                const moved = forms.*;
+                self.state = .{ .allocate_element_spans = .{
+                    .forms = moved,
+                    .values = values,
+                } };
+                break :result .pending;
+            },
+            .allocate_element_spans => |*allocated| result: {
+                const spans = try self.allocator.alloc(Span, allocated.forms.elements().len);
+                const forms = allocated.forms;
+                const values = allocated.values;
+                self.state = .{ .copy_elements = .{
+                    .forms = forms,
+                    .values = values,
+                    .spans = spans,
+                } };
+                break :result .pending;
+            },
+            .copy_elements => |*copy| result: {
+                const source_elements = copy.forms.elements();
+                if (copy.index != source_elements.len) {
+                    copy.values[copy.index] = source_elements[copy.index].value;
+                    copy.spans[copy.index] = source_elements[copy.index].span;
+                    copy.index += 1;
+                    break :result .pending;
+                }
+                const forms = copy.forms;
+                const values = copy.values;
+                const spans = copy.spans;
+                self.state = .{ .materialize_list = .{
+                    .forms = forms,
+                    .values = values,
+                    .spans = spans,
+                    .materializer = .initCode(
+                        self.allocator,
+                        values,
+                        self.provenance_namespace,
+                    ),
+                } };
+                break :result .pending;
+            },
+            .materialize_list => |*materialization| switch (try materialization.materializer.advance(1)) {
+                .pending => .pending,
+                .complete => |item| result: {
+                    const spans = materialization.spans;
+                    materialization.materializer.deinit();
+                    self.allocator.free(materialization.values);
+                    materialization.forms.retire(self.releases, self.allocator);
+                    self.state = .{ .list_spans = .{
+                        .spans = spans,
+                        .result = item,
+                        .writer = .initSource(
+                            self.spans,
+                            self.allocator,
+                            item.list,
+                            spans,
+                            self.context.source_start,
+                            self.context.source_end,
+                            self.context.start,
+                        ),
+                    } };
+                    break :result .pending;
+                },
+            },
+            .list_spans => |*span_state| switch (try span_state.writer.advance()) {
+                .pending => .pending,
+                .complete => result: {
+                    const item = span_state.result;
+                    span_state.writer.deinit();
+                    self.allocator.free(span_state.spans);
+                    self.state = .complete;
                     break :result .{ .complete = .{ .value = item, .span = self.context.start } };
                 },
             },
-            .allocate_pairs => result: {
-                if (self.body.?.len % 2 != 0) {
+            .allocate_pairs => |body| result: {
+                if (body.len % 2 != 0) {
                     self.diag.set(
-                        self.body.?[self.body.?.len - 1].span,
+                        body[body.len - 1].span,
                         "dictionary literal key is missing its value",
                     );
                     return error.Parse;
                 }
-                self.pairs = try self.allocator.alloc(dict.Pair, self.body.?.len / 2);
-                self.phase = .copy_pairs;
+                const pairs = try self.allocator.alloc(dict.Pair, body.len / 2);
+                self.state = .{ .copy_pairs = .{
+                    .body = body,
+                    .pairs = pairs,
+                } };
                 break :result .pending;
             },
-            .copy_pairs => result: {
-                if (self.pair_index != self.pairs.?.len) {
-                    self.pairs.?[self.pair_index] = .{
-                        self.body.?[self.pair_index * 2].value,
-                        self.body.?[self.pair_index * 2 + 1].value,
+            .copy_pairs => |*copy| result: {
+                if (copy.index != copy.pairs.len) {
+                    copy.pairs[copy.index] = .{
+                        copy.body[copy.index * 2].value,
+                        copy.body[copy.index * 2 + 1].value,
                     };
-                    self.pair_index += 1;
+                    copy.index += 1;
                     break :result .pending;
                 }
-                self.dict_materializer = try .init(self.allocator, self.pairs.?, true);
-                self.phase = .materialize_dict;
+                const materializer = try storage.DictMaterializer.init(self.allocator, copy.pairs, true);
+                const body = copy.body;
+                const pairs = copy.pairs;
+                self.state = .{ .materialize_dict = .{
+                    .body = body,
+                    .pairs = pairs,
+                    .materializer = materializer,
+                } };
                 break :result .pending;
             },
-            .materialize_dict => switch (try self.dict_materializer.?.advance(1)) {
+            .materialize_dict => |*materialization| switch (try materialization.materializer.advance(1)) {
                 .pending => .pending,
                 .duplicate_key => {
                     self.diag.set(self.context.start, "dictionary literal contains a duplicate key");
                     return error.Parse;
                 },
                 .complete => |item| result: {
-                    self.dict_materializer.?.deinit();
-                    self.dict_materializer = null;
-                    self.phase = .complete;
+                    materialization.materializer.deinit();
+                    self.allocator.free(materialization.pairs);
+                    self.allocator.free(materialization.body);
+                    self.state = .complete;
                     break :result .{ .complete = .{ .value = item, .span = self.context.start } };
                 },
             },
