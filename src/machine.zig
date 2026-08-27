@@ -8526,9 +8526,13 @@ const FailureDriver = struct {
                     self.beginLocation(evaluator);
                     continue;
                 }
+                const cursor = try intern.TraceWordCursor.init(
+                    self.allocator,
+                    self.trace[resolve_index],
+                );
                 self.state = .{ .resolve = .{
                     .index = resolve_index,
-                    .cursor = try .init(self.allocator, self.trace[resolve_index]),
+                    .cursor = cursor,
                 } };
             },
             .resolve => |*resolve| switch (try resolve.cursor.advance()) {
