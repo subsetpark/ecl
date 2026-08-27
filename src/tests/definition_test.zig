@@ -56,26 +56,27 @@ test "definition annotations support all top-level forms and dynamic data" {
 
 test "every primitive exposes meaningful reflective documentation" {
     const names = [_][]const u8{
-        "dup",       "swap",      "pop",      "over",      "cons",        "compose",
-        "match?",    "type",      "parse",    "parse-int", "parse-float", "dict-of",
-        "@attempt",  "raise",     "args",     "exit",      "dip",         "call",
-        "if",        "while",     "times",    "cond",      "each",        "zip-with",
-        "for",       "fold",      "scan",     "stencil",   "unfold",      "infra",
-        "def",       "set",       "defp",     "setp",      "doc",         "which",
-        "see",       "@module",   "@defm",    "register",  "import",      "alias",
-        "words",     "load",      "@spawn",   "await",     "cancel",      "tasks",
-        "await-any", "await-for", "@each",    "+",         "-",           "*",
-        "/",         "div",       "mod",      "pow",       "atan2",       "min",
-        "max",       "=",         "<>",       "<",         ">",           "<=",
-        ">=",        "and",       "or",       "neg",       "abs",         "sqrt",
-        "floor",     "ceil",      "round",    "exp",       "log",         "sin",
-        "cos",       "not",       "at",       "where",     "in?",         "raze",
-        "cat",       "take",      "drop",     "reverse",   "first",       "rest",
-        "range",     "shape",     "len",      "flip",      "reshape",     "cmp",
-        "grade",     "distinct",  "group",    "keys",      "vals",        "put",
-        "to-dict",   "del",       "merge",    "has?",      "split",       "join",
-        "str",       "format",    "band",     "bor",       "bxor",        "bsl",
-        "bsr",       "bnot",      "rand-int", "rand-ints", "rand-float",  "entropy",
+        "dup",        "swap",    "pop",       "over",      "cons",        "compose",
+        "match?",     "type",    "parse",     "parse-int", "parse-float", "dict-of",
+        "@attempt",   "raise",   "args",      "exit",      "dip",         "call",
+        "if",         "while",   "times",     "cond",      "each",        "zip-with",
+        "for",        "fold",    "scan",      "stencil",   "unfold",      "infra",
+        "def",        "set",     "defp",      "setp",      "unset",       "undef",
+        "doc",        "which",   "see",       "@module",   "@defm",       "register",
+        "import",     "alias",   "words",     "load",      "@spawn",      "await",
+        "cancel",     "tasks",   "await-any", "await-for", "@each",       "+",
+        "-",          "*",       "/",         "div",       "mod",         "pow",
+        "atan2",      "min",     "max",       "=",         "<>",          "<",
+        ">",          "<=",      ">=",        "and",       "or",          "neg",
+        "abs",        "sqrt",    "floor",     "ceil",      "round",       "exp",
+        "log",        "sin",     "cos",       "not",       "at",          "where",
+        "in?",        "raze",    "cat",       "take",      "drop",        "reverse",
+        "first",      "rest",    "range",     "shape",     "len",         "flip",
+        "reshape",    "cmp",     "grade",     "distinct",  "group",       "keys",
+        "vals",       "put",     "to-dict",   "del",       "merge",       "has?",
+        "split",      "join",    "str",       "format",    "band",        "bor",
+        "bxor",       "bsl",     "bsr",       "bnot",      "rand-int",    "rand-ints",
+        "rand-float", "entropy",
     };
     var source = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer source.deinit();
@@ -210,6 +211,32 @@ test "redefinition and set replace behavior and clear metadata" {
     try expectErrorContains(&runtime, "'set-target doc", "'kind 'domain");
 }
 
+test "unset and undef equivalently remove only the current scope binding" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+
+    try expectOk(&runtime, "1 'removed-by-unset set 'removed-by-unset unset");
+    try expectErrorContains(&runtime, "removed-by-unset", "'kind 'undefined-word");
+    try expectOk(&runtime, "2 'removed-by-undef set 'removed-by-undef undef");
+    try expectErrorContains(&runtime, "removed-by-undef", "'kind 'undefined-word");
+
+    // Missing direct bindings are idempotent no-ops. In particular, neither
+    // spelling can mutate the immutable core environment.
+    try expectOk(&runtime, "'never-bound unset 'never-bound undef");
+    try expectOk(&runtime, "9 'dup set 'dup undef 4 dup");
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("4 4", display.bytes());
+
+    // A removed name can be published again, and module construction applies
+    // the same operation to public and private bindings.
+    try expectOk(&runtime, "3 'again set 'again unset 5 'again set again");
+    try expectOk(&runtime, "(1 'public set 2 'private setp 'public unset 'private undef " ++
+        "(-- n) (7) 'kept def) 'unbound @defm unbound.kept");
+    try expectErrorContains(&runtime, "unbound.public", "'kind 'undefined-word");
+    try expectErrorContains(&runtime, "unbound.private", "'kind 'undefined-word");
+}
+
 test "recognized malformed annotations are domain errors" {
     try support.expectErrors(&.{
         .{ .name = "duplicate separator", .source = "(a -- b -- c) (1) 'x def", .kind = "domain", .word = "def" },
@@ -248,6 +275,8 @@ test "reserved namespace names reject every binding surface but remain readable"
         .{ .name = "alias", .source = "() 'm @defm '-- 'm alias", .kind = "domain", .word = "alias" },
         .{ .name = "public export", .source = "((-- x) (1) '-- def) 'm @defm", .kind = "domain", .word = "def" },
         .{ .name = "private value", .source = "(1 ': setp) 'm @defm", .kind = "domain", .word = "defp" },
+        .{ .name = "unset separator", .source = "'-- unset", .kind = "domain", .word = "unset" },
+        .{ .name = "undef qualified", .source = "'m.x undef", .kind = "domain", .word = "undef" },
         .{ .name = "bare reserved word is readable", .source = "--", .kind = "undefined-word", .word = "--" },
     });
     try support.expectStack("'-- ': (-- :) 'x:y", "'-- ': (-- :) 'x:y");

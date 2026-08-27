@@ -53,11 +53,15 @@
     Run it before every commit and after every patch in a stack. Iterate faster
     still with `zig build` plus real behavior against `./zig-out/bin/ecl`, and
     `zig build check` when all you need is "does the tree still compile".
-  - **CI: `.github/workflows/ci.yml`.** The complete matrix in Debug and ReleaseSafe, plus
-    PTY, native, fuzz, worker-count, differential, TSan, lint, and terminal
-    acceptance. Do not run this locally. `zig build test` alone is a five-minute
-    round trip after a one-line change, and re-running the matrix by hand
-    replaces CI's evidence with a slower copy of it.
+  - **CI: `.github/workflows/ci.yml`.** Pull requests run the Debug precommit
+    tier and one complete ReleaseSafe suite, with the public formatter, native
+    SDK rejection, PTY, and standalone native acceptance surfaces. Pushes to
+    master and manual runs add the full Debug suite, bounded fuzz campaigns,
+    eight-worker concurrency, differential, TSan, and ReleaseFast snapshots.
+    Each optimization mode owns one long-lived job so its later tiers reuse its
+    Zig cache and emitted artifacts. Do not run this locally. `zig build test`
+    alone is a five-minute round trip after a one-line change, and re-running
+    the matrix by hand replaces CI's evidence with a slower copy of it.
     Use the authenticated GitHub CLI to list, inspect, and manage workflow
     runs; do not scrape the Actions website or guess run URLs. Start with
     `gh run list --workflow ci.yml --limit <n>` and inspect a selected run with

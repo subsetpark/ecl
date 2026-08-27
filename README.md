@@ -309,10 +309,12 @@ Run the local gate before committing:
 zig build precommit < /dev/null
 ```
 
-`zig build check` is the quicker whole-tree compile check. Per-push CI owns the
-complete Debug and ReleaseSafe suites, PTY and native-extension acceptance,
-worker-count variants, fuzz and differential checks, TSan, lint, and terminal
-acceptance. See [`AGENTS.md`](AGENTS.md) for the repository's testing and
-architectural rules.
+`zig build check` is the quicker whole-tree compile check. Pull-request CI runs
+the Debug precommit tier and one complete ReleaseSafe suite, including PTY and
+standalone native-extension acceptance. Master and manual CI add the full Debug
+suite, bounded fuzz campaigns, eight-worker concurrency, differential checks,
+TSan, and ReleaseFast snapshots. Each optimization mode runs its tiers in one
+job so Zig can reuse that mode's cache and emitted artifacts. See
+[`AGENTS.md`](AGENTS.md) for the repository's testing and architectural rules.
 
 ecl is distributed under the [BSD 3-Clause License](LICENSE).

@@ -97,6 +97,9 @@ primitives, operationalized as two rules:
   hashes because equality ignores insertion order.
 - **Symbols:** one global append-only intern table; a symbol is a u32
   index. Words and symbols share the id space with distinct value tags.
+  Those ids are process-lifetime representation only: persistence and the
+  native ABI carry the spelling bytes and intern them in the receiving
+  process, never serialize or exchange a raw id.
   Concurrent interning locks the write path only; reads index the
   append-only vector lock-free. Symbols are never freed — the unbounded
   intern table is a documented hazard.
@@ -478,10 +481,17 @@ primitives, operationalized as two rules:
   and compiled form. Omitting metadata clears it in the new
   snapshot; extant leases retain the old snapshot's body and metadata
   until release. Every future resolution heals by construction, so late
-  binding needs zero invalidation. Creating a name publishes a new immutable
-  shape and bumps `shapeGeneration`; rebinding an existing name replaces its
-  cell in place and deliberately does not, which is why that counter is named
-  for shapes and is not a "has anything changed" signal. **The iron law for
+  binding needs zero invalidation. Creating or removing a name publishes a new
+  immutable shape and bumps `shapeGeneration`; rebinding an existing name
+  replaces its cell in place and deliberately does not, which is why that
+  counter is named for shapes and is not a "has anything changed" signal.
+  `unset` and `undef` are the same direct-scope removal operation: absence is a
+  no-op, and removing a shadow never grants mutation authority over its parent.
+  Each shape independently owns references to every cell it names. A filtered
+  removal shape therefore leaves delayed readers' cells alive through their
+  old shape leases, while bounded shape retirement releases one cell edge per
+  turn; after readers drain, retained cells and shapes are bounded by current
+  state rather than definition/removal history. **The iron law for
   any future cache: hold the cell, re-read its interior every execution;
   never cache a resolution.**
 - **A module's construction boundary passes values, never environments.** An
@@ -1979,9 +1989,10 @@ preceding material by one empty line.
 cost, because a gate nobody runs proves nothing. `zig build precommit` is the
 local tier: Zig and ECL formatting, the source-architecture audit, the binary,
 whole-tree semantic analysis, and the fast core of the suite, in about eighty
-seconds after a source change. Per-push CI owns the complete matrix, and the
-release-candidate matrix owns the exhaustive initialized-Session OOM sweep and
-the complete ReleaseFast suite.
+seconds after a source change. Pull-request CI pairs that Debug tier with one
+complete ReleaseSafe suite. Master and manual CI own the broader matrix, and
+the release-candidate workflow owns the exhaustive initialized-Session OOM
+sweep and the complete ReleaseFast suite.
 
 The local tier separates *analysis* from *execution*, and that separation is
 the load-bearing part. `zig build check` builds every test root — the in-process
@@ -2024,10 +2035,10 @@ checking shows up as a failing test rather than as silence.
 
 **The stateful-module suite.** `src/tests/stateful_module_test.zig` pins
 the Milestone 11 contracts one test per obligation. Its tests carrying the
-`concurrency: ` name prefix are routed by the build file into
-`test-workers` (1 and 8) and `test-tsan` automatically, so every new
+`concurrency: ` name prefix are routed by the build file into `test-workers`
+(1 and 8), `test-workers-8`, and `test-tsan` automatically, so every new
 concurrent surface — arbiter ordering, the reload barrier, and the removal
-close edge — enters those gates without a second manifest. The
+close edge — enters the broad post-merge gates without a second manifest. The
 initialized-Session OOM sweep reaches construction stacks, transactional
 updates, a mid-draft failure, and removal. Lifecycle coverage keeps
 superseded code alive across removal and unrelated module creation,
@@ -2047,17 +2058,24 @@ the same gate is part of `zig build test`.
 
 **Allocation-failure topology.** Focused constructors and other low-level
 allocation paths use exhaustive failure injection in the ordinary
-`zig build test` suite. Initialized-Session coverage is two coarse probes in
-the separate ReleaseSafe `zig build test-oom` release-candidate gate; its
-quadratic ordinal replay is intentionally not part of per-push CI. The
-established core bundle crosses kernels, primitives, session services,
-reflection, source and native loading, native call transactions, modules, and
-definition replacement in one deterministic lifetime. The M12 bundle crosses
-its embedded data modules and host IO surfaces in another. The build schedules
-the two filtered test artifacts independently, so their exhaustive ordinal
-replays run in parallel while each bundle remains deterministic. This removes
-the quadratic cross-product between two large allocation sets while still
-paying for one embedded-prelude bootstrap per bundle rather than per word.
+`zig build test` suite. Initialized-Session coverage is four coarse probes in
+the separate ReleaseSafe `zig build test-oom` release-candidate gate; each
+probe partitions its exhaustive ordinal replay between two workers. The
+quadratic sweep is intentionally not part of per-push CI. The established core
+bundle crosses kernels, primitives, session services, reflection, source and
+native loading, native call transactions, modules, and definition replacement
+in one deterministic lifetime. Three M12 bundles independently cross general
+embedded data modules and host IO, package synchronization, and package CLI.
+Synchronization itself executes `pkg.mvs.resolve`; a second direct MVS call
+would duplicate that expensive production path rather than reach another
+failure site. At introduction the three-way M12 partition measured 21,235,
+56,632, and 23,739 ReleaseSafe allocation ordinals, reducing the theoretical
+prefix replay from 4.73 billion allocator calls for one 97,245-ordinal probe to
+2.11 billion. The build schedules the core and M12 test artifacts
+independently, and ordinal shards within each active probe also run in parallel
+while every replay remains deterministic. This bounds release-candidate wall
+time while still paying for one embedded-prelude bootstrap per related bundle
+rather than per word.
 Native fixture code uses the real generated descriptor and public loader. The probes' tagged
 cooperative scheduler mode executes the same queue, wait-set, native
 continuation, cancellation, publication, and reclamation transitions on
@@ -2067,30 +2085,32 @@ a thread race; the 1/N-worker suites and TSan separately validate the
 threaded executor. `checkAllAllocationFailures` supplies exact
 allocated/freed accounting over the standard backing allocator; the debug
 test allocator is deliberately not nested underneath this already
-exhaustive wrapper. Within the M12 bundle, expensive fixed-work fixtures are
-ordered at the tail: embedded data modules precede host filesystem IO, and the
-attempted HTTP call is last. This changes no failure site or Session lifetime;
-it prevents unrelated later ordinals from repeatedly paying for earlier IO.
+exhaustive wrapper. Within the general M12 bundle, expensive fixed-work
+fixtures are ordered at the tail: embedded data modules precede host filesystem
+IO, and the attempted HTTP call is last. This changes no failure site or
+Session lifetime; it prevents unrelated later ordinals from repeatedly paying
+for earlier IO.
 Reaching
 snippets use the smallest collection that enters each path, because additional
 elements add work but no allocation site.
 
 **Terminal acceptance topology.** `zig build acceptance` rejects Debug builds
-and owns only the M13-specific ReleaseSafe assertions: the public
-definition/module retention soak, the installed-binary soul check, bounded
-display rendering, and the source architecture audit. The GitHub Actions workflow
-runs it last. Earlier sequential tasks remain the owners of the general
-behavioral, PTY, native, worker-count, fuzz, differential, TSan, and lint
-evidence; terminal acceptance does not replay those matrices. The exhaustive
+and provides a focused entry point for the M13-specific release assertions:
+the public definition/module retention soak, the installed-binary soul check,
+bounded display rendering, and the source architecture audit. Those same tests
+are already members of the complete ReleaseSafe suite, so CI does not compile a
+second filtered artifact merely to replay them. The exhaustive
 initialized-Session OOM gate runs once for a release candidate rather than on
 every pushed commit; focused component OOM probes remain in the ordinary test
 task.
-The complete behavioral suite runs per push in Debug and in the distributed
-ReleaseSafe mode. ReleaseFast disables checks rather than adding a detector,
-and ecl does not distribute that configuration, so its per-push gate compiles
-the real binary and runs the broad promoted CLI snapshot instead of replaying
-every internal test. The complete ReleaseFast suite remains a release-candidate
-matrix entry, where mode-specific optimized code generation is still checked.
+The complete behavioral suite runs on every pull request in the distributed
+ReleaseSafe mode. The Debug precommit tier supplies fast feedback there; the
+complete Debug suite and specialized matrices run after merge and on manual CI.
+ReleaseFast disables checks rather than adding a detector, and ecl does not
+distribute that configuration, so master and manual CI compile the real binary
+and run the broad promoted CLI snapshot instead of replaying every internal
+test. The complete ReleaseFast suite remains a release-candidate matrix entry,
+where mode-specific optimized code generation is still checked.
 Repository verification classification includes every native SDK
 compile-negative input, including the fixture proving that native effects
 cannot declare the source-only `...` after-row.
@@ -2110,9 +2130,9 @@ nine seed corpora as ordinary tests; bounded campaigns invoke
 `fuzz-reader`, `fuzz-formatter`, `fuzz-editor`, `fuzz-completion`,
 `fuzz-history`, `fuzz-pending`, `fuzz-scheduler`,
 `fuzz-native-descriptor`, and `fuzz-native-call` separately, because Zig's
-coverage-guided runner selects one fuzz entry point per invocation. CI
-therefore cannot report validation of a model or metadata parser as
-coverage for the real dynamic loader, generated adapter, scheduler
+coverage-guided runner selects one fuzz entry point per invocation. Broad
+post-merge CI therefore cannot report validation of a model or metadata parser
+as coverage for the real dynamic loader, generated adapter, scheduler
 continuation, and retirement path.
 
 Every coverage-guided test artifact explicitly selects LLVM: Zig 0.16's

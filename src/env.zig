@@ -385,6 +385,7 @@ pub const BindingCell = struct {
     const Publisher = snapshot_api.Publisher(BindingSnapshot);
     allocator: std.mem.Allocator,
     releases: *heap.ReleaseDomain,
+    references: std.atomic.Value(u32) = .init(1),
     publisher: Publisher,
     snapshots: *BindingSnapshot,
     retire_lock: std.Io.Mutex = .init,
@@ -426,6 +427,7 @@ pub const BindingCell = struct {
         allocator: std.mem.Allocator,
         self: *BindingCell,
     ) bool {
+        std.debug.assert(self.references.load(.acquire) == 0);
         std.debug.assert(self.publisher.quiescent());
         const snapshots = self.publisher.currentOwned();
         self.publisher.publish(null);
@@ -433,7 +435,15 @@ pub const BindingCell = struct {
         allocator.destroy(self);
         return true;
     }
-    fn retire(self: *BindingCell) void {
+    fn retain(self: *BindingCell) void {
+        const old = self.references.fetchAdd(1, .monotonic);
+        std.debug.assert(old != 0 and old != std.math.maxInt(u32));
+    }
+    fn release(self: *BindingCell) void {
+        const old = self.references.fetchSub(1, .release);
+        std.debug.assert(old != 0);
+        if (old != 1) return;
+        _ = self.references.load(.acquire);
         self.releases.retire(self, &self.retirement);
     }
     fn lockRetired(self: *BindingCell) void {
@@ -462,25 +472,134 @@ const Shape = struct {
     const NameMap = poll.FixedMap(intern.NamespaceName, *BindingCell);
     names: NameMap,
     previous: ?*Shape = null,
+    retirement_entries: ?NameMap.RawEntryCursor = null,
     retirement: heap.ReleaseDomain.Retirement = .{},
     pub fn advanceRetirement(
         releases: *heap.ReleaseDomain,
         allocator: std.mem.Allocator,
         self: *Shape,
     ) bool {
-        const previous = self.previous;
-        self.names.deinit();
-        allocator.destroy(self);
-        if (previous) |next| releases.retire(next, &next.retirement);
-        return true;
+        if (self.retirement_entries == null)
+            self.retirement_entries = self.names.rawEntries();
+        return switch (self.retirement_entries.?.advance()) {
+            .pending => false,
+            .item => |entry| release: {
+                entry.value.release();
+                break :release false;
+            },
+            .complete => complete: {
+                const previous = self.previous;
+                self.names.deinit();
+                allocator.destroy(self);
+                if (previous) |next| releases.retire(next, &next.retirement);
+                break :complete true;
+            },
+        };
     }
-    fn destroyChain(first: ?*Shape, allocator: std.mem.Allocator) void {
-        var cursor = first;
-        while (cursor) |shape| {
-            cursor = shape.previous;
-            shape.names.deinit();
-            allocator.destroy(shape);
+    fn retire(self: *Shape, releases: *heap.ReleaseDomain) void {
+        releases.retire(self, &self.retirement);
+    }
+};
+
+/// Builds one independently owned shape a bounded slot or insertion probe at
+/// a time. Every copied cell is retained before it becomes reachable from the
+/// provisional map; abandoning the cursor retires that partial shape through
+/// the same bounded path used for published snapshots.
+const ShapeBuilder = struct {
+    allocator: std.mem.Allocator,
+    releases: *heap.ReleaseDomain,
+    source: ?Shape.NameMap.RawEntryCursor,
+    excluded: ?intern.NamespaceName,
+    extra_name: ?intern.NamespaceName,
+    extra_cell: ?*BindingCell,
+    initializer: ?Shape.NameMap.InitCursor,
+    built: ?*Shape = null,
+    insertion: ?Shape.NameMap.PutCursor = null,
+    pending_cell: ?*BindingCell = null,
+
+    fn init(
+        environment: *Environment,
+        source: ?*const Shape.NameMap,
+        expected: usize,
+        excluded: ?intern.NamespaceName,
+        extra_name: ?intern.NamespaceName,
+        extra_cell: ?*BindingCell,
+    ) ShapeBuilder {
+        std.debug.assert((extra_name == null) == (extra_cell == null));
+        return .{
+            .allocator = environment.allocator,
+            .releases = environment.releases,
+            .source = if (source) |names| names.rawEntries() else null,
+            .excluded = excluded,
+            .extra_name = extra_name,
+            .extra_cell = extra_cell,
+            .initializer = Shape.NameMap.initCursor(environment.allocator, expected),
+        };
+    }
+
+    fn deinit(self: *ShapeBuilder) void {
+        if (self.initializer) |*initializer| initializer.deinit();
+        if (self.pending_cell) |cell| cell.release();
+        if (self.built) |shape| shape.retire(self.releases);
+        self.* = undefined;
+    }
+
+    fn startInsertion(
+        self: *ShapeBuilder,
+        name: intern.NamespaceName,
+        cell: *BindingCell,
+    ) void {
+        cell.retain();
+        self.pending_cell = cell;
+        self.insertion = self.built.?.names.putCursor(name, cell);
+    }
+
+    fn advance(self: *ShapeBuilder) error{OutOfMemory}!poll.Progress(*Shape) {
+        if (self.initializer) |*initializer| switch (try initializer.advance()) {
+            .pending => return .pending,
+            .complete => |names| {
+                initializer.deinit();
+                self.initializer = null;
+                const built = self.allocator.create(Shape) catch |err| {
+                    var abandoned = names;
+                    abandoned.deinit();
+                    return err;
+                };
+                built.* = .{ .names = names };
+                self.built = built;
+                return .pending;
+            },
+        };
+        if (self.insertion) |*insertion| switch (insertion.advance()) {
+            .pending => return .pending,
+            .complete => {
+                self.pending_cell = null;
+                self.insertion = null;
+                return .pending;
+            },
+        };
+        if (self.source) |*source| return switch (source.advance()) {
+            .pending => .pending,
+            .item => |entry| pending: {
+                if (self.excluded == null or entry.key != self.excluded.?)
+                    self.startInsertion(entry.key, entry.value);
+                break :pending .pending;
+            },
+            .complete => complete: {
+                self.source = null;
+                break :complete .pending;
+            },
+        };
+        if (self.extra_name) |name| {
+            const cell = self.extra_cell.?;
+            self.extra_name = null;
+            self.extra_cell = null;
+            self.startInsertion(name, cell);
+            return .pending;
         }
+        const built = self.built.?;
+        self.built = null;
+        return .{ .complete = built };
     }
 };
 const ShapePublisher = snapshot_api.Publisher(Shape);
@@ -517,10 +636,10 @@ pub const EnvironmentView = enum(usize) {
         return self.target().resolveDirect(id);
     }
 
-    /// How many times this environment published a new *shape* — a name
-    /// created. Rebinding an existing name replaces its cell in place and
-    /// deliberately does not bump this, so it is not a mutation counter and
-    /// must not be read as one.
+    /// How many times this environment published a new *shape* — a name was
+    /// created or removed. Rebinding an existing name replaces its cell in
+    /// place and deliberately does not bump this, so it is not a mutation
+    /// counter and must not be read as one.
     pub fn shapeGeneration(self: EnvironmentView) u64 {
         return self.target().shapeGeneration();
     }
@@ -615,7 +734,6 @@ pub const Environment = struct {
     releases: *heap.ReleaseDomain,
     writer: std.Io.Mutex = .init,
     shapes: ShapePublisher,
-    cells: poll.ChunkList(*BindingCell),
     shape_generation: std.atomic.Value(u64) = .init(0),
     frozen: std.atomic.Value(bool) = .init(false),
 
@@ -624,8 +742,6 @@ pub const Environment = struct {
         state: union(enum) {
             waiting_for_readers,
             shapes: ?*Shape,
-            cells: poll.ChunkList(*BindingCell).Iterator,
-            storage,
             complete,
         },
 
@@ -653,21 +769,8 @@ pub const Environment = struct {
                 .shapes => |shapes| result: {
                     if (shapes) |first|
                         self.target.releases.retire(first, &first.retirement);
-                    self.state = .{ .cells = self.target.cells.iterator() };
-                    break :result false;
-                },
-                .cells => |*cells| if (cells.next()) |binding_cell| result: {
-                    const cell = binding_cell.*;
-                    self.target.releases.retire(cell, &cell.retirement);
-                    break :result false;
-                } else result: {
-                    self.state = .storage;
-                    break :result false;
-                },
-                .storage => {
-                    self.target.cells.retire(self.target.releases);
                     self.state = .complete;
-                    return true;
+                    break :result true;
                 },
                 .complete => true,
             };
@@ -678,7 +781,6 @@ pub const Environment = struct {
             .allocator = allocator,
             .releases = releases,
             .shapes = .init(null),
-            .cells = .init(allocator),
         };
     }
     fn lockBlocking(self: *Environment) void {
@@ -726,24 +828,11 @@ pub const Environment = struct {
 
     pub const BindProgress = poll.Progress(*BindingCell);
     pub const BindCursor = struct {
-        const Builder = union(enum) {
-            initialize: Shape.NameMap.InitCursor,
-            clone: Shape.NameMap.CloneCursor,
-
-            fn deinit(self: *Builder) void {
-                switch (self.*) {
-                    inline else => |*cursor| cursor.deinit(),
-                }
-            }
-        };
-        const Built = struct { shape: ShapeLease, names: Shape.NameMap };
         const State = union(enum) {
             snapshot,
             lookup: struct { shape: ShapeLease, cursor: ?Shape.NameMap.RawLookupCursor },
-            build: struct { shape: ShapeLease, builder: Builder },
-            stage: struct { shape: ShapeLease, names: Shape.NameMap },
-            insert: struct { built: *Built, cursor: Shape.NameMap.PutCursor },
-            commit: *Built,
+            build: struct { shape: ShapeLease, builder: ShapeBuilder },
+            commit: struct { shape: ShapeLease, built: *Shape },
             complete,
         };
 
@@ -776,21 +865,14 @@ pub const Environment = struct {
                     state.builder.deinit();
                     state.shape.deinit();
                 },
-                .stage => |*state| {
-                    state.names.deinit();
+                .commit => |*state| {
+                    state.built.retire(self.environment.releases);
                     state.shape.deinit();
                 },
-                .insert => |state| self.destroyBuilt(state.built),
-                .commit => |built| self.destroyBuilt(built),
                 .snapshot, .complete => {},
             }
-            if (self.candidate_cell) |candidate| candidate.retire();
+            if (self.candidate_cell) |candidate| candidate.release();
             self.* = undefined;
-        }
-        fn destroyBuilt(self: *BindCursor, built: *Built) void {
-            built.names.deinit();
-            built.shape.deinit();
-            self.environment.allocator.destroy(built);
         }
         pub fn advance(self: *BindCursor) BindError!BindProgress {
             return switch (self.state) {
@@ -817,7 +899,7 @@ pub const Environment = struct {
                                 return err;
                             };
                             self.environment.unlock();
-                            self.candidate_cell.?.retire();
+                            self.candidate_cell.?.release();
                             self.candidate_cell = null;
                             state.shape.deinit();
                             self.state = .complete;
@@ -825,80 +907,62 @@ pub const Environment = struct {
                         }
                         self.state = .{ .build = .{
                             .shape = state.shape,
-                            .builder = .{ .clone = state.shape.shape.?.names.cloneCursor(1) },
+                            .builder = .init(
+                                self.environment,
+                                &state.shape.shape.?.names,
+                                state.shape.shape.?.names.count() + 1,
+                                null,
+                                self.id,
+                                self.candidate_cell.?,
+                            ),
                         } };
                         break :result .pending;
                     },
                 } else result: {
                     self.state = .{ .build = .{
                         .shape = state.shape,
-                        .builder = .{ .initialize = Shape.NameMap.initCursor(
-                            self.environment.allocator,
+                        .builder = .init(
+                            self.environment,
+                            null,
                             1,
-                        ) },
+                            null,
+                            self.id,
+                            self.candidate_cell.?,
+                        ),
                     } };
                     break :result .pending;
                 },
-                .build => |*state| switch (state.builder) {
-                    inline else => |*builder| switch (try builder.advance()) {
-                        .pending => .pending,
-                        .complete => |names| result: {
-                            builder.deinit();
-                            self.state = .{ .stage = .{
-                                .shape = state.shape,
-                                .names = names,
-                            } };
-                            break :result .pending;
-                        },
-                    },
-                },
-                .stage => |*state| result: {
-                    const built = try self.environment.allocator.create(Built);
-                    built.* = .{ .shape = state.shape, .names = state.names };
-                    self.state = .{ .insert = .{
-                        .built = built,
-                        .cursor = built.names.putCursor(self.id, self.candidate_cell.?),
-                    } };
-                    break :result .pending;
-                },
-                .insert => |*state| switch (state.cursor.advance()) {
+                .build => |*state| switch (try state.builder.advance()) {
                     .pending => .pending,
-                    .complete => result: {
-                        self.state = .{ .commit = state.built };
+                    .complete => |built| result: {
+                        const shape = state.shape;
+                        state.builder.deinit();
+                        self.state = .{ .commit = .{ .shape = shape, .built = built } };
                         break :result .pending;
                     },
                 },
-                .commit => |state| result: {
-                    const next = try self.environment.allocator.create(Shape);
+                .commit => |*state| result: {
                     self.environment.lockBlocking();
                     if (self.environment.frozen.load(.acquire)) {
                         self.environment.unlock();
-                        self.environment.allocator.destroy(next);
                         return error.Frozen;
                     }
                     if (!self.environment.shapes.isCurrent(state.shape.shape)) {
                         self.environment.unlock();
-                        self.environment.allocator.destroy(next);
-                        self.destroyBuilt(state);
+                        state.built.retire(self.environment.releases);
+                        state.shape.deinit();
                         self.state = .snapshot;
                         break :result .pending;
                     }
                     const published_cell = self.candidate_cell.?;
-                    self.environment.cells.append(published_cell) catch {
-                        self.environment.unlock();
-                        self.environment.allocator.destroy(next);
-                        return error.OutOfMemory;
-                    };
-                    next.* = .{
-                        .names = state.names,
-                        .previous = self.environment.shapes.currentOwned(),
-                    };
+                    state.built.previous = self.environment.shapes.currentOwned();
+                    const next = state.built;
+                    published_cell.release();
                     self.candidate_cell = null;
                     self.environment.shapes.publish(next);
                     _ = self.environment.shape_generation.fetchAdd(1, .release);
                     self.environment.unlock();
                     state.shape.deinit();
-                    self.environment.allocator.destroy(state);
                     self.state = .complete;
                     break :result .{ .complete = published_cell };
                 },
@@ -923,6 +987,117 @@ pub const Environment = struct {
         defer cursor.deinit();
         return poll.driveFallible(*BindingCell, &cursor, .{});
     }
+
+    pub const UnbindProgress = poll.Progress(bool);
+    pub const UnbindCursor = struct {
+        const State = union(enum) {
+            snapshot,
+            lookup: struct { shape: ShapeLease, cursor: ?Shape.NameMap.RawLookupCursor },
+            build: struct { shape: ShapeLease, builder: ShapeBuilder },
+            commit: struct { shape: ShapeLease, built: *Shape },
+            complete,
+        };
+
+        environment: *Environment,
+        id: intern.NamespaceName,
+        state: State = .snapshot,
+
+        fn init(environment: *Environment, id: intern.NamespaceName) UnbindCursor {
+            return .{ .environment = environment, .id = id };
+        }
+        pub fn deinit(self: *UnbindCursor) void {
+            switch (self.state) {
+                .lookup => |*state| state.shape.deinit(),
+                .build => |*state| {
+                    state.builder.deinit();
+                    state.shape.deinit();
+                },
+                .commit => |*state| {
+                    state.built.retire(self.environment.releases);
+                    state.shape.deinit();
+                },
+                .snapshot, .complete => {},
+            }
+            self.* = undefined;
+        }
+        pub fn advance(self: *UnbindCursor) BindError!UnbindProgress {
+            return switch (self.state) {
+                .snapshot => snapshot: {
+                    if (self.environment.frozen.load(.acquire)) return error.Frozen;
+                    const shape = self.environment.acquireShape();
+                    self.state = .{ .lookup = .{
+                        .cursor = if (shape.shape) |current| current.names.rawLookup(self.id) else null,
+                        .shape = shape,
+                    } };
+                    break :snapshot .pending;
+                },
+                .lookup => |*state| if (state.cursor) |*lookup| switch (lookup.advance()) {
+                    .pending => .pending,
+                    .complete => |maybe_cell| found: {
+                        if (maybe_cell == null) {
+                            state.shape.deinit();
+                            self.state = .complete;
+                            break :found .{ .complete = false };
+                        }
+                        const current = state.shape.shape.?;
+                        self.state = .{ .build = .{
+                            .shape = state.shape,
+                            .builder = .init(
+                                self.environment,
+                                &current.names,
+                                current.names.count() - 1,
+                                self.id,
+                                null,
+                                null,
+                            ),
+                        } };
+                        break :found .pending;
+                    },
+                } else missing: {
+                    state.shape.deinit();
+                    self.state = .complete;
+                    break :missing .{ .complete = false };
+                },
+                .build => |*state| switch (try state.builder.advance()) {
+                    .pending => .pending,
+                    .complete => |built| built_result: {
+                        const shape = state.shape;
+                        state.builder.deinit();
+                        self.state = .{ .commit = .{ .shape = shape, .built = built } };
+                        break :built_result .pending;
+                    },
+                },
+                .commit => |*state| commit: {
+                    self.environment.lockBlocking();
+                    if (self.environment.frozen.load(.acquire)) {
+                        self.environment.unlock();
+                        return error.Frozen;
+                    }
+                    if (!self.environment.shapes.isCurrent(state.shape.shape)) {
+                        self.environment.unlock();
+                        state.built.retire(self.environment.releases);
+                        state.shape.deinit();
+                        self.state = .snapshot;
+                        break :commit .pending;
+                    }
+                    state.built.previous = self.environment.shapes.currentOwned();
+                    const next = state.built;
+                    self.environment.shapes.publish(next);
+                    _ = self.environment.shape_generation.fetchAdd(1, .release);
+                    self.environment.unlock();
+                    state.shape.deinit();
+                    self.state = .complete;
+                    break :commit .{ .complete = true };
+                },
+                .complete => unreachable,
+            };
+        }
+    };
+
+    fn unbindCursor(self: *Environment, name: intern.NamespaceName) UnbindCursor {
+        return .init(self, name);
+    }
+
     pub fn resolveDirect(self: *const Environment, id: u32) ?BindingLease {
         var cursor = self.directLookupCursor(id);
         defer cursor.deinit();
@@ -1280,6 +1455,45 @@ pub const Scope = struct {
         effect: ?ValidatedEffect = null,
         doc: ?*DocumentationString = null,
     };
+
+    pub const UnpublishCursor = union(enum) {
+        absent,
+        environment: Environment.UnbindCursor,
+
+        pub fn deinit(self: *UnpublishCursor) void {
+            switch (self.*) {
+                .absent => {},
+                .environment => |*cursor| cursor.deinit(),
+            }
+            self.* = undefined;
+        }
+        pub fn advance(self: *UnpublishCursor) BindError!Environment.UnbindProgress {
+            return switch (self.*) {
+                .absent => |*state| absent: {
+                    state.* = {};
+                    break :absent .{ .complete = false };
+                },
+                .environment => |*cursor| cursor.advance(),
+            };
+        }
+    };
+
+    /// Removes only this scope's direct binding. An absent local binding is a
+    /// successful no-op, including for an unmaterialized child scope; parent
+    /// and core bindings are observation-only from here and may become visible
+    /// again only after a local shadow is removed.
+    pub fn unpublishWordCursor(
+        self: *Scope,
+        name: intern.NamespaceName,
+    ) UnpublishCursor {
+        const target = switch (self.storage) {
+            .session => |environment| environment,
+            .core_build => |environment| environment,
+            .module_root => |environment| environment,
+            .isolated => self.isolated_environment.load(.acquire) orelse return .absent,
+        };
+        return .{ .environment = target.unbindCursor(name) };
+    }
 
     /// Publishes one word definition, whichever publication this scope
     /// accepts. Callers were switching on `publisher()` themselves and
