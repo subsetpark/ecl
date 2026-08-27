@@ -3884,6 +3884,10 @@ pub const Machine = struct {
                 candidate: heap.Owned(modules.SealedImage),
                 cursor: heap.Owned(modules.Registry.RegistrationCursor),
             },
+            published: struct {
+                instance: heap.Owned(*native_module.ModuleInstance),
+                candidate: heap.Owned(modules.SealedImage),
+            },
 
             pub fn deinit(
                 self: *State,
@@ -3901,6 +3905,10 @@ pub const Machine = struct {
                         commit.cursor.deinit(releases, storage_allocator);
                         commit.candidate.deinit(releases, storage_allocator);
                         commit.instance.deinit(releases, storage_allocator);
+                    },
+                    .published => |*published| {
+                        published.candidate.deinit(releases, storage_allocator);
+                        published.instance.deinit(releases, storage_allocator);
                     },
                 }
                 self.* = undefined;
@@ -3969,7 +3977,13 @@ pub const Machine = struct {
                 }) {
                     .pending => return .yielded,
                     .complete => {
-                        commit.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        const next: State = .{ .published = .{
+                            .instance = commit.instance,
+                            .candidate = commit.candidate,
+                        } };
+                        var cursor = commit.cursor;
+                        self.state.borrowMut().* = next;
+                        cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         return verifyPublishedModule(
                             evaluator,
                             self,
@@ -3980,6 +3994,7 @@ pub const Machine = struct {
                         );
                     },
                 },
+                .published => unreachable,
             }
         }
 
