@@ -97,6 +97,9 @@ primitives, operationalized as two rules:
   hashes because equality ignores insertion order.
 - **Symbols:** one global append-only intern table; a symbol is a u32
   index. Words and symbols share the id space with distinct value tags.
+  Those ids are process-lifetime representation only: persistence and the
+  native ABI carry the spelling bytes and intern them in the receiving
+  process, never serialize or exchange a raw id.
   Concurrent interning locks the write path only; reads index the
   append-only vector lock-free. Symbols are never freed — the unbounded
   intern table is a documented hazard.
