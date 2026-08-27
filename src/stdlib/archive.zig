@@ -111,9 +111,8 @@ fn unpackTgz(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
         .io = io,
-        .mode = .unpack,
         .bytes_value = .init(bytes_value.take()),
-        .destination_value = .init(destination.take()),
+        .source = .{ .unpack = .{ .destination = .init(destination.take()) } },
         .entries = .init(entries),
         .state = .{ .parsing = .{ .encode_bytes = .{
             .byte = .init(byte_encoder),
@@ -139,9 +138,8 @@ pub fn inspectPackage(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
         .io = null,
-        .mode = .package_inspect,
         .bytes_value = .init(bytes_value.take()),
-        .package_value = .init(package.take()),
+        .source = .{ .inspect = .{ .package = .init(package.take()) } },
         .entries = .init(entries),
         .state = .{ .parsing = .{ .encode_bytes = .{
             .byte = .init(byte_encoder),
@@ -175,10 +173,11 @@ pub fn installPackage(evaluator: *Machine) MachineError!void {
     try evaluator.startDriver(UnpackDriver{
         .allocator = evaluator.allocator(),
         .io = io,
-        .mode = .package_install,
         .bytes_value = .init(bytes_value.take()),
-        .package_value = .init(package.take()),
-        .destination_value = .init(destination.take()),
+        .source = .{ .install = .{
+            .package = .init(package.take()),
+            .destination = .init(destination.take()),
+        } },
         .entries = .init(entries),
         .state = .{ .parsing = .{ .encode_bytes = .{
             .byte = .init(byte_encoder),
@@ -300,10 +299,8 @@ const UnpackDriver = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     allocator: std.mem.Allocator,
     io: ?std.Io,
-    mode: Mode,
     bytes_value: heap.Owned(Value),
-    package_value: ?heap.Owned(Value) = null,
-    destination_value: ?heap.Owned(Value) = null,
+    source: SourceTarget,
     entries: heap.Owned(EntryList),
     state: State,
 
@@ -313,6 +310,14 @@ const UnpackDriver = struct {
     const Staged = struct {
         result: Value,
         path: heap.Owned([]u8),
+    };
+    const SourceTarget = union(enum) {
+        unpack: struct { destination: heap.Owned(Value) },
+        inspect: struct { package: heap.Owned(Value) },
+        install: struct {
+            package: heap.Owned(Value),
+            destination: heap.Owned(Value),
+        },
     };
     const EncodeTarget = union(enum) {
         unpack: heap.Owned(storage.ToUtf8Cursor),
@@ -622,6 +627,22 @@ const UnpackDriver = struct {
         };
     }
 
+    fn operationMode(self: *const UnpackDriver) Mode {
+        return switch (self.source) {
+            .unpack => .unpack,
+            .inspect => .package_inspect,
+            .install => .package_install,
+        };
+    }
+
+    fn sourceDestination(self: *const UnpackDriver) Value {
+        return switch (self.source) {
+            .unpack => |*source| source.destination.borrow(),
+            .install => |*source| source.destination.borrow(),
+            .inspect => unreachable,
+        };
+    }
+
     fn encodeBytes(
         self: *UnpackDriver,
         evaluator: *Machine,
@@ -867,7 +888,7 @@ const UnpackDriver = struct {
         const tar = archive.tar.borrow();
         if (context.tar_offset == tar.len) {
             if (context.zero_blocks < 2) return self.failDomain(evaluator, "tar archive has no end marker");
-            scanning.work = if (self.mode == .unpack) .allocate_results else .materialize_manifest;
+            scanning.work = if (self.operationMode() == .unpack) .allocate_results else .materialize_manifest;
             return .yielded;
         }
         if (context.tar_offset + tar_block_bytes > tar.len)
@@ -944,7 +965,7 @@ const UnpackDriver = struct {
             .data_offset = data_offset,
             .size = @intCast(effective_size),
         };
-        if (self.mode != .unpack) try self.validatePackageEntry(evaluator, archive, context, entry);
+        if (self.operationMode() != .unpack) try self.validatePackageEntry(evaluator, archive, context, entry);
         if (kind == .file) context.file_count += 1;
         const hash = std.hash.Wyhash.hash(0, path);
         scanning.work = .{ .insert_member = .{
@@ -1088,7 +1109,7 @@ const UnpackDriver = struct {
             return self.failDomain(evaluator, "tar data follows its end marker");
         scanning.context.tar_offset = end;
         if (end != tar.len) return .yielded;
-        scanning.work = if (self.mode == .unpack) .allocate_results else .materialize_manifest;
+        scanning.work = if (self.operationMode() == .unpack) .allocate_results else .materialize_manifest;
         return .yielded;
     }
 
@@ -1154,7 +1175,7 @@ const UnpackDriver = struct {
             .pending => .yielded,
             .complete => |text| result: {
                 materializer.deinit();
-                if (self.mode == .package_inspect) {
+                if (self.operationMode() == .package_inspect) {
                     scanning.work = .complete;
                     break :result .{ .output = text };
                 }
@@ -1236,7 +1257,7 @@ const UnpackDriver = struct {
         const io = self.io.?;
         switch (publication.*) {
             .destination_check => |result| {
-                if (self.mode == .package_install) {
+                if (self.operationMode() == .package_install) {
                     const parent = std.fs.path.dirname(archiveDestination(archive)) orelse ".";
                     std.Io.Dir.cwd().createDirPath(io, parent) catch |err|
                         return self.failIo(evaluator, "cannot create package store parents", err);
@@ -1291,7 +1312,7 @@ const UnpackDriver = struct {
             .extract => |*extraction| switch (extraction.work) {
                 .next => {
                     const entry = extraction.iterator.next() orelse {
-                        if (self.mode == .package_install) {
+                        if (self.operationMode() == .package_install) {
                             const seal = extraction.dir.createFile(
                                 io,
                                 package_seal_name,
@@ -1420,13 +1441,13 @@ const UnpackDriver = struct {
 
     fn failIo(self: *UnpackDriver, evaluator: *Machine, message: []const u8, err: anyerror) MachineError {
         const failure = evaluator.failFmt(.io, "{s}: {s}", .{ message, @errorName(err) });
-        evaluator.addErrorPath(self.destination_value.?.borrow());
+        evaluator.addErrorPath(self.sourceDestination());
         return failure;
     }
 
     fn failIoName(self: *UnpackDriver, evaluator: *Machine, message: []const u8) MachineError {
         const failure = evaluator.fail(.io, message);
-        evaluator.addErrorPath(self.destination_value.?.borrow());
+        evaluator.addErrorPath(self.sourceDestination());
         return failure;
     }
 
@@ -1515,7 +1536,7 @@ const UnpackDriver = struct {
                     .context = .{
                         .path = .init(path),
                         .created_count = commit_state.created_count,
-                        .seal_created = self.mode == .package_install,
+                        .seal_created = self.operationMode() == .package_install,
                     },
                 } };
             },
@@ -1802,10 +1823,14 @@ const UnpackDriver = struct {
             .retired => {},
         }
         self.bytes_value.deinit(releases, allocator);
-        if (self.destination_value) |*destination| destination.deinit(releases, allocator);
-        self.destination_value = null;
-        if (self.package_value) |*package| package.deinit(releases, allocator);
-        self.package_value = null;
+        switch (self.source) {
+            .unpack => |*source| source.destination.deinit(releases, allocator),
+            .inspect => |*source| source.package.deinit(releases, allocator),
+            .install => |*source| {
+                source.package.deinit(releases, allocator);
+                source.destination.deinit(releases, allocator);
+            },
+        }
         self.entries.deinit(releases, allocator);
         allocator.destroy(self);
         return true;
