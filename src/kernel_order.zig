@@ -159,6 +159,7 @@ fn startGrade(evaluator: *Machine, sorted_values: bool) MachineError!void {
         .collection = .init(collection.take()),
         .sorted_values = sorted_values,
         .indices = .init(indices),
+        .state = .init(.{ .validate = 0 }),
     });
 }
 
@@ -387,117 +388,176 @@ const GradeDriver = struct {
     collection: heap.Owned(Value),
     sorted_values: bool,
     indices: heap.Owned([]usize),
-    sort: ?heap.Owned(GradeSortCursor) = null,
-    phase: enum { validate, initialize, sort, prepare, materialize } = .validate,
-    index: usize = 0,
-    comparator: ?CompareCursor = null,
-    values: ?heap.Owned([]Value) = null,
-    index_writer: ?heap.Owned(heap.LeafWriter(.leaf_i64)) = null,
-    value_materializer: ?heap.Owned(storage.ValueMaterializer) = null,
+    state: heap.Owned(State),
+
+    const State = union(enum) {
+        validate: usize,
+        compare: struct { index: usize, cursor: CompareCursor },
+        initialize: usize,
+        sort: heap.Owned(GradeSortCursor),
+        prepare,
+        prepare_values: struct { index: usize, values: heap.Owned([]Value) },
+        materialize_values: struct {
+            values: heap.Owned([]Value),
+            materializer: heap.Owned(storage.ValueMaterializer),
+        },
+        prepare_indices: struct {
+            index: usize,
+            writer: heap.Owned(heap.LeafWriter(.leaf_i64)),
+        },
+        complete_values: heap.Owned([]Value),
+        complete,
+
+        pub fn deinit(
+            self: *State,
+            releases: *heap.ReleaseDomain,
+            allocator: std.mem.Allocator,
+        ) void {
+            switch (self.*) {
+                .sort => |*sort| sort.deinit(releases, allocator),
+                .prepare_values => |*prepare| prepare.values.deinit(releases, allocator),
+                .materialize_values => |*materialize| {
+                    materialize.materializer.deinit(releases, allocator);
+                    materialize.values.deinit(releases, allocator);
+                },
+                .prepare_indices => |*prepare| prepare.writer.deinit(releases, allocator),
+                .complete_values => |*values| values.deinit(releases, allocator),
+                .validate, .compare, .initialize, .prepare, .complete => {},
+            }
+        }
+    };
 
     pub fn advance(evaluator: *Machine, self: *GradeDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
-        while (budget != 0) switch (self.phase) {
-            .validate => {
-                if (self.indices.borrow().len == 0 or self.index == self.indices.borrow().len) {
-                    self.phase = .initialize;
-                    self.index = 0;
+        while (budget != 0) switch (self.state.borrowMut().*) {
+            .validate => |index| {
+                if (self.indices.borrow().len == 0 or index == self.indices.borrow().len) {
+                    self.state.borrowMut().* = .{ .initialize = 0 };
                     continue;
                 }
-                if (self.comparator == null) self.comparator = .init(
-                    list.atUnchecked(self.collection.borrow(), 0),
-                    list.atUnchecked(self.collection.borrow(), self.index),
-                );
-                switch (self.comparator.?.advance(1)) {
+                self.state.borrowMut().* = .{ .compare = .{
+                    .index = index,
+                    .cursor = .init(
+                        list.atUnchecked(self.collection.borrow(), 0),
+                        list.atUnchecked(self.collection.borrow(), index),
+                    ),
+                } };
+            },
+            .compare => |*compare| {
+                switch (compare.cursor.advance(1)) {
                     .pending => return .yielded,
                     .not_comparable => return evaluator.failAtIndex(
                         .type,
                         "grade expected mutually comparable numbers, chars, or strings",
-                        self.index,
+                        compare.index,
                     ),
                     .complete => {
-                        self.comparator = null;
-                        self.index += 1;
+                        self.state.borrowMut().* = .{ .validate = compare.index + 1 };
                         budget -= 1;
                     },
                 }
             },
-            .initialize => {
+            .initialize => |*index| {
                 const indices = self.indices.borrow();
-                const end = @min(self.index + budget, indices.len);
-                const initialized = end - self.index;
-                while (self.index != end) : (self.index += 1) indices[self.index] = self.index;
+                const end = @min(index.* + budget, indices.len);
+                const initialized = end - index.*;
+                while (index.* != end) : (index.* += 1) indices[index.*] = index.*;
                 budget -= initialized;
-                if (self.index == indices.len) {
-                    self.sort = .init(try .init(
+                if (index.* == indices.len) {
+                    const sort = try GradeSortCursor.init(
                         evaluator.allocator(),
                         indices,
                         self.collection.borrow(),
-                    ));
-                    self.phase = .sort;
-                    self.index = 0;
+                    );
+                    self.state.borrowMut().* = .{ .sort = .init(sort) };
                 }
             },
-            .sort => switch (self.sort.?.borrowMut().advance(budget)) {
+            .sort => |*sort| switch (sort.borrowMut().advance(budget)) {
                 .pending => return .yielded,
                 .complete => {
-                    self.sort.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                    self.sort = null;
-                    self.phase = .prepare;
-                    self.index = 0;
+                    sort.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.state.borrowMut().* = .prepare;
                     continue;
                 },
             },
             .prepare => {
                 if (self.sorted_values) {
-                    if (self.values == null) self.values = .init(try evaluator.allocator().alloc(
+                    const values = try evaluator.allocator().alloc(
                         Value,
                         self.indices.borrow().len,
-                    ));
-                    const values = self.values.?.borrow();
-                    const indices = self.indices.borrow();
-                    const end = @min(self.index + budget, indices.len);
-                    const prepared = end - self.index;
-                    while (self.index != end) : (self.index += 1)
-                        values[self.index] = list.atUnchecked(self.collection.borrow(), indices[self.index]);
-                    budget -= prepared;
-                    if (self.index == indices.len) {
-                        self.value_materializer = .init(storage.ValueMaterializer.init(
-                            evaluator.allocator(),
-                            values,
-                        ));
-                        self.phase = .materialize;
-                    }
+                    );
+                    self.state.borrowMut().* = .{ .prepare_values = .{
+                        .index = 0,
+                        .values = .init(values),
+                    } };
                 } else {
-                    if (self.index_writer == null) self.index_writer = .init(try heap.LeafWriter(.leaf_i64).init(
+                    const writer = try heap.LeafWriter(.leaf_i64).init(
                         evaluator.allocator(),
                         self.indices.borrow().len,
-                    ));
-                    const indices = self.indices.borrow();
-                    const end = @min(self.index + budget, indices.len);
-                    const prepared = end - self.index;
-                    var block: [kernel_flat.block_size]i64 = undefined;
-                    var offset = self.index;
-                    while (offset != end) {
-                        const piece_end = @min(offset + kernel_flat.block_size, end);
-                        for (offset..piece_end) |index| block[index - offset] = @intCast(indices[index]);
-                        self.index_writer.?.borrowMut().writeRange(offset, block[0 .. piece_end - offset]);
-                        offset = piece_end;
-                    }
-                    self.index = end;
-                    budget -= prepared;
-                    if (self.index == indices.len)
-                        return .{ .output = self.index_writer.?.borrowMut().finish() };
+                    );
+                    self.state.borrowMut().* = .{ .prepare_indices = .{
+                        .index = 0,
+                        .writer = .init(writer),
+                    } };
                 }
             },
-            .materialize => {
-                std.debug.assert(self.sorted_values);
-                return switch (try self.value_materializer.?.borrowMut().advance(budget)) {
+            .prepare_values => |*prepare| {
+                const values = prepare.values.borrow();
+                const indices = self.indices.borrow();
+                const end = @min(prepare.index + budget, indices.len);
+                const prepared = end - prepare.index;
+                while (prepare.index != end) : (prepare.index += 1)
+                    values[prepare.index] = list.atUnchecked(self.collection.borrow(), indices[prepare.index]);
+                budget -= prepared;
+                if (prepare.index == indices.len) {
+                    const materializer = storage.ValueMaterializer.init(
+                        evaluator.allocator(),
+                        values,
+                    );
+                    self.state.borrowMut().* = .{ .materialize_values = .{
+                        .values = .init(prepare.values.take()),
+                        .materializer = .init(materializer),
+                    } };
+                }
+            },
+            .prepare_indices => |*prepare| {
+                const indices = self.indices.borrow();
+                const end = @min(prepare.index + budget, indices.len);
+                const prepared = end - prepare.index;
+                var block: [kernel_flat.block_size]i64 = undefined;
+                var offset = prepare.index;
+                while (offset != end) {
+                    const piece_end = @min(offset + kernel_flat.block_size, end);
+                    for (offset..piece_end) |index| block[index - offset] = @intCast(indices[index]);
+                    prepare.writer.borrowMut().writeRange(offset, block[0 .. piece_end - offset]);
+                    offset = piece_end;
+                }
+                prepare.index = end;
+                budget -= prepared;
+                if (prepare.index == indices.len) {
+                    const result = prepare.writer.borrowMut().finish();
+                    _ = prepare.writer.take();
+                    self.state.borrowMut().* = .complete;
+                    return .{ .output = result };
+                }
+            },
+            .materialize_values => |*materialize| {
+                return switch (try materialize.materializer.borrowMut().advance(budget)) {
                     .pending => .yielded,
-                    .complete => |result| .{ .output = result },
+                    .complete => |result| completed: {
+                        materialize.materializer.deinit(
+                            evaluator.releaseDomain(),
+                            evaluator.allocator(),
+                        );
+                        self.state.borrowMut().* = .{ .complete_values = .init(
+                            materialize.values.take(),
+                        ) };
+                        break :completed .{ .output = result };
+                    },
                 };
             },
+            .complete_values, .complete => unreachable,
         };
         return .yielded;
     }
