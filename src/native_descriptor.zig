@@ -334,32 +334,55 @@ pub const ValidateCursor = struct {
     host: *const heap.HostCleanup,
     requested: intern.ModuleName,
     descriptor_ptr: *const abi.Descriptor,
-    descriptor: ?abi.Descriptor = null,
-    phase: enum {
+    state: State = .header,
+    failure_definition: ?u32 = null,
+
+    const Allocated = struct {
+        descriptor: abi.Descriptor,
+        requirements: []abi.CapabilityRequirement,
+        definitions: []ValidatedDefinition,
+    };
+    const ModuleArtifacts = struct {
+        descriptor: abi.Descriptor,
+        name: intern.ModuleName,
+        doc: *env.DocumentationString,
+        requirements: []abi.CapabilityRequirement,
+        capability_index: usize = 0,
+        definitions: []ValidatedDefinition,
+        definition_index: usize = 0,
+    };
+    const DefinitionBuild = struct {
+        module: ModuleArtifacts,
+        definition: abi.Definition,
+        name: intern.NamespaceName,
+    };
+    const State = union(enum) {
         header,
-        module_name,
-        module_doc,
-        capabilities,
-        definition,
-        definition_doc,
-        definition_effect,
-        finish,
+        module_name: Allocated,
+        module_doc: struct {
+            allocated: Allocated,
+            name: intern.ModuleName,
+            builder: DocumentBuild,
+        },
+        capabilities: ModuleArtifacts,
+        definition: ModuleArtifacts,
+        definition_doc: struct {
+            build: DefinitionBuild,
+            builder: DocumentBuild,
+        },
+        definition_effect_init: struct {
+            build: DefinitionBuild,
+            doc: *env.DocumentationString,
+        },
+        definition_effect: struct {
+            build: DefinitionBuild,
+            doc: *env.DocumentationString,
+            builder: EffectBuild,
+        },
+        finish: ModuleArtifacts,
         complete,
         failed,
-    } = .header,
-    name: ?intern.ModuleName = null,
-    module_doc_builder: ?DocumentBuild = null,
-    module_doc: ?*env.DocumentationString = null,
-    requirements: ?[]abi.CapabilityRequirement = null,
-    capability_index: usize = 0,
-    definitions: ?[]ValidatedDefinition = null,
-    definition_index: usize = 0,
-    current_definition: ?abi.Definition = null,
-    current_name: ?intern.NamespaceName = null,
-    current_doc_builder: ?DocumentBuild = null,
-    current_doc: ?*env.DocumentationString = null,
-    current_effect_builder: ?EffectBuild = null,
-    failure_definition: ?u32 = null,
+    };
 
     pub fn init(
         host: *const heap.HostCleanup,
@@ -379,55 +402,77 @@ pub const ValidateCursor = struct {
     }
 
     pub fn advance(self: *ValidateCursor, budget: usize) ValidateError!Progress {
-        std.debug.assert(budget != 0 and self.phase != .complete and self.phase != .failed);
+        std.debug.assert(budget != 0 and self.state != .complete and self.state != .failed);
         var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) switch (self.phase) {
+        while (remaining != 0) : (remaining -= 1) switch (self.state) {
             .header => self.validateHeader() catch |err| return self.reject(err, null),
-            .module_name => self.validateModuleName() catch |err| return self.reject(err, null),
-            .module_doc => {
-                const completed = self.module_doc_builder.?.advance(remaining) catch |err|
+            .module_name => |allocated| self.validateModuleName(allocated) catch |err|
+                return self.reject(err, null),
+            .module_doc => |*module_doc| {
+                const completed = module_doc.builder.advance(remaining) catch |err|
                     return self.reject(err, null);
                 if (completed == null) return .pending;
-                self.module_doc = self.module_doc_builder.?.take();
-                self.module_doc_builder.?.deinit();
-                self.module_doc_builder = null;
-                self.phase = .capabilities;
+                const allocated = module_doc.allocated;
+                const name = module_doc.name;
+                const document = module_doc.builder.take();
+                module_doc.builder.deinit();
+                self.state = .{ .capabilities = .{
+                    .descriptor = allocated.descriptor,
+                    .name = name,
+                    .doc = document,
+                    .requirements = allocated.requirements,
+                    .definitions = allocated.definitions,
+                } };
             },
-            .capabilities => self.validateCapability() catch |err| return self.reject(err, null),
-            .definition => self.prepareDefinition() catch |err|
-                return self.reject(err, @intCast(self.definition_index)),
-            .definition_doc => {
-                const completed = self.current_doc_builder.?.advance(remaining) catch |err|
-                    return self.reject(err, @intCast(self.definition_index));
+            .capabilities => |*module| self.validateCapability(module) catch |err|
+                return self.reject(err, null),
+            .definition => |*module| self.prepareDefinition(module) catch |err|
+                return self.reject(err, @intCast(module.definition_index)),
+            .definition_doc => |*definition_doc| {
+                const definition_index = definition_doc.build.module.definition_index;
+                const completed = definition_doc.builder.advance(remaining) catch |err|
+                    return self.reject(err, @intCast(definition_index));
                 if (completed == null) return .pending;
-                self.current_doc = self.current_doc_builder.?.take();
-                self.current_doc_builder.?.deinit();
-                self.current_doc_builder = null;
-                self.current_effect_builder = EffectBuild.init(self.host, self.current_definition.?) catch |err|
-                    return self.reject(err, @intCast(self.definition_index));
-                self.phase = .definition_effect;
+                const build = definition_doc.build;
+                const document = definition_doc.builder.take();
+                definition_doc.builder.deinit();
+                self.state = .{ .definition_effect_init = .{
+                    .build = build,
+                    .doc = document,
+                } };
             },
-            .definition_effect => {
-                const completed = self.current_effect_builder.?.advance(remaining) catch |err|
-                    return self.reject(err, @intCast(self.definition_index));
+            .definition_effect_init => |initializing| {
+                const builder = EffectBuild.init(self.host, initializing.build.definition) catch |err|
+                    return self.reject(err, @intCast(initializing.build.module.definition_index));
+                self.state = .{ .definition_effect = .{
+                    .build = initializing.build,
+                    .doc = initializing.doc,
+                    .builder = builder,
+                } };
+            },
+            .definition_effect => |*definition_effect| {
+                const definition_index = definition_effect.build.module.definition_index;
+                const completed = definition_effect.builder.advance(remaining) catch |err|
+                    return self.reject(err, @intCast(definition_index));
                 if (completed == null) return .pending;
-                self.definitions.?[self.definition_index] = .{
-                    .name = self.current_name.?,
-                    .doc = self.current_doc.?,
-                    .effect = self.current_effect_builder.?.take(),
-                    .callback_index = self.current_definition.?.callback_index,
-                    .continuation_size = self.current_definition.?.continuation_size,
-                    .continuation_alignment = self.current_definition.?.continuation_alignment,
-                    .init_continuation = self.current_definition.?.init_continuation,
-                    .deinit_continuation = self.current_definition.?.deinit_continuation,
+                var module = definition_effect.build.module;
+                const definition = definition_effect.build.definition;
+                const name = definition_effect.build.name;
+                const document = definition_effect.doc;
+                const effect = definition_effect.builder.take();
+                definition_effect.builder.deinit();
+                module.definitions[module.definition_index] = .{
+                    .name = name,
+                    .doc = document,
+                    .effect = effect,
+                    .callback_index = definition.callback_index,
+                    .continuation_size = definition.continuation_size,
+                    .continuation_alignment = definition.continuation_alignment,
+                    .init_continuation = definition.init_continuation,
+                    .deinit_continuation = definition.deinit_continuation,
                 };
-                self.current_doc = null;
-                self.current_effect_builder.?.deinit();
-                self.current_effect_builder = null;
-                self.current_definition = null;
-                self.current_name = null;
-                self.definition_index += 1;
-                self.phase = .definition;
+                module.definition_index += 1;
+                self.state = .{ .definition = module };
             },
             .finish => return self.finish() catch |err| self.reject(err, null),
             .complete, .failed => unreachable,
@@ -438,8 +483,7 @@ pub const ValidateCursor = struct {
     fn validateHeader(self: *ValidateCursor) ValidateError!void {
         const declared_size = self.descriptor_ptr.size;
         try validateRecordSize(declared_size, @sizeOf(abi.Descriptor));
-        self.descriptor = self.descriptor_ptr.*;
-        const descriptor = self.descriptor.?;
+        const descriptor = self.descriptor_ptr.*;
         if (descriptor.abi_version != abi.abi_version) return error.AbiVersionMismatch;
         if (descriptor.definition_count > max_definitions or
             descriptor.capability_count > max_capabilities)
@@ -456,21 +500,26 @@ pub const ValidateCursor = struct {
         );
         if (descriptor.callback_count != 0 and descriptor.invoke == null)
             return error.MissingInvoke;
-        self.requirements = try self.host.allocator().alloc(
+        const requirements = try self.host.allocator().alloc(
             abi.CapabilityRequirement,
             descriptor.capability_count,
         );
-        self.definitions = try self.host.allocator().alloc(
+        errdefer self.host.allocator().free(requirements);
+        const definitions = try self.host.allocator().alloc(
             ValidatedDefinition,
             descriptor.definition_count,
         );
-        self.phase = .module_name;
+        self.state = .{ .module_name = .{
+            .descriptor = descriptor,
+            .requirements = requirements,
+            .definitions = definitions,
+        } };
     }
 
-    fn validateModuleName(self: *ValidateCursor) ValidateError!void {
+    fn validateModuleName(self: *ValidateCursor, allocated: Allocated) ValidateError!void {
         const bytes = try guestUtf8(
-            self.descriptor.?.module_name_ptr,
-            self.descriptor.?.module_name_len,
+            allocated.descriptor.module_name_ptr,
+            allocated.descriptor.module_name_len,
             max_module_name_bytes,
         );
         const name = intern.internModuleName(bytes) catch |err| switch (err) {
@@ -478,49 +527,53 @@ pub const ValidateCursor = struct {
             error.InvalidName => return error.InvalidName,
         };
         if (name != self.requested) return error.ModuleNameMismatch;
-        self.name = name;
         const document = try guestUtf8(
-            self.descriptor.?.module_doc_ptr,
-            self.descriptor.?.module_doc_len,
+            allocated.descriptor.module_doc_ptr,
+            allocated.descriptor.module_doc_len,
             max_document_bytes,
         );
-        self.module_doc_builder = .init(self.host, document);
-        self.phase = .module_doc;
+        self.state = .{ .module_doc = .{
+            .allocated = allocated,
+            .name = name,
+            .builder = .init(self.host, document),
+        } };
     }
 
-    fn validateCapability(self: *ValidateCursor) ValidateError!void {
-        if (self.capability_index == self.descriptor.?.capability_count) {
-            self.phase = .definition;
+    fn validateCapability(self: *ValidateCursor, module: *ModuleArtifacts) ValidateError!void {
+        if (module.capability_index == module.descriptor.capability_count) {
+            const moved = module.*;
+            self.state = .{ .definition = moved };
             return;
         }
         const records = try RecordArray(abi.CapabilityRequirement).init(
-            self.descriptor.?.capabilities_ptr,
-            self.descriptor.?.capability_count,
-            self.descriptor.?.capability_record_size,
+            module.descriptor.capabilities_ptr,
+            module.descriptor.capability_count,
+            module.descriptor.capability_record_size,
         );
-        const requirement = try records.read(self.capability_index);
+        const requirement = try records.read(module.capability_index);
         try validateRecordSize(requirement.size, @sizeOf(abi.CapabilityRequirement));
         switch (@as(abi.CapabilityId, @enumFromInt(requirement.id))) {
             .call, .build_values, .reschedule => {},
             _ => return error.UnsupportedCapabilityId,
         }
-        self.requirements.?[self.capability_index] = requirement;
-        self.capability_index += 1;
+        module.requirements[module.capability_index] = requirement;
+        module.capability_index += 1;
     }
 
-    fn prepareDefinition(self: *ValidateCursor) ValidateError!void {
-        if (self.definition_index == self.descriptor.?.definition_count) {
-            self.phase = .finish;
+    fn prepareDefinition(self: *ValidateCursor, module: *ModuleArtifacts) ValidateError!void {
+        if (module.definition_index == module.descriptor.definition_count) {
+            const moved = module.*;
+            self.state = .{ .finish = moved };
             return;
         }
         const records = try RecordArray(abi.Definition).init(
-            self.descriptor.?.definitions_ptr,
-            self.descriptor.?.definition_count,
-            self.descriptor.?.definition_record_size,
+            module.descriptor.definitions_ptr,
+            module.descriptor.definition_count,
+            module.descriptor.definition_record_size,
         );
-        const definition = try records.read(self.definition_index);
+        const definition = try records.read(module.definition_index);
         try validateRecordSize(definition.size, @sizeOf(abi.Definition));
-        if (definition.callback_index >= self.descriptor.?.callback_count)
+        if (definition.callback_index >= module.descriptor.callback_count)
             return error.CallbackIndexOutOfRange;
         const has_continuation = definition.continuation_size != 0 or
             definition.continuation_alignment != 0 or
@@ -532,7 +585,7 @@ pub const ValidateCursor = struct {
                 definition.continuation_alignment > abi.max_continuation_alignment or
                 !std.math.isPowerOfTwo(definition.continuation_alignment) or
                 definition.init_continuation == null or definition.deinit_continuation == null or
-                !self.hasCapability(.reschedule))
+                !hasCapability(module, .reschedule))
                 return error.InvalidContinuation;
         }
         _ = try RecordArray(abi.EffectSlot).init(
@@ -550,71 +603,91 @@ pub const ValidateCursor = struct {
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidName => return error.InvalidName,
         };
-        for (self.definitions.?[0..self.definition_index]) |prior|
+        for (module.definitions[0..module.definition_index]) |prior|
             if (prior.name == name) return error.DuplicateDefinition;
         const document = try guestUtf8(definition.doc_ptr, definition.doc_len, max_document_bytes);
-        self.current_definition = definition;
-        self.current_name = name;
-        self.current_doc_builder = .init(self.host, document);
-        self.phase = .definition_doc;
+        const moved = module.*;
+        self.state = .{ .definition_doc = .{
+            .build = .{ .module = moved, .definition = definition, .name = name },
+            .builder = .init(self.host, document),
+        } };
     }
 
-    fn hasCapability(self: *const ValidateCursor, id: abi.CapabilityId) bool {
-        for (self.requirements.?[0..self.capability_index]) |requirement|
+    fn hasCapability(module: *const ModuleArtifacts, id: abi.CapabilityId) bool {
+        for (module.requirements[0..module.capability_index]) |requirement|
             if (requirement.id == @intFromEnum(id)) return true;
         return false;
     }
 
     fn finish(self: *ValidateCursor) ValidateError!Progress {
-        const invoke = self.descriptor.?.invoke orelse return error.MissingInvoke;
+        const module = self.state.finish;
+        const invoke = module.descriptor.invoke orelse return error.MissingInvoke;
         const state = try self.host.allocator().create(DescriptorState);
         state.* = .{
             .host = self.host,
-            .name = self.name.?,
-            .doc = self.module_doc.?,
-            .definitions = self.definitions.?,
-            .requirements = self.requirements.?,
+            .name = module.name,
+            .doc = module.doc,
+            .definitions = module.definitions,
+            .requirements = module.requirements,
             .invoke = invoke,
-            .callback_count = self.descriptor.?.callback_count,
+            .callback_count = module.descriptor.callback_count,
         };
-        self.module_doc = null;
-        self.definitions = null;
-        self.requirements = null;
-        self.phase = .complete;
+        self.state = .complete;
         return .{ .complete = @ptrCast(state) };
     }
 
     fn reject(self: *ValidateCursor, err: ValidateError, definition: ?u32) ValidateError {
         self.failure_definition = definition;
         self.cleanup();
-        self.phase = .failed;
+        self.state = .failed;
         return err;
     }
 
     fn cleanup(self: *ValidateCursor) void {
         const releases = heap.hostDomain(self.host);
-        if (self.module_doc_builder) |*builder| builder.deinit();
-        self.module_doc_builder = null;
-        if (self.module_doc) |document| releases.releaseHeader(env.documentationHeader(document));
-        self.module_doc = null;
-        if (self.current_doc_builder) |*builder| builder.deinit();
-        self.current_doc_builder = null;
-        if (self.current_doc) |document| releases.releaseHeader(env.documentationHeader(document));
-        self.current_doc = null;
-        if (self.current_effect_builder) |*builder| builder.deinit();
-        self.current_effect_builder = null;
-        if (self.definitions) |definitions| {
-            for (definitions[0..self.definition_index]) |definition| {
-                releases.releaseHeader(env.documentationHeader(definition.doc));
-                definition.effect.retire(releases);
-            }
-            self.host.allocator().free(definitions);
-            self.definitions = null;
+        switch (self.state) {
+            .header, .complete, .failed => {},
+            .module_name => |*allocated| self.cleanupAllocated(allocated),
+            .module_doc => |*module_doc| {
+                module_doc.builder.deinit();
+                self.cleanupAllocated(&module_doc.allocated);
+            },
+            .capabilities => |*module| self.cleanupModule(module, releases),
+            .definition => |*module| self.cleanupModule(module, releases),
+            .definition_doc => |*definition_doc| {
+                definition_doc.builder.deinit();
+                self.cleanupModule(&definition_doc.build.module, releases);
+            },
+            .definition_effect_init => |*initializing| {
+                releases.releaseHeader(env.documentationHeader(initializing.doc));
+                self.cleanupModule(&initializing.build.module, releases);
+            },
+            .definition_effect => |*definition_effect| {
+                definition_effect.builder.deinit();
+                releases.releaseHeader(env.documentationHeader(definition_effect.doc));
+                self.cleanupModule(&definition_effect.build.module, releases);
+            },
+            .finish => |*module| self.cleanupModule(module, releases),
         }
-        if (self.requirements) |requirements| {
-            self.host.allocator().free(requirements);
-            self.requirements = null;
+    }
+
+    fn cleanupAllocated(self: *ValidateCursor, allocated: *Allocated) void {
+        self.host.allocator().free(allocated.definitions);
+        self.host.allocator().free(allocated.requirements);
+    }
+
+    fn cleanupModule(
+        self: *ValidateCursor,
+        module: *ModuleArtifacts,
+        releases: *heap.ReleaseDomain,
+    ) void {
+        releases.releaseHeader(env.documentationHeader(module.doc));
+        for (module.definitions[0..module.definition_index]) |definition| {
+            releases.releaseHeader(env.documentationHeader(definition.doc));
+            definition.effect.retire(releases);
         }
+        self.host.allocator().free(module.definitions);
+        self.host.allocator().free(module.requirements);
     }
 };
 

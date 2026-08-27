@@ -113,7 +113,7 @@ fn validate(
     raw: *const abi.Descriptor,
 ) descriptor_api.ValidateError!*descriptor_api.ValidatedDescriptor {
     var cursor = descriptor_api.ValidateCursor.init(host, requested, raw);
-    defer if (cursor.phase != .complete) cursor.deinit();
+    defer cursor.deinit();
     while (true) switch (try cursor.advance(7)) {
         .pending => {},
         .complete => |validated| return validated,
