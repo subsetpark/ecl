@@ -200,12 +200,25 @@ const EffectBuild = struct {
     host: *const heap.HostCleanup,
     definition: abi.Definition,
     tokens: []value.Value,
-    input_index: usize = 0,
-    output_index: usize = 0,
-    phase: enum { inputs, separator, outputs, materialize, complete } = .inputs,
-    inserter: ?intern.InternInsertionCursor = null,
-    materializer: ?storage.GenericValueMaterializer = null,
-    result: ?env.ValidatedEffect = null,
+    state: State = .{ .inputs = .{} },
+
+    const SlotState = struct {
+        index: usize = 0,
+        work: union(enum) {
+            next,
+            inserting: intern.InternInsertionCursor,
+        } = .next,
+    };
+    const State = union(enum) {
+        inputs: SlotState,
+        separator,
+        outputs: SlotState,
+        materialize: storage.GenericValueMaterializer,
+        materialized: value.Value,
+        complete: env.ValidatedEffect,
+        failed,
+        consumed,
+    };
 
     fn init(host: *const heap.HostCleanup, definition: abi.Definition) ValidateError!EffectBuild {
         const count = std.math.add(
@@ -225,81 +238,95 @@ const EffectBuild = struct {
 
     fn deinit(self: *EffectBuild) void {
         const releases = heap.hostDomain(self.host);
-        if (self.materializer) |*materializer| materializer.retire(releases);
-        if (self.result) |effect| effect.retire(releases);
+        switch (self.state) {
+            .materialize => |*materializer| materializer.retire(releases),
+            .materialized => |item| releases.releaseValue(item),
+            .complete => |effect| effect.retire(releases),
+            .inputs, .separator, .outputs, .failed, .consumed => {},
+        }
         self.host.allocator().free(self.tokens);
         self.* = undefined;
     }
 
     fn advance(self: *EffectBuild, budget: usize) ValidateError!?env.ValidatedEffect {
         var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) switch (self.phase) {
-            .inputs => {
-                if (try self.advanceSlot(true)) self.phase = .separator;
+        while (remaining != 0) : (remaining -= 1) switch (self.state) {
+            .inputs => |*slots| {
+                if (try self.advanceSlot(slots, true)) self.state = .separator;
             },
             .separator => {
                 self.tokens[self.definition.input_count] = .{ .word = .{ .name = try intern.intern("--") } };
-                self.phase = .outputs;
+                self.state = .{ .outputs = .{} };
             },
-            .outputs => {
-                if (try self.advanceSlot(false)) {
-                    self.materializer = .init(self.host.allocator(), self.tokens);
-                    self.phase = .materialize;
+            .outputs => |*slots| {
+                if (try self.advanceSlot(slots, false)) {
+                    self.state = .{ .materialize = .init(self.host.allocator(), self.tokens) };
                 }
             },
-            .materialize => switch (try self.materializer.?.advance(remaining)) {
+            .materialize => |*materializer| switch (try materializer.advance(remaining)) {
                 .pending => return null,
                 .complete => |item| {
-                    self.materializer.?.deinit();
-                    self.materializer = null;
-                    const parsed = env.ValidatedEffect.parse(item.list, try intern.intern("--")) orelse {
-                        heap.hostDomain(self.host).releaseValue(item);
-                        return error.InvalidEffect;
-                    };
-                    self.result = parsed;
-                    self.phase = .complete;
-                    return parsed;
+                    materializer.deinit();
+                    self.state = .{ .materialized = item };
+                    return null;
                 },
             },
-            .complete => return self.result,
+            .materialized => |item| {
+                const parsed = env.ValidatedEffect.parse(item.list, try intern.intern("--")) orelse {
+                    heap.hostDomain(self.host).releaseValue(item);
+                    self.state = .failed;
+                    return error.InvalidEffect;
+                };
+                self.state = .{ .complete = parsed };
+                return parsed;
+            },
+            .complete => |effect| return effect,
+            .failed, .consumed => unreachable,
         };
         return null;
     }
 
-    fn advanceSlot(self: *EffectBuild, input: bool) ValidateError!bool {
-        const index = if (input) self.input_index else self.output_index;
+    fn advanceSlot(self: *EffectBuild, slots: *SlotState, input: bool) ValidateError!bool {
+        const index = slots.index;
         const count = if (input) self.definition.input_count else self.definition.output_count;
         if (index == count) return true;
         const base = if (input) self.definition.inputs_ptr else self.definition.outputs_ptr;
         const stride = if (input) self.definition.input_record_size else self.definition.output_record_size;
-        if (self.inserter) |*inserter| return switch (try inserter.advance()) {
-            .pending => false,
-            .complete => |id| complete: {
-                const token_index = if (input)
-                    self.input_index
-                else
-                    @as(usize, self.definition.input_count) + 1 + self.output_index;
-                self.tokens[token_index] = .{ .word = .{ .name = id } };
-                self.inserter = null;
-                if (input) self.input_index += 1 else self.output_index += 1;
-                break :complete false;
+        switch (slots.work) {
+            .inserting => |*inserter| return switch (try inserter.advance()) {
+                .pending => false,
+                .complete => |id| complete: {
+                    const token_index = if (input)
+                        slots.index
+                    else
+                        @as(usize, self.definition.input_count) + 1 + slots.index;
+                    self.tokens[token_index] = .{ .word = .{ .name = id } };
+                    slots.index += 1;
+                    slots.work = .next;
+                    break :complete false;
+                },
             },
-        };
-        const records = try RecordArray(abi.EffectSlot).init(base, count, stride);
-        const slot = try records.read(index);
-        try validateRecordSize(slot.size, @sizeOf(abi.EffectSlot));
-        const bytes = guestUtf8(slot.name_ptr, slot.name_len, max_word_name_bytes) catch
-            return error.InvalidEffect;
-        if (bytes.len == 0) return error.InvalidEffect;
-        self.inserter = intern.insertionCursor(bytes);
-        return false;
+            .next => {
+                const records = try RecordArray(abi.EffectSlot).init(base, count, stride);
+                const slot = try records.read(index);
+                try validateRecordSize(slot.size, @sizeOf(abi.EffectSlot));
+                const bytes = guestUtf8(slot.name_ptr, slot.name_len, max_word_name_bytes) catch
+                    return error.InvalidEffect;
+                if (bytes.len == 0) return error.InvalidEffect;
+                slots.work = .{ .inserting = intern.insertionCursor(bytes) };
+                return false;
+            },
+        }
     }
 
     fn take(self: *EffectBuild) env.ValidatedEffect {
-        std.debug.assert(self.phase == .complete);
-        const result = self.result.?;
-        self.result = null;
-        return result;
+        return switch (self.state) {
+            .complete => |effect| moved: {
+                self.state = .consumed;
+                break :moved effect;
+            },
+            else => unreachable,
+        };
     }
 };
 
