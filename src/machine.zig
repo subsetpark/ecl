@@ -8235,8 +8235,7 @@ fn startFailure(self: *Machine) error{OutOfMemory}!void {
         .failure = self.unit.takePendingForUnwind(),
         .trace = trace,
         .resolved = resolved,
-        .frame_index = self.unit.frames.items.len,
-        .boundary_index = self.unit.boundary_index,
+        .state = .{ .trace = self.unit.frames.items.len },
     };
     driver.appendInitial(self);
     self.adoptDriver(driver);
@@ -8245,6 +8244,94 @@ fn startFailure(self: *Machine) error{OutOfMemory}!void {
 const FailureDriver = struct {
     pub const address_stable_driver = {};
     pub const ownership: heap.DriverOwnership = .self_owned;
+    const UnwindTarget = union(enum) {
+        uncaught: struct { stack_base: usize },
+        caught: struct {
+            boundary_index: FrameIndex,
+            stack_base: usize,
+            locals_base: usize,
+            previous_base: usize,
+            previous_boundary: ?FrameIndex,
+        },
+
+        fn frameTarget(self: UnwindTarget) usize {
+            return switch (self) {
+                .uncaught => 0,
+                .caught => |caught| @as(usize, @intFromEnum(caught.boundary_index)) + 1,
+            };
+        }
+        fn localsTarget(self: UnwindTarget) usize {
+            return switch (self) {
+                .uncaught => 0,
+                .caught => |caught| caught.locals_base,
+            };
+        }
+        fn stackTarget(self: UnwindTarget) usize {
+            return switch (self) {
+                .uncaught => |uncaught| uncaught.stack_base,
+                .caught => |caught| caught.stack_base,
+            };
+        }
+        fn previousBase(self: UnwindTarget) usize {
+            return switch (self) {
+                .uncaught => 0,
+                .caught => |caught| caught.previous_base,
+            };
+        }
+        fn previousBoundary(self: UnwindTarget) ?FrameIndex {
+            return switch (self) {
+                .uncaught => null,
+                .caught => |caught| caught.previous_boundary,
+            };
+        }
+    };
+    const Unwind = struct {
+        error_value: Value,
+        target: UnwindTarget,
+
+        fn retire(self: *Unwind, releases: *heap.ReleaseDomain) void {
+            releases.releaseValue(self.error_value);
+        }
+    };
+    const State = union(enum) {
+        trace: usize,
+        spell: usize,
+        resolve: struct { index: usize, cursor: intern.TraceWordCursor },
+        locate: spans.SpanArchive.LocateCursor,
+        value: ErrorValueCursor,
+        nearest: struct { error_value: Value, boundary: ?FrameIndex },
+        current: Unwind,
+        frames: Unwind,
+        boundary: Unwind,
+        locals: Unwind,
+        stack: Unwind,
+        outcome_name: struct { error_value: Value, cursor: intern.InternInsertionCursor },
+        outcome_prepare: Value,
+        outcome: struct {
+            error_value: Value,
+            builder: kernel_storage.DictMaterializer,
+        },
+        caught: Value,
+        failed,
+
+        fn deinit(self: *State, releases: *heap.ReleaseDomain) void {
+            switch (self.*) {
+                .resolve => |*resolve| resolve.cursor.deinit(),
+                .value => |*cursor| cursor.retire(releases),
+                .nearest => |nearest| releases.releaseValue(nearest.error_value),
+                .current, .frames, .boundary, .locals, .stack => |*unwind| unwind.retire(releases),
+                .outcome_name => |outcome| releases.releaseValue(outcome.error_value),
+                .outcome_prepare => |item| releases.releaseValue(item),
+                .outcome => |*outcome| {
+                    outcome.builder.retire(releases);
+                    releases.releaseValue(outcome.error_value);
+                },
+                .caught => |item| releases.releaseValue(item),
+                .trace, .spell, .locate, .failed => {},
+            }
+        }
+    };
+
     allocator: std.mem.Allocator,
     failure: EclErr,
     /// The activation chain, innermost first. Entries are trace words rather
@@ -8253,26 +8340,8 @@ const FailureDriver = struct {
     trace: []intern.TraceWord,
     resolved: []u32,
     trace_count: usize = 0,
-    resolve_index: usize = 0,
-    resolver: ?intern.TraceWordCursor = null,
-    frame_index: usize,
-    location_cursor: ?spans.SpanArchive.LocateCursor = null,
-    location: ?spans.LocatedSpan = null,
-    value_cursor: ?ErrorValueCursor = null,
-    error_value: ?Value = null,
-    boundary_index: ?FrameIndex,
-    attempt_index: ?FrameIndex = null,
-    attempt_stack_base: usize = 0,
-    /// Where the locals stack returns to. A body that fails between
-    /// `_ll` and `_dl` leaves its names behind; unwinding is
-    /// the only thing that will release them.
-    attempt_locals_base: usize = 0,
-    previous_base: usize = 0,
-    previous_boundary: ?FrameIndex = null,
-    outcome_inserter: ?intern.InternInsertionCursor = null,
     outcome_pair: [1]dict.Pair = .{dict.Pair{ .{ .int = 0 }, .{ .int = 0 } }},
-    outcome_builder: ?kernel_storage.DictMaterializer = null,
-    phase: enum { trace, spell, locate, value, nearest, current, frames, boundary, locals, stack, outcome_name, outcome, finish } = .trace,
+    state: State,
 
     fn appendInitial(self: *FailureDriver, evaluator: *Machine) void {
         if (self.failure.word) |word| self.appendTrace(word);
@@ -8289,10 +8358,7 @@ const FailureDriver = struct {
         releases: *heap.ReleaseDomain,
         storage_allocator: std.mem.Allocator,
     ) void {
-        if (self.value_cursor) |*cursor| cursor.retire(releases);
-        if (self.outcome_builder) |*builder| builder.retire(releases);
-        if (self.error_value) |item| releases.releaseValue(item);
-        if (self.resolver) |*cursor| cursor.deinit();
+        self.state.deinit(releases);
         self.failure.retire(releases);
         storage_allocator.free(self.trace);
         storage_allocator.free(self.resolved);
@@ -8301,175 +8367,192 @@ const FailureDriver = struct {
         if (self.failure.site) |site| {
             switch (site) {
                 .token => |token| {
-                    self.location_cursor = evaluator.unit.archive.locateCursor(token.code, token.index);
-                    self.phase = .locate;
+                    self.state = .{ .locate = evaluator.unit.archive.locateCursor(token.code, token.index) };
                 },
                 .contract_quotation => |candidate| {
-                    self.location_cursor = evaluator.unit.archive.locateQuotationCursor(candidate.borrow());
-                    self.phase = .locate;
+                    self.state = .{ .locate = evaluator.unit.archive.locateQuotationCursor(candidate.borrow()) };
                 },
                 .explicit_location => |location| {
-                    self.location = .{
+                    self.beginValue(.{
                         .source_name = location.source_name,
                         .span = location.span,
-                    };
-                    self.beginValue();
+                    });
                 },
             }
-        } else self.beginValue();
+        } else self.beginValue(null);
     }
-    fn beginValue(self: *FailureDriver) void {
-        self.value_cursor = .init(
-            self.allocator,
-            &self.failure,
-            // `appendInitial` puts the failing word first when there is one,
-            // so its spelling is the first resolved entry.
-            .{
-                .word = if (self.failure.word != null) self.resolved[0] else null,
-                .trace = self.resolved[0..self.trace_count],
-            },
-            self.location,
-        );
-        self.phase = .value;
+    fn beginValue(self: *FailureDriver, location: ?spans.LocatedSpan) void {
+        self.state = .{
+            .value = .init(
+                self.allocator,
+                &self.failure,
+                // `appendInitial` puts the failing word first when there is one,
+                // so its spelling is the first resolved entry.
+                .{
+                    .word = if (self.failure.word != null) self.resolved[0] else null,
+                    .trace = self.resolved[0..self.trace_count],
+                },
+                location,
+            ),
+        };
     }
-    fn beginUnwind(self: *FailureDriver, evaluator: *Machine) void {
-        self.phase = .current;
-        if (self.attempt_index == null) {
-            self.attempt_stack_base = evaluator.unit.entry_base;
-            self.previous_base = 0;
-            self.previous_boundary = null;
-        }
+    fn beginUnwind(self: *FailureDriver, error_value: Value, target: UnwindTarget) void {
+        self.state = .{ .current = .{ .error_value = error_value, .target = target } };
     }
     pub fn advance(evaluator: *Machine, self: *FailureDriver) MachineError!WorkProgress {
         var budget: usize = kernel_poll_quantum;
-        while (budget != 0) : (budget -= 1) switch (self.phase) {
-            .trace => {
-                if (self.frame_index == 0) {
-                    self.phase = .spell;
+        while (budget != 0) : (budget -= 1) switch (self.state) {
+            .trace => |*frame_index| {
+                if (frame_index.* == 0) {
+                    self.state = .{ .spell = 0 };
                     continue;
                 }
-                self.frame_index -= 1;
-                switch (evaluator.unit.frames.items[self.frame_index]) {
+                frame_index.* -= 1;
+                switch (evaluator.unit.frames.items[frame_index.*]) {
                     .eval => |frame| if (frame.traced_word != no_word) self.appendTrace(frame.traced_word),
                     .effect_check, .application, .qualified_after_load, .boundary => {},
                 }
             },
             // Qualifying a module-local word interns its spelling. Failures
             // are rare, so this is the one place that cost is paid.
-            .spell => {
-                if (self.resolve_index == self.trace_count) {
+            .spell => |resolve_index| {
+                if (resolve_index == self.trace_count) {
                     self.beginLocation(evaluator);
                     continue;
                 }
-                if (self.resolver == null)
-                    self.resolver = try .init(self.allocator, self.trace[self.resolve_index]);
-                switch (try self.resolver.?.advance()) {
-                    .pending => {},
-                    .complete => |id| {
-                        self.resolver.?.deinit();
-                        self.resolver = null;
-                        self.resolved[self.resolve_index] = id;
-                        self.resolve_index += 1;
-                    },
-                }
+                self.state = .{ .resolve = .{
+                    .index = resolve_index,
+                    .cursor = try .init(self.allocator, self.trace[resolve_index]),
+                } };
             },
-            .locate => switch (self.location_cursor.?.advance()) {
+            .resolve => |*resolve| switch (try resolve.cursor.advance()) {
                 .pending => {},
-                .complete => |location| {
-                    self.location = location;
-                    self.location_cursor = null;
-                    self.beginValue();
+                .complete => |id| {
+                    const index = resolve.index;
+                    resolve.cursor.deinit();
+                    self.resolved[index] = id;
+                    self.state = .{ .spell = index + 1 };
                 },
             },
-            .value => switch (try self.value_cursor.?.advance()) {
+            .locate => |*cursor| switch (cursor.advance()) {
+                .pending => {},
+                .complete => |location| self.beginValue(location),
+            },
+            .value => |*cursor| switch (try cursor.advance()) {
                 .pending => {},
                 .complete => |item| {
-                    self.value_cursor.?.retire(evaluator.releaseDomain());
-                    self.value_cursor = null;
-                    self.error_value = item;
-                    self.phase = .nearest;
+                    cursor.retire(evaluator.releaseDomain());
+                    self.state = .{ .nearest = .{
+                        .error_value = item,
+                        .boundary = evaluator.unit.boundary_index,
+                    } };
                 },
             },
-            .nearest => {
-                if (self.boundary_index == null) {
-                    self.beginUnwind(evaluator);
+            .nearest => |*nearest| {
+                const boundary_index = nearest.boundary orelse {
+                    const item = nearest.error_value;
+                    self.beginUnwind(item, .{ .uncaught = .{
+                        .stack_base = evaluator.unit.entry_base,
+                    } });
                     continue;
-                }
-                const boundary = evaluator.unit.frames.items[@intFromEnum(self.boundary_index.?)].boundary;
+                };
+                const boundary = evaluator.unit.frames.items[@intFromEnum(boundary_index)].boundary;
                 if (boundary.mode == .attempt) {
-                    self.attempt_index = self.boundary_index;
-                    self.attempt_stack_base = boundary.stack_base;
-                    self.attempt_locals_base = boundary.locals_base;
-                    self.previous_base = boundary.previous_base;
-                    self.previous_boundary = boundary.previous_boundary;
-                    self.beginUnwind(evaluator);
-                } else self.boundary_index = boundary.previous_boundary;
+                    const item = nearest.error_value;
+                    self.beginUnwind(item, .{ .caught = .{
+                        .boundary_index = boundary_index,
+                        .stack_base = boundary.stack_base,
+                        .locals_base = boundary.locals_base,
+                        .previous_base = boundary.previous_base,
+                        .previous_boundary = boundary.previous_boundary,
+                    } });
+                } else nearest.boundary = boundary.previous_boundary;
             },
-            .current => {
+            .current => |*unwind| {
                 releaseCurrent(evaluator);
-                self.phase = .frames;
+                const next = unwind.*;
+                self.state = .{ .frames = next };
             },
-            .frames => {
-                const target: usize = if (self.attempt_index == null)
-                    0
-                else
-                    @as(usize, @intFromEnum(self.attempt_index.?)) + 1;
-                if (evaluator.unit.frames.items.len != target) {
+            .frames => |*unwind| {
+                if (evaluator.unit.frames.items.len != unwind.target.frameTarget()) {
                     evaluator.unit.deinitPoppedFrame(evaluator.unit.frames.pop().?);
-                } else self.phase = .boundary;
+                } else {
+                    const next = unwind.*;
+                    self.state = .{ .boundary = next };
+                }
             },
-            .boundary => {
-                if (self.attempt_index != null) {
+            .boundary => |*unwind| {
+                if (unwind.target == .caught) {
                     evaluator.unit.deinitPoppedFrame(evaluator.unit.frames.pop().?);
                 }
-                self.phase = .locals;
+                const next = unwind.*;
+                self.state = .{ .locals = next };
             },
-            .locals => {
-                const target = @min(self.attempt_locals_base, evaluator.unit.locals.items.len);
+            .locals => |*unwind| {
+                const target = @min(unwind.target.localsTarget(), evaluator.unit.locals.items.len);
                 if (evaluator.unit.locals.items.len != target) {
                     const item = evaluator.unit.locals.pop().?;
                     evaluator.releaseDomain().releaseValue(item);
                     continue;
                 }
-                self.phase = .stack;
+                const next = unwind.*;
+                self.state = .{ .stack = next };
             },
-            .stack => {
-                const target = @min(@as(usize, self.attempt_stack_base), evaluator.unit.stack.items.len);
+            .stack => |*unwind| {
+                const target = @min(unwind.target.stackTarget(), evaluator.unit.stack.items.len);
                 if (evaluator.unit.stack.items.len != target) {
                     const item = evaluator.unit.stack.pop().?;
                     evaluator.releaseDomain().releaseValue(item);
                     continue;
                 }
-                evaluator.unit.stack_base = self.previous_base;
-                evaluator.unit.boundary_index = self.previous_boundary;
-                if (self.attempt_index == null) {
-                    evaluator.unit.finishUnwindFailed(self.error_value.?);
-                    self.error_value = null;
-                    self.phase = .finish;
-                } else {
-                    self.outcome_inserter = intern.insertionCursor("err");
-                    self.phase = .outcome_name;
+                evaluator.unit.stack_base = unwind.target.previousBase();
+                evaluator.unit.boundary_index = unwind.target.previousBoundary();
+                const error_value = unwind.error_value;
+                switch (unwind.target) {
+                    .uncaught => {
+                        evaluator.unit.finishUnwindFailed(error_value);
+                        self.state = .failed;
+                    },
+                    .caught => {
+                        self.state = .{ .outcome_name = .{
+                            .error_value = error_value,
+                            .cursor = intern.insertionCursor("err"),
+                        } };
+                    },
                 }
             },
-            .outcome_name => switch (try self.outcome_inserter.?.advance()) {
+            .outcome_name => |*outcome| switch (try outcome.cursor.advance()) {
                 .pending => {},
                 .complete => |key| {
-                    self.outcome_pair[0] = .{ .{ .symbol = key }, self.error_value.? };
-                    self.outcome_builder = try .init(self.allocator, &self.outcome_pair, false);
-                    self.phase = .outcome;
+                    const error_value = outcome.error_value;
+                    self.outcome_pair[0] = .{ .{ .symbol = key }, error_value };
+                    self.state = .{ .outcome_prepare = error_value };
                 },
             },
-            .outcome => switch (try self.outcome_builder.?.advance(1)) {
+            .outcome_prepare => |error_value| {
+                const builder = try kernel_storage.DictMaterializer.init(
+                    self.allocator,
+                    &self.outcome_pair,
+                    false,
+                );
+                self.state = .{ .outcome = .{
+                    .error_value = error_value,
+                    .builder = builder,
+                } };
+            },
+            .outcome => |*outcome_state| switch (try outcome_state.builder.advance(1)) {
                 .pending => {},
                 .duplicate_key => unreachable,
                 .complete => |outcome| {
-                    self.outcome_builder.?.deinit();
-                    self.outcome_builder = null;
+                    const error_value = outcome_state.error_value;
+                    outcome_state.builder.deinit();
+                    self.state = .{ .caught = error_value };
                     evaluator.unit.finishUnwindCaught();
                     return .{ .output = outcome };
                 },
             },
-            .finish => return if (self.attempt_index == null) .failed else .completed,
+            .caught => unreachable,
+            .failed => return .failed,
         };
         return .yielded;
     }
