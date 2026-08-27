@@ -615,29 +615,51 @@ test "blocking and resumable list construction share specialization behavior" {
     const allocator = std.testing.allocator;
     var cleanup = heap.testing.Cleanup.init(allocator);
     defer cleanup.deinit();
-    const source = [_]Value{
+    const mixed = [_]Value{
         .{ .int = 1 },
         .{ .float = 2.5 },
         .{ .char = 'x' },
         .{ .symbol = 7 },
         .{ .word = .{ .name = 9 } },
     };
-
-    const blocking = try fromValues(allocator, &source);
-    defer cleanup.releaseValue(blocking);
-    var cursor = ValueMaterializer.init(allocator, &source);
-    var pending: usize = 0;
-    const resumed = while (true) switch (try cursor.advance(1)) {
-        .pending => pending += 1,
-        .complete => |result| break result,
+    const widened_ints = [_]Value{
+        .{ .int = 1 },
+        .{ .int = 256 },
+        .{ .int = 2 },
     };
-    cursor.deinit();
-    defer cleanup.releaseValue(resumed);
+    const wide_chars = [_]Value{
+        .{ .char = 'x' },
+        .{ .char = 0x10000 },
+        .{ .char = 0x100 },
+    };
+    const cases = [_]struct {
+        source: []const Value,
+        kind: HeapKind,
+    }{
+        .{ .source = &mixed, .kind = .generic_spine },
+        .{ .source = &widened_ints, .kind = .leaf_i64 },
+        .{ .source = &wide_chars, .kind = .leaf_char4 },
+    };
 
-    try std.testing.expect(pending > source.len);
-    try std.testing.expectEqual(try len(blocking), try len(resumed));
-    for (source, 0..) |expected, index| {
-        try std.testing.expectEqual(expected, try at(blocking, index));
-        try std.testing.expectEqual(expected, try at(resumed, index));
+    for (cases) |case| {
+        const blocking = try fromValues(allocator, case.source);
+        defer cleanup.releaseValue(blocking);
+        var cursor = ValueMaterializer.init(allocator, case.source);
+        var pending: usize = 0;
+        const resumed = while (true) switch (try cursor.advance(1)) {
+            .pending => pending += 1,
+            .complete => |result| break result,
+        };
+        cursor.deinit();
+        defer cleanup.releaseValue(resumed);
+
+        try std.testing.expect(pending > case.source.len);
+        try std.testing.expectEqual(case.kind, blocking.list.kind());
+        try std.testing.expectEqual(blocking.list.kind(), resumed.list.kind());
+        try std.testing.expectEqual(try len(blocking), try len(resumed));
+        for (case.source, 0..) |expected, index| {
+            try std.testing.expectEqual(expected, try at(blocking, index));
+            try std.testing.expectEqual(expected, try at(resumed, index));
+        }
     }
 }

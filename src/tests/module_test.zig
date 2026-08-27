@@ -227,12 +227,30 @@ test "module: an unknown long module prefix remains cancellable while it is inte
     @memcpy(qualified_bytes[prefix.len..], ".missing");
     const qualified = try intern.intern(qualified_bytes);
 
-    var runtime = try session.Session.init(allocator, &.{});
+    // Cooperative FIFO scheduling gives each seeded task one bounded opening
+    // turn before its body runs. The target spends its first evaluation turn
+    // resolving the long qualified word. Its second turn advances one prefix-
+    // interning slice and yields part-way through name validation; the seeded
+    // canceller then runs and requests cancellation before the target's third
+    // turn.
+    const source =
+        "1 pack (execute) seed @spawn dup 'target set " ++
+        "1 pack (cancel) seed @spawn await pop target await";
+
+    var runtime = try session.Session.initWithConfig(allocator, &.{}, .cooperative);
     defer runtime.deinit();
-    try runtime.pushOwned(.{ .symbol = qualified });
-    runtime.requestCancellation();
-    try expectErrorContains(&runtime, "execute", &.{"unit cancelled"});
-    try std.testing.expect(runtime.lastPolls() >= 1);
+    try runtime.pushOwned(.{ .word = .{ .name = qualified } });
+    try expectOk(&runtime, source);
+
+    var lookup = intern.lookupCursor(prefix);
+    const interned = while (true) switch (lookup.advance()) {
+        .pending => {},
+        .complete => |found| break found,
+    };
+    var rendered = try runtime.stackDisplay();
+    defer rendered.deinit();
+    try std.testing.expect(interned != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.bytes(), "'kind 'cancelled") != null);
 }
 
 test "env: creating and removing names bump the shape generation and rebinding does not" {
