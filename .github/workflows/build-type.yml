@@ -196,10 +196,14 @@ jobs:
 
       - name: ThreadSanitizer
         if: inputs.run_tsan
-        run: >-
-          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
-          'cd /build; timeout 20m zig build test-tsan
-          -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m < /dev/null'
+        run: |
+          # GitHub-hosted Ubuntu uses 32 bits of mmap entropy. Zig 0.16's TSan
+          # runtime can SEGV during shadow-memory setup at that setting, before
+          # the test runner reaches main; 28 bits leaves its shadow range free.
+          sudo sysctl -w vm.mmap_rnd_bits=28
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc \
+            'cd /build; timeout 20m zig build test-tsan \
+            -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m < /dev/null'
 
       - name: Reference snapshots
         if: inputs.run_snapshots
