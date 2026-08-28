@@ -145,26 +145,22 @@ pub const FlatCursor = struct {
     }
 };
 
-/// A staged block of results plus the one bit that decides whether they may be
-/// stored. `faulted` is accumulated over the whole block rather than checked per
-/// element, which is what keeps the clean path branch-light.
+/// A bounded staged block of results. Whether a checked producer completed is
+/// returned as a nominal status instead of being correlated with this storage.
 pub fn Block(comptime Element: type) type {
     return struct {
         const Self = @This();
 
         items: [block_size]Element,
         len: usize = 0,
-        faulted: bool = false,
 
         pub fn init() Self {
             // SAFETY: `len` starts at zero, and every producer initializes the
             // complete visible prefix before increasing it.
             return .{ .items = undefined };
         }
-
         pub fn reset(self: *Self) void {
             self.len = 0;
-            self.faulted = false;
         }
 
         pub fn written(self: *const Self) []const Element {
@@ -173,12 +169,10 @@ pub fn Block(comptime Element: type) type {
     };
 }
 
-/// The monomorphic loop family for one element-type triple.
-///
-/// `body` is the operation, inlined: it answers `null` for a fault so the loop
-/// carries one flag instead of an error union per element. `Rescan` is the
-/// shared scalar semantics; the loop calls it only for a block that faulted.
-pub fn Family(comptime Left: type, comptime Right: type, comptime Out: type) type {
+pub const CheckedStatus = enum { clean, faulted };
+
+/// Monomorphic loops whose element types prove that the operation cannot fault.
+pub fn InfallibleFamily(comptime Left: type, comptime Right: type, comptime Out: type) type {
     return struct {
         pub const Staging = Block(Out);
 
@@ -186,7 +180,7 @@ pub fn Family(comptime Left: type, comptime Right: type, comptime Out: type) typ
         /// logical position, which is what makes a resumed chunk read the same
         /// elements a fault replay would.
         pub fn binary(
-            comptime body: fn (Left, Right) ?Out,
+            comptime body: fn (Left, Right) Out,
             left: []const Left,
             right: []const Right,
             range: Chunk,
@@ -195,20 +189,16 @@ pub fn Family(comptime Left: type, comptime Right: type, comptime Out: type) typ
             block.reset();
             std.debug.assert(range.len() <= block_size);
             std.debug.assert(range.end <= left.len and range.end <= right.len);
-            var faulted = false;
             for (range.start..range.end) |index| {
-                const result = body(left[index], right[index]);
-                block.items[index - range.start] = result orelse std.mem.zeroes(Out);
-                faulted = faulted or result == null;
+                block.items[index - range.start] = body(left[index], right[index]);
             }
             block.len = range.len();
-            block.faulted = faulted;
         }
 
         /// leaf x scalar. The scalar operand is a value, not a materialized
         /// broadcast: the loop reads it from a register, stride zero.
         pub fn binaryScalarRight(
-            comptime body: fn (Left, Right) ?Out,
+            comptime body: fn (Left, Right) Out,
             left: []const Left,
             right: Right,
             range: Chunk,
@@ -217,20 +207,16 @@ pub fn Family(comptime Left: type, comptime Right: type, comptime Out: type) typ
             block.reset();
             std.debug.assert(range.len() <= block_size);
             std.debug.assert(range.end <= left.len);
-            var faulted = false;
             for (range.start..range.end) |index| {
-                const result = body(left[index], right);
-                block.items[index - range.start] = result orelse std.mem.zeroes(Out);
-                faulted = faulted or result == null;
+                block.items[index - range.start] = body(left[index], right);
             }
             block.len = range.len();
-            block.faulted = faulted;
         }
 
         /// scalar x leaf, the mirror image; operand order is preserved because
         /// the operations are not all commutative.
         pub fn binaryScalarLeft(
-            comptime body: fn (Left, Right) ?Out,
+            comptime body: fn (Left, Right) Out,
             left: Left,
             right: []const Right,
             range: Chunk,
@@ -239,18 +225,14 @@ pub fn Family(comptime Left: type, comptime Right: type, comptime Out: type) typ
             block.reset();
             std.debug.assert(range.len() <= block_size);
             std.debug.assert(range.end <= right.len);
-            var faulted = false;
             for (range.start..range.end) |index| {
-                const result = body(left, right[index]);
-                block.items[index - range.start] = result orelse std.mem.zeroes(Out);
-                faulted = faulted or result == null;
+                block.items[index - range.start] = body(left, right[index]);
             }
             block.len = range.len();
-            block.faulted = faulted;
         }
 
         pub fn unary(
-            comptime body: fn (Left) ?Out,
+            comptime body: fn (Left) Out,
             operand: []const Left,
             range: Chunk,
             block: *Staging,
@@ -258,14 +240,282 @@ pub fn Family(comptime Left: type, comptime Right: type, comptime Out: type) typ
             block.reset();
             std.debug.assert(range.len() <= block_size);
             std.debug.assert(range.end <= operand.len);
-            var faulted = false;
             for (range.start..range.end) |index| {
-                const result = body(operand[index]);
-                block.items[index - range.start] = result orelse std.mem.zeroes(Out);
-                faulted = faulted or result == null;
+                block.items[index - range.start] = body(operand[index]);
             }
             block.len = range.len();
-            block.faulted = faulted;
+        }
+    };
+}
+
+/// Scalar-classified checked loops. A failure returns before the staged prefix
+/// becomes publishable; the caller replays the original inputs for diagnostics.
+pub fn CheckedFamily(comptime Left: type, comptime Right: type, comptime Out: type) type {
+    return struct {
+        pub const Staging = Block(Out);
+        const Fault = error{Fault};
+
+        pub fn binary(
+            comptime body: fn (Left, Right) Fault!Out,
+            left: []const Left,
+            right: []const Right,
+            range: Chunk,
+            block: *Staging,
+        ) CheckedStatus {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= left.len and range.end <= right.len);
+            for (range.start..range.end) |index| {
+                block.items[index - range.start] = body(left[index], right[index]) catch return .faulted;
+            }
+            block.len = range.len();
+            return .clean;
+        }
+
+        pub fn binaryScalarRight(
+            comptime body: fn (Left, Right) Fault!Out,
+            left: []const Left,
+            right: Right,
+            range: Chunk,
+            block: *Staging,
+        ) CheckedStatus {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= left.len);
+            for (range.start..range.end) |index| {
+                block.items[index - range.start] = body(left[index], right) catch return .faulted;
+            }
+            block.len = range.len();
+            return .clean;
+        }
+
+        pub fn binaryScalarLeft(
+            comptime body: fn (Left, Right) Fault!Out,
+            left: Left,
+            right: []const Right,
+            range: Chunk,
+            block: *Staging,
+        ) CheckedStatus {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= right.len);
+            for (range.start..range.end) |index| {
+                block.items[index - range.start] = body(left, right[index]) catch return .faulted;
+            }
+            block.len = range.len();
+            return .clean;
+        }
+
+        pub fn unary(
+            comptime body: fn (Left) Fault!Out,
+            operand: []const Left,
+            range: Chunk,
+            block: *Staging,
+        ) CheckedStatus {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= operand.len);
+            for (range.start..range.end) |index| {
+                block.items[index - range.start] = body(operand[index]) catch return .faulted;
+            }
+            block.len = range.len();
+            return .clean;
+        }
+    };
+}
+
+/// One vector result and its lane fault mask. Checked vector loops reduce the
+/// mask before making the staged block publishable; they never expose a
+/// per-element optional or error union to the hot loop.
+pub fn MaskedVector(comptime Element: type, comptime lanes: comptime_int) type {
+    return struct {
+        values: @Vector(lanes, Element),
+        faults: @Vector(lanes, bool),
+    };
+}
+
+/// Explicit vector loops for a same-width input pair. Full vectors use the
+/// target's suggested width; the scalar callback owns the bounded tail.
+pub fn VectorFamily(
+    comptime Left: type,
+    comptime Right: type,
+    comptime Out: type,
+    comptime lanes: comptime_int,
+) type {
+    return struct {
+        pub const Staging = Block(Out);
+        const LeftVector = @Vector(lanes, Left);
+        const RightVector = @Vector(lanes, Right);
+        const OutVector = @Vector(lanes, Out);
+        const Masked = MaskedVector(Out, lanes);
+        const Fault = error{Fault};
+
+        fn storeVector(block: *Staging, offset: usize, values: OutVector) void {
+            block.items[offset..][0..lanes].* = values;
+        }
+
+        pub fn binary(
+            comptime vector_body: fn (LeftVector, RightVector) OutVector,
+            comptime scalar_body: fn (Left, Right) Out,
+            left: []const Left,
+            right: []const Right,
+            range: Chunk,
+            block: *Staging,
+        ) void {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= left.len and range.end <= right.len);
+            var index = range.start;
+            while (index + lanes <= range.end) : (index += lanes) {
+                const a: LeftVector = left[index..][0..lanes].*;
+                const b: RightVector = right[index..][0..lanes].*;
+                storeVector(block, index - range.start, vector_body(a, b));
+            }
+            while (index < range.end) : (index += 1) {
+                block.items[index - range.start] = scalar_body(left[index], right[index]);
+            }
+            block.len = range.len();
+        }
+
+        pub fn binaryScalarRight(
+            comptime vector_body: fn (LeftVector, RightVector) OutVector,
+            comptime scalar_body: fn (Left, Right) Out,
+            left: []const Left,
+            right: Right,
+            range: Chunk,
+            block: *Staging,
+        ) void {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= left.len);
+            const broadcast: RightVector = @splat(right);
+            var index = range.start;
+            while (index + lanes <= range.end) : (index += lanes) {
+                const a: LeftVector = left[index..][0..lanes].*;
+                storeVector(block, index - range.start, vector_body(a, broadcast));
+            }
+            while (index < range.end) : (index += 1) {
+                block.items[index - range.start] = scalar_body(left[index], right);
+            }
+            block.len = range.len();
+        }
+
+        pub fn binaryScalarLeft(
+            comptime vector_body: fn (LeftVector, RightVector) OutVector,
+            comptime scalar_body: fn (Left, Right) Out,
+            left: Left,
+            right: []const Right,
+            range: Chunk,
+            block: *Staging,
+        ) void {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= right.len);
+            const broadcast: LeftVector = @splat(left);
+            var index = range.start;
+            while (index + lanes <= range.end) : (index += lanes) {
+                const b: RightVector = right[index..][0..lanes].*;
+                storeVector(block, index - range.start, vector_body(broadcast, b));
+            }
+            while (index < range.end) : (index += 1) {
+                block.items[index - range.start] = scalar_body(left, right[index]);
+            }
+            block.len = range.len();
+        }
+
+        pub fn checkedBinary(
+            comptime vector_body: fn (LeftVector, RightVector) Masked,
+            comptime scalar_body: fn (Left, Right) Fault!Out,
+            left: []const Left,
+            right: []const Right,
+            range: Chunk,
+            block: *Staging,
+        ) CheckedStatus {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= left.len and range.end <= right.len);
+            var index = range.start;
+            while (index + lanes <= range.end) : (index += lanes) {
+                const result = vector_body(left[index..][0..lanes].*, right[index..][0..lanes].*);
+                if (@reduce(.Or, result.faults)) return .faulted;
+                storeVector(block, index - range.start, result.values);
+            }
+            while (index < range.end) : (index += 1) {
+                block.items[index - range.start] = scalar_body(left[index], right[index]) catch return .faulted;
+            }
+            block.len = range.len();
+            return .clean;
+        }
+
+        pub fn checkedBinaryScalarRight(
+            comptime vector_body: fn (LeftVector, RightVector) Masked,
+            comptime scalar_body: fn (Left, Right) Fault!Out,
+            left: []const Left,
+            right: Right,
+            range: Chunk,
+            block: *Staging,
+        ) CheckedStatus {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= left.len);
+            const broadcast: RightVector = @splat(right);
+            var index = range.start;
+            while (index + lanes <= range.end) : (index += lanes) {
+                const result = vector_body(left[index..][0..lanes].*, broadcast);
+                if (@reduce(.Or, result.faults)) return .faulted;
+                storeVector(block, index - range.start, result.values);
+            }
+            while (index < range.end) : (index += 1) {
+                block.items[index - range.start] = scalar_body(left[index], right) catch return .faulted;
+            }
+            block.len = range.len();
+            return .clean;
+        }
+
+        pub fn checkedBinaryScalarLeft(
+            comptime vector_body: fn (LeftVector, RightVector) Masked,
+            comptime scalar_body: fn (Left, Right) Fault!Out,
+            left: Left,
+            right: []const Right,
+            range: Chunk,
+            block: *Staging,
+        ) CheckedStatus {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= right.len);
+            const broadcast: LeftVector = @splat(left);
+            var index = range.start;
+            while (index + lanes <= range.end) : (index += lanes) {
+                const result = vector_body(broadcast, right[index..][0..lanes].*);
+                if (@reduce(.Or, result.faults)) return .faulted;
+                storeVector(block, index - range.start, result.values);
+            }
+            while (index < range.end) : (index += 1) {
+                block.items[index - range.start] = scalar_body(left, right[index]) catch return .faulted;
+            }
+            block.len = range.len();
+            return .clean;
+        }
+
+        pub fn unary(
+            comptime vector_body: fn (LeftVector) OutVector,
+            comptime scalar_body: fn (Left) Out,
+            operand: []const Left,
+            range: Chunk,
+            block: *Staging,
+        ) void {
+            block.reset();
+            std.debug.assert(range.len() <= block_size);
+            std.debug.assert(range.end <= operand.len);
+            var index = range.start;
+            while (index + lanes <= range.end) : (index += lanes) {
+                const a: LeftVector = operand[index..][0..lanes].*;
+                storeVector(block, index - range.start, vector_body(a));
+            }
+            while (index < range.end) : (index += 1) {
+                block.items[index - range.start] = scalar_body(operand[index]);
+            }
+            block.len = range.len();
         }
     };
 }
@@ -301,18 +551,17 @@ test "range planning bounds by budget quantum and remaining length" {
     try std.testing.expect(cursor.complete());
 }
 
-test "blocks stage results and a fault anywhere blocks the whole block" {
-    const Ints = Family(i64, i64, i64);
+test "infallible and checked blocks have distinct publication outcomes" {
+    const Ints = InfallibleFamily(i64, i64, i64);
     const add = struct {
-        fn body(left: i64, right: i64) ?i64 {
-            return std.math.add(i64, left, right) catch null;
+        fn body(left: i64, right: i64) i64 {
+            return left + right;
         }
     }.body;
     var block = Ints.Staging.init();
     const left = [_]i64{ 1, 2, 3, 4 };
     const right = [_]i64{ 10, 20, 30, 40 };
     Ints.binary(add, &left, &right, .{ .start = 1, .end = 4 }, &block);
-    try std.testing.expect(!block.faulted);
     try std.testing.expectEqualSlices(i64, &.{ 22, 33, 44 }, block.written());
 
     // A scalar operand is read without a broadcast buffer.
@@ -323,23 +572,39 @@ test "blocks stage results and a fault anywhere blocks the whole block" {
 
     // One overflow marks the block, whatever its position, and the clean
     // elements are not published from a faulted block.
+    const CheckedInts = CheckedFamily(i64, i64, i64);
+    const checked_add = struct {
+        fn body(a: i64, b: i64) error{Fault}!i64 {
+            return std.math.add(i64, a, b) catch error.Fault;
+        }
+    }.body;
+    var checked_block = CheckedInts.Staging.init();
     const overflowing = [_]i64{ std.math.maxInt(i64), 1 };
-    Ints.binary(add, &overflowing, &[_]i64{ 1, 1 }, .{ .start = 0, .end = 2 }, &block);
-    try std.testing.expect(block.faulted);
-    Ints.binary(add, &overflowing, &[_]i64{ 0, 1 }, .{ .start = 0, .end = 2 }, &block);
-    try std.testing.expect(!block.faulted);
+    try std.testing.expectEqual(
+        CheckedStatus.faulted,
+        CheckedInts.binary(checked_add, &overflowing, &[_]i64{ 1, 1 }, .{ .start = 0, .end = 2 }, &checked_block),
+    );
+    try std.testing.expectEqual(
+        CheckedStatus.clean,
+        CheckedInts.binary(checked_add, &overflowing, &[_]i64{ 0, 1 }, .{ .start = 0, .end = 2 }, &checked_block),
+    );
 
-    const Negate = Family(i64, void, i64);
+    const Negate = CheckedFamily(i64, void, i64);
     const negate = struct {
-        fn body(operand: i64) ?i64 {
-            return std.math.sub(i64, 0, operand) catch null;
+        fn body(operand: i64) error{Fault}!i64 {
+            return std.math.sub(i64, 0, operand) catch error.Fault;
         }
     }.body;
     var unary_block = Negate.Staging.init();
-    Negate.unary(negate, &[_]i64{ 1, -2, 3 }, .{ .start = 0, .end = 3 }, &unary_block);
+    try std.testing.expectEqual(
+        CheckedStatus.clean,
+        Negate.unary(negate, &[_]i64{ 1, -2, 3 }, .{ .start = 0, .end = 3 }, &unary_block),
+    );
     try std.testing.expectEqualSlices(i64, &.{ -1, 2, -3 }, unary_block.written());
-    Negate.unary(negate, &[_]i64{std.math.minInt(i64)}, .{ .start = 0, .end = 1 }, &unary_block);
-    try std.testing.expect(unary_block.faulted);
+    try std.testing.expectEqual(
+        CheckedStatus.faulted,
+        Negate.unary(negate, &[_]i64{std.math.minInt(i64)}, .{ .start = 0, .end = 1 }, &unary_block),
+    );
 }
 
 test "a long range is executed one bounded block at a time" {
@@ -361,7 +626,7 @@ fn typedWriteFailureProbe(allocator: std.mem.Allocator) !void {
     defer cleanup.deinit();
     var writer = try heap.LeafWriter(.leaf_i64).init(allocator, block_size + 1);
     errdefer writer.retirePartial(cleanup.domain());
-    const Ints = Family(i64, i64, i64);
+    const Ints = InfallibleFamily(i64, i64, i64);
     var block = Ints.Staging.init();
     var source: [block_size + 1]i64 = undefined;
     for (&source, 0..) |*item, index| item.* = @intCast(index);
@@ -371,7 +636,7 @@ fn typedWriteFailureProbe(allocator: std.mem.Allocator) !void {
         const piece = blockRange(range, offset);
         Ints.binaryScalarRight(
             struct {
-                fn body(left: i64, right: i64) ?i64 {
+                fn body(left: i64, right: i64) i64 {
                     return left + right;
                 }
             }.body,

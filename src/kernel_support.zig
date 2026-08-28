@@ -1,5 +1,6 @@
 //! Shared contracts for the closed M5 kernel surface.
 const std = @import("std");
+const builtin = @import("builtin");
 const value = @import("value.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
@@ -15,6 +16,20 @@ pub const max_depth: usize = 256;
 /// range without importing the machine. `Context` remains the only door to the
 /// budget itself.
 pub const poll_quantum: usize = machine.kernel_poll_quantum;
+
+/// Whether the selected target can execute packed i64 multiplication without
+/// scalarizing the vector loop. Benchmark classification and kernel dispatch
+/// share this predicate so `--explicit-simd-only` describes the loop that will
+/// actually run.
+pub fn targetHasNativePackedI64Multiply() bool {
+    return switch (builtin.cpu.arch) {
+        .aarch64 => builtin.cpu.has(.aarch64, .sve),
+        .x86, .x86_64 => builtin.cpu.has(.x86, .avx512dq),
+        .riscv32, .riscv64 => builtin.cpu.has(.riscv, .v),
+        .wasm32, .wasm64 => std.simd.suggestVectorLength(i64) != null,
+        else => false,
+    };
+}
 
 /// The fault vocabulary the scalar semantics raise and the block mask carries.
 /// Kernel families share this so a rescan reports exactly what the scalar path

@@ -1224,21 +1224,22 @@ operand shape, and rows that still run boxed say so.
   kernel safe points.
 - **Broadcast by scalar operand** (stride-0 style), never a materialized
   replicated vector.
-- **Fault handling:** a block of up to 256 staged results carries one fault
-  flag rather than a check per element. A block that faults is replayed through
-  the same scalar semantic function the generic route uses, which is what makes
-  the reported index, kind, message, and data the scalar path's rather than a
-  reimplementation's. Nothing is stored until a block is known clean, so a
-  result sharing a reused input buffer never destroys the operands the replay
-  reads. Recognized `each`/`zip-with`/`fold`/`scan` reach the same loop entries
-  and report faults *without* a list index, because the combinator they stand in
-  for applies its quotation to one element at a time and its fault has no list
-  position.
-- **The typed bodies are the scalar semantics.** A monomorphic body calls
-  `scalarBinary`/`scalarUnary` with statically known operand tags, so an
-  optimized build folds the tag switches away while the meaning stays in one
-  place. Nothing about arithmetic, comparison, boolean, bitwise, or shift
-  behavior is written twice.
+- **Fault handling is selected by a closed loop policy.** Infallible loops have
+  no fault channel. Checked scalar loops return a nominal clean/faulted status;
+  checked vector loops reduce an overflow or invalid-lane mask once per vector.
+  A block of up to 256 results is a transaction: only a clean status makes its
+  staged prefix publishable. A fault discards that prefix and replays the
+  original inputs through `scalarBinary`/`scalarUnary`, which preserves the
+  first logical index, kind, message, and data even when the result claimed an
+  input buffer. Recognized `each`/`zip-with`/`fold`/`scan` reach the same loop
+  entries and report faults *without* a list index, because the combinator they
+  stand in for applies its quotation to one element at a time and its fault has
+  no list position.
+- **Scalar semantics remain authoritative.** Checked scalar-classified loops
+  call `scalarBinary`/`scalarUnary` directly. Infallible scalar tails share the
+  closed formulas used by their vectors. Differential tests compare whole
+  rendered outcomes with the generic scalar route, and every vector fault is
+  diagnosed by scalar replay rather than by duplicated reporting logic.
 - **Result width is decided before the first element or the operation stays
   generic.** The numeric width map is exact for every operation except `min`
   and `max` on a mixed int/float pair, which return one of their operands and
@@ -1270,11 +1271,19 @@ operand shape, and rows that still run boxed say so.
   reductions — integer (with fault masks), min/max, boolean — may be
   reassociated for SIMD. Fused and generic paths are bit-identical; the
   fast path is unobservable down to the last float bit.
-- **Loop shapes are autovectorization-friendly:** monomorphic branchless
-  bodies, block fault masks, scalar tails. Every kernel takes an explicit
-  index range. Kernels never own threads; units (`@spawn`/`@each`) are
-  the sole concurrency grain, and `@each` guarantees no cross-element
-  rendezvous, so a chunking driver is observationally conformant.
+- **The first explicit SIMD tranche is closed and target-sized.** It uses
+  `std.simd.suggestVectorLength` for same-width i64/f64 comparisons and
+  min/max, i64 bitwise operations and `bnot`, and checked i64 add/subtract.
+  Checked i64 multiply joins that set only when the target has a native packed
+  64-bit multiply; NEON and pre-AVX512 x86 stay scalar-checked rather than
+  paying for LLVM's scalarized vector mask. Full vectors are followed by a
+  bounded scalar tail; scalar operands are register broadcasts. Floating
+  comparison and selection mask NaN lanes because the scalar authority
+  classifies them as type faults. Mixed numeric, byte, character, shift,
+  division, transcendental, and packed-mask/SWAR paths remain scalar-classified.
+  Every kernel takes an explicit index range. Kernels never own threads; units
+  (`@spawn`/`@each`) are the sole concurrency grain, and `@each` guarantees no
+  cross-element rendezvous, so chunking remains observationally conformant.
 - **The kernel list is closed and written down** — adding a kernel is a
   design event, and every kernel ships with its idiom-table entry (one
   artifact) and its differential test.
