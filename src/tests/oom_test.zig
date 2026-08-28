@@ -428,6 +428,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-primitives.ecl",
         "(3 4 +) 'oom-sum def oom-sum pop " ++
+            "1 2 stack pop pop pop " ++
             "1 'oom-unset set 'oom-unset unset 2 'oom-unset set 'oom-unset undef " ++
             "(1 0 /) @attempt pop (5 6 +) @attempt pop " ++
             "({'kind 'custom 'data {'detail 7}} raise) @attempt pop " ++

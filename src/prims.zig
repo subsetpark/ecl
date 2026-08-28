@@ -27,6 +27,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "dup", .primitive = dup },
         .{ .name = "swap", .primitive = swap },
         .{ .name = "pop", .primitive = pop },
+        .{ .name = "stack", .primitive = stack },
         .{ .name = "cons", .primitive = cons },
         .{ .name = "match?", .primitive = match },
         .{ .name = "type", .primitive = typeWord },
@@ -105,6 +106,82 @@ fn pop(evaluator: *Machine) MachineError!void {
     var item = try evaluator.popValue();
     item.deinit();
 }
+
+/// A retained, bottom-to-top copy of the visible operand window. Capturing is
+/// chunked because the window is user-sized, and the exact backing allocation
+/// never relocates while a later cursor borrows it.
+const StackSnapshot = struct {
+    values: heap.OwnedValueBuffer,
+    depth: usize,
+    index: usize = 0,
+
+    fn init(evaluator: *Machine) error{OutOfMemory}!StackSnapshot {
+        const depth = evaluator.available();
+        return .{
+            .values = try .init(evaluator.releaseDomain(), depth),
+            .depth = depth,
+        };
+    }
+
+    fn advanceCapture(self: *StackSnapshot, evaluator: *Machine, budget: usize) bool {
+        std.debug.assert(evaluator.available() == self.depth);
+        const end = @min(self.index + budget, self.depth);
+        while (self.index != end) : (self.index += 1)
+            self.values.appendBorrowed(evaluator.visibleOperandBorrowed(self.index));
+        return self.index == self.depth;
+    }
+
+    fn items(self: *const StackSnapshot) []const Value {
+        std.debug.assert(self.index == self.depth);
+        return self.values.values();
+    }
+
+    pub fn retire(self: *StackSnapshot, _: *heap.ReleaseDomain) void {
+        self.values.deinit();
+    }
+};
+
+fn stack(evaluator: *Machine) MachineError!void {
+    try evaluator.startDriver(StackSnapshotDriver{
+        .snapshot = .init(try .init(evaluator)),
+    });
+}
+
+const StackSnapshotDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+
+    snapshot: heap.Owned(StackSnapshot),
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
+    result: ?heap.Owned(Value) = null,
+
+    pub fn advance(evaluator: *Machine, self: *StackSnapshotDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        if (!self.snapshot.borrowMut().advanceCapture(
+            evaluator,
+            machine.kernel_poll_quantum,
+        )) return .yielded;
+
+        if (self.materializer == null) {
+            self.materializer = .init(.init(evaluator.allocator(), self.snapshot.borrow().items()));
+            return .yielded;
+        }
+        if (self.result == null) switch (try self.materializer.?.borrowMut().advance(
+            machine.kernel_poll_quantum,
+        )) {
+            .pending => return .yielded,
+            .complete => |result| {
+                self.result = .init(result);
+                return .yielded;
+            },
+        };
+
+        self.snapshot.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        const result = self.result.?.take();
+        self.result = null;
+        return .{ .output = result };
+    }
+};
+
 fn cons(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
     var collection = try evaluator.popList();
@@ -485,17 +562,16 @@ const PpDriver = struct {
 pub fn ioStack(evaluator: *Machine) MachineError!void {
     if (evaluator.unit.inherited.console == null and evaluator.unit.output == null)
         return evaluator.fail(.io, "standard output is unavailable");
-    const count = evaluator.available();
-    if (count == 0) return;
+    if (evaluator.available() == 0) return;
     try evaluator.startDriver(StackDisplayDriver{
-        .count = count,
+        .snapshot = .init(try .init(evaluator)),
     });
 }
 
 const StackDisplayDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 
-    count: usize,
+    snapshot: heap.Owned(StackSnapshot),
     index: usize = 0,
     render: ?heap.Owned(printer.OwnedStringCursor) = null,
     rendered: ?heap.Owned([]u8) = null,
@@ -504,7 +580,10 @@ const StackDisplayDriver = struct {
 
     pub fn advance(evaluator: *Machine, self: *StackDisplayDriver) MachineError!machine.WorkProgress {
         try evaluator.pollKernel();
-        std.debug.assert(evaluator.available() == self.count);
+        if (!self.snapshot.borrowMut().advanceCapture(
+            evaluator,
+            machine.kernel_poll_quantum,
+        )) return .yielded;
 
         var prefix_buffer: [64]u8 = undefined;
         const prefix = stackDisplayPrefix(&prefix_buffer, self.index);
@@ -512,7 +591,7 @@ const StackDisplayDriver = struct {
             if (self.render == null) {
                 self.render = .init(try printer.OwnedStringCursor.initDisplayAtColumn(
                     evaluator.allocator(),
-                    evaluator.visibleOperandBorrowed(self.index),
+                    self.snapshot.borrow().items()[self.index],
                     prefix.len,
                 ));
             }
@@ -545,7 +624,7 @@ const StackDisplayDriver = struct {
         self.prefix_written = false;
         self.written = 0;
         self.index += 1;
-        return if (self.index == self.count) .completed else .yielded;
+        return if (self.index == self.snapshot.borrow().items().len) .completed else .yielded;
     }
 };
 
