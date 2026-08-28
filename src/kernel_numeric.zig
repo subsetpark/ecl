@@ -1,6 +1,5 @@
 //! Checked scalar and flat-leaf arithmetic plus pervasive descent.
 const std = @import("std");
-const builtin = @import("builtin");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
@@ -1192,7 +1191,7 @@ fn binaryLoopPolicy(
     if (left == .integer and right == .integer) return switch (operation) {
         .eq, .ne, .lt, .gt, .le, .ge, .min, .max, .band, .bor, .bxor => .vector_infallible,
         .add, .sub => .vector_checked,
-        .mul => if (targetHasVectorI64Multiply()) .vector_checked else .scalar_checked,
+        .mul => if (support.targetHasNativePackedI64Multiply()) .vector_checked else .scalar_checked,
         .div, .int_div, .mod, .pow, .atan2, .and_word, .or_word, .bsl, .bsr => .scalar_checked,
     };
     if (left == .real and right == .real) return switch (operation) {
@@ -1208,20 +1207,6 @@ fn binaryLoopPolicy(
         .add, .sub, .mul, .div, .int_div, .mod, .pow, .atan2, .and_word, .or_word, .bsl, .bsr => .scalar_checked,
     };
     return .scalar_checked;
-}
-
-/// `suggestVectorLength(i64)` describes register width, not whether every i64
-/// operation exists in that ISA. In particular, NEON and pre-AVX512 x86 lack a
-/// packed 64-bit multiply and LLVM scalarizes the explicit vector with extra
-/// mask traffic. Select it only where the target has a native lane operation.
-fn targetHasVectorI64Multiply() bool {
-    return switch (builtin.cpu.arch) {
-        .aarch64 => builtin.cpu.has(.aarch64, .sve),
-        .x86, .x86_64 => builtin.cpu.has(.x86, .avx512dq),
-        .riscv32, .riscv64 => builtin.cpu.has(.riscv, .v),
-        .wasm32, .wasm64 => std.simd.suggestVectorLength(i64) != null,
-        else => false,
-    };
 }
 
 fn unaryLoopPolicy(comptime operation: UnaryOp, comptime operand: Number) LoopPolicy {

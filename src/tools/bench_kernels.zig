@@ -107,7 +107,12 @@ const Case = struct {
 /// or boxed case in the same class as the comparison floor.
 const cases = [_]Case{
     .{ .class = "explicit SIMD", .name = "checked i64 add", .setup = "1000000 range", .workload = "1 + len" },
-    .{ .class = "explicit SIMD", .name = "checked i64 multiply", .setup = "1000000 range", .workload = "2 * len" },
+    .{
+        .class = if (ecl.kernels.support.targetHasNativePackedI64Multiply()) "explicit SIMD" else "scalar checked",
+        .name = "checked i64 multiply",
+        .setup = "1000000 range",
+        .workload = "2 * len",
+    },
     .{ .class = "explicit SIMD", .name = "i64 comparison", .setup = "1000000 range", .workload = "500000 < len" },
     .{ .class = "explicit SIMD", .name = "f64 comparison", .setup = "1000000 range 0.5 *", .workload = "500000.0 < len" },
     .{ .class = "explicit SIMD", .name = "i64 minimum", .setup = "1000000 range", .workload = "500000 min len" },

@@ -61,6 +61,27 @@ fn clearStack(runtime: *session.Session) !void {
     }
 }
 
+/// A checked fault must restore the exact input value, including its leaf
+/// representation and every element that an adopted output buffer could have
+/// overwritten before the fault was reported.
+fn expectFaultRetainsInput(runtime: *session.Session, input: value.Value, source: []const u8) !void {
+    const expected_stack = try printer.toOwnedString(allocator, input);
+    defer allocator.free(expected_stack);
+
+    try runtime.pushOwned(input);
+    switch (try runtime.runUnit("<typed-kernel-rollback-test>", source)) {
+        .ok, .incomplete => return error.TestUnexpectedResult,
+        .err => |failure| runtime.release(failure),
+    }
+
+    const retained = runtime.stackItems();
+    try std.testing.expectEqual(@as(usize, 1), retained.len);
+    const actual_stack = try printer.toOwnedString(allocator, retained[0]);
+    defer allocator.free(actual_stack);
+    try std.testing.expectEqualStrings(expected_stack, actual_stack);
+    try clearStack(runtime);
+}
+
 /// The same values reached two ways: as the specialized leaf a typed loop
 /// dispatches on, and as a generic spine, which is the production generic route
 /// clause 8 requires the reference to come from.
@@ -669,9 +690,11 @@ test "typed kernels: explicit vector cores preserve lanes tails broadcasts alias
         .{ .word = "*", .dangerous = std.math.maxInt(i64) },
     }) |case| {
         for ([_]usize{ 0, 1, flat.block_size - 1, flat.block_size, length - 1 }) |position| {
-            @memset(left, 2);
+            for (left, 0..) |*item, index| item.* = @as(i64, @intCast(index)) - @as(i64, @intCast(length / 2));
             left[position] = case.dangerous;
             try expectParity(&runtime, .{ .ints = left }, "2 " ++ case.word);
+            const input = try buildInts(.specialized, left);
+            try expectFaultRetainsInput(&runtime, input, "2 " ++ case.word);
         }
     }
 
@@ -679,7 +702,9 @@ test "typed kernels: explicit vector cores preserve lanes tails broadcasts alias
     // therefore replay and report the first NaN's logical index.
     @memset(left_real, 1.5);
     const nan_position = flat.block_size + 1;
+    const later_nan_position = flat.block_size + 3;
     left_real[nan_position] = std.math.nan(f64);
+    left_real[later_nan_position] = std.math.nan(f64);
     inline for ([_][]const u8{ "<", "min" }) |word| {
         try expectParity(&runtime, .{ .floats = left_real }, "2.0 " ++ word);
         const input = try buildFloats(.specialized, left_real);
