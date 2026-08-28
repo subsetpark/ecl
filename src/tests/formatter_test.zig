@@ -95,6 +95,15 @@ test "formatter applies uniform aligned structural layout" {
     try expectFormat("(| x y | x y)", "(|x y| x y)\n");
 }
 
+test "multiline modules break only their local top-level run" {
+    const source = "((1) 'x def) @module dup 'stats register wrap";
+    try expectFormat(
+        source,
+        "(\n ### def x\n (1) 'x def) @module dup 'stats register wrap\n",
+    );
+    try expectParseEquivalent(source);
+}
+
 test "long top-level runs pack locally to the configured width" {
     var source: std.ArrayList(u8) = .empty;
     defer source.deinit(allocator);
@@ -380,22 +389,22 @@ test "formatter synthesizes and normalizes module navigation headers" {
     const composed = "[1] ((1) 'x def) with 'legacy @defm\n";
     try expectFormat(
         composed,
-        "[1]\n(\n ### def x\n (1) 'x def)\nwith\n'legacy\n@defm\n",
+        "[1]\n(\n ### def x\n (1) 'x def) with 'legacy @defm\n",
     );
     // A computed name gets no header, matching def's rule.
     try expectFormat(
         "((1) 'x def) chosen-name @defm\n",
-        "(\n ### def x\n (1) 'x def)\nchosen-name\n@defm\n",
+        "(\n ### def x\n (1) 'x def) chosen-name @defm\n",
     );
     // Anonymous construction names nothing, so it is an ordinary expression
     // and earns no header — with or without a symbol beside it.
     try expectFormat(
         "((1) 'x def) @module\n",
-        "(\n ### def x\n (1) 'x def)\n@module\n",
+        "(\n ### def x\n (1) 'x def) @module\n",
     );
     try expectFormat(
         "((1) 'x def) @module 'stats register\n",
-        "(\n ### def x\n (1) 'x def)\n@module\n'stats\nregister\n",
+        "(\n ### def x\n (1) 'x def) @module 'stats register\n",
     );
     // A header is synthesized and rewritten only where a registration is
     // recognized, so above an anonymous construction the text stays an
@@ -403,7 +412,7 @@ test "formatter synthesizes and normalizes module navigation headers" {
     // no definition for.
     try expectFormat(
         "### module stats\n((1) 'x def) @module\n",
-        "### module stats\n(\n ### def x\n (1) 'x def)\n@module\n",
+        "### module stats\n(\n ### def x\n (1) 'x def) @module\n",
     );
     try expectParseEquivalent(registration);
     try expectParseEquivalent(seeded);

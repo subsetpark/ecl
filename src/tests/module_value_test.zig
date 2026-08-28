@@ -538,7 +538,7 @@ test "module sources: formatter and standard modules use @defm" {
     );
     const anonymous = try formatter.format(std.testing.allocator, "((1) 'x def) @module\n");
     defer std.testing.allocator.free(anonymous);
-    try std.testing.expectEqualStrings("(\n ### def x\n (1) 'x def)\n@module\n", anonymous);
+    try std.testing.expectEqualStrings("(\n ### def x\n (1) 'x def) @module\n", anonymous);
 
     // Every embedded standard module is registration-driven, enumerated from
     // the manifest rather than by hand so a new module is covered the day it
