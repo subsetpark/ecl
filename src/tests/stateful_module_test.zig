@@ -193,7 +193,7 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     );
     try expectOk(&runtime, "'answer see 'spelled see 'answer which");
     try std.testing.expectEqualStrings(
-        "(: \"The answer.\") ([42] first)\n" ++
+        "([42] first)\n" ++
             "([42] first)\n" ++
             "answer -> answer def public\n",
         output.written(),

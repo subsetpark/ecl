@@ -338,9 +338,9 @@ always applies it. Values are bound by capturing them in a body.
   observationally `v literal 'name def`, exactly: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for
   `def` to consume. `which` reports the resulting public `def`, while `see`
-  prints only its literal-capture body; an unannotated `set` has no effect or
-  documentation, and nothing distinguishes it from the corresponding
-  `literal` plus `def` spelling. `set` is
+  prints its literal-capture body, preceded by the annotation when one is
+  present; an unannotated `set` has no effect or documentation, and nothing
+  distinguishes it from the corresponding `literal` plus `def` spelling. `set` is
   environment assignment, not a lexical binding form. For ordinary local
   values, prefer stack flow or binder locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
