@@ -60,6 +60,7 @@ jobs:
     timeout-minutes: 300
     env:
       OPTIMIZE: ${{ inputs.optimize }}
+      RUN_TSAN: ${{ inputs.run_tsan }}
 
     steps:
       - name: Validate optimization mode
@@ -79,7 +80,14 @@ jobs:
 
       - name: Set up Alpine and Zig
         run: |
+          tsan_security=()
+          if [[ "$RUN_TSAN" == "true" ]]; then
+            # TSan may disable ASLR and re-exec while reserving shadow memory;
+            # Docker's default seccomp profile blocks that personality call.
+            tsan_security+=(--security-opt seccomp=unconfined)
+          fi
           docker run --detach --name ecl-ci --platform linux/amd64 \
+            "${tsan_security[@]}" \
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             alpine:latest tail -f /dev/null
           docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
