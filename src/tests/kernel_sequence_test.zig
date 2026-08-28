@@ -74,6 +74,7 @@ test "sequence: where, in?, and find validate and search" {
             "{'a 1} [{'a 1} {'b 2}] in? {'z 1} [{'a 1} {'b 2}] in?",
         "[0 2] [1 0] 0 2 1 0",
     );
+    try helper.expectStack("[[1] [2]] [0] in?", "([0]\n [0])");
     try helper.expectErrors(&.{
         .{
             .name = "where rejects non-integer counts",

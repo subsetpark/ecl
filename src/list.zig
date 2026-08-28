@@ -193,24 +193,30 @@ pub const ValueMaterializer = struct {
         return .{ .list = header };
     }
     pub fn advance(self: *ValueMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
-        std.debug.assert(budget != 0 and self.phase != .complete);
-        var remaining = budget;
-        while (remaining != 0) switch (self.phase) {
+        var work: poll.WorkBudget = .init(budget);
+        return self.advanceWithBudget(&work);
+    }
+    pub fn advanceWithBudget(
+        self: *ValueMaterializer,
+        work: *poll.WorkBudget,
+    ) error{OutOfMemory}!MaterializeResult {
+        std.debug.assert(self.phase != .complete);
+        while (!work.exhausted()) switch (self.phase) {
             .profile => {
                 if (self.index == self.source.len) {
                     try self.beginFill();
                     continue;
                 }
+                std.debug.assert(work.spend());
                 self.profileOne(self.source[self.index]);
                 self.index += 1;
-                remaining -= 1;
                 if (self.item_profile.kind == .mixed) self.index = self.source.len;
             },
             .fill => {
                 if (self.index == self.source.len) return self.finish();
+                std.debug.assert(work.spend());
                 self.builder.?.writeValue(self.index, self.source[self.index]);
                 self.index += 1;
-                remaining -= 1;
             },
             .complete => unreachable,
         };

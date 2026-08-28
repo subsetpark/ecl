@@ -792,10 +792,12 @@ allocation failure interrupt it at bounded intervals.
 - **Nested continuation uses one allowance.** A parent that may continue after
   a child cursor completes passes a single `WorkBudget` through that child;
   it never guesses consumption from an integer originally handed down. The
-  membership-to-structural-match path is the production instance: parent
-  frames and comparison actions charge the same allowance, so child completion
-  can batch into the next parent transition while exhaustion remains a hard
-  scheduler-visible boundary.
+  membership-to-structural-match and membership-to-result-materializer paths
+  are production instances: parent frames, comparison actions, and result
+  writes charge the same allowance, so child completion can batch into the next
+  parent transition while exhaustion remains a hard scheduler-visible
+  boundary. `ValueMaterializer.advance` remains the standalone count-taking
+  shell; nested scheduler-visible composition uses `advanceWithBudget`.
 - **Aggregate algorithms belong to their value owner.** `list.zig` owns
   specialization plus generic, codepoint, byte, integer, float, and symbol
   materializers. Every blocking list constructor drives one of those same

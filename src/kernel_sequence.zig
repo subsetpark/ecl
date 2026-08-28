@@ -838,7 +838,7 @@ const MembershipCursor = struct {
                         self.frames.pushReserved(.{ .build = build.* });
                         return .pending;
                     }
-                    switch (try build.materializer.?.advance(work.remaining)) {
+                    switch (try build.materializer.?.advanceWithBudget(&work)) {
                         .pending => {
                             self.frames.pushReserved(.{ .build = build.* });
                             return .pending;
@@ -846,7 +846,7 @@ const MembershipCursor = struct {
                         .complete => |result| {
                             build.result = result;
                             self.frames.pushReserved(.{ .build = build.* });
-                            return .pending;
+                            continue;
                         },
                     }
                 },

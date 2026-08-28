@@ -24,9 +24,10 @@ timeout 500 zig build bench-workdrivers -Doptimize=ReleaseFast < /dev/null
 `-- --quick` selects reduced size sets with three repetitions. It is a smoke
 gate and is not performance evidence. `-- --cursor-storage-only` selects the
 focused first-frame cursor workload, `-- --nested-cursor-only` selects the
-shared-budget workload, and `-- --latency-only` selects the mixed short-task
-and cancellation safeguards. Without `--quick`, each retains the full 101
-repetitions.
+structural shared-budget workload, `-- --materializer-budget-only` selects the
+result-materialization shared-budget workload, and `-- --latency-only` selects
+the mixed short-task and cancellation safeguards. Without `--quick`, each
+retains the full 101 repetitions.
 
 ### Selected timing results
 
@@ -133,4 +134,43 @@ p50/p95 results within 3.1%, with identical deterministic counters; a first
 eight-worker tail was not reproducible. The treatment therefore clears the
 throughput and hard-progress gates without motivating a scheduler or quantum
 change. The focused workload and the optional `--latency-only` selection remain
-in schema `ecl.workdrivers.*.v3`.
+in schema `ecl.workdrivers.*.v4`.
+
+## Membership materializer budget A/B — 2026-08-28
+
+The third intervention tested the remaining conservative boundary inside
+generic-spine membership. The control handed `ValueMaterializer` an integer
+remaining count and returned to the scheduler even when a small result
+materializer completed early. The treatment adds the same `advanceWithBudget`
+composition used by structural matching, so result profiling and writes draw
+from the parent's exact allowance and the parent continues only while that
+allowance remains. Both variants were compiled from one temporary build-time
+switch, removed after acceptance.
+
+The focused public workload applies membership to a generic spine of singleton
+lists against a scalar collection. Every singleton creates a small nested
+result materializer, while scalar comparison avoids the structural
+`MatchCursor` measured by the preceding A/B. ReleaseSafe timings below are 101
+repetitions on macOS arm64 (Apple M4 Max), Zig 0.16.0; times are wall-clock
+milliseconds.
+
+| Workers | Results | Control p50 | Shared-budget p50 | Reduction | Control resumes | Shared-budget resumes | Control handoffs | Shared-budget handoffs |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 32 | 0.051 | 0.046 | 9.1% | 40 | 7 | 33 | 0 |
+| 1 | 1,024 | 0.418 | 0.324 | 22.6% | 1,032 | 7 | 1,025 | 0 |
+| 1 | 65,536 | 24.985 | 20.554 | 17.7% | 65,545 | 18 | 65,538 | 11 |
+| 8 | 32 | 0.048 | 0.045 | 5.6% | 40 | 7 | 33 | 0 |
+| 8 | 1,024 | 0.414 | 0.323 | 22.0% | 1,032 | 7 | 1,025 | 0 |
+| 8 | 65,536 | 25.316 | 20.612 | 18.6% | 65,545 | 18 | 65,538 | 11 |
+
+Allocation counts are identical at every size. Peak bytes rise within a single
+quantum because releases are drained at its end (for example 220,107 to
+317,427 bytes at 1,024 results), but both variants converge at 6,155,211 bytes
+by 65,536 results and the treatment still makes eleven scheduler handoffs.
+A reversed-order 101-repetition comparison reproduced the 65,536-result p50
+improvement at 19.5% with one worker and 18.6% with eight. The unrelated mixed
+short-task and cancellation latency safeguard showed no treatment regression,
+with identical polls, logical transitions, driver resumes, application
+resumes, and scheduler handoffs. The accepted path therefore retains one
+shared-budget implementation with no experimental or legacy control branch;
+the focused workload remains in schema `ecl.workdrivers.*.v4`.
