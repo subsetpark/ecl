@@ -60,7 +60,6 @@ jobs:
     timeout-minutes: 300
     env:
       OPTIMIZE: ${{ inputs.optimize }}
-      RUN_TSAN: ${{ inputs.run_tsan }}
 
     steps:
       - name: Validate optimization mode
@@ -80,22 +79,11 @@ jobs:
 
       - name: Set up Alpine and Zig
         run: |
-          tsan_security=()
-          if [[ "$RUN_TSAN" == "true" ]]; then
-            # TSan may disable ASLR and re-exec while reserving shadow memory;
-            # Docker's default seccomp profile blocks that personality call.
-            tsan_security+=(--security-opt seccomp=unconfined)
-          fi
           docker run --detach --name ecl-ci --platform linux/amd64 \
-            "${tsan_security[@]}" \
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             alpine:latest tail -f /dev/null
-          docker exec --env OPTIMIZE="$OPTIMIZE" --env RUN_TSAN="$RUN_TSAN" ecl-ci sh -euxc '
-            packages="curl xz linux-headers expect python3 git"
-            if [ "$RUN_TSAN" = "true" ]; then
-              packages="$packages gdb"
-            fi
-            apk add --no-cache $packages
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
+            apk add --no-cache curl xz linux-headers expect python3 git
             curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
             echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
             mkdir -p /opt/zig /build /root/.cache/zig/tmp
@@ -108,27 +96,14 @@ jobs:
       - name: ThreadSanitizer
         if: inputs.run_tsan
         run: |
-          sudo sysctl -w vm.mmap_rnd_bits=28
-          docker exec --env OPTIMIZE="$OPTIMIZE" --env TSAN_OPTIONS=verbosity=2 ecl-ci sh -c '
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
             cd /build
-            set +e
+            test_runner=/opt/zig/lib/compiler/test_runner.zig
+            cp "$test_runner" /tmp/test_runner.zig
+            trap "cp /tmp/test_runner.zig $test_runner" EXIT
+            sed -i "/\.logFn = log,/a\\    .signal_stack_size = null," "$test_runner"
             timeout 20m zig build test-tsan \
-              -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m \
-              < /dev/null > /tmp/tsan.log 2>&1
-            tsan_code=$?
-            set -e
-            cat /tmp/tsan.log
-            if [ "$tsan_code" -ne 0 ]; then
-              test_binary="$(sed -n "s/^failed command: \([^ ]*\/test\) .*/\1/p" /tmp/tsan.log | tail -1)"
-              if [ -n "$test_binary" ]; then
-                TSAN_OPTIONS=verbosity=2 timeout 2m gdb --batch \
-                  -ex "set disable-randomization off" \
-                  -ex run \
-                  -ex "thread apply all backtrace full" \
-                  --args "$test_binary"
-              fi
-              exit "$tsan_code"
-            fi
+              -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m < /dev/null
           '
 
       - name: Install zlint
