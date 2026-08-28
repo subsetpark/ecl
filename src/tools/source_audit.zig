@@ -218,6 +218,7 @@ const repository_verification_files = [_][]const u8{
     "test/comptime/negative/unexpected_fallibility.zig",
     "test/comptime/negative/generic_parameter.zig",
     "test/comptime/negative/malformed_comparator.zig",
+    "test/comptime/negative/malformed_exact_materializer.zig",
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
 };

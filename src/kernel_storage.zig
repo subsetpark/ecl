@@ -91,93 +91,37 @@ pub const Utf8Materializer = struct {
     }
 };
 
-fn ChunkedMaterializer(
-    comptime Source: type,
-    comptime Builder: type,
-    comptime Context: type,
-    comptime Ops: type,
-) type {
-    return struct {
-        const Self = @This();
-        pub const owned_disposal: heap.OwnedDisposal = .retire;
+const ByteStringSpec = struct {
+    pub const Source = u8;
+    pub const Builder = heap.ListBuilder(.leaf_char1);
+    pub const Context = void;
+    pub const Result = Value;
+
+    pub fn begin(
         allocator: std.mem.Allocator,
         source: []const Source,
-        context: Context,
-        builder: ?Builder = null,
-        index: usize = 0,
-        complete: bool = false,
-
-        pub fn init(allocator: std.mem.Allocator, source: []const Source, context: Context) Self {
-            return .{ .allocator = allocator, .source = source, .context = context };
-        }
-        pub fn deinit(self: *Self) void {
-            std.debug.assert(self.builder == null);
-            self.* = undefined;
-        }
-        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
-            if (self.builder) |*builder| builder.retirePartial(releases);
-        }
-        pub fn advance(self: *Self, budget: usize) error{OutOfMemory}!MaterializeResult {
-            std.debug.assert(budget != 0 and !self.complete);
-            if (self.builder == null)
-                self.builder = try Ops.begin(self.allocator, self.source, self.context);
-            const end = @min(self.index + budget, self.source.len);
-            Ops.fill(&self.builder.?, self.source, &self.index, end);
-            if (self.index != self.source.len) return .pending;
-            const result = Ops.finish(&self.builder.?);
-            self.builder = null;
-            self.complete = true;
-            return .{ .complete = result };
-        }
-    };
-}
-
-const ByteStringOps = struct {
-    fn begin(
-        allocator: std.mem.Allocator,
-        source: []const u8,
-        _: void,
-    ) error{OutOfMemory}!heap.ListBuilder(.leaf_char1) {
+        _: Context,
+    ) error{OutOfMemory}!Builder {
         return .init(allocator, source.len, initialCapacity(source.len));
     }
-    fn fill(
-        builder: *heap.ListBuilder(.leaf_char1),
-        source: []const u8,
+    pub fn fill(
+        builder: *Builder,
+        source: []const Source,
         index: *usize,
         end: usize,
     ) void {
         @memcpy(builder.items()[index.*..end], source[index.*..end]);
         index.* = end;
     }
-    fn finish(builder: *heap.ListBuilder(.leaf_char1)) Value {
+    pub fn finish(builder: *Builder) Result {
         return .{ .list = builder.finish() };
     }
-};
-
-const ByteStringChunked = ChunkedMaterializer(
-    u8,
-    heap.ListBuilder(.leaf_char1),
-    void,
-    ByteStringOps,
-);
-pub const ByteStringMaterializer = struct {
-    pub const owned_disposal: heap.OwnedDisposal = .retire;
-
-    inner: ByteStringChunked,
-    pub fn init(allocator: std.mem.Allocator, source: []const u8) ByteStringMaterializer {
-        return .{ .inner = .init(allocator, source, {}) };
-    }
-    pub fn deinit(self: *ByteStringMaterializer) void {
-        self.inner.deinit();
-        self.* = undefined;
-    }
-    pub fn retire(self: *ByteStringMaterializer, releases: *heap.ReleaseDomain) void {
-        self.inner.retire(releases);
-    }
-    pub fn advance(self: *ByteStringMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
-        return self.inner.advance(budget);
+    pub fn retirePartial(builder: *Builder, releases: *heap.ReleaseDomain) void {
+        builder.retirePartial(releases);
     }
 };
+
+pub const ByteStringMaterializer = poll.ExactMaterializer(ByteStringSpec);
 
 /// Resumable equivalent of the language's text convention: valid UTF-8 is
 /// decoded to scalars, while opaque host bytes map one-to-one to characters.
@@ -452,4 +396,21 @@ fn initialCapacity(used: usize) usize {
     var result: usize = 4;
     while (result < @max(used, 1)) result = std.math.mul(usize, result, 2) catch return used;
     return result;
+}
+
+fn byteStringFailureProbe(allocator: std.mem.Allocator) !void {
+    var cleanup = heap.testing.Cleanup.init(allocator);
+    defer cleanup.deinit();
+    var cursor = ByteStringMaterializer.init(allocator, "materialize");
+    defer cursor.retire(cleanup.domain());
+    const result = try poll.driveFallible(Value, &cursor, .{1});
+    defer cleanup.releaseValue(result);
+}
+
+test "kernel storage: byte string materializer exhausts allocation failures" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        byteStringFailureProbe,
+        .{},
+    );
 }

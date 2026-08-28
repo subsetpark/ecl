@@ -176,6 +176,7 @@ pub fn build(b: *std.Build) void {
         .{ .file = "unexpected_fallibility", .message = "poll.drive: cursor advance must return poll.Progress(T)" },
         .{ .file = "generic_parameter", .message = "poll.drive: cursor advance must be non-generic and non-variadic" },
         .{ .file = "malformed_comparator", .message = "poll.MergeSortCursor: comparator advance must have signature fn (*Cursor, usize) poll.Progress(std.math.Order)" },
+        .{ .file = "malformed_exact_materializer", .message = "poll.ExactMaterializer: fill must have signature fn (*Builder, []const Source, *usize, usize) void" },
     };
     const poll_contract_module = b.createModule(.{
         .root_source_file = b.path("src/poll.zig"),
@@ -782,6 +783,7 @@ pub fn build(b: *std.Build) void {
             "session completion:",
             "binding:",
             "scope:",
+            "kernel storage:",
         },
     });
     precommit_tests.linkage = runtime_linkage;

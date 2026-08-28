@@ -149,6 +149,135 @@ fn validateMergeSortComparator(comptime T: type, comptime Comparator: type) void
     }
 }
 
+fn validateExactMaterializerSpec(comptime Spec: type) void {
+    const boundary = "poll.ExactMaterializer";
+    if (@typeInfo(Spec) != .@"struct")
+        @compileError(boundary ++ ": spec must be a struct namespace");
+    inline for (&.{ "Source", "Builder", "Context", "Result" }) |name| {
+        if (!@hasDecl(Spec, name))
+            @compileError(boundary ++ ": spec must declare " ++ name);
+        if (@TypeOf(@field(Spec, name)) != type)
+            @compileError(boundary ++ ": spec " ++ name ++ " must be a type");
+    }
+    const Source = Spec.Source;
+    const Builder = Spec.Builder;
+    const Context = Spec.Context;
+    const Result = Spec.Result;
+    if (!@hasDecl(Spec, "begin"))
+        @compileError(boundary ++ ": spec must declare begin");
+    const begin = switch (@typeInfo(@TypeOf(Spec.begin))) {
+        .@"fn" => |info| info,
+        else => @compileError(boundary ++ ": begin must be a function"),
+    };
+    if (begin.is_generic or begin.is_var_args or begin.params.len != 3 or
+        begin.params[0].type == null or begin.params[0].type.? != std.mem.Allocator or
+        begin.params[1].type == null or begin.params[1].type.? != []const Source or
+        begin.params[2].type == null or begin.params[2].type.? != Context or
+        begin.return_type == null or begin.return_type.? != error{OutOfMemory}!Builder)
+    {
+        @compileError(boundary ++
+            ": begin must have signature fn (Allocator, []const Source, Context) error{OutOfMemory}!Builder");
+    }
+    if (!@hasDecl(Spec, "fill"))
+        @compileError(boundary ++ ": spec must declare fill");
+    const fill = switch (@typeInfo(@TypeOf(Spec.fill))) {
+        .@"fn" => |info| info,
+        else => @compileError(boundary ++ ": fill must be a function"),
+    };
+    if (fill.is_generic or fill.is_var_args or fill.params.len != 4 or
+        fill.params[0].type == null or fill.params[0].type.? != *Builder or
+        fill.params[1].type == null or fill.params[1].type.? != []const Source or
+        fill.params[2].type == null or fill.params[2].type.? != *usize or
+        fill.params[3].type == null or fill.params[3].type.? != usize or
+        fill.return_type == null or fill.return_type.? != void)
+    {
+        @compileError(boundary ++
+            ": fill must have signature fn (*Builder, []const Source, *usize, usize) void");
+    }
+    if (!@hasDecl(Spec, "finish"))
+        @compileError(boundary ++ ": spec must declare finish");
+    const finish = switch (@typeInfo(@TypeOf(Spec.finish))) {
+        .@"fn" => |info| info,
+        else => @compileError(boundary ++ ": finish must be a function"),
+    };
+    if (finish.is_generic or finish.is_var_args or finish.params.len != 1 or
+        finish.params[0].type == null or finish.params[0].type.? != *Builder or
+        finish.return_type == null or finish.return_type.? != Result)
+    {
+        @compileError(boundary ++ ": finish must have signature fn (*Builder) Result");
+    }
+    if (!@hasDecl(Spec, "retirePartial"))
+        @compileError(boundary ++ ": spec must declare retirePartial");
+    const retire = switch (@typeInfo(@TypeOf(Spec.retirePartial))) {
+        .@"fn" => |info| info,
+        else => @compileError(boundary ++ ": retirePartial must be a function"),
+    };
+    if (retire.is_generic or retire.is_var_args or retire.params.len != 2 or
+        retire.params[0].type == null or retire.params[0].type.? != *Builder or
+        retire.params[1].type == null or retire.params[1].type.? != *heap.ReleaseDomain or
+        retire.return_type == null or retire.return_type.? != void)
+    {
+        @compileError(boundary ++
+            ": retirePartial must have signature fn (*Builder, *heap.ReleaseDomain) void");
+    }
+}
+
+/// Lazy exact allocation, bounded fill, completion transfer, and partial
+/// retirement for sources whose final size is already known. Specs retain
+/// semantic choices such as element conversion and builder initialization;
+/// the factory owns only the identical lifecycle mechanics.
+pub fn ExactMaterializer(comptime Spec: type) type {
+    comptime validateExactMaterializerSpec(Spec);
+    return struct {
+        const Self = @This();
+        pub const owned_disposal: heap.OwnedDisposal = .retire;
+
+        allocator: std.mem.Allocator,
+        source: []const Spec.Source,
+        context: Spec.Context,
+        builder: ?Spec.Builder = null,
+        index: usize = 0,
+        complete: bool = false,
+
+        pub fn init(allocator: std.mem.Allocator, source: []const Spec.Source) Self {
+            if (Spec.Context != void)
+                @compileError("poll.ExactMaterializer.init requires a void Context; use initContext");
+            return .{ .allocator = allocator, .source = source, .context = {} };
+        }
+
+        pub fn initContext(
+            allocator: std.mem.Allocator,
+            source: []const Spec.Source,
+            context: Spec.Context,
+        ) Self {
+            return .{ .allocator = allocator, .source = source, .context = context };
+        }
+
+        pub fn deinit(self: *Self) void {
+            std.debug.assert(self.builder == null);
+            self.* = undefined;
+        }
+
+        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
+            if (self.builder) |*builder| Spec.retirePartial(builder, releases);
+            self.builder = null;
+        }
+
+        pub fn advance(self: *Self, budget: usize) error{OutOfMemory}!Progress(Spec.Result) {
+            std.debug.assert(budget != 0 and !self.complete);
+            if (self.builder == null)
+                self.builder = try Spec.begin(self.allocator, self.source, self.context);
+            const end = self.index + @min(budget, self.source.len - self.index);
+            Spec.fill(&self.builder.?, self.source, &self.index, end);
+            if (self.index != self.source.len) return .pending;
+            const result = Spec.finish(&self.builder.?);
+            self.builder = null;
+            self.complete = true;
+            return .{ .complete = result };
+        }
+    };
+}
+
 /// Drive a non-failing finite cursor to its observable result.
 pub fn drive(comptime T: type, cursor: anytype, args: anytype) T {
     const Cursor = @TypeOf(cursor.*);

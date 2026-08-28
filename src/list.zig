@@ -29,53 +29,49 @@ const Profile = struct {
 
 pub const MaterializeResult = poll.Progress(Value);
 
-/// Exact-size resumable construction for a typed leaf. The source remains
-/// caller-owned until completion; the destination never relocates.
-fn ExactSliceMaterializer(comptime Source: type, comptime kind: HeapKind) type {
+/// A typed leaf specialization derives its source from the heap representation
+/// mapping, so a caller cannot correlate a leaf kind with the wrong element.
+fn ExactLeafSpec(comptime kind: HeapKind) type {
+    const Element = heap.LeafElement(kind);
     return struct {
-        const Self = @This();
-        pub const owned_disposal: heap.OwnedDisposal = .retire;
+        pub const Source = Element;
+        pub const Builder = heap.ListBuilder(kind);
+        pub const Context = void;
+        pub const Result = Value;
 
-        allocator: std.mem.Allocator,
-        source: []const Source,
-        builder: ?heap.ListBuilder(kind) = null,
-        index: usize = 0,
-        complete: bool = false,
-
-        pub fn init(allocator: std.mem.Allocator, source: []const Source) Self {
-            return .{ .allocator = allocator, .source = source };
+        pub fn begin(
+            allocator: std.mem.Allocator,
+            source: []const Source,
+            _: Context,
+        ) error{OutOfMemory}!Builder {
+            return .init(allocator, source.len, initialCapacity(source.len));
         }
-        pub fn deinit(self: *Self) void {
-            std.debug.assert(self.builder == null);
-            self.* = undefined;
+        pub fn fill(
+            builder: *Builder,
+            source: []const Source,
+            index: *usize,
+            end: usize,
+        ) void {
+            @memcpy(builder.items()[index.*..end], source[index.*..end]);
+            index.* = end;
         }
-        pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
-            if (self.builder) |*builder| builder.retirePartial(releases);
+        pub fn finish(builder: *Builder) Result {
+            return .{ .list = builder.finish() };
         }
-        pub fn advance(self: *Self, budget: usize) error{OutOfMemory}!MaterializeResult {
-            std.debug.assert(budget != 0 and !self.complete);
-            if (self.builder == null)
-                self.builder = try .init(
-                    self.allocator,
-                    self.source.len,
-                    initialCapacity(self.source.len),
-                );
-            const end = @min(self.index + budget, self.source.len);
-            @memcpy(self.builder.?.items()[self.index..end], self.source[self.index..end]);
-            self.index = end;
-            if (self.index != self.source.len) return .pending;
-            const header = self.builder.?.finish();
-            self.builder = null;
-            self.complete = true;
-            return .{ .complete = .{ .list = header } };
+        pub fn retirePartial(builder: *Builder, releases: *heap.ReleaseDomain) void {
+            builder.retirePartial(releases);
         }
     };
 }
 
-pub const ByteListMaterializer = ExactSliceMaterializer(u8, .leaf_u8);
-pub const I64Materializer = ExactSliceMaterializer(i64, .leaf_i64);
-pub const F64Materializer = ExactSliceMaterializer(f64, .leaf_f64);
-pub const SymbolMaterializer = ExactSliceMaterializer(u32, .leaf_symbol);
+fn ExactLeafMaterializer(comptime kind: HeapKind) type {
+    return poll.ExactMaterializer(ExactLeafSpec(kind));
+}
+
+pub const ByteListMaterializer = ExactLeafMaterializer(.leaf_u8);
+pub const I64Materializer = ExactLeafMaterializer(.leaf_i64);
+pub const F64Materializer = ExactLeafMaterializer(.leaf_f64);
+pub const SymbolMaterializer = ExactLeafMaterializer(.leaf_symbol);
 
 pub const CodepointMaterializer = struct {
     pub const owned_disposal: heap.OwnedDisposal = .retire;
@@ -293,16 +289,53 @@ pub const ValueMaterializer = struct {
     }
 };
 
-/// Representation-sensitive generic-spine construction for code roots.
-pub const GenericValueMaterializer = struct {
-    pub const owned_disposal: heap.OwnedDisposal = .retire;
+const GenericValueSpec = struct {
+    pub const Source = Value;
+    pub const Builder = heap.ListBuilder(.generic_spine);
+    pub const Context = heap.CodeProvenanceNamespace;
+    pub const Result = Value;
 
-    allocator: std.mem.Allocator,
-    source: []const Value,
-    provenance_namespace: heap.CodeProvenanceNamespace,
-    builder: ?heap.ListBuilder(.generic_spine) = null,
-    index: usize = 0,
-    complete: bool = false,
+    pub fn begin(
+        allocator: std.mem.Allocator,
+        source: []const Source,
+        provenance_namespace: Context,
+    ) error{OutOfMemory}!Builder {
+        var builder = try Builder.initCode(
+            allocator,
+            source.len,
+            initialCapacity(source.len),
+            provenance_namespace,
+        );
+        builder.setLen(0);
+        return builder;
+    }
+    pub fn fill(
+        builder: *Builder,
+        source: []const Source,
+        index: *usize,
+        end: usize,
+    ) void {
+        while (index.* != end) : (index.* += 1) {
+            const item = source[index.*];
+            heap.retainValue(item);
+            builder.items()[index.*] = item;
+            builder.setLen(index.* + 1);
+        }
+    }
+    pub fn finish(builder: *Builder) Result {
+        return .{ .list = builder.finish() };
+    }
+    pub fn retirePartial(builder: *Builder, releases: *heap.ReleaseDomain) void {
+        builder.retirePartial(releases);
+    }
+};
+
+const GenericValueExactMaterializer = poll.ExactMaterializer(GenericValueSpec);
+
+/// Representation-sensitive generic-spine construction keeps its public
+/// semantic wrapper and provenance constructors while sharing exact fill.
+pub const GenericValueMaterializer = struct {
+    inner: GenericValueExactMaterializer,
 
     pub fn init(allocator: std.mem.Allocator, source: []const Value) GenericValueMaterializer {
         return initCode(allocator, source, .none);
@@ -312,43 +345,17 @@ pub const GenericValueMaterializer = struct {
         source: []const Value,
         provenance_namespace: heap.CodeProvenanceNamespace,
     ) GenericValueMaterializer {
-        return .{
-            .allocator = allocator,
-            .source = source,
-            .provenance_namespace = provenance_namespace,
-        };
+        return .{ .inner = .initContext(allocator, source, provenance_namespace) };
     }
     pub fn deinit(self: *GenericValueMaterializer) void {
-        std.debug.assert(self.builder == null);
+        self.inner.deinit();
         self.* = undefined;
     }
     pub fn retire(self: *GenericValueMaterializer, releases: *heap.ReleaseDomain) void {
-        if (self.builder) |*builder| builder.retirePartial(releases);
+        self.inner.retire(releases);
     }
     pub fn advance(self: *GenericValueMaterializer, budget: usize) error{OutOfMemory}!MaterializeResult {
-        std.debug.assert(budget != 0 and !self.complete);
-        if (self.builder == null) {
-            var builder = try heap.ListBuilder(.generic_spine).initCode(
-                self.allocator,
-                self.source.len,
-                initialCapacity(self.source.len),
-                self.provenance_namespace,
-            );
-            builder.setLen(0);
-            self.builder = builder;
-        }
-        const end = @min(self.index + budget, self.source.len);
-        while (self.index != end) : (self.index += 1) {
-            const item = self.source[self.index];
-            heap.retainValue(item);
-            self.builder.?.items()[self.index] = item;
-            self.builder.?.setLen(self.index + 1);
-        }
-        if (self.index != self.source.len) return .pending;
-        const header = self.builder.?.finish();
-        self.builder = null;
-        self.complete = true;
-        return .{ .complete = .{ .list = header } };
+        return self.inner.advance(budget);
     }
 };
 
@@ -662,4 +669,23 @@ test "blocking and resumable list construction share specialization behavior" {
             try std.testing.expectEqual(expected, try at(resumed, index));
         }
     }
+}
+
+test "exact leaf materialization crosses a quantum boundary" {
+    var cleanup = heap.testing.Cleanup.init(std.testing.allocator);
+    defer cleanup.deinit();
+    const source = [_]i64{ 4, 3, 2, 1 };
+    var cursor = I64Materializer.init(std.testing.allocator, &source);
+    defer cursor.retire(cleanup.domain());
+    var pending: usize = 0;
+    const result = while (true) switch (try cursor.advance(1)) {
+        .pending => pending += 1,
+        .complete => |value_result| break value_result,
+    };
+    defer cleanup.releaseValue(result);
+
+    try std.testing.expect(pending >= source.len - 1);
+    try std.testing.expectEqual(HeapKind.leaf_i64, result.list.kind());
+    for (source, 0..) |expected, index|
+        try std.testing.expectEqual(expected, (try at(result, index)).int);
 }

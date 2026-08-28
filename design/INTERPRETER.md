@@ -814,10 +814,18 @@ allocation failure interrupt it at bounded intervals.
   once through a work cursor. Reader forms, binder output, string
   provenance, span tables, and the session span archive use this
   substrate; none grows by relocating accumulated state or by automatic
-  hash-table rehashing. List-owned typed materializers share exact leaf
-  allocation and bounded fill policy; action-producing reflection drivers
-  accumulate through `ActionPlan`, which owns counting, exact allocation,
-  filling, and rendering.
+  hash-table rehashing. `poll.ExactMaterializer` is the one compiler-checked
+  lifecycle for a known-size slice: its spec fixes source, builder, context,
+  result, allocation, fill, finish, and partial-retirement signatures. The
+  generated cursor allocates lazily, advances one caller-budgeted range, moves
+  the result out exactly once, and retires an abandoned partial builder exactly
+  once. List-owned typed leaves derive their source element from
+  `heap.LeafElement(kind)`; generic-spine provenance and byte-string semantics
+  remain explicit wrappers/specs over that substrate. Profiling materializers
+  and UTF-8 decoding remain separate multi-pass state machines rather than
+  weakening the exact lifecycle to absorb them. Action-producing reflection
+  drivers accumulate through `ActionPlan`, which owns counting, exact
+  allocation, filling, and rendering.
 - **Stateful list combinators use those same shapes.** `stencil` computes
   its result count up front, owns one exact result buffer, and stages and
   materializes only the current overlapping window before its isolated
