@@ -437,7 +437,7 @@ test "native: reflection exposes native origin effects documentation and capabil
     try std.testing.expect(std.mem.indexOf(
         u8,
         output.written(),
-        "(n -- result : \"Increment an integer.\") <native:sample.increment>",
+        "<native:sample.increment> requires call build-values reschedule",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "requires call, build-values, reschedule") != null);
     var display = try runtime.stackDisplay();

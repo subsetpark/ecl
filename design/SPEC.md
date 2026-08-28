@@ -337,14 +337,19 @@ always applies it. Values are bound by capturing them in a body.
   inert, so nothing in it executes or resolves. `v 'name set` is therefore
   observationally `v literal 'name def`, exactly: the sugar synthesizes no
   annotation of its own, while an annotation beneath `v` is preserved for
-  `def` to consume. `which` and `see` report the resulting public `def`; an
-  unannotated `set` has no effect or documentation, and nothing distinguishes
-  it from the corresponding `literal` plus `def` spelling. `set` is
+  `def` to consume. `which` reports the resulting public `def`, while `see`
+  prints only its literal-capture body; an unannotated `set` has no effect or
+  documentation, and nothing distinguishes it from the corresponding
+  `literal` plus `def` spelling. `set` is
   environment assignment, not a lexical binding form. For ordinary local
   values, prefer stack flow or binder locals.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete binding snapshot: omitting an effect or docstring clears the
   old one. Code holding the old body keeps running it safely.
+- `see` prints only the resolved binding body through the standard source
+  formatter. It omits the annotation, navigation header, name, and
+  `def`/`defp` terminator; `which` reports binding and effect metadata, and
+  `doc` returns documentation.
 - `'name unset` and `'name undef` are exact aliases. They remove a binding
   only from the current writable scope and otherwise do nothing. Removing a
   shadow reveals the next binding in the ordinary parent/core lookup chain;
@@ -414,8 +419,8 @@ values the word consumes is known, how many it leaves is not. The before
 slots are checked at boundaries exactly as today; the after check is
 skipped. This is a genuine partial contract, not the absence of one — a
 word that would otherwise carry a documentation-only annotation regains
-input checking and honest reflection, and `see` renders the annotation
-back with `-- ...`.
+input checking and honest reflection, and `which` renders the effect with
+`-- ...`.
 
 The grammar is strict: no mixing (`(a -- ... b)` is `'domain`), and the
 token never appears in a before row (`(... -- b)` is `'domain`). Named row

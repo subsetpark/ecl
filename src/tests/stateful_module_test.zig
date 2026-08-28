@@ -150,19 +150,15 @@ test "definitions: module def and defp accept all four annotation forms" {
         "10 forms.bare 10 forms.effected 10 forms.documented 12 forms.complete 10 forms.via-private",
         "11 20 7 3 21",
     );
-    // Reflection preserves exactly which portions were supplied: an absent
-    // effect prints no effect, an absent document has none to report.
+    // Body reflection is independent of annotation shape; documentation is
+    // available through `doc`, while `which` owns effect reflection.
     try expectOk(&runtime, "'forms.bare see 'forms.effected see " ++
         "'forms.documented see 'forms.complete see");
     try std.testing.expectEqualStrings(
-        "### def forms.bare\n" ++
-            "(1 +) 'forms.bare def\n" ++
-            "### def forms.effected\n" ++
-            "(n -- n) (2 *) 'forms.effected def\n" ++
-            "### def forms.documented\n" ++
-            "(: \"Subtract three.\") (3 -) 'forms.documented def\n" ++
-            "### def forms.complete\n" ++
-            "(n -- n : \"Divide by four.\") (4 div) 'forms.complete def\n",
+        "(1 +)\n" ++
+            "(2 *)\n" ++
+            "(3 -)\n" ++
+            "(4 div)\n",
         output.written(),
     );
     try expectStack(&runtime, "'forms.documented doc", "\"Subtract three.\"");
@@ -189,7 +185,7 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
     // The equivalence is exact in the body and in the absent metadata: both
-    // spellings reflect as the same unannotated public def.
+    // spellings expose the same literal-capture body.
     try expectStack(
         &runtime,
         "42 'answer set 42 literal 'spelled def answer spelled match?",
@@ -197,10 +193,8 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     );
     try expectOk(&runtime, "'answer see 'spelled see 'answer which");
     try std.testing.expectEqualStrings(
-        "### def answer\n" ++
-            "([42] first) 'answer def\n" ++
-            "### def spelled\n" ++
-            "([42] first) 'spelled def\n" ++
+        "([42] first)\n" ++
+            "([42] first)\n" ++
             "answer -> answer def public\n",
         output.written(),
     );
@@ -211,7 +205,7 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     try expectStack(&runtime, "m.x m.peek", "7 8");
     output.clearRetainingCapacity();
     try expectOk(&runtime, "'m.x see");
-    try std.testing.expectEqualStrings("### def m.x\n([7] first) 'm.x def\n", output.written());
+    try std.testing.expectEqualStrings("([7] first)\n", output.written());
 }
 
 test "modules: a nonempty construction stack becomes the durable initial stack once per slot" {

@@ -469,10 +469,7 @@ test "module loader: observation and dispatch require the requested registration
     // operation that lifts a body out of its home.
     output.clearRetainingCapacity();
     try expectOk(&runtime, "'register-style.answer see");
-    try std.testing.expectEqualStrings(
-        "### def register-style.answer\n([7] first) 'register-style.answer def\n",
-        output.written(),
-    );
+    try std.testing.expectEqualStrings("([7] first)\n", output.written());
 }
 
 test "module registration: reuse reload removal and delayed calls reclaim boundedly" {

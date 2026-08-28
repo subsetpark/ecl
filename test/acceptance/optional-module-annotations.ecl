@@ -36,7 +36,7 @@
  (hidden hidden-effect hidden-doc hidden-both) 'via-private def
  ) 'forms @defm
 
-### Reflection reports exactly the portions that were supplied.
+### `see` prints only each body; `doc` reports documentation separately.
 'forms.bare see
 'forms.effected see
 'forms.documented see

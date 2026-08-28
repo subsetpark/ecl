@@ -6,7 +6,7 @@ modules then appear by module name, with each section's words ordered by
 codepoint — the language's own string ordering (`cmp`) — so symbol-spelled
 words precede letter-spelled ones. An entry gives the word's successful stack
 effect followed by its semantics. Source and native bindings carry declared
-effects reflected by `see`; builtin words that hand work to a scheduler driver
+effects reflected by `which`; builtin words that hand work to a scheduler driver
 state the same shape in their documentation because their result appears after
 the primitive callback returns. The language rules behind those effects live in the
 [`language specification`](SPEC.md); this document owns the exhaustive list of
@@ -651,18 +651,15 @@ Return a nonempty list's first element followed by the intermediate
 accumulators from reducing its remainder. Defined in ecl over `scan`.
 
 ### see
-`( 'name -- )` — Print a re-readable definition through the standard source
-formatter, including its width-aware layout and matching `### def` or
-`### defp` navigation header when the reflected form is an ordinary source
-definition. The definition has one combined annotation, omitting each portion
-that was not supplied. What
-prints is what is stored: a name bound by `set` prints its capture body ending
-in `'name def`, with no annotation, not the `set` spelling that produced it.
+`( 'name -- )` — Print only the binding body through the standard source
+formatter, with its width-aware layout and no annotation, navigation header,
+name, or `def`/`defp` terminator. What prints is what is stored: a name bound by
+`set` prints its literal-capture body, not the `set` spelling that produced it.
 Reader-built bodies retain a shared slice of their source unit, so head binders
 print with their authored local names even though execution uses the lowered
 `_ll`/`_gl`/`_dl` quotation. Runtime-constructed bodies without source
-provenance fall back to their canonical value form. Native and module origins
-are displayed.
+provenance fall back to their canonical value form. Native origins are
+displayed in native body descriptors.
 
 ### seed
 `( values quotation -- unit-plan )` — Seal a values list and a construction
