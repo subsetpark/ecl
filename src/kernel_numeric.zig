@@ -1,5 +1,6 @@
 //! Checked scalar and flat-leaf arithmetic plus pervasive descent.
 const std = @import("std");
+const builtin = @import("builtin");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
@@ -955,11 +956,10 @@ fn asFloat(operand: Value) f64 {
 // pushed per element, and nothing is profiled afterwards to recover a
 // representation the dispatch already knew.
 //
-// The semantics are not reimplemented here. Every block body calls the same
-// `scalarBinary`/`scalarUnary` the generic route calls, with statically known
-// operand tags, so an optimized build folds those tag switches away while the
-// meaning stays in exactly one place. A block that faults is replayed through
-// that same function to report the first failing index, kind, and message.
+// Scalar-classified bodies call `scalarBinary`/`scalarUnary` with statically
+// known operand tags. The closed explicit-vector set has direct lane formulas,
+// but a checked block still replays through those scalar authorities to report
+// the first failing index, kind, and message.
 // ===========================================================================
 
 /// The numeric element classes a typed loop carries. `byte` is an invisible
@@ -1175,6 +1175,60 @@ fn unaryResult(comptime operation: UnaryOp, comptime operand: Number) Number {
 const Shape = enum { leaf_leaf, leaf_scalar, scalar_leaf, leaf_only };
 const binary_shapes = [_]Shape{ .leaf_leaf, .leaf_scalar, .scalar_leaf };
 
+/// The closed execution policy selected from the operation and typed element
+/// classes. Only checked policies may request scalar replay.
+const LoopPolicy = enum {
+    vector_infallible,
+    vector_checked,
+    scalar_infallible,
+    scalar_checked,
+};
+
+fn binaryLoopPolicy(
+    comptime operation: BinaryOp,
+    comptime left: Number,
+    comptime right: Number,
+) LoopPolicy {
+    if (left == .integer and right == .integer) return switch (operation) {
+        .eq, .ne, .lt, .gt, .le, .ge, .min, .max, .band, .bor, .bxor => .vector_infallible,
+        .add, .sub => .vector_checked,
+        .mul => if (targetHasVectorI64Multiply()) .vector_checked else .scalar_checked,
+        .div, .int_div, .mod, .pow, .atan2, .and_word, .or_word, .bsl, .bsr => .scalar_checked,
+    };
+    if (left == .real and right == .real) return switch (operation) {
+        // A NaN lane is a scalar Type fault, so the vector loop carries a
+        // block mask even though ordinary comparisons and selection cannot
+        // otherwise fail.
+        .eq, .ne, .lt, .gt, .le, .ge, .min, .max => .vector_checked,
+        .add, .sub, .mul, .div, .pow, .atan2 => .scalar_checked,
+        .int_div, .mod, .and_word, .or_word, .band, .bor, .bxor, .bsl, .bsr => .scalar_checked,
+    };
+    if (left == .byte and right == .byte) return switch (operation) {
+        .eq, .ne, .lt, .gt, .le, .ge, .min, .max, .band, .bor, .bxor => .scalar_infallible,
+        .add, .sub, .mul, .div, .int_div, .mod, .pow, .atan2, .and_word, .or_word, .bsl, .bsr => .scalar_checked,
+    };
+    return .scalar_checked;
+}
+
+/// `suggestVectorLength(i64)` describes register width, not whether every i64
+/// operation exists in that ISA. In particular, NEON and pre-AVX512 x86 lack a
+/// packed 64-bit multiply and LLVM scalarizes the explicit vector with extra
+/// mask traffic. Select it only where the target has a native lane operation.
+fn targetHasVectorI64Multiply() bool {
+    return switch (builtin.cpu.arch) {
+        .aarch64 => builtin.cpu.has(.aarch64, .sve),
+        .x86, .x86_64 => builtin.cpu.has(.x86, .avx512dq),
+        .riscv32, .riscv64 => builtin.cpu.has(.riscv, .v),
+        .wasm32, .wasm64 => std.simd.suggestVectorLength(i64) != null,
+        else => false,
+    };
+}
+
+fn unaryLoopPolicy(comptime operation: UnaryOp, comptime operand: Number) LoopPolicy {
+    if (operand == .integer and operation == .bnot) return .vector_infallible;
+    return .scalar_checked;
+}
+
 /// A typed input operand. A leaf is reached through a reader that retains its
 /// root for the driver's whole lifetime; `aliased` marks the operand whose
 /// buffer the result is taking over, whose reads come from the output capability
@@ -1338,10 +1392,10 @@ fn fixedCharStep(
     comptime right_class: FlatScalarClass,
     comptime shape: Shape,
 ) FixedCharStep {
-    const Loops = flat.Family(left_class.Element(), right_class.Element(), i64);
+    const Loops = flat.CheckedFamily(left_class.Element(), right_class.Element(), i64);
     const body = struct {
-        fn run(a: left_class.Element(), b: right_class.Element()) ?i64 {
-            const result = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch return null;
+        fn run(a: left_class.Element(), b: right_class.Element()) error{Fault}!i64 {
+            const result = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch return error.Fault;
             return result.int;
         }
     }.run;
@@ -1385,7 +1439,7 @@ fn fixedCharStep(
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
-                switch (shape) {
+                const status = switch (shape) {
                     .leaf_leaf => Loops.binary(
                         body,
                         state.left.slice(left_class),
@@ -1408,8 +1462,8 @@ fn fixedCharStep(
                         &block,
                     ),
                     .leaf_only => unreachable,
-                }
-                if (block.faulted) return replay(state, context, piece);
+                };
+                if (status == .faulted) return replay(state, context, piece);
                 state.output.writeRange(piece.start, block.written());
                 offset += piece.len();
             }
@@ -1478,10 +1532,10 @@ fn dynamicCharStep(
     comptime right_class: FlatScalarClass,
     comptime shape: Shape,
 ) DynamicCharStep {
-    const Loops = flat.Family(left_class.Element(), right_class.Element(), u32);
+    const Loops = flat.CheckedFamily(left_class.Element(), right_class.Element(), u32);
     const body = struct {
-        fn run(a: left_class.Element(), b: right_class.Element()) ?u32 {
-            const result = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch return null;
+        fn run(a: left_class.Element(), b: right_class.Element()) error{Fault}!u32 {
+            const result = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch return error.Fault;
             return result.char;
         }
     }.run;
@@ -1525,7 +1579,7 @@ fn dynamicCharStep(
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
-                switch (shape) {
+                const status = switch (shape) {
                     .leaf_leaf => Loops.binary(
                         body,
                         state.left.slice(left_class),
@@ -1548,8 +1602,8 @@ fn dynamicCharStep(
                         &block,
                     ),
                     .leaf_only => unreachable,
-                }
-                if (block.faulted) return replay(state, context, piece);
+                };
+                if (status == .faulted) return replay(state, context, piece);
                 if (state.phase == .profile) {
                     for (block.written()) |codepoint| state.max_codepoint = @max(state.max_codepoint, codepoint);
                 } else state.writer.?.borrowMut().writeCodepoints(piece.start, block.written());
@@ -1658,12 +1712,114 @@ fn binaryStep(
     comptime shape: Shape,
 ) TypedStep {
     const out = comptime binaryResult(operation, left_class, right_class).?;
-    const Loops = flat.Family(left_class.Element(), right_class.Element(), out.Element());
-    const body = struct {
-        fn run(a: left_class.Element(), b: right_class.Element()) ?out.Element() {
-            const result = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch
-                return null;
+    const policy = comptime binaryLoopPolicy(operation, left_class, right_class);
+    const ScalarInfallible = flat.InfallibleFamily(left_class.Element(), right_class.Element(), out.Element());
+    const ScalarChecked = flat.CheckedFamily(left_class.Element(), right_class.Element(), out.Element());
+    const lanes = std.simd.suggestVectorLength(left_class.Element()) orelse 1;
+    const Vectors = flat.VectorFamily(left_class.Element(), right_class.Element(), out.Element(), lanes);
+    const infallible_body = struct {
+        fn run(a: left_class.Element(), b: right_class.Element()) out.Element() {
+            return switch (operation) {
+                .eq => @intFromBool(a == b),
+                .ne => @intFromBool(a != b),
+                .lt => @intFromBool(a < b),
+                .gt => @intFromBool(a > b),
+                .le => @intFromBool(a <= b),
+                .ge => @intFromBool(a >= b),
+                .min => if (b < a) b else a,
+                .max => if (b > a) b else a,
+                .band => @intCast(a & b),
+                .bor => @intCast(a | b),
+                .bxor => @intCast(a ^ b),
+                .add,
+                .sub,
+                .mul,
+                .div,
+                .int_div,
+                .mod,
+                .pow,
+                .atan2,
+                .and_word,
+                .or_word,
+                .bsl,
+                .bsr,
+                => unreachable,
+            };
+        }
+    }.run;
+    const checked_body = struct {
+        fn run(a: left_class.Element(), b: right_class.Element()) error{Fault}!out.Element() {
+            const result = scalarBinary(operation, left_class.boxed(a), right_class.boxed(b)) catch return error.Fault;
             return out.unboxed(result);
+        }
+    }.run;
+    const vector_body = struct {
+        fn run(
+            a: @Vector(lanes, left_class.Element()),
+            b: @Vector(lanes, right_class.Element()),
+        ) @Vector(lanes, out.Element()) {
+            const ones: @Vector(lanes, i64) = @splat(1);
+            const zeroes: @Vector(lanes, i64) = @splat(0);
+            return switch (operation) {
+                .eq => @select(i64, a == b, ones, zeroes),
+                .ne => @select(i64, a != b, ones, zeroes),
+                .lt => @select(i64, a < b, ones, zeroes),
+                .gt => @select(i64, a > b, ones, zeroes),
+                .le => @select(i64, a <= b, ones, zeroes),
+                .ge => @select(i64, a >= b, ones, zeroes),
+                .min => @select(left_class.Element(), b < a, b, a),
+                .max => @select(left_class.Element(), b > a, b, a),
+                .band => a & b,
+                .bor => a | b,
+                .bxor => a ^ b,
+                .add,
+                .sub,
+                .mul,
+                .div,
+                .int_div,
+                .mod,
+                .pow,
+                .atan2,
+                .and_word,
+                .or_word,
+                .bsl,
+                .bsr,
+                => unreachable,
+            };
+        }
+    }.run;
+    const checked_vector_body = struct {
+        fn run(
+            a: @Vector(lanes, left_class.Element()),
+            b: @Vector(lanes, right_class.Element()),
+        ) flat.MaskedVector(out.Element(), lanes) {
+            if (left_class == .integer and right_class == .integer) {
+                const result = switch (operation) {
+                    .add => @addWithOverflow(a, b),
+                    .sub => @subWithOverflow(a, b),
+                    .mul => @mulWithOverflow(a, b),
+                    else => unreachable,
+                };
+                const no_overflow: @Vector(lanes, u1) = @splat(0);
+                return .{ .values = result[0], .faults = result[1] != no_overflow };
+            }
+            const nan = (a != a) | (b != b);
+            const ones: @Vector(lanes, i64) = @splat(1);
+            const zeroes: @Vector(lanes, i64) = @splat(0);
+            return .{
+                .values = switch (operation) {
+                    .eq => @select(i64, a == b, ones, zeroes),
+                    .ne => @select(i64, a != b, ones, zeroes),
+                    .lt => @select(i64, a < b, ones, zeroes),
+                    .gt => @select(i64, a > b, ones, zeroes),
+                    .le => @select(i64, a <= b, ones, zeroes),
+                    .ge => @select(i64, a >= b, ones, zeroes),
+                    .min => @select(left_class.Element(), b < a, b, a),
+                    .max => @select(left_class.Element(), b > a, b, a),
+                    else => unreachable,
+                },
+                .faults = nan,
+            };
         }
     }.run;
     return struct {
@@ -1704,31 +1860,45 @@ fn binaryStep(
 
         fn step(state: *TypedState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
-            var block = Loops.Staging.init();
+            var block = flat.Block(out.Element()).init();
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
-                switch (shape) {
-                    .leaf_leaf => Loops.binary(body, leftSlice(state), rightSlice(state), piece, &block),
-                    .leaf_scalar => Loops.binaryScalarRight(
-                        body,
-                        leftSlice(state),
-                        right_class.unboxed(state.right.scalar),
-                        piece,
-                        &block,
-                    ),
-                    .scalar_leaf => Loops.binaryScalarLeft(
-                        body,
-                        left_class.unboxed(state.left.scalar),
-                        rightSlice(state),
-                        piece,
-                        &block,
-                    ),
-                    .leaf_only => unreachable,
-                }
+                const status: flat.CheckedStatus = switch (comptime policy) {
+                    .vector_infallible => blk: {
+                        switch (shape) {
+                            .leaf_leaf => Vectors.binary(vector_body, infallible_body, leftSlice(state), rightSlice(state), piece, &block),
+                            .leaf_scalar => Vectors.binaryScalarRight(vector_body, infallible_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
+                            .scalar_leaf => Vectors.binaryScalarLeft(vector_body, infallible_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
+                            .leaf_only => unreachable,
+                        }
+                        break :blk .clean;
+                    },
+                    .vector_checked => switch (shape) {
+                        .leaf_leaf => Vectors.checkedBinary(checked_vector_body, checked_body, leftSlice(state), rightSlice(state), piece, &block),
+                        .leaf_scalar => Vectors.checkedBinaryScalarRight(checked_vector_body, checked_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
+                        .scalar_leaf => Vectors.checkedBinaryScalarLeft(checked_vector_body, checked_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
+                        .leaf_only => unreachable,
+                    },
+                    .scalar_infallible => blk: {
+                        switch (shape) {
+                            .leaf_leaf => ScalarInfallible.binary(infallible_body, leftSlice(state), rightSlice(state), piece, &block),
+                            .leaf_scalar => ScalarInfallible.binaryScalarRight(infallible_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
+                            .scalar_leaf => ScalarInfallible.binaryScalarLeft(infallible_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
+                            .leaf_only => unreachable,
+                        }
+                        break :blk .clean;
+                    },
+                    .scalar_checked => switch (shape) {
+                        .leaf_leaf => ScalarChecked.binary(checked_body, leftSlice(state), rightSlice(state), piece, &block),
+                        .leaf_scalar => ScalarChecked.binaryScalarRight(checked_body, leftSlice(state), right_class.unboxed(state.right.scalar), piece, &block),
+                        .scalar_leaf => ScalarChecked.binaryScalarLeft(checked_body, left_class.unboxed(state.left.scalar), rightSlice(state), piece, &block),
+                        .leaf_only => unreachable,
+                    },
+                };
                 // Nothing is stored until the whole block is known clean: a
                 // reused input buffer still holds the operands the replay reads.
-                if (block.faulted) return replay(state, context, piece);
+                if (status == .faulted) return replay(state, context, piece);
                 state.output.store(out, piece.start, block.written());
                 offset += piece.len();
             }
@@ -1739,11 +1909,30 @@ fn binaryStep(
 /// One charged chunk of a unary typed operation.
 fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedStep {
     const out = comptime unaryResult(operation, operand_class);
-    const Loops = flat.Family(operand_class.Element(), void, out.Element());
-    const body = struct {
-        fn run(a: operand_class.Element()) ?out.Element() {
-            const result = scalarUnary(operation, operand_class.boxed(a)) catch return null;
+    const policy = comptime unaryLoopPolicy(operation, operand_class);
+    const Checked = flat.CheckedFamily(operand_class.Element(), void, out.Element());
+    const lanes = std.simd.suggestVectorLength(operand_class.Element()) orelse 1;
+    const Vectors = flat.VectorFamily(operand_class.Element(), void, out.Element(), lanes);
+    const infallible_body = struct {
+        fn run(a: operand_class.Element()) out.Element() {
+            return switch (operation) {
+                .bnot => ~a,
+                .not_word, .neg, .abs, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => unreachable,
+            };
+        }
+    }.run;
+    const checked_body = struct {
+        fn run(a: operand_class.Element()) error{Fault}!out.Element() {
+            const result = scalarUnary(operation, operand_class.boxed(a)) catch return error.Fault;
             return out.unboxed(result);
+        }
+    }.run;
+    const vector_body = struct {
+        fn run(a: @Vector(lanes, operand_class.Element())) @Vector(lanes, out.Element()) {
+            return switch (operation) {
+                .bnot => ~a,
+                .not_word, .neg, .abs, .sqrt, .floor, .ceil, .round, .exp, .log, .sin, .cos => unreachable,
+            };
         }
     }.run;
     return struct {
@@ -1765,12 +1954,19 @@ fn unaryStep(comptime operation: UnaryOp, comptime operand_class: Number) TypedS
 
         fn step(state: *TypedState, context: support.Context) MachineError!void {
             const range = try state.cursor.nextRange(context) orelse return;
-            var block = Loops.Staging.init();
+            var block = flat.Block(out.Element()).init();
             var offset: usize = 0;
             while (offset != range.len()) {
                 const piece = flat.blockRange(range, offset);
-                Loops.unary(body, operandSlice(state), piece, &block);
-                if (block.faulted) return replay(state, context, piece);
+                const status: flat.CheckedStatus = switch (comptime policy) {
+                    .vector_infallible => blk: {
+                        Vectors.unary(vector_body, infallible_body, operandSlice(state), piece, &block);
+                        break :blk .clean;
+                    },
+                    .scalar_checked => Checked.unary(checked_body, operandSlice(state), piece, &block),
+                    .vector_checked, .scalar_infallible => unreachable,
+                };
+                if (status == .faulted) return replay(state, context, piece);
                 state.output.store(out, piece.start, block.written());
                 offset += piece.len();
             }

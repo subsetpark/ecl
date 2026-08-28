@@ -115,6 +115,7 @@ const Inputs = union(enum) {
     codepoints: []const u32,
     symbols: []const u32,
     int_pair: struct { left: []const i64, right: []const i64 },
+    float_pair: struct { left: []const f64, right: []const f64 },
     mixed_pair: struct { left: []const i64, right: []const f64 },
     codepoint_pair: struct { left: []const u32, right: []const u32 },
     codepoint_int_pair: struct { left: []const u32, right: []const i64 },
@@ -146,6 +147,12 @@ const Inputs = union(enum) {
                 buffer[0] = try buildInts(representation, pair.left);
                 errdefer runtime.release(buffer[0]);
                 buffer[1] = try buildInts(representation, pair.right);
+                return buffer[0..2];
+            },
+            .float_pair => |pair| {
+                buffer[0] = try buildFloats(representation, pair.left);
+                errdefer runtime.release(buffer[0]);
+                buffer[1] = try buildFloats(representation, pair.right);
                 return buffer[0..2];
             },
             .mixed_pair => |pair| {
@@ -612,6 +619,77 @@ test "typed kernels: fault blocks report the first logical index and validate al
     defer allocator.free(rendered);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'type") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "'index 0") != null);
+}
+
+test "typed kernels: explicit vector cores preserve lanes tails broadcasts aliases and first faults" {
+    var runtime = try session.Session.init(allocator, &.{});
+    defer runtime.deinit();
+
+    const length = flat.block_size * 2 + 3;
+    const left = try allocator.alloc(i64, length);
+    defer allocator.free(left);
+    const right = try allocator.alloc(i64, length);
+    defer allocator.free(right);
+    const left_real = try allocator.alloc(f64, length);
+    defer allocator.free(left_real);
+    const right_real = try allocator.alloc(f64, length);
+    defer allocator.free(right_real);
+    for (left, right, left_real, right_real, 0..) |*a, *b, *af, *bf, index| {
+        a.* = @as(i64, @intCast(index % 31)) - 15;
+        b.* = 7 - @as(i64, @intCast(index % 19));
+        af.* = @as(f64, @floatFromInt(a.*)) + 0.25;
+        bf.* = @as(f64, @floatFromInt(b.*)) - 0.5;
+    }
+
+    // Full vectors plus a short tail, every operand shape, and every explicit
+    // infallible vector family.
+    inline for ([_][]const u8{ "=", "<>", "<", ">", "<=", ">=", "min", "max", "band", "bor", "bxor" }) |word| {
+        try expectParity(&runtime, .{ .int_pair = .{ .left = left, .right = right } }, word);
+        try expectParity(&runtime, .{ .ints = left }, "3 " ++ word);
+        try expectParity(&runtime, .{ .ints = left }, "3 swap " ++ word);
+    }
+    try expectParity(&runtime, .{ .ints = left }, "bnot");
+    inline for ([_][]const u8{ "=", "<>", "<", ">", "<=", ">=", "min", "max" }) |word| {
+        try expectParity(&runtime, .{ .float_pair = .{ .left = left_real, .right = right_real } }, word);
+        try expectParity(&runtime, .{ .floats = left_real }, "3.5 " ++ word);
+        try expectParity(&runtime, .{ .floats = left_real }, "3.5 swap " ++ word);
+    }
+
+    // Selection must return the left operand on a tie, including the exact
+    // sign bit of floating zero.
+    try expectParity(&runtime, .{ .floats = &.{ -0.0, 0.0, -0.0 } }, "0.0 min");
+    try expectParity(&runtime, .{ .floats = &.{ -0.0, 0.0, -0.0 } }, "0.0 max");
+
+    // Checked vector arithmetic publishes no part of a faulted block. The
+    // unique leaf/scalar shape aliases the output buffer, making corruption
+    // observable when the generic replay compares the complete outcome.
+    inline for ([_]struct { word: []const u8, dangerous: i64 }{
+        .{ .word = "+", .dangerous = std.math.maxInt(i64) },
+        .{ .word = "-", .dangerous = std.math.minInt(i64) },
+        .{ .word = "*", .dangerous = std.math.maxInt(i64) },
+    }) |case| {
+        for ([_]usize{ 0, 1, flat.block_size - 1, flat.block_size, length - 1 }) |position| {
+            @memset(left, 2);
+            left[position] = case.dangerous;
+            try expectParity(&runtime, .{ .ints = left }, "2 " ++ case.word);
+        }
+    }
+
+    // NaN is not comparable in the scalar authority. A vector fault mask must
+    // therefore replay and report the first NaN's logical index.
+    @memset(left_real, 1.5);
+    const nan_position = flat.block_size + 1;
+    left_real[nan_position] = std.math.nan(f64);
+    inline for ([_][]const u8{ "<", "min" }) |word| {
+        try expectParity(&runtime, .{ .floats = left_real }, "2.0 " ++ word);
+        const input = try buildFloats(.specialized, left_real);
+        const rendered = try outcome(&runtime, &.{input}, "2.0 " ++ word);
+        defer allocator.free(rendered);
+        var expected_index: [64]u8 = undefined;
+        const needle = try std.fmt.bufPrint(&expected_index, "'index {d}", .{nan_position});
+        try std.testing.expect(std.mem.indexOf(u8, rendered, needle) != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered, "'kind 'type") != null);
+    }
 }
 
 test "typed kernels: temporary bytes are bounded by output plus one kernel chunk under a DebugAllocator limit" {

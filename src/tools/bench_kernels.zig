@@ -106,6 +106,14 @@ const Case = struct {
 /// One case per operation class the workstream names, each paired with a ragged
 /// or boxed case in the same class as the comparison floor.
 const cases = [_]Case{
+    .{ .class = "explicit SIMD", .name = "checked i64 add", .setup = "1000000 range", .workload = "1 + len" },
+    .{ .class = "explicit SIMD", .name = "checked i64 multiply", .setup = "1000000 range", .workload = "2 * len" },
+    .{ .class = "explicit SIMD", .name = "i64 comparison", .setup = "1000000 range", .workload = "500000 < len" },
+    .{ .class = "explicit SIMD", .name = "f64 comparison", .setup = "1000000 range 0.5 *", .workload = "500000.0 < len" },
+    .{ .class = "explicit SIMD", .name = "i64 minimum", .setup = "1000000 range", .workload = "500000 min len" },
+    .{ .class = "explicit SIMD", .name = "f64 maximum", .setup = "1000000 range 0.5 *", .workload = "500000.0 max len" },
+    .{ .class = "explicit SIMD", .name = "i64 bitwise", .setup = "1000000 range", .workload = "1 bxor len" },
+    .{ .class = "explicit SIMD", .name = "i64 unary", .setup = "1000000 range", .workload = "bnot len" },
     .{ .class = "flat pervasion", .name = "leaf x scalar", .setup = "1000000 range", .workload = "1 + len" },
     .{ .class = "flat pervasion", .name = "leaf x leaf", .setup = "1000000 range", .workload = "dup + len" },
     .{ .class = "flat pervasion", .name = "unary", .setup = "1000000 range", .workload = "neg len" },
@@ -184,6 +192,14 @@ fn measure(io: std.Io, case: Case) !Measurement {
 }
 
 pub fn main(init: std.process.Init) !void {
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    defer args.deinit();
+    _ = args.skip();
+    const explicit_simd_only = if (args.next()) |argument|
+        std.mem.eql(u8, argument, "--explicit-simd-only")
+    else
+        false;
+
     var buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const out = &stdout.interface;
@@ -200,43 +216,46 @@ pub fn main(init: std.process.Init) !void {
         .{ "class", "case", "allocations", "peak bytes", "polls", "ms" },
     );
     try out.flush();
-    for (scaling_sizes) |size| {
-        for ([_]bool{ false, true }) |ragged| {
-            const setup = if (ragged)
-                try std.fmt.allocPrint(std.heap.page_allocator, "{d} range (wrap) each", .{size})
-            else
-                try std.fmt.allocPrint(std.heap.page_allocator, "{d} range", .{size});
-            defer std.heap.page_allocator.free(setup);
-            const result = measure(init.io, .{
-                .class = "scaling",
-                .name = if (ragged) "ragged x scalar" else "flat x scalar",
-                .setup = setup,
-                .workload = "1 + len",
-            }) catch |err| {
+    if (!explicit_simd_only) {
+        for (scaling_sizes) |size| {
+            for ([_]bool{ false, true }) |ragged| {
+                const setup = if (ragged)
+                    try std.fmt.allocPrint(std.heap.page_allocator, "{d} range (wrap) each", .{size})
+                else
+                    try std.fmt.allocPrint(std.heap.page_allocator, "{d} range", .{size});
+                defer std.heap.page_allocator.free(setup);
+                const result = measure(init.io, .{
+                    .class = "scaling",
+                    .name = if (ragged) "ragged x scalar" else "flat x scalar",
+                    .setup = setup,
+                    .workload = "1 + len",
+                }) catch |err| {
+                    try out.print(
+                        "{s: <18} {s: <26} {d: >12} {s: >14}\n",
+                        .{ "scaling", if (ragged) "ragged x scalar" else "flat x scalar", size, @errorName(err) },
+                    );
+                    try out.flush();
+                    continue;
+                };
                 try out.print(
-                    "{s: <18} {s: <26} {d: >12} {s: >14}\n",
-                    .{ "scaling", if (ragged) "ragged x scalar" else "flat x scalar", size, @errorName(err) },
+                    "{s: <18} {s: <26} {d: >12} {d: >14} {d: >10} {d: >12.3}{s}  n={d}\n",
+                    .{
+                        "scaling",
+                        if (ragged) "ragged x scalar" else "flat x scalar",
+                        result.allocations,
+                        result.peak_bytes,
+                        result.polls,
+                        @as(f64, @floatFromInt(result.nanoseconds)) / std.time.ns_per_ms,
+                        if (result.failed) "  (failed)" else "",
+                        size,
+                    },
                 );
                 try out.flush();
-                continue;
-            };
-            try out.print(
-                "{s: <18} {s: <26} {d: >12} {d: >14} {d: >10} {d: >12.3}{s}  n={d}\n",
-                .{
-                    "scaling",
-                    if (ragged) "ragged x scalar" else "flat x scalar",
-                    result.allocations,
-                    result.peak_bytes,
-                    result.polls,
-                    @as(f64, @floatFromInt(result.nanoseconds)) / std.time.ns_per_ms,
-                    if (result.failed) "  (failed)" else "",
-                    size,
-                },
-            );
-            try out.flush();
+            }
         }
     }
     for (cases) |case| {
+        if (explicit_simd_only and !std.mem.eql(u8, case.class, "explicit SIMD")) continue;
         const result = measure(init.io, case) catch |err| {
             try out.print("{s: <18} {s: <26} {s: >12}\n", .{ case.class, case.name, @errorName(err) });
             try out.flush();
