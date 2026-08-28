@@ -789,6 +789,13 @@ allocation failure interrupt it at bounded intervals.
   sorting is one parameterized `MergeSortCursor`; reflection name ordering
   and language `grade` supply only their payload and resumable comparator,
   so resumption and stability have one implementation.
+- **Nested continuation uses one allowance.** A parent that may continue after
+  a child cursor completes passes a single `WorkBudget` through that child;
+  it never guesses consumption from an integer originally handed down. The
+  membership-to-structural-match path is the production instance: parent
+  frames and comparison actions charge the same allowance, so child completion
+  can batch into the next parent transition while exhaustion remains a hard
+  scheduler-visible boundary.
 - **Aggregate algorithms belong to their value owner.** `list.zig` owns
   specialization plus generic, codepoint, byte, integer, float, and symbol
   materializers. Every blocking list constructor drives one of those same

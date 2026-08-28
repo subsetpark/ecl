@@ -737,8 +737,8 @@ const MembershipCursor = struct {
         }
     }
     pub fn advance(self: *MembershipCursor, evaluator: *Machine, budget: usize) MachineError!IndexProgress {
-        var remaining = budget;
-        while (remaining != 0) : (remaining -= 1) {
+        var work: poll.WorkBudget = .init(budget);
+        while (work.spend()) {
             var frame = self.frames.pop() orelse {
                 const result = self.last.?;
                 self.last = null;
@@ -772,8 +772,8 @@ const MembershipCursor = struct {
                         continue;
                     }
                     // A candidate with no structure against a needle with none
-                    // is one comparison. Only a pair that has some needs the
-                    // worklist, which was being allocated for every candidate.
+                    // is one comparison. Only a structured pair needs the
+                    // nested comparison cursor and its shared budget.
                     const candidate_value = list.atUnchecked(self.collection, search.candidate);
                     if (equal.matchWithoutStructure(search.needle, candidate_value)) |matches| {
                         if (matches) {
@@ -789,7 +789,7 @@ const MembershipCursor = struct {
                         search.needle,
                         candidate_value,
                     );
-                    switch (try search.match.?.advance(remaining)) {
+                    switch (try search.match.?.advanceWithBudget(&work)) {
                         .pending => {
                             try self.frames.push(.{ .search = search.* });
                             return .pending;
@@ -803,7 +803,7 @@ const MembershipCursor = struct {
                                 search.candidate += 1;
                                 try self.frames.push(.{ .search = search.* });
                             }
-                            return .pending;
+                            continue;
                         },
                     }
                 },
@@ -834,7 +834,11 @@ const MembershipCursor = struct {
                     if (build.materializer == null)
                         build.materializer = .init(self.allocator, build.values.values());
                     try self.frames.reserve(1);
-                    switch (try build.materializer.?.advance(remaining)) {
+                    if (work.exhausted()) {
+                        self.frames.pushReserved(.{ .build = build.* });
+                        return .pending;
+                    }
+                    switch (try build.materializer.?.advance(work.remaining)) {
                         .pending => {
                             self.frames.pushReserved(.{ .build = build.* });
                             return .pending;

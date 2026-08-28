@@ -117,8 +117,18 @@ pub const MatchCursor = struct {
     }
 
     pub fn advance(self: *MatchCursor, budget: usize) error{OutOfMemory}!MatchProgress {
-        std.debug.assert(budget != 0);
-        for (0..budget) |_| {
+        var work: poll.WorkBudget = .init(budget);
+        return self.advanceWithBudget(&work);
+    }
+
+    /// Advances against the caller's one shared allowance. A parent cursor
+    /// can continue after completion without guessing how much child work the
+    /// completed comparison consumed.
+    pub fn advanceWithBudget(
+        self: *MatchCursor,
+        work: *poll.WorkBudget,
+    ) error{OutOfMemory}!MatchProgress {
+        while (work.spend()) {
             if (try self.step()) |result| return .{ .complete = result };
         }
         return .pending;

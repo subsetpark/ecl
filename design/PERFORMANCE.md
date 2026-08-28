@@ -23,7 +23,10 @@ timeout 500 zig build bench-workdrivers -Doptimize=ReleaseFast < /dev/null
 
 `-- --quick` selects reduced size sets with three repetitions. It is a smoke
 gate and is not performance evidence. `-- --cursor-storage-only` selects the
-focused first-frame cursor workload and retains the full 101 repetitions.
+focused first-frame cursor workload, `-- --nested-cursor-only` selects the
+shared-budget workload, and `-- --latency-only` selects the mixed short-task
+and cancellation safeguards. Without `--quick`, each retains the full 101
+repetitions.
 
 ### Selected timing results
 
@@ -94,5 +97,40 @@ identical. The treatment therefore clears both gates: it removes the attributed
 allocation rather than moving it, and produces a large repeated release-mode
 improvement on the affected path. The general throughput cases remain at their
 27-allocation fixed baseline because they do not construct this cursor; the
-focused case remains in schema `ecl.workdrivers.*.v2` to keep that distinction
-observable.
+focused case remains in the versioned WorkDriver schema to keep that
+distinction observable.
+
+## Nested-cursor budget A/B — 2026-08-28
+
+The second intervention tested the conservative boundary between generic-spine
+membership and structural equality. The control handed `MatchCursor` an integer
+remaining count and returned to the scheduler whenever the child completed,
+because the parent could not know the exact consumption. The treatment passes
+one `WorkBudget` through both cursors, allowing the parent to continue only
+while that same bounded allowance remains. Both variants were compiled from
+one temporary build-time switch, removed after acceptance.
+
+The focused public workload searches a generic spine of structurally compared
+dictionaries and deliberately misses so every candidate crosses the nested
+cursor boundary. ReleaseSafe timings below are 101 repetitions on macOS arm64
+(Apple M4 Max), Zig 0.16.0; times are wall-clock milliseconds.
+
+| Workers | Candidates | Control p50 | Shared-budget p50 | Reduction | Control resumes | Shared-budget resumes | Control handoffs | Shared-budget handoffs |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 32 | 0.036 | 0.033 | 9.0% | 36 | 4 | 32 | 0 |
+| 1 | 1,024 | 0.224 | 0.122 | 45.7% | 1,028 | 4 | 1,024 | 0 |
+| 1 | 65,536 | 12.803 | 5.946 | 53.6% | 65,540 | 13 | 65,536 | 9 |
+| 8 | 32 | 0.034 | 0.032 | 6.0% | 36 | 4 | 32 | 0 |
+| 8 | 1,024 | 0.228 | 0.122 | 46.4% | 1,028 | 4 | 1,024 | 0 |
+| 8 | 65,536 | 13.339 | 5.946 | 55.4% | 65,540 | 13 | 65,536 | 9 |
+
+Allocation count (38), peak temporary bytes (82,280), logical dispatch (3),
+and application resumes (0) are identical. At 65,536 candidates the treatment
+still makes nine scheduler handoffs, proving the throughput change did not turn
+the traversal into one unbounded slice. Two reversed-order 101-repetition
+latency comparisons left the unrelated mixed short-task and cancellation
+p50/p95 results within 3.1%, with identical deterministic counters; a first
+eight-worker tail was not reproducible. The treatment therefore clears the
+throughput and hard-progress gates without motivating a scheduler or quantum
+change. The focused workload and the optional `--latency-only` selection remain
+in schema `ecl.workdrivers.*.v3`.
