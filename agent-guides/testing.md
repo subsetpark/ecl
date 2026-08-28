@@ -154,16 +154,15 @@ reason first, not the matrix.
   `test-oom`; it fired only once a module auto-load inside racing children widened the
   window. When TSan does crash, isolate with a counterfactual run—remove the suspected
   trigger with the fix still absent—before claiming a cause.
-- **Zig 0.16's bundled Linux TSan can call null libc interceptors on
-  GitHub-hosted runners before any test executes.** Confirming backtraces reach
-  address zero from `___interceptor_sigaltstack`,
-  `___interceptor_sigemptyset`, and `___interceptor_dl_iterate_phdr`, while Zig
-  configures its alternative signal stack and segfault handler or captures the
-  test runner's progress trace. The CI step temporarily disables all three
-  startup features in the generated test runner, which owns `std.options` for
-  the test executable; production and non-TSan builds retain Zig's defaults.
-  Do not replace this with ASLR or Docker seccomp changes: both
-  counterfactuals left the hosted crash unchanged.
+- **Run Zig 0.16's bundled Linux TSan against glibc, not Alpine/musl.** On
+  GitHub-hosted runners the musl binary leaves multiple TSan libc interceptors
+  unresolved and crashes before an ECL test body executes. Confirming
+  backtraces reach address zero from `___interceptor_sigaltstack`,
+  `___interceptor_sigemptyset`, `___interceptor_dl_iterate_phdr`, and
+  `___interceptor_sched_getaffinity`. CI therefore runs only the TSan gate in a
+  dedicated Ubuntu container; do not weaken the test runner by disabling each
+  intercepted feature. ASLR and Docker seccomp counterfactuals also left the
+  hosted crash unchanged.
 - **Never run `zig build test-tsan` directly on macOS. It is Docker-only, without
   exception.** Zig 0.16's native arm64 macOS sanitizer runtime segfaults *before `main`*:
   `libclang_rt.tsan_osx_dynamic.dylib` faults in `__tsan::InitializePlatform` →
@@ -179,7 +178,7 @@ reason first, not the matrix.
   interpreting *any* TSan crash: pass a filter that matches no test. If it still SEGVs, the
   binary is dying in startup and no test is involved.
 
-  Run it in the same Linux/x86_64 Alpine environment used by CI; the Linux/arm64 runtime
+  Run it in the same Linux/x86_64 glibc environment used by CI; the Linux/arm64 runtime
   may in turn fail while unmapping shadow memory under Docker Desktop. Keep the checkout
   read-only and caches container-local. Copy the checkout to a writable directory inside
   the container rather than building in the read-only mount: suites that call
@@ -187,15 +186,18 @@ reason first, not the matrix.
   `-w /work` aborts them with `ReadOnlyFileSystem` before any race can be observed.
 
   ```sh
-  docker run --rm --platform linux/amd64 \
-    -v "$PWD":/work:ro alpine:latest sh -euxc '
-      apk add --no-cache curl xz linux-headers
+  timeout 25m docker run --rm --platform linux/amd64 \
+    -v "$PWD":/work:ro ubuntu:24.04 bash -euxo pipefail -c '
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends ca-certificates curl libc6-dev xz-utils
       curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
       echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
       mkdir -p /tmp/zig
       tar -C /tmp/zig --strip-components=1 -xf /tmp/zig.tar.xz
       mkdir -p /build && cp -a /work/. /build/ && cd /build
-      /tmp/zig/zig build --cache-dir /tmp/ecl-cache --global-cache-dir /tmp/ecl-global test-tsan
+      timeout 20m /tmp/zig/zig build --cache-dir /tmp/ecl-cache \
+        --global-cache-dir /tmp/ecl-global test-tsan < /dev/null
     '
   ```
 
