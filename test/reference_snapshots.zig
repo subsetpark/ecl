@@ -799,20 +799,16 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: 3 'x set 'x see
         \\exit: 0
         \\stdout:
-        \\### def x
-        \\([3] first) 'x def
+        \\([3] first)
         \\stderr:
         \\<empty>
         \\=== see set ===
         \\source: 'set see
         \\exit: 0
         \\stdout:
-        \\### def set
-        \\(: "Bind a value as a constant word in the current scope; an optional annotation may precede the
-        \\    value.")
+        \\(:
+        \\ "Bind a value as a constant word in the current scope; an optional annotation may precede the value.")
         \\(swap literal swap def)
-        \\'set
-        \\def
         \\stderr:
         \\<empty>
         \\=== setp ===
@@ -862,11 +858,8 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\exit: 0
         \\stdout:
         \\(quotation -- ... :
-        \\ "Run a quotation against a private draft of the home module's durable stack and publish the
-        \\  result.")
+        \\ "Run a quotation against a private draft of the home module's durable stack and publish the result.")
         \\<primitive>
-        \\'within
-        \\def
         \\stderr:
         \\<empty>
         \\=== doc without ===
@@ -1199,8 +1192,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\source: (a -- ...) (dup) 'f def 'f see
         \\exit: 0
         \\stdout:
-        \\### def f
-        \\(a -- ...) (dup) 'f def
+        \\(a -- ...) (dup)
         \\stderr:
         \\<empty>
         \\=== row after mixing ===

@@ -133,7 +133,7 @@ test "stdlib: qualified reflection auto-loads every module transport" {
     defer runtime.deinit();
     try expectOk(&runtime, "'csv.parse which 'result.ok see");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "csv.parse") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "result.ok") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(dup type 'list match?") != null);
 }
 
 test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling" {

@@ -431,12 +431,7 @@ test "concurrency: primitive @each is reflective and task-join is absent" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         output.buffered(),
-        "(sequence unit-input -- results :\n" ++
-            " \"Apply a quotation or unit plan concurrently in one fresh unit per element and return one result\n" ++
-            "  per element in input order.\")\n" ++
-            "<primitive>\n" ++
-            "'@each\n" ++
-            "def\n",
+        "<primitive>\n",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "await-all") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "@each") != null);

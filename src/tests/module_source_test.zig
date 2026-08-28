@@ -672,7 +672,7 @@ test "module: import explicitly replaces one binding and preserves metadata" {
         "1 'mean set 'stats.mean 'mean import mean 'stats.count 'count import count " ++
         "'count doc \"Count.\" match? 'count see");
     try std.testing.expectEqualStrings("", diagnostics.written());
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- n : \"Count.\") (stats.count) 'count def") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(stats.count)\n") != null);
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 4), runtime.stackItems()[1].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
@@ -787,7 +787,7 @@ test "module: a parameterized behavior dependency is a quotation the caller wrot
     });
 }
 
-test "reflection: which and see expose home shadow and effect" {
+test "reflection: which and see expose metadata while see omits the definition wrapper" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -807,13 +807,13 @@ test "reflection: which and see expose home shadow and effect" {
     defer runtime.deinit();
     try expectOk(&runtime, "(40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm.f 'f import " ++
         "'m.f see 9 'f set 'f which 'f see words");
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- n) (s 2 +) 'm.f def") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "(s 2 +)\n") != null);
     // One binding kind: a session constant reports as a public def with no
     // metadata, because the sugar supplies none, and `see` prints the stored
     // literal capture rather than reconstructing the `set` spelling.
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "f -> f def public") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "shadows m.f") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "([9] first) 'f def") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "([9] first)\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " f ") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), " s ") == null);
 }
@@ -983,13 +983,13 @@ test "modules: module set and setp publish unannotated constants" {
     try expectOk(&runtime, "m.x m.peek");
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[1].int);
-    // Privacy is unchanged, and the published effect is visible to
-    // reflection exactly as a hand-written one would be.
+    // Privacy is unchanged; `which` owns metadata reflection and `see` owns
+    // body reflection.
     try expectErrorContains(&runtime, "m.h", &.{ "'kind 'undefined-word", "'word 'm.h" });
     try expectOk(&runtime, "'m.x which 'm.x see");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "m.x -> m.x def public") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(-- value)") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "([7] first) 'm.x def") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "([7] first)\n") != null);
 }
 
 test "modules: cross-home constant references cross unchecked while declared effects still bind" {

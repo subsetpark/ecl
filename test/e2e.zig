@@ -685,7 +685,7 @@ test "e2e: native extension discovery ABI and reflection acceptance" {
         .stdout = "sample.increment -> sample.increment native public generation 1 " ++
             "(n -- result) requires call, build-values, reschedule\n" ++
             "(n -- result : \"Increment an integer.\") <native:sample.increment> requires call build-values\n" ++
-            "reschedule\n'sample.increment\ndef\n42\n",
+            "reschedule\n42\n",
         .stderr = "",
     });
 }
@@ -959,7 +959,7 @@ test "e2e: module effect declaration acceptance" {
     defer visible.deinit();
     try visible.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{"(a -- b)"},
+        .stdout = "(a -- b) (dup +)\n",
         .stderr = "",
     });
 }
@@ -989,7 +989,7 @@ test "e2e: reflection acceptance" {
     try result.expect(.{
         .exit_code = 0,
         .stdout_contains = &.{
-            "(-- n) (s 2 +) 'm.f def",
+            "(s 2 +)",
             "f -> f def public (-- n)",
         },
         .stdout_excludes = &.{" s "},
@@ -1053,17 +1053,17 @@ test "e2e: optional module annotation acceptance" {
     defer result.deinit();
     try result.expect(.{
         .exit_code = 0,
-        .stdout = "### def forms.bare\n(1 +) 'forms.bare def\n" ++
-            "### def forms.effected\n(n -- n) (2 *) 'forms.effected def\n" ++
-            "### def forms.documented\n(: \"Subtract three.\") (3 -) 'forms.documented def\n" ++
-            "### def forms.complete\n(n -- n : \"Divide by four.\") (4 div) 'forms.complete def\n" ++
+        .stdout = "(1 +)\n" ++
+            "(n -- n) (2 *)\n" ++
+            "(: \"Subtract three.\") (3 -)\n" ++
+            "(n -- n : \"Divide by four.\") (4 div)\n" ++
             "\"Subtract three.\"\n" ++
             "11\n20\n7\n3\n59\n" ++
             "1\n" ++
-            "### def answer\n(: \"The answer.\") ([42] first) 'answer def\n" ++
-            "### def spelled\n([42] first) 'spelled def\n" ++
+            "(: \"The answer.\") ([42] first)\n" ++
+            "([42] first)\n" ++
             "'contract\n'domain\n'domain\n" ++
-            "### def positional.f\n(dup) 'positional.f def\n(a b)\n",
+            "(dup)\n(a b)\n",
         .stderr = "",
     });
 }
@@ -1179,7 +1179,7 @@ test "e2e: annotated literal module constant and partial effect acceptance" {
     defer reflected.deinit();
     try reflected.expect(.{
         .exit_code = 0,
-        .stdout_contains = &.{ "(result on-ok on-err -- ...", "'result.either\ndef" },
+        .stdout_contains = &.{"(|result on-ok on-err|"},
         .stderr = "",
     });
 }

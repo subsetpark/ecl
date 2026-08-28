@@ -99,11 +99,8 @@ test "every primitive exposes meaningful reflective documentation" {
     try std.testing.expectEqualStrings(expected.written(), display.bytes());
     try expectOk(&runtime, "'over see 'call see");
     try std.testing.expectEqualStrings(
-        "### def over\n" ++
-            "(x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") (swap dup (swap) dip)\n" ++
-            "'over\n" ++
-            "def\n" ++
-            "(quotation -- ... : \"Run a quotation on the current stack.\") <primitive> 'call def\n",
+        "(x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") (swap dup (swap) dip)\n" ++
+            "(quotation -- ... : \"Run a quotation on the current stack.\") <primitive>\n",
         output.written(),
     );
 }
@@ -141,7 +138,7 @@ test "module annotations retain contracts documentation qualification and shadow
     try expectErrorContains(&runtime, "((a -- b c : \"An intentionally false contract.\") (dup +) 'f def) 'lies @defm 1 lies.f", "'kind 'contract");
 }
 
-test "multiline documentation is normalized and see is canonical and re-readable" {
+test "multiline documentation is normalized and see prints annotation and canonical body" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
@@ -153,21 +150,10 @@ test "multiline documentation is normalized and see is canonical and re-readable
         "'square see 'answer see");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqualStrings(
-        "### def square\n" ++
-            "(x -- y : \"Square a numeric value.\") (dup *) 'square def\n" ++
-            "### def answer\n" ++
-            "(: \"Only docs.\") (42) 'answer def\n",
+        "(x -- y : \"Square a numeric value.\") (dup *)\n" ++
+            "(: \"Only docs.\") (42)\n",
         output.written(),
     );
-
-    var reread = try session.Session.init(std.testing.allocator, &.{});
-    defer reread.deinit();
-    try expectOk(&reread, output.written());
-    try expectOk(&reread, "4 square 'square doc \"Square a numeric value.\" match? " ++
-        "answer 'answer doc \"Only docs.\" match?");
-    var display = try reread.stackDisplay();
-    defer display.deinit();
-    try std.testing.expectEqualStrings("16 1 42 1", display.bytes());
 }
 
 test "see retains source binders while execution uses their lowered body" {
@@ -181,19 +167,9 @@ test "see retains source binders while execution uses their lowered body" {
     try expectOk(&runtime, "(n -- n : \"Increment.\") (|x| x 1 +) 'inc def");
     try expectOk(&runtime, "'inc see");
     try std.testing.expectEqualStrings(
-        "### def inc\n(n -- n : \"Increment.\") (|x| x 1 +) 'inc def\n",
+        "(n -- n : \"Increment.\") (|x| x 1 +)\n",
         output.written(),
     );
-
-    // The reflected definition is ordinary source: rereading it lowers the
-    // binder again, and both copies execute identically.
-    var reread = try session.Session.init(std.testing.allocator, &.{});
-    defer reread.deinit();
-    try expectOk(&reread, output.written());
-    try expectOk(&reread, "41 inc");
-    var display = try reread.stackDisplay();
-    defer display.deinit();
-    try std.testing.expectEqualStrings("42", display.bytes());
 }
 
 test "redefinition and set replace behavior and clear metadata" {
@@ -392,29 +368,20 @@ test "definitions: set publishes a literal-capture word with no synthesized meta
     try support.expectStack("3 'x set 4 'x set x", "4");
 }
 
-test "definitions: which and see render set bindings as public defs" {
+test "definitions: which reports a def while see prints the set capture body" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
     // Reflection reports what is stored: one kind, and no metadata, because
-    // the sugar supplies none. There is no `set` label to report, and `see`
-    // does not reconstruct the `set` spelling from the capture shape.
+    // the sugar supplies none. `which` reports the public def while `see`
+    // prints only its stored literal-capture body.
     try expectOk(&runtime, "3 'x set 'x which 'x see");
     try std.testing.expectEqualStrings(
         "x -> x def public\n" ++
-            "### def x\n" ++
-            "([3] first) 'x def\n",
+            "([3] first)\n",
         output.written(),
     );
-
-    // The rendering is source: reading it back reproduces the binding.
-    var reread = try session.Session.init(std.testing.allocator, &.{});
-    defer reread.deinit();
-    try expectOk(&reread, "([3] first) 'x def x");
-    var display = try reread.stackDisplay();
-    defer display.deinit();
-    try std.testing.expectEqualStrings("3", display.bytes());
 }
 
 test "definitions: set distinguishes binding annotations from captured data" {
@@ -506,18 +473,16 @@ test "definitions: body is not a word and one binding kind needs no extraction" 
         .{ .name = "builtin", .source = "'def body", .kind = "undefined-word", .word = "body" },
     });
     // The invariant `body` used to observe is unchanged and still observable.
-    // `see` renders the stored body verbatim, so a constant is visibly a word
-    // whose body is the literal capture, and a definition visibly is not.
+    // `see` renders only the stored body, so a constant is visibly a word whose
+    // body is the literal capture, and a definition visibly is not.
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
     defer runtime.deinit();
     try expectOk(&runtime, "3 'x set 'x see (dup *) 'sq def 'sq see");
     try std.testing.expectEqualStrings(
-        "### def x\n" ++
-            "([3] first) 'x def\n" ++
-            "### def sq\n" ++
-            "(dup *) 'sq def\n",
+        "([3] first)\n" ++
+            "(dup *)\n",
         output.written(),
     );
 }

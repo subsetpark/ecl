@@ -900,13 +900,7 @@ const SeeDriver = struct {
                     return;
                 }
             },
-            7 => try self.add(.{ .bytes = " '" }),
-            8 => try self.add(.{ .trace_word = resolved.trace_word }),
-            9 => try self.add(.{ .bytes = switch (resolved.lease.binding) {
-                .word => if (resolved.lease.visibility == .private) " defp\n" else " def\n",
-                .builtin, .seed, .native => " def\n",
-            } }),
-            10 => {
+            7 => {
                 self.actions.borrowMut().seal();
                 const context = plan.context;
                 self.state.borrowMut().* = .{ .render = context };
@@ -1016,7 +1010,7 @@ const SeeDriver = struct {
                 ) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     // The reflection plan emits only reader-valid canonical
-                    // values and fixed definition syntax. Failure here is an
+                    // values and fixed binding descriptors. Failure here is an
                     // internal disagreement between those two production
                     // boundaries, not a user program error.
                     error.InvalidUtf8, error.InvalidSource => unreachable,

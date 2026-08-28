@@ -97,8 +97,8 @@ before the body and supplies a stack effect, documentation, or both.
 ```
 
 At top level an effect is reflective metadata. On a public module word it is
-also a dynamically checked boundary contract. `doc`, `body`, `which`, and
-`see` inspect definitions through ordinary language values.
+also a dynamically checked boundary contract. `doc`, `which`, and `see`
+inspect definitions through ordinary language values.
 
 ### Failure has an explicit boundary
 
