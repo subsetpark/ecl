@@ -1,5 +1,6 @@
 //! Defunctionalized CEK evaluator, boundary unwinding, and error dicts.
 const std = @import("std");
+const session_options = @import("session_options");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
@@ -2162,6 +2163,18 @@ comptime {
     if (@sizeOf(WorkDriver) > 80) @compileError("WorkDriver exceeds its fixed frame budget");
 }
 
+/// Opt-in root-Unit counters for release-mode runtime characterization.
+/// Ordinary runtime and test modules compile every recording branch away; a
+/// separate benchmark module enables them so counters cannot perturb timing.
+pub const RootExecutionMetrics = struct {
+    logical_transitions: u64 = 0,
+    driver_resumes: u64 = 0,
+    application_resumes: u64 = 0,
+    scheduler_handoffs: u64 = 0,
+};
+
+pub const root_execution_metrics_enabled = session_options.instrument_root_execution;
+
 pub const Unit = struct {
     const TerminalState = union(enum) {
         evaluating,
@@ -2305,6 +2318,7 @@ pub const Unit = struct {
     fuel: u32 = fuel_quantum,
     kernel_fuel: u32 = kernel_poll_quantum,
     polls: u64 = 0,
+    root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
     max_frames: usize = 0,
     entry_base: usize,
     stack_base: usize,
@@ -5235,6 +5249,8 @@ pub const Machine = struct {
     fn chargeKernel(self: *Machine, amount: usize) MachineError!bool {
         std.debug.assert(amount <= kernel_poll_quantum);
         if (amount == 0) return false;
+        if (comptime root_execution_metrics_enabled)
+            self.unit.root_execution_metrics.logical_transitions += amount;
         var reached_boundary = false;
         if (amount >= self.unit.kernel_fuel) {
             try self.pollKernel();
@@ -6229,10 +6245,14 @@ pub fn initializeSource(
 pub fn runSlice(unit: *Unit) MachineError!RunStatus {
     var evaluator = Machine{ .unit = unit };
     defer unit.dropSpareScope();
-    return loop(&evaluator) catch |err| switch (err) {
+    const status = loop(&evaluator) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => return error.OutOfMemory,
     };
+    if (comptime root_execution_metrics_enabled) {
+        if (status != .completed) unit.root_execution_metrics.scheduler_handoffs += 1;
+    }
+    return status;
 }
 
 /// Makes the next evaluator entry observe cancellation before executing a
@@ -6274,6 +6294,8 @@ fn loop(self: *Machine) MachineError!RunStatus {
         if (self.unit.hasParkRequest()) return .parked;
         if (self.unit.workDriver()) |driver_ptr| {
             const driver = driver_ptr.*;
+            if (comptime root_execution_metrics_enabled)
+                self.unit.root_execution_metrics.driver_resumes += 1;
             const progress = driver.advance(self) catch |err| {
                 if (err == error.Ecl and self.unit.pendingFailure().site == null) {
                     if (driver.site) |site| self.unit.pendingFailure().site = .{ .token = site };
@@ -6363,6 +6385,8 @@ fn loop(self: *Machine) MachineError!RunStatus {
         self.unit.active_index = current.ip;
         const form = list.atUnchecked(.{ .list = current.code }, current.ip);
         current.ip += 1;
+        if (comptime root_execution_metrics_enabled)
+            self.unit.root_execution_metrics.logical_transitions += 1;
         dispatch(self, form) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
@@ -7809,6 +7833,8 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                     break :blk .{ .isolated, window };
                 },
             };
+            if (comptime root_execution_metrics_enabled)
+                self.unit.root_execution_metrics.application_resumes += 1;
             const next = continuation.resume_fn(
                 self,
                 continuation.context,

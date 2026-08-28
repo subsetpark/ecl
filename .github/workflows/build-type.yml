@@ -49,6 +49,9 @@ on:
       run_oom:
         default: false
         type: boolean
+      run_performance_smoke:
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -153,6 +156,25 @@ jobs:
           docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
           'cd /build; timeout 20m zig build test
           -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m < /dev/null'
+
+      - name: WorkDriver benchmark smoke
+        if: inputs.run_performance_smoke
+        run: |
+          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
+            cd /build
+            output="$(mktemp)"
+            trap "rm -f \"$output\"" EXIT
+            set +e
+            timeout 10m zig build bench-workdrivers -Doptimize="$OPTIMIZE" -- --quick < /dev/null > "$output" 2>&1
+            benchmark_status=$?
+            set -e
+            if [ "$benchmark_status" -ne 0 ]; then
+              cat "$output"
+              exit "$benchmark_status"
+            fi
+            grep -qx "# schema=ecl.workdrivers.timing.v1" "$output"
+            grep -qx "# schema=ecl.workdrivers.counters.v1" "$output"
+          '
 
       # check-ecl validates the same corpus in-process. This additionally
       # exercises the installed formatter through its public CLI surface.

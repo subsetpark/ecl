@@ -35,6 +35,19 @@ primitives, operationalized as two rules:
    build tooling, deliberately not in a runtime test that searches
    implementation text.
 
+Performance characterization is production-connected and release-only.
+`zig build bench-workdrivers -Doptimize=ReleaseSafe` runs the WorkDriver workload
+matrix twice through public `Session` turns: an ordinary runtime records
+wall/CPU time and polls using the ordinary allocator, while a separately
+compiled artifact records allocation traffic, peak temporary bytes, and
+root-Unit logical transitions, driver/application resumes, and scheduler
+handoffs. The counter branches compile out of every ordinary runtime and test
+module, and the atomic counting allocator is absent from the timing artifact.
+Both versioned CSV schemas identify their target, optimization mode, and Zig
+version; `-- --quick` is a smoke subset, not reportable performance evidence.
+Recorded target-specific results and their current disposition live in
+[`PERFORMANCE.md`](PERFORMANCE.md).
+
 ## Values and memory
 
 - **Value = 16-byte two-word tagged cell** (a Zig tagged union). Word 0:

@@ -38,6 +38,7 @@ jobs:
       run_repl: true
       run_native_acceptance: true
       run_workers_eight: ${{ github.event_name != 'pull_request' }}
+      run_performance_smoke: true
 
   release-fast:
     name: ReleaseFast smoke
