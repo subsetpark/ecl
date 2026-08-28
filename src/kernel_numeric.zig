@@ -20,18 +20,67 @@ pub const UnaryOp = support.UnaryOp;
 const ScalarError = error{ Type, Overflow, Domain, ShiftCount };
 const ScalarBinary = *const fn (Value, Value) ScalarError!Value;
 const ScalarUnary = *const fn (Value) ScalarError!Value;
+
+const BinaryEntry = support.InstallationEntry(BinaryOp);
+const BinaryInstallation = support.ClosedInstallation(struct {
+    pub const Operation = BinaryOp;
+    pub const entries = [_]BinaryEntry{
+        BinaryEntry.installed(.add),
+        BinaryEntry.installed(.sub),
+        BinaryEntry.installed(.mul),
+        BinaryEntry.installed(.div),
+        BinaryEntry.installed(.int_div),
+        BinaryEntry.delegated(.mod),
+        BinaryEntry.installed(.pow),
+        BinaryEntry.installed(.atan2),
+        BinaryEntry.installed(.min),
+        BinaryEntry.installed(.max),
+        BinaryEntry.installed(.eq),
+        BinaryEntry.delegated(.ne),
+        BinaryEntry.installed(.lt),
+        BinaryEntry.installed(.gt),
+        BinaryEntry.delegated(.le),
+        BinaryEntry.delegated(.ge),
+        BinaryEntry.delegated(.and_word),
+        BinaryEntry.delegated(.or_word),
+        BinaryEntry.installed(.band),
+        BinaryEntry.installed(.bor),
+        BinaryEntry.installed(.bxor),
+        BinaryEntry.installed(.bsl),
+        BinaryEntry.installed(.bsr),
+    };
+
+    pub fn bind(comptime operation: Operation) env.PrimitiveImpl {
+        return bindBinary(operation);
+    }
+});
+
+const UnaryEntry = support.InstallationEntry(UnaryOp);
+const UnaryInstallation = support.ClosedInstallation(struct {
+    pub const Operation = UnaryOp;
+    pub const entries = [_]UnaryEntry{
+        UnaryEntry.delegated(.neg),
+        UnaryEntry.delegated(.abs),
+        UnaryEntry.installed(.sqrt),
+        UnaryEntry.installed(.floor),
+        UnaryEntry.installed(.ceil),
+        UnaryEntry.installed(.round),
+        UnaryEntry.installed(.exp),
+        UnaryEntry.installed(.log),
+        UnaryEntry.installed(.sin),
+        UnaryEntry.installed(.cos),
+        UnaryEntry.installed(.not_word),
+        UnaryEntry.installed(.bnot),
+    };
+
+    pub fn bind(comptime operation: Operation) env.PrimitiveImpl {
+        return bindUnary(operation);
+    }
+});
+
 pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    inline for (std.meta.fields(BinaryOp)) |field| {
-        const operation: BinaryOp = @enumFromInt(field.value);
-        if (operation == .mod or operation == .ne or operation == .le or operation == .ge or
-            operation == .and_word or operation == .or_word) continue;
-        try support.installPrimitive(core, operation.spelling(), bindBinary(operation));
-    }
-    inline for (std.meta.fields(UnaryOp)) |field| {
-        const operation: UnaryOp = @enumFromInt(field.value);
-        if (operation == .neg or operation == .abs) continue;
-        try support.installPrimitive(core, operation.spelling(), bindUnary(operation));
-    }
+    try BinaryInstallation.install(core);
+    try UnaryInstallation.install(core);
 }
 
 fn bindBinary(comptime operation: BinaryOp) env.PrimitiveImpl {

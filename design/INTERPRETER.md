@@ -1225,6 +1225,15 @@ operand shape, and rows that still run boxed say so.
   because it carries no representation. Each row's adjacent rationale comment
   keeps a generic classification reviewable without pretending that prose is
   runtime registry data.
+- **Installation is a separate closed contract.** Each operation family owns
+  one `kernel_support.ClosedInstallation` spec that names every enum member
+  exactly once as directly `installed`, `delegated` to a hosted idiom or
+  module, or intentionally `excluded`. The spec also binds installed members
+  to their primitive and checks the authored spelling against the operation's
+  canonical spelling. Missing, duplicated, misspelled, or multiply classified
+  members fail at comptime. This proves which words enter core; the dispatch
+  table above independently proves how sized operations execute after they
+  resolve.
 - **Typed loops receive memory only through heap-issued capabilities.**
   `heap.LeafReader(kind)` retains its list's root for the reader's whole
   lifetime, so a slice cannot outlive its owner across a suspension.

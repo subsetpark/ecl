@@ -19,14 +19,25 @@ const MachineError = support.MachineError;
 /// `kernels.zig` classifies exactly the operations this installer publishes.
 const Op = support.OrderOp;
 
-pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    inline for (std.meta.fields(Op)) |field| {
-        const operation: Op = @enumFromInt(field.value);
-        try support.installPrimitive(core, operation.spelling(), bind(operation));
+const Entry = support.InstallationEntry(Op);
+const Installation = support.ClosedInstallation(struct {
+    pub const Operation = Op;
+    pub const entries = [_]Entry{
+        Entry.installed(.cmp),
+        Entry.installed(.grade),
+        Entry.installed(.group),
+    };
+
+    pub fn bind(comptime operation: Operation) env.PrimitiveImpl {
+        return bindOperation(operation);
     }
+});
+
+pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
+    try Installation.install(core);
 }
 
-fn bind(comptime operation: Op) env.PrimitiveImpl {
+fn bindOperation(comptime operation: Op) env.PrimitiveImpl {
     return struct {
         fn run(evaluator: *Machine) MachineError!void {
             return switch (operation) {

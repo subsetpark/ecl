@@ -182,6 +182,10 @@ pub fn build(b: *std.Build) void {
         .{ .file = "owned_wrong_parameters", .message = "heap.Owned retire must have signature fn (Payload|*Payload, *ReleaseDomain) void or fn (Payload|*Payload, *ReleaseDomain, Allocator) void" },
         .{ .file = "owned_wrong_return", .message = "heap.Owned deinit must have signature fn (Payload|*Payload) void, fn (Payload|*Payload, Allocator) void, fn (Payload|*Payload, *ReleaseDomain) void, or fn (Payload|*Payload, *ReleaseDomain, Allocator) void" },
         .{ .file = "owned_malformed_driver", .message = "owned_malformed_driver.Driver field ownership forbids a destructor hook" },
+        .{ .file = "kernel_install_missing", .message = "kernel installation: operation second is missing from the closed spec" },
+        .{ .file = "kernel_install_duplicate", .message = "kernel installation: operation first appears more than once" },
+        .{ .file = "kernel_install_misspelled", .message = "kernel installation: operation first spelling must be one" },
+        .{ .file = "kernel_install_multiply_classified", .message = "kernel installation: operation first is multiply classified" },
     };
     const poll_contract_module = b.createModule(.{
         .root_source_file = b.path("src/poll.zig"),
@@ -205,6 +209,7 @@ pub fn build(b: *std.Build) void {
         });
         negative_module.addImport("ecl-poll", poll_contract_module);
         negative_module.addImport("ecl-heap", heap_contract_module);
+        negative_module.addImport("ecl", mod);
         const negative = b.addObject(.{
             .name = b.fmt("comptime-contract-negative-{s}", .{case.file}),
             .root_module = negative_module,

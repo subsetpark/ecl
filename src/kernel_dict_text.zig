@@ -19,19 +19,32 @@ const MachineError = support.MachineError;
 /// every other text operation is installed directly in core.
 const Op = support.TextOp;
 
-pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
-    inline for (std.meta.fields(Op)) |field| {
-        const operation: Op = @enumFromInt(field.value);
-        if (operation == .format) continue;
-        try support.installPrimitive(core, operation.spelling(), bind(operation));
+const Entry = support.InstallationEntry(Op);
+const Installation = support.ClosedInstallation(struct {
+    pub const Operation = Op;
+    pub const entries = [_]Entry{
+        Entry.installed(.put),
+        Entry.installed(.del),
+        Entry.installed(.split),
+        Entry.installed(.join),
+        Entry.installed(.str),
+        Entry.delegated(.format),
+    };
+
+    pub fn bind(comptime operation: Operation) env.PrimitiveImpl {
+        return bindOperation(operation);
     }
+});
+
+pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
+    try Installation.install(core);
 }
 
 pub fn formatForIdiom(evaluator: *Machine) MachineError!void {
     return formatPrimitive(evaluator);
 }
 
-fn bind(comptime operation: Op) env.PrimitiveImpl {
+fn bindOperation(comptime operation: Op) env.PrimitiveImpl {
     return struct {
         fn run(evaluator: *Machine) MachineError!void {
             return switch (operation) {

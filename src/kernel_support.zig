@@ -278,3 +278,109 @@ pub fn installPrimitive(
 ) error{OutOfMemory}!void {
     try core.installBuiltin(name, primitive);
 }
+
+pub const InstallationDisposition = enum {
+    installed,
+    delegated,
+    excluded,
+};
+
+pub fn InstallationEntry(comptime Operation: type) type {
+    return struct {
+        operation: Operation,
+        spelling: []const u8,
+        disposition: InstallationDisposition,
+
+        pub fn installed(comptime operation: Operation) @This() {
+            return .{
+                .operation = operation,
+                .spelling = operation.spelling(),
+                .disposition = .installed,
+            };
+        }
+
+        pub fn delegated(comptime operation: Operation) @This() {
+            return .{
+                .operation = operation,
+                .spelling = operation.spelling(),
+                .disposition = .delegated,
+            };
+        }
+
+        pub fn excluded(comptime operation: Operation) @This() {
+            return .{
+                .operation = operation,
+                .spelling = operation.spelling(),
+                .disposition = .excluded,
+            };
+        }
+    };
+}
+
+fn validateInstallationSpec(comptime Spec: type) void {
+    const boundary = "kernel installation";
+    if (@typeInfo(Spec) != .@"struct")
+        @compileError(boundary ++ ": spec must be a struct namespace");
+    if (!@hasDecl(Spec, "Operation") or @TypeOf(Spec.Operation) != type)
+        @compileError(boundary ++ ": spec must declare Operation as a type");
+    const Operation = Spec.Operation;
+    const operation_info = switch (@typeInfo(Operation)) {
+        .@"enum" => |info| info,
+        else => @compileError(boundary ++ ": Operation must be an enum"),
+    };
+    if (!@hasDecl(Operation, "spelling"))
+        @compileError(boundary ++ ": Operation must declare spelling");
+    if (!@hasDecl(Spec, "entries"))
+        @compileError(boundary ++ ": spec must declare entries");
+    const Entry = InstallationEntry(Operation);
+    comptime var classified: [operation_info.fields.len]?InstallationDisposition =
+        .{null} ** operation_info.fields.len;
+    inline for (Spec.entries) |entry| {
+        if (@TypeOf(entry) != Entry)
+            @compileError(boundary ++ ": every entry must be an InstallationEntry(Operation)");
+        comptime var operation_index: ?usize = null;
+        inline for (operation_info.fields, 0..) |field, index| {
+            if (field.value == @intFromEnum(entry.operation)) operation_index = index;
+        }
+        const index = operation_index orelse unreachable;
+        if (classified[index]) |prior| {
+            if (prior == entry.disposition)
+                @compileError(boundary ++ ": operation " ++ @tagName(entry.operation) ++
+                    " appears more than once")
+            else
+                @compileError(boundary ++ ": operation " ++ @tagName(entry.operation) ++
+                    " is multiply classified");
+        }
+        classified[index] = entry.disposition;
+        const canonical = entry.operation.spelling();
+        if (!std.mem.eql(u8, entry.spelling, canonical))
+            @compileError(boundary ++ ": operation " ++ @tagName(entry.operation) ++
+                " spelling must be " ++ canonical);
+        if (entry.disposition == .installed) {
+            if (!@hasDecl(Spec, "bind"))
+                @compileError(boundary ++ ": installed operations require bind");
+            if (@TypeOf(Spec.bind(entry.operation)) != env.PrimitiveImpl)
+                @compileError(boundary ++ ": bind must return env.PrimitiveImpl");
+        }
+    }
+    inline for (operation_info.fields, 0..) |field, index| {
+        if (classified[index] == null)
+            @compileError(boundary ++ ": operation " ++ field.name ++
+                " is missing from the closed spec");
+    }
+}
+
+/// Validate and install one closed operation enum. Every operation is named
+/// exactly once as installed, delegated, or excluded; only installed entries
+/// invoke the spec's binder and mutate the building environment.
+pub fn ClosedInstallation(comptime Spec: type) type {
+    comptime validateInstallationSpec(Spec);
+    return struct {
+        pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
+            inline for (Spec.entries) |entry| {
+                if (comptime entry.disposition == .installed)
+                    try installPrimitive(core, entry.spelling, Spec.bind(entry.operation));
+            }
+        }
+    };
+}

@@ -32,6 +32,20 @@ const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
 
+const Entry = support.InstallationEntry(support.RandomOp);
+const Installation = support.ClosedInstallation(struct {
+    pub const Operation = support.RandomOp;
+    pub const entries = [_]Entry{
+        Entry.delegated(.rand_int),
+        Entry.delegated(.rand_ints),
+        Entry.delegated(.rand_float),
+        Entry.delegated(.entropy),
+    };
+});
+comptime {
+    _ = @sizeOf(Installation);
+}
+
 /// The golden-ratio odd constant SplitMix64 advances by; reused here as the
 /// per-counter stride so consecutive counters land in unrelated sub-streams.
 const gamma: u64 = 0x9E3779B97F4A7C15;

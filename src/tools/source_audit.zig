@@ -224,6 +224,10 @@ const repository_verification_files = [_][]const u8{
     "test/comptime/negative/owned_wrong_parameters.zig",
     "test/comptime/negative/owned_wrong_return.zig",
     "test/comptime/negative/owned_malformed_driver.zig",
+    "test/comptime/negative/kernel_install_missing.zig",
+    "test/comptime/negative/kernel_install_duplicate.zig",
+    "test/comptime/negative/kernel_install_misspelled.zig",
+    "test/comptime/negative/kernel_install_multiply_classified.zig",
     "test/http_fixture_server.zig",
     "test/pkg_lock_fixture.zig",
 };
