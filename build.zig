@@ -26,9 +26,6 @@ pub fn build(b: *std.Build) void {
     });
     mod.link_libc = true;
     mod.addImport("native-abi", native_abi);
-    const normal_root_options = b.addOptions();
-    normal_root_options.addOption(bool, "disable_signal_stack", false);
-    mod.addOptions("root_options", normal_root_options);
     const runtime_options = b.addOptions();
     runtime_options.addOption(usize, "default_worker_count", 1);
     mod.addOptions("session_options", runtime_options);
@@ -232,7 +229,6 @@ pub fn build(b: *std.Build) void {
     });
     const test_options = b.addOptions();
     test_options.addOption(usize, "default_worker_count", 1);
-    test_mod.addOptions("root_options", normal_root_options);
     test_mod.addOptions("session_options", test_options);
     test_mod.addImport("minish", minish);
     test_mod.addImport("native-abi", native_abi);
@@ -507,7 +503,6 @@ pub fn build(b: *std.Build) void {
         });
         const worker_options = b.addOptions();
         worker_options.addOption(usize, "default_worker_count", worker_count);
-        worker_test_mod.addOptions("root_options", normal_root_options);
         worker_test_mod.addOptions("session_options", worker_options);
         worker_test_mod.addImport("minish", minish);
         worker_test_mod.addImport("native-abi", native_abi);
@@ -541,9 +536,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .sanitize_thread = tsan_supported,
     });
-    const tsan_root_options = b.addOptions();
-    tsan_root_options.addOption(bool, "disable_signal_stack", true);
-    tsan_mod.addOptions("root_options", tsan_root_options);
     tsan_mod.addOptions("session_options", test_options);
     tsan_mod.addImport("minish", minish);
     tsan_mod.addImport("native-abi", native_abi);

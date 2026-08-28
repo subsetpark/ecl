@@ -1,15 +1,5 @@
 //! ecl's value, reader, frame-machine, environment, and module surfaces,
 //! including the public library aggregation and cross-layer test root.
-const std = @import("std");
-const root_options = @import("root_options");
-
-// Zig 0.16's bundled TSan runtime can fail to resolve the real sigaltstack
-// symbol on hosted Linux. The TSan root disables Zig's per-thread alternative
-// signal stack; production and every other test root retain the std default.
-pub const std_options: std.Options = .{
-    .signal_stack_size = if (root_options.disable_signal_stack) null else 1 << 18,
-};
-
 pub const version = "0.1.0";
 pub const value = @import("value.zig");
 pub const poll = @import("poll.zig");
