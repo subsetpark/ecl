@@ -2043,10 +2043,127 @@ pub const OwnedDisposal = enum {
     deinit,
 };
 
+const OwnedPayloadProtocol = enum {
+    value,
+    slice,
+    header,
+    driver,
+    pin,
+    retire_domain,
+    retire_domain_allocator,
+    deinit_plain,
+    deinit_allocator,
+    deinit_domain,
+    deinit_domain_allocator,
+};
+
+fn validateOwnedPayload(comptime T: type) OwnedPayloadProtocol {
+    if (T == Value) return .value;
+    switch (@typeInfo(T)) {
+        .pointer => |pointer| {
+            if (pointer.size == .slice) return .slice;
+            if (pointer.size == .one and
+                (pointer.child == Header or pointer.child == ListHandle or pointer.child == DictHandle))
+            {
+                return .header;
+            }
+            if (pointer.size == .one and @hasDecl(pointer.child, "ownership")) {
+                _ = validateDriverOwnership(pointer.child);
+                return .driver;
+            }
+            if (pointer.size == .one and @hasDecl(pointer.child, "releasePin")) {
+                const release = switch (@typeInfo(@TypeOf(pointer.child.releasePin))) {
+                    .@"fn" => |info| info,
+                    else => @compileError("heap.Owned pin payload releasePin must be a function"),
+                };
+                if (release.is_generic or release.is_var_args or release.params.len != 1 or
+                    release.params[0].type == null or release.params[0].type.? != T or
+                    release.return_type == null or release.return_type.? != void)
+                {
+                    @compileError("heap.Owned pin payload releasePin must have signature fn (*Payload) void");
+                }
+                return .pin;
+            }
+        },
+        .@"struct", .@"union", .@"enum" => {
+            const has_retire = @hasDecl(T, "retire");
+            const has_deinit = @hasDecl(T, "deinit");
+            const disposal: OwnedDisposal = if (@hasDecl(T, "owned_disposal")) selected: {
+                if (@TypeOf(T.owned_disposal) != OwnedDisposal)
+                    @compileError("heap.Owned payload owned_disposal must be heap.OwnedDisposal");
+                break :selected T.owned_disposal;
+            } else if (has_retire and has_deinit) {
+                @compileError("heap.Owned structured payload with both retire and deinit must declare owned_disposal");
+            } else if (has_retire) .retire else if (has_deinit) .deinit else @compileError("heap.Owned payload has no disposal protocol");
+            switch (disposal) {
+                .retire => {
+                    if (!has_retire)
+                        @compileError("heap.Owned payload selects retire but does not declare retire");
+                    const retire = switch (@typeInfo(@TypeOf(T.retire))) {
+                        .@"fn" => |info| info,
+                        else => @compileError("heap.Owned payload retire must be a function"),
+                    };
+                    if (retire.is_generic or retire.is_var_args or retire.return_type == null or
+                        retire.return_type.? != void or retire.params.len < 2 or retire.params.len > 3 or
+                        retire.params[0].type == null or
+                        (retire.params[0].type.? != *T and retire.params[0].type.? != T) or
+                        retire.params[1].type == null or retire.params[1].type.? != *ReleaseDomain)
+                    {
+                        @compileError("heap.Owned retire must have signature fn (Payload|*Payload, *ReleaseDomain) void or fn (Payload|*Payload, *ReleaseDomain, Allocator) void");
+                    }
+                    if (retire.params.len == 2) return .retire_domain;
+                    if (retire.params[2].type == null or
+                        retire.params[2].type.? != std.mem.Allocator)
+                    {
+                        @compileError("heap.Owned retire must have signature fn (Payload|*Payload, *ReleaseDomain) void or fn (Payload|*Payload, *ReleaseDomain, Allocator) void");
+                    }
+                    return .retire_domain_allocator;
+                },
+                .deinit => {
+                    if (!has_deinit)
+                        @compileError("heap.Owned payload selects deinit but does not declare deinit");
+                    const deinit = switch (@typeInfo(@TypeOf(T.deinit))) {
+                        .@"fn" => |info| info,
+                        else => @compileError("heap.Owned payload deinit must be a function"),
+                    };
+                    if (deinit.is_generic or deinit.is_var_args or deinit.return_type == null or
+                        deinit.return_type.? != void or deinit.params.len < 1 or deinit.params.len > 3 or
+                        deinit.params[0].type == null or
+                        (deinit.params[0].type.? != *T and deinit.params[0].type.? != T))
+                    {
+                        @compileError("heap.Owned deinit must have signature fn (Payload|*Payload) void, fn (Payload|*Payload, Allocator) void, fn (Payload|*Payload, *ReleaseDomain) void, or fn (Payload|*Payload, *ReleaseDomain, Allocator) void");
+                    }
+                    if (deinit.params.len == 1) return .deinit_plain;
+                    if (deinit.params.len == 2 and deinit.params[1].type != null and
+                        deinit.params[1].type.? == std.mem.Allocator)
+                    {
+                        return .deinit_allocator;
+                    }
+                    if (deinit.params.len == 2 and deinit.params[1].type != null and
+                        deinit.params[1].type.? == *ReleaseDomain)
+                    {
+                        return .deinit_domain;
+                    }
+                    if (deinit.params.len == 3 and deinit.params[1].type != null and
+                        deinit.params[1].type.? == *ReleaseDomain and
+                        deinit.params[2].type != null and deinit.params[2].type.? == std.mem.Allocator)
+                    {
+                        return .deinit_domain_allocator;
+                    }
+                    @compileError("heap.Owned deinit must have signature fn (Payload|*Payload) void, fn (Payload|*Payload, Allocator) void, fn (Payload|*Payload, *ReleaseDomain) void, or fn (Payload|*Payload, *ReleaseDomain, Allocator) void");
+                },
+            }
+        },
+        else => {},
+    }
+    @compileError("heap.Owned payload has no disposal protocol");
+}
+
 /// Field-level ownership marker for runtime continuations. Unlike
 /// `OwnedValue`, this capability does not carry a reclamation root: the
 /// enclosing owner supplies that root when its fields are derivedly retired.
 pub fn Owned(comptime T: type) type {
+    const protocol = comptime validateOwnedPayload(T);
     return struct {
         const Self = @This();
         pub const owned_payload = T;
@@ -2076,7 +2193,7 @@ pub fn Owned(comptime T: type) type {
             releases: *ReleaseDomain,
             allocator: std.mem.Allocator,
         ) void {
-            if (self.item) |*item| disposeOwned(T, releases, allocator, item);
+            if (self.item) |*item| disposeOwned(T, protocol, releases, allocator, item);
             self.item = null;
         }
     };
@@ -2084,87 +2201,24 @@ pub fn Owned(comptime T: type) type {
 
 fn disposeOwned(
     comptime T: type,
+    comptime protocol: OwnedPayloadProtocol,
     releases: *ReleaseDomain,
     allocator: std.mem.Allocator,
     item: *T,
 ) void {
-    if (T == Value) {
-        releases.releaseValue(item.*);
-        return;
+    switch (protocol) {
+        .value => releases.releaseValue(item.*),
+        .slice => allocator.free(item.*),
+        .header => releases.releaseHeader(item.*),
+        .driver => destroyDriver(releases, allocator, item.*),
+        .pin => item.*.releasePin(),
+        .retire_domain => item.retire(releases),
+        .retire_domain_allocator => item.retire(releases, allocator),
+        .deinit_plain => item.deinit(),
+        .deinit_allocator => item.deinit(allocator),
+        .deinit_domain => item.deinit(releases),
+        .deinit_domain_allocator => item.deinit(releases, allocator),
     }
-    switch (@typeInfo(T)) {
-        .pointer => |pointer| {
-            if (pointer.size == .slice) {
-                allocator.free(item.*);
-                return;
-            }
-            if (pointer.size == .one and
-                (pointer.child == Header or pointer.child == ListHandle or pointer.child == DictHandle))
-            {
-                releases.releaseHeader(item.*);
-                return;
-            }
-            if (pointer.size == .one and @hasDecl(pointer.child, "ownership")) {
-                destroyDriver(releases, allocator, item.*);
-                return;
-            }
-            if (pointer.size == .one and @hasDecl(pointer.child, "releasePin")) {
-                item.*.releasePin();
-                return;
-            }
-        },
-        .@"struct", .@"union", .@"enum" => {
-            const has_retire = @hasDecl(T, "retire");
-            const has_deinit = @hasDecl(T, "deinit");
-            const disposal: OwnedDisposal = if (@hasDecl(T, "owned_disposal"))
-                T.owned_disposal
-            else if (has_retire and has_deinit)
-                @compileError(@typeName(T) ++ " must choose retire or deinit explicitly")
-            else if (has_retire)
-                .retire
-            else if (has_deinit)
-                .deinit
-            else
-                @compileError("heap.Owned has no disposal protocol for " ++ @typeName(T));
-            switch (disposal) {
-                .retire => {
-                    if (!has_retire)
-                        @compileError(@typeName(T) ++ " selects retirement without a retire method");
-                    const retire_info = @typeInfo(@TypeOf(T.retire)).@"fn";
-                    if (retire_info.params.len == 2)
-                        item.retire(releases)
-                    else if (retire_info.params.len == 3 and
-                        retire_info.params[2].type.? == std.mem.Allocator)
-                        item.retire(releases, allocator)
-                    else
-                        @compileError("unsupported retire protocol for " ++ @typeName(T));
-                    return;
-                },
-                .deinit => {
-                    if (!has_deinit)
-                        @compileError(@typeName(T) ++ " selects deinit without a deinit method");
-                    const deinit_info = @typeInfo(@TypeOf(T.deinit)).@"fn";
-                    if (deinit_info.params.len == 1)
-                        item.deinit()
-                    else if (deinit_info.params.len == 2 and
-                        deinit_info.params[1].type.? == std.mem.Allocator)
-                        item.deinit(allocator)
-                    else if (deinit_info.params.len == 2 and
-                        deinit_info.params[1].type.? == *ReleaseDomain)
-                        item.deinit(releases)
-                    else if (deinit_info.params.len == 3 and
-                        deinit_info.params[1].type.? == *ReleaseDomain and
-                        deinit_info.params[2].type.? == std.mem.Allocator)
-                        item.deinit(releases, allocator)
-                    else
-                        @compileError("unsupported deinit protocol for " ++ @typeName(T));
-                    return;
-                },
-            }
-        },
-        else => {},
-    }
-    @compileError("heap.Owned has no disposal protocol for " ++ @typeName(T));
 }
 
 fn isOwnedMarker(comptime T: type) bool {
@@ -2275,6 +2329,55 @@ pub fn destroyDriver(
             allocator.destroy(driver);
         },
     }
+}
+
+test "Owned eagerly validated protocols dispose through their real paths" {
+    const Retired = struct {
+        count: *usize,
+        pub const owned_disposal: OwnedDisposal = .retire;
+        pub fn retire(self: *@This(), _: *ReleaseDomain) void {
+            self.count.* += 1;
+        }
+    };
+    const Deinitialized = struct {
+        count: *usize,
+        pub fn deinit(self: @This(), _: std.mem.Allocator) void {
+            self.count.* += 1;
+        }
+    };
+    const Pin = struct {
+        count: *usize,
+        pub fn releasePin(self: *@This()) void {
+            self.count.* += 1;
+        }
+    };
+    const Driver = struct {
+        pub const ownership: DriverOwnership = .fields;
+        bytes: Owned([]u8),
+    };
+
+    var cleanup = testing.Cleanup.init(std.testing.allocator);
+    defer cleanup.deinit();
+    var retired_count: usize = 0;
+    var retired = Owned(Retired).init(.{ .count = &retired_count });
+    retired.deinit(cleanup.domain(), std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), retired_count);
+
+    var deinitialized_count: usize = 0;
+    var deinitialized = Owned(Deinitialized).init(.{ .count = &deinitialized_count });
+    deinitialized.deinit(cleanup.domain(), std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), deinitialized_count);
+
+    var pin_count: usize = 0;
+    var pin_payload = Pin{ .count = &pin_count };
+    var pin = Owned(*Pin).init(&pin_payload);
+    pin.deinit(cleanup.domain(), std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), pin_count);
+
+    const driver = try std.testing.allocator.create(Driver);
+    driver.* = .{ .bytes = .init(try std.testing.allocator.alloc(u8, 4)) };
+    var owned_driver = Owned(*Driver).init(driver);
+    owned_driver.deinit(cleanup.domain(), std.testing.allocator);
 }
 
 /// Exact-capacity, non-relocating ownership for a partially initialized value

@@ -1503,6 +1503,7 @@ pub const IsolatedApplication = struct {
 };
 
 fn ApplicationAdapters(comptime Driver: type) type {
+    _ = comptime heap.validateDriverOwnership(Driver);
     return struct {
         fn run(
             evaluator: *Machine,
@@ -2100,6 +2101,7 @@ pub const NativeContinuation = union(enum) {
 };
 
 fn WorkDriverAdapters(comptime Driver: type) type {
+    _ = comptime heap.validateDriverOwnership(Driver);
     return struct {
         pub fn advance(evaluator: *Machine, raw: *anyopaque) MachineError!WorkProgress {
             const driver: *Driver = @ptrCast(@alignCast(raw));

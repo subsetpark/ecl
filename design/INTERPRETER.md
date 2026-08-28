@@ -976,13 +976,19 @@ Any change to this machinery must preserve:
   meaning. A structured payload exposing both `retire` and `deinit` must
   select an `OwnedDisposal` at compile time; partial-state materializers
   select `retire`, and an omitted or contradictory selection fails
-  compilation. Every scheduler, application, and fallback driver declares
-  one exhaustive `DriverOwnership`: `fields` forbids destructor hooks and
-  always uses the generated walk, `bounded_retirement` requires the
-  intrusive node and `advanceRetirement`, and `self_owned` is restricted
-  to address-stable aggregate state whose internal borrows require
-  coordinated teardown. All erased adapters and direct detach paths call
-  the same policy dispatcher. `Machine.startDriver` consumes the whole
+  compilation. Instantiating `Owned(T)` eagerly selects one closed disposal
+  protocol for values, slices, heap handles, driver pointers, pins, and every
+  accepted `retire`/`deinit` parameter shape; method receiver, parameter order,
+  and `void` return are checked there even if no destructor call is analyzed.
+  Runtime disposal switches only on that selected protocol, so validation and
+  execution cannot drift. Every scheduler, application, and fallback driver
+  declares one exhaustive `DriverOwnership`: `fields` forbids destructor hooks
+  and always uses the generated walk, `bounded_retirement` requires the
+  intrusive node and `advanceRetirement`, and `self_owned` is restricted to
+  address-stable aggregate state whose internal borrows require coordinated
+  teardown. Application and work type-erasure factories validate that policy
+  before returning their adapters; all erased adapters and direct detach paths
+  call the same policy dispatcher. `Machine.startDriver` consumes the whole
   initialized value on both success and allocation failure; the only
   separate entry accepts a heap object whose type declares address-stable
   construction and cannot be used by an ordinary driver. Typed intrusive

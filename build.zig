@@ -177,9 +177,19 @@ pub fn build(b: *std.Build) void {
         .{ .file = "generic_parameter", .message = "poll.drive: cursor advance must be non-generic and non-variadic" },
         .{ .file = "malformed_comparator", .message = "poll.MergeSortCursor: comparator advance must have signature fn (*Cursor, usize) poll.Progress(std.math.Order)" },
         .{ .file = "malformed_exact_materializer", .message = "poll.ExactMaterializer: fill must have signature fn (*Builder, []const Source, *usize, usize) void" },
+        .{ .file = "owned_ambiguous_disposal", .message = "heap.Owned structured payload with both retire and deinit must declare owned_disposal" },
+        .{ .file = "owned_missing_selected_method", .message = "heap.Owned payload selects retire but does not declare retire" },
+        .{ .file = "owned_wrong_parameters", .message = "heap.Owned retire must have signature fn (Payload|*Payload, *ReleaseDomain) void or fn (Payload|*Payload, *ReleaseDomain, Allocator) void" },
+        .{ .file = "owned_wrong_return", .message = "heap.Owned deinit must have signature fn (Payload|*Payload) void, fn (Payload|*Payload, Allocator) void, fn (Payload|*Payload, *ReleaseDomain) void, or fn (Payload|*Payload, *ReleaseDomain, Allocator) void" },
+        .{ .file = "owned_malformed_driver", .message = "owned_malformed_driver.Driver field ownership forbids a destructor hook" },
     };
     const poll_contract_module = b.createModule(.{
         .root_source_file = b.path("src/poll.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const heap_contract_module = b.createModule(.{
+        .root_source_file = b.path("src/heap.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -194,6 +204,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         negative_module.addImport("ecl-poll", poll_contract_module);
+        negative_module.addImport("ecl-heap", heap_contract_module);
         const negative = b.addObject(.{
             .name = b.fmt("comptime-contract-negative-{s}", .{case.file}),
             .root_module = negative_module,
