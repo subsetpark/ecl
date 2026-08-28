@@ -102,8 +102,25 @@ jobs:
             cp "$test_runner" /tmp/test_runner.zig
             trap "cp /tmp/test_runner.zig $test_runner" EXIT
             sed -i "/\.logFn = log,/a\\    .signal_stack_size = null," "$test_runner"
+            set +e
             timeout 20m zig build test-tsan \
-              -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m < /dev/null
+              -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m \
+              < /dev/null > /tmp/tsan.log 2>&1
+            tsan_code=$?
+            set -e
+            cat /tmp/tsan.log
+            if [ "$tsan_code" -ne 0 ]; then
+              apk add --no-cache gdb
+              test_binary="$(sed -n "s/^failed command: \([^ ]*\/test\) .*/\1/p" /tmp/tsan.log | tail -1)"
+              if [ -n "$test_binary" ]; then
+                TSAN_OPTIONS=verbosity=2 timeout 2m gdb --batch \
+                  -ex "set disable-randomization off" \
+                  -ex run \
+                  -ex "thread apply all backtrace full" \
+                  --args "$test_binary"
+              fi
+              exit "$tsan_code"
+            fi
           '
 
       - name: Install zlint
