@@ -101,8 +101,8 @@ jobs:
             test_runner=/opt/zig/lib/compiler/test_runner.zig
             cp "$test_runner" /tmp/test_runner.zig
             trap "cp /tmp/test_runner.zig $test_runner" EXIT
-            sed -i "/\.logFn = log,/a\\    .enable_segfault_handler = false,\\n    .signal_stack_size = null," "$test_runner"
-            grep -A3 "\.logFn = log" "$test_runner"
+            sed -i "/\.logFn = log,/a\\    .allow_stack_tracing = false,\\n    .enable_segfault_handler = false,\\n    .signal_stack_size = null," "$test_runner"
+            grep -A4 "\.logFn = log" "$test_runner"
             set +e
             timeout 20m zig build test-tsan \
               -Doptimize="$OPTIMIZE" --summary all --test-timeout 10m \

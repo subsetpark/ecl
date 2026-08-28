@@ -154,15 +154,16 @@ reason first, not the matrix.
   `test-oom`; it fired only once a module auto-load inside racing children widened the
   window. When TSan does crash, isolate with a counterfactual run—remove the suspected
   trigger with the fix still absent—before claiming a cause.
-- **Zig 0.16's bundled Linux TSan can call null signal interceptors on
+- **Zig 0.16's bundled Linux TSan can call null libc interceptors on
   GitHub-hosted runners before any test executes.** Confirming backtraces reach
-  address zero from `___interceptor_sigaltstack` and
-  `___interceptor_sigemptyset`, while Zig configures its alternative signal
-  stack and segfault handler. The CI step temporarily disables both features in
-  the generated test runner, which owns `std.options` for the test executable;
-  production and non-TSan builds retain Zig's defaults. Do not replace this
-  with ASLR or Docker seccomp changes: both counterfactuals left the hosted
-  crash unchanged.
+  address zero from `___interceptor_sigaltstack`,
+  `___interceptor_sigemptyset`, and `___interceptor_dl_iterate_phdr`, while Zig
+  configures its alternative signal stack and segfault handler or captures the
+  test runner's progress trace. The CI step temporarily disables all three
+  startup features in the generated test runner, which owns `std.options` for
+  the test executable; production and non-TSan builds retain Zig's defaults.
+  Do not replace this with ASLR or Docker seccomp changes: both
+  counterfactuals left the hosted crash unchanged.
 - **Never run `zig build test-tsan` directly on macOS. It is Docker-only, without
   exception.** Zig 0.16's native arm64 macOS sanitizer runtime segfaults *before `main`*:
   `libclang_rt.tsan_osx_dynamic.dylib` faults in `__tsan::InitializePlatform` →
