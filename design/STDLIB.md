@@ -6,7 +6,7 @@ modules then appear by module name, with each section's words ordered by
 codepoint — the language's own string ordering (`cmp`) — so symbol-spelled
 words precede letter-spelled ones. An entry gives the word's successful stack
 effect followed by its semantics. Source and native bindings carry declared
-effects reflected by `which` and `see`; builtin words that hand work to a scheduler driver
+effects reflected by `which` and `see`; built-in words that hand work to a scheduler driver
 state the same shape in their documentation because their result appears after
 the primitive callback returns. The language rules behind those effects live in the
 [`language specification`](SPEC.md); this document owns the exhaustive list of
