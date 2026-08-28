@@ -154,6 +154,15 @@ reason first, not the matrix.
   `test-oom`; it fired only once a module auto-load inside racing children widened the
   window. When TSan does crash, isolate with a counterfactual run—remove the suspected
   trigger with the fix still absent—before claiming a cause.
+- **Zig 0.16's bundled Linux TSan can call a null `sigaltstack` interceptor on
+  GitHub-hosted runners before any test executes.** The confirming backtrace is
+  `___interceptor_sigaltstack` at address zero, reached from
+  `Thread.maybeAttachSignalStack`. The CI step temporarily disables the default
+  test runner's alternative signal stack, while the TSan root option disables
+  it for threads spawned by the imported ECL module. Both halves are required
+  because each root owns its own `std.options`; production and non-TSan builds
+  retain Zig's default signal-stack behavior. Do not replace this with ASLR or
+  Docker seccomp changes: both counterfactuals left the hosted crash unchanged.
 - **Never run `zig build test-tsan` directly on macOS. It is Docker-only, without
   exception.** Zig 0.16's native arm64 macOS sanitizer runtime segfaults *before `main`*:
   `libclang_rt.tsan_osx_dynamic.dylib` faults in `__tsan::InitializePlatform` →
