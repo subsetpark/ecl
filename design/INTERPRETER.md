@@ -104,6 +104,14 @@ Recorded target-specific results and their current disposition live in
   Canonical rendering never elides. The worklist keeps both styles free of
   host recursion, and display elision happens before matrix-shape scanning or
   before any element or character from the huge list is scheduled.
+- **Bounded cursor stacks inline exactly one entry.** `ChunkStack` stores its
+  first frame in a tagged value slot and allocates linked 256-entry chunks only
+  when traversal depth reaches two. The inline slot contains the frame and no
+  pointer back into its containing stack, so a cursor may move into a Unit's
+  inline driver slot before polling without leaving a self-link at its old
+  address. Deeper storage remains non-relocating; `reserve` covers the inline
+  slot and heap tail as one ownership-atomic capacity promise, and retirement
+  links heap chunks only to other heap chunks.
 - **Dicts:** keys vector + values vector (insertion order for free) +
   cached per-entry hashes + linear scan below ~16 entries, one u32 hash
   index above. Hash agrees with `=`: numerics hash by numeric value (2 and

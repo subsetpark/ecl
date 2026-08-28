@@ -103,6 +103,8 @@ const Sample = struct {
 const Mode = enum { timing, counters };
 const full_sizes = [_]usize{ 1, 32, 1_024, 65_535, 65_536, 65_537, 1_048_576 };
 const quick_sizes = [_]usize{ 32, 65_536 };
+const full_cursor_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
+const quick_cursor_sizes = [_]usize{ 32, 4_096 };
 
 fn timevalNs(value: std.posix.timeval) u64 {
     return @intCast(value.sec * std.time.ns_per_s + value.usec * std.time.ns_per_us);
@@ -287,6 +289,31 @@ fn runLatency(
     }
 }
 
+/// Isolates the per-operation first-frame allocation identified by the
+/// allocation-budget suite. The focused range stops at 65,536 because that is
+/// enough to expose linear allocation while keeping the durable full run
+/// proportionate to the general throughput cases.
+fn runCursorStorage(
+    io: std.Io,
+    out: *std.Io.Writer,
+    mode: Mode,
+    sizes: []const usize,
+    repetitions: usize,
+) !void {
+    for ([_]usize{ 1, 8 }) |workers| {
+        for (sizes) |size| {
+            const setup = try std.fmt.allocPrint(std.heap.smp_allocator, "{d} range", .{size});
+            defer std.heap.smp_allocator.free(setup);
+            try printCase(io, out, mode, workers, size, .{
+                .name = "single-frame-cursor",
+                .setup = setup,
+                .workload = "(pop 2 [[1 2] [3]] in?) each len",
+            }, repetitions);
+            try out.flush();
+        }
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     if (builtin.mode == .Debug) return error.ReleaseBuildRequired;
     var args = std.process.Args.Iterator.init(init.minimal.args);
@@ -299,15 +326,17 @@ pub fn main(init: std.process.Init) !void {
     if ((mode == .counters) != ecl.machine.root_execution_metrics_enabled)
         return error.InstrumentationModeMismatch;
     var quick = false;
-    while (args.next()) |arg| if (std.mem.eql(u8, arg, "--quick")) {
-        quick = true;
-    };
+    var cursor_storage_only = false;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--quick")) quick = true;
+        if (std.mem.eql(u8, arg, "--cursor-storage-only")) cursor_storage_only = true;
+    }
     const repetitions: usize = if (mode == .counters) 1 else if (quick) 3 else 101;
 
     var buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const out = &stdout.interface;
-    try out.print("# schema=ecl.workdrivers.{s}.v1\n", .{@tagName(mode)});
+    try out.print("# schema=ecl.workdrivers.{s}.v2\n", .{@tagName(mode)});
     try out.print("# WorkDriver baseline ({s})\n", .{@tagName(mode)});
     try out.print("optimize={s},target={s}-{s},zig={s},root_counters={}\n", .{
         @tagName(builtin.mode),
@@ -320,7 +349,12 @@ pub fn main(init: std.process.Init) !void {
         try out.writeAll("case,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\n")
     else
         try out.writeAll("case,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs\n");
-    try runScaling(init.io, out, mode, if (quick) &quick_sizes else &full_sizes, repetitions);
-    try runLatency(init.io, out, mode, repetitions, quick);
+    if (cursor_storage_only) {
+        try runCursorStorage(init.io, out, mode, if (quick) &quick_cursor_sizes else &full_cursor_sizes, repetitions);
+    } else {
+        try runScaling(init.io, out, mode, if (quick) &quick_sizes else &full_sizes, repetitions);
+        try runCursorStorage(init.io, out, mode, if (quick) &quick_cursor_sizes else &full_cursor_sizes, repetitions);
+        try runLatency(init.io, out, mode, repetitions, quick);
+    }
     try out.flush();
 }

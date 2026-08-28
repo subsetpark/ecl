@@ -21,8 +21,9 @@ timeout 500 zig build bench-workdrivers -Doptimize=ReleaseSafe < /dev/null
 timeout 500 zig build bench-workdrivers -Doptimize=ReleaseFast < /dev/null
 ```
 
-`-- --quick` selects only sizes 32 and 65,536 with three repetitions. It is a
-smoke gate and is not performance evidence.
+`-- --quick` selects reduced size sets with three repetitions. It is a smoke
+gate and is not performance evidence. `-- --cursor-storage-only` selects the
+focused first-frame cursor workload and retains the full 101 repetitions.
 
 ### Selected timing results
 
@@ -61,8 +62,37 @@ workers and in ReleaseSafe and ReleaseFast.
 
 The baseline therefore does not justify changing queue topology or the
 scheduler quantum: non-task throughput is insensitive to worker count, and the
-mixed/cancellation results do not show a uniform eight-worker improvement.
-The next bounded investigation should attribute the fixed allocation total to
-driver/cursor storage, starting with the separately identified first-frame
-`ChunkStack` allocation, before considering transition batching or scheduler
-policy.
+mixed/cancellation results do not show a uniform eight-worker improvement. It
+instead selected the separately identified first-frame `ChunkStack` allocation
+as the first bounded intervention, recorded below.
+
+## Inline-first `ChunkStack` A/B — 2026-08-28
+
+The first bounded intervention compared the original heap-first `ChunkStack`
+with a treatment holding exactly one entry inline. Both variants were compiled
+from the same source behind a temporary build-time switch; the switch was
+removed after acceptance so production retains no dormant container path. The
+focused public workload applies scalar membership over a generic spine once per
+input element. It changes neither root polls nor logical transition counts, so
+the result isolates cursor storage rather than a different execution path.
+
+ReleaseSafe results below are 101 repetitions on macOS arm64 (Apple M4 Max),
+Zig 0.16.0. Times are wall-clock milliseconds.
+
+| Workers | Operations | Control p50 | Inline p50 | Reduction | Control allocations | Inline allocations |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 32 | 0.234 | 0.083 | 64.3% | 96 | 64 |
+| 1 | 1,024 | 5.176 | 0.860 | 83.4% | 1,088 | 64 |
+| 1 | 65,536 | 326.186 | 50.824 | 84.4% | 65,600 | 64 |
+| 8 | 32 | 0.236 | 0.082 | 65.1% | 96 | 64 |
+| 8 | 1,024 | 5.161 | 0.854 | 83.5% | 1,088 | 64 |
+| 8 | 65,536 | 330.830 | 50.686 | 84.7% | 65,600 | 64 |
+
+The allocation delta is exactly one per operation at every measured size while
+polls, driver resumes, application resumes, and scheduler handoffs are
+identical. The treatment therefore clears both gates: it removes the attributed
+allocation rather than moving it, and produces a large repeated release-mode
+improvement on the affected path. The general throughput cases remain at their
+27-allocation fixed baseline because they do not construct this cursor; the
+focused case remains in schema `ecl.workdrivers.*.v2` to keep that distinction
+observable.

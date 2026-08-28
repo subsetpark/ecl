@@ -1,5 +1,6 @@
 const std = @import("std");
 const formatter = @import("../formatter.zig");
+const print = @import("../print.zig");
 const heap = @import("../heap.zig");
 const console = @import("../console.zig");
 const line_editor = @import("../line_editor.zig");
@@ -13,6 +14,36 @@ const native_runtime = @import("native_runtime_options");
 const max_source_bytes = 4096;
 const max_edit_steps = 128;
 const max_session_steps = 24;
+
+fn fuzzMovedRenderCursor(_: void, smith: *std.testing.Smith) !void {
+    const number = smith.value(i64);
+    var cursor = try print.RenderCursor.init(std.testing.allocator, .{ .int = number });
+    var moved = cursor;
+    // SAFETY: `moved` owns the cursor's action stack now; the copied-from
+    // local is never observed or deinitialized again.
+    cursor = undefined;
+    defer moved.deinit();
+
+    var actual_storage: [64]u8 = undefined;
+    var actual = std.Io.Writer.fixed(&actual_storage);
+    while (true) switch (try moved.advance(&actual, 1)) {
+        .pending => {},
+        .complete => break,
+    };
+
+    var expected_storage: [64]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_storage, "{d}", .{number});
+    try std.testing.expectEqualStrings(expected, actual.buffered());
+}
+
+test "fuzz: moved render cursor preserves its inline first action" {
+    try std.testing.fuzz({}, fuzzMovedRenderCursor, .{ .corpus = &.{
+        "",
+        "zero",
+        "negative",
+        "max-int",
+    } });
+}
 
 fn fuzzReaderInput(_: void, smith: *std.testing.Smith) !void {
     var storage: [max_source_bytes]u8 = undefined;

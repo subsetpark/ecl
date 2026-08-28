@@ -429,6 +429,7 @@ pub fn ChunkStack(comptime T: type) type {
         const Self = @This();
         pub const owned_disposal: heap.OwnedDisposal = .retire;
         const chunk_len = 256;
+        const First = union(enum) { empty, item: T };
         const Chunk = struct {
             retirement: heap.ReleaseDomain.Retirement = .{},
             previous: ?*Chunk,
@@ -448,6 +449,10 @@ pub fn ChunkStack(comptime T: type) type {
         };
 
         allocator: std.mem.Allocator,
+        // This owns only the entry. In particular it has no pointer back into
+        // Self, so moving a cursor before polling cannot leave an internal
+        // link aimed at the cursor's old inline storage.
+        first: First = .empty,
         top: ?*Chunk = null,
 
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -459,23 +464,23 @@ pub fn ChunkStack(comptime T: type) type {
                 self.top = chunk.previous;
                 self.allocator.destroy(chunk);
             }
+            self.first = .empty;
         }
         pub fn retire(self: *Self, releases: *heap.ReleaseDomain) void {
             if (self.top) |top| releases.retire(top, &top.retirement);
             self.top = null;
+            self.first = .empty;
         }
 
         pub fn push(self: *Self, item: T) error{OutOfMemory}!void {
-            if (self.top == null or self.top.?.len == chunk_len) {
-                const chunk = try self.allocator.create(Chunk);
-                // SAFETY: only slots below `len` are read, and `push` writes
-                // each such slot before incrementing `len`.
-                chunk.* = .{ .previous = self.top, .len = 0, .items = undefined };
-                self.top = chunk;
+            if (self.firstEmpty()) {
+                self.first = .{ .item = item };
+                return;
             }
-            const chunk = self.top.?;
-            chunk.items[chunk.len] = item;
-            chunk.len += 1;
+            if (self.top == null or self.top.?.len == chunk_len) {
+                try self.allocateChunk();
+            }
+            self.pushHeap(item);
         }
 
         /// Makes the next `additional` pushes allocation-free. A fresh chunk
@@ -483,44 +488,111 @@ pub fn ChunkStack(comptime T: type) type {
         /// ownership on multi-frame transitions matters more than packing it.
         pub fn reserve(self: *Self, additional: usize) error{OutOfMemory}!void {
             std.debug.assert(additional <= chunk_len);
-            const available = if (self.top) |chunk| chunk_len - chunk.len else 0;
+            const inline_available: usize = if (self.firstEmpty()) 1 else 0;
+            const available = inline_available + if (self.top) |chunk| chunk_len - chunk.len else 0;
             if (available >= additional) return;
-            const chunk = try self.allocator.create(Chunk);
-            // SAFETY: slots are read only below `len`, after a later `push`
-            // initializes the corresponding element.
-            chunk.* = .{ .previous = self.top, .len = 0, .items = undefined };
-            self.top = chunk;
+            try self.allocateChunk();
         }
 
         /// Commits one item after `reserve`; ownership transfer cannot fail.
         pub fn pushReserved(self: *Self, item: T) void {
+            if (self.firstEmpty()) {
+                self.first = .{ .item = item };
+                return;
+            }
+            self.pushHeap(item);
+        }
+
+        pub fn pop(self: *Self) ?T {
+            if (self.top) |chunk| {
+                if (chunk.len != 0) {
+                    chunk.len -= 1;
+                    const result = chunk.items[chunk.len];
+                    if (chunk.len == 0 and chunk.previous != null) {
+                        self.top = chunk.previous;
+                        self.allocator.destroy(chunk);
+                    }
+                    return result;
+                }
+            }
+            return switch (self.first) {
+                .empty => null,
+                .item => |item| result: {
+                    self.first = .empty;
+                    break :result item;
+                },
+            };
+        }
+
+        pub fn topPtr(self: *Self) ?*T {
+            if (self.top) |chunk| {
+                if (chunk.len != 0) return &chunk.items[chunk.len - 1];
+            }
+            return switch (self.first) {
+                .empty => null,
+                .item => |*item| item,
+            };
+        }
+
+        pub fn isEmpty(self: *const Self) bool {
+            if (self.top) |chunk| if (chunk.len != 0) return false;
+            return self.firstEmpty();
+        }
+
+        fn firstEmpty(self: *const Self) bool {
+            return self.first == .empty;
+        }
+
+        fn allocateChunk(self: *Self) error{OutOfMemory}!void {
+            const chunk = try self.allocator.create(Chunk);
+            // SAFETY: slots are read only below `len`, after push or
+            // pushReserved initializes the corresponding element.
+            chunk.* = .{ .previous = self.top, .len = 0, .items = undefined };
+            self.top = chunk;
+        }
+
+        fn pushHeap(self: *Self, item: T) void {
             const chunk = self.top.?;
             std.debug.assert(chunk.len != chunk_len);
             chunk.items[chunk.len] = item;
             chunk.len += 1;
         }
-
-        pub fn pop(self: *Self) ?T {
-            const chunk = self.top orelse return null;
-            if (chunk.len == 0) return null;
-            chunk.len -= 1;
-            const result = chunk.items[chunk.len];
-            if (chunk.len == 0 and chunk.previous != null) {
-                self.top = chunk.previous;
-                self.allocator.destroy(chunk);
-            }
-            return result;
-        }
-
-        pub fn topPtr(self: *Self) ?*T {
-            const chunk = self.top orelse return null;
-            return if (chunk.len == 0) null else &chunk.items[chunk.len - 1];
-        }
-
-        pub fn isEmpty(self: *const Self) bool {
-            return self.top == null or self.top.?.len == 0;
-        }
     };
+}
+
+test "ChunkStack inline entry survives moves and preserves allocation failure" {
+    var no_storage: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&no_storage);
+
+    var original = ChunkStack(u32).init(fixed.allocator());
+    defer original.deinit();
+    try original.reserve(1);
+    original.pushReserved(41);
+
+    var moved = original;
+    original = ChunkStack(u32).init(fixed.allocator());
+    defer moved.deinit();
+    moved.topPtr().?.* += 1;
+    try std.testing.expectError(error.OutOfMemory, moved.reserve(1));
+    try std.testing.expectEqual(@as(?u32, 42), moved.pop());
+    try std.testing.expect(moved.isEmpty());
+}
+
+test "ChunkStack inline entry preserves deep LIFO and reserved pushes" {
+    var stack = ChunkStack(usize).init(std.testing.allocator);
+    defer stack.deinit();
+
+    var next: usize = 0;
+    while (next < 600) : (next += 2) {
+        try stack.reserve(2);
+        stack.pushReserved(next);
+        stack.pushReserved(next + 1);
+    }
+    while (next != 0) {
+        next -= 1;
+        try std.testing.expectEqual(@as(?usize, next), stack.pop());
+    }
+    try std.testing.expect(stack.isEmpty());
 }
 
 /// An append-only sequence whose fixed-size chunks never relocate prior

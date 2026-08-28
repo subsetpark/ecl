@@ -285,6 +285,11 @@ pub fn build(b: *std.Build) void {
         description: []const u8,
     }{
         .{
+            .step_name = "fuzz-render-cursor",
+            .test_name = "fuzz: moved render cursor preserves its inline first action",
+            .description = "Fuzz RenderCursor relocation with an inline first action",
+        },
+        .{
             .step_name = "fuzz-reader",
             .test_name = "fuzz: reader accepts arbitrary bounded input",
             .description = "Fuzz bounded reader input",
@@ -734,6 +739,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{
             // Whole verification sources whose every test is fast.
             "session.test.",
+            "poll.test.",
             "heap.test.",
             "list.test.",
             "dict.test.",

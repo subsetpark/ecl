@@ -479,15 +479,10 @@ test "allocation: dispatch spends nothing per element" {
     for (dispatch_free) |case| try expectBudget(case);
 }
 
-/// Membership over a generic spine, which the typed scan declines. The match
-/// worklist it allocated per candidate is gone; what remains is exactly one
-/// allocation for the walk itself -- the cursor's frame stack, allocated to
-/// hold a single search entry -- plus, when the needle is a list and the
-/// operation pervades, the cost of building the result it returns.
-///
-/// The scalar-needle case isolates the first from the second, and one is the
-/// floor this shape reaches without changing `ChunkStack`, which every cursor
-/// in the interpreter builds on.
+/// Membership over a generic spine, which the typed scan declines. Its cursor
+/// normally needs only one frame, now held by `ChunkStack` without allocating.
+/// A list needle still pays to construct its pervasive result; the scalar
+/// needle isolates the allocation-free traversal itself.
 const generic_membership = [_]Case{
     .{
         .name = "membership over a generic spine",
@@ -499,7 +494,7 @@ const generic_membership = [_]Case{
         .name = "scalar needle over a generic spine",
         .setup = "{d} range",
         .workload = "(pop 2 [[1 2] [3]] in?) each len",
-        .per_element = 1,
+        .per_element = 0,
     },
 };
 
