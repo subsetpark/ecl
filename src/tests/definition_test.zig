@@ -99,8 +99,8 @@ test "every primitive exposes meaningful reflective documentation" {
     try std.testing.expectEqualStrings(expected.written(), display.bytes());
     try expectOk(&runtime, "'over see 'call see");
     try std.testing.expectEqualStrings(
-        "(swap dup (swap) dip)\n" ++
-            "<primitive>\n",
+        "(x y -- x y x : \"Copy the value beneath the top of the stack onto the top.\") (swap dup (swap) dip)\n" ++
+            "(quotation -- ... : \"Run a quotation on the current stack.\") <primitive>\n",
         output.written(),
     );
 }
@@ -138,7 +138,7 @@ test "module annotations retain contracts documentation qualification and shadow
     try expectErrorContains(&runtime, "((a -- b c : \"An intentionally false contract.\") (dup +) 'f def) 'lies @defm 1 lies.f", "'kind 'contract");
 }
 
-test "multiline documentation is normalized and see prints only the canonical body" {
+test "multiline documentation is normalized and see prints annotation and canonical body" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
     var runtime = try session.Session.initWithOutput(std.testing.allocator, &.{}, &output.writer);
@@ -150,8 +150,8 @@ test "multiline documentation is normalized and see prints only the canonical bo
         "'square see 'answer see");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     try std.testing.expectEqualStrings(
-        "(dup *)\n" ++
-            "(42)\n",
+        "(x -- y : \"Square a numeric value.\") (dup *)\n" ++
+            "(: \"Only docs.\") (42)\n",
         output.written(),
     );
 }
@@ -167,7 +167,7 @@ test "see retains source binders while execution uses their lowered body" {
     try expectOk(&runtime, "(n -- n : \"Increment.\") (|x| x 1 +) 'inc def");
     try expectOk(&runtime, "'inc see");
     try std.testing.expectEqualStrings(
-        "(|x| x 1 +)\n",
+        "(n -- n : \"Increment.\") (|x| x 1 +)\n",
         output.written(),
     );
 }

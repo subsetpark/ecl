@@ -346,10 +346,10 @@ always applies it. Values are bound by capturing them in a body.
 - Redefinition (`def` or `set` over an existing name) replaces the
   complete binding snapshot: omitting an effect or docstring clears the
   old one. Code holding the old body keeps running it safely.
-- `see` prints only the resolved binding body through the standard source
-  formatter. It omits the annotation, navigation header, name, and
-  `def`/`defp` terminator; `which` reports binding and effect metadata, and
-  `doc` returns documentation.
+- `see` prints the resolved binding's combined annotation, when present,
+  followed by its body through the standard source formatter. It omits the
+  navigation header, name, and `def`/`defp` terminator; `which` reports binding
+  and effect metadata, and `doc` returns documentation.
 - `'name unset` and `'name undef` are exact aliases. They remove a binding
   only from the current writable scope and otherwise do nothing. Removing a
   shadow reveals the next binding in the ordinary parent/core lookup chain;
@@ -419,8 +419,8 @@ values the word consumes is known, how many it leaves is not. The before
 slots are checked at boundaries exactly as today; the after check is
 skipped. This is a genuine partial contract, not the absence of one — a
 word that would otherwise carry a documentation-only annotation regains
-input checking and honest reflection, and `which` renders the effect with
-`-- ...`.
+input checking and honest reflection, and `which` and `see` render the effect
+with `-- ...`.
 
 The grammar is strict: no mixing (`(a -- ... b)` is `'domain`), and the
 token never appears in a before row (`(... -- b)` is `'domain`). Named row

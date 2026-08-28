@@ -69,7 +69,7 @@ const entries = [_]Metadata{
     .{ .name = "undef", .effect = "name --", .text = "Remove a binding from the current scope; an alias of unset." },
     .{ .name = "doc", .effect = "name -- string", .text = "Return the canonical documentation string of a resolved binding." },
     .{ .name = "which", .effect = "name --", .text = "Print where a word resolves and any bindings it shadows." },
-    .{ .name = "see", .effect = "name --", .text = "Print the standard-formatted body of a binding." },
+    .{ .name = "see", .effect = "name --", .text = "Print the standard-formatted annotation and body of a binding." },
 
     .{ .name = "unmodule", .effect = "module-name --", .text = "Close, quiesce, and retire a registered module named by a symbol." },
     .{ .name = "within", .effect = "quotation -- ...", .text = "Run a quotation against a private draft of the home module's durable stack and publish the result." },

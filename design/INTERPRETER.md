@@ -640,10 +640,10 @@ primitives, operationalized as two rules:
   after every check and allocation succeeds. Top-level effect metadata
   does not schedule contract frames; module home transitions trigger the
   effect frame, while same-home tail calls remain frame-neutral. `doc`,
-  `which`, and `see` resolve through ordinary leased bindings; `doc` and
-  `which` expose metadata, while `see` materializes only the body through the
-  poll-aware reflection plan and sends it through the same canonical layout as
-  `ecl fmt`. Every parsed unit owns one ref-counted source
+  `which`, and `see` resolve through ordinary leased bindings; `see` combines
+  effect and documentation back into one quotation, materializes it followed
+  by the body through the poll-aware reflection plan, and sends both through
+  the same canonical layout as `ecl fmt`. Every parsed unit owns one ref-counted source
   buffer; provenance records the byte range and opening-delimiter span of each
   reader-built quotation, and a published binding retains only that slice
   handle. `see` can therefore

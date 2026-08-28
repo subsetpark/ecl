@@ -150,15 +150,15 @@ test "definitions: module def and defp accept all four annotation forms" {
         "10 forms.bare 10 forms.effected 10 forms.documented 12 forms.complete 10 forms.via-private",
         "11 20 7 3 21",
     );
-    // Body reflection is independent of annotation shape; documentation is
-    // available through `doc`, while `which` owns effect reflection.
+    // Reflection preserves exactly which annotation portions were supplied;
+    // documentation is also available separately through `doc`.
     try expectOk(&runtime, "'forms.bare see 'forms.effected see " ++
         "'forms.documented see 'forms.complete see");
     try std.testing.expectEqualStrings(
         "(1 +)\n" ++
-            "(2 *)\n" ++
-            "(3 -)\n" ++
-            "(4 div)\n",
+            "(n -- n) (2 *)\n" ++
+            "(: \"Subtract three.\") (3 -)\n" ++
+            "(n -- n : \"Divide by four.\") (4 div)\n",
         output.written(),
     );
     try expectStack(&runtime, "'forms.documented doc", "\"Subtract three.\"");
@@ -193,7 +193,7 @@ test "definitions: set and setp publish exact literal captures without synthesiz
     );
     try expectOk(&runtime, "'answer see 'spelled see 'answer which");
     try std.testing.expectEqualStrings(
-        "([42] first)\n" ++
+        "(: \"The answer.\") ([42] first)\n" ++
             "([42] first)\n" ++
             "answer -> answer def public\n",
         output.written(),

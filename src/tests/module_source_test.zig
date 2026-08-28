@@ -787,7 +787,7 @@ test "module: a parameterized behavior dependency is a quotation the caller wrot
     });
 }
 
-test "reflection: which exposes metadata while see exposes only the body" {
+test "reflection: which and see expose metadata while see omits the definition wrapper" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);

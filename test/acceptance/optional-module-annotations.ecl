@@ -36,7 +36,7 @@
  (hidden hidden-effect hidden-doc hidden-both) 'via-private def
  ) 'forms @defm
 
-### `see` prints only each body; `doc` reports documentation separately.
+### `see` prints each supplied annotation and body; `doc` reports documentation separately.
 'forms.bare see
 'forms.effected see
 'forms.documented see

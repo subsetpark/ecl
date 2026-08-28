@@ -684,7 +684,8 @@ test "e2e: native extension discovery ABI and reflection acceptance" {
         .exit_code = 0,
         .stdout = "sample.increment -> sample.increment native public generation 1 " ++
             "(n -- result) requires call, build-values, reschedule\n" ++
-            "<native:sample.increment> requires call build-values reschedule\n42\n",
+            "(n -- result : \"Increment an integer.\") <native:sample.increment> requires call build-values\n" ++
+            "reschedule\n42\n",
         .stderr = "",
     });
 }
@@ -958,7 +959,7 @@ test "e2e: module effect declaration acceptance" {
     defer visible.deinit();
     try visible.expect(.{
         .exit_code = 0,
-        .stdout = "(dup +)\n",
+        .stdout = "(a -- b) (dup +)\n",
         .stderr = "",
     });
 }
@@ -1053,13 +1054,13 @@ test "e2e: optional module annotation acceptance" {
     try result.expect(.{
         .exit_code = 0,
         .stdout = "(1 +)\n" ++
-            "(2 *)\n" ++
-            "(3 -)\n" ++
-            "(4 div)\n" ++
+            "(n -- n) (2 *)\n" ++
+            "(: \"Subtract three.\") (3 -)\n" ++
+            "(n -- n : \"Divide by four.\") (4 div)\n" ++
             "\"Subtract three.\"\n" ++
             "11\n20\n7\n3\n59\n" ++
             "1\n" ++
-            "([42] first)\n" ++
+            "(: \"The answer.\") ([42] first)\n" ++
             "([42] first)\n" ++
             "'contract\n'domain\n'domain\n" ++
             "(dup)\n(a b)\n",
