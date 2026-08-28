@@ -109,6 +109,8 @@ const full_nested_cursor_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
 const quick_nested_cursor_sizes = [_]usize{ 32, 4_096 };
 const full_materializer_budget_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
 const quick_materializer_budget_sizes = [_]usize{ 32, 4_096 };
+const full_call_site_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
+const quick_call_site_sizes = [_]usize{ 32, 4_096 };
 
 fn timevalNs(value: std.posix.timeval) u64 {
     return @intCast(value.sec * std.time.ns_per_s + value.usec * std.time.ns_per_us);
@@ -195,7 +197,7 @@ fn printCase(
 ) !void {
     if (mode == .counters) {
         const sample = try runSample(io, workers, case);
-        try out.print("{s},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n", .{
+        try out.print("{s},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n", .{
             case.name,
             workers,
             size,
@@ -206,6 +208,9 @@ fn printCase(
             sample.metrics.driver_resumes,
             sample.metrics.application_resumes,
             sample.metrics.scheduler_handoffs,
+            sample.metrics.qualified_cache_hits,
+            sample.metrics.qualified_cache_misses,
+            sample.metrics.qualified_cache_heals,
         });
         return;
     }
@@ -374,6 +379,35 @@ fn runMaterializerBudget(
     }
 }
 
+/// Separates a cold canonical qualified call from repeated execution of one
+/// reader-owned call site. The quotation passed to `times` is one stable code
+/// root, so every iteration after the first is eligible for the same cache
+/// entry without changing the called module or binding.
+fn runQualifiedCallSite(
+    io: std.Io,
+    out: *std.Io.Writer,
+    mode: Mode,
+    sizes: []const usize,
+    repetitions: usize,
+) !void {
+    for ([_]usize{ 1, 8 }) |workers| {
+        for (sizes) |size| {
+            const workload = try std.fmt.allocPrint(
+                std.heap.smp_allocator,
+                "{d} (callsite-bench.one pop) times",
+                .{size},
+            );
+            defer std.heap.smp_allocator.free(workload);
+            try printCase(io, out, mode, workers, size, .{
+                .name = "qualified-call-site",
+                .setup = "((1) 'one def) 'callsite-bench @defm",
+                .workload = workload,
+            }, repetitions);
+            try out.flush();
+        }
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     if (builtin.mode == .Debug) return error.ReleaseBuildRequired;
     var args = std.process.Args.Iterator.init(init.minimal.args);
@@ -389,12 +423,14 @@ pub fn main(init: std.process.Init) !void {
     var cursor_storage_only = false;
     var nested_cursor_only = false;
     var materializer_budget_only = false;
+    var call_site_only = false;
     var latency_only = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--quick")) quick = true;
         if (std.mem.eql(u8, arg, "--cursor-storage-only")) cursor_storage_only = true;
         if (std.mem.eql(u8, arg, "--nested-cursor-only")) nested_cursor_only = true;
         if (std.mem.eql(u8, arg, "--materializer-budget-only")) materializer_budget_only = true;
+        if (std.mem.eql(u8, arg, "--call-site-only")) call_site_only = true;
         if (std.mem.eql(u8, arg, "--latency-only")) latency_only = true;
     }
     const repetitions: usize = if (mode == .counters) 1 else if (quick) 3 else 101;
@@ -402,7 +438,7 @@ pub fn main(init: std.process.Init) !void {
     var buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const out = &stdout.interface;
-    try out.print("# schema=ecl.workdrivers.{s}.v4\n", .{@tagName(mode)});
+    try out.print("# schema=ecl.workdrivers.{s}.v5\n", .{@tagName(mode)});
     try out.print("# WorkDriver baseline ({s})\n", .{@tagName(mode)});
     try out.print("optimize={s},target={s}-{s},zig={s},root_counters={}\n", .{
         @tagName(builtin.mode),
@@ -414,9 +450,17 @@ pub fn main(init: std.process.Init) !void {
     if (mode == .timing)
         try out.writeAll("case,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\n")
     else
-        try out.writeAll("case,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs\n");
+        try out.writeAll("case,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs,qualified_cache_hits,qualified_cache_misses,qualified_cache_heals\n");
     if (latency_only) {
         try runLatency(init.io, out, mode, repetitions, quick);
+    } else if (call_site_only) {
+        try runQualifiedCallSite(
+            init.io,
+            out,
+            mode,
+            if (quick) &quick_call_site_sizes else &full_call_site_sizes,
+            repetitions,
+        );
     } else if (materializer_budget_only) {
         try runMaterializerBudget(
             init.io,
@@ -450,6 +494,13 @@ pub fn main(init: std.process.Init) !void {
             out,
             mode,
             if (quick) &quick_materializer_budget_sizes else &full_materializer_budget_sizes,
+            repetitions,
+        );
+        try runQualifiedCallSite(
+            init.io,
+            out,
+            mode,
+            if (quick) &quick_call_site_sizes else &full_call_site_sizes,
             repetitions,
         );
         try runLatency(init.io, out, mode, repetitions, quick);

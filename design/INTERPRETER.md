@@ -513,9 +513,23 @@ Recorded target-specific results and their current disposition live in
   removal shape therefore leaves delayed readers' cells alive through their
   old shape leases, while bounded shape retirement releases one cell edge per
   turn; after readers drain, retained cells and shapes are bounded by current
-  state rather than definition/removal history. **The iron law for
-  any future cache: hold the cell, re-read its interior every execution;
-  never cache a resolution.**
+  state rather than definition/removal history. **The iron law for a binding
+  cache: hold the cell and re-read its interior every execution; never retain
+  a binding payload as the cached answer.**
+- **Canonical qualified call sites use a bounded, generation-guarded
+  lookaside.** Each Unit has exactly sixteen direct-mapped entries keyed by an
+  owned source-code root, instruction index, and word id. An entry owns one
+  opaque registration-generation guard and one stable binding-cell handle. A
+  hit may enter execution only after proving that exact generation is still
+  current, and it reloads the cell snapshot before constructing the ordinary
+  `Resolution`; reload or removal makes the guard stale, clears the entry, and
+  falls through to ordinary resumable resolution. Alias spellings bypass the
+  lookaside because alias retargeting is a separate mutable mapping. Unit
+  teardown releases entries before its current code; the fixed capacity bounds
+  retained code, generations, and cells, and collisions can change performance
+  but never meaning. The cached source still enters the single
+  `executeResolved` tail, so privacy, effect checks, trace metadata, state
+  authority, and generation pinning are unchanged.
 - **A module's construction boundary passes values, never environments.** An
   image holds one `Environment` — its own definitions — and resolution goes
   module then core. Nothing is snapshotted at construction, so there is no
@@ -1488,7 +1502,7 @@ all. Per-application guard cost is O(phrase length) against
 O(n) work, with no cache and no invalidation. A combinator may resolve its
 quotation's words once at entry to choose a fused kernel — that snapshot
 is scoped to the recognition guard only; the generic path keeps full
-per-application late binding, and resolutions are never cached.
+per-application late binding, and recognizer guards never retain resolutions.
 
 The standard-library placement rule is deliberately asymmetric: implement
 a word in the prelude when its definition in ecl is compact, or when its

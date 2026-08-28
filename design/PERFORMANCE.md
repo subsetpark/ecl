@@ -25,9 +25,10 @@ timeout 500 zig build bench-workdrivers -Doptimize=ReleaseFast < /dev/null
 gate and is not performance evidence. `-- --cursor-storage-only` selects the
 focused first-frame cursor workload, `-- --nested-cursor-only` selects the
 structural shared-budget workload, `-- --materializer-budget-only` selects the
-result-materialization shared-budget workload, and `-- --latency-only` selects
-the mixed short-task and cancellation safeguards. Without `--quick`, each
-retains the full 101 repetitions.
+result-materialization shared-budget workload, `-- --call-site-only` selects
+the repeated qualified-call workload, and `-- --latency-only` selects the mixed
+short-task and cancellation safeguards. Without `--quick`, each retains the
+full 101 repetitions.
 
 ### Selected timing results
 
@@ -134,7 +135,7 @@ p50/p95 results within 3.1%, with identical deterministic counters; a first
 eight-worker tail was not reproducible. The treatment therefore clears the
 throughput and hard-progress gates without motivating a scheduler or quantum
 change. The focused workload and the optional `--latency-only` selection remain
-in schema `ecl.workdrivers.*.v4`.
+in schema `ecl.workdrivers.*.v5`.
 
 ## Membership materializer budget A/B — 2026-08-28
 
@@ -173,4 +174,46 @@ short-task and cancellation latency safeguard showed no treatment regression,
 with identical polls, logical transitions, driver resumes, application
 resumes, and scheduler handoffs. The accepted path therefore retains one
 shared-budget implementation with no experimental or legacy control branch;
-the focused workload remains in schema `ecl.workdrivers.*.v4`.
+the focused workload remains in schema `ecl.workdrivers.*.v5`.
+
+## Generation-guarded qualified call-site cache A/B — 2026-08-28
+
+The fourth intervention tested repeated qualified dispatch from one source call
+site. The control performed the complete module-prefix, registry-generation,
+and export lookup on every call. The treatment gives each Unit a fixed
+16-entry, allocation-free lookaside keyed by owned code root, instruction
+index, and word id. An entry owns a generation guard and stable binding cell;
+every hit first proves that exact generation is still current and then reloads
+the cell's current snapshot. Alias-qualified calls bypass the cache because an
+alias may be retargeted independently. Both variants were compiled from one
+temporary build-time switch, removed after acceptance.
+
+The focused public workload repeatedly executes one canonical qualified word
+from one quotation. ReleaseSafe timings below are 101 repetitions on macOS
+arm64 (Apple M4 Max), Zig 0.16.0; times are wall-clock milliseconds.
+
+| Workers | Calls | Control p50 | Guarded-cache p50 | Reduction | Control resumes | Guarded-cache resumes | Hits / misses |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 32 | 0.087 | 0.069 | 20.2% | 66 | 35 | 31 / 1 |
+| 1 | 1,024 | 1.161 | 0.554 | 52.3% | 2,050 | 1,027 | 1,023 / 1 |
+| 1 | 65,536 | 71.372 | 32.391 | 54.6% | 131,074 | 65,539 | 65,535 / 1 |
+| 8 | 32 | 0.088 | 0.069 | 21.6% | 66 | 35 | 31 / 1 |
+| 8 | 1,024 | 1.136 | 0.551 | 51.5% | 2,050 | 1,027 | 1,023 / 1 |
+| 8 | 65,536 | 71.794 | 32.678 | 54.5% | 131,074 | 65,539 | 65,535 / 1 |
+
+The one-call cold case was unchanged in the first comparison and within 1.8%
+in the reversed comparison. The reversed 101-repetition run reproduced the
+65,536-call result at 54.5% with one worker and 55.1% with eight. Allocation
+count (33), peak temporary bytes (83,081), logical transitions (196,611),
+application resumes (65,536), and scheduler handoffs (65,728) are identical;
+the cache removes exactly one driver resume and poll per hit. The unrelated
+mixed short-task and cancellation medians showed no treatment regression.
+
+Public behavior counterfactuals reuse a call site across canonical reload,
+alias retarget, and module removal. They prove that reload observes the new
+generation, aliases remain late-bound, and removal heals to `undefined-word`
+rather than executing a retained generation. Fixed capacity bounds retained
+code, generations, and cells per Unit; collisions affect performance only.
+The accepted path retains no experimental or legacy control branch, while the
+focused workload and hit/miss/heal counters remain in schema
+`ecl.workdrivers.*.v5`.

@@ -172,8 +172,8 @@ jobs:
               cat "$output"
               exit "$benchmark_status"
             fi
-            grep -qx "# schema=ecl.workdrivers.timing.v4" "$output"
-            grep -qx "# schema=ecl.workdrivers.counters.v4" "$output"
+            grep -qx "# schema=ecl.workdrivers.timing.v5" "$output"
+            grep -qx "# schema=ecl.workdrivers.counters.v5" "$output"
           '
 
       # check-ecl validates the same corpus in-process. This additionally

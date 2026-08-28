@@ -593,6 +593,27 @@ test "module: qualified import replacement and alias collisions" {
     try expectErrorContains(&runtime, "'dotted.name 'a alias", &.{"'kind 'domain"});
 }
 
+test "module: qualified call sites heal generations and bypass aliases" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+
+    try expectOk(
+        &runtime,
+        "((1) 'v def) 'cache-heal @defm (cache-heal.v) 'probe def probe " ++
+            "((2) 'v def) 'cache-heal @defm probe " ++
+            "((10) 'v def) 'alias-a @defm ((20) 'v def) 'alias-b @defm " ++
+            "'short 'alias-a alias (short.v) 'alias-probe def alias-probe " ++
+            "'short 'alias-b alias alias-probe " ++
+            "((3) 'v def) 'removed-cache @defm (removed-cache.v) 'removed-probe def " ++
+            "removed-probe 'removed-cache unmodule (removed-probe) @attempt 'err at 'kind at",
+    );
+    var display = try runtime.stackDisplay();
+    defer display.deinit();
+    try std.testing.expectEqualStrings("1 2 10 20 3 'undefined-word", display.bytes());
+}
+
 test "module: provisional tasks keep rollback generations alive until quiescence" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);

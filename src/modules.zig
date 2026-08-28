@@ -470,6 +470,12 @@ const Registration = struct {
                 },
             };
         }
+        pub fn captureCell(self: *ResolveCursor) void {
+            self.lookup.captureCell();
+        }
+        pub fn takeCell(self: *ResolveCursor) ?env.BindingCellHandle {
+            return self.lookup.takeCell();
+        }
     };
     pub fn resolveCursor(self: *const Registration, id: u32) ResolveCursor {
         return resolveCursorFor(self.image, ModuleHome.init(&@constCast(self).home), id);
@@ -1235,6 +1241,11 @@ pub const GenerationLease = enum(usize) {
     pub fn resolveCursor(self: GenerationLease, id: u32) ModuleResolveCursor {
         return self.registration().resolveCursor(id);
     }
+    pub fn guard(self: GenerationLease) GenerationGuard {
+        const retained = self.registration();
+        retained.retain();
+        return .initRetained(retained);
+    }
     pub fn publicNameCursor(self: GenerationLease) ModulePublicNameCursor {
         return self.registration().publicNameCursor();
     }
@@ -1247,6 +1258,41 @@ pub const GenerationLease = enum(usize) {
         return .initRetained(retained);
     }
     pub fn deinit(self: *GenerationLease) void {
+        if (self.* == .consumed) return;
+        self.registration().release();
+        self.* = .consumed;
+    }
+};
+
+/// A retained registration identity suitable for a derived call-site cache.
+/// It grants no raw registry or slot access. A hit becomes executable only if
+/// this exact generation is still current at the guard check.
+pub const GenerationGuard = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn initRetained(retained: *Registration) GenerationGuard {
+        return @enumFromInt(@intFromPtr(retained));
+    }
+    fn registration(self: GenerationGuard) *Registration {
+        std.debug.assert(self != .consumed);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    pub fn tryEnterCurrent(
+        self: GenerationGuard,
+        _: *const ExecutionAccess,
+    ) ?ExecutionGeneration {
+        const retained = self.registration();
+        const slot = registrationSlot(retained) orelse return null;
+        if (!slot.publisher.isCurrent(retained)) return null;
+        // The guard itself keeps the registration alive across the current
+        // check, so this retain cannot resurrect a dead generation. A reload
+        // racing immediately after the check is equivalent to ordinary
+        // resolution linearizing immediately before that reload.
+        retained.retain();
+        return .initRetained(retained);
+    }
+    pub fn deinit(self: *GenerationGuard) void {
         if (self.* == .consumed) return;
         self.registration().release();
         self.* = .consumed;
