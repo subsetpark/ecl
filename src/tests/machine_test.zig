@@ -602,6 +602,23 @@ test "over compose and at have exact stack effects" {
     try std.testing.expectEqual(@as(i64, 20), runtime.stackItems()[0].int);
 }
 
+test "stack snapshots the visible operand window from bottom to top" {
+    const support = @import("kernel_test_support.zig");
+    try support.expectStacks(&.{
+        .{ .name = "empty", .source = "stack", .expected = "()" },
+        .{
+            .name = "ordered preserved values",
+            .source = "1 2 3 stack",
+            .expected = "1 2 3 [1 2 3]",
+        },
+        .{
+            .name = "isolated operand window",
+            .source = "9 [1 2] (stack) infra",
+            .expected = "9 (1 2 [1 2])",
+        },
+    });
+}
+
 test "io.pp and io.prin write through and writer failures become io errors" {
     const allocator = std.testing.allocator;
     var captured: std.Io.Writer.Allocating = .init(allocator);

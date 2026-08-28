@@ -12,6 +12,11 @@ const entries = [_]Metadata{
     .{ .name = "swap", .effect = "x y -- y x", .text = "Exchange the top two stack values." },
     .{ .name = "pop", .effect = "x --", .text = "Discard the top stack value." },
     .{
+        .name = "stack",
+        .effect = null,
+        .text = "Copy the visible operand stack into a bottom-to-top list while leaving every original value in place.",
+    },
+    .{
         .name = "_ll",
         .effect = "... n --",
         .text = "Move the top n values into the head-binder locals, last name first. " ++
