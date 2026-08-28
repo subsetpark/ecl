@@ -26,9 +26,10 @@ gate and is not performance evidence. `-- --cursor-storage-only` selects the
 focused first-frame cursor workload, `-- --nested-cursor-only` selects the
 structural shared-budget workload, `-- --materializer-budget-only` selects the
 result-materialization shared-budget workload, `-- --call-site-only` selects
-the repeated qualified-call workload, and `-- --latency-only` selects the mixed
-short-task and cancellation safeguards. Without `--quick`, each retains the
-full 101 repetitions.
+the repeated qualified-call workload, `-- --local-call-site-only` selects the
+module-local hit and core-fallback workloads, and `-- --latency-only` selects
+the mixed short-task and cancellation safeguards. Without `--quick`, each
+retains the full 101 repetitions.
 
 ### Selected timing results
 
@@ -135,7 +136,7 @@ p50/p95 results within 3.1%, with identical deterministic counters; a first
 eight-worker tail was not reproducible. The treatment therefore clears the
 throughput and hard-progress gates without motivating a scheduler or quantum
 change. The focused workload and the optional `--latency-only` selection remain
-in schema `ecl.workdrivers.*.v5`.
+in schema `ecl.workdrivers.*.v6`.
 
 ## Membership materializer budget A/B — 2026-08-28
 
@@ -174,7 +175,7 @@ short-task and cancellation latency safeguard showed no treatment regression,
 with identical polls, logical transitions, driver resumes, application
 resumes, and scheduler handoffs. The accepted path therefore retains one
 shared-budget implementation with no experimental or legacy control branch;
-the focused workload remains in schema `ecl.workdrivers.*.v5`.
+the focused workload remains in schema `ecl.workdrivers.*.v6`.
 
 ## Generation-guarded qualified call-site cache A/B — 2026-08-28
 
@@ -216,4 +217,54 @@ rather than executing a retained generation. Fixed capacity bounds retained
 code, generations, and cells per Unit; collisions affect performance only.
 The accepted path retains no experimental or legacy control branch, while the
 focused workload and hit/miss/heal counters remain in schema
-`ecl.workdrivers.*.v5`.
+`ecl.workdrivers.*.v6`.
+
+## Same-image module-local call-site cache A/B — 2026-08-28
+
+The fifth intervention tested a plain word whose stamped scope is exactly the
+module root the running activation already owns. The control retained the
+canonical-qualified cache but drove the module environment's generic direct
+lookup on every local call. The treatment stores that direct lookup's stable
+binding cell in the same fixed 16-entry per-Unit cache. It also arranges those
+entries as eight two-way sets: an initial direct-mapped treatment showed one
+timing repetition where the caller's qualified site and callee's local site
+continually evicted each other. Two ways removed that collision without raising
+the entry bound.
+
+A local hit requires one nominal context carrying the exact non-recycled scope
+id and current activation home. The factory produces it only when the word's
+stamp equals the running resolution scope and that scope is a module root. The
+activation is therefore the image-liveness proof; child scopes and escaped
+foreign quotations bypass the cache. The entry stores no home, environment, or
+binding payload and reloads its cell on every hit.
+
+ReleaseSafe timings below are 101 repetitions on macOS arm64 (Apple M4 Max),
+Zig 0.16.0; times are wall-clock milliseconds.
+
+| Workers | Calls | Control p50 | Local-cache p50 | Reduction | Control resumes | Local-cache resumes | Hits / misses |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1,024 | 0.747 | 0.598 | 19.9% | 2,051 | 1,028 | 1,023 / 1 |
+| 1 | 65,536 | 44.527 | 35.126 | 21.1% | 131,075 | 65,540 | 65,535 / 1 |
+| 8 | 1,024 | 0.745 | 0.601 | 19.3% | 2,051 | 1,028 | 1,023 / 1 |
+| 8 | 65,536 | 44.815 | 35.044 | 21.8% | 131,075 | 65,540 | 65,535 / 1 |
+
+The reversed focused run reproduced 22.3% with one worker and 21.3% with
+eight. Allocation count (33), peak temporary bytes (83,089), logical
+transitions (262,147), application resumes (65,536), and scheduler handoffs
+(65,792) are identical; the cache removes exactly one driver resume and poll
+per warm local hit. The one-call cold case stayed within 0.7%.
+
+A second focused case repeatedly resolves core `+` from a module body, so every
+local probe misses. At 65,536 calls its medians moved 47.521 to 47.558 ms with
+one worker and 48.030 to 47.788 ms with eight, demonstrating no material miss
+tax. Reversed qualified-cache and unrelated latency safeguards changed
+direction across orderings while retaining identical deterministic counters.
+
+The public counterfactual warms a private local state call, escapes the exact
+quotation, and invokes it from another module. It still receives the ordinary
+registration-less foreign-home domain error rather than authority over the
+caller. Existing double-registration behavior also continues deriving state
+authority from the registration used for each invocation. The accepted path
+retains one two-way cache implementation with no experimental or legacy
+control branch; the two focused cases and local hit/miss counters remain in
+schema `ecl.workdrivers.*.v6`.

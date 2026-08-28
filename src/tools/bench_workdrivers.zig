@@ -111,6 +111,8 @@ const full_materializer_budget_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
 const quick_materializer_budget_sizes = [_]usize{ 32, 4_096 };
 const full_call_site_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
 const quick_call_site_sizes = [_]usize{ 32, 4_096 };
+const full_local_call_site_sizes = [_]usize{ 1, 32, 1_024, 65_536 };
+const quick_local_call_site_sizes = [_]usize{ 32, 4_096 };
 
 fn timevalNs(value: std.posix.timeval) u64 {
     return @intCast(value.sec * std.time.ns_per_s + value.usec * std.time.ns_per_us);
@@ -197,7 +199,7 @@ fn printCase(
 ) !void {
     if (mode == .counters) {
         const sample = try runSample(io, workers, case);
-        try out.print("{s},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n", .{
+        try out.print("{s},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n", .{
             case.name,
             workers,
             size,
@@ -211,6 +213,8 @@ fn printCase(
             sample.metrics.qualified_cache_hits,
             sample.metrics.qualified_cache_misses,
             sample.metrics.qualified_cache_heals,
+            sample.metrics.local_cache_hits,
+            sample.metrics.local_cache_misses,
         });
         return;
     }
@@ -408,6 +412,46 @@ fn runQualifiedCallSite(
     }
 }
 
+/// Keeps the outer qualified call identical in both variants and isolates the
+/// repeated direct lookup of one word defined in the running module image.
+fn runModuleLocalCallSite(
+    io: std.Io,
+    out: *std.Io.Writer,
+    mode: Mode,
+    sizes: []const usize,
+    repetitions: usize,
+) !void {
+    for ([_]usize{ 1, 8 }) |workers| {
+        for (sizes) |size| {
+            const workload = try std.fmt.allocPrint(
+                std.heap.smp_allocator,
+                "{d} (local-callsite-bench.outer pop) times",
+                .{size},
+            );
+            defer std.heap.smp_allocator.free(workload);
+            try printCase(io, out, mode, workers, size, .{
+                .name = "module-local-call-site",
+                .setup = "((1) 'leaf def (leaf) 'outer def) 'local-callsite-bench @defm",
+                .workload = workload,
+            }, repetitions);
+            try out.flush();
+
+            const core_workload = try std.fmt.allocPrint(
+                std.heap.smp_allocator,
+                "{d} (local-core-bench.outer pop) times",
+                .{size},
+            );
+            defer std.heap.smp_allocator.free(core_workload);
+            try printCase(io, out, mode, workers, size, .{
+                .name = "module-local-core-fallback",
+                .setup = "((1 1 +) 'outer def) 'local-core-bench @defm",
+                .workload = core_workload,
+            }, repetitions);
+            try out.flush();
+        }
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     if (builtin.mode == .Debug) return error.ReleaseBuildRequired;
     var args = std.process.Args.Iterator.init(init.minimal.args);
@@ -424,6 +468,7 @@ pub fn main(init: std.process.Init) !void {
     var nested_cursor_only = false;
     var materializer_budget_only = false;
     var call_site_only = false;
+    var local_call_site_only = false;
     var latency_only = false;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--quick")) quick = true;
@@ -431,6 +476,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, arg, "--nested-cursor-only")) nested_cursor_only = true;
         if (std.mem.eql(u8, arg, "--materializer-budget-only")) materializer_budget_only = true;
         if (std.mem.eql(u8, arg, "--call-site-only")) call_site_only = true;
+        if (std.mem.eql(u8, arg, "--local-call-site-only")) local_call_site_only = true;
         if (std.mem.eql(u8, arg, "--latency-only")) latency_only = true;
     }
     const repetitions: usize = if (mode == .counters) 1 else if (quick) 3 else 101;
@@ -438,7 +484,7 @@ pub fn main(init: std.process.Init) !void {
     var buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     const out = &stdout.interface;
-    try out.print("# schema=ecl.workdrivers.{s}.v5\n", .{@tagName(mode)});
+    try out.print("# schema=ecl.workdrivers.{s}.v6\n", .{@tagName(mode)});
     try out.print("# WorkDriver baseline ({s})\n", .{@tagName(mode)});
     try out.print("optimize={s},target={s}-{s},zig={s},root_counters={}\n", .{
         @tagName(builtin.mode),
@@ -450,7 +496,7 @@ pub fn main(init: std.process.Init) !void {
     if (mode == .timing)
         try out.writeAll("case,workers,size,repetitions,polls_max,wall_p50_ns,wall_p95_ns,wall_p99_ns,cpu_p50_ns,cpu_p95_ns\n")
     else
-        try out.writeAll("case,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs,qualified_cache_hits,qualified_cache_misses,qualified_cache_heals\n");
+        try out.writeAll("case,workers,size,allocations,peak_bytes,root_polls,root_logical_transitions,root_driver_resumes,root_application_resumes,root_scheduler_handoffs,qualified_cache_hits,qualified_cache_misses,qualified_cache_heals,local_cache_hits,local_cache_misses\n");
     if (latency_only) {
         try runLatency(init.io, out, mode, repetitions, quick);
     } else if (call_site_only) {
@@ -459,6 +505,14 @@ pub fn main(init: std.process.Init) !void {
             out,
             mode,
             if (quick) &quick_call_site_sizes else &full_call_site_sizes,
+            repetitions,
+        );
+    } else if (local_call_site_only) {
+        try runModuleLocalCallSite(
+            init.io,
+            out,
+            mode,
+            if (quick) &quick_local_call_site_sizes else &full_local_call_site_sizes,
             repetitions,
         );
     } else if (materializer_budget_only) {
@@ -501,6 +555,13 @@ pub fn main(init: std.process.Init) !void {
             out,
             mode,
             if (quick) &quick_call_site_sizes else &full_call_site_sizes,
+            repetitions,
+        );
+        try runModuleLocalCallSite(
+            init.io,
+            out,
+            mode,
+            if (quick) &quick_local_call_site_sizes else &full_local_call_site_sizes,
             repetitions,
         );
         try runLatency(init.io, out, mode, repetitions, quick);

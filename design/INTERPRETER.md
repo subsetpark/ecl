@@ -516,20 +516,27 @@ Recorded target-specific results and their current disposition live in
   state rather than definition/removal history. **The iron law for a binding
   cache: hold the cell and re-read its interior every execution; never retain
   a binding payload as the cached answer.**
-- **Canonical qualified call sites use a bounded, generation-guarded
-  lookaside.** Each Unit has exactly sixteen direct-mapped entries keyed by an
-  owned source-code root, instruction index, and word id. An entry owns one
-  opaque registration-generation guard and one stable binding-cell handle. A
-  hit may enter execution only after proving that exact generation is still
-  current, and it reloads the cell snapshot before constructing the ordinary
-  `Resolution`; reload or removal makes the guard stale, clears the entry, and
+- **Module call sites use one bounded, guarded lookaside.** Each Unit has
+  exactly sixteen entries arranged as eight two-way sets, keyed by an owned
+  source-code root, instruction index, and word id. A canonical-qualified
+  target owns one opaque registration-generation guard and one stable
+  binding-cell handle. It may enter execution only after proving that exact
+  generation is still current; reload or removal clears a stale entry and
   falls through to ordinary resumable resolution. Alias spellings bypass the
-  lookaside because alias retargeting is a separate mutable mapping. Unit
-  teardown releases entries before its current code; the fixed capacity bounds
-  retained code, generations, and cells, and collisions can change performance
-  but never meaning. The cached source still enters the single
-  `executeResolved` tail, so privacy, effect checks, trace metadata, state
-  authority, and generation pinning are unchanged.
+  lookaside because alias retargeting is a separate mutable mapping.
+  A same-image local target owns a stable cell plus its nominal scope id. The
+  lookup accepts them only with one `LocalCacheContext`, constructed when the
+  occurrence's stamp exactly equals the running activation's module-root scope;
+  that activation is the liveness proof, and its correlated home supplies the
+  current registration rather than anything stored in the entry. Child scopes,
+  core fallbacks, and escaped foreign quotations therefore miss without
+  acquiring or transferring authority. Both target kinds reload the cell
+  snapshot before constructing the ordinary `Resolution`. Unit teardown
+  releases entries before its current code; fixed capacity bounds retained
+  code, generations, and cells, and collisions can change performance but
+  never meaning. Every hit still enters the single `executeResolved` tail, so
+  privacy, effect checks, trace metadata, state authority, and generation
+  pinning are unchanged.
 - **A module's construction boundary passes values, never environments.** An
   image holds one `Environment` — its own definitions — and resolution goes
   module then core. Nothing is snapshotted at construction, so there is no
