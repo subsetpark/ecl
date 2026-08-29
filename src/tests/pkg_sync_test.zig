@@ -23,7 +23,8 @@ test "pkg store: inspect returns exact root manifest" {
     defer allocator.free(source);
     try expectHostStack(
         source,
-        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'requires {}}\\n\"",
+        "\"{'format 1 'name \\\"bad\\\" 'version \\\"1.0.0\\\" 'exports " ++
+            "{\\\"bad\\\" [\\\"**/*\\\"]} 'requires {}}\\n\"",
         true,
     );
 }
@@ -32,8 +33,6 @@ test "pkg store: rejects invalid source package layouts before publication" {
     var fixture = try HttpsFixture.start();
     defer fixture.stop();
     const cases = [_]struct { endpoint: []const u8, message: []const u8 }{
-        .{ .endpoint = "/pkg/foo-1.0.0-prefix.tgz", .message = "bar.ecl" },
-        .{ .endpoint = "/pkg/foo-1.0.0-nested.tgz", .message = "nested/foo.ecl" },
         .{ .endpoint = "/pkg/foo-1.0.0-native.tgz", .message = "foo.eclmod" },
         .{ .endpoint = "/pkg/foo-1.0.0-missing-manifest.tgz", .message = "no root ecl.pkg" },
         .{ .endpoint = "/pkg/foo-1.0.0-invalid-manifest.tgz", .message = "not valid UTF-8" },
@@ -50,6 +49,24 @@ test "pkg store: rejects invalid source package layouts before publication" {
             .message_contains = case.message,
         }, true);
     }
+}
+
+test "pkg store: package export globs admit nested source artifacts" {
+    var fixture = try HttpsFixture.start();
+    defer fixture.stop();
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const destination = try scratch.pathFor("cache/pkg/foo-nested");
+    defer allocator.free(destination);
+    const source = try packageSource(
+        fixture.port,
+        "/pkg/foo-1.0.0-nested.tgz",
+        "foo",
+        .install,
+        destination,
+    );
+    defer allocator.free(source);
+    try expectHostStack(source, "(\"ecl.pkg\" \"nested/foo.ecl\")", true);
 }
 
 test "pkg store: atomically installs one valid source package" {
@@ -69,7 +86,10 @@ test "pkg store: atomically installs one valid source package" {
         .unlimited,
     );
     defer allocator.free(manifest);
-    try std.testing.expectEqualStrings("{'format 1 'name \"bad\" 'version \"1.0.0\" 'requires {}}\n", manifest);
+    try std.testing.expectEqualStrings(
+        "{'format 1 'name \"bad\" 'version \"1.0.0\" 'exports {\"bad\" [\"**/*\"]} 'requires {}}\n",
+        manifest,
+    );
     const seal = try scratch.directory.dir.readFileAlloc(
         std.testing.io,
         "cache/pkg/bad-entry/.ecl-package.tgz",
@@ -365,8 +385,8 @@ test "pkg sync: explicit project root, not ambient discovery, selects store mode
     try scratch.directory.dir.createDir(std.testing.io, "ambient", .default_dir);
     try scratch.directory.dir.createDir(std.testing.io, "target", .default_dir);
     try scratch.directory.dir.createDir(std.testing.io, "cache", .default_dir);
-    const ambient_manifest = "{'format 1 'name \"ambient\" 'version \"0.1.0\" 'requires {}}\n";
-    const target_manifest = "{'format 1 'name \"target\" 'version \"0.1.0\" 'requires {}}\n";
+    const ambient_manifest = "{'format 1 'name \"ambient\" 'version \"0.1.0\" 'exports {} 'requires {}}\n";
+    const target_manifest = "{'format 1 'name \"target\" 'version \"0.1.0\" 'exports {} 'requires {}}\n";
     try scratch.directory.dir.writeFile(std.testing.io, .{
         .sub_path = "ambient/ecl.pkg",
         .data = ambient_manifest,
@@ -905,7 +925,7 @@ test "pkg sync: prefix violation names offender without retained entry" {
         .name = "prefix violation",
         .source = source,
         .kind = "domain",
-        .message_contains = "package `foo`, member `bar.ecl`",
+        .message_contains = "outside export namespace `foo`",
         .data = &.{.{ .name = "package", .expected = .{ .string = "foo" } }},
     }, true, environ);
     try paths.expectUnchanged();

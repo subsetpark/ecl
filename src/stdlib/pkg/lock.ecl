@@ -11,27 +11,73 @@
  ['format 'root 'store 'packages 'requires]
  'vendor-lock-keys setp
 
+ ### defp selection-keys
+ # Exact fields retained for one globally selected package.
+ ['version 'url 'hash]
+ 'selection-keys setp
+
+ ### defp edge-keys
+ # Exact fields retained for one consumer-local dependency alias.
+ ['package 'version]
+ 'edge-keys setp
+
+ ### defp selection-checked
+ (selection -- selection : "Validate one selected package source.")
+ (|selection|
+  selection type 'dict match?
+  'type error.new "a selected package is a dict" error.with-message assert
+  selection selection-keys dict.keys-exactly?
+  'domain error.new "a selected package has exactly the keys 'version 'url 'hash"
+  error.with-message assert
+  selection 'version at pkg.version.validate pop
+  selection 'url at pkg.name.url?
+  'domain error.new "a selected package url is an https url" error.with-message assert
+  selection 'hash at pkg.name.hash?
+  'domain error.new "a selected package hash is sha256- and 64 lowercase hex digits"
+  error.with-message assert
+  selection)
+ 'selection-checked defp
+
+ ### defp edge-checked
+ (edge -- edge : "Validate one alias-to-package minimum-version edge.")
+ (|edge|
+  edge type 'dict match?
+  'type error.new "a lock requirement edge is a dict" error.with-message assert
+  edge edge-keys dict.keys-exactly?
+  'domain error.new "a lock requirement edge has exactly the keys 'package 'version"
+  error.with-message assert
+  edge 'package at pkg.name.valid?
+  'domain error.new "a required package name is canonical" error.with-message assert
+  edge 'version at pkg.version.validate pop
+  edge)
+ 'edge-checked defp
+
  ### defp minimums-checked
- (minimums -- minimums : "Validate and return one package's minimum-version requirements.")
+ (minimums -- minimums : "Validate and return one package's aliased requirements.")
  (|minimums|
   minimums type 'dict match?
-  'type error.new "a lock's requirements are a dict from package name to version" error.with-message
+  'type error.new "a lock's requirements are a dict from local alias to package edge"
+  error.with-message
   assert
   minimums dict.keys (pkg.name.valid?) all?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
-  minimums dict.vals (pkg.version.validate pop) for
+  minimums dict.vals (edge-checked pop) for
+  minimums dict.vals ('package at) each dup distinct len swap len =
+  'domain error.new "a consumer requires a package under only one local alias"
+  error.with-message assert
   minimums)
  'minimums-checked defp
 
  ### defp known?
  (pair packages -- bool : "Test whether a required package has a locked selection.")
- (|pair packages| packages pair first dict.has?)
+ (|pair packages| packages pair 1 at 'package at dict.has?)
  'known? defp
 
  ### defp satisfied?
  (entry packages -- bool : "Test whether a locked version meets a minimum version.")
  (|entry packages|
-  packages entry first 'version pair at-path entry 1 at pkg.version.less? not)
+  packages entry 1 at 'package at 'version pair at-path
+  entry 1 at 'version at pkg.version.less? not)
  'satisfied? defp
 
  ### def validate
@@ -63,7 +109,7 @@
   assert
   candidate 'packages at dict.keys (pkg.name.valid?) all?
   'domain error.new "a package name is dot-joined lowercase segments" error.with-message assert
-  candidate 'packages at dict.vals (pkg.manifest.validate-requirement pop) for
+  candidate 'packages at dict.vals (selection-checked pop) for
   candidate 'requires at type 'dict match?
   'type error.new "a lock's requirements are keyed by the requiring package" error.with-message
   assert
@@ -106,8 +152,13 @@
  'render-selection defp
 
  ### defp render-minimum
- (pair -- text : "Render one package name and minimum version.")
- ((str) each "{} {}" str.format)
+ (pair -- text : "Render one alias-to-package minimum edge.")
+ (|pair|
+  pair first str
+  pair 1 at 'package at str
+  pair 1 at 'version at str
+  3 pack
+  "{} {{'package {} 'version {}}}" str.format)
  'render-minimum defp
 
  ### defp render-minimums
@@ -157,8 +208,8 @@
   state entry pair
   (|state entry|
    state 'requirer at
-   entry first
-   state 'lock at 'packages at entry first 'version pair at-path)
+   entry 1 at 'package at
+   state 'lock at 'packages at entry 1 at 'package at 'version pair at-path)
   infra
   "{} -> {} {}" str.format
   state append-tree-line)
@@ -211,9 +262,9 @@
  ### defp path-edge
  (state entry -- state : "Skip a visited child or collect its paths.")
  (|state entry|
-  entry first
+  entry 1 at 'package at
   state
-  state 'path at entry first path-has?
+  state 'path at entry 1 at 'package at path-has?
   (swap pop)
   (path-child)
   if)

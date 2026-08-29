@@ -48,7 +48,8 @@
  ### defp precheck-requirement-value
  (requirement pair package -- : "Validate the version held by a requirement value.")
  (|requirement pair package|
-  package pair first requirement 'version at resolve-version-checked pop)
+  package requirement 'package pair first at-or requirement 'version at
+  resolve-version-checked pop)
  'precheck-requirement-value defp
 
  ### defp precheck-requirement
@@ -222,7 +223,7 @@
 
  ### defp source-record
  (requirement package -- record : "Attach declaring-package provenance to a requirement.")
- (|requirement package| requirement 'package package put)
+ (|requirement package| requirement 'requirer package put)
  'source-record defp
 
  ### defp merge-source
@@ -233,13 +234,13 @@
   prior name requirement package 4 pack
   (|prior name requirement package|
    name requirement 'version at
-   prior ('package at) ('hash at) bi
+   prior ('requirer at) ('hash at) bi
    package requirement 'hash at)
   infra
   (hash-conflict) with
   when
   prior 'url prior requirement ('url at) both lex-min put
-  'package prior 'package at package lex-min put)
+  'requirer prior 'requirer at package lex-min put)
  'merge-source defp
 
  ### defp lex-min
@@ -346,7 +347,7 @@
  (state pair requirer -- state :
   "Record and visit one exact requirement edge, detecting active-path cycles.")
  (|state pair requirer|
-  state requirer pair first pair 1 at walk-requirement)
+  state requirer pair 1 at 'package at pair 1 at walk-requirement)
  'walk-edge defp
 
  ### defp walk-requirement
@@ -438,7 +439,7 @@
  ### defp selection-pair
  (name state -- pair : "Return one selected package entry.")
  (|name state|
-  state 'sources name state selected-node pair at-path 'package del
+  state 'sources name state selected-node pair at-path 'requirer del 'package del
   name swap pair)
  'selection-pair defp
 
@@ -448,8 +449,15 @@
  'selected-packages defp
 
  ### defp minimum-map
- (manifest -- minimums : "Return one manifest's required names and minimum versions.")
- ('requires at dup dict.keys swap dict.vals ('version at) each dict.from-lists)
+ (manifest -- minimums : "Return one manifest's alias-to-package minimum requirements.")
+ ('requires at dup dict.keys swap dict.vals
+  (|requirement|
+   requirement wrap
+   (|requirement| 'package requirement 'package at 'version requirement 'version at)
+   infra
+   dict.from-flat)
+  each
+  dict.from-lists)
  'minimum-map defp
 
  ### defp requires-pair

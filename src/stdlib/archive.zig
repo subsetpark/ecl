@@ -482,6 +482,11 @@ const UnpackDriver = struct {
             created_count: usize = 0,
             work: ExtractWork = .next,
         },
+        validate_package: struct {
+            staged: Staged,
+            dir: std.Io.Dir,
+            created_count: usize,
+        },
         seal: struct {
             staged: Staged,
             dir: std.Io.Dir,
@@ -1188,14 +1193,6 @@ const UnpackDriver = struct {
         }
         if (std.mem.endsWith(u8, entry.path, ".eclmod"))
             return self.failPackageMember(evaluator, archive, "native package members are not permitted", entry.path);
-        if (!std.mem.endsWith(u8, entry.path, ".ecl")) return;
-        if (lastSlash(entry.path) != null)
-            return self.failPackageMember(evaluator, archive, "package source modules must be at the archive root", entry.path);
-        const module_name = entry.path[0 .. entry.path.len - ".ecl".len];
-        if (!validPackageName(module_name))
-            return self.failPackageMember(evaluator, archive, "package source module name is not canonical", entry.path);
-        if (!packageOwns(archivePackageName(archive), module_name))
-            return self.failPackageMember(evaluator, archive, "package does not own source module", entry.path);
     }
 
     fn materializeManifest(
@@ -1393,22 +1390,12 @@ const UnpackDriver = struct {
                 .next => {
                     const entry = extraction.iterator.next() orelse {
                         if (self.operationMode() == .package_install) {
-                            const seal = extraction.dir.createFile(
-                                io,
-                                package_seal_name,
-                                .{ .exclusive = true },
-                            ) catch |err| return self.failIo(
-                                evaluator,
-                                "cannot create package archive seal",
-                                err,
-                            );
                             const staged = extraction.staged;
                             const dir = extraction.dir;
                             const created_count = extraction.created_count;
-                            publication.* = .{ .seal = .{
+                            publication.* = .{ .validate_package = .{
                                 .staged = staged,
                                 .dir = dir,
-                                .file = seal,
                                 .created_count = created_count,
                             } };
                         } else {
@@ -1447,6 +1434,43 @@ const UnpackDriver = struct {
                         extraction.work = .next;
                     }
                 },
+            },
+            .validate_package => |*validation| {
+                var diagnostic: ?[]u8 = null;
+                evaluator.validatePackageTree(
+                    io,
+                    archivePackageName(archive),
+                    validation.staged.path.borrow(),
+                    &diagnostic,
+                ) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Invalid => {
+                        defer if (diagnostic) |message| self.allocator.free(message);
+                        return evaluator.failFmt(
+                            .domain,
+                            "invalid package catalog: {s}",
+                            .{diagnostic orelse "validation failed"},
+                        );
+                    },
+                };
+                const seal = validation.dir.createFile(
+                    io,
+                    package_seal_name,
+                    .{ .exclusive = true },
+                ) catch |err| return self.failIo(
+                    evaluator,
+                    "cannot create package archive seal",
+                    err,
+                );
+                const staged = validation.staged;
+                const dir = validation.dir;
+                const created_count = validation.created_count;
+                publication.* = .{ .seal = .{
+                    .staged = staged,
+                    .dir = dir,
+                    .file = seal,
+                    .created_count = created_count,
+                } };
             },
             .seal => |*seal| {
                 const compressed = archive.bytes.borrow().bytes();
@@ -1586,6 +1610,16 @@ const UnpackDriver = struct {
                     .context = context,
                     .dir = dir,
                     .work = rollbackEntries(self, extraction.created_count),
+                } };
+            },
+            .validate_package => |*validation| {
+                releases.releaseValue(validation.staged.result);
+                const path = validation.staged.path.take();
+                self.state = .{ .rollback = .{
+                    .archive = archive,
+                    .context = .{ .path = .init(path) },
+                    .dir = validation.dir,
+                    .work = rollbackEntries(self, validation.created_count),
                 } };
             },
             .seal => |*seal| {

@@ -54,13 +54,19 @@ def requirement(version: str, url: str, hash_value: str) -> str:
 
 
 def manifest(name: str, version: str, requires: Mapping[str, str]) -> str:
-    entries = " ".join(f'\"{key}\" {requires[key]}' for key in sorted(requires))
+    entries = " ".join(
+        f'\"{key}\" '
+        + requires[key].replace("{'version", "{'package \"" + key + "\" 'version", 1)
+        for key in sorted(requires)
+    )
     return (
         "{'format 1 'name \""
         + name
         + "\" 'version \""
         + version
-        + "\" 'requires {"
+        + "\" 'exports {\""
+        + name
+        + "\" [\"**/*\"]} 'requires {"
         + entries
         + "}}\n"
     )
