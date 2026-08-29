@@ -246,6 +246,8 @@ test "inline times checkpointed guards and case prevalidate and select" {
             .expected = "0 1",
         },
         .{ .name = "case", .source = "3 [1 (10) 3 (30) (90)] case", .expected = "30" },
+        .{ .name = "case else", .source = "2 [1 (10) 3 (30) (90)] case", .expected = "90" },
+        .{ .name = "case else only", .source = "2 [(90)] case", .expected = "90" },
         .{ .name = "case inert key", .source = "(missing) [(missing) (7) (9)] case", .expected = "7" },
         .{ .name = "case inert word subject", .source = "(foo) first [foo (7) (9)] case", .expected = "7" },
         .{ .name = "case first duplicate", .source = "1 [1 (10) 1 (20) (30)] case", .expected = "10" },
@@ -347,6 +349,29 @@ test "idioms: automatic hits and forced generic preserves behavior" {
 
     try expectStack(&automatic, "pop [1 2 3] reverse", "[3 2 1]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    // Constant and partial-capture spellings of `match? each` produce their
+    // boolean mask in one bounded driver. Structured elements still compare
+    // as whole values rather than inheriting `in?`'s recursive pervasion.
+    try expectStack(&automatic, "pop [1 2 1] (1 match?) each", "[1 0 1]");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    try expectStack(
+        &automatic,
+        "pop [1 1.0 [2] {'a 3} 'x] [2] (match?) partial each",
+        "[0 0 1 0 0]",
+    );
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    try expectStack(&generic, "pop [1 2 1] (1 match?) each", "[1 0 1]");
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
+
+    try expectStack(
+        &generic,
+        "pop [1 1.0 [2] {'a 3} 'x] [2] (match?) partial each",
+        "[0 0 1 0 0]",
+    );
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
 
     // The literal-capture shape `((v) first)` that `partial` builds reaches
     // the same constant-operand kernels a bare constant does, in both operand
@@ -451,6 +476,17 @@ test "idioms: a rebound name keeps recognition off" {
     defer rebound_source.deinit();
     try expectStack(&rebound_source, "(pop 42) 'neg def [1 2] (neg) each", "[42 42]");
     try std.testing.expectEqual(@as(u64, 0), rebound_source.lastIdiomHits());
+
+    var rebound_match_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&rebound_match_heap);
+    var rebound_match = try session.Session.init(rebound_match_heap.allocator(), &.{});
+    defer rebound_match.deinit();
+    try expectStack(
+        &rebound_match,
+        "(pop pop 42) 'match? def [1 2] (1 match?) each",
+        "[42 42]",
+    );
+    try std.testing.expectEqual(@as(u64, 0), rebound_match.lastIdiomHits());
 
     var rebound_dependency_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&rebound_dependency_heap);

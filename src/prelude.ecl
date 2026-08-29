@@ -145,10 +145,11 @@
     clauses last append
     dup (len pop) for
 
-    # Extract the even key slots, compare the captured subject with each,
-    # and let find's len-on-miss result select the final else quotation.
+    # Extract the even key slots and compare the captured subject with each.
+    # A true sentinel appended to that mask makes where's first index the
+    # matching action, or the final else quotation when no key matched.
     clauses dup len 2 div range 2 * at
-    subject (match?) partial each 1 find at call)
+    subject (match?) partial each 1 append where first at call)
    call)
   (pop pop {'kind 'shape 'msg "case requires a nonempty odd clause list ending in else"} raise)
   if)
@@ -316,10 +317,7 @@
 ### def find
 (sequence needle -- index :
  "Return the first matching index, or the sequence length when no element matches.")
-((match?) partial each dup where swap len swap dup len 0 =
- (pop)
- (first nip)
- if)
+((match?) partial each 1 append where first)
 'find def
 
 ### def await-all

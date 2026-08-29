@@ -6,6 +6,7 @@ const list = @import("list.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
 const machine = @import("machine.zig");
+const equal = @import("equal.zig");
 const numeric = @import("kernel_numeric.zig");
 const order = @import("kernel_order.zig");
 const sequence = @import("kernel_sequence.zig");
@@ -36,12 +37,14 @@ pub const DirectOp = enum {
 pub const Operation = union(enum) {
     unary: numeric.UnaryOp,
     binary: numeric.BinaryOp,
+    match,
     direct: DirectOp,
 
     pub fn spelling(self: Operation) []const u8 {
         return switch (self) {
             .unary => |operation| operation.spelling(),
             .binary => |operation| operation.spelling(),
+            .match => "match?",
             .direct => |operation| operation.spelling(),
         };
     }
@@ -180,7 +183,7 @@ const str_format_pattern = [_]PatternAtom{
 const unary_count = std.meta.fields(numeric.UnaryOp).len;
 const binary_count = std.meta.fields(numeric.BinaryOp).len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 5 + 8 + 15]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 5 + 4 + 8 + 15]RegistryEntry = undefined;
     var index: usize = 0;
     for (std.meta.fields(numeric.UnaryOp)) |field| {
         entries[index] = .{
@@ -220,6 +223,20 @@ pub const registry = blk: {
             .constant_left = true,
         };
         index += 5;
+    }
+    for ([_]struct { pattern: []const PatternAtom, constant_left: bool }{
+        .{ .pattern = &constant_operation_pattern, .constant_left = false },
+        .{ .pattern = &constant_swap_operation_pattern, .constant_left = true },
+        .{ .pattern = &capture_operation_pattern, .constant_left = false },
+        .{ .pattern = &capture_swap_operation_pattern, .constant_left = true },
+    }) |match_each| {
+        entries[index] = .{
+            .context = .each,
+            .pattern = match_each.pattern,
+            .operation = .match,
+            .constant_left = match_each.constant_left,
+        };
+        index += 1;
     }
     for ([_]numeric.BinaryOp{ .add, .mul, .min, .max }) |operation| {
         entries[index] = .{
@@ -574,6 +591,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
             .fold, .scan => stack[stack.len - 3] == .list,
             .direct => evaluator.available() >= 2,
         },
+        .match => entry.context == .each and stack[stack.len - 2] == .list,
         // `dip` is the one direct entry that needs a second input, and a
         // non-list top must reach the generic composition so the type error
         // still names the word that observed it.
@@ -604,6 +622,7 @@ fn applyEntry(evaluator: *Machine, entry: RegistryEntry, capture: Capture) Machi
             .fold, .scan => applyReduction(evaluator, operation, entry.context == .scan),
             .direct => binaryPrimitive(operation)(evaluator),
         },
+        .match => applyMatchEach(evaluator, capture.constant.?),
         .direct => |operation| applyDirect(evaluator, operation),
     };
 }
@@ -799,6 +818,66 @@ const PervadeEachDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
+fn applyMatchEach(evaluator: *Machine, constant: Value) MachineError!void {
+    const stack = evaluator.unit.stack.items;
+    const input = stack[stack.len - 2];
+    std.debug.assert(input == .list);
+    const count: usize = @intCast(input.list.length());
+    if (count == 0) return finishCollected(evaluator, &.{}, 2);
+    const writer = try heap.LeafWriter(.leaf_u8).init(evaluator.allocator(), count);
+    try evaluator.startDriver(MatchEachDriver{
+        .input = input,
+        .constant = constant,
+        .writer = .init(writer),
+    });
+}
+
+/// The recognized `(constant match?) each` family writes its known boolean
+/// result representation directly. Atomic pairs stay in one bounded loop;
+/// structured pairs retain `match?`'s iterative, allocation-fallible cursor.
+const MatchEachDriver = struct {
+    input: Value,
+    constant: Value,
+    writer: heap.Owned(heap.LeafWriter(.leaf_u8)),
+    index: usize = 0,
+    cursor: ?heap.Owned(equal.MatchCursor) = null,
+
+    pub fn advance(evaluator: *Machine, self: *MatchEachDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const count: usize = @intCast(self.input.list.length());
+        var budget: usize = machine.kernel_poll_quantum;
+        while (self.index != count and budget != 0) : (budget -= 1) {
+            const item = list.atUnchecked(self.input, self.index);
+            if (self.cursor == null) {
+                if (equal.matchWithoutStructure(item, self.constant)) |matches| {
+                    self.writer.borrowMut().fillRange(self.index, 1, @intFromBool(matches));
+                    self.index += 1;
+                    continue;
+                }
+                self.cursor = .init(try .init(evaluator.allocator(), item, self.constant));
+            }
+            switch (try self.cursor.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+                .pending => return .yielded,
+                .complete => |matches| {
+                    self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.cursor = null;
+                    self.writer.borrowMut().fillRange(self.index, 1, @intFromBool(matches));
+                    self.index += 1;
+                    // One structural comparison already spent a separately
+                    // bounded quantum. Give the scheduler its turn before the
+                    // next element rather than pretending that work was free.
+                    return .yielded;
+                },
+            }
+        }
+        if (self.index != count) return .yielded;
+        popRelease(evaluator, 2);
+        return .{ .output = self.writer.borrowMut().finish() };
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
 fn applyReduction(
     evaluator: *Machine,
     operation: numeric.BinaryOp,
@@ -955,6 +1034,7 @@ fn operationPrimitive(operation: Operation) ?env.PrimitiveImpl {
     return switch (operation) {
         .unary => |selected| unaryPrimitive(selected),
         .binary => |selected| binaryPrimitive(selected),
+        .match => null,
         .direct => null,
     };
 }
@@ -969,6 +1049,7 @@ fn operationBinding(operation: Operation) BindingKind {
             .mod, .ne, .le, .ge, .and_word, .or_word => .source,
             else => .builtin,
         },
+        .match => .builtin,
         .direct => .source,
     };
 }
