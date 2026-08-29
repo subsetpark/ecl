@@ -145,6 +145,7 @@ pub const UnaryOp = enum {
 pub const SequenceOp = enum {
     at,
     where,
+    first_where,
     in_word,
     raze,
     cat,
@@ -163,6 +164,7 @@ pub const SequenceOp = enum {
         return switch (self) {
             .at => "at",
             .where => "where",
+            .first_where => "first-where",
             .in_word => "in?",
             .raze => "raze",
             .cat => "cat",

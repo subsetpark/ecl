@@ -386,6 +386,7 @@ pub fn build(b: *std.Build) void {
     const full_session_oom_tests = b.addTest(.{
         .root_module = full_session_oom_mod,
         .filters = &.{
+            "oom: recognized structured find propagates every allocation failure",
             "oom: full-session surfaces propagate every allocation failure",
             "oom: admitted construction driver allocation failure transfers its cursor once",
         },

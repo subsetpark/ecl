@@ -90,8 +90,8 @@ const small = 400;
 const large = 1_200;
 
 /// Runs `setup` at `count` elements in `runtime`, then measures `workload`
-/// alone. Both sizes share one session: initializing one costs more than either
-/// measurement, and the subtraction removes anything they share anyway.
+/// alone. The caller gives each size an independently initialized session so
+/// lazy state paid by the first workload cannot make the second look cheaper.
 fn measure(
     runtime: *session.Session,
     counting: *CountingAllocator,
@@ -127,13 +127,17 @@ fn measure(
     return counting.allocations;
 }
 
-fn expectBudget(case: Case) !void {
-    const allocator = std.testing.allocator;
+fn measureIndependent(allocator: std.mem.Allocator, case: Case, count: usize) !usize {
     var counting = CountingAllocator{ .backing = allocator };
     var runtime = try session.Session.init(counting.allocator(), &.{});
     defer runtime.deinit();
-    const at_small = try measure(&runtime, &counting, allocator, case, small);
-    const at_large = try measure(&runtime, &counting, allocator, case, large);
+    return measure(&runtime, &counting, allocator, case, count);
+}
+
+fn expectBudget(case: Case) !void {
+    const allocator = std.testing.allocator;
+    const at_small = try measureIndependent(allocator, case, small);
+    const at_large = try measureIndependent(allocator, case, large);
     // Subtracting removes every fixed cost the two runs share, so what is left
     // is the per-element spend and nothing else. A fast path that stopped
     // firing shows up here and nowhere else.
@@ -267,6 +271,18 @@ const dispatch_free = [_]Case{
         .name = "membership",
         .setup = "{d} range",
         .workload = "(pop 2 [1 2 3] in?) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "first positive count",
+        .setup = "{d} range",
+        .workload = "(pop [0 0 2] first-where) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "recognized scalar find",
+        .setup = "{d} range",
+        .workload = "(pop [1 2 3] 2 find) each len",
         .per_element = 0,
     },
     .{

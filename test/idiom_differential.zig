@@ -131,6 +131,11 @@ fn sourceFor(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
             ),
             .direct => unreachable,
         },
+        .match => std.fmt.allocPrint(
+            allocator,
+            "{s} ({s}) each",
+            .{ matchInput(variant), phrase },
+        ),
         .direct => unreachable,
     };
 }
@@ -151,6 +156,7 @@ fn directSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
                 entry.source_word.?,
             },
         ),
+        .match => unreachable,
         .direct => |operation| std.fmt.allocPrint(
             allocator,
             "{s} {s}",
@@ -172,19 +178,50 @@ fn phraseSource(entry: ecl.idioms.RegistryEntry, variant: Variant) ![]u8 {
             // `literal` builds at runtime — the same value either way.
             .capture => {
                 try result.append(allocator, '(');
-                try result.appendSlice(allocator, binaryConstant(entry.operation.binary, variant));
+                try result.appendSlice(allocator, constantFor(entry.operation, variant));
+                try result.append(allocator, ')');
+            },
+            .quotation_word => |word| {
+                try result.append(allocator, '(');
+                try result.appendSlice(allocator, word.spelling);
                 try result.append(allocator, ')');
             },
             else => try result.appendSlice(allocator, switch (atom) {
-                .constant => binaryConstant(entry.operation.binary, variant),
+                .constant => constantFor(entry.operation, variant),
                 .literal => "0",
                 .operation => entry.operation.spelling(),
                 .word => |word| word.spelling,
-                .capture => unreachable,
+                .capture, .quotation_word => unreachable,
             }),
         }
     }
     return result.toOwnedSlice(allocator);
+}
+
+fn constantFor(operation: ecl.idioms.Operation, variant: Variant) []const u8 {
+    return switch (operation) {
+        .binary => |binary| binaryConstant(binary, variant),
+        .match => matchConstant(variant),
+        else => unreachable,
+    };
+}
+
+fn matchInput(variant: Variant) []const u8 {
+    return switch (variant) {
+        .atom => "[1 2 1]",
+        .empty => "[]",
+        .spine => "[[1] [2] [1]]",
+        .float => "[1.0 2.0]",
+        .failure => "[{} {'a 1}]",
+    };
+}
+
+fn matchConstant(variant: Variant) []const u8 {
+    return switch (variant) {
+        .atom, .empty, .float => "1",
+        .spine => "[1]",
+        .failure => "{'a 1}",
+    };
 }
 
 fn unaryDirectInput(operation: ecl.kernels.numeric.UnaryOp, variant: Variant) []const u8 {
@@ -322,6 +359,13 @@ fn sortInput(variant: Variant) []const u8 {
 fn directInput(operation: ecl.idioms.DirectOp, variant: Variant) []const u8 {
     return switch (operation) {
         .sort => sortInput(variant),
+        .find => switch (variant) {
+            .atom => "[1 2 1] 2",
+            .empty => "[] 1",
+            .spine => "[[1] [2]] [2]",
+            .float => "[1.0 2.0] 2.0",
+            .failure => "[{}] {'a 1}",
+        },
         .first, .rest, .reverse => switch (variant) {
             .atom => "[1 2 3]",
             .empty => "[]",

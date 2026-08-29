@@ -39,6 +39,7 @@ fn primitive(evaluator: *Machine, operation: Op) MachineError!void {
     return switch (operation) {
         .at => atPrimitive(evaluator),
         .where => wherePrimitive(evaluator),
+        .first_where => firstWherePrimitive(evaluator),
         .in_word => inPrimitive(evaluator),
         .raze => razePrimitive(evaluator),
         .cat => catPrimitive(evaluator),
@@ -401,6 +402,100 @@ const WhereDriver = struct {
             },
         };
         return .yielded;
+    }
+};
+
+fn firstWherePrimitive(evaluator: *Machine) MachineError!void {
+    var counts = try evaluator.popValue();
+    defer counts.deinit();
+    if (counts.borrow() != .list) return evaluator.typeError("a non-negative integer count list");
+    const count: usize = @intCast(counts.borrow().list.length());
+    const kind = counts.borrow().list.kind();
+    inline for ([_]value.HeapKind{ .leaf_u8, .leaf_i64 }) |candidate| {
+        if (kind == candidate) {
+            const Driver = TypedFirstWhereDriver(candidate);
+            return evaluator.startDriver(Driver{
+                .counts = .init(heap.LeafReader(candidate).acquire(counts.borrow().list)),
+                .cursor = .init(count),
+                .count = count,
+            });
+        }
+    }
+    try evaluator.startDriver(FirstWhereDriver{
+        .counts = .init(counts.take()),
+    });
+}
+
+/// The first index whose count is positive, or the input length when none is.
+/// This is a search rather than a validating transform: once a positive count
+/// is found, the unobserved suffix cannot affect the result and is not read.
+fn TypedFirstWhereDriver(comptime kind: value.HeapKind) type {
+    return struct {
+        const Self = @This();
+        pub const ownership: heap.DriverOwnership = .fields;
+        pub const inline_driver = true;
+
+        counts: heap.Owned(heap.LeafReader(kind)),
+        cursor: kernel_flat.FlatCursor,
+        count: usize,
+
+        fn finish(self: *Self, evaluator: *Machine, index: usize) machine.WorkProgress {
+            self.counts.deinit(evaluator.releaseDomain(), evaluator.allocator());
+            return .{ .output = .{ .int = @intCast(index) } };
+        }
+
+        pub fn advance(evaluator: *Machine, self: *Self) MachineError!machine.WorkProgress {
+            const context = support.Context{ .evaluator = evaluator };
+            if (try self.cursor.nextRange(context)) |range| {
+                const items = self.counts.borrow().slice();
+                for (items[range.start..range.end], range.start..) |item, index| {
+                    if (kind == .leaf_i64 and item < 0) return evaluator.failAtIndex(
+                        .domain,
+                        "first-where counts must be non-negative",
+                        index,
+                    );
+                    if (item != 0) return self.finish(evaluator, index);
+                }
+            }
+            if (!self.cursor.complete()) return .yielded;
+            return self.finish(evaluator, self.count);
+        }
+    };
+}
+
+const FirstWhereDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    pub const inline_driver = true;
+
+    counts: heap.Owned(Value),
+    index: usize = 0,
+
+    fn finish(self: *FirstWhereDriver, evaluator: *Machine, index: usize) machine.WorkProgress {
+        self.counts.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        return .{ .output = .{ .int = @intCast(index) } };
+    }
+
+    pub fn advance(evaluator: *Machine, self: *FirstWhereDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const count: usize = @intCast(self.counts.borrow().list.length());
+        var budget: usize = machine.kernel_poll_quantum;
+        while (self.index != count and budget != 0) : (budget -= 1) {
+            const item = list.atUnchecked(self.counts.borrow(), self.index);
+            if (item != .int) return evaluator.failAtIndex(
+                .type,
+                "first-where expected integer counts",
+                self.index,
+            );
+            if (item.int < 0) return evaluator.failAtIndex(
+                .domain,
+                "first-where counts must be non-negative",
+                self.index,
+            );
+            if (item.int != 0) return self.finish(evaluator, self.index);
+            self.index += 1;
+        }
+        if (self.index != count) return .yielded;
+        return self.finish(evaluator, count);
     }
 };
 

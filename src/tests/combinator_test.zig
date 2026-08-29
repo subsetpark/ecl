@@ -246,6 +246,8 @@ test "inline times checkpointed guards and case prevalidate and select" {
             .expected = "0 1",
         },
         .{ .name = "case", .source = "3 [1 (10) 3 (30) (90)] case", .expected = "30" },
+        .{ .name = "case else", .source = "2 [1 (10) 3 (30) (90)] case", .expected = "90" },
+        .{ .name = "case else only", .source = "2 [(90)] case", .expected = "90" },
         .{ .name = "case inert key", .source = "(missing) [(missing) (7) (9)] case", .expected = "7" },
         .{ .name = "case inert word subject", .source = "(foo) first [foo (7) (9)] case", .expected = "7" },
         .{ .name = "case first duplicate", .source = "1 [1 (10) 1 (20) (30)] case", .expected = "10" },
@@ -315,6 +317,8 @@ test "combinators: loops guards reductions and result materialization stay cance
     try expectCancelledAfterSetup("70001 range (pop ()) each", "cond", .automatic);
     try expectCancelledAfterSetup("70000 range", "(dup pop) each", .generic_only);
     try expectCancelledAfterSetup("70000 range", "sort", .automatic);
+    try expectCancelledAfterSetup("70000 range -1 =", "first-where", .automatic);
+    try expectCancelledAfterSetup("70000 range", "-1 find", .automatic);
     try expectCancelledAfterSetup("70000 range", "0 (+) fold", .automatic);
     // The idiom loop consumes fewer than one kernel quantum; its second
     // traversal, result specialization, is what crosses the poll boundary.
@@ -347,6 +351,46 @@ test "idioms: automatic hits and forced generic preserves behavior" {
 
     try expectStack(&automatic, "pop [1 2 3] reverse", "[3 2 1]");
     try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    // Constant and partial-capture spellings of `match? each` produce their
+    // boolean mask in one bounded driver. Structured elements still compare
+    // as whole values rather than inheriting `in?`'s recursive pervasion.
+    try expectStack(&automatic, "pop [1 2 1] (1 match?) each", "[1 0 1]");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    try expectStack(
+        &automatic,
+        "pop [1 1.0 [2] {'a 3} 'x] [2] (match?) partial each",
+        "[0 0 1 0 0]",
+    );
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    try expectStack(&generic, "pop [1 2 1] (1 match?) each", "[1 0 1]");
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
+
+    try expectStack(
+        &generic,
+        "pop [1 1.0 [2] {'a 3} 'x] [2] (match?) partial each",
+        "[0 0 1 0 0]",
+    );
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
+
+    // The trusted `find` body keeps a declarative match-mask fallback, while
+    // direct recognition compares only until the first hit and never builds
+    // that mask. Empty, structured, and miss cases share the length sentinel.
+    try expectStack(&automatic, "pop [1 2 1] 2 find", "1");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+    try expectStack(&automatic, "pop [[1] [2]] [2] find", "1");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+    try expectStack(&automatic, "pop [] [2] find", "0");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    try expectStack(&generic, "pop [1 2 1] 2 find", "1");
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
+    try expectStack(&generic, "pop [[1] [2]] [2] find", "1");
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
+    try expectStack(&generic, "pop [] [2] find", "0");
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
 
     // The literal-capture shape `((v) first)` that `partial` builds reaches
     // the same constant-operand kernels a bare constant does, in both operand
@@ -451,6 +495,32 @@ test "idioms: a rebound name keeps recognition off" {
     defer rebound_source.deinit();
     try expectStack(&rebound_source, "(pop 42) 'neg def [1 2] (neg) each", "[42 42]");
     try std.testing.expectEqual(@as(u64, 0), rebound_source.lastIdiomHits());
+
+    var rebound_match_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&rebound_match_heap);
+    var rebound_match = try session.Session.init(rebound_match_heap.allocator(), &.{});
+    defer rebound_match.deinit();
+    try expectStack(
+        &rebound_match,
+        "(pop pop 42) 'match? def [1 2] (1 match?) each",
+        "[42 42]",
+    );
+    try std.testing.expectEqual(@as(u64, 0), rebound_match.lastIdiomHits());
+
+    // A word inside a one-element quotation is subject to the same binding
+    // guard as a bare pattern word. This replacement has the exact `find`
+    // shape, but its quoted `match?` resolves to the session definition, so
+    // the recognizer must fall back and preserve that definition's result.
+    var rebound_quoted_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&rebound_quoted_heap);
+    var rebound_quoted = try session.Session.init(rebound_quoted_heap.allocator(), &.{});
+    defer rebound_quoted.deinit();
+    try expectStack(
+        &rebound_quoted,
+        "(pop pop 42) 'match? def " ++
+            "((match?) partial each first-where) 'find def [1 2] 2 find",
+        "0",
+    );
 
     var rebound_dependency_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&rebound_dependency_heap);
