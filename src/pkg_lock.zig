@@ -736,73 +736,13 @@ fn findEntryIndex(entries: []const Entry, name: []const u8) ?usize {
     return null;
 }
 
-pub fn validPackageName(name: []const u8) bool {
-    if (name.len == 0) return false;
-    var segment_start: usize = 0;
-    for (name, 0..) |byte, index| {
-        if (byte == '.') {
-            if (!validNameSegment(name[segment_start..index])) return false;
-            segment_start = index + 1;
-        }
-    }
-    return validNameSegment(name[segment_start..]);
-}
-
-fn validNameSegment(segment: []const u8) bool {
-    if (segment.len == 0 or segment[0] < 'a' or segment[0] > 'z') return false;
-    for (segment[1..]) |byte| if (!((byte >= 'a' and byte <= 'z') or
-        (byte >= '0' and byte <= '9') or byte == '-')) return false;
-    return true;
-}
-
-fn validHash(hash: []const u8) bool {
-    if (hash.len != 71 or !std.mem.eql(u8, hash[0..7], "sha256-")) return false;
-    for (hash[7..]) |byte| if (!((byte >= '0' and byte <= '9') or
-        (byte >= 'a' and byte <= 'f'))) return false;
-    return true;
-}
-
-fn validUrl(url: []const u8) bool {
-    return url.len > "https://".len and std.mem.startsWith(u8, url, "https://");
-}
-
-pub fn validVersion(version: []const u8) bool {
-    if (version.len == 0 or std.mem.indexOfScalar(u8, version, '+') != null) return false;
-    const hyphen = std.mem.indexOfScalar(u8, version, '-');
-    const core = if (hyphen) |index| version[0..index] else version;
-    var fields = std.mem.splitScalar(u8, core, '.');
-    var count: usize = 0;
-    while (fields.next()) |part| {
-        count += 1;
-        if (!validNumeric(part)) return false;
-    }
-    if (count != 3) return false;
-    if (hyphen) |index| {
-        const prerelease = version[index + 1 ..];
-        var identifiers = std.mem.splitScalar(u8, prerelease, '.');
-        var identifier_count: usize = 0;
-        while (identifiers.next()) |identifier| {
-            identifier_count += 1;
-            if (identifier.len == 0) return false;
-            var numeric = true;
-            for (identifier) |byte| {
-                const digit = byte >= '0' and byte <= '9';
-                numeric = numeric and digit;
-                if (!(digit or (byte >= 'a' and byte <= 'z') or
-                    (byte >= 'A' and byte <= 'Z') or byte == '-')) return false;
-            }
-            if (numeric and identifier.len > 1 and identifier[0] == '0') return false;
-        }
-        if (identifier_count == 0) return false;
-    }
-    return true;
-}
-
-fn validNumeric(field_bytes: []const u8) bool {
-    if (field_bytes.len == 0 or (field_bytes.len > 1 and field_bytes[0] == '0')) return false;
-    for (field_bytes) |byte| if (byte < '0' or byte > '9') return false;
-    return true;
-}
+/// The package-name, version, hash, and URL grammar has one owner: the
+/// catalog builder validates a manifest against it before a package is sealed,
+/// and lock validation applies the same spellings here.
+pub const validPackageName = pkg_catalog.validCanonicalName;
+pub const validHash = pkg_catalog.validHash;
+pub const validUrl = pkg_catalog.validUrl;
+pub const validVersion = pkg_catalog.validVersion;
 
 fn versionLess(left: []const u8, right: []const u8) bool {
     const left_hyphen = std.mem.indexOfScalar(u8, left, '-');

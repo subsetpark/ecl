@@ -93,7 +93,9 @@ test "loader: a root-defined module reaches its declared direct dependency" {
     try fixture.write(
         "project/ecl.pkg",
         "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
-            "'exports {\"root\" [\"src/**/*\"]} 'requires {\"dep\" {}}}\n",
+            "'exports {\"root\" [\"src/**/*\"]} 'requires " ++
+            "{\"dep\" {'package \"dep\" 'version \"1.0.0\" " ++
+            "'url \"https://example.invalid/dep.tgz\" 'hash \"" ++ hash_a ++ "\"}}}\n",
     );
     try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
     try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 5);
@@ -121,6 +123,82 @@ test "loader: a root-defined module reaches its declared direct dependency" {
 
     try expectOk(&runtime, "root.local.answer");
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
+}
+
+test "loader: catalog discovery holds a manifest to the whole public contract" {
+    // `pkg.store.install` seals a staged package against this boundary rather
+    // than against `pkg.manifest.validate`, so anything the public validator
+    // rejects has to fail here too. Each case below is one such rejection.
+    const cases = [_]struct { requires: []const u8, needle: []const u8 }{
+        .{
+            .requires = "{\"dep\" {'package \"dep\" 'version \"1.0.0\" " ++
+                "'url \"http://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+            .needle = "url is not an https url",
+        },
+        .{
+            .requires = "{\"dep\" {'package \"dep\" 'version \"1.0.0\"}}",
+            .needle = "does not have the exact keys",
+        },
+        .{
+            .requires = "{\"dep\" {'package \"dep\" 'version \"one\" " ++
+                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+            .needle = "has a non-semver version",
+        },
+        .{
+            .requires = "{\"dep\" {'package \"root.sub\" 'version \"1.0.0\" " ++
+                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+            .needle = "one name owns the other",
+        },
+        .{
+            .requires = "{\"one\" {'package \"dep\" 'version \"1.0.0\" " ++
+                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"} " ++
+                "\"two\" {'package \"dep\" 'version \"1.0.0\" " ++
+                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+            .needle = "under more than one alias",
+        },
+        .{
+            .requires = "((\"pwned\" \"/tmp/pkg-pwned\" io.spit))",
+            .needle = "requires must be a dict",
+        },
+    };
+    for (cases) |case| {
+        var fixture = try LockFixture.init();
+        defer fixture.deinit();
+        const manifest = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+                "'exports {{\"root\" [\"src/**/*\"]}} 'requires {s}}}\n",
+            .{case.requires},
+        );
+        defer std.testing.allocator.free(manifest);
+        try fixture.write("project/ecl.pkg", manifest);
+        try fixture.write(
+            "project/ecl.lock",
+            "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n",
+        );
+        try fixture.directory.dir.createDir(std.testing.io, "project/src", .default_dir);
+        try fixture.write("project/src/a.ecl", "((1) 'answer def) 'root.local @defm\n");
+
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer diagnostics.deinit();
+        var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .project_start = fixture.nested,
+        });
+        defer runtime.deinit();
+
+        try expectErrorContains(
+            &runtime,
+            "root.local.answer",
+            &.{ "invalid package catalog", case.needle },
+        );
+    }
 }
 
 test "loader: a lock may omit a requirer entry for a package that requires nothing" {

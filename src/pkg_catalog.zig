@@ -436,14 +436,117 @@ const Builder = struct {
             exports.appendAssumeCapacity(.{ .namespace = namespace, .globs = globs });
         }
 
-        _ = asDict(
-            field(top, "requires") catch @panic("exact manifest lost its requires field"),
-        ) catch
-            return self.fail("package manifest `{s}` requires must be a dict", .{path});
+        if (!validVersion(version))
+            return self.fail("package manifest `{s}` has a non-semver version", .{path});
+        try self.validateRequires(path, name, top);
         return .{
             .name = name,
             .version = version,
             .exports = try exports.toOwnedSlice(self.allocator),
+        };
+    }
+
+    /// The requirement contract `pkg.manifest.validate` states. The installer
+    /// seals a staged package against this boundary rather than against the
+    /// public validator, so a manifest the public validator rejects must not
+    /// pass here either; anything less lets a direct caller publish a package
+    /// nothing can later read back.
+    fn validateRequires(
+        self: *Builder,
+        path: []const u8,
+        name: []const u8,
+        top: *value.DictHandle,
+    ) BuildError!void {
+        const requires = asDict(
+            field(top, "requires") catch @panic("exact manifest lost its requires field"),
+        ) catch
+            return self.fail("package manifest `{s}` requires must be a dict", .{path});
+        const count: usize = @intCast(requires.length());
+        var required: std.ArrayList([]u8) = .empty;
+        defer {
+            for (required.items) |entry| self.allocator.free(entry);
+            required.deinit(self.allocator);
+        }
+        try required.ensureTotalCapacity(self.allocator, count);
+        for (0..count) |index| {
+            const alias = ownedUtf8(self.allocator, dict.keyAt(requires, index)) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Invalid => return self.fail(
+                    "package manifest `{s}` has a non-string requirement alias",
+                    .{path},
+                ),
+            };
+            defer self.allocator.free(alias);
+            if (!validCanonicalName(alias)) return self.fail(
+                "package manifest `{s}` requirement alias `{s}` is not a canonical package name",
+                .{ path, alias },
+            );
+            const requirement = exactFields(
+                dict.valueAt(requires, index),
+                &.{ "package", "version", "url", "hash" },
+            ) catch return self.fail(
+                "package manifest `{s}` requirement `{s}` does not have the exact keys " ++
+                    "'package 'version 'url 'hash",
+                .{ path, alias },
+            );
+            const required_name = try self.requirementField(path, alias, requirement, "package");
+            errdefer self.allocator.free(required_name);
+            if (!validCanonicalName(required_name)) return self.fail(
+                "package manifest `{s}` requirement `{s}` names a non-canonical package",
+                .{ path, alias },
+            );
+            const version = try self.requirementField(path, alias, requirement, "version");
+            defer self.allocator.free(version);
+            if (!validVersion(version)) return self.fail(
+                "package manifest `{s}` requirement `{s}` has a non-semver version",
+                .{ path, alias },
+            );
+            const url = try self.requirementField(path, alias, requirement, "url");
+            defer self.allocator.free(url);
+            if (!validUrl(url)) return self.fail(
+                "package manifest `{s}` requirement `{s}` url is not an https url",
+                .{ path, alias },
+            );
+            const hash = try self.requirementField(path, alias, requirement, "hash");
+            defer self.allocator.free(hash);
+            if (!validHash(hash)) return self.fail(
+                "package manifest `{s}` requirement `{s}` hash is not sha256- and 64 hex digits",
+                .{ path, alias },
+            );
+            for (required.items) |prior| if (std.mem.eql(u8, prior, required_name)) return self.fail(
+                "package manifest `{s}` requires `{s}` under more than one alias",
+                .{ path, required_name },
+            );
+            required.appendAssumeCapacity(required_name);
+        }
+        for (required.items, 0..) |left, index| {
+            if (related(name, left)) return self.fail(
+                "package `{s}` may not require `{s}`: one name owns the other",
+                .{ name, left },
+            );
+            for (required.items[index + 1 ..]) |right| if (related(left, right)) return self.fail(
+                "package manifest `{s}` requires `{s}` and `{s}`: one name owns the other",
+                .{ path, left, right },
+            );
+        }
+    }
+
+    fn requirementField(
+        self: *Builder,
+        path: []const u8,
+        alias: []const u8,
+        requirement: *value.DictHandle,
+        key: []const u8,
+    ) BuildError![]u8 {
+        return ownedUtf8(
+            self.allocator,
+            field(requirement, key) catch @panic("exact requirement lost a field"),
+        ) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.Invalid => self.fail(
+                "package manifest `{s}` requirement `{s}` has a non-string {s}",
+                .{ path, alias, key },
+            ),
         };
     }
 };
@@ -538,6 +641,11 @@ fn matchSegment(pattern: []const u8, text: []const u8) bool {
     return pattern_index == pattern.len;
 }
 
+/// Two package names collide when either owns the other as a dotted prefix.
+fn related(left: []const u8, right: []const u8) bool {
+    return ownsNamespace(left, right) or ownsNamespace(right, left);
+}
+
 fn ownsNamespace(namespace: []const u8, module_name: []const u8) bool {
     return std.mem.eql(u8, namespace, module_name) or
         (module_name.len > namespace.len and
@@ -545,7 +653,56 @@ fn ownsNamespace(namespace: []const u8, module_name: []const u8) bool {
             module_name[namespace.len] == '.');
 }
 
-fn validCanonicalName(name: []const u8) bool {
+pub fn validHash(hash: []const u8) bool {
+    if (hash.len != 71 or !std.mem.eql(u8, hash[0..7], "sha256-")) return false;
+    for (hash[7..]) |byte| if (!((byte >= '0' and byte <= '9') or
+        (byte >= 'a' and byte <= 'f'))) return false;
+    return true;
+}
+
+pub fn validUrl(url: []const u8) bool {
+    return url.len > "https://".len and std.mem.startsWith(u8, url, "https://");
+}
+
+pub fn validVersion(version: []const u8) bool {
+    if (version.len == 0 or std.mem.indexOfScalar(u8, version, '+') != null) return false;
+    const hyphen = std.mem.indexOfScalar(u8, version, '-');
+    const core = if (hyphen) |index| version[0..index] else version;
+    var fields = std.mem.splitScalar(u8, core, '.');
+    var count: usize = 0;
+    while (fields.next()) |part| {
+        count += 1;
+        if (!validNumeric(part)) return false;
+    }
+    if (count != 3) return false;
+    if (hyphen) |index| {
+        const prerelease = version[index + 1 ..];
+        var identifiers = std.mem.splitScalar(u8, prerelease, '.');
+        var identifier_count: usize = 0;
+        while (identifiers.next()) |identifier| {
+            identifier_count += 1;
+            if (identifier.len == 0) return false;
+            var numeric = true;
+            for (identifier) |byte| {
+                const digit = byte >= '0' and byte <= '9';
+                numeric = numeric and digit;
+                if (!(digit or (byte >= 'a' and byte <= 'z') or
+                    (byte >= 'A' and byte <= 'Z') or byte == '-')) return false;
+            }
+            if (numeric and identifier.len > 1 and identifier[0] == '0') return false;
+        }
+        if (identifier_count == 0) return false;
+    }
+    return true;
+}
+
+fn validNumeric(field_bytes: []const u8) bool {
+    if (field_bytes.len == 0 or (field_bytes.len > 1 and field_bytes[0] == '0')) return false;
+    for (field_bytes) |byte| if (byte < '0' or byte > '9') return false;
+    return true;
+}
+
+pub fn validCanonicalName(name: []const u8) bool {
     if (name.len == 0) return false;
     var segment_start: usize = 0;
     for (name, 0..) |byte, index| {
