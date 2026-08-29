@@ -1564,7 +1564,10 @@ filesystem authority or escape the discovered project root.
 - `'requires` is keyed by the **requiring** package — the root under its own
   `'name` — and maps each local alias to an exact `{'package … 'version …}`
   edge. Under minimal version selection every edge agrees with `'packages`.
-  Only one selected version of a package is supported in format 1.
+  Only one selected version of a package is supported in format 1. The root
+  always appears; a selected package that requires nothing may be omitted, and
+  an absent requirer is the empty edge set, so the visibility that `'requires`
+  masks is the package itself alone.
 - The version selected for a name is never below a minimum recorded for that
   name. A lock that violates this is malformed.
 - Entries in `'packages`, in `'requires`, and in each inner requirement map

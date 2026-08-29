@@ -123,6 +123,41 @@ test "loader: a root-defined module reaches its declared direct dependency" {
     try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
 }
 
+test "loader: a lock may omit a requirer entry for a package that requires nothing" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    // `pkg.lock.validate` accepts, and `pkg.lock.write` emits, a lock whose
+    // `requires` names only the requirers that have edges. Opening one must
+    // succeed: a canonically written lock is never unopenable.
+    try fixture.write(
+        "project/ecl.lock",
+        "{'format 1 'root \"root\" 'packages " ++
+            "{\"dep\" {'version \"1.0.0\" 'url \"https://example.invalid/dep.tgz\" " ++
+            "'hash \"" ++ hash_a ++ "\"}} " ++
+            "'requires {\"root\" {\"dep\" {'package \"dep\" 'version \"1.0.0\"}}}}\n",
+    );
+    try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 5);
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+        .environ = &environ,
+    });
+    defer runtime.deinit();
+
+    try expectOk(&runtime, "dep.answer");
+    try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
+}
+
 test "loader: embedded modules precede lock and a manifested project is hermetic" {
     var fixture = try LockFixture.init();
     defer fixture.deinit();

@@ -520,7 +520,17 @@ fn fillVisibility(
         }
         entries[entry_index].requires = visible;
     }
-    for (entries) |entry| if (entry.requires.len == 0) return error.Invalid;
+    // A selected package that requires nothing may be omitted from `requires`
+    // entirely: `pkg.lock.validate` accepts such a lock and `pkg.lock.write`
+    // emits one, so rejecting it here would make a canonically written lock
+    // unopenable. Absence is the empty edge set, which leaves the package
+    // visible only to itself.
+    for (entries, 0..) |*entry, index| {
+        if (entry.requires.len != 0) continue;
+        const visible = try allocator.alloc(pkg_catalog.PackageId, 1);
+        visible[0] = @enumFromInt(@as(u32, @intCast(index)));
+        entry.requires = visible;
+    }
 }
 
 fn invalidSnapshot(
