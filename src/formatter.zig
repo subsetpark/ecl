@@ -396,7 +396,7 @@ const Annotation = struct {
 const NestedDoc = struct {
     doc: *const Doc,
     has_content: bool,
-    trailing_comment: bool,
+    trailing_hardlines: usize,
     force_break: bool,
 };
 const Formatter = struct {
@@ -585,7 +585,7 @@ const Formatter = struct {
             return .{
                 .doc = try self.docs.concat(&.{ try self.docs.text(delimited.open), try self.docs.text(delimited.close) }),
                 .has_content = true,
-                .trailing_comment = false,
+                .trailing_hardlines = 0,
                 .force_break = false,
             };
         }
@@ -593,12 +593,13 @@ const Formatter = struct {
         defer pieces.deinit(self.allocator());
         try pieces.append(self.allocator(), try self.docs.text(delimited.open));
         try pieces.append(self.allocator(), try self.docs.aligned(nested_doc.doc));
-        if (nested_doc.trailing_comment) try pieces.append(self.allocator(), try self.docs.hardline());
+        for (0..nested_doc.trailing_hardlines) |_|
+            try pieces.append(self.allocator(), try self.docs.hardline());
         try pieces.append(self.allocator(), try self.docs.text(delimited.close));
         return .{
             .doc = try self.docs.group(try self.docs.aligned(try self.docs.concat(pieces.items))),
             .has_content = true,
-            .trailing_comment = false,
+            .trailing_hardlines = 0,
             .force_break = nested_doc.force_break,
         };
     }
@@ -631,7 +632,8 @@ const Formatter = struct {
         defer body.deinit(self.allocator());
         try body.append(self.allocator(), try self.docs.text(delimited.open));
         try body.append(self.allocator(), try self.docs.aligned(nested_doc.doc));
-        if (nested_doc.trailing_comment) try body.append(self.allocator(), try self.docs.hardline());
+        for (0..nested_doc.trailing_hardlines) |_|
+            try body.append(self.allocator(), try self.docs.hardline());
         try body.append(self.allocator(), try self.docs.concat(closing.items));
         const registered_body = try self.docs.group(try self.docs.aligned(try self.docs.concat(body.items)));
         if (start == registration.body) return registered_body;
@@ -748,11 +750,14 @@ const Formatter = struct {
                 newlines = 0;
             },
         };
-        if (newlines > 0) try self.appendHardlines(&output, @min(newlines, 2));
+        const trailing_hardlines = if (previous_comment)
+            @min(@max(newlines, 1), 2)
+        else
+            @min(newlines, 2);
         return .{
             .doc = try self.docs.concat(output.items),
-            .has_content = have_content or output.items.len > 0,
-            .trailing_comment = previous_comment and newlines == 0,
+            .has_content = have_content or output.items.len > 0 or trailing_hardlines > 0,
+            .trailing_hardlines = trailing_hardlines,
             .force_break = force_break,
         };
     }

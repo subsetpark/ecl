@@ -787,17 +787,80 @@ test "ecl fmt formats files and stdin without evaluating source" {
     const unchanged = try temporary.dir.readFileAlloc(io, "format.ecl", allocator, .unlimited);
     defer allocator.free(unchanged);
     try std.testing.expectEqualStrings(input, unchanged);
+    const original_info = try temporary.dir.statFile(
+        io,
+        "format.ecl",
+        .{ .follow_symlinks = false },
+    );
+
+    var write_result = try cli.runOptions(.{
+        .argv = &.{ exe, "fmt", "-w", "format.ecl" },
+        .cwd = .{ .dir = temporary.dir },
+    });
+    defer write_result.deinit();
+    try write_result.expect(.{ .exit_code = 0, .stdout = "", .stderr = "" });
+    const rewritten = try temporary.dir.readFileAlloc(io, "format.ecl", allocator, .unlimited);
+    defer allocator.free(rewritten);
+    try std.testing.expectEqualStrings(expected, rewritten);
+    const rewritten_info = try temporary.dir.statFile(
+        io,
+        "format.ecl",
+        .{ .follow_symlinks = false },
+    );
+    try std.testing.expectEqual(original_info.permissions, rewritten_info.permissions);
+
+    try temporary.dir.symLink(io, "format.ecl", "format-link.ecl", .{});
+    var linked_write = try cli.runOptions(.{
+        .argv = &.{ exe, "fmt", "-w", "format-link.ecl" },
+        .cwd = .{ .dir = temporary.dir },
+    });
+    defer linked_write.deinit();
+    try linked_write.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr = "ecl fmt: -w target `format-link.ecl` is not a regular file\n",
+    });
+    const link_info = try temporary.dir.statFile(
+        io,
+        "format-link.ecl",
+        .{ .follow_symlinks = false },
+    );
+    try std.testing.expectEqual(std.Io.File.Kind.sym_link, link_info.kind);
+
+    const invalid_source = "(unclosed";
+    try temporary.dir.writeFile(io, .{ .sub_path = "invalid.ecl", .data = invalid_source });
+    var invalid_write = try cli.runOptions(.{
+        .argv = &.{ exe, "fmt", "-w", "invalid.ecl" },
+        .cwd = .{ .dir = temporary.dir },
+    });
+    defer invalid_write.deinit();
+    try invalid_write.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr = "ecl fmt: source does not parse\n",
+    });
+    const preserved = try temporary.dir.readFileAlloc(io, "invalid.ecl", allocator, .unlimited);
+    defer allocator.free(preserved);
+    try std.testing.expectEqualStrings(invalid_source, preserved);
 
     var stdin_result = try runWithInput(&.{ build_options.ecl_exe, "fmt", "-" }, input);
     defer stdin_result.deinit();
     try stdin_result.expect(.{ .exit_code = 0, .stdout = expected, .stderr = "" });
+
+    var stdin_write = try run(&.{ build_options.ecl_exe, "fmt", "-w", "-" });
+    defer stdin_write.deinit();
+    try stdin_write.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr = "ecl fmt: -w requires a file path\n",
+    });
 
     var invalid = try run(&.{ build_options.ecl_exe, "fmt" });
     defer invalid.deinit();
     try invalid.expect(.{
         .exit_code = 1,
         .stdout = "",
-        .stderr = "ecl fmt: expected exactly one FILE or -\n",
+        .stderr = "ecl fmt: usage: ecl fmt [-w] <FILE|->\n",
     });
 }
 

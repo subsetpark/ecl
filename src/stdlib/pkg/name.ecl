@@ -85,4 +85,4 @@
   stencil
   (1 =) any?)
  'collides? def
- ) 'pkg.name @defm
+) 'pkg.name @defm

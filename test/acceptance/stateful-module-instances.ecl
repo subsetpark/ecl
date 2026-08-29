@@ -10,7 +10,7 @@
 
  ### def tick
  ((1 +) within) 'tick def
- )
+)
 'counter-body
 set
 
@@ -53,7 +53,7 @@ core.utils io.pp
 
  ### def size
  ((dup len without) within) 'size def
- ) seed 'pool @defm
+) seed 'pool @defm
 pool.size io.pp
 pool.checkout io.pp
 pool.size io.pp

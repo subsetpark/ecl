@@ -10,6 +10,7 @@ const help =
     \\    ecl <FILE> [ARGS...]       Run a UTF-8 script
     \\    ecl <SOURCE> [ARGS...]     Evaluate source and print the stack
     \\    ecl fmt <FILE|->           Format source to standard output
+    \\    ecl fmt -w <FILE>          Format and atomically rewrite a file
     \\    ecl pkg <SUBCOMMAND>       Manage the current project's packages
     \\
     \\OPTIONS:
@@ -269,14 +270,30 @@ fn readFormatStdin(init: std.process.Init) AppError![]u8 {
 }
 
 fn formatCommand(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
-    if (arguments.len != 1) {
-        try writeFile(init.io, .stderr, "ecl fmt: expected exactly one FILE or -\n");
+    const write_in_place = arguments.len > 0 and std.mem.eql(u8, arguments[0], "-w");
+    if ((write_in_place and arguments.len != 2) or (!write_in_place and arguments.len != 1)) {
+        try writeFile(init.io, .stderr, "ecl fmt: usage: ecl fmt [-w] <FILE|->\n");
         return 1;
     }
-    const source = if (std.mem.eql(u8, arguments[0], "-"))
+    const source_path = arguments[@intFromBool(write_in_place)];
+    if (write_in_place and std.mem.eql(u8, source_path, "-")) {
+        try writeFile(init.io, .stderr, "ecl fmt: -w requires a file path\n");
+        return 1;
+    }
+    var permissions: std.Io.File.Permissions = .default_file;
+    if (write_in_place) {
+        const info = std.Io.Dir.cwd().statFile(
+            init.io,
+            source_path,
+            .{ .follow_symlinks = false },
+        ) catch |err| return emitIoError(init, "cannot inspect format input", err);
+        if (info.kind != .file) return formatTargetNotRegular(init, source_path);
+        permissions = info.permissions;
+    }
+    const source = if (std.mem.eql(u8, source_path, "-"))
         try readFormatStdin(init)
     else
-        std.Io.Dir.cwd().readFileAlloc(init.io, arguments[0], init.gpa, .unlimited) catch |err|
+        std.Io.Dir.cwd().readFileAlloc(init.io, source_path, init.gpa, .unlimited) catch |err|
             return emitIoError(init, "cannot read format input", err);
     defer init.gpa.free(source);
     const formatted = ecl.formatter.format(init.gpa, source) catch |err| switch (err) {
@@ -291,7 +308,62 @@ fn formatCommand(init: std.process.Init, arguments: []const []const u8) AppError
         },
     };
     defer init.gpa.free(formatted);
+    if (write_in_place) {
+        if (std.mem.eql(u8, source, formatted)) return 0;
+        return writeFormattedFile(init, source_path, permissions, formatted);
+    }
     try writeFile(init.io, .stdout, formatted);
+    return 0;
+}
+
+fn formatTargetNotRegular(init: std.process.Init, path: []const u8) AppError!u8 {
+    var buffer: [512]u8 = undefined;
+    const message = std.fmt.bufPrint(
+        &buffer,
+        "ecl fmt: -w target `{s}` is not a regular file\n",
+        .{path},
+    ) catch "ecl fmt: -w target is not a regular file\n";
+    try writeFile(init.io, .stderr, message);
+    return 1;
+}
+
+fn writeFormattedFile(
+    init: std.process.Init,
+    path: []const u8,
+    permissions: std.Io.File.Permissions,
+    formatted: []const u8,
+) AppError!u8 {
+    const parent_path = std.fs.path.dirname(path) orelse ".";
+    var parent = std.Io.Dir.cwd().openDir(
+        init.io,
+        parent_path,
+        .{ .follow_symlinks = false },
+    ) catch |err| return emitIoError(init, "cannot open format output directory", err);
+    defer parent.close(init.io);
+    const basename = std.fs.path.basename(path);
+    var atomic = parent.createFileAtomic(init.io, basename, .{
+        .permissions = permissions,
+        .replace = true,
+    }) catch |err| return emitIoError(init, "cannot create format output", err);
+    defer atomic.deinit(init.io);
+
+    var output_buffer: [4096]u8 = undefined;
+    var writer = atomic.file.writer(init.io, &output_buffer);
+    writer.interface.writeAll(formatted) catch |err|
+        return emitIoError(init, "cannot write format output", err);
+    writer.interface.flush() catch |err|
+        return emitIoError(init, "cannot write format output", err);
+    atomic.file.sync(init.io) catch |err|
+        return emitIoError(init, "cannot synchronize format output", err);
+
+    const current = parent.statFile(
+        init.io,
+        basename,
+        .{ .follow_symlinks = false },
+    ) catch |err| return emitIoError(init, "cannot recheck format input", err);
+    if (current.kind != .file) return formatTargetNotRegular(init, path);
+    atomic.replace(init.io) catch |err|
+        return emitIoError(init, "cannot publish format output", err);
     return 0;
 }
 fn executeSource(

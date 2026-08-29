@@ -137,7 +137,8 @@ ecl                         Start a REPL, or read non-TTY stdin as one unit
 ecl -e <SOURCE> [ARGS...]  Evaluate source and print the final stack
 ecl <FILE> [ARGS...]       Run a UTF-8 script
 ecl <SOURCE> [ARGS...]     Evaluate source and print the final stack
-ecl fmt <FILE|->           Format source without evaluating it
+ecl fmt <FILE|->           Format source to standard output without evaluating it
+ecl fmt -w <FILE>          Format and atomically rewrite a file
 ecl pkg <SUBCOMMAND>       Manage the current project's packages
 ecl -h | --help            Show command help
 ecl -V | --version         Show the version
@@ -164,6 +165,25 @@ Ctrl-C abandons the current unit; Ctrl-D exits from an empty primary prompt.
 `str` is the compact, round-trippable rendering of a value. REPL display and
 `io.pp` favor readable matrix layout and bound terminal output by eliding very
 large values.
+
+### Neovim
+
+The repository includes filetype detection and lightweight syntax highlighting
+for Neovim. Add its `runtime` directory to Neovim's runtime path:
+
+```lua
+vim.opt.runtimepath:append("/path/to/ecl/runtime")
+vim.cmd("filetype indent on")
+```
+
+Opening an `.ecl` file then enables highlighting for comments, strings and
+escapes, numbers, characters, quoted symbols, delimiters, binders, and
+definition words. With filetype indentation enabled, Neovim also aligns nested
+forms using the formatter's one-space style while preserving whitespace inside
+multiline strings. Run `gggqG` to format the whole buffer through `ecl fmt -`;
+the `ecl` executable must be on Neovim's `PATH`. Formatting arbitrary partial
+ranges is not supported because they may not be complete ECL programs. Restart
+Neovim after changing the runtime path.
 
 ### Packages
 

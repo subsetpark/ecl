@@ -86,4 +86,4 @@
   failure 'kind at kinds in?)
  'kind-in? def
 
- ) 'error @defm
+) 'error @defm

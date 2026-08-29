@@ -34,7 +34,7 @@
 
  ### def via-private
  (hidden hidden-effect hidden-doc hidden-both) 'via-private def
- ) 'forms @defm
+) 'forms @defm
 
 ### `see` prints each supplied annotation and body; `doc` reports documentation separately.
 'forms.bare see
