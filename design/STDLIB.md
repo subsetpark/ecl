@@ -39,6 +39,20 @@ Conventions:
 `( x y -- z )` — **Pervasive.** Multiply. Integer overflow is
 `'overflow`.
 
+### \*file\*
+`( -- string )` — Return the source name attached to the currently executing
+reader-authored occurrence. A definition reports the file that authored its
+body even when another file calls it. `'domain` in runtime-assembled code with
+no source provenance; there is no fallback to the caller's file.
+
+### \*module\*
+`( -- 'module-name )` — Return the canonical registration name selected by
+the current module activation. The same image registered under different names
+reports the name through which it was called; an alias reports its target's
+canonical name. `'domain` at top level, during module construction, through an
+anonymous module value, or through an escaped quotation whose image has no
+invoking registration.
+
 ### +
 `( x y -- z )` — **Pervasive.** Add. Acts ordinally on chars:
 `char int +` (either order) is a char; `char char +` is `'type`. Integer

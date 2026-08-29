@@ -26,6 +26,8 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "register", .primitive = registerWord },
         .{ .name = "@defm", .primitive = defmWord },
         .{ .name = "unmodule", .primitive = unmoduleWord },
+        .{ .name = "*file*", .primitive = fileWord },
+        .{ .name = "*module*", .primitive = moduleNameWord },
         .{ .name = "within", .primitive = withinWord },
         .{ .name = "without", .primitive = withoutWord },
         .{ .name = "import", .primitive = importWord },
@@ -78,6 +80,49 @@ fn unmoduleWord(evaluator: *Machine) MachineError!void {
     const name = try evaluator.popSymbol();
     try evaluator.startDriver(UnmoduleDriver{ .validation = .init(name) });
 }
+
+/// Returns the canonical registration selected by the active execution home.
+/// The name belongs to the home rather than the image: one image can be
+/// registered more than once, and an alias still reaches its target's
+/// canonical registration. Construction and module-value invocation have no
+/// registration to report.
+fn moduleNameWord(evaluator: *Machine) MachineError!void {
+    const home = evaluator.currentHome() orelse return evaluator.fail(
+        .domain,
+        "*module* is legal only in code homed in a registered module",
+    );
+    const name = home.name() orelse return evaluator.fail(
+        .domain,
+        "*module* is legal only in code homed in a registered module",
+    );
+    try evaluator.pushOwned(.{ .symbol = intern.moduleId(name) });
+}
+
+/// Returns the reader source that authored the active occurrence. Source names
+/// are user-sized host input, so materialization remains scheduled and
+/// cancellable rather than hiding a traversal in the primitive callback.
+fn fileWord(evaluator: *Machine) MachineError!void {
+    const source_name = evaluator.activeSourceName() orelse return evaluator.fail(
+        .domain,
+        "*file* is unavailable for code without source provenance",
+    );
+    try evaluator.startDriver(FileDriver{
+        .text = .init(.init(evaluator.allocator(), source_name)),
+    });
+}
+
+const FileDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+    text: heap.Owned(kernel_storage.TextMaterializer),
+
+    pub fn advance(evaluator: *Machine, self: *FileDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        return switch (try self.text.borrowMut().advance(machine.kernel_poll_quantum)) {
+            .pending => .yielded,
+            .complete => |result| .{ .output = result },
+        };
+    }
+};
 
 const UnmoduleDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;

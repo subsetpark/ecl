@@ -1088,7 +1088,11 @@ Any change to this machinery must preserve:
   archive exposes no blocking absorption adapter. Parser errors carry their
   complete source name in an owned `explicit_location` failure-site variant;
   no fixed diagnostic buffer truncates provenance, and driver retirement cannot
-  invalidate it before error materialization. Copy-on-write replacement swaps the destination's old
+  invalidate it before error materialization. `*file*` uses that same direct
+  header-and-token lookup for the active occurrence, then materializes the
+  archive-owned source name through bounded text work; absence remains
+  `'domain` for runtime-built code rather than falling back to another frame.
+  Copy-on-write replacement swaps the destination's old
   representation into the consumed source wrapper and retires that wrapper
   through the caller's shared domain; representation adoption has no
   allocator-only blocking adapter. Driver destruction is selected by the

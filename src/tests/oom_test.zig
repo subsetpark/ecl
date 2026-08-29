@@ -495,7 +495,8 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-module.ecl",
-        "(1 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm " ++
+        "*file* pop " ++
+            "(1 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm " ++
             "'allocation-module.get 'get import get pop 'short 'allocation-module alias short.get pop " ++
             "(2 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm get pop " ++
             "(((dup) 'f def) 'bad @defm) @attempt pop " ++
