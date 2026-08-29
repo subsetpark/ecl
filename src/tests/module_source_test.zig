@@ -87,6 +87,42 @@ test "loader: the root package exports local source through the same catalog" {
     try std.testing.expectEqual(@as(i64, 17), runtime.stackItems()[0].int);
 }
 
+test "loader: a root-defined module reaches its declared direct dependency" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.write(
+        "project/ecl.pkg",
+        "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+            "'exports {\"root\" [\"src/**/*\"]} 'requires {\"dep\" {}}}\n",
+    );
+    try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
+    try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 5);
+    try fixture.directory.dir.createDir(std.testing.io, "project/src", .default_dir);
+    try fixture.write(
+        "project/src/unrelated.ecl",
+        "((dep.answer) 'answer def) 'root.local @defm\n",
+    );
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+        .environ = &environ,
+    });
+    defer runtime.deinit();
+
+    try expectOk(&runtime, "root.local.answer");
+    try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
+}
+
 test "loader: embedded modules precede lock and a manifested project is hermetic" {
     var fixture = try LockFixture.init();
     defer fixture.deinit();

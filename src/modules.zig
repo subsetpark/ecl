@@ -358,10 +358,15 @@ const ModuleImage = struct {
 /// the generation number, and the slot lifetime witness that keeps the durable
 /// state and arbiter reachable while old code can still name them.
 /// Nominal publication provenance. Only the embedded-module loader may pass
-/// `standard_library`; every program-facing registration path is ordinary.
-/// Resolution exposes this distinction without exposing a registry, image, or
-/// mutation capability, so optimizers can trust shipped module definitions
-/// without trusting a later replacement registered under the same name.
+/// `standard_library`; `register`, `@defm`, dynamic native loading, and
+/// explicit replacement publish `ordinary`. Cataloged package source publishes
+/// `package`, and the root project's own cataloged source publishes
+/// `root_package`; both carry the package id that `requires` masks visibility
+/// against, so a module registered from package source keeps its own package's
+/// direct lock edges wherever it later executes. Resolution exposes these
+/// distinctions without exposing a registry, image, or mutation capability, so
+/// optimizers can trust shipped module definitions without trusting a later
+/// replacement registered under the same name.
 pub const RegistrationProvenance = union(enum) {
     ordinary,
     standard_library,

@@ -1611,7 +1611,7 @@ Cold module resolution has two modes:
 A locked selection names the immutable `<name>-<version>-<hex>` directory
 below. A cache lock prefixes that key with the environment-selected shared
 cache. A vendored lock prefixes it with the fixed `<project-root>/vendor`
-directory and does not consult `ECL_CACHE`, `XDG_CACHE_HOME`, or `HOME`. The
+directory and does not consult `ECL_CACHE`, `XDG_CACHE_HOME`, or `HOME`.
 The catalog supplies the source candidate's exact relative path. A request for
 `stats.regressions` may therefore load `src/stats/implementation.ecl`, and the
 same artifact may also declare `stats.distributions`.

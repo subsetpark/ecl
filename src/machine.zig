@@ -9134,10 +9134,7 @@ const ModuleCompletionDriver = struct {
                         ),
                         .ordinary, .root_package, .standard_library => {},
                     }
-                    const provenance: modules.RegistrationProvenance = switch (validate.provenance) {
-                        .root_package => .ordinary,
-                        else => validate.provenance,
-                    };
+                    const provenance = validate.provenance;
                     const registration = evaluator.unit.inherited.registry.?.registrationCursor(
                         validate.sealed.borrow().ref(),
                         name,
