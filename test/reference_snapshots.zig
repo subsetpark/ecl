@@ -715,7 +715,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 313 'col 54}}
+        \\{'kind 'user 'msg "bad" 'word 'raise 'trace ['raise 'fail] 'data {'source "prelude.ecl" 'line 314 'col 54}}
         \\=== result.ok? ===
         \\source: (2 3 +) @attempt result.ok?
         \\exit: 0
@@ -817,7 +817,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 338 'col 20}}
+        \\{'kind 'domain 'msg "defp/setp are legal only in a module root" 'word 'defp 'trace ['defp 'setp] 'data {'source "prelude.ecl" 'line 336 'col 20}}
         \\=== qualify execute ===
         \\source: ((41) 'f def) 'core.utils @defm 'core.utils 'f qualify execute
         \\exit: 0
@@ -919,7 +919,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 344 'col 14}}
+        \\{'kind 'type 'msg "an ok result must carry a list of success values" 'word 'raise 'trace ['raise 'assert 'result.and-then] 'data {'source "prelude.ecl" 'line 342 'col 14}}
         \\=== str upper ===
         \\source: "héllo" str.upper
         \\exit: 0
@@ -933,7 +933,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'str.index-of] 'data {'source "prelude.ecl" 'line 344 'col 14}}
+        \\{'kind 'domain 'msg "str.index-of found no occurrence of the needle" 'word 'raise 'trace ['raise 'assert 'str.index-of] 'data {'source "prelude.ecl" 'line 342 'col 14}}
         \\=== csv parse ===
         \\source: "a,,c
         \\d" csv.parse
@@ -1004,7 +1004,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stdout:
         \\<empty>
         \\stderr:
-        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 344 'col 14}}
+        \\{'kind 'shape 'msg "table columns must share one length" 'word 'raise 'trace ['raise 'assert 'table.rows] 'data {'source "prelude.ecl" 'line 342 'col 14}}
         \\=== getenv unset ===
         \\source: "ECL_SNAPSHOT_ABSENT" getenv
         \\exit: 1
