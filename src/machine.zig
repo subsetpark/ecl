@@ -3118,39 +3118,39 @@ pub const Machine = struct {
             .resolved => unreachable,
         }
     }
-    /// An import consumes two symbols before discovering a cold qualified
-    /// module. Restore them in source order, rewind the primitive, and share
-    /// the ordinary qualified-name auto-load/retry path.
+    /// A batch import consumes its module symbol and requested-name list before
+    /// discovering a cold module. Restore both operands, rewind the primitive,
+    /// and share the ordinary qualified-name auto-load/retry path.
     pub fn retryImportAfterLoad(
         self: *Machine,
-        binding: u32,
-        original: u32,
-        outcome: ResolutionOutcome,
+        module_id: u32,
+        requested: Value,
+        module_name: intern.ModuleName,
+        requested_word: u32,
     ) MachineError!WorkProgress {
-        if (self.unit.current == null or self.unit.inherited.registry == null)
-            return self.undefinedNameIn(original, .qualified);
-        switch (outcome) {
-            .unknown_module_prefix => |prefix| {
-                try self.startDriver(QualifiedLoadPreparationDriver.init(
-                    prefix,
-                    .{ .qualified = original, .continuation = .replay },
-                    .{ .import = .{ .binding = binding, .original = original } },
-                ));
-                return .detached;
-            },
-            .unregistered_module => |name| {
-                try self.pushBorrowed(.{ .symbol = original });
-                try self.pushBorrowed(.{ .symbol = binding });
-                self.unit.current.?.ip = self.unit.active_index;
-                try self.autoLoadModule(name, .{
-                    .qualified = original,
-                    .continuation = .replay,
-                });
-                return .detached;
-            },
-            .unresolved => |chain| return self.undefinedNameIn(original, chain),
-            .resolved => unreachable,
+        if (self.unit.current == null or self.unit.inherited.registry == null) {
+            self.releaseDomain().releaseValue(requested);
+            return self.undefinedNameIn(requested_word, .qualified);
         }
+        try self.restoreImportOperands(module_id, requested);
+        self.unit.current.?.ip = self.unit.active_index;
+        try self.autoLoadModule(module_name, .{
+            .qualified = requested_word,
+            .continuation = .replay,
+        });
+        return .detached;
+    }
+    /// Consumes the requested-name list on both success and allocation
+    /// failure. Keeping the exact stack commit outside the driver-returning
+    /// retry function preserves the WorkProgress output boundary audited for
+    /// every driver.
+    fn restoreImportOperands(self: *Machine, module_id: u32, requested: Value) error{OutOfMemory}!void {
+        var owned = heap.Owned(Value).init(requested);
+        defer owned.deinit(self.releaseDomain(), self.allocator());
+        var reservation = try self.reserveStack(2);
+        reservation.pushBorrowed(.{ .symbol = module_id });
+        reservation.pushOwned(owned.take());
+        std.debug.assert(reservation.complete());
     }
     /// A completed auto-load registers the module before resuming the tagged
     /// qualified operation. The requested spelling also identifies a
@@ -6788,7 +6788,6 @@ const QualifiedLoadPreparationDriver = struct {
     const Restore = union(enum) {
         none,
         operand: u32,
-        import: struct { binding: u32, original: u32 },
     };
 
     cursor: intern.InternModuleNameCursor,
@@ -6818,7 +6817,7 @@ const QualifiedLoadPreparationDriver = struct {
             .complete => |maybe_name| {
                 const name = maybe_name orelse return switch (self.restore) {
                     .none => evaluator.undefinedWordIn(self.request.qualified, .qualified),
-                    .operand, .import => evaluator.undefinedNameIn(self.request.qualified, .qualified),
+                    .operand => evaluator.undefinedNameIn(self.request.qualified, .qualified),
                 };
                 const request = self.request;
                 const restore = self.restore;
@@ -6826,11 +6825,6 @@ const QualifiedLoadPreparationDriver = struct {
                     .none => {},
                     .operand => |requested| {
                         try evaluator.pushBorrowed(.{ .symbol = requested });
-                        evaluator.unit.current.?.ip = evaluator.unit.active_index;
-                    },
-                    .import => |operands| {
-                        try evaluator.pushBorrowed(.{ .symbol = operands.original });
-                        try evaluator.pushBorrowed(.{ .symbol = operands.binding });
                         evaluator.unit.current.?.ip = evaluator.unit.active_index;
                     },
                 }

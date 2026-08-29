@@ -478,14 +478,14 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-reflection.ecl",
         "(( -- n ) (1) 'f def) 'reflection-module @defm " ++
-            "'reflection-module.f 'f import words " ++
+            "'reflection-module ('f) import words " ++
             "'f which 'reflection-module.f see",
     );
-    try runOk(&runtime, "oom-loader.ecl", "'stats.answer 'answer import answer pop");
+    try runOk(&runtime, "oom-loader.ecl", "'stats ('answer) import answer pop");
     try runOk(
         &runtime,
         "oom-native.ecl",
-        "'sample.increment 'increment import 41 sample.increment pop 7 sample.singleton pop " ++
+        "'sample ('increment) import 41 sample.increment pop 7 sample.singleton pop " ++
             "7 'sample 'increment qualify execute pop " ++
             "[1 2] sample.sum-list pop {'a 1 'b 2} sample.sum-dict pop " ++
             "'answer 42 sample.pair-dict pop sample.builder-budget pop " ++
@@ -497,7 +497,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "oom-module.ecl",
         "*file* pop " ++
             "(1 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm " ++
-            "'allocation-module.get 'get import get pop 'short 'allocation-module alias short.get pop " ++
+            "'allocation-module ('get) import get pop 'short 'allocation-module alias short.get pop " ++
             "(2 'x setp ( -- n ) (x) 'get def) 'allocation-module @defm get pop " ++
             "(((dup) 'f def) 'bad @defm) @attempt pop " ++
             // A non-empty construction stack is captured as durable slot
@@ -612,8 +612,8 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-random.ecl",
-        "'rng.seed 'seed import 'rng.deal 'deal import 'rng.shuffle 'shuffle import " ++
-            "'rng.ints 'ints import 'rng.float 'float import 42 seed 2 4 deal shuffle pop 2 6 ints pop float pop " ++
+        "'rng ('seed 'deal 'shuffle 'ints 'float) import " ++
+            "42 seed 2 4 deal shuffle pop 2 6 ints pop float pop " ++
             "[7 0] 2 6 rand.ints nip pop",
     );
     // Each stdlib module has its own Session-reachable load path: embedded
@@ -883,6 +883,45 @@ test "oom: admitted construction driver allocation failure transfers its cursor 
 
         failing.fail_index = failing.alloc_index + offset;
         const result = runtime.runUnit("oom-driver-failure.ecl", admitted_construction_source);
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectError(error.OutOfMemory, result);
+    }
+}
+
+const batch_import_setup = "(1 'a set 2 'b set) 'oom-import @defm";
+const batch_import_source = "'oom-import ('a 'b) import";
+
+fn batchImportAllocationCount() !usize {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var runtime = try session.Session.initWithConfig(
+        failing.allocator(),
+        &.{},
+        .cooperative,
+    );
+    defer runtime.deinit();
+    try runOk(&runtime, "oom-import-setup.ecl", batch_import_setup);
+
+    const before = failing.alloc_index;
+    try runOk(&runtime, "oom-import-count.ecl", batch_import_source);
+    return failing.alloc_index - before;
+}
+
+test "oom: batch import propagates every allocation failure" {
+    const allocation_count = try batchImportAllocationCount();
+    try std.testing.expect(allocation_count != 0);
+
+    for (0..allocation_count) |offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var runtime = try session.Session.initWithConfig(
+            failing.allocator(),
+            &.{},
+            .cooperative,
+        );
+        defer runtime.deinit();
+        try runOk(&runtime, "oom-import-setup.ecl", batch_import_setup);
+
+        failing.fail_index = failing.alloc_index + offset;
+        const result = runtime.runUnit("oom-import-failure.ecl", batch_import_source);
         try std.testing.expect(failing.has_induced_failure);
         try std.testing.expectError(error.OutOfMemory, result);
     }

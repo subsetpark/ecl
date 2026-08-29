@@ -958,14 +958,18 @@ anonymously, be passed as data, and be registered more than once.
   restart, and the native ABI exposes no module-state capability, so an
   `.eclmod` word can neither observe an internal module home nor reach a durable
   stack.
-- **Surface**: `import` consumes a qualified original and a bare binding name,
-  then publishes exactly that one binding in the current environment — which
-  inside a module body means the image, publicly, on the same terms `def`
-  binds there. The
-  binding is a late-bound forwarding definition whose effect and documentation
-  are copied from the original. Naming a binding that already exists replaces
-  only that binding; importing never splices an entire module or emits shadow
-  notices. Dotted words split at their final dot and give qualified access with
+- **Surface**: `import` consumes a module-name symbol and a list of attribute
+  symbols, then publishes those attributes under their own names in the current
+  environment — which inside a module body means the image, publicly, on the
+  same terms `def` binds there. It validates every symbol and resolves every
+  public attribute against one pinned module generation before publishing the
+  first binding. A missing or private attribute is `'undefined-word` and
+  publishes none of the request; malformed operand and name domains are
+  `'type` and `'domain`, respectively. Each binding is a late-bound forwarding
+  definition whose effect and documentation are copied from the original.
+  Naming a binding that already exists replaces only that binding; importing
+  selected names never splices an entire module or emits shadow notices.
+  Dotted words split at their final dot and give qualified access with
   no import. `qualify` validates a module-name symbol and an unqualified
   binding-name symbol and constructs the corresponding executable word;
   `execute` applies that word through ordinary late-bound dispatch, preserving
@@ -977,7 +981,7 @@ anonymously, be passed as data, and be registered more than once.
   names may not collide in either direction. `which` shows any name's
   resolution.
 - **Loading**: the first qualified reference (`stats.mean`) to an unregistered
-  module — including an original named by `import` —
+  module — including the module named by `import` —
   consults the embedded standard library first, then searches each
   `ECL_PATH` entry in order, trying `stats.ecl` and then `stats.eclmod`;
   the first existing candidate is authoritative, including its errors.
@@ -985,7 +989,7 @@ anonymously, be passed as data, and be registered more than once.
   cannot silently replace the stdlib `csv`, and in-session shadowing or
   explicit `@defm` registration remain the way to override one. Every
   module is addressable by qualified name with no ceremony; an explicit
-  `import` supplies a chosen bare spelling for one word.
+  `import` supplies the selected attributes' own bare spellings.
   Every qualified-name operation triggers the same load when needed:
   execution, `doc`, `see`, `which`, and qualified completion do not
   depend on whether an earlier operation happened to register the module.
@@ -1026,7 +1030,7 @@ tie those ordinary modules into the language.
 
 Twenty modules ship inside the binary. They are ordinary modules — registered,
 enumerable, shadowable — and they load lazily on the first qualified mention of
-their name, whether that is a bare `str.upper` or `'str.upper 'upper import`. Resolution consults
+their name, whether that is a bare `str.upper` or `'str ('upper) import`. Resolution consults
 the embedded manifest before `ECL_PATH`, so a stray `csv.ecl` on the search
 path cannot silently replace a stdlib name; in-session shadowing and explicit
 `@defm` registration remain the documented overrides. All twenty resolve with no
@@ -1172,7 +1176,7 @@ outside the staging root.
 
 Observable text I/O lives here: `io.pp`, `io.prin`, `io.print`, `io.inspect`,
 `io.debug`, `io.stack`, `io.stdin`, `io.slurp`, `io.spit`, and `io.lines`. A qualified
-reference or an explicit import such as `'io.print 'print import` makes the
+reference or an explicit import such as `'io ('print) import` makes the
 boundary explicit. Core `str` canonically renders any value *as a string
 value* without performing I/O.
 
@@ -1345,7 +1349,8 @@ cycle are `'domain`.
 A project declares its dependencies in `ecl.pkg`, and resolution derives
 `ecl.lock` from it. Both files are ECL data: read with `parse` and **never
 evaluated**, so resolving a dependency graph cannot run code from a
-dependency. Importing stays by qualified name — `'foo.bar.baz 'baz import`
+dependency. Importing stays by module and attribute name —
+`'foo.bar ('baz) import`
 never mentions a file, a URL, or a version — and a checkout plus a lock reproduces the same module
 images on any machine.
 

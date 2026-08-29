@@ -1,15 +1,30 @@
-# ecl
+# ECL
 
-ecl is a concatenative array language for command-line data work. Programs run
-from left to right over an operand stack. Lists are both data and code;
-pervasive arithmetic and comparison apply the same way to scalars, vectors,
-nested arrays, and ragged data.
+ECL is a language drawing from two primary programming language families:
 
-The implementation is one Zig executable containing the evaluator, REPL,
-formatter, core vocabulary, and standard library. It has no runtime dependency
-on a prelude or module directory.
+*concatenative* - Like Forth, Factor, and Joy, ECL's operational semantics
+model the pushing and popping of values to and from an **operand stack**.
+The language's syntax is a reverse-Polish notation, where stack
+manipulation words are evaluated from left to right. Like Joy in particular,
+ECL is homoiconic (or refective), and lists are special cases of programs.
 
-ecl is pre-1.0 software. Version `0.1.0` is usable, but language and native
+*array* - Like APL, J, and K, primitive operators are pervasive: they
+automatically conform to arbitrary-dimensional lists without having to
+invoke higher-order-functions like `map` or constructs like loops.
+
+As the name suggests, ECL represents the attempt to evolve an old
+project---[ec](https://ec-calc.com/) into a proper programming language.
+Like ECL, ec attempted to combine the two above attributes in a single
+computing environment; both both the semantics and implementation of the
+older project made it suitable only as a desk calculator, not as a programming
+language.
+
+ECL is intended to attain some of the usefulness for live data exploration and
+command-line use of K, some of the elegance and functional character of Joy,
+while being more suited to writing standard and maintainble user-land programs
+  than either.
+
+ECL is pre-1.0 software. Version `0.1.0` is usable, but language and native
 extension compatibility may change between prereleases.
 
 ## Build
@@ -36,7 +51,7 @@ removal command is `zig build uninstall --prefix ~/.local`.
 
 ## The language model
 
-### Values move through a stack
+### Values
 
 Literals push values. Words consume values and leave results.
 
@@ -46,89 +61,81 @@ ecl '1 2 3 3 pack sum'              # 6
 ecl '[5 -3 8 -1] dup 0 > where at'  # [5 8]
 ```
 
-There are no statement or expression forms around this model. A word's inputs
-are the values immediately beneath it, and its outputs become the inputs to
-the words that follow.
+### Quotations
 
-### A list is an array and a quotation
-
-Parentheses and square brackets read the same immutable list value. Printing
-uses brackets for specialized homogeneous storage and parentheses for generic
-storage; the delimiter is not a distinct runtime type. Strings are lists of
-characters, and matrices and higher-dimensional data are nested lists.
-
-Arithmetic and comparison pervade through list structure:
+Programs are represented both in syntax and in data as simple lists of words.
+Executing a program is equivalent to pushing its words to the operand stack.
+Defining a function is equivalent to assigning a program to a new word, and
+functions are words which push their programs to the stack.
 
 ```sh
-ecl '[1 2 3] 10 *'        # [10 20 30]
-ecl '[[1 2] [3]] 10 *'    # ([10 20] [30])
+ecl> 10 range (sum) (len) bi /
+4.5
+ecl> 10 range ((sum) (len) bi /) call
+4.5
+ecl> ((sum) (len) bi /) 'mean def
+ecl> 10 range mean
+4.5
 ```
 
-Dictionaries are immutable insertion-ordered maps. Any value can be a key;
-quoted symbols are the usual choice:
+Because there's no internal compiled representation of programs besides their
+quoted spellings (see _idioms_ below for an internal exception), program
+construction and metaprogramming by quotation manipulation is a common
+and universally available technique.
 
 ```sh
-ecl "{'name \"Ada\" 'scores [8 9]} 'scores at mean"  # 8.5
+ecl> 4 range [4 3] reshape 3 4 rng.ints
+([0 1 2]
+ [3 0 1]
+ [2 3 0]
+ [1 2 3]) [2 2 0]
+ecl> (lex-cmp) partial each
+[-1 1 1 -1]
 ```
 
-A list is inert until a word applies it as code:
+### Array operations
+
+The primitive operators in ECL conform to the shapes of their operands.
+This means that one applies a program like `1 +` to a value of any shape:
+if the value is a scalar then 1 is added to it and the result is pushed on
+  the stack; if the value is a list, or list of lists, then 1 is added to
+  every scalar inside the value in a way that preserves its shape.
 
 ```sh
-ecl '6 (dup *) call'          # 36
-ecl '[1 2 3] (dup *) each'    # [1 4 9]
-ecl '3 (1 +) (2 *) bi'        # 4 6
+ecl> 20 100 rng.ints [4 5] reshape
+([35 0 79 44 47]
+ [90 13 40 99 90]
+ [1 26 83 31 17]
+ [7 25 2 92 84])
+ecl> 1 + sqrt
+([6.0 1.0 8.94427190999916 6.708203932499369 6.928203230275509]
+ [9.539392014169456 3.7416573867739413 6.4031242374328485 10.0 9.539392014169456]
+ [1.4142135623730951 5.196152422706632 9.16515138991168 5.656854249492381 4.242640687119285]
+ [2.8284271247461903 5.0990195135927845 1.7320508075688772 9.643650760992955 9.219544457292887])
+ecl>
 ```
 
-Quotations carry no hidden environment. Names resolve when the quotation runs,
-and quotation construction is the metaprogramming system.
+This semantic unity has both language-level and interpreter-level
+implications: at the level of syntax, many looping constructs necessary in
+other languages are elided. At the level of execution, the
+representation of `1 +` as a single operation allows for optimization
+of its execution over the sequential execution of scalar operations.
 
-### Definitions are data
+### Modules
 
-`def` binds a quotation to a name. An optional annotation quotation comes
-before the body and supplies a stack effect, documentation, or both.
-
-```ecl
-### def square
-(number -- square : "Return a number multiplied by itself.")
-(dup *)
-'square def
-
-9 square
-```
-
-At top level an effect is reflective metadata. On a public module word it is
-also a dynamically checked boundary contract. `doc`, `which`, and `see`
-inspect definitions through ordinary language values.
-
-### Failure has an explicit boundary
-
-An error aborts its current unit and restores that unit's operand stack.
-`@attempt` runs a self-contained quotation in a fresh unit and returns an
-ordinary result dictionary:
+Modules are the unit of encapsulation and binding-sealing. The word `@defm`
+constructs a module and registers it globally, namespacing its exposed
+definitions and (optionally) encapsulating private state.
 
 ```sh
-ecl '(1 0 /) @attempt'
-# {'err {'kind 'domain ...}}
+ecl> (((1 +) within) 'inc def
+..    ((1 -) within) 'dec def
+..    ((dup without) within) 'get def 0) 'counter @defm
+ecl> counter.get
+0
+ecl> pop counter.inc counter.inc counter.get
+2
 ```
-
-The `result` module validates and composes the same `{'ok values}` and
-`{'err error}` envelopes produced by tasks. Errors carry a kind, message,
-ecl-level trace, and source position when one is known.
-
-### Concurrency is structured
-
-`@spawn` starts a quotation in an isolated unit. `await`, `await-any`, and
-`await-for` observe its result; `cancel` stops it. A unit cannot leave detached
-tasks behind. `@each` is the parallel counterpart of `each` and preserves input
-order:
-
-```sh
-ECL_WORKERS=8 ecl '[1 2 3] (dup *) @each'  # [1 4 9]
-```
-
-Immutable values cross task boundaries safely. Sequential combinators remain
-left-to-right and deterministic; parallel combinators define their result and
-failure ordering independently of scheduling.
 
 ## Running ecl
 
@@ -148,7 +155,7 @@ A script file prints only when it calls `io.pp`, `io.print`, `io.prin`,
 `io.inspect`, or `io.debug`. Calculator input, `-e`, and non-TTY stdin print
 the final stack. Trailing arguments are available through `args`.
 
-Running `ecl` on a terminal starts the built-in editor:
+Running `ecl` on a terminal starts the built-in REPL:
 
 ```text
 $ ecl
@@ -161,10 +168,6 @@ ecl> +
 The REPL retains its stack between units and provides multiline input,
 history, UTF-8 cursor movement, and completion from the live environment.
 Ctrl-C abandons the current unit; Ctrl-D exits from an empty primary prompt.
-
-`str` is the compact, round-trippable rendering of a value. REPL display and
-`io.pp` favor readable matrix layout and bound terminal output by eliding very
-large values.
 
 ### Neovim
 
@@ -187,37 +190,21 @@ Neovim after changing the runtime path.
 
 ### Packages
 
-`ecl pkg` manages inert `ecl.pkg` manifests, reproducible `ecl.lock` files,
-and immutable source-package store entries. Its commands initialize projects,
-add exact HTTPS requirements, synchronize online or offline, inspect the
-locked graph, verify retained archive hashes, vendor a lock into the fixed
-project-local `vendor/` store, and garbage-collect the shared cache against an
-explicit set of lock files:
+`ecl pkg` manages exact HTTPS dependencies with an `ecl.pkg` manifest and a
+reproducible `ecl.lock` file. A typical workflow is:
 
 ```sh
-ecl pkg init [name]
+ecl pkg init
 ecl pkg add smoke 1.0.0 https://example.com/smoke-1.0.0.tgz
 ecl pkg sync
-ecl pkg tree
-ecl pkg why smoke.answer
 ecl pkg verify
-ecl pkg vendor
-ecl pkg gc ../one/ecl.lock ../two/ecl.lock
 ```
 
-`vendor` verifies each retained archive before reinstalling it beneath the
-project and rewrites `ecl.lock` with the closed `'store 'vendor` mode. Locked
-execution, synchronization, and `verify` then remain on that project-local
-store and need no shared cache or network. `init` accepts an explicit canonical
-name when the working-directory basename is unsuitable and creates `ecl.pkg`
-without replacing a racing file. `gc` requires at
-least one named lock and removes only canonical package-store directories not
-selected by any of them; unknown cache nodes are preserved.
-
-[`examples/pkg-smoke`](examples/pkg-smoke) is a checked-in consumer of the
-public source-only smoke package. Its walkthrough covers `add`, `sync`, locked
-execution, offline sync, `tree`, `why`, and `verify` while asserting that the
-committed manifest and lock remain byte-stable.
+Commit both files. Packages are installed in an immutable shared cache;
+`ecl pkg vendor` copies the locked packages into the project for self-contained
+offline use. Use `tree` and `why` to inspect the lock, and `gc` to clean the
+shared cache. See [`examples/pkg-smoke`](examples/pkg-smoke) for a complete
+workflow.
 
 ## Modules and the standard library
 
@@ -249,18 +236,19 @@ ecl '"a,b\nc,d" csv.parse'                 # (("a" "b") ("c" "d"))
 ecl '"{\"a\":[1,null]}" json.parse'       # {"a" (1 'null)}
 ```
 
-`import` gives one qualified word a chosen bare name in the current
-environment. It does not import or re-export an entire module.
+`import` gives selected public module words bare names in the current
+environment. Every requested word must be public.
 
 ```ecl
-'str.upper 'upper import
+'str ('upper 'lower) import
 "hello" upper
 ```
 
-### Source modules
+### Module namespacing
 
-A source module is an ordinary `.ecl` program that registers a canonical
-module name. For example, save this as `modules/stats.ecl`:
+Module definition registers a canonical module name. Module-qualified words
+can then be looked up for any ECL file in `ECL_PATH`. For example, save this as
+`modules/stats.ecl`:
 
 ```ecl
 ### module stats
@@ -268,25 +256,16 @@ module name. For example, save this as `modules/stats.ecl`:
 (
  ### def twice
  (value -- doubled : "Double a number.")
- (2 *)
- 'twice def
- )
-'stats
-@defm
+ (2 *) 'twice def
+) 'stats @defm
 ```
 
 Put its containing directory on `ECL_PATH`:
 
 ```sh
 ECL_PATH="$PWD/modules" ecl '21 stats.twice'
-ECL_PATH="$PWD/modules" ecl "'stats.twice 'twice import 21 twice"
+ECL_PATH="$PWD/modules" ecl "'stats ('twice) import 21 twice"
 ```
-
-The first unresolved `stats.*` reference loads `stats.ecl`, requires it to
-register `stats`, and resumes the original operation. Inside a module, `def`
-publishes a public word and `defp` creates a private implementation word.
-Module bodies may also own transactional durable state through `within` and
-`without`.
 
 `ECL_PATH` is an ordered platform path list. For each root, the loader tries
 `<module>.ecl` and then `<module>.eclmod`; the first existing candidate is
@@ -315,11 +294,8 @@ native modules.
   first-party ECL source.
 - [`design/INTERPRETER.md`](design/INTERPRETER.md) describes the runtime
   architecture and its ownership, scheduling, and reclamation invariants.
-- [`design/workstream-v1.md`](design/workstream-v1.md) records the language's
-  design history. [`design/workstream-pkg.md`](design/workstream-pkg.md)
-  tracks the package-management workstream.
 
-The runtime also documents itself:
+ECL is also highly reflective:
 
 ```ecl
 'fold1 doc

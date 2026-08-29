@@ -3,7 +3,7 @@
  ### def inc
  (n -- n)
  (1 +) 'inc def) 'math @defm
-'math.inc 'inc import
+'math ('inc) import
 'm 'math alias
 10 math.inc io.pp 20 inc io.pp 30 m.inc io.pp
 

@@ -389,6 +389,7 @@ pub fn build(b: *std.Build) void {
             "oom: recognized structured find propagates every allocation failure",
             "oom: full-session surfaces propagate every allocation failure",
             "oom: admitted construction driver allocation failure transfers its cursor once",
+            "oom: batch import propagates every allocation failure",
         },
     });
     full_session_oom_tests.linkage = runtime_linkage;

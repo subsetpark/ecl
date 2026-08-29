@@ -327,7 +327,7 @@ test "reflection: words is sorted unique and private-safe" {
     );
     defer runtime.deinit();
     try expectOk(&runtime, "(1 'hidden setp 2 'zebra set 3 'alpha set) 'm @defm " ++
-        "'m.alpha 'alpha import 'm.zebra 'zebra import 4 'zebra set words");
+        "'m ('alpha 'zebra) import 4 'zebra set words");
     const rendered = output.written();
     try std.testing.expect(std.mem.indexOf(u8, rendered, "alpha") != null);
     try std.testing.expect(std.mem.indexOf(u8, rendered, "hidden") == null);
@@ -1115,9 +1115,9 @@ test "loader: failures and cycles are total" {
         },
     );
     defer runtime.deinit();
-    try expectErrorContains(&runtime, "'missing-module.x 'x import", &.{ "'kind 'undefined-word", "'name 'missing-module.x" });
-    try expectErrorContains(&runtime, "'cycle.x 'x import", &.{ "'kind 'domain", "recursive auto-load" });
-    try expectErrorContains(&runtime, "'orphan.x 'x import", &.{
+    try expectErrorContains(&runtime, "'missing-module ('x) import", &.{ "'kind 'undefined-word", "'name 'missing-module.x" });
+    try expectErrorContains(&runtime, "'cycle ('x) import", &.{ "'kind 'domain", "recursive auto-load" });
+    try expectErrorContains(&runtime, "'orphan ('x) import", &.{
         "'kind 'io",
         "registered nothing under that name",
         "'path \"test/acceptance/modules/orphan.ecl\"",

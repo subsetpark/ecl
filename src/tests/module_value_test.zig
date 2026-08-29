@@ -445,7 +445,7 @@ test "module loader: observation and dispatch require the requested registration
     try expectStack(&runtime, "register-style.answer", "7");
 
     // `import` reaches the same registration through the same path.
-    try expectStack(&runtime, "'register-style.answer 'answer import answer", "7");
+    try expectStack(&runtime, "'register-style ('answer) import answer", "7");
 
     // A file that constructs an anonymous image but registers nothing still
     // fails with the existing total loader error.
@@ -454,7 +454,7 @@ test "module loader: observation and dispatch require the requested registration
         "registered nothing under that name",
         "'path \"test/acceptance/modules/image-only.ecl\"",
     });
-    try expectErrorContains(&runtime, "'image-only.answer 'answer import", &.{
+    try expectErrorContains(&runtime, "'image-only ('answer) import", &.{
         "'kind 'io",
         "registered nothing under that name",
         "'path \"test/acceptance/modules/image-only.ecl\"",
@@ -557,7 +557,11 @@ test "module sources: formatter and standard modules use @defm" {
         "pkg.mvs.resolve",   "pkg.sync.run",      "pkg.cli.init",
     };
     for (stdlib.names(), exports) |name, qualified| {
-        const source = try std.fmt.allocPrint(std.testing.allocator, "'{s} 'local import", .{qualified});
+        const source = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "'{s} ('{s}) import",
+            .{ name, qualified[name.len + 1 ..] },
+        );
         defer std.testing.allocator.free(source);
         expectOk(&runtime, source) catch |failed| {
             std.log.err("embedded module {s} did not register its own name", .{name});

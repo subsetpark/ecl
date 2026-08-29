@@ -1,12 +1,9 @@
 # DoD-30: stable equijoins with explicit missingness, over a CSV order table
 # and a JSON customer table.
-'table.from-header-rows 'from-header-rows import
-'table.from-records 'from-records import
-'table.rename 'rename import
-'table.inner-join 'inner-join import
-'table.left-join-with 'left-join-with import
-'table.height 'height import
-'table.column 'column import
+'table
+('from-header-rows 'from-records 'rename 'inner-join 'left-join-with 'height
+ 'column)
+import
 
 "test/acceptance/orders.csv" io.slurp csv.parse from-header-rows 'orders set
 "test/acceptance/customers.json" io.slurp json.parse from-records 'customers set

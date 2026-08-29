@@ -80,7 +80,7 @@ const entries = [_]Metadata{
     .{ .name = "@module", .effect = "unit-input -- module", .text = "Evaluate a module body in a fresh unit and return its definitions as an anonymous immutable module value." },
     .{ .name = "register", .effect = "module module-name --", .text = "Register a module value under a canonical name, creating that registration or replacing its code while keeping its durable state." },
     .{ .name = "@defm", .effect = "unit-input module-name --", .text = "Evaluate a module body and register the resulting module value under a name; exactly `@module` followed by `register`." },
-    .{ .name = "import", .effect = "original binding --", .text = "Bind one qualified module word under a bare local name while preserving its effect and documentation." },
+    .{ .name = "import", .effect = "module-name q --", .text = "Import a list of public module attributes under their own names, preserving effects and documentation." },
     .{ .name = "alias", .effect = "short name --", .text = "Register a short alias for a qualified module name." },
     .{ .name = "qualify", .effect = "module-name binding-name -- qualified-word", .text = "Construct an executable qualified word without reparsing source text." },
     .{ .name = "invoke", .effect = "module binding-name -- ...", .text = "Call one public export of a module value, which carries no name to qualify." },

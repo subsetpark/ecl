@@ -150,7 +150,7 @@ const cases = [_]Case{
     .{ .name = "rand.ints", .source = "[7 0] 4 6 rand.ints" },
     .{ .name = "rand.float", .source = "[7 0] rand.float" },
     .{ .name = "rand.int empty range", .source = "[7 0] 0 rand.int" },
-    .{ .name = "rng deal", .source = "'rng.deal 'deal import 3 10 deal" },
+    .{ .name = "rng deal", .source = "'rng ('deal) import 3 10 deal" },
     // The unit-constructor convention: the guided boundary error and the
     // seeding composition that replaced the `-with` family.
     .{ .name = "isolated substack", .source = "3 (1 +) @attempt" },
@@ -1112,7 +1112,7 @@ test "promoted Zig CLI behavior matches the reference snapshot" {
         \\stderr:
         \\{'kind 'domain 'msg "rand.int expected a positive bound, not 0" 'word 'rand.int 'trace ['rand.int] 'data {'source "<command>" 'line 1 'col 9}}
         \\=== rng deal ===
-        \\source: 'rng.deal 'deal import 3 10 deal
+        \\source: 'rng ('deal) import 3 10 deal
         \\exit: 0
         \\stdout:
         \\[5 0 7]

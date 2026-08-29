@@ -238,7 +238,7 @@ test "native runtime: malformed artifacts are authoritative" {
         defer allocator.free(search);
         try environment.put("ECL_PATH", search);
         var result = try cli.runOptions(.{
-            .argv = &.{ build_options.ecl_exe, "-e", "'sample.increment 'increment import" },
+            .argv = &.{ build_options.ecl_exe, "-e", "'sample ('increment) import" },
             .environ_map = &environment,
         });
         defer result.deinit();

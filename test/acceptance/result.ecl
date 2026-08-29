@@ -1,18 +1,9 @@
 # DoD-25a: the result module's whole contract, reached both through explicit
 # metadata-preserving imports and by bare qualified reference.
-'result.ok 'ok import
-'result.err 'err import
-'result.ok? 'ok? import
-'result.err? 'err? import
-'result.or-raise 'or-raise import
-'result.or-else 'or-else import
-'result.and-then 'and-then import
-'result.map-err 'map-err import
-'result.recover 'recover import
-'result.recover-kinds 'recover-kinds import
-'result.either 'either import
-'result.all 'all import
-'result.partition 'partition import
+'result
+('ok 'err 'ok? 'err? 'or-raise 'or-else 'and-then 'map-err 'recover
+ 'recover-kinds 'either 'all 'partition)
+import
 
 # Construction and observation. A success payload is always a stack.
 [1 2] ok io.pp

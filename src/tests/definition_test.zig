@@ -122,7 +122,7 @@ test "module annotations retain contracts documentation qualification and shadow
         "(-- n : \"Private module word.\") (2) 'private defp " ++
         "(-- text : \"Expose private documentation.\") ('private doc) 'private-doc def" ++
         ") 'm @defm " ++
-        "'m.public 'public import 'public doc \"Public module word.\" match? " ++
+        "'m ('public) import 'public doc \"Public module word.\" match? " ++
         "m.private-doc \"Private module word.\" match? " ++
         "(-- n : \"Session shadow.\") (9) 'public def " ++
         "'public doc \"Session shadow.\" match? " ++

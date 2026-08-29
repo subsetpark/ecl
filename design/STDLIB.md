@@ -467,14 +467,15 @@ searches, not a `0` answer about `[1 1]`. Use `([1 1] match?) any?` for
 that.
 
 ### import
-`( 'original 'binding -- )` — Bind one qualified module word under an
-unqualified local name: `'str.upper 'upper import` makes `upper` mean `str.upper`. The
-binding dispatches through the module, so an imported word resolves against its
-own home exactly as the qualified spelling does. Shadowing an existing binding
-is allowed — it is the documented way to patch one — but it takes naming the
-word, so it cannot happen by accident. The new binding preserves the
-original's effect and documentation; `see` renders its one-word forwarding
-quotation. An unqualified original or a qualified binding is `'domain`.
+`( module-name q -- )` — Import the public attributes named by the symbol list
+`q` under their own unqualified names: `'str ('upper 'lower) import` binds
+`upper` and `lower`. Every requested name is validated against one module
+generation before any binding is published; a missing or private attribute is
+`'undefined-word` and publishes none of the request. A non-list `q` or a
+non-symbol item is `'type`; an invalid module or attribute name is `'domain`.
+Each imported binding dispatches through the module, preserves the original's
+effect and documentation, and may replace an existing local binding. `see`
+renders its one-word forwarding quotation.
 
 ### infra
 `( list quotation -- list )` — *Isolated*, contract unconstrained. Run
@@ -505,10 +506,15 @@ Equivalent to `dup len 1 - at`.
 including ragged data.
 
 ### lex-cmp
+`( left right -- order )` — Lexicographically compare two sequences using
+`cmp` on corresponding elements. Stop at the first nonzero result; when the
+shared prefix is equal, compare sequence lengths. Defined in ecl.
+
+### lex-cmp-with
 `( left right comparator -- order )` — Lexicographically compare two
-sequences with an inline `( left-element right-element -- order )`
-comparator. Stop at the first nonzero result; when the shared prefix is
-equal, compare sequence lengths. Defined in ecl.
+sequences with an inline `( left-element right-element -- order )` comparator
+that returns −1, 0, or 1. Stop at the first nonzero result; when the shared
+prefix is equal, compare sequence lengths. Defined in ecl.
 
 ### literal
 `( value -- quotation )` — Return the plain quotation `((x) first)`:

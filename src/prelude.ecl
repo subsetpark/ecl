@@ -220,10 +220,11 @@
 ((pair) zip-with)
 'zip def
 
-### def lex-cmp
+### def lex-cmp-with
 (left right comparator -- order :
- "Compare two sequences lexicographically. The comparator runs only through the first differing
-  pair; a shared prefix is ordered by sequence length.")
+ "Compare two sequences lexicographically with a three-way comparator that returns -1, 0, or 1. The
+  comparator runs only through the first differing pair; a shared prefix is ordered by sequence
+  length.")
 (0 0
  (|left right comparator index order|
   order 0 = index left len < and index right len < and)
@@ -235,6 +236,12 @@
   order left len right len cmp
   over 0 = (nip) (pop) if)
  call)
+'lex-cmp-with def
+
+### def lex-cmp
+(left right -- order :
+ "Compare two sequences lexicographically using cmp on corresponding elements.")
+((cmp) lex-cmp-with)
 'lex-cmp def
 
 ### def min-of

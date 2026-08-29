@@ -296,7 +296,7 @@ test "modules: dotted names qualify dynamically and split executable words at th
     try expectStack(&runtime, "'core.utils 1 ('f) ('g) if qualify execute", "41");
     try expectOk(&runtime, "'utils 'core.utils alias");
     try expectStack(&runtime, "utils.g", "42");
-    try expectOk(&runtime, "'core.utils.g 'g import");
+    try expectOk(&runtime, "'core.utils ('g) import");
     try expectStack(&runtime, "g", "42");
     try expectOk(&runtime, "((43) 'f def) 'core.utils @defm");
     try expectStack(&runtime, "core.utils.f 'core.utils 'f qualify execute", "43 43");
@@ -647,7 +647,7 @@ test "concurrency: unmodule closes quiesces and retires slots names and aliases"
         try expectErrorContains(&runtime, "c.peek", &.{"'kind 'undefined-word"});
         // Every alias targeting the slot goes with it in the same publish.
         try expectErrorContains(&runtime, "short.peek", &.{"'kind 'undefined-word"});
-        try expectErrorContains(&runtime, "'short.peek 'peek import", &.{"'kind 'undefined-word"});
+        try expectErrorContains(&runtime, "'short ('peek) import", &.{"'kind 'undefined-word"});
         // Reusing the public name creates no way to refer to the removed slot.
         try expectOk(&runtime, removable_module);
         try expectStack(&runtime, "'c unmodule " ++ removable_module ++ " c.tick c.peek", "1");

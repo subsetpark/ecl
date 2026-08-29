@@ -51,11 +51,15 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         var runtime = try session.Session.init(heap.allocator(), &.{});
         defer runtime.deinit();
         try std.testing.expect(std.mem.startsWith(u8, qualified, name));
-        const source = try std.fmt.allocPrint(allocator, "'{s} 'local import", .{qualified});
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "'{s} ('{s}) import",
+            .{ name, qualified[name.len + 1 ..] },
+        );
         defer allocator.free(source);
         try expectOk(&runtime, source);
     }
-    try support.expectStack("'result.ok 'ok import [1 2] ok", "{'ok [1 2]}");
+    try support.expectStack("'result ('ok) import [1 2] ok", "{'ok [1 2]}");
 }
 
 test "stdlib: every pkg.store capability is documented and reflectable" {
@@ -176,7 +180,7 @@ test "stdlib: embedded resolution precedence against ECL_PATH follows the ruling
             .ecl_path = search,
         });
         defer imported.deinit();
-        try expectDisplay(&imported, "'result.ok 'ok import [3] ok", "{'ok [3]}");
+        try expectDisplay(&imported, "'result ('ok) import [3] ok", "{'ok [3]}");
     }
 
     var runtime = try session.Session.initWithHost(heap.allocator(), &.{}, .{
@@ -216,7 +220,7 @@ test "stdlib: concurrent first references converge on one published module" {
         try expectDisplay(
             &runtime,
             "[[1] [2] [3] [4] [5] [6] [7] [8]] (result.ok) @each " ++
-                "([1] result.ok) ('result.ok 'ok import [2] ok) 2 pack (@spawn) each await-all",
+                "([1] result.ok) ('result ('ok) import [2] ok) 2 pack (@spawn) each await-all",
             "({'ok [1]} {'ok [2]} {'ok [3]} {'ok [4]} " ++
                 "{'ok [5]} {'ok [6]} {'ok [7]} {'ok [8]}) " ++
                 "({'ok ({'ok [1]})} {'ok ({'ok [2]})})",

@@ -92,12 +92,12 @@ test "csv: emit produces canonical CRLF output quoting exactly as required" {
             // Larger than one 65,536-unit scheduler quantum, so the parse and
             // the emit both cross yields and resume mid-record.
             .name = "input beyond one budget quantum resumes correctly",
-            .source = "'str.repeat 'repeat import \"ab,cd\\u{D}\\n\" 12000 repeat dup csv.parse csv.emit match?",
+            .source = "'str ('repeat) import \"ab,cd\\u{D}\\n\" 12000 repeat dup csv.parse csv.emit match?",
             .expected = "1",
         },
         .{
             .name = "quoted fields beyond one quantum resume correctly",
-            .source = "'str.repeat 'repeat import \"\\\"a\\\"\\\"b\\\",\\\"c,d\\\"\\u{D}\\n\" 8000 repeat " ++
+            .source = "'str ('repeat) import \"\\\"a\\\"\\\"b\\\",\\\"c,d\\\"\\u{D}\\n\" 8000 repeat " ++
                 "dup csv.parse csv.emit match?",
             .expected = "1",
         },

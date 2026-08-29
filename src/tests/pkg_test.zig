@@ -232,7 +232,7 @@ test "pkg: version ordering is a strict total order over a generated corpus" {
     // table must be a dict of columns" instead of ordering two versions. It
     // now takes naming `where`, and it still must not reach this module.
     try support.expectStack(
-        "'table.where 'where import \"1.2.0\" \"1.10.0\" pkg.version.less? " ++
+        "'table ('where) import \"1.2.0\" \"1.10.0\" pkg.version.less? " ++
             "[\"1.0.0-a\" \"1.0.0\"] pkg.version.max",
         "1 \"1.0.0\"",
     );

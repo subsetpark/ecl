@@ -93,8 +93,8 @@ by the program.
 
 Use `defp` for implementation details within one module. Cross-module calls
 go through documented public words because ordinary ECL modules have no
-privileged friendship relation. `import` permits a shorter local spelling; it
-does not promise to re-export the imported binding.
+privileged friendship relation. `import` permits shorter local spellings; it
+does not promise to re-export the imported bindings.
 
 ## Use the dataflow vocabulary
 

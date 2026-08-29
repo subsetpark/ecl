@@ -529,7 +529,7 @@ test "scope: isolated @attempt and child import do not leak" {
     try expectErrorContains(&runtime, "(1 'k set) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
     try expectErrorContains(&runtime, "((1 'k set missing) @attempt pop) @attempt pop k", &.{ "'kind 'undefined-word", "'word 'k" });
     try expectOk(&runtime, "(7 'x set) 'm @defm");
-    try expectErrorContains(&runtime, "('m.x 'x import x) @attempt pop x", &.{ "'kind 'undefined-word", "'word 'x" });
+    try expectErrorContains(&runtime, "('m ('x) import x) @attempt pop x", &.{ "'kind 'undefined-word", "'word 'x" });
 }
 
 test "module: privacy module-body contract top-level private and qualified trace" {
@@ -562,13 +562,13 @@ test "modules: removal strips aliases and leaves no half-removed entry" {
     var runtime = try session.Session.init(backing.allocator(), &.{});
     defer runtime.deinit();
     try expectOk(&runtime, "((1) 'x def) 'a @defm ((2) 'x def) 'b @defm " ++
-        "'short 'a alias 'a.x 'x import short.x a.x x");
+        "'short 'a alias 'a ('x) import short.x a.x x");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try expectOk(&runtime, "'a unmodule");
     // The canonical name and every alias targeting it go in one publish.
     try expectErrorContains(&runtime, "a.x", &.{"'kind 'undefined-word"});
     try expectErrorContains(&runtime, "short.x", &.{"'kind 'undefined-word"});
-    try expectErrorContains(&runtime, "'short.x 'x import", &.{"'kind 'undefined-word"});
+    try expectErrorContains(&runtime, "'short ('x) import", &.{"'kind 'undefined-word"});
     // Enumeration never shows a half-removed entry, and unrelated modules
     // and their aliases are untouched.
     try expectOk(&runtime, "'other 'b alias other.x b.x");
@@ -582,7 +582,7 @@ test "module: qualified import replacement and alias collisions" {
     var runtime = try session.Session.init(backing.allocator(), &.{});
     defer runtime.deinit();
     try expectOk(&runtime, "(1 'x set) 'a @defm (2 'x set) 'b @defm " ++
-        "'a.x 'x import 'b.x 'x import x 'a.x 'x import x 'short 'a alias short.x");
+        "'a ('x) import 'b ('x) import x 'a ('x) import x 'short 'a alias short.x");
     try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
@@ -671,7 +671,7 @@ test "module: effect shape cross-home contract and same-home TCO" {
     try std.testing.expectEqual(@as(i64, 8), runtime.stackItems()[runtime.stackItems().len - 1].int);
 }
 
-test "module: import explicitly replaces one binding and preserves metadata" {
+test "module: import explicitly replaces requested bindings and preserves metadata" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -690,25 +690,44 @@ test "module: import explicitly replaces one binding and preserves metadata" {
     );
     defer runtime.deinit();
     try expectOk(&runtime, "(3 'mean set ( -- n : \"Count.\") (4) 'count def 5 'other set) 'stats @defm " ++
-        "1 'mean set 'stats.mean 'mean import mean 'stats.count 'count import count " ++
+        "1 'mean set 'stats ('mean 'count) import mean count " ++
         "'count doc \"Count.\" match? 'count see");
     try std.testing.expectEqualStrings("", diagnostics.written());
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(stats.count)\n") != null);
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 4), runtime.stackItems()[1].int);
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[2].int);
-    try expectErrorContains(&runtime, "'count 'stats.count import", &.{
+    try expectErrorContains(&runtime, "'stats ('stats.count) import", &.{
         "'kind 'domain",
-        "import binding must be unqualified",
-    });
-    try expectErrorContains(&runtime, "'stats 'local import", &.{
-        "'kind 'domain",
-        "import original must be a qualified word",
+        "import attributes must be unqualified",
     });
     try expectErrorContains(&runtime, "'result use", &.{
         "'kind 'undefined-word",
         "'word 'use",
     });
+}
+
+test "module: import validates requested public attributes before publishing" {
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var runtime = try session.Session.init(backing.allocator(), &.{});
+    defer runtime.deinit();
+
+    try expectOk(&runtime, "(1 'one set 2 'two set 3 'hidden setp 4 'fresh set) 'batch @defm " ++
+        "'batch ('one 'two) import one two");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
+
+    try expectErrorContains(&runtime, "'batch ('fresh 'missing) import", &.{
+        "'kind 'undefined-word",
+        "'name 'batch.missing",
+    });
+    try expectErrorContains(&runtime, "fresh", &.{ "'kind 'undefined-word", "'word 'fresh" });
+    try expectErrorContains(&runtime, "'batch ('hidden) import", &.{
+        "'kind 'undefined-word",
+        "'name 'batch.hidden",
+    });
+    try expectErrorContains(&runtime, "'batch (one) import", &.{"'kind 'type"});
 }
 
 test "module: import inside a module body binds module-locally" {
@@ -719,10 +738,10 @@ test "module: import inside a module body binds module-locally" {
     // `import` used to reach for top-level publication unconditionally, so a
     // module root aborted the process on an `unreachable` inside the scope's
     // publication method. It now takes the same module sink `def` takes there.
-    try expectOk(&runtime, "((1) 'x def) 'src @defm ('src.x 'y import) 'holder @defm holder.y");
+    try expectOk(&runtime, "((1) 'x def) 'src @defm ('src ('x) import) 'holder @defm holder.x");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
     // The binding landed in the image, not in the session that ran `@defm`.
-    try expectErrorContains(&runtime, "y", &.{ "'kind 'undefined-word", "'word 'y" });
+    try expectErrorContains(&runtime, "x", &.{ "'kind 'undefined-word", "'word 'x" });
 }
 
 test "scope: a binding resolves in the scope it was defined in, child scopes included" {
@@ -826,7 +845,7 @@ test "reflection: which and see expose metadata while see omits the definition w
         },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "(40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm.f 'f import " ++
+    try expectOk(&runtime, "(40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm ('f) import " ++
         "'m.f see 9 'f set 'f which 'f see words");
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "(s 2 +)\n") != null);
     // One binding kind: a session constant reports as a public def with no
@@ -860,7 +879,7 @@ test "session completion: live and registered names are sorted unique" {
     try expectOk(
         &runtime,
         "(1 'hidden setp 2 'public set) 'completion-module @defm " ++
-            "'completion-module.public 'public import 'cm 'completion-module alias " ++
+            "'completion-module ('public) import 'cm 'completion-module alias " ++
             "3 'repl-live set",
     );
     var all = try runtime.completionCandidates("");
@@ -970,10 +989,10 @@ test "loader: ECL_PATH loads first candidate and retries import" {
         },
     );
     defer runtime.deinit();
-    try expectOk(&runtime, "('attempted.answer 'answer import answer) @attempt pop attempted.answer");
+    try expectOk(&runtime, "('attempted ('answer) import answer) @attempt pop attempted.answer");
     try std.testing.expectEqual(@as(i64, 3), runtime.stackItems()[0].int);
     try expectErrorContains(&runtime, "answer", &.{"'kind 'undefined-word"});
-    try expectOk(&runtime, "'stats.answer 'answer import answer");
+    try expectOk(&runtime, "'stats ('answer) import answer");
     try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[1].int);
 
     var no_path = try session.Session.initWithHost(
@@ -987,7 +1006,7 @@ test "loader: ECL_PATH loads first candidate and retries import" {
         },
     );
     defer no_path.deinit();
-    try expectErrorContains(&no_path, "'stats.answer 'answer import", &.{ "'kind 'undefined-word", "'name 'stats.answer" });
+    try expectErrorContains(&no_path, "'stats ('answer) import", &.{ "'kind 'undefined-word", "'name 'stats.answer" });
 }
 
 test "modules: module set and setp publish unannotated constants" {
@@ -1022,7 +1041,7 @@ test "modules: cross-home constant references cross unchecked while declared eff
     // check frame is installed at all: qualified access, imported access, and
     // module-internal access agree without one.
     try expectOk(&runtime, "(7 'x set 8 'h setp (-- n) (h) 'peek def) 'm @defm");
-    try expectOk(&runtime, "m.x 'm.x 'x import x m.peek");
+    try expectOk(&runtime, "m.x 'm ('x) import x m.peek");
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[1].int);

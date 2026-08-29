@@ -279,7 +279,7 @@ test "native: a discovered artifact publishes its complete table atomically" {
 
     try expectOk(
         &runtime,
-        "'sample.increment 'increment import 40 sample.increment 41 increment 's 'sample alias 42 s.increment",
+        "'sample ('increment) import 40 sample.increment 41 increment 's 'sample alias 42 s.increment",
     );
     try std.testing.expectEqual(@as(usize, 3), runtime.stackItems().len);
     try std.testing.expectEqual(@as(i64, 41), runtime.stackItems()[0].int);
@@ -407,7 +407,7 @@ test "native: a rejected artifact publishes nothing and never selects a later ca
         defer diagnostics.deinit();
         var runtime = try initRuntime(&output.writer, &diagnostics.writer, search);
         defer runtime.deinit();
-        try expectErrorContains(&runtime, "'sample.increment 'increment import", &.{ "'kind 'io", case.message, broken });
+        try expectErrorContains(&runtime, "'sample ('increment) import", &.{ "'kind 'io", case.message, broken });
         var completion = try runtime.completionCandidates("sample.");
         defer completion.deinit();
         try std.testing.expectEqual(@as(usize, 0), completion.items().len);

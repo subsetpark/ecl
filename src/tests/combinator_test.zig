@@ -544,7 +544,7 @@ test "idioms: a rebound name keeps recognition off" {
     defer used_sort.deinit();
     try expectStack(
         &used_sort,
-        "((a -- b) (pop [0]) 'grade def) 'm @defm 'm.grade 'grade import [3 1 2] sort",
+        "((a -- b) (pop [0]) 'grade def) 'm @defm 'm ('grade) import [3 1 2] sort",
         "[1 2 3]",
     );
     try std.testing.expectEqual(@as(u64, 0), used_sort.lastIdiomHits());

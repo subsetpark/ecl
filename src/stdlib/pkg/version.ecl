@@ -92,7 +92,7 @@
 
  ### defp core-cmp
  (left right -- order : "Compare validated major, minor, and patch fields in order.")
- ((field-cmp) lex-cmp)
+ ((field-cmp) lex-cmp-with)
  'core-cmp defp
 
  ### defp identifier-cmp
@@ -110,7 +110,7 @@
  ([(empty? swap empty? and) (pop pop 0)
    (pop empty?) (pop pop 1)
    (nip empty?) (pop pop -1)
-   ((identifier-cmp) lex-cmp)]
+   ((identifier-cmp) lex-cmp-with)]
   cond)
  'prerelease-cmp defp
 

@@ -465,7 +465,7 @@ Recorded target-specific results and their current disposition live in
   `scope`. That is what keeps a module word's `(private-helper)` resolving
   when it is handed to a combinator defined in core. It also means a
   session-level `import` that replaces a core name still reaches prelude bodies
-  — explicit one-name replacement is the documented way to patch a binding.
+  — explicitly requesting that name is the documented way to patch a binding.
 - **Name domains are nominal and validated.** `BindingName` is exactly one
   unqualified non-reserved segment, `ModuleName` is one or more valid
   segments joined by dots, and `QualifiedName` is the validated pair of a
@@ -478,6 +478,14 @@ Recorded target-specific results and their current disposition live in
   Unicode whitespace set used by tokenization; a branded host/native name
   therefore cannot contain whitespace, reader delimiters, malformed bytes,
   or another spelling the language could not read as that name category.
+- **Batch import validates before publication.** `ImportDriver` retains the
+  requested list, prepares exact non-relocating storage for its nominal
+  `BindingName`/qualified-name pairs, and acquires one `GenerationLease` for
+  the whole operation. It resolves every requested name through that
+  generation's public-only cursor before constructing the first forwarding
+  binding. A private or missing attribute therefore raises
+  `'undefined-word` without exposing a successfully validated prefix; later
+  publication copies metadata and remains bounded one cursor step at a time.
   Syntax markers such as `--` and `:` remain raw interned symbols and cannot
   pass through a privileged binding-name factory. Registry mutation cursors
   likewise expose operation-specific error sets, so callers cannot retain
@@ -836,9 +844,11 @@ allocation failure interrupt it at bounded intervals.
 - **Composite name work remains composite while suspended.** An unknown
   qualified module prefix installs one `InternModuleNameCursor` that owns both
   insertion and module-name validation, then transfers the validated brand to
-  loading. Dispatch, reflective retry, and import retry preserve that cursor
-  in `QualifiedLoadPreparationDriver`; none can synchronously intern a
-  runtime-sized prefix inside a scheduler step. Reflection producers remain
+  loading. Dispatch and reflective retry preserve that cursor in
+  `QualifiedLoadPreparationDriver`. Batch import validates its separately
+  interned module symbol, then uses one `QualifiedCursor` per requested
+  attribute; none of these paths can synchronously intern a runtime-sized name
+  inside a scheduler step. Reflection producers remain
   distinct, but both `words` and completion hand their collected chunks to
   `SortedUniqueNameCursor`, the one materialize/sort/deduplicate pipeline.
 - **Blocking drives are boundary-specific, not alternate production APIs.**
@@ -1751,8 +1761,9 @@ honest source with no public dual representation.
   loading preserves the caller evaluation even in tail position; after the
   `.qualified_after_load` frame verifies the requested registration, dispatch
   resumes that stored word directly. It never replays a consumed `execute`
-  operand. Reflection and import currently restore their consumed symbols and
-  select the continuation's explicit replay arm. Session completion selects
+  operand. Reflection restores its consumed symbol, while import restores its
+  module symbol and requested-name list; both select the continuation's
+  explicit replay arm. Session completion selects
   load-only, without executing an export or creating an import. Transport and
   prior registration are therefore unobservable to every qualified-name
   operation, and the tagged continuation makes the three resumption modes
@@ -1791,7 +1802,7 @@ honest source with no public dual representation.
   polymorphic functional update paired with `put` for both lists and dicts.
 - **`io` is the observable-I/O boundary.** Its builtin table publishes
   `pp`, `prin`, `print`, `inspect`, `stdin`, `slurp`, `spit`, and `lines`;
-  qualified names and explicit imports such as `'io.print 'print import` are
+  qualified names and explicit imports such as `'io ('print) import` are
   the only routes to those words. The
   primitive callbacks keep host authority private, while `print`, `inspect`,
   and `lines` schedule fixed quotations over sibling exports. The canonical

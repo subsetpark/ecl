@@ -1030,7 +1030,7 @@ test "e2e: explicit import replacement acceptance" {
         build_options.ecl_exe,
         "-e",
         "1 'mean set 2 'count set (3 'mean set 4 'count set) 'stats @defm " ++
-            "'stats.mean 'mean import 'stats.count 'count import mean count",
+            "'stats ('mean 'count) import mean count",
     });
     defer result.deinit();
     try result.expect(.{
@@ -1044,7 +1044,7 @@ test "e2e: reflection acceptance" {
     var result = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "(40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm.f 'f import 'm.f see 'f which words",
+        "(40 's setp ( -- n ) (s 2 +) 'f def) 'm @defm 'm ('f) import 'm.f see 'f which words",
     });
     defer result.deinit();
     try result.expect(.{
@@ -1138,7 +1138,7 @@ test "e2e: direct load and ECL_PATH acceptance" {
     defer environment.deinit();
     try environment.put("ECL_PATH", "test/acceptance/modules");
     var result = try cli.runOptions(.{
-        .argv = &.{ build_options.ecl_exe, "-e", "'stats.answer 'answer import answer" },
+        .argv = &.{ build_options.ecl_exe, "-e", "'stats ('answer) import answer" },
         .environ_map = &environment,
     });
     defer result.deinit();
@@ -1151,7 +1151,7 @@ test "e2e: direct load and ECL_PATH acceptance" {
     var empty_environment = std.process.Environ.Map.init(allocator);
     defer empty_environment.deinit();
     var no_implicit_cwd = try cli.runOptions(.{
-        .argv = &.{ exe, "-e", "'stats.answer 'answer import" },
+        .argv = &.{ exe, "-e", "'stats ('answer) import" },
         .cwd = .{ .dir = module_directory },
         .environ_map = &empty_environment,
     });
@@ -1461,7 +1461,7 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
 
     // DoD-32, to the letter.
     var dod32 = try cli.runOptions(.{
-        .argv = &.{ "./ecl", "'str.upper 'upper import \"hello\" upper io.pp" },
+        .argv = &.{ "./ecl", "'str ('upper) import \"hello\" upper io.pp" },
         .cwd = .{ .dir = temporary.dir },
         .environ_map = &environment,
     });
@@ -1473,7 +1473,7 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
     const modules = [_]struct { name: []const u8, imported: []const u8, qualified: []const u8 }{
         .{
             .name = "dict",
-            .imported = "'dict.from-pairs 'from-pairs import [['a 1]] from-pairs io.pp",
+            .imported = "'dict ('from-pairs) import [['a 1]] from-pairs io.pp",
             .qualified = "[['a 1]] dict.from-pairs io.pp",
         },
         // The moved envelope words prove the whole point of the consolidation:
@@ -1481,28 +1481,28 @@ test "e2e: every stdlib module resolves with no ECL_PATH and no filesystem" {
         // auto-load, with no `ECL_PATH` and no readable directory.
         .{
             .name = "result",
-            .imported = "'result.or-raise 'or-raise import (2 3 +) @attempt or-raise io.pp",
+            .imported = "'result ('or-raise) import (2 3 +) @attempt or-raise io.pp",
             .qualified = "(2 3 +) @attempt result.or-raise io.pp",
         },
-        .{ .name = "str", .imported = "'str.upper 'upper import \"hi\" upper io.pp", .qualified = "\"hi\" str.upper io.pp" },
-        .{ .name = "io", .imported = "'io.print 'print import \"hi\" print", .qualified = "\"hi\" io.print" },
-        .{ .name = "csv", .imported = "'csv.parse 'csv-parse import \"a,b\" csv-parse io.pp", .qualified = "\"a,b\" csv.parse io.pp" },
-        .{ .name = "json", .imported = "'json.parse 'json-parse import \"[1]\" json-parse io.pp", .qualified = "\"[1]\" json.parse io.pp" },
+        .{ .name = "str", .imported = "'str ('upper) import \"hi\" upper io.pp", .qualified = "\"hi\" str.upper io.pp" },
+        .{ .name = "io", .imported = "'io ('print) import \"hi\" print", .qualified = "\"hi\" io.print" },
+        .{ .name = "csv", .imported = "'csv ('parse) import \"a,b\" parse io.pp", .qualified = "\"a,b\" csv.parse io.pp" },
+        .{ .name = "json", .imported = "'json ('parse) import \"[1]\" parse io.pp", .qualified = "\"[1]\" json.parse io.pp" },
         .{
             .name = "table",
-            .imported = "'table.valid? 'valid? import {\"a\" [1]} valid? io.pp",
+            .imported = "'table ('valid?) import {\"a\" [1]} valid? io.pp",
             .qualified = "{\"a\" [1]} table.valid? io.pp",
         },
         .{
             .name = "rng",
             // The default key is fixed, so an unseeded draw from a fresh
             // process is as reproducible as any other embedded module's output.
-            .imported = "'rng.int 'int import 6 int io.pp",
+            .imported = "'rng ('int) import 6 int io.pp",
             .qualified = "6 rng.int io.pp",
         },
         .{
             .name = "http",
-            .imported = "'http.get 'get import 'get doc len 0 > io.pp",
+            .imported = "'http ('get) import 'get doc len 0 > io.pp",
             .qualified = "'http.get doc len 0 > io.pp",
         },
     };
@@ -1616,7 +1616,7 @@ test "e2e: entropy is the one draw that differs between processes" {
     var seeded = try run(&.{
         build_options.ecl_exe,
         "-e",
-        "'rng.seed 'seed import 'rng.ints 'ints import " ++
+        "'rng ('seed 'ints) import " ++
             "rand.entropy dup 'k set seed 100 6 ints 'a set k seed 100 6 ints a match? io.pp",
     });
     defer seeded.deinit();

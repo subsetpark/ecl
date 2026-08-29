@@ -186,9 +186,17 @@ fn withoutWord(evaluator: *Machine) MachineError!void {
 
 fn importWord(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
-    const binding = try evaluator.popSymbol();
-    const original = try evaluator.popSymbol();
-    try evaluator.startDriver(ImportDriver.init(evaluator, original, binding));
+    var requested = try evaluator.popList();
+    errdefer requested.deinit();
+    const module_id = try evaluator.popSymbol();
+    const requested_count: usize = @intCast(requested.borrow().list.length());
+    const prepared = try evaluator.allocator().alloc(ImportName, requested_count);
+    try evaluator.startDriver(ImportDriver.init(
+        evaluator,
+        module_id,
+        requested.take(),
+        prepared,
+    ));
 }
 fn aliasModule(evaluator: *Machine) MachineError!void {
     try evaluator.require(2);
@@ -227,27 +235,48 @@ const RegisterDriver = struct {
     }
 };
 
+const ImportName = struct {
+    binding: intern.BindingName,
+    qualified: u32,
+};
+
+/// Batch import validates and resolves the entire requested public surface
+/// against one pinned generation before publishing the first forwarding
+/// binding. A missing or private attribute therefore cannot leave a prefix of
+/// the request installed in the destination scope.
 const ImportDriver = struct {
     pub const ownership: heap.DriverOwnership = .fields;
-    original: u32,
-    binding_id: u32,
+    module_id: u32,
+    requested: heap.Owned(Value),
+    prepared: heap.Owned([]ImportName),
     scope: *env.Scope,
-    binding_validation: intern.NamespaceCursor,
-    dot: intern.LastDotCursor,
-    binding: ?intern.BindingName = null,
-    qualified: bool = false,
-    resolution: ?heap.Owned(machine.ResolutionCursor) = null,
-    resolved: ?heap.Owned(machine.Resolution) = null,
+    module_validation: intern.ModuleNameCursor,
+    module_name: ?intern.ModuleName = null,
+    prepare_index: usize = 0,
+    binding_validation: ?intern.NamespaceCursor = null,
+    qualifier: ?heap.Owned(intern.QualifiedCursor) = null,
+    acquisition: ?heap.Owned(modules.Registry.AcquireCursor) = null,
+    generation: ?heap.Owned(modules.GenerationLease) = null,
+    validation_index: usize = 0,
+    resolution: ?heap.Owned(modules.ModuleResolveCursor) = null,
+    validated: bool = false,
+    publish_index: usize = 0,
+    resolved: ?heap.Owned(env.BindingLease) = null,
     forwarding_body: ?heap.Owned(Value) = null,
     publisher: ?heap.Owned(env.Environment.BindCursor) = null,
 
-    fn init(evaluator: *Machine, original: u32, binding: u32) ImportDriver {
+    fn init(
+        evaluator: *Machine,
+        module_id: u32,
+        requested: Value,
+        prepared: []ImportName,
+    ) ImportDriver {
         return .{
-            .original = original,
-            .binding_id = binding,
+            .module_id = module_id,
+            .requested = .init(requested),
+            .prepared = .init(prepared),
             .scope = evaluator.currentScope(),
-            .binding_validation = .init(binding),
-            .dot = intern.lastDotCursor(intern.get(original)),
+            .module_validation = .init(module_id),
         };
     }
 
@@ -255,71 +284,149 @@ const ImportDriver = struct {
         try evaluator.pollKernel();
         var budget: usize = machine.kernel_poll_quantum;
         while (budget != 0) : (budget -= 1) {
-            if (self.binding == null) switch (self.binding_validation.advance()) {
+            if (self.module_name == null) switch (self.module_validation.advance()) {
                 .pending => continue,
                 .complete => |maybe_name| {
-                    self.binding = maybe_name orelse return evaluator.fail(
+                    self.module_name = maybe_name orelse return evaluator.fail(
                         .domain,
-                        "import binding must be unqualified and non-reserved",
+                        "import requires a valid module name",
                     );
                     continue;
                 },
             };
-            if (!self.qualified) switch (self.dot.advance()) {
-                .pending => continue,
-                .complete => |maybe_index| {
-                    const index = maybe_index orelse return evaluator.fail(
-                        .domain,
-                        "import original must be a qualified word",
-                    );
-                    const bytes = intern.get(self.original);
-                    if (index == 0 or index + 1 == bytes.len)
-                        return evaluator.fail(.domain, "import original must be a qualified word");
-                    self.qualified = true;
-                    self.resolution = .init(machine.ResolutionCursor.initAtCurrent(evaluator, self.original));
+
+            if (self.prepare_index != self.prepared.borrow().len) {
+                const item = list.atUnchecked(self.requested.borrow(), self.prepare_index);
+                if (self.binding_validation == null and self.qualifier == null) {
+                    const symbol = switch (item) {
+                        .symbol => |name| name,
+                        else => return evaluator.typeError("a list of symbols"),
+                    };
+                    self.binding_validation = .init(symbol);
+                }
+                if (self.qualifier == null) switch (self.binding_validation.?.advance()) {
+                    .pending => continue,
+                    .complete => |maybe_name| {
+                        const binding = maybe_name orelse return evaluator.fail(
+                            .domain,
+                            "import attributes must be unqualified and non-reserved symbols",
+                        );
+                        self.binding_validation = null;
+                        self.prepared.borrowMut().*[self.prepare_index].binding = binding;
+                        self.qualifier = .init(try .init(
+                            evaluator.allocator(),
+                            intern.qualifiedName(self.module_name.?, binding),
+                        ));
+                        continue;
+                    },
+                };
+                switch (try self.qualifier.?.borrowMut().advance()) {
+                    .pending => continue,
+                    .complete => |qualified| {
+                        self.prepared.borrowMut().*[self.prepare_index].qualified = qualified;
+                        self.qualifier.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.qualifier = null;
+                        self.binding_validation = null;
+                        self.prepare_index += 1;
+                        continue;
+                    },
+                }
+            }
+
+            if (self.generation == null) {
+                const registry = evaluator.unit.inherited.registry orelse
+                    return evaluator.fail(.domain, "module registry is unavailable");
+                if (self.acquisition == null)
+                    self.acquisition = .init(registry.acquireCursor(self.module_name.?));
+                switch (self.acquisition.?.borrowMut().advance()) {
+                    .pending => continue,
+                    .complete => |maybe_generation| if (maybe_generation) |generation| {
+                        self.generation = .init(generation);
+                        self.acquisition.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.acquisition = null;
+                        continue;
+                    } else {
+                        const module_id = self.module_id;
+                        const module_name = self.module_name.?;
+                        const requested_word = if (self.prepared.borrow().len == 0)
+                            module_id
+                        else
+                            self.prepared.borrow()[0].qualified;
+                        const requested = self.requested.take();
+                        evaluator.retireDriver(self);
+                        return evaluator.retryImportAfterLoad(
+                            module_id,
+                            requested,
+                            module_name,
+                            requested_word,
+                        );
+                    },
+                }
+            }
+
+            if (self.prepared.borrow().len == 0) return .completed;
+
+            if (!self.validated) {
+                if (self.validation_index == self.prepared.borrow().len) {
+                    self.validated = true;
                     continue;
-                },
-            };
-            if (self.resolved == null and self.publisher == null) switch (self.resolution.?.borrowMut().advance()) {
-                .pending => continue,
-                .complete => |outcome| switch (outcome) {
-                    .resolved => |resolved| {
-                        self.resolved = .init(resolved);
+                }
+                const requested = self.prepared.borrow()[self.validation_index];
+                if (self.resolution == null)
+                    self.resolution = .init(self.generation.?.borrow().resolveCursor(
+                        intern.bindingId(requested.binding),
+                    ));
+                switch (self.resolution.?.borrowMut().advance()) {
+                    .pending => continue,
+                    .complete => |maybe_lease| {
+                        var lease = maybe_lease orelse
+                            return evaluator.undefinedNameIn(requested.qualified, .qualified);
+                        lease.deinit();
+                        self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.resolution = null;
+                        self.validation_index += 1;
+                        continue;
+                    },
+                }
+            }
+
+            if (self.publish_index == self.prepared.borrow().len) return .completed;
+            const requested = self.prepared.borrow()[self.publish_index];
+            if (self.resolved == null and self.publisher == null) {
+                if (self.resolution == null)
+                    self.resolution = .init(self.generation.?.borrow().resolveCursor(
+                        intern.bindingId(requested.binding),
+                    ));
+                switch (self.resolution.?.borrowMut().advance()) {
+                    .pending => continue,
+                    .complete => |maybe_lease| {
+                        self.resolved = .init(maybe_lease orelse unreachable);
                         self.resolution.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
                         self.resolution = null;
                         continue;
                     },
-                    .unresolved => |chain| return evaluator.undefinedNameIn(self.original, chain),
-                    .unknown_module_prefix, .unregistered_module => {
-                        const binding = self.binding_id;
-                        const original = self.original;
-                        evaluator.retireDriver(self);
-                        return evaluator.retryImportAfterLoad(binding, original, outcome);
-                    },
-                },
-            };
+                }
+            }
             if (self.forwarding_body == null) {
                 self.forwarding_body = .init(try list.fromValuesGeneric(
                     evaluator.allocator(),
-                    &.{.{ .word = .{ .name = self.original } }},
+                    &.{.{ .word = .{ .name = requested.qualified } }},
                 ));
                 continue;
             }
             if (self.publisher == null) {
-                const lease = &self.resolved.?.borrow().lease;
+                const lease = self.resolved.?.borrow();
                 const body = env.quotation(self.forwarding_body.?.borrow().list) orelse unreachable;
                 // `import` inside a module body binds module-locally, the same
                 // way `def` does there. Reaching for top publication on a
                 // module root used to abort on an `unreachable`, which one
                 // line of ordinary source could trigger.
-                self.publisher = .init(try self.scope.publishWordCursor(self.binding.?, .{
+                self.publisher = .init(try self.scope.publishWordCursor(requested.binding, .{
                     .body = body,
                     .visibility = .public,
                     .effect = lease.effect,
                     .doc = lease.doc,
                 }));
-                self.resolved.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
-                self.resolved = null;
                 continue;
             }
             switch (self.publisher.?.borrowMut().advance() catch |err| switch (err) {
@@ -330,7 +437,15 @@ const ImportDriver = struct {
                 ),
             }) {
                 .pending => {},
-                .complete => return .completed,
+                .complete => {
+                    self.publisher.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.publisher = null;
+                    self.forwarding_body.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.forwarding_body = null;
+                    self.resolved.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.resolved = null;
+                    self.publish_index += 1;
+                },
             }
         }
         return .yielded;
