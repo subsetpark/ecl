@@ -23,6 +23,14 @@ Read this guide for every source or test change. The short rules in
   Prove a capability that genuinely needs a real stream against the built binary
   through an explicit pipe in `test/e2e.zig`, and keep the in-process test on the
   part that needs no stream—the mode gate, the claim, the error kind.
+- A golden transcript asserts behavior, not the coordinates behavior happens to
+  carry. `test/reference_snapshots.zig` records errors raised inside
+  `src/prelude.ecl`, whose `'data` reports a prelude line number; pinning that
+  number makes every unrelated prelude edit fail the snapshot while proving
+  nothing about the edit. Those positions use `ohsnap`'s embedded-regex form
+  (`'line <^\d+$>`)—the anchors are required and the snapshot still fails if
+  the field goes missing or non-numeric. Keep the kind, message, word, trace,
+  and source file literal; regex only the coordinate.
 
 ## Running commands safely
 
