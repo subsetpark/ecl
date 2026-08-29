@@ -97,7 +97,7 @@ pub const Operation = union(enum) {
                 // and `reshape` each read two operands whose representations
                 // both matter.
                 .at, .cat, .take, .drop, .in_word, .reshape => .two,
-                .where, .raze, .reverse, .first, .rest, .range, .shape, .len, .flip => .one,
+                .where, .first_where, .raze, .reverse, .first, .rest, .range, .shape, .len, .flip => .one,
             },
             .order => |operation| switch (operation) {
                 .cmp => .two,
@@ -558,6 +558,12 @@ const sequence_rows = [_]Row{
         // exact-size leaf_i64 storage
     },
     .{
+        .operations = only(.{Operation{ .sequence = .first_where }}),
+        .left = union2(byte_leaf, OperandSet{ .aggregates = &.{.leaf_i64} }),
+        .class = .sequential_typed,
+        // ordered short-circuit over a pinned integer-count leaf; no result list is materialized
+    },
+    .{
         .operations = only(.{Operation{ .sequence = .reverse }}),
         .left = all_leaves,
         .class = .bulk_copy,
@@ -606,6 +612,15 @@ const sequence_rows = [_]Row{
         .left = union2(spine, dictionary),
         .class = .generic_fallback,
         // boxed or keyed operand; bounded descent re-enters at each leaf
+    },
+    .{
+        .operations = only(.{Operation{ .sequence = .first_where }}),
+        .left = without(
+            any_operand,
+            union2(byte_leaf, OperandSet{ .aggregates = &.{.leaf_i64} }),
+        ),
+        .class = .generic_fallback,
+        // boxed counts retain ordered validation; non-integer leaves and non-lists reject at the public boundary
     },
     .{
         .operations = only(.{Operation{ .sequence = .range }}),

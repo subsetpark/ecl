@@ -625,7 +625,7 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "dup 'a dict.has? pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
             "dup ['a 'b] dict.keys-exactly? pop dup 'a (1 +) dict.update " ++
             "dup 'c 0 (1 +) dict.update-or dup (nip) dict.map dup (1 +) dict.map-values " ++
-            "dup (nip 1) dict.filter dup (nip 0) dict.reject dup ['a] dict.take " ++
+            "dup (pop pop 1) dict.filter dup (pop pop 0) dict.reject dup ['a] dict.take " ++
             "dup ['a] dict.drop dup ['a] dict.split pop pop " ++
             "{'a 2} (|key left right| key pop left right +) dict.merge-with pop " ++
             "['a 'b] 0 dict.from-keys pop " ++
@@ -793,6 +793,47 @@ fn packageCliSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     const cli_source = try packageCliSource(scaffold_allocator, scratch.path);
     defer scaffold_allocator.free(cli_source);
     try runOk(&runtime, "oom-pkg-cli.ecl", cli_source);
+}
+
+const structured_find_source = "[[1]] [1] find pop";
+
+fn structuredFindAllocationCount() !usize {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var runtime = try session.Session.initWithConfig(
+        failing.allocator(),
+        &.{},
+        .cooperative,
+    );
+    defer runtime.deinit();
+
+    const before = failing.alloc_index;
+    try std.testing.expectEqual(
+        .ok,
+        try runtime.runUnit("oom-structured-find-count.ecl", structured_find_source),
+    );
+    return failing.alloc_index - before;
+}
+
+test "oom: recognized structured find propagates every allocation failure" {
+    const allocation_count = try structuredFindAllocationCount();
+    try std.testing.expect(allocation_count != 0);
+
+    // Bootstrap outside the failure window, then exhaust the smallest public
+    // operation that reaches the recognized driver's structural match cursor.
+    for (0..allocation_count) |offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var runtime = try session.Session.initWithConfig(
+            failing.allocator(),
+            &.{},
+            .cooperative,
+        );
+        defer runtime.deinit();
+
+        failing.fail_index = failing.alloc_index + offset;
+        const result = runtime.runUnit("oom-structured-find-failure.ecl", structured_find_source);
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectError(error.OutOfMemory, result);
+    }
 }
 
 test "oom: full-session surfaces propagate every allocation failure" {

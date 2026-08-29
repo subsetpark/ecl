@@ -70,10 +70,11 @@ test "sequence: at gathers list string and dict indices" {
 
 test "sequence: where, in?, and find validate and search" {
     try helper.expectStack(
-        "[1 0 1 0] where [2 4] [1 2 3] in? [2 3 2] 2 find [2 3] 9 find " ++
+        "[1 0 1 0] where [0 2 0] first-where [0 0] first-where [] first-where " ++
+            "[1 -1] first-where [2 4] [1 2 3] in? [2 3 2] 2 find [2 3] 9 find " ++
             "[] 9 find [[1] [2]] [2] find \"abc\" \\b find " ++
             "{'a 1} [{'a 1} {'b 2}] in? {'z 1} [{'a 1} {'b 2}] in?",
-        "[0 2] [1 0] 0 2 0 1 1 1 0",
+        "[0 2] 1 2 0 0 [1 0] 0 2 0 1 1 1 0",
     );
     try helper.expectStack("[[1] [2]] [0] in?", "([0]\n [0])");
     try helper.expectErrors(&.{
@@ -89,6 +90,20 @@ test "sequence: where, in?, and find validate and search" {
             .source = "[1 -1] where",
             .kind = "domain",
             .word = "where",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+        .{
+            .name = "first-where rejects non-integer observed counts",
+            .source = "[0 1.5 2] first-where",
+            .kind = "type",
+            .word = "first-where",
+            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
+        },
+        .{
+            .name = "first-where rejects negative observed counts",
+            .source = "[0 -1 2] first-where",
+            .kind = "domain",
+            .word = "first-where",
             .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
         },
     });

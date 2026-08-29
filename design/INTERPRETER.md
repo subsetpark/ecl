@@ -1301,7 +1301,8 @@ operand shape, and rows that still run boxed say so.
   does a length-zero result, whose representation is the value layer's existing
   per-producer choice and observable as printed brackets.
 - **What crosses the seam today.** Numeric, comparison, logical, bitwise, and
-  shift pervasion, including the guarded idioms; `range`; `where`; `rand.ints`;
+  shift pervasion, including the guarded idioms; `range`; `where`; the
+  short-circuiting `first-where` count search; `rand.ints`;
   and the exact-size copies and gathers behind `cat`, `take`, `drop`, `rest`,
   `reverse`, and `at` with a typed index vector; typed membership over scalar
   or flat-list needles; rank-one `reshape`; same-kind list `put`; and `shape`'s
@@ -1309,6 +1310,10 @@ operand shape, and rows that still run boxed say so.
   and first-seen typed `group`/`distinct`; pinned width-specialized `split`;
   and two-pass exact-width `join`; `str.format` keeps hosted semantics while
   its standard-library body selects the existing two-pass format driver.
+  Trusted `find` recognition replaces its declarative `match? each`
+  plus `first-where` fallback with one bounded first-hit driver, preserving
+  structural matching while materializing neither the boolean mask nor an
+  index vector.
   Character-element pervasion uses a fixed
   i64 writer for subtraction and comparison and a profile/fill pass for
   character offsets and selection; invalid character and symbol combinations

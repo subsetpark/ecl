@@ -274,6 +274,18 @@ const dispatch_free = [_]Case{
         .per_element = 0,
     },
     .{
+        .name = "first positive count",
+        .setup = "{d} range",
+        .workload = "(pop [0 0 2] first-where) each len",
+        .per_element = 0,
+    },
+    .{
+        .name = "recognized scalar find",
+        .setup = "{d} range",
+        .workload = "(pop [1 2 3] 2 find) each len",
+        .per_element = 0,
+    },
+    .{
         .name = "dict membership",
         .setup = "{} dict.keys pop {d} range",
         .workload = "(pop {'a 1} 'a dict.has?) each len",

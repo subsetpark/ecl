@@ -36,6 +36,7 @@ const entries = [_]Metadata{
     },
     .{ .name = "cons", .effect = "value list -- list", .text = "Prepend a value or executable form to a list." },
     .{ .name = "match?", .effect = "left right -- bool", .text = "Return whether two complete values are structurally equal." },
+    .{ .name = "first-where", .effect = "counts -- index", .text = "Return the first index with a positive count, or the count-list length when none exists; counts after the first hit are not inspected." },
     .{ .name = "type", .effect = "value -- type", .text = "Return the value kind as a symbol." },
     .{ .name = "execute", .effect = "word -- ...", .text = "Execute a word through ordinary name resolution and dispatch." },
     .{ .name = "parse", .effect = "string -- quotation", .text = "Parse source text into an unevaluated quotation." },

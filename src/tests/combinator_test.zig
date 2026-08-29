@@ -317,6 +317,8 @@ test "combinators: loops guards reductions and result materialization stay cance
     try expectCancelledAfterSetup("70001 range (pop ()) each", "cond", .automatic);
     try expectCancelledAfterSetup("70000 range", "(dup pop) each", .generic_only);
     try expectCancelledAfterSetup("70000 range", "sort", .automatic);
+    try expectCancelledAfterSetup("70000 range -1 =", "first-where", .automatic);
+    try expectCancelledAfterSetup("70000 range", "-1 find", .automatic);
     try expectCancelledAfterSetup("70000 range", "0 (+) fold", .automatic);
     // The idiom loop consumes fewer than one kernel quantum; its second
     // traversal, result specialization, is what crosses the poll boundary.
@@ -371,6 +373,23 @@ test "idioms: automatic hits and forced generic preserves behavior" {
         "pop [1 1.0 [2] {'a 3} 'x] [2] (match?) partial each",
         "[0 0 1 0 0]",
     );
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
+
+    // The trusted `find` body keeps a declarative match-mask fallback, while
+    // direct recognition compares only until the first hit and never builds
+    // that mask. Empty, structured, and miss cases share the length sentinel.
+    try expectStack(&automatic, "pop [1 2 1] 2 find", "1");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+    try expectStack(&automatic, "pop [[1] [2]] [2] find", "1");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+    try expectStack(&automatic, "pop [] [2] find", "0");
+    try std.testing.expectEqual(@as(u64, 1), automatic.lastIdiomHits());
+
+    try expectStack(&generic, "pop [1 2 1] 2 find", "1");
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
+    try expectStack(&generic, "pop [[1] [2]] [2] find", "1");
+    try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
+    try expectStack(&generic, "pop [] [2] find", "0");
     try std.testing.expectEqual(@as(u64, 0), generic.lastIdiomHits());
 
     // The literal-capture shape `((v) first)` that `partial` builds reaches
@@ -487,6 +506,21 @@ test "idioms: a rebound name keeps recognition off" {
         "[42 42]",
     );
     try std.testing.expectEqual(@as(u64, 0), rebound_match.lastIdiomHits());
+
+    // A word inside a one-element quotation is subject to the same binding
+    // guard as a bare pattern word. This replacement has the exact `find`
+    // shape, but its quoted `match?` resolves to the session definition, so
+    // the recognizer must fall back and preserve that definition's result.
+    var rebound_quoted_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&rebound_quoted_heap);
+    var rebound_quoted = try session.Session.init(rebound_quoted_heap.allocator(), &.{});
+    defer rebound_quoted.deinit();
+    try expectStack(
+        &rebound_quoted,
+        "(pop pop 42) 'match? def " ++
+            "((match?) partial each first-where) 'find def [1 2] 2 find",
+        "0",
+    );
 
     var rebound_dependency_heap: test_heap.SessionHeap = .init;
     defer test_heap.retire(&rebound_dependency_heap);

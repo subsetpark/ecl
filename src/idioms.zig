@@ -21,6 +21,7 @@ pub const Context = enum { direct, each, zip_with, fold, scan };
 pub const DirectOp = enum {
     sort,
     first,
+    find,
     rest,
     reverse,
     distinct,
@@ -63,6 +64,7 @@ pub const PatternAtom = union(enum) {
     /// as `((value) first)`, so `partial` prefixes it onto its quotation.
     capture,
     literal,
+    quotation_word: ExpectedWord,
     operation,
     word: ExpectedWord,
 };
@@ -146,6 +148,12 @@ const first_pattern = [_]PatternAtom{
     .literal,
     .{ .word = .{ .spelling = "at" } },
 };
+const find_pattern = [_]PatternAtom{
+    .{ .quotation_word = .{ .spelling = "match?" } },
+    .{ .word = .{ .spelling = "partial", .binding = .source } },
+    .{ .word = .{ .spelling = "each" } },
+    .{ .word = .{ .spelling = "first-where" } },
+};
 const rest_pattern = [_]PatternAtom{
     .{ .word = .{ .spelling = "dup" } },
     .{ .word = .{ .spelling = "first", .binding = .source } },
@@ -183,7 +191,7 @@ const str_format_pattern = [_]PatternAtom{
 const unary_count = std.meta.fields(numeric.UnaryOp).len;
 const binary_count = std.meta.fields(numeric.BinaryOp).len;
 pub const registry = blk: {
-    var entries: [unary_count + binary_count * 5 + 4 + 8 + 15]RegistryEntry = undefined;
+    var entries: [unary_count + binary_count * 5 + 4 + 8 + 16]RegistryEntry = undefined;
     var index: usize = 0;
     for (std.meta.fields(numeric.UnaryOp)) |field| {
         entries[index] = .{
@@ -272,6 +280,7 @@ pub const registry = blk: {
     for ([_]struct { operation: DirectOp, pattern: []const PatternAtom }{
         .{ .operation = .sort, .pattern = &sort_pattern },
         .{ .operation = .first, .pattern = &first_pattern },
+        .{ .operation = .find, .pattern = &find_pattern },
         .{ .operation = .rest, .pattern = &rest_pattern },
         .{ .operation = .reverse, .pattern = &reverse_pattern },
         .{ .operation = .distinct, .pattern = &distinct_pattern },
@@ -378,6 +387,35 @@ const IdiomDriver = struct {
         self.expected = null;
         self.expected_binding = .builtin;
         self.expected_origin = .trusted;
+    }
+    fn beginWordResolution(
+        self: *IdiomDriver,
+        evaluator: *Machine,
+        word: value.WordRef,
+        expected_word: ExpectedWord,
+    ) bool {
+        if (!std.mem.eql(u8, intern.get(word.name), expected_word.spelling) or
+            !stampOnCandidateChain(
+                evaluator,
+                self.candidate,
+                word.scope,
+                expected_word.origin,
+            ))
+        {
+            return false;
+        }
+        self.expected_binding = expected_word.binding;
+        self.expected_origin = expected_word.origin;
+        self.expected = null;
+        self.resolution = .init(.init(
+            evaluator,
+            word.name,
+            resolutionScopeForOrigin(evaluator, self.candidate, expected_word.origin),
+            null,
+            null,
+            null,
+        ));
+        return true;
     }
     fn finish(
         self: *IdiomDriver,
@@ -496,6 +534,21 @@ const IdiomDriver = struct {
                     }
                     self.atom_index += 1;
                 },
+                .quotation_word => |expected_word| {
+                    if (actual != .list or actual.list.length() != 1) {
+                        self.rejectEntry();
+                        continue;
+                    }
+                    const quoted = list.atUnchecked(actual, 0);
+                    const word = if (quoted == .word) quoted.word else {
+                        self.rejectEntry();
+                        continue;
+                    };
+                    if (!self.beginWordResolution(evaluator, word, expected_word)) {
+                        self.rejectEntry();
+                        continue;
+                    }
+                },
                 .operation => {
                     const word = if (actual == .word) actual.word else {
                         self.rejectEntry();
@@ -530,16 +583,7 @@ const IdiomDriver = struct {
                         self.rejectEntry();
                         continue;
                     };
-                    if (!std.mem.eql(u8, intern.get(word.name), expected_word.spelling)) {
-                        self.rejectEntry();
-                        continue;
-                    }
-                    if (!stampOnCandidateChain(
-                        evaluator,
-                        self.candidate,
-                        word.scope,
-                        expected_word.origin,
-                    )) {
+                    if (!self.beginWordResolution(evaluator, word, expected_word)) {
                         self.rejectEntry();
                         continue;
                     }
@@ -547,17 +591,6 @@ const IdiomDriver = struct {
                         self.capture.active_word = word.name;
                         self.capture.active_index = @intCast(self.atom_index);
                     }
-                    self.expected_binding = expected_word.binding;
-                    self.expected_origin = expected_word.origin;
-                    self.expected = null;
-                    self.resolution = .init(.init(
-                        evaluator,
-                        word.name,
-                        resolutionScopeForOrigin(evaluator, self.candidate, expected_word.origin),
-                        null,
-                        null,
-                        null,
-                    ));
                 },
             }
         }
@@ -597,6 +630,7 @@ fn canApplyEntry(evaluator: *Machine, entry: RegistryEntry) bool {
         // still names the word that observed it.
         .direct => |operation| switch (operation) {
             .dip => evaluator.available() >= 2 and stack[stack.len - 1] == .list,
+            .find => evaluator.available() >= 2 and stack[stack.len - 2] == .list,
             .str_format => evaluator.available() >= 2,
             else => evaluator.available() >= 1,
         },
@@ -631,6 +665,7 @@ fn applyDirect(evaluator: *Machine, operation: DirectOp) MachineError!void {
     try switch (operation) {
         .sort => order.sortForIdiom(evaluator),
         .first => sequence.firstForIdiom(evaluator),
+        .find => applyMatchFind(evaluator),
         .rest => sequence.restForIdiom(evaluator),
         .reverse => sequence.reverseForIdiom(evaluator),
         .distinct => order.distinctForIdiom(evaluator),
@@ -873,6 +908,68 @@ const MatchEachDriver = struct {
         if (self.index != count) return .yielded;
         popRelease(evaluator, 2);
         return .{ .output = self.writer.borrowMut().finish() };
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn applyMatchFind(evaluator: *Machine) MachineError!void {
+    const stack = evaluator.unit.stack.items;
+    const input = stack[stack.len - 2];
+    std.debug.assert(input == .list);
+    try evaluator.startDriver(MatchFindDriver{
+        .input = input,
+        .needle = stack[stack.len - 1],
+    });
+}
+
+/// The recognized `find` source word compares until its first hit and returns
+/// the miss sentinel directly. Atomic pairs share `match?`'s scalar authority;
+/// structured pairs retain the same allocation-fallible bounded cursor.
+const MatchFindDriver = struct {
+    pub const inline_driver = true;
+
+    input: Value,
+    needle: Value,
+    index: usize = 0,
+    cursor: ?heap.Owned(equal.MatchCursor) = null,
+
+    fn finish(self: *MatchFindDriver, evaluator: *Machine, index: usize) machine.WorkProgress {
+        if (self.cursor) |*cursor| cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        self.cursor = null;
+        popRelease(evaluator, 2);
+        return .{ .output = .{ .int = @intCast(index) } };
+    }
+
+    pub fn advance(evaluator: *Machine, self: *MatchFindDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        const count: usize = @intCast(self.input.list.length());
+        var budget: usize = machine.kernel_poll_quantum;
+        while (self.index != count and budget != 0) : (budget -= 1) {
+            const item = list.atUnchecked(self.input, self.index);
+            if (self.cursor == null) {
+                if (equal.matchWithoutStructure(item, self.needle)) |matches| {
+                    if (matches) return self.finish(evaluator, self.index);
+                    self.index += 1;
+                    continue;
+                }
+                self.cursor = .init(try .init(evaluator.allocator(), item, self.needle));
+            }
+            switch (try self.cursor.?.borrowMut().advance(machine.kernel_poll_quantum)) {
+                .pending => return .yielded,
+                .complete => |matches| {
+                    self.cursor.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                    self.cursor = null;
+                    if (matches) return self.finish(evaluator, self.index);
+                    self.index += 1;
+                    // A structural comparison spent a separately bounded
+                    // quantum, so yield before starting the next element.
+                    return .yielded;
+                },
+            }
+        }
+        if (self.index != count) return .yielded;
+        return self.finish(evaluator, count);
     }
 
     pub const ownership: heap.DriverOwnership = .fields;

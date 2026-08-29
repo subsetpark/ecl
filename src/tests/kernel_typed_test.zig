@@ -399,6 +399,7 @@ test "typed differential: sequence order text and random operation parity across
         // Typed gather and the index vector `where` produces.
         "dup where at",
         "where",
+        "first-where",
         "dup len range at",
         "dup len wrap reshape",
         // Same-kind list put. `dup` forces the allocating copy path and keeps
