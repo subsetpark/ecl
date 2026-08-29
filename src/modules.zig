@@ -1609,12 +1609,38 @@ const LoadingNode = struct {
     owner: std.atomic.Value(usize),
     next: ?*LoadingNode,
 };
+/// The authority to make one artifact's registrations visible. Only
+/// `LoadingLease.artifactCommit` mints one, and only from a live lease keyed
+/// to that artifact, so a holder of the project lock cannot publish an
+/// artifact whose declarations nobody verified. An `ArtifactId` names an
+/// artifact; this names the right to publish it.
+pub const ArtifactCommit = enum(u32) {
+    _,
+
+    fn init(published: pkg_catalog.ArtifactId) ArtifactCommit {
+        return @enumFromInt(@intFromEnum(published));
+    }
+    pub fn artifact(self: ArtifactCommit) pkg_catalog.ArtifactId {
+        return @enumFromInt(@intFromEnum(self));
+    }
+};
+
 pub const LoadingLease = enum(usize) {
     finished = 0,
     _,
 
     fn init(loading: *LoadingNode) LoadingLease {
         return @enumFromInt(@intFromPtr(loading));
+    }
+    /// Trade a live artifact lease for the authority to publish that
+    /// artifact. The lease is not released here: publication must become
+    /// visible before the lease frees, or a contender would find the artifact
+    /// uncommitted and reload it. `finish` follows on the same step.
+    pub fn artifactCommit(self: *LoadingLease) ArtifactCommit {
+        return switch (self.node().key) {
+            .artifact => |artifact| .init(artifact),
+            .module => @panic("a module loading lease cannot publish an artifact"),
+        };
     }
     fn node(self: LoadingLease) *LoadingNode {
         std.debug.assert(self != .finished);

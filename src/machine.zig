@@ -7242,8 +7242,11 @@ const QualifiedRegistrationDriver = struct {
                         ));
                         return .yielded;
                     }
-                    evaluator.unit.inherited.project_lock.?.commitArtifact(artifact);
-                    self.loading.?.borrowMut().finish();
+                    var artifact_lease = self.loading.?.borrowMut();
+                    evaluator.unit.inherited.project_lock.?.commitArtifact(
+                        artifact_lease.artifactCommit(),
+                    );
+                    artifact_lease.finish();
                 }
                 return continueQualifiedRequest(evaluator, self, self.request);
             },

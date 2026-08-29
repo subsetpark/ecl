@@ -12,6 +12,7 @@ const storage = @import("kernel_storage.zig");
 const intern = @import("intern.zig");
 const project = @import("project.zig");
 const pkg_catalog = @import("pkg_catalog.zig");
+const modules = @import("modules.zig");
 
 const Value = value.Value;
 const max_lock_bytes = 16 * 1024 * 1024;
@@ -114,12 +115,16 @@ pub const ProjectLock = opaque {
         };
     }
 
+    /// Publish one artifact's registrations. The commit authority is minted
+    /// only by the loading lease that guarded the artifact's verification, so
+    /// this immutable observation capability cannot be turned into a way to
+    /// make an unverified artifact visible.
     pub fn commitArtifact(
         self: *const ProjectLock,
-        artifact: pkg_catalog.ArtifactId,
+        commit: modules.ArtifactCommit,
     ) void {
         switch (backingConst(self).state) {
-            .valid => |valid| valid.committed[@intFromEnum(artifact)].store(true, .release),
+            .valid => |valid| valid.committed[@intFromEnum(commit.artifact())].store(true, .release),
             .invalid => unreachable,
         }
     }
