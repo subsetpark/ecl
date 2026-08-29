@@ -514,8 +514,8 @@ const Formatter = struct {
                     );
                     if (packed_registration != null) skip_through = registration.?.terminator;
                     if (fill_pair) {
-                        const start = line.items.len - 3;
-                        const pair = try self.docs.group(try self.docs.concat(line.items[start..]));
+                        const start = line.items.len - 2;
+                        const pair = try self.docs.localGroup(try self.docs.concat(line.items[start..]));
                         line.shrinkRetainingCapacity(start);
                         try line.append(self.allocator(), pair);
                     }

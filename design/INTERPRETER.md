@@ -35,6 +35,19 @@ primitives, operationalized as two rules:
    build tooling, deliberately not in a runtime test that searches
    implementation text.
 
+Performance characterization is production-connected and release-only.
+`zig build bench-workdrivers -Doptimize=ReleaseSafe` runs the WorkDriver workload
+matrix twice through public `Session` turns: an ordinary runtime records
+wall/CPU time and polls using the ordinary allocator, while a separately
+compiled artifact records allocation traffic, peak temporary bytes, and
+root-Unit logical transitions, driver/application resumes, and scheduler
+handoffs. The counter branches compile out of every ordinary runtime and test
+module, and the atomic counting allocator is absent from the timing artifact.
+Both versioned CSV schemas identify their target, optimization mode, and Zig
+version; `-- --quick` is a smoke subset, not reportable performance evidence.
+Recorded target-specific results and their current disposition live in
+[`PERFORMANCE.md`](PERFORMANCE.md).
+
 ## Values and memory
 
 - **Value = 16-byte two-word tagged cell** (a Zig tagged union). Word 0:
@@ -91,6 +104,17 @@ primitives, operationalized as two rules:
   Canonical rendering never elides. The worklist keeps both styles free of
   host recursion, and display elision happens before matrix-shape scanning or
   before any element or character from the huge list is scheduled.
+- **Bounded cursor stacks inline exactly one entry.** `ChunkStack` stores its
+  first frame in a tagged value slot and allocates linked 256-entry chunks only
+  when traversal depth reaches two. The inline slot contains the frame and no
+  pointer back into its containing stack, so a cursor may move into a Unit's
+  inline driver slot before polling without leaving a self-link at its old
+  address. Deeper storage remains non-relocating; `reserve` covers the inline
+  slot and heap tail as one ownership-atomic capacity promise, and retirement
+  links heap chunks only to other heap chunks. When that promise stages an
+  empty newest chunk, logical stack access skips it without consuming the
+  reservation, and popping older entries unlinks emptied chunks through the
+  newer link rather than stranding the reserved capacity or hiding the top.
 - **Dicts:** keys vector + values vector (insertion order for free) +
   cached per-entry hashes + linear scan below ~16 entries, one u32 hash
   index above. Hash agrees with `=`: numerics hash by numeric value (2 and
@@ -492,9 +516,30 @@ primitives, operationalized as two rules:
   removal shape therefore leaves delayed readers' cells alive through their
   old shape leases, while bounded shape retirement releases one cell edge per
   turn; after readers drain, retained cells and shapes are bounded by current
-  state rather than definition/removal history. **The iron law for
-  any future cache: hold the cell, re-read its interior every execution;
-  never cache a resolution.**
+  state rather than definition/removal history. **The iron law for a binding
+  cache: hold the cell and re-read its interior every execution; never retain
+  a binding payload as the cached answer.**
+- **Module call sites use one bounded, guarded lookaside.** Each Unit has
+  exactly sixteen entries arranged as eight two-way sets, keyed by an owned
+  source-code root, instruction index, and word id. A canonical-qualified
+  target owns one opaque registration-generation guard and one stable
+  binding-cell handle. It may enter execution only after proving that exact
+  generation is still current; reload or removal clears a stale entry and
+  falls through to ordinary resumable resolution. Alias spellings bypass the
+  lookaside because alias retargeting is a separate mutable mapping.
+  A same-image local target owns a stable cell plus its nominal scope id. The
+  lookup accepts them only with one `LocalCacheContext`, constructed when the
+  occurrence's stamp exactly equals the running activation's module-root scope;
+  that activation is the liveness proof, and its correlated home supplies the
+  current registration rather than anything stored in the entry. Child scopes,
+  core fallbacks, and escaped foreign quotations therefore miss without
+  acquiring or transferring authority. Both target kinds reload the cell
+  snapshot before constructing the ordinary `Resolution`. Unit teardown
+  releases entries before its current code; fixed capacity bounds retained
+  code, generations, and cells, and collisions can change performance but
+  never meaning. Every hit still enters the single `executeResolved` tail, so
+  privacy, effect checks, trace metadata, state authority, and generation
+  pinning are unchanged.
 - **A module's construction boundary passes values, never environments.** An
   image holds one `Environment` — its own definitions — and resolution goes
   module then core. Nothing is snapshotted at construction, so there is no
@@ -768,6 +813,15 @@ allocation failure interrupt it at bounded intervals.
   sorting is one parameterized `MergeSortCursor`; reflection name ordering
   and language `grade` supply only their payload and resumable comparator,
   so resumption and stability have one implementation.
+- **Nested continuation uses one allowance.** A parent that may continue after
+  a child cursor completes passes a single `WorkBudget` through that child;
+  it never guesses consumption from an integer originally handed down. The
+  membership-to-structural-match and membership-to-result-materializer paths
+  are production instances: parent frames, comparison actions, and result
+  writes charge the same allowance, so child completion can batch into the next
+  parent transition while exhaustion remains a hard scheduler-visible
+  boundary. `ValueMaterializer.advance` remains the standalone count-taking
+  shell; nested scheduler-visible composition uses `advanceWithBudget`.
 - **Aggregate algorithms belong to their value owner.** `list.zig` owns
   specialization plus generic, codepoint, byte, integer, float, and symbol
   materializers. Every blocking list constructor drives one of those same
@@ -1458,7 +1512,7 @@ all. Per-application guard cost is O(phrase length) against
 O(n) work, with no cache and no invalidation. A combinator may resolve its
 quotation's words once at entry to choose a fused kernel — that snapshot
 is scoped to the recognition guard only; the generic path keeps full
-per-application late binding, and resolutions are never cached.
+per-application late binding, and recognizer guards never retain resolutions.
 
 The standard-library placement rule is deliberately asymmetric: implement
 a word in the prelude when its definition in ecl is compact, or when its

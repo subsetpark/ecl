@@ -240,6 +240,7 @@ const SessionCore = struct {
     requested_exit: ?u8 = null,
     last_max_frames: usize = 0,
     last_polls: u64 = 0,
+    last_root_execution_metrics: if (machine.root_execution_metrics_enabled) machine.RootExecutionMetrics else void = if (machine.root_execution_metrics_enabled) .{} else {},
     idiom_mode: machine.IdiomMode = .automatic,
     native_diagnostics: bool = false,
     last_idiom_hits: u64 = 0,
@@ -542,6 +543,8 @@ pub const Session = enum(usize) {
         core.stack = unit.takeStack();
         core.last_max_frames = unit.max_frames;
         core.last_polls = unit.polls;
+        if (comptime machine.root_execution_metrics_enabled)
+            core.last_root_execution_metrics = unit.root_execution_metrics;
         core.requested_exit = unit.exitStatus();
         core.last_idiom_hits = unit.idiom_hits;
         unit.deinit();
@@ -804,6 +807,15 @@ pub const Session = enum(usize) {
         return self.coreState().scheduler.timerEntryCount();
     }
 };
+
+/// Observation surface present only in a separately compiled counter artifact.
+/// Ordinary runtime and test modules receive an empty namespace, not a
+/// representation-inspection method on Session.
+pub const RootExecutionObservation = if (machine.root_execution_metrics_enabled) struct {
+    pub fn last(runtime: *const Session) machine.RootExecutionMetrics {
+        return runtime.coreState().last_root_execution_metrics;
+    }
+} else struct {};
 
 /// Terminal authority for the line editor: prompts, named effects, candidate
 /// lists, and — only where the row can actually be measured — single-row

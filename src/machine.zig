@@ -1,5 +1,6 @@
 //! Defunctionalized CEK evaluator, boundary unwinding, and error dicts.
 const std = @import("std");
+const session_options = @import("session_options");
 const value = @import("value.zig");
 const heap = @import("heap.zig");
 const list = @import("list.zig");
@@ -2162,6 +2163,23 @@ comptime {
     if (@sizeOf(WorkDriver) > 80) @compileError("WorkDriver exceeds its fixed frame budget");
 }
 
+/// Opt-in root-Unit counters for release-mode runtime characterization.
+/// Ordinary runtime and test modules compile every recording branch away; a
+/// separate benchmark module enables them so counters cannot perturb timing.
+pub const RootExecutionMetrics = struct {
+    logical_transitions: u64 = 0,
+    driver_resumes: u64 = 0,
+    application_resumes: u64 = 0,
+    scheduler_handoffs: u64 = 0,
+    qualified_cache_hits: u64 = 0,
+    qualified_cache_misses: u64 = 0,
+    qualified_cache_heals: u64 = 0,
+    local_cache_hits: u64 = 0,
+    local_cache_misses: u64 = 0,
+};
+
+pub const root_execution_metrics_enabled = session_options.instrument_root_execution;
+
 pub const Unit = struct {
     const TerminalState = union(enum) {
         evaluating,
@@ -2305,6 +2323,8 @@ pub const Unit = struct {
     fuel: u32 = fuel_quantum,
     kernel_fuel: u32 = kernel_poll_quantum,
     polls: u64 = 0,
+    root_execution_metrics: if (root_execution_metrics_enabled) RootExecutionMetrics else void = if (root_execution_metrics_enabled) .{} else {},
+    module_call_sites: ModuleCallSiteCache = .{},
     max_frames: usize = 0,
     entry_base: usize,
     stack_base: usize,
@@ -2792,6 +2812,7 @@ pub const Unit = struct {
     }
 
     pub fn deinit(self: *Unit) void {
+        self.module_call_sites.deinit(self.releases);
         if (self.current) |current| self.releases.releaseHeader(current.code);
         while (self.frames.pop()) |frame| self.deinitPoppedFrame(frame);
         self.frames.deinit(self.allocator);
@@ -5235,6 +5256,8 @@ pub const Machine = struct {
     fn chargeKernel(self: *Machine, amount: usize) MachineError!bool {
         std.debug.assert(amount <= kernel_poll_quantum);
         if (amount == 0) return false;
+        if (comptime root_execution_metrics_enabled)
+            self.unit.root_execution_metrics.logical_transitions += amount;
         var reached_boundary = false;
         if (amount >= self.unit.kernel_fuel) {
             try self.pollKernel();
@@ -5698,6 +5721,30 @@ pub const Machine = struct {
     }
 
     pub fn executeWord(self: *Machine, word: value.WordRef) MachineError!void {
+        const qualified_call_site = ErrorSite{
+            .code = self.unit.current.?.code,
+            .index = self.unit.active_index,
+        };
+        switch (self.unit.module_call_sites.lookupQualified(
+            self.releaseDomain(),
+            self.unit.module_access,
+            qualified_call_site,
+            word.name,
+        )) {
+            .absent => {},
+            .stale => {
+                if (comptime root_execution_metrics_enabled)
+                    self.unit.root_execution_metrics.qualified_cache_heals += 1;
+            },
+            .hit => |resolution| {
+                if (comptime root_execution_metrics_enabled)
+                    self.unit.root_execution_metrics.qualified_cache_hits += 1;
+                var resolved = resolution;
+                defer resolved.deinit(self.unit.allocator);
+                try executeResolved(self, &resolved);
+                return;
+            },
+        }
         // Acquired only on the `fresh_pin` arm, and handed to the cursor so the
         // pin taken here is the one `scheduleWord` consumes.
         var borrow_pin: ?modules.GenerationPin = null;
@@ -5718,12 +5765,36 @@ pub const Machine = struct {
         // directory walk, the cell, the owner load, and `encloses` are all
         // skipped rather than merely cheapened.
         const running_site = self.unit.current.?.site;
+        const local_context = LocalCacheContext.init(running_site, word.scope);
+        if (local_context) |context| {
+            switch (self.unit.module_call_sites.lookupLocal(
+                qualified_call_site,
+                word.name,
+                context,
+            )) {
+                .absent => {
+                    if (comptime root_execution_metrics_enabled)
+                        self.unit.root_execution_metrics.local_cache_misses += 1;
+                },
+                .stale => unreachable,
+                .hit => |resolution| {
+                    if (comptime root_execution_metrics_enabled)
+                        self.unit.root_execution_metrics.local_cache_hits += 1;
+                    var resolved = resolution;
+                    defer resolved.deinit(self.unit.allocator);
+                    try executeResolved(self, &resolved);
+                    return;
+                },
+            }
+        }
+        const local_cache_scope = if (local_context) |context| context.scope_id else null;
         if (word.scope != 0 and
             @intFromEnum(running_site.resolution_scope_id) == word.scope)
         {
             self.unit.active_word = .plain(word.name);
             try self.startDriver(DispatchDriver{
                 .word = word.name,
+                .call_site = qualified_call_site,
                 .resolution = .init(.init(
                     self,
                     word.name,
@@ -5732,6 +5803,7 @@ pub const Machine = struct {
                     // The activation already holds this chain, so the fast path
                     // acquires nothing -- that is the point of it.
                     null,
+                    local_cache_scope,
                 )),
             });
             return;
@@ -5815,7 +5887,15 @@ pub const Machine = struct {
         borrowed_cell = null;
         try self.startDriver(DispatchDriver{
             .word = word.name,
-            .resolution = .init(.init(self, word.name, written, owned_pin, owned_cell)),
+            .call_site = qualified_call_site,
+            .resolution = .init(.init(
+                self,
+                word.name,
+                written,
+                owned_pin,
+                owned_cell,
+                local_cache_scope,
+            )),
         });
     }
     /// Opens one state application against the invoking word's home slot.
@@ -6229,10 +6309,14 @@ pub fn initializeSource(
 pub fn runSlice(unit: *Unit) MachineError!RunStatus {
     var evaluator = Machine{ .unit = unit };
     defer unit.dropSpareScope();
-    return loop(&evaluator) catch |err| switch (err) {
+    const status = loop(&evaluator) catch |err| switch (err) {
         error.Ecl => return error.Ecl,
         error.OutOfMemory => return error.OutOfMemory,
     };
+    if (comptime root_execution_metrics_enabled) {
+        if (status != .completed) unit.root_execution_metrics.scheduler_handoffs += 1;
+    }
+    return status;
 }
 
 /// Makes the next evaluator entry observe cancellation before executing a
@@ -6274,6 +6358,8 @@ fn loop(self: *Machine) MachineError!RunStatus {
         if (self.unit.hasParkRequest()) return .parked;
         if (self.unit.workDriver()) |driver_ptr| {
             const driver = driver_ptr.*;
+            if (comptime root_execution_metrics_enabled)
+                self.unit.root_execution_metrics.driver_resumes += 1;
             const progress = driver.advance(self) catch |err| {
                 if (err == error.Ecl and self.unit.pendingFailure().site == null) {
                     if (driver.site) |site| self.unit.pendingFailure().site = .{ .token = site };
@@ -6363,6 +6449,8 @@ fn loop(self: *Machine) MachineError!RunStatus {
         self.unit.active_index = current.ip;
         const form = list.atUnchecked(.{ .list = current.code }, current.ip);
         current.ip += 1;
+        if (comptime root_execution_metrics_enabled)
+            self.unit.root_execution_metrics.logical_transitions += 1;
         dispatch(self, form) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.Ecl => {
@@ -6609,6 +6697,7 @@ fn dispatch(self: *Machine, form: Value) MachineError!void {
 }
 const DispatchDriver = struct {
     word: u32,
+    call_site: ?ErrorSite = null,
     resolution: heap.Owned(ResolutionCursor),
 
     /// Started once per word executed, so this is the driver the inline slot
@@ -6622,21 +6711,39 @@ const DispatchDriver = struct {
             .pending => {},
             .complete => |outcome| {
                 const installed = self_machine.unit.workDriver().?;
+                const word = self.word;
                 const request = QualifiedLoadRequest{
-                    .qualified = self.word,
+                    .qualified = word,
                     .continuation = .{ .dispatch = .{
-                        .word = self.word,
+                        .word = word,
                         .site = installed.site,
                         .trace_parent = installed.trace_parent,
                     } },
                 };
                 self.resolution.deinit(self_machine.releaseDomain(), self_machine.allocator());
                 const allocator = self_machine.unit.allocator;
+                const call_site = self.call_site;
                 self_machine.retireDriver(self);
                 switch (outcome) {
                     .resolved => |resolution| {
                         var resolved = resolution;
                         defer resolved.deinit(allocator);
+                        if (comptime root_execution_metrics_enabled) {
+                            if (resolved.execution_generation != null) {
+                                self_machine.unit.root_execution_metrics.qualified_cache_misses += 1;
+                            }
+                        }
+                        if (resolved.takeCallSiteCache()) |candidate_value| {
+                            var candidate = candidate_value;
+                            if (call_site) |site| {
+                                self_machine.unit.module_call_sites.install(
+                                    self_machine.releaseDomain(),
+                                    site,
+                                    word,
+                                    candidate,
+                                );
+                            } else candidate.deinit();
+                        }
                         try executeResolved(self_machine, &resolved);
                         return .detached;
                     },
@@ -6847,6 +6954,7 @@ fn continueQualifiedRequest(
             evaluator.setActiveWord(.plain(dispatch_request.word));
             try evaluator.startDriver(DispatchDriver{
                 .word = dispatch_request.word,
+                .call_site = dispatch_request.site,
                 .resolution = .init(.initAtCurrent(evaluator, dispatch_request.word)),
             });
             if (dispatch_request.site) |site|
@@ -7054,6 +7162,188 @@ fn homeTraceWord(home: *const modules.ModuleHome, local: intern.BindingName) int
     const name = home.name() orelse return .plain(intern.bindingId(local));
     return .moduleLocal(name, local);
 }
+
+const CallSiteCacheCandidate = union(enum) {
+    qualified: struct {
+        generation: modules.GenerationGuard,
+        cell: env.BindingCellHandle,
+    },
+    local: struct {
+        scope_id: env.ScopeId,
+        cell: env.BindingCellHandle,
+    },
+
+    fn deinit(self: *CallSiteCacheCandidate) void {
+        switch (self.*) {
+            .qualified => |*qualified| {
+                qualified.cell.deinit();
+                qualified.generation.deinit();
+            },
+            .local => |*local| local.cell.deinit(),
+        }
+        self.* = undefined;
+    }
+};
+
+const CallSiteCacheLookup = union(enum) {
+    absent,
+    stale,
+    hit: Resolution,
+};
+
+/// Proof that this occurrence resolves directly in the exact module root the
+/// running activation already owns. Scope and home travel together so a cache
+/// hit cannot accidentally borrow one image's cell and another registration's
+/// state authority.
+const LocalCacheContext = struct {
+    scope_id: env.ScopeId,
+    home: *modules.ModuleHome,
+
+    fn init(site: ExecutionSite, word_scope: u32) ?LocalCacheContext {
+        if (word_scope == 0 or
+            @intFromEnum(site.resolution_scope_id) != word_scope)
+        {
+            return null;
+        }
+        const scope = site.resolution_scope orelse return null;
+        if (!scope.isModuleRoot()) return null;
+        return .{
+            .scope_id = site.resolution_scope_id,
+            .home = site.home orelse return null,
+        };
+    }
+};
+
+/// A small, allocation-free lookaside indexed by the actual source call site.
+/// Each entry owns its code root and one guarded target. Two ways keep a
+/// caller's qualified site and its callee's local site from evicting each other
+/// when their hashes share a set. Capacity remains a hard memory bound;
+/// collisions lose performance only.
+const ModuleCallSiteCache = struct {
+    const capacity = 16;
+    const ways = 2;
+    const set_count = capacity / ways;
+    const Entry = struct {
+        code: OwnedCode,
+        index: u32,
+        word: u32,
+        target: CallSiteCacheCandidate,
+
+        fn deinit(self: *Entry, releases: *heap.ReleaseDomain) void {
+            self.target.deinit();
+            self.code.deinit(releases);
+            self.* = undefined;
+        }
+    };
+
+    entries: [capacity]?Entry = .{null} ** capacity,
+    victims: [set_count]u1 = .{0} ** set_count,
+
+    fn set(site: ErrorSite) usize {
+        return (@intFromPtr(site.code) >> 4 ^ site.index) % set_count;
+    }
+
+    fn find(self: *ModuleCallSiteCache, site: ErrorSite, word: u32) ?usize {
+        const base = set(site) * ways;
+        for (0..ways) |way| {
+            const index = base + way;
+            const candidate = &(self.entries[index] orelse continue);
+            if (candidate.code.borrow() == site.code and
+                candidate.index == site.index and
+                candidate.word == word)
+            {
+                return index;
+            }
+        }
+        return null;
+    }
+
+    fn lookupQualified(
+        self: *ModuleCallSiteCache,
+        releases: *heap.ReleaseDomain,
+        access: *const modules.ExecutionAccess,
+        site: ErrorSite,
+        word: u32,
+    ) CallSiteCacheLookup {
+        const slot_index = self.find(site, word) orelse return .absent;
+        const candidate = &(self.entries[slot_index] orelse return .absent);
+        const qualified = switch (candidate.target) {
+            .qualified => |*target| target,
+            .local => return .absent,
+        };
+        const execution = qualified.generation.tryEnterCurrent(access) orelse {
+            candidate.deinit(releases);
+            self.entries[slot_index] = null;
+            return .stale;
+        };
+        const lease = qualified.cell.load();
+        const home = execution.home(access);
+        return .{ .hit = .{
+            .lease = lease,
+            .execution_generation = execution,
+            .home = home,
+            .trace_word = homeTraceWord(home, lease.traceWord().?),
+            .origin = moduleResolutionOrigin(home),
+        } };
+    }
+
+    fn lookupLocal(
+        self: *ModuleCallSiteCache,
+        site: ErrorSite,
+        word: u32,
+        context: LocalCacheContext,
+    ) CallSiteCacheLookup {
+        const slot_index = self.find(site, word) orelse return .absent;
+        const candidate = &(self.entries[slot_index] orelse return .absent);
+        const local = switch (candidate.target) {
+            .local => |*target| target,
+            .qualified => return .absent,
+        };
+        if (local.scope_id != context.scope_id) return .absent;
+        const lease = local.cell.load();
+        return .{ .hit = .{
+            .lease = lease,
+            .execution_generation = null,
+            .home = context.home,
+            .trace_word = homeTraceWord(context.home, lease.traceWord().?),
+            .origin = moduleResolutionOrigin(context.home),
+        } };
+    }
+
+    fn install(
+        self: *ModuleCallSiteCache,
+        releases: *heap.ReleaseDomain,
+        site: ErrorSite,
+        word: u32,
+        candidate: CallSiteCacheCandidate,
+    ) void {
+        const set_index = set(site);
+        const base = set_index * ways;
+        const destination_index = self.find(site, word) orelse empty: {
+            for (0..ways) |way| {
+                const index = base + way;
+                if (self.entries[index] == null) break :empty index;
+            }
+            const victim = base + self.victims[set_index];
+            self.victims[set_index] ^= 1;
+            break :empty victim;
+        };
+        const destination = &self.entries[destination_index];
+        if (destination.*) |*previous| previous.deinit(releases);
+        destination.* = .{
+            .code = .retain(site.code),
+            .index = site.index,
+            .word = word,
+            .target = candidate,
+        };
+    }
+
+    fn deinit(self: *ModuleCallSiteCache, releases: *heap.ReleaseDomain) void {
+        for (&self.entries) |*entry| if (entry.*) |*live| live.deinit(releases);
+        self.* = undefined;
+    }
+};
+
 /// Which chain a failed lookup searched, reported as `'scope` in an
 /// undefined-word error.
 /// The chain a word with `written` as its resolution scope searches. A
@@ -7115,6 +7405,7 @@ pub const Resolution = struct {
     /// without exception: reading the unit's root instead was wrong for
     /// anything defined in a child scope, such as inside one `@attempt`.
     defining_scope: ?*env.Scope = null,
+    call_site_cache: ?CallSiteCacheCandidate = null,
     /// Moves the borrow's reference out, so `deinit` will not release it.
     pub fn takeBorrowPin(self: *Resolution) ?modules.GenerationPin {
         const owned = self.borrow_pin;
@@ -7129,6 +7420,7 @@ pub const Resolution = struct {
     }
 
     pub fn deinit(self: *Resolution, _: std.mem.Allocator) void {
+        if (self.call_site_cache) |*candidate| candidate.deinit();
         self.lease.deinit();
         if (self.execution_generation) |*generation| generation.deinit();
         // Released only if the dispatch never scheduled a body; `scheduleWord`
@@ -7136,6 +7428,12 @@ pub const Resolution = struct {
         if (self.borrow_pin) |*pin| pin.deinit();
         if (self.borrowed_cell) |cell| cell.releaseBorrow();
         self.* = undefined;
+    }
+
+    fn takeCallSiteCache(self: *Resolution) ?CallSiteCacheCandidate {
+        const candidate = self.call_site_cache;
+        self.call_site_cache = null;
+        return candidate;
     }
 };
 
@@ -7240,6 +7538,9 @@ pub const ResolutionCursor = struct {
     /// The foreign scope this dispatch borrowed, if any. Rides here so the
     /// activation that ends up reading the scope is the one that releases it.
     borrowed_cell: ?*env.ScopeCell = null,
+    /// Present only for a source occurrence resolving directly in the running
+    /// module root. The activation is the liveness proof for this scope.
+    local_cache_scope: ?env.ScopeId = null,
 
     /// A cursor for a name that genuinely means "whatever the running chain
     /// says": reflection like `which`, `see`, and `doc`, and the fallback paths
@@ -7253,7 +7554,7 @@ pub const ResolutionCursor = struct {
     /// module's own shadow was the answer. Reaching this from a dispatch path
     /// now means visibly discarding a `WordRef` for its bare id, which greps.
     pub fn initAtCurrent(evaluator: *Machine, word: u32) ResolutionCursor {
-        return .init(evaluator, word, evaluator.unit.current.?.resolutionScope(), null, null);
+        return .init(evaluator, word, evaluator.unit.current.?.resolutionScope(), null, null, null);
     }
 
     pub fn init(
@@ -7262,11 +7563,13 @@ pub const ResolutionCursor = struct {
         written: ?*env.Scope,
         borrow_pin: ?modules.GenerationPin,
         borrowed_cell: ?*env.ScopeCell,
+        local_cache_scope: ?env.ScopeId,
     ) ResolutionCursor {
         const spelling = intern.get(word);
         return .{
             .borrow_pin = borrow_pin,
             .borrowed_cell = borrowed_cell,
+            .local_cache_scope = local_cache_scope,
             .allocator = evaluator.unit.allocator,
             .registry = evaluator.unit.inherited.registry,
             .module_access = evaluator.unit.module_access,
@@ -7339,9 +7642,28 @@ pub const ResolutionCursor = struct {
         return image_home;
     }
 
-    fn directResult(self: *ResolutionCursor, lease: env.BindingLease) Resolution {
+    fn directResult(
+        self: *ResolutionCursor,
+        lease: env.BindingLease,
+        captured_cell: ?env.BindingCellHandle,
+    ) Resolution {
         const local = lease.traceWord();
         const home = if (local == null) null else self.homeForLocalHit();
+        var cell = captured_cell;
+        const cache = cache: {
+            const scope_id = self.local_cache_scope orelse {
+                if (cell) |*owned| owned.deinit();
+                break :cache null;
+            };
+            if (local == null) {
+                if (cell) |*owned| owned.deinit();
+                break :cache null;
+            }
+            break :cache CallSiteCacheCandidate{ .local = .{
+                .scope_id = scope_id,
+                .cell = cell.?,
+            } };
+        };
         return .{
             .lease = lease,
             .execution_generation = null,
@@ -7354,6 +7676,7 @@ pub const ResolutionCursor = struct {
             // supplies; anything else resolves against the scope it was found
             // in.
             .defining_scope = if (home != null) null else self.searched_scope,
+            .call_site_cache = cache,
         };
     }
 
@@ -7363,9 +7686,21 @@ pub const ResolutionCursor = struct {
     fn generationResult(
         self: *ResolutionCursor,
         lease: env.BindingLease,
+        captured_cell: ?env.BindingCellHandle,
     ) Resolution {
         var generation_lease = self.generation.?;
         self.generation = null;
+        var cell = captured_cell;
+        const cache = cache: {
+            if (generation_lease.name() != self.prefix.?) {
+                if (cell) |*owned| owned.deinit();
+                break :cache null;
+            }
+            break :cache CallSiteCacheCandidate{ .qualified = .{
+                .generation = generation_lease.guard(),
+                .cell = cell.?,
+            } };
+        };
         const execution_generation = generation_lease.enterExecution(self.module_access);
         const home = execution_generation.home(self.module_access);
         return .{
@@ -7374,6 +7709,7 @@ pub const ResolutionCursor = struct {
             .home = home,
             .trace_word = homeTraceWord(home, lease.traceWord().?),
             .origin = moduleResolutionOrigin(home),
+            .call_site_cache = cache,
         };
     }
 
@@ -7468,9 +7804,11 @@ pub const ResolutionCursor = struct {
                         break :result .{ .complete = .{ .unresolved = .qualified } };
                     };
                     self.qualified_name = intern.qualifiedName(self.prefix.?, self.export_name.?);
-                    self.work = .{ .export_lookup = self.generation.?.resolveCursor(
+                    var export_lookup = self.generation.?.resolveCursor(
                         intern.bindingId(intern.qualifiedBinding(self.qualified_name.?)),
-                    ) };
+                    );
+                    export_lookup.captureCell();
+                    self.work = .{ .export_lookup = export_lookup };
                     self.phase = .qualified_export;
                     break :result .pending;
                 },
@@ -7478,6 +7816,10 @@ pub const ResolutionCursor = struct {
             .qualified_export => switch (self.work.export_lookup.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
+                    const captured_cell = if (maybe_lease != null)
+                        self.work.export_lookup.takeCell()
+                    else
+                        null;
                     self.work.deinit();
                     const lease = maybe_lease orelse {
                         self.releaseGeneration();
@@ -7485,7 +7827,9 @@ pub const ResolutionCursor = struct {
                         break :result .{ .complete = .{ .unresolved = .qualified } };
                     };
                     self.phase = .complete;
-                    break :result .{ .complete = .{ .resolved = self.generationResult(lease) } };
+                    break :result .{ .complete = .{
+                        .resolved = self.generationResult(lease, captured_cell),
+                    } };
                 },
             },
             .scope => result: {
@@ -7497,7 +7841,9 @@ pub const ResolutionCursor = struct {
                 self.scope = current.parent;
                 if (current.environmentOrNull()) |environment| {
                     self.searched_scope = current;
-                    self.work = .{ .direct = environment.directLookupCursor(self.word) };
+                    var direct = environment.directLookupCursor(self.word);
+                    if (self.local_cache_scope != null) direct.captureCell();
+                    self.work = .{ .direct = direct };
                     self.phase = .direct;
                 }
                 break :result .pending;
@@ -7505,10 +7851,16 @@ pub const ResolutionCursor = struct {
             .direct => switch (self.work.direct.advance()) {
                 .pending => .pending,
                 .complete => |maybe_lease| result: {
+                    const captured_cell = if (maybe_lease != null)
+                        self.work.direct.takeCell()
+                    else
+                        null;
                     self.work.deinit();
                     if (maybe_lease) |lease| {
                         self.phase = .complete;
-                        break :result .{ .complete = .{ .resolved = self.directResult(lease) } };
+                        break :result .{ .complete = .{
+                            .resolved = self.directResult(lease, captured_cell),
+                        } };
                     }
                     self.searched_scope = null;
                     self.phase = .scope;
@@ -7809,6 +8161,8 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                     break :blk .{ .isolated, window };
                 },
             };
+            if (comptime root_execution_metrics_enabled)
+                self.unit.root_execution_metrics.application_resumes += 1;
             const next = continuation.resume_fn(
                 self,
                 continuation.context,

@@ -505,6 +505,7 @@ const IdiomDriver = struct {
                         resolutionScopeForOrigin(evaluator, self.candidate, .trusted),
                         null,
                         null,
+                        null,
                     ));
                 },
                 .word => |expected_word| {
@@ -536,6 +537,7 @@ const IdiomDriver = struct {
                         evaluator,
                         word.name,
                         resolutionScopeForOrigin(evaluator, self.candidate, expected_word.origin),
+                        null,
                         null,
                         null,
                     ));

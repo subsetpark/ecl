@@ -769,9 +769,7 @@ test "ecl fmt formats files and stdin without evaluating source" {
     const input = "(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb " ++
         "cccccccccccccccccccccccccccccccccccccccc) {'kind 'user} raise";
     const expected = "(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n" ++
-        " cccccccccccccccccccccccccccccccccccccccc)\n" ++
-        "{'kind 'user}\n" ++
-        "raise\n";
+        " cccccccccccccccccccccccccccccccccccccccc) {'kind 'user} raise\n";
 
     var temporary = std.testing.tmpDir(.{});
     defer temporary.cleanup();

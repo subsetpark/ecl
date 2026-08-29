@@ -468,6 +468,30 @@ pub const BindingCell = struct {
         return result;
     }
 };
+
+/// An owned reference to one stable binding cell. Loading always rereads the
+/// cell's current snapshot; consumers never cache a binding payload.
+pub const BindingCellHandle = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn initRetained(binding_cell: *BindingCell) BindingCellHandle {
+        binding_cell.retain();
+        return @enumFromInt(@intFromPtr(binding_cell));
+    }
+    fn cell(self: BindingCellHandle) *BindingCell {
+        std.debug.assert(self != .consumed);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    pub fn load(self: BindingCellHandle) BindingLease {
+        return self.cell().load();
+    }
+    pub fn deinit(self: *BindingCellHandle) void {
+        if (self.* == .consumed) return;
+        self.cell().release();
+        self.* = .consumed;
+    }
+};
 const Shape = struct {
     const NameMap = poll.FixedMap(intern.NamespaceName, *BindingCell);
     names: NameMap,
@@ -692,9 +716,20 @@ pub const DirectLookupCursor = struct {
     shape: ShapeLease,
     lookup: ?Shape.NameMap.RawLookupCursor,
     validation: ?intern.NamespaceCursor,
+    capture_cell: bool = false,
+    cell: ?BindingCellHandle = null,
     pub fn deinit(self: *DirectLookupCursor) void {
+        if (self.cell) |*cell| cell.deinit();
         self.shape.deinit();
         self.* = undefined;
+    }
+    pub fn captureCell(self: *DirectLookupCursor) void {
+        self.capture_cell = true;
+    }
+    pub fn takeCell(self: *DirectLookupCursor) ?BindingCellHandle {
+        const result = self.cell;
+        self.cell = null;
+        return result;
     }
     pub fn advance(self: *DirectLookupCursor) DirectLookupProgress {
         if (self.validation) |*validation| return switch (validation.advance()) {
@@ -712,7 +747,11 @@ pub const DirectLookupCursor = struct {
         const lookup = &(self.lookup orelse return .{ .complete = null });
         return switch (lookup.advance()) {
             .pending => .pending,
-            .complete => |cell| .{ .complete = if (cell) |binding_cell| binding_cell.load() else null },
+            .complete => |cell| result: {
+                const binding_cell = cell orelse break :result .{ .complete = null };
+                if (self.capture_cell) self.cell = .initRetained(binding_cell);
+                break :result .{ .complete = binding_cell.load() };
+            },
         };
     }
 };

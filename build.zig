@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
     mod.addImport("native-abi", native_abi);
     const runtime_options = b.addOptions();
     runtime_options.addOption(usize, "default_worker_count", 1);
+    runtime_options.addOption(bool, "instrument_root_execution", false);
     mod.addOptions("session_options", runtime_options);
 
     const native_sdk = b.addModule("ecl-native", .{
@@ -229,6 +230,7 @@ pub fn build(b: *std.Build) void {
     });
     const test_options = b.addOptions();
     test_options.addOption(usize, "default_worker_count", 1);
+    test_options.addOption(bool, "instrument_root_execution", false);
     test_mod.addOptions("session_options", test_options);
     test_mod.addImport("minish", minish);
     test_mod.addImport("native-abi", native_abi);
@@ -282,6 +284,11 @@ pub fn build(b: *std.Build) void {
         test_name: []const u8,
         description: []const u8,
     }{
+        .{
+            .step_name = "fuzz-render-cursor",
+            .test_name = "fuzz: moved render cursor preserves its inline first action",
+            .description = "Fuzz RenderCursor relocation with an inline first action",
+        },
         .{
             .step_name = "fuzz-reader",
             .test_name = "fuzz: reader accepts arbitrary bounded input",
@@ -435,6 +442,62 @@ pub fn build(b: *std.Build) void {
     );
     bench_step.dependOn(&run_bench.step);
 
+    const workdriver_bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/bench_workdrivers.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    workdriver_bench_mod.addImport("ecl", mod);
+    workdriver_bench_mod.link_libc = true;
+    const workdriver_bench_exe = b.addExecutable(.{
+        .name = "ecl-bench-workdrivers",
+        .root_module = workdriver_bench_mod,
+    });
+    const run_workdriver_timing = b.addRunArtifact(workdriver_bench_exe);
+    run_workdriver_timing.addArg("--timing");
+    if (b.args) |args| run_workdriver_timing.addArgs(args);
+
+    const instrumented_options = b.addOptions();
+    instrumented_options.addOption(usize, "default_worker_count", 1);
+    instrumented_options.addOption(bool, "instrument_root_execution", true);
+    const instrumented_ecl = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    instrumented_ecl.link_libc = true;
+    instrumented_ecl.addImport("native-abi", native_abi);
+    instrumented_ecl.addImport("ecl-native", native_sdk);
+    instrumented_ecl.addOptions("session_options", instrumented_options);
+    const workdriver_counter_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/bench_workdrivers.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    workdriver_counter_mod.addImport("ecl", instrumented_ecl);
+    workdriver_counter_mod.link_libc = true;
+    const workdriver_counter_exe = b.addExecutable(.{
+        .name = "ecl-bench-workdriver-counters",
+        .root_module = workdriver_counter_mod,
+    });
+    const run_workdriver_counters = b.addRunArtifact(workdriver_counter_exe);
+    run_workdriver_counters.addArg("--counters");
+    if (b.args) |args| run_workdriver_counters.addArgs(args);
+    run_workdriver_counters.step.dependOn(&run_workdriver_timing.step);
+    const workdriver_bench_step = b.step(
+        "bench-workdrivers",
+        "Characterize WorkDriver and scheduler overhead (ReleaseSafe/ReleaseFast only)",
+    );
+    switch (optimize) {
+        .ReleaseSafe, .ReleaseFast => workdriver_bench_step.dependOn(&run_workdriver_counters.step),
+        else => {
+            const release_required = b.addFail(
+                "WorkDriver benchmarks require -Doptimize=ReleaseSafe or ReleaseFast",
+            );
+            workdriver_bench_step.dependOn(&release_required.step);
+        },
+    }
+
     const audit_step = b.step("source-audit", "Check source architecture");
     audit_step.dependOn(&run_audit.step);
     fuzz_step.dependOn(&run_audit.step);
@@ -503,6 +566,7 @@ pub fn build(b: *std.Build) void {
         });
         const worker_options = b.addOptions();
         worker_options.addOption(usize, "default_worker_count", worker_count);
+        worker_options.addOption(bool, "instrument_root_execution", false);
         worker_test_mod.addOptions("session_options", worker_options);
         worker_test_mod.addImport("minish", minish);
         worker_test_mod.addImport("native-abi", native_abi);
@@ -683,6 +747,7 @@ pub fn build(b: *std.Build) void {
         .filters = &.{
             // Whole verification sources whose every test is fast.
             "session.test.",
+            "poll.test.",
             "heap.test.",
             "list.test.",
             "dict.test.",

@@ -538,7 +538,7 @@ test "module sources: formatter and standard modules use @defm" {
     );
     const anonymous = try formatter.format(std.testing.allocator, "((1) 'x def) @module\n");
     defer std.testing.allocator.free(anonymous);
-    try std.testing.expectEqualStrings("(\n ### def x\n (1) 'x def)\n@module\n", anonymous);
+    try std.testing.expectEqualStrings("(\n ### def x\n (1) 'x def) @module\n", anonymous);
 
     // Every embedded standard module is registration-driven, enumerated from
     // the manifest rather than by hand so a new module is covered the day it
@@ -615,4 +615,20 @@ test "module values: an escaped quotation names the image it was written in" {
     try expectStack(&runtime, "escaped call", "1");
     try expectOk(&runtime, "'going unmodule");
     try expectErrorContains(&runtime, "escaped call", &.{ "'kind 'domain", "retired" });
+}
+
+test "module values: local call sites do not grant an escaped quotation the caller home" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+
+    try expectStack(
+        &runtime,
+        "(0 ((1 + dup without) within) 'tick defp " ++
+            "((tick)) 'q def (q call) 'warm def (q) 'escape def) " ++
+            "'local-cache-owner @defm " ++
+            "((|q| q call) 'apply def) 'foreign-caller @defm " ++
+            "local-cache-owner.warm local-cache-owner.escape 'held set " ++
+            "(held foreign-caller.apply) @attempt 'err at 'kind at",
+        "1 'domain",
+    );
 }
