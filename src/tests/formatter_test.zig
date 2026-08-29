@@ -102,6 +102,13 @@ test "multiline modules break only their local top-level run" {
         "(\n ### def x\n (1) 'x def) @module dup 'stats register wrap\n",
     );
     try expectParseEquivalent(source);
+
+    const trailing_break = "((1) 'x def\n) @module dup 'stats register wrap";
+    try expectFormat(
+        trailing_break,
+        "(\n ### def x\n (1) 'x def\n) @module dup 'stats register wrap\n",
+    );
+    try expectParseEquivalent(trailing_break);
 }
 
 test "long top-level runs pack locally to the configured width" {

@@ -488,7 +488,15 @@ pub fn build(b: *std.Build) void {
         "bench-workdrivers",
         "Characterize WorkDriver and scheduler overhead (ReleaseSafe/ReleaseFast only)",
     );
-    workdriver_bench_step.dependOn(&run_workdriver_counters.step);
+    switch (optimize) {
+        .ReleaseSafe, .ReleaseFast => workdriver_bench_step.dependOn(&run_workdriver_counters.step),
+        else => {
+            const release_required = b.addFail(
+                "WorkDriver benchmarks require -Doptimize=ReleaseSafe or ReleaseFast",
+            );
+            workdriver_bench_step.dependOn(&release_required.step);
+        },
+    }
 
     const audit_step = b.step("source-audit", "Check source architecture");
     audit_step.dependOn(&run_audit.step);

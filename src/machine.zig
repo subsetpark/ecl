@@ -6711,10 +6711,11 @@ const DispatchDriver = struct {
             .pending => {},
             .complete => |outcome| {
                 const installed = self_machine.unit.workDriver().?;
+                const word = self.word;
                 const request = QualifiedLoadRequest{
-                    .qualified = self.word,
+                    .qualified = word,
                     .continuation = .{ .dispatch = .{
-                        .word = self.word,
+                        .word = word,
                         .site = installed.site,
                         .trace_parent = installed.trace_parent,
                     } },
@@ -6738,7 +6739,7 @@ const DispatchDriver = struct {
                                 self_machine.unit.module_call_sites.install(
                                     self_machine.releaseDomain(),
                                     site,
-                                    self.word,
+                                    word,
                                     candidate,
                                 );
                             } else candidate.deinit();

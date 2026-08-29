@@ -504,16 +504,20 @@ pub fn ChunkStack(comptime T: type) type {
         }
 
         pub fn pop(self: *Self) ?T {
-            if (self.top) |chunk| {
-                if (chunk.len != 0) {
-                    chunk.len -= 1;
-                    const result = chunk.items[chunk.len];
-                    if (chunk.len == 0 and chunk.previous != null) {
-                        self.top = chunk.previous;
+            if (self.newestNonemptyChunk()) |location| {
+                const chunk = location.chunk;
+                chunk.len -= 1;
+                const result = chunk.items[chunk.len];
+                if (chunk.len == 0) {
+                    if (chunk.previous) |previous| {
+                        if (location.newer) |newer|
+                            newer.previous = previous
+                        else
+                            self.top = previous;
                         self.allocator.destroy(chunk);
                     }
-                    return result;
                 }
+                return result;
             }
             return switch (self.first) {
                 .empty => null,
@@ -525,9 +529,8 @@ pub fn ChunkStack(comptime T: type) type {
         }
 
         pub fn topPtr(self: *Self) ?*T {
-            if (self.top) |chunk| {
-                if (chunk.len != 0) return &chunk.items[chunk.len - 1];
-            }
+            if (self.newestNonemptyChunk()) |location|
+                return &location.chunk.items[location.chunk.len - 1];
             return switch (self.first) {
                 .empty => null,
                 .item => |*item| item,
@@ -535,7 +538,9 @@ pub fn ChunkStack(comptime T: type) type {
         }
 
         pub fn isEmpty(self: *const Self) bool {
-            if (self.top) |chunk| if (chunk.len != 0) return false;
+            var chunk = self.top;
+            while (chunk) |current| : (chunk = current.previous)
+                if (current.len != 0) return false;
             return self.firstEmpty();
         }
 
@@ -549,6 +554,25 @@ pub fn ChunkStack(comptime T: type) type {
             // pushReserved initializes the corresponding element.
             chunk.* = .{ .previous = self.top, .len = 0, .items = undefined };
             self.top = chunk;
+        }
+
+        const ChunkLocation = struct {
+            chunk: *Chunk,
+            newer: ?*Chunk,
+        };
+
+        /// `reserve` may stage an empty newest chunk while older entries stay
+        /// live. Logical stack access skips that reserved storage without
+        /// consuming it, and remembers the newer link so an older chunk that
+        /// becomes empty can still be unlinked.
+        fn newestNonemptyChunk(self: *Self) ?ChunkLocation {
+            var newer: ?*Chunk = null;
+            var chunk = self.top;
+            while (chunk) |current| : (chunk = current.previous) {
+                if (current.len != 0) return .{ .chunk = current, .newer = newer };
+                newer = current;
+            }
+            return null;
         }
 
         fn pushHeap(self: *Self, item: T) void {
@@ -592,6 +616,26 @@ test "ChunkStack inline entry preserves deep LIFO and reserved pushes" {
         next -= 1;
         try std.testing.expectEqual(@as(?usize, next), stack.pop());
     }
+    try std.testing.expect(stack.isEmpty());
+}
+
+test "ChunkStack reserve does not hide the logical top" {
+    var stack = ChunkStack(usize).init(std.testing.allocator);
+    defer stack.deinit();
+
+    try stack.push(1);
+    try stack.push(2);
+    try stack.reserve(256);
+
+    stack.topPtr().?.* = 3;
+    try std.testing.expectEqual(@as(?usize, 3), stack.pop());
+    try std.testing.expectEqual(@as(?usize, 1), stack.pop());
+    try std.testing.expect(stack.isEmpty());
+
+    stack.pushReserved(4);
+    stack.pushReserved(5);
+    try std.testing.expectEqual(@as(?usize, 5), stack.pop());
+    try std.testing.expectEqual(@as(?usize, 4), stack.pop());
     try std.testing.expect(stack.isEmpty());
 }
 

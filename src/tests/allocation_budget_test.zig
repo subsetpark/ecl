@@ -144,12 +144,14 @@ fn expectBudget(case: Case) !void {
         );
         return error.NonMonotonicAllocation;
     }
-    const marginal = (at_large - at_small) / (large - small);
-    if (marginal > case.per_element) {
+    const allocation_delta = at_large - at_small;
+    const element_delta = large - small;
+    const allocation_budget = case.per_element * element_delta;
+    if (allocation_delta > allocation_budget) {
         std.debug.print(
-            "\n{s}: {d} allocations per element, budget {d}" ++
+            "\n{s}: {d} marginal allocations, budget {d}" ++
                 " ({d} at {d} elements, {d} at {d})\n",
-            .{ case.name, marginal, case.per_element, at_small, small, at_large, large },
+            .{ case.name, allocation_delta, allocation_budget, at_small, small, at_large, large },
         );
         return error.AllocationBudgetExceeded;
     }

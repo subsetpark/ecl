@@ -111,7 +111,10 @@ Recorded target-specific results and their current disposition live in
   inline driver slot before polling without leaving a self-link at its old
   address. Deeper storage remains non-relocating; `reserve` covers the inline
   slot and heap tail as one ownership-atomic capacity promise, and retirement
-  links heap chunks only to other heap chunks.
+  links heap chunks only to other heap chunks. When that promise stages an
+  empty newest chunk, logical stack access skips it without consuming the
+  reservation, and popping older entries unlinks emptied chunks through the
+  newer link rather than stranding the reserved capacity or hiding the top.
 - **Dicts:** keys vector + values vector (insertion order for free) +
   cached per-entry hashes + linear scan below ~16 entries, one u32 hash
   index above. Hash agrees with `=`: numerics hash by numeric value (2 and

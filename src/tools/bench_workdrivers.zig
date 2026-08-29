@@ -457,12 +457,7 @@ pub fn main(init: std.process.Init) !void {
     var args = std.process.Args.Iterator.init(init.minimal.args);
     defer args.deinit();
     _ = args.skip();
-    const mode: Mode = if (args.next()) |arg|
-        if (std.mem.eql(u8, arg, "--counters")) .counters else .timing
-    else
-        .timing;
-    if ((mode == .counters) != ecl.machine.root_execution_metrics_enabled)
-        return error.InstrumentationModeMismatch;
+    var mode: Mode = .timing;
     var quick = false;
     var cursor_storage_only = false;
     var nested_cursor_only = false;
@@ -471,6 +466,7 @@ pub fn main(init: std.process.Init) !void {
     var local_call_site_only = false;
     var latency_only = false;
     while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--counters")) mode = .counters;
         if (std.mem.eql(u8, arg, "--quick")) quick = true;
         if (std.mem.eql(u8, arg, "--cursor-storage-only")) cursor_storage_only = true;
         if (std.mem.eql(u8, arg, "--nested-cursor-only")) nested_cursor_only = true;
@@ -479,6 +475,8 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, arg, "--local-call-site-only")) local_call_site_only = true;
         if (std.mem.eql(u8, arg, "--latency-only")) latency_only = true;
     }
+    if ((mode == .counters) != ecl.machine.root_execution_metrics_enabled)
+        return error.InstrumentationModeMismatch;
     const repetitions: usize = if (mode == .counters) 1 else if (quick) 3 else 101;
 
     var buffer: [4096]u8 = undefined;
