@@ -2928,6 +2928,16 @@ pub const Machine = struct {
     pub fn sourceCursor(self: *const Machine, header: *Header) spans.SpanArchive.SourceCursor {
         return self.unit.archive.sourceCursor(header);
     }
+    /// The source name attached to the occurrence being dispatched. The
+    /// archive owns the returned bytes for at least as long as the current
+    /// code header, which the activation retains across any driver this call
+    /// starts. Runtime-built code has no entry and returns null.
+    pub fn activeSourceName(self: *const Machine) ?[]const u8 {
+        const current = self.unit.current orelse return null;
+        const located = self.unit.archive.locate(current.code, self.unit.active_index) orelse
+            return null;
+        return located.source_name;
+    }
     pub fn currentHome(self: *const Machine) ?*modules.ModuleHome {
         return self.unit.current.?.home();
     }

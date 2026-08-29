@@ -453,6 +453,56 @@ test "early prelude installs source-defined wrap and pair" {
     try std.testing.expectEqualStrings("[1] [2 3]", display.bytes());
 }
 
+test "dynamic context: *file* follows authored source provenance" {
+    const allocator = std.testing.allocator;
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+
+    try std.testing.expect((try runtime.runUnit("direct.ecl", "*file*")) == .ok);
+    {
+        var display = try runtime.stackDisplay();
+        defer display.deinit();
+        try std.testing.expectEqualStrings("\"direct.ecl\"", display.bytes());
+    }
+
+    // The active occurrence belongs to the stored body, so a later caller's
+    // source name never replaces the file that authored the definition.
+    try std.testing.expect((try runtime.runUnit(
+        "definition.ecl",
+        "pop (*file*) 'where-defined def",
+    )) == .ok);
+    try std.testing.expect((try runtime.runUnit("caller.ecl", "where-defined")) == .ok);
+    {
+        var display = try runtime.stackDisplay();
+        defer display.deinit();
+        try std.testing.expectEqualStrings("\"definition.ecl\"", display.bytes());
+    }
+
+    // Module construction re-scopes words without changing their reader
+    // provenance, so qualified dispatch observes the module source too.
+    try std.testing.expect((try runtime.runUnit(
+        "module-definition.ecl",
+        "pop ((*file*) 'where-defined def) 'located @defm",
+    )) == .ok);
+    try std.testing.expect((try runtime.runUnit("module-caller.ecl", "located.where-defined")) == .ok);
+    {
+        var display = try runtime.stackDisplay();
+        defer display.deinit();
+        try std.testing.expectEqualStrings("\"module-definition.ecl\"", display.bytes());
+    }
+
+    // Concatenation builds a fresh quotation with no source provenance. Its
+    // contents do not borrow a filename from either authored input or caller.
+    const failure = (try runtime.runUnit(
+        "runtime-built-caller.ecl",
+        "pop (*file*) (1 pop) cat call",
+    )).err;
+    defer runtime.release(failure);
+    try std.testing.expectEqualStrings("domain", try errorKind(allocator, failure));
+}
+
 test "provisional scalar primitives enforce the non-finite regime" {
     const allocator = std.testing.allocator;
     var runtime_heap: test_heap.SessionHeap = .init;

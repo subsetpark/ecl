@@ -224,6 +224,7 @@ pub fn main(init: std.process.Init) !void {
     failed = auditUnsafeCasts() or failed;
     failed = auditPreludeLayout() or failed;
     failed = auditUnitConstructorSpelling() or failed;
+    failed = auditDynamicContextSpelling() or failed;
     if (failed) return error.SourceAuditFailed;
 }
 
@@ -896,6 +897,26 @@ fn hasForbiddenTokens(
 /// marked, and nothing else in first-party vocabulary is.
 const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@each", "@module", "@defm" };
 
+/// Wrapped stars mean one thing in shipped vocabulary: the word returns a
+/// value supplied by dynamic execution context rather than consuming it from
+/// the operand stack. The compiler cannot express that semantic class, so the
+/// audit owns its closed manifest just as it owns the `@` constructor class.
+const dynamic_context_words = [_][]const u8{ "*file*", "*module*" };
+const first_party_definition_sources = [_][:0]const u8{
+    @embedFile("../prelude.ecl"),
+    @embedFile("../stdlib/result.ecl"),
+    @embedFile("../stdlib/str.ecl"),
+    @embedFile("../stdlib/table.ecl"),
+    @embedFile("../stdlib/rng.ecl"),
+    @embedFile("../stdlib/pkg/version.ecl"),
+    @embedFile("../stdlib/pkg/name.ecl"),
+    @embedFile("../stdlib/pkg/data.ecl"),
+    @embedFile("../stdlib/pkg/manifest.ecl"),
+    @embedFile("../stdlib/pkg/lock.ecl"),
+    @embedFile("../stdlib/pkg/mvs.ecl"),
+    @embedFile("../stdlib/pkg/sync.ecl"),
+};
+
 fn auditUnitConstructorSpelling() bool {
     var failed = false;
     const installers = [_][:0]const u8{
@@ -931,21 +952,7 @@ fn auditUnitConstructorSpelling() bool {
         }
         index = end;
     }
-    const definition_sources = [_][:0]const u8{
-        @embedFile("../prelude.ecl"),
-        @embedFile("../stdlib/result.ecl"),
-        @embedFile("../stdlib/str.ecl"),
-        @embedFile("../stdlib/table.ecl"),
-        @embedFile("../stdlib/rng.ecl"),
-        @embedFile("../stdlib/pkg/version.ecl"),
-        @embedFile("../stdlib/pkg/name.ecl"),
-        @embedFile("../stdlib/pkg/data.ecl"),
-        @embedFile("../stdlib/pkg/manifest.ecl"),
-        @embedFile("../stdlib/pkg/lock.ecl"),
-        @embedFile("../stdlib/pkg/mvs.ecl"),
-        @embedFile("../stdlib/pkg/sync.ecl"),
-    };
-    for (definition_sources) |source| {
+    for (first_party_definition_sources) |source| {
         var scan: usize = 0;
         while (std.mem.indexOfPos(u8, source, scan, "'@")) |found| {
             const start = found + 1;
@@ -953,6 +960,56 @@ fn auditUnitConstructorSpelling() bool {
             const name = source[start..end];
             if (!isUnitConstructor(name)) {
                 std.log.err("unit constructors: `{s}` is marked but constructs no unit", .{name});
+                failed = true;
+            }
+            scan = end;
+        }
+    }
+    return failed;
+}
+
+fn auditDynamicContextSpelling() bool {
+    var failed = false;
+    const installers = [_][:0]const u8{
+        @embedFile("../prims.zig"),
+        @embedFile("../task_prims.zig"),
+        @embedFile("../module_prims.zig"),
+    };
+    const documentation = @embedFile("../primitive_docs.zig");
+    for (dynamic_context_words) |name| {
+        var installed = false;
+        for (installers) |source| {
+            if (installedPrimitiveName(source, name)) installed = true;
+        }
+        if (!installed) {
+            std.log.err("dynamic context: `{s}` is not installed under that spelling", .{name});
+            failed = true;
+        }
+        if (!installedPrimitiveName(documentation, name)) {
+            std.log.err("dynamic context: `{s}` has no documentation entry", .{name});
+            failed = true;
+        }
+    }
+    var index: usize = 0;
+    while (std.mem.indexOfPos(u8, documentation, index, ".name = \"*")) |found| {
+        const start = found + ".name = \"".len;
+        const end = std.mem.indexOfScalarPos(u8, documentation, start, '"') orelse
+            documentation.len;
+        const name = documentation[start..end];
+        if (wrappedStars(name) and !isDynamicContextWord(name)) {
+            std.log.err("dynamic context: primitive `{s}` uses wrapped stars", .{name});
+            failed = true;
+        }
+        index = end;
+    }
+    for (first_party_definition_sources) |source| {
+        var scan: usize = 0;
+        while (std.mem.indexOfPos(u8, source, scan, "'*")) |found| {
+            const start = found + 1;
+            const end = preludeTokenEnd(source, start);
+            const name = source[start..end];
+            if (wrappedStars(name) and !isDynamicContextWord(name)) {
+                std.log.err("dynamic context: definition `{s}` uses wrapped stars", .{name});
                 failed = true;
             }
             scan = end;
@@ -973,6 +1030,17 @@ fn occurrences(haystack: []const u8, needle: []const u8) usize {
 
 fn isUnitConstructor(name: []const u8) bool {
     for (unit_constructors) |listed| {
+        if (std.mem.eql(u8, listed, name)) return true;
+    }
+    return false;
+}
+
+fn wrappedStars(name: []const u8) bool {
+    return name.len > 2 and name[0] == '*' and name[name.len - 1] == '*';
+}
+
+fn isDynamicContextWord(name: []const u8) bool {
+    for (dynamic_context_words) |listed| {
         if (std.mem.eql(u8, listed, name)) return true;
     }
     return false;

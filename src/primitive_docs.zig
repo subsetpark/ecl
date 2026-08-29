@@ -72,6 +72,8 @@ const entries = [_]Metadata{
     .{ .name = "see", .effect = "name --", .text = "Print the standard-formatted annotation and body of a binding." },
 
     .{ .name = "unmodule", .effect = "module-name --", .text = "Close, quiesce, and retire a registered module named by a symbol." },
+    .{ .name = "*file*", .effect = "-- string", .text = "Return the source name dynamically supplied by the currently executing reader-authored occurrence." },
+    .{ .name = "*module*", .effect = "-- module-name", .text = "Return the canonical registration name dynamically supplied by the current module activation." },
     .{ .name = "within", .effect = "quotation -- ...", .text = "Run a quotation against a private draft of the home module's durable stack and publish the result." },
     .{ .name = "without", .effect = null, .text = "Move the draft's top value onto the pending outputs a within application returns to its caller." },
     .{ .name = "@module", .effect = "unit-input -- module", .text = "Evaluate a module body in a fresh unit and return its definitions as an anonymous immutable module value." },

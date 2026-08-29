@@ -274,6 +274,19 @@ lexes and defines normally. The convention is enforced for first-party
 vocabulary by the source audit and is the recommended spelling for any
 user-defined word that wraps its quotation in a unit.
 
+#### The `*name*` spelling convention
+
+Leading and trailing `*` mark a value dynamically supplied by the current
+execution context rather than consumed from the operand stack. `*file*`
+returns the source name attached to its currently executing reader-authored
+occurrence; a definition therefore keeps reporting the file that authored its
+body when another file calls it. Runtime-assembled code has no source
+provenance, so `*file*` is `'domain` there rather than falling back to its
+caller. `*module*` returns the canonical registration selected by the current
+module activation. The stars are ordinary word characters, not reader syntax,
+and the convention applies to shipped vocabulary rather than reserving the
+spelling from user definitions.
+
 #### Seeding a unit
 
 There are no `-with` words. Every unit constructor takes one input, the
@@ -623,7 +636,11 @@ anonymously, be passed as data, and be registered more than once.
   A word reached through a quotation that escaped its module has no invoking
   registration at all: it resolves against the image its words were written
   in, so private lookup and same-home dispatch still hold, while `within` is
-  `'domain` and diagnostic spelling is the unqualified local name. Such an
+  `'domain`, `*module*` is `'domain`, and diagnostic spelling is the
+  unqualified local name. `*module*` otherwise returns the canonical name
+  of the registration selected by the activation; the same image can therefore
+  report different names when reached through different registrations, while
+  an alias reports its target registration's canonical name. Such an
   application *does* cross a module boundary, so a declared effect on that word
   is checked like any other cross-boundary call. Crossing is decided by the home
   the call resolves to differing from the caller's, not by whether the source

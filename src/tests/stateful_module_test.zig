@@ -229,6 +229,43 @@ test "modules: a nonempty construction stack becomes the durable initial stack o
     try std.testing.expect(counting.deinit() == .ok);
 }
 
+test "modules: *module* reports the active canonical registration" {
+    var runtime = try session.Session.init(std.testing.allocator, &.{});
+    defer runtime.deinit();
+
+    // Identity belongs to the execution home, not the image: the same image
+    // reports the registration through which the caller reached it.
+    try expectStack(
+        &runtime,
+        "((*module*) 'name def) @module dup 'left register 'right register " ++
+            "left.name right.name",
+        "'left 'right",
+    );
+    // Aliases select their target registration and therefore report its
+    // canonical name rather than the spelling used at the call site.
+    try expectStack(&runtime, "'short 'left alias short.name", "'left");
+
+    // A registration-less execution home has no module name to manufacture.
+    try expectErrorContains(&runtime, "*module*", &.{
+        "'kind 'domain",
+        "registered module",
+    });
+    try expectErrorContains(&runtime, "(*module*) 'building @defm", &.{
+        "'kind 'domain",
+        "registered module",
+    });
+    try expectErrorContains(
+        &runtime,
+        "((*module*) 'name def) @module 'name invoke",
+        &.{ "'kind 'domain", "registered module" },
+    );
+    try expectOk(&runtime, "((*module*) 'name set) 'escaped @defm");
+    try expectErrorContains(&runtime, "escaped.name call", &.{
+        "'kind 'domain",
+        "registered module",
+    });
+}
+
 test "modules: unit plans seed the @defm construction stack in order" {
     var runtime = try session.Session.init(std.testing.allocator, &.{});
     defer runtime.deinit();
