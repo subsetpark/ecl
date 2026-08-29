@@ -94,4 +94,4 @@
   infra
   "{{'format 1 'name {} 'version {} 'requires {}}}\n" str.format)
  'write def
- ) 'pkg.manifest @defm
+) 'pkg.manifest @defm

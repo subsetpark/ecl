@@ -2011,6 +2011,7 @@ ecl <SOURCE> [ARGS…]     evaluate source when the argument is not a readable
                          instead), print the final stack
 ecl - [ARGS…]            read stdin as one unit
 ecl fmt <FILE|->         format source to stdout
+ecl fmt -w <FILE>        format and atomically rewrite a regular file
 ecl -h | --help          usage
 ecl -V | --version       version
 ```
@@ -2037,13 +2038,16 @@ never disable the editor.
 `ecl fmt` reads valid source without evaluating it and writes canonical
 source. Formatting is idempotent, preserves program structure and every
 ordinary literal value byte-for-byte, and never applies layout rules based
-on a form's first word. Specifics:
+on a form's first word. `-w` formats completely before touching the source,
+preserves its permissions, and publishes with a same-directory atomic replace;
+it refuses standard input, symlinks, and non-regular files. Specifics:
 
 - Space-separated items pack into locally grouped runs up to 100 columns;
   continuation lines begin immediately inside the opening delimiter.
-  Existing physical newlines remain hard boundaries. A comment or
-  multiline child breaks only its local run. An indivisible token or
-  preserved comment may exceed the target width.
+  A closing delimiter on its own line aligns with its opener. Existing
+  physical newlines remain hard boundaries. A comment or multiline child
+  breaks only its local run. An indivisible token or preserved comment may
+  exceed the target width.
 - Comments are preserved and force physical line boundaries while staying
   attached to their neighboring forms.
 - Strings are indivisible and byte-preserved, with one exception: the

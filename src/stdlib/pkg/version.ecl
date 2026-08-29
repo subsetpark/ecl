@@ -144,4 +144,4 @@
   (keep-larger) fold1
   first)
  'max def
- ) 'pkg.version @defm
+) 'pkg.version @defm

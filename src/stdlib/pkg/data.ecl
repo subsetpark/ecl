@@ -44,4 +44,4 @@
  (holder -- pairs : "Return a dict's entries in ascending key order.")
  (|holder| holder dict.keys sort holder (entry-of) partial each)
  'sorted-entries def
- ) 'pkg.data @defm
+) 'pkg.data @defm

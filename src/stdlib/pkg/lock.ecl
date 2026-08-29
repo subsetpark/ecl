@@ -170,7 +170,7 @@
   state 'requirer pair first put
   pair 1 at pkg.data.sorted-entries
   swap (tree-edge) fold
-  )
+ )
  'tree-requirer defp
 
  ### def tree
@@ -306,4 +306,4 @@
   lock render-path
   module ": " cat swap cat "\n" cat)
  'why def
- ) 'pkg.lock @defm
+) 'pkg.lock @defm

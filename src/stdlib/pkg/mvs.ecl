@@ -510,4 +510,4 @@
   dict.from-flat
   root walk-manifest resolved-lock)
  'resolve-validated defp
- ) 'pkg.mvs @defm
+) 'pkg.mvs @defm

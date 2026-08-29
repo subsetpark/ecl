@@ -2033,16 +2033,20 @@ without consuming the host stack. The second layer lowers that CST to a
 Wadler/Oppen-style document IR (`text`, concat, soft/hard lines, groups,
 alignment, prose fill). The renderer keeps one command stack and performs
 bounded, remaining-width lookahead at each group; it never materializes
-both flat and broken renderings. Generic containers align at the column
-immediately after their opening delimiter. Local nested groups pack each
-space-separated structural run, so a hard break in one child cannot
-explode its surrounding phrase into one-item lines. Existing source line
-boundaries remain hard. Only binders and structurally recognized
+both flat and broken renderings. Generic container contents align at the
+column immediately after their opening delimiter, while a closing delimiter
+on its own line aligns with its opener. Local nested groups pack each
+space-separated structural run, so a hard break in one child cannot explode
+its surrounding phrase into one-item lines. Existing source line boundaries
+remain hard. Only binders and structurally recognized
 definition annotations receive syntax-specific layout; doc paragraphs use
 fill rather than one all-or-nothing group. Structurally literal
 `def`/`defp`/`set`/`setp` blocks receive matching canonical
 `### def <name>` / `### defp <name>` section comments, separated from
-preceding material by one empty line.
+preceding material by one empty line. In-place CLI formatting completes this
+pipeline before creating a same-directory temporary file, preserves the
+source permissions, rechecks that the destination is still a regular file,
+and publishes it with one atomic replacement.
 
 ## Verification
 

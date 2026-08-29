@@ -575,4 +575,4 @@
   left-join-checked)
  'left-join-with def
 
- ) 'table @defm
+) 'table @defm

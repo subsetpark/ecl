@@ -91,7 +91,7 @@ test "formatter applies uniform aligned structural layout" {
             "  dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd))\n",
     );
     try expectFormat("(alpha beta\ngamma delta)", "(alpha beta\n gamma delta)\n");
-    try expectFormat("(\n foo\n)", "(\n foo\n )\n");
+    try expectFormat("(\n foo\n)", "(\n foo\n)\n");
     try expectFormat("(| x y | x y)", "(|x y| x y)\n");
 }
 
@@ -199,7 +199,7 @@ test "formatter owns canonical definition section comments" {
             " (-- n)\n (1)\n 'visible def\n # note\n\n" ++
             " ### defp hidden\n" ++
             " # hidden details\n" ++
-            " (-- n)\n (2)\n 'hidden defp\n ) 'm @defm\n",
+            " (-- n)\n (2)\n 'hidden defp\n) 'm @defm\n",
     );
     try expectParseEquivalent(nested);
 
@@ -215,7 +215,7 @@ test "formatter owns canonical definition section comments" {
             " ### def generated\n" ++
             " # attached inside the module\n" ++
             " (-- n)\n (3)\n 'generated def\n" ++
-            " ) 'm @defm\n",
+            ") 'm @defm\n",
     );
     try expectParseEquivalent(nested_synthesized);
 

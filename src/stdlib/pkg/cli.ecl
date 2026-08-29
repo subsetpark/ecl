@@ -160,4 +160,4 @@
   pkg.store.gc
   wrap "removed {} packages" str.format io.print)
  'gc def
- ) 'pkg.cli @defm
+) 'pkg.cli @defm
