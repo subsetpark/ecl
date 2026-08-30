@@ -452,7 +452,7 @@ Recorded target-specific results and their current disposition live in
   `where` broke `filter`, whose body is `over swap each where at`. The session
   half of the same defect outlived the fix — `lexicalScope()` is a core-only
   scope while the prelude bootstraps and becomes session-over-core the moment a
-  Session exists, so all 69 prelude definitions were written and validated
+  Session exists, so all 70 prelude definitions were written and validated
   under core-only resolution and then silently acquired session visibility.
   That transition was an artifact of the two phases using different scope
   storage, not a design, and `(999) 'len def` breaking `table.from-rows`
@@ -860,6 +860,18 @@ allocation failure interrupt it at bounded intervals.
   Blocking dictionary construction and lookup drive those cursors. Dictionary
   update semantics remain only in the scheduler-visible language kernels;
   there is no unused synchronous `put`/`del`/`merge` family.
+- **Selector pervasion is owned by the collection boundary.** `at` and `put`
+  descend nested list selectors with explicit chunked frame stacks and the
+  shared 256-level aggregate limit. `at` materializes the selector-shaped
+  gather; `put` first copies one list into an unpublished exact-size buffer,
+  then applies conforming replacement leaves left to right and materializes
+  once. Cancellation, conformance failure, and allocation failure therefore
+  discard private driver state without publishing a partial list. Dictionary
+  dispatch occurs before selector descent, so every dictionary key remains one
+  whole value regardless of its shape. The host-backed `update` combinator
+  uses the same rule while owning its selector validation, isolated scalar
+  applications, unpublished value buffer, and final list or dictionary
+  materializer in one resumable state.
 - **Composite name work remains composite while suspended.** An unknown
   qualified module prefix installs one `InternModuleNameCursor` that owns both
   insertion and module-name validation, then transfers the validated brand to
@@ -1338,7 +1350,7 @@ operand shape, and rows that still run boxed say so.
   short-circuiting `first-where` count search; `rand.ints`;
   and the exact-size copies and gathers behind `cat`, `take`, `drop`, `rest`,
   `reverse`, and `at` with a typed index vector; typed membership over scalar
-  or flat-list needles; rank-one `reshape`; same-kind list `put`; and `shape`'s
+  or flat-list needles; rank-one `reshape`; same-kind scalar list `put`; and `shape`'s
   known-width result; cross-width string `cmp`; stable typed `grade`/`sort`;
   and first-seen typed `group`/`distinct`; pinned width-specialized `split`;
   and two-pass exact-width `join`; `str.format` keeps hosted semantics while
@@ -1845,7 +1857,15 @@ honest source with no public dual representation.
   `from-flat`, and `from-lists`) reuse bounded host drivers under qualified
   exports; no constructor backend remains globally reachable. Derived operations
   schedule ordinary ECL quotations from their callbacks, as derived `io`
-  operations do. `merge-with` is the exceptional quotation-dependent rebuild:
+  operations do. `dict.at` gathers a requested key list through bounded `each`;
+  each scalar lookup enters the core-authored `at-path` with a singleton path,
+  so the module-local `at` cannot recursively shadow core `at` and a structural
+  list remains one whole-value dictionary key. `dict.update` selects the
+  generic update combinator's outer-key-list policy; the shared backend
+  validates all atomic keys before applying the quotation in request order,
+  preserving structural keys and making duplicate requests observe earlier
+  results. `merge-with` is the exceptional
+  quotation-dependent rebuild:
   one owned state alternates bounded key search/materialization drivers with
   isolated conflict applications, and an exact owned value buffer retains
   collision results until the dictionary materializer has retained them.

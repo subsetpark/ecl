@@ -139,7 +139,8 @@ const entries = [_]Metadata{
     .{ .name = "grade", .effect = "list -- indices", .text = "Return the stable ascending sort permutation of a comparable list." },
     .{ .name = "group", .effect = "list -- dict", .text = "Group equal list values into a dictionary of zero-based index lists." },
 
-    .{ .name = "put", .effect = "collection key value -- collection", .text = "Functionally update a list index or dictionary key." },
+    .{ .name = "put", .effect = "collection selector value -- collection", .text = "Functionally replace list positions through a pervasive selector, or one whole-value dictionary key." },
+    .{ .name = "update", .effect = "collection selector quotation -- collection", .text = "Apply a unary quotation at list positions through a pervasive selector, or at one whole-value dictionary key." },
     .{ .name = "del", .effect = "collection key -- collection", .text = "Functionally remove an in-bounds list index or a dictionary key; a missing dictionary key is unchanged." },
     .{ .name = "split", .effect = "string separator -- parts", .text = "Split a string at every occurrence of a separator; an empty separator yields its Unicode scalar strings." },
     .{ .name = "join", .effect = "strings separator -- string", .text = "Join a list of strings with a separator string." },

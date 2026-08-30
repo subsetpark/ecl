@@ -8,9 +8,49 @@ const helper = @import("kernel_test_support.zig");
 
 test "dict-text: polymorphic collection updates preserve ownership" {
     try helper.expectStack(
-        "{'a 1} 'b 2 put {'a 1 'b 2} 'a del [1 2 3] 1 9 put [1 2 3] 1 del",
-        "{'a 1 'b 2} {'b 2} [1 9 3] [1 3]",
+        "{'a 1} 'b 2 put {'a 1 'b 2} 'a del {[1 2] 9} [1 2] 10 put " ++
+            "[1 2 3] 1 9 put [1 2 3] 1 del",
+        "{'a 1 'b 2} {'b 2} {[1 2] 10} [1 9 3] [1 3]",
     );
+}
+
+test "dict-text: put pervades over list selectors with conforming replacements" {
+    try helper.expectStack(
+        "[10 20 30 40] [1 3] 0 put " ++
+            "[10 20 30 40] [1 3] [90 80] put " ++
+            "[10 20 30 40] [[0 2] 3] [[9 8] 7] put " ++
+            "[10 20] [1 1] [7 8] put " ++
+            "[1 [2 3]] [1] [[9 10]] put " ++
+            "[1 2] [] 9 put [1 2] [] [] put",
+        "[10 0 30 0] [10 90 30 80] [9 20 8 7] [10 8] " ++
+            "(1 [9 10]) [1 2] [1 2]",
+    );
+    try helper.expectErrors(&.{
+        .{
+            .name = "put replacement must conform to the selector",
+            .source = "[1 2 3] [0 2] [9] put",
+            .kind = "conform",
+            .word = "put",
+        },
+        .{
+            .name = "put nested replacement must conform to the nested selector",
+            .source = "[1 2 3] [[0 2]] [[9]] put",
+            .kind = "conform",
+            .word = "put",
+        },
+        .{
+            .name = "put selector leaves must be integer indices",
+            .source = "[1 2] [0 'a] 9 put",
+            .kind = "type",
+            .word = "put",
+        },
+        .{
+            .name = "put selector leaves must be in bounds",
+            .source = "[1 2] [0 2] 9 put",
+            .kind = "domain",
+            .word = "put",
+        },
+    });
 }
 
 test "dict-text: dict.from-lists and polymorphic list updates" {

@@ -70,6 +70,45 @@ test "combinators: isolated iteration broadcast reduction and infra" {
     });
 }
 
+test "combinators: update applies isolated quotations through pervasive selectors" {
+    try support.expectStacks(&.{
+        .{
+            .name = "pervasive selector",
+            .source = "[10 20 30 40] [1 3] (2 *) update",
+            .expected = "[10 40 30 80]",
+        },
+        .{
+            .name = "nested selector and repeated positions",
+            .source = "[10 20] [[1] 1] (1 +) update",
+            .expected = "[10 22]",
+        },
+        .{
+            .name = "whole-value dictionary key",
+            .source = "{[1 2] 9} [1 2] (1 +) update",
+            .expected = "{[1 2] 10}",
+        },
+        .{
+            .name = "empty selector does not apply quotation",
+            .source = "[1 2] [] (missing) update",
+            .expected = "[1 2]",
+        },
+    });
+    try support.expectErrors(&.{
+        .{
+            .name = "all selector leaves validate before application",
+            .source = "[1 2] [0 2] (missing) update",
+            .kind = "domain",
+            .word = "update",
+        },
+        .{
+            .name = "quotation returns exactly one value",
+            .source = "[1] 0 (dup) update",
+            .kind = "contract",
+            .word = "update",
+        },
+    });
+}
+
 test "combinators: stencil and unfold isolate applications and preserve order" {
     try support.expectStacks(&.{
         .{
@@ -484,6 +523,7 @@ test "nested in-place applications finish in one unwind" {
         .{ .name = "bi", .source = "3 4 (+) (*) bi", .expected = "28" },
         .{ .name = "bi2", .source = "3 4 (+) (*) bi2", .expected = "7 12" },
         .{ .name = "tri", .source = "3 (1 +) (2 *) (3 -) tri", .expected = "4 6 0" },
+        .{ .name = "tri2", .source = "3 4 (+) (*) (-) tri2", .expected = "7 12 -1" },
         .{ .name = "dip inside times", .source = "5 2 (9 (1 +) dip pop) times", .expected = "7" },
         .{ .name = "binder body under dip", .source = "10 20 (|lo hi| hi lo - lo +) call", .expected = "20" },
     });

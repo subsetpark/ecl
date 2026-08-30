@@ -10,6 +10,7 @@ const machine = @import("machine.zig");
 const support = @import("kernel_support.zig");
 const storage = @import("kernel_storage.zig");
 const kernel_flat = @import("kernel_flat.zig");
+const poll = @import("poll.zig");
 
 const Value = value.Value;
 const Machine = support.Machine;
@@ -217,6 +218,25 @@ fn putPrimitive(evaluator: *Machine) MachineError!void {
             });
         },
         .list => {
+            if (key.borrow() == .list) {
+                const count: usize = @intCast(collection.borrow().list.length());
+                const values = try evaluator.allocator().alloc(Value, count);
+                var actions = poll.ChunkStack(PutAction).init(evaluator.allocator());
+                errdefer actions.deinit();
+                try actions.push(.{ .node = .{
+                    .selector = key.borrow(),
+                    .replacement = new_value.borrow(),
+                    .depth = 0,
+                } });
+                try evaluator.startDriver(PervasivePutDriver{
+                    .collection = .init(collection.take()),
+                    .selector = .init(key.take()),
+                    .replacement = .init(new_value.take()),
+                    .values = .init(values),
+                    .actions = .init(actions),
+                });
+                return;
+            }
             if (key.borrow() != .int) return evaluator.typeError("an integer list index");
             if (key.borrow().int < 0) return evaluator.fail(.domain, "put index is negative");
             const index = std.math.cast(usize, key.borrow().int) orelse
@@ -242,6 +262,116 @@ fn putPrimitive(evaluator: *Machine) MachineError!void {
         .int, .float, .char, .symbol, .word, .task, .module, .unit_plan => return evaluator.typeError("a list or dict"),
     }
 }
+
+const PutAction = union(enum) {
+    node: struct {
+        selector: Value,
+        replacement: Value,
+        depth: usize,
+    },
+    children: struct {
+        selectors: Value,
+        replacement: Value,
+        conforming_replacements: bool,
+        depth: usize,
+        index: usize,
+    },
+};
+
+const PervasivePutDriver = struct {
+    pub const ownership: heap.DriverOwnership = .fields;
+
+    collection: heap.Owned(Value),
+    selector: heap.Owned(Value),
+    replacement: heap.Owned(Value),
+    values: heap.Owned([]Value),
+    actions: heap.Owned(poll.ChunkStack(PutAction)),
+    copy_index: usize = 0,
+    materializer: ?heap.Owned(list.ValueMaterializer) = null,
+
+    pub fn advance(evaluator: *Machine, self: *PervasivePutDriver) MachineError!machine.WorkProgress {
+        try evaluator.pollKernel();
+        var remaining: usize = machine.kernel_poll_quantum;
+        const output = self.values.borrow();
+
+        if (self.copy_index != output.len) {
+            const end = @min(self.copy_index + remaining, output.len);
+            const copied = end - self.copy_index;
+            while (self.copy_index != end) : (self.copy_index += 1)
+                output[self.copy_index] = list.atUnchecked(self.collection.borrow(), self.copy_index);
+            remaining -= copied;
+            if (self.copy_index != output.len) return .yielded;
+        }
+
+        while (remaining != 0 and !self.actions.borrow().isEmpty()) : (remaining -= 1) {
+            const action = self.actions.borrowMut().pop().?;
+            switch (action) {
+                .node => |node| {
+                    if (node.selector == .list) {
+                        if (node.depth >= support.max_depth)
+                            return evaluator.fail(.domain, "put selector nesting exceeds 256 levels");
+                        const selector_count: usize = @intCast(node.selector.list.length());
+                        const conforming = node.replacement == .list;
+                        if (conforming) {
+                            const replacement_count: usize = @intCast(node.replacement.list.length());
+                            if (selector_count != replacement_count)
+                                return evaluator.conformError(selector_count, replacement_count);
+                        }
+                        try self.actions.borrowMut().push(.{ .children = .{
+                            .selectors = node.selector,
+                            .replacement = node.replacement,
+                            .conforming_replacements = conforming,
+                            .depth = node.depth + 1,
+                            .index = 0,
+                        } });
+                        continue;
+                    }
+                    if (node.selector != .int)
+                        return evaluator.typeError("an integer list index");
+                    if (node.selector.int < 0)
+                        return evaluator.fail(.domain, "put index is negative");
+                    const index = std.math.cast(usize, node.selector.int) orelse
+                        return evaluator.fail(.domain, "put index is out of bounds");
+                    if (index >= output.len)
+                        return evaluator.fail(.domain, "put index is out of bounds");
+                    output[index] = node.replacement;
+                },
+                .children => |children| {
+                    if (children.index == children.selectors.list.length()) continue;
+                    try self.actions.borrowMut().reserve(2);
+                    self.actions.borrowMut().pushReserved(.{ .children = .{
+                        .selectors = children.selectors,
+                        .replacement = children.replacement,
+                        .conforming_replacements = children.conforming_replacements,
+                        .depth = children.depth,
+                        .index = children.index + 1,
+                    } });
+                    self.actions.borrowMut().pushReserved(.{ .node = .{
+                        .selector = list.atUnchecked(children.selectors, children.index),
+                        .replacement = if (children.conforming_replacements)
+                            list.atUnchecked(children.replacement, children.index)
+                        else
+                            children.replacement,
+                        .depth = children.depth,
+                    } });
+                },
+            }
+        }
+        if (!self.actions.borrow().isEmpty()) return .yielded;
+
+        if (self.materializer == null)
+            self.materializer = .init(list.ValueMaterializer.init(evaluator.allocator(), output));
+        if (remaining == 0) return .yielded;
+        return switch (try self.materializer.?.borrowMut().advance(remaining)) {
+            .pending => .yielded,
+            .complete => |result| completed: {
+                self.materializer.?.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                self.materializer = null;
+                break :completed .{ .output = result };
+            },
+        };
+    }
+};
 
 const put_leaf_kinds = [_]value.HeapKind{
     .leaf_u8,

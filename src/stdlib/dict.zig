@@ -2,15 +2,17 @@
 //!
 //! Representation observers and user-sized rebuilds reuse the host kernels.
 //! Derived operations schedule ordinary quotations in this module's home, in
-//! the same way the derived `io` words do. The one host helper needed by the
-//! hosted `merge-with` fold is private, so no implementation primitive leaks
-//! through qualified lookup, import, invocation, or reflection.
+//! the same way the derived `io` words do. Quotation-dependent `update` reuses
+//! the core combinator backend, while the one host helper needed by the hosted
+//! `merge-with` fold is private, so no implementation primitive leaks through
+//! qualified lookup, import, invocation, or reflection.
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const intern = @import("../intern.zig");
 const env = @import("../env.zig");
 const machine = @import("../machine.zig");
+const combinators = @import("../combinators.zig");
 const dict_kernels = @import("../kernel_dict_text.zig");
 const dict_storage = @import("../dict.zig");
 
@@ -45,6 +47,11 @@ pub const words = [_]env.BuiltinWord{
         .primitive = dict_kernels.hasForModule,
     },
     .{
+        .name = "at",
+        .doc = "( dict keys -- values ) Return values for a key list in request order, failing if any key is absent.",
+        .primitive = valuesAt,
+    },
+    .{
         .name = "merge",
         .doc = "( left right -- dict ) Merge two dictionaries, with right-hand values winning.",
         .primitive = dict_kernels.mergeForModule,
@@ -76,8 +83,8 @@ pub const words = [_]env.BuiltinWord{
     },
     .{
         .name = "update",
-        .doc = "( dict key quotation -- dict ) Apply a unary quotation to an existing value without reordering its key.",
-        .primitive = update,
+        .doc = "( dict keys quotation -- dict ) Apply a unary quotation at each requested whole-value key without reordering entries.",
+        .primitive = combinators.updateDictKeysForModule,
     },
     .{
         .name = "update-or",
@@ -176,6 +183,31 @@ fn pairs(evaluator: *Machine) MachineError!void {
         try word("swap"),
         try word("dict.vals"),
         try word("zip"),
+    });
+}
+
+fn valuesAt(evaluator: *Machine) MachineError!void {
+    try evaluator.require(2);
+    var keys = try evaluator.popList();
+    defer keys.deinit();
+    var dictionary = try evaluator.popDict();
+    defer dictionary.deinit();
+    // This module's public `at` shadows core `at` in quotations scheduled in
+    // the module home. A singleton path enters core-authored `at-path`, whose
+    // sealed body resolves scalar `at` against core. Besides avoiding recursive
+    // `dict.at`, wrapping preserves a structural list as one whole-value key.
+    var lookup = try quotation(evaluator, &.{
+        try word("swap"),
+        try word("wrap"),
+        try word("at-path"),
+    });
+    defer lookup.deinit();
+    return call(evaluator, &.{
+        keys.borrow(),
+        dictionary.borrow(),
+        lookup.borrow(),
+        try word("partial"),
+        try word("each"),
     });
 }
 
@@ -320,26 +352,6 @@ fn keysExactly(evaluator: *Machine) MachineError!void {
     });
 }
 
-fn update(evaluator: *Machine) MachineError!void {
-    try evaluator.require(3);
-    var transform = try evaluator.popQuotation();
-    defer transform.deinit();
-    var key = try evaluator.popValue();
-    defer key.deinit();
-    var dictionary = try evaluator.popDict();
-    defer dictionary.deinit();
-    return call(evaluator, &.{
-        dictionary.borrow(),
-        key.borrow(),
-        dictionary.borrow(),
-        key.borrow(),
-        try word("at"),
-        transform.borrow(),
-        try word("call"),
-        try word("put"),
-    });
-}
-
 fn updateOr(evaluator: *Machine) MachineError!void {
     try evaluator.require(4);
     var transform = try evaluator.popQuotation();
@@ -353,7 +365,8 @@ fn updateOr(evaluator: *Machine) MachineError!void {
     var existing = try quotation(evaluator, &.{
         dictionary.borrow(),
         key.borrow(),
-        try word("at"),
+        try word("wrap"),
+        try word("at-path"),
         transform.borrow(),
         try word("call"),
     });
@@ -379,7 +392,8 @@ fn entryApplication(evaluator: *Machine, transform: Value, negate: bool) error{O
         try word("first"),
         try word("swap"),
         .{ .int = 1 },
-        try word("at"),
+        try word("wrap"),
+        try word("at-path"),
         transform,
         try word("call"),
         try word("not"),
@@ -388,7 +402,8 @@ fn entryApplication(evaluator: *Machine, transform: Value, negate: bool) error{O
         try word("first"),
         try word("swap"),
         .{ .int = 1 },
-        try word("at"),
+        try word("wrap"),
+        try word("at-path"),
         transform,
         try word("call"),
     });
@@ -445,7 +460,8 @@ fn selectEntries(evaluator: *Machine, reject_matches: bool) MachineError!void {
         apply_entry.borrow(),
         try word("each"),
         try word("where"),
-        try word("at"),
+        try word("wrap"),
+        try word("at-path"),
         try word("dict.from-pairs"),
     });
 }
