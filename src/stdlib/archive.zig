@@ -12,6 +12,7 @@ const machine = @import("../machine.zig");
 const storage = @import("../kernel_storage.zig");
 const list = @import("../list.zig");
 const poll = @import("../poll.zig");
+const pkg_catalog = @import("../pkg_catalog.zig");
 
 const Value = value.Value;
 const Machine = machine.Machine;
@@ -486,6 +487,8 @@ const UnpackDriver = struct {
             staged: Staged,
             dir: std.Io.Dir,
             created_count: usize,
+            catalog: pkg_catalog.Build,
+            diagnostic: ?[]u8 = null,
         },
         seal: struct {
             staged: Staged,
@@ -673,6 +676,15 @@ const UnpackDriver = struct {
             .unpack => |*path| path.borrow(),
             .install => |*install| install.destination.borrow(),
             .inspect => unreachable,
+        };
+    }
+
+    /// The package value an install carries, for the failures raised against
+    /// its staged tree. Only the install target reaches package validation.
+    fn installPackageValue(self: *const UnpackDriver) Value {
+        return switch (self.source.borrow()) {
+            .install => |*install| install.package.borrow(),
+            .inspect, .unpack => unreachable,
         };
     }
 
@@ -1393,11 +1405,25 @@ const UnpackDriver = struct {
                             const staged = extraction.staged;
                             const dir = extraction.dir;
                             const created_count = extraction.created_count;
-                            publication.* = .{ .validate_package = .{
-                                .staged = staged,
-                                .dir = dir,
-                                .created_count = created_count,
-                            } };
+                            publication.* = .{
+                                .validate_package = .{
+                                    .staged = staged,
+                                    .dir = dir,
+                                    .created_count = created_count,
+                                    // SAFETY: the cursor is written on the next
+                                    // statement, before any step observes it. It
+                                    // is built second because it borrows the
+                                    // diagnostic slot this state owns.
+                                    .catalog = undefined,
+                                },
+                            };
+                            const validation = &publication.validate_package;
+                            validation.catalog = try evaluator.beginPackageTreeValidation(
+                                io,
+                                archivePackageName(archive),
+                                validation.staged.path.borrow(),
+                                &validation.diagnostic,
+                            );
                         } else {
                             extraction.dir.close(io);
                             const staged = extraction.staged;
@@ -1436,23 +1462,34 @@ const UnpackDriver = struct {
                 },
             },
             .validate_package => |*validation| {
-                var diagnostic: ?[]u8 = null;
-                evaluator.validatePackageTree(
-                    io,
-                    archivePackageName(archive),
-                    validation.staged.path.borrow(),
-                    &diagnostic,
-                ) catch |err| switch (err) {
+                switch (validation.catalog.advance(work_quantum) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Invalid => {
-                        defer if (diagnostic) |message| self.allocator.free(message);
-                        return evaluator.failFmt(
+                        const message = validation.diagnostic;
+                        defer if (message) |owned| self.allocator.free(owned);
+                        validation.diagnostic = null;
+                        const failure = evaluator.failFmt(
                             .domain,
                             "invalid package catalog: {s}",
-                            .{diagnostic orelse "validation failed"},
+                            .{message orelse "validation failed"},
                         );
+                        evaluator.addErrorPackage(self.installPackageValue());
+                        return failure;
                     },
+                }) {
+                    .pending => return .yielded,
+                    .done => {},
+                }
+                var catalog = validation.catalog.take() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.Invalid => return evaluator.failFmt(
+                        .domain,
+                        "invalid package catalog: {s}",
+                        .{validation.diagnostic orelse "validation failed"},
+                    ),
                 };
+                catalog.deinit();
+                validation.catalog.deinit();
                 const seal = validation.dir.createFile(
                     io,
                     package_seal_name,
@@ -1613,6 +1650,11 @@ const UnpackDriver = struct {
                 } };
             },
             .validate_package => |*validation| {
+                // The cursor holds the staged tree's open directory and walk
+                // across steps, so abandoning this state has to release them.
+                validation.catalog.deinit();
+                if (validation.diagnostic) |message| self.allocator.free(message);
+                validation.diagnostic = null;
                 releases.releaseValue(validation.staged.result);
                 const path = validation.staged.path.take();
                 self.state = .{ .rollback = .{

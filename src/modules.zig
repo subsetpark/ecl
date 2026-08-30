@@ -1723,26 +1723,23 @@ pub const Registry = enum(usize) {
     /// derivation used by Session startup. The opaque registry keeps the
     /// allocator/reclamation capability correlated while exposing only the
     /// package-boundary operation the installer needs.
-    pub fn validatePackageTree(
+    /// Begin validating one staged package tree. The caller drives the
+    /// returned cursor in bounded steps and deinits it; a package tree holds
+    /// thousands of artifacts, so the walk cannot be one scheduler step.
+    pub fn beginPackageTreeValidation(
         self: *const Registry,
         io: std.Io,
         package_name: []const u8,
         root_dir: []const u8,
         diagnostic: *?[]u8,
-    ) pkg_catalog.BuildError!void {
-        const input = [_]pkg_catalog.PackageInput{.{
-            .id = @enumFromInt(0),
-            .name = package_name,
-            .version = "",
-            .root_dir = root_dir,
-        }};
-        var catalog = try pkg_catalog.build(
+    ) error{OutOfMemory}!pkg_catalog.Build {
+        return pkg_catalog.Build.initOwned(
             self.privateState().host,
             io,
-            &input,
+            package_name,
+            root_dir,
             diagnostic,
         );
-        catalog.deinit();
     }
 
     pub fn deinit(self: *Registry) void {

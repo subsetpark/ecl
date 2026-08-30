@@ -129,9 +129,13 @@ const Builder = struct {
         self.modules.deinit(self.allocator);
     }
 
-    fn buildPackage(self: *Builder, input: PackageInput) BuildError!void {
+    /// Read and validate one package's manifest, then open the directory walk
+    /// its export globs select over. The walk itself is resumable: a package
+    /// tree holds thousands of artifacts and a scheduler step may not traverse
+    /// them all at once.
+    fn openPackage(self: *Builder, input: PackageInput) BuildError!Walk {
         var manifest = try self.readManifest(input.root_dir);
-        defer manifest.deinit(self.allocator);
+        errdefer manifest.deinit(self.allocator);
         if (!std.mem.eql(u8, manifest.name, input.name) or
             (input.version.len != 0 and !std.mem.eql(u8, manifest.version, input.version)))
         {
@@ -140,27 +144,30 @@ const Builder = struct {
                 .{ input.root_dir, manifest.name, manifest.version, input.name, input.version },
             );
         }
-
-        var claims: std.ArrayList(Claim) = .empty;
-        defer {
-            for (claims.items) |claim| self.allocator.free(claim.relative_path);
-            claims.deinit(self.allocator);
-        }
         var directory = std.Io.Dir.cwd().openDir(self.io, input.root_dir, .{ .iterate = true }) catch |err|
             return self.fail("cannot open package directory `{s}`: {s}", .{ input.root_dir, @errorName(err) });
-        defer directory.close(self.io);
-        var walker = directory.walk(self.allocator) catch return error.OutOfMemory;
-        defer walker.deinit();
-        while (walker.next(self.io) catch |err|
-            return self.fail("cannot traverse package directory `{s}`: {s}", .{ input.root_dir, @errorName(err) })) |entry|
-        {
+        errdefer directory.close(self.io);
+        const walker = directory.walk(self.allocator) catch return error.OutOfMemory;
+        return .{ .manifest = manifest, .directory = directory, .walker = walker };
+    }
+
+    /// Claim up to `budget` directory entries for their export namespace.
+    /// Returns false once the walk is exhausted.
+    fn walkStep(self: *Builder, input: PackageInput, walk: *Walk, budget: usize) BuildError!bool {
+        var remaining = budget;
+        while (remaining != 0) : (remaining -= 1) {
+            const next = walk.walker.next(self.io) catch |err| return self.fail(
+                "cannot traverse package directory `{s}`: {s}",
+                .{ input.root_dir, @errorName(err) },
+            );
+            const entry = next orelse return false;
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".ecl")) continue;
             if (entry.path.len > max_relative_path_bytes) return self.fail(
                 "package `{s}` contains an ECL artifact path longer than {d} bytes",
                 .{ input.name, max_relative_path_bytes },
             );
             var matched_namespace: ?[]const u8 = null;
-            for (manifest.exports) |export_entry| {
+            for (walk.manifest.exports) |export_entry| {
                 var matched = false;
                 for (export_entry.globs) |glob| {
                     if (globMatches(glob, entry.path)) {
@@ -177,28 +184,34 @@ const Builder = struct {
                 } else matched_namespace = export_entry.namespace;
             }
             if (matched_namespace) |namespace| {
-                try claims.ensureUnusedCapacity(self.allocator, 1);
-                claims.appendAssumeCapacity(.{
+                try walk.claims.ensureUnusedCapacity(self.allocator, 1);
+                walk.claims.appendAssumeCapacity(.{
                     .relative_path = try self.allocator.dupe(u8, entry.path),
                     .namespace = namespace,
                 });
             }
-            if (self.artifacts.items.len + claims.items.len > max_artifacts) return self.fail(
+            if (self.artifacts.items.len + walk.claims.items.len > max_artifacts) return self.fail(
                 "package graph contains more than {d} exported ECL artifacts",
                 .{max_artifacts},
             );
         }
+        return true;
+    }
 
-        std.mem.sort(Claim, claims.items, {}, struct {
+    /// Order the claims and prove every declared glob selected something. Both
+    /// run over memory already held and are bounded by the manifest, so they
+    /// stay one step.
+    fn closeWalk(self: *Builder, input: PackageInput, walk: *Walk) BuildError!void {
+        std.mem.sort(Claim, walk.claims.items, {}, struct {
             fn lessThan(_: void, left: Claim, right: Claim) bool {
                 return std.mem.order(u8, left.relative_path, right.relative_path) == .lt;
             }
         }.lessThan);
 
-        for (manifest.exports) |export_entry| {
+        for (walk.manifest.exports) |export_entry| {
             for (export_entry.globs) |glob| {
                 var matched = false;
-                for (claims.items) |claim| {
+                for (walk.claims.items) |claim| {
                     if (std.mem.eql(u8, claim.namespace, export_entry.namespace) and
                         globMatches(glob, claim.relative_path))
                     {
@@ -212,8 +225,6 @@ const Builder = struct {
                 );
             }
         }
-
-        for (claims.items) |claim| try self.buildArtifact(input, claim);
     }
 
     fn buildArtifact(self: *Builder, input: PackageInput, claim: Claim) BuildError!void {
@@ -551,32 +562,190 @@ const Builder = struct {
     }
 };
 
+/// One package's directory traversal, held across scheduler steps.
+const Walk = struct {
+    manifest: Manifest,
+    directory: std.Io.Dir,
+    walker: std.Io.Dir.Walker,
+    claims: std.ArrayList(Claim) = .empty,
+
+    fn deinit(self: *Walk, allocator: std.mem.Allocator, io: std.Io) void {
+        for (self.claims.items) |claim| allocator.free(claim.relative_path);
+        self.claims.deinit(allocator);
+        self.walker.deinit();
+        self.directory.close(io);
+        self.manifest.deinit(allocator);
+    }
+};
+
+pub const Progress = enum { pending, done };
+
+/// A resumable catalog build. One `advance` reads one manifest, claims up to
+/// `budget` directory entries, or parses one source artifact, so a caller
+/// inside the scheduler can traverse a package tree of any size without
+/// monopolizing its worker or deferring cancellation. `build` below is the
+/// same walk run to completion for callers that are not on a scheduler step.
+pub const Build = struct {
+    builder: Builder,
+    packages: []const PackageInput,
+    owned_input: ?OwnedInput = null,
+    package_index: usize = 0,
+    stage: Stage = .manifest,
+
+    const OwnedInput = struct {
+        input: PackageInput,
+        name: []u8,
+        root_dir: []u8,
+    };
+    const Stage = union(enum) {
+        manifest,
+        walking: Walk,
+        artifacts: struct { walk: Walk, index: usize = 0 },
+        finished,
+    };
+
+    pub fn init(
+        host: *const heap.HostCleanup,
+        io: std.Io,
+        packages: []const PackageInput,
+        diagnostic: *?[]u8,
+    ) Build {
+        diagnostic.* = null;
+        return .{
+            .builder = .{
+                .allocator = host.allocator(),
+                .host = host,
+                .io = io,
+                .diagnostic = diagnostic,
+            },
+            .packages = packages,
+        };
+    }
+
+    /// The single-package form the installer uses. It copies the identity it
+    /// validates, because the caller's own storage may not outlive a build
+    /// that now spans scheduler steps.
+    pub fn initOwned(
+        host: *const heap.HostCleanup,
+        io: std.Io,
+        name: []const u8,
+        root_dir: []const u8,
+        diagnostic: *?[]u8,
+    ) error{OutOfMemory}!Build {
+        const allocator = host.allocator();
+        const owned_name = try allocator.dupe(u8, name);
+        errdefer allocator.free(owned_name);
+        const owned_root = try allocator.dupe(u8, root_dir);
+        errdefer allocator.free(owned_root);
+        var result = init(host, io, &.{}, diagnostic);
+        result.owned_input = .{
+            .input = .{
+                .id = @enumFromInt(0),
+                .name = owned_name,
+                .version = "",
+                .root_dir = owned_root,
+            },
+            .name = owned_name,
+            .root_dir = owned_root,
+        };
+        return result;
+    }
+
+    /// The owned input is held by value rather than pointed at, because this
+    /// cursor is stored inside a driver state that moves between steps and a
+    /// slice into itself would not survive the copy.
+    fn packageCount(self: *const Build) usize {
+        return if (self.owned_input != null) 1 else self.packages.len;
+    }
+
+    fn currentInput(self: *const Build) PackageInput {
+        if (self.owned_input) |owned| return owned.input;
+        return self.packages[self.package_index];
+    }
+
+    pub fn advance(self: *Build, budget: usize) BuildError!Progress {
+        if (self.package_index == self.packageCount()) {
+            self.stage = .finished;
+            return .done;
+        }
+        const input = self.currentInput();
+        switch (self.stage) {
+            .manifest => {
+                // Open into a local first: writing the union directly would
+                // let a failing `openPackage` leave the stage tagged over an
+                // unwritten payload, which `deinit` would then release.
+                const opened = try self.builder.openPackage(input);
+                self.stage = .{ .walking = opened };
+                return .pending;
+            },
+            .walking => |*walk| {
+                if (try self.builder.walkStep(input, walk, budget)) return .pending;
+                try self.builder.closeWalk(input, walk);
+                // Move the walk out before the union store: writing the new
+                // stage in place would otherwise overlap the payload being
+                // copied out of it.
+                const traversed = walk.*;
+                self.stage = .{ .artifacts = .{ .walk = traversed } };
+                return .pending;
+            },
+            .artifacts => |*artifacts| {
+                if (artifacts.index == artifacts.walk.claims.items.len) {
+                    artifacts.walk.deinit(self.builder.allocator, self.builder.io);
+                    self.stage = .manifest;
+                    self.package_index += 1;
+                    return if (self.package_index == self.packageCount()) .done else .pending;
+                }
+                try self.builder.buildArtifact(input, artifacts.walk.claims.items[artifacts.index]);
+                artifacts.index += 1;
+                return .pending;
+            },
+            .finished => return .done,
+        }
+    }
+
+    /// Take the finished catalog. Only valid once `advance` reported `.done`.
+    pub fn take(self: *Build) BuildError!Catalog {
+        std.debug.assert(self.stage == .finished or self.package_index == self.packageCount());
+        const allocator = self.builder.allocator;
+        const artifacts = try self.builder.artifacts.toOwnedSlice(allocator);
+        errdefer {
+            for (artifacts) |*artifact| artifact.deinit(allocator);
+            allocator.free(artifacts);
+        }
+        const modules = try self.builder.modules.toOwnedSlice(allocator);
+        self.releaseInput();
+        return .{ .allocator = allocator, .artifacts = artifacts, .modules = modules };
+    }
+
+    fn releaseInput(self: *Build) void {
+        const owned = self.owned_input orelse return;
+        self.builder.allocator.free(owned.name);
+        self.builder.allocator.free(owned.root_dir);
+        self.owned_input = null;
+    }
+
+    pub fn deinit(self: *Build) void {
+        switch (self.stage) {
+            .walking => |*walk| walk.deinit(self.builder.allocator, self.builder.io),
+            .artifacts => |*artifacts| artifacts.walk.deinit(self.builder.allocator, self.builder.io),
+            .manifest, .finished => {},
+        }
+        self.stage = .finished;
+        self.builder.deinit();
+        self.releaseInput();
+    }
+};
+
 pub fn build(
     host: *const heap.HostCleanup,
     io: std.Io,
     packages: []const PackageInput,
     diagnostic: *?[]u8,
 ) BuildError!Catalog {
-    diagnostic.* = null;
-    var builder = Builder{
-        .allocator = host.allocator(),
-        .host = host,
-        .io = io,
-        .diagnostic = diagnostic,
-    };
-    errdefer builder.deinit();
-    for (packages) |input| try builder.buildPackage(input);
-    const artifacts = try builder.artifacts.toOwnedSlice(builder.allocator);
-    errdefer {
-        for (artifacts) |*artifact| artifact.deinit(builder.allocator);
-        builder.allocator.free(artifacts);
-    }
-    const modules = try builder.modules.toOwnedSlice(builder.allocator);
-    return .{
-        .allocator = builder.allocator,
-        .artifacts = artifacts,
-        .modules = modules,
-    };
+    var cursor: Build = .init(host, io, packages, diagnostic);
+    errdefer cursor.deinit();
+    while (try cursor.advance(std.math.maxInt(usize)) == .pending) {}
+    return cursor.take();
 }
 
 fn validGlob(glob: []const u8) bool {

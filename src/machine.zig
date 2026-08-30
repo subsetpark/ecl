@@ -184,6 +184,7 @@ const ErrorDataKey = enum {
     right,
     @"destination-exists",
     scope,
+    package,
 };
 const ErrorData = struct {
     key: ErrorDataKey,
@@ -2902,14 +2903,14 @@ pub const Machine = struct {
     pub fn releaseDomain(self: *const Machine) *heap.ReleaseDomain {
         return self.unit.releases;
     }
-    pub fn validatePackageTree(
+    pub fn beginPackageTreeValidation(
         self: *const Machine,
         io: std.Io,
         package_name: []const u8,
         root_dir: []const u8,
         diagnostic: *?[]u8,
-    ) pkg_catalog.BuildError!void {
-        return self.unit.inherited.registry.?.validatePackageTree(
+    ) error{OutOfMemory}!pkg_catalog.Build {
+        return self.unit.inherited.registry.?.beginPackageTreeValidation(
             io,
             package_name,
             root_dir,
@@ -4927,6 +4928,12 @@ pub const Machine = struct {
     /// while letting a builtin module attach the one datum it owns.
     pub fn addErrorPath(self: *Machine, path: Value) void {
         self.unit.pendingFailure().addData(.path, path);
+    }
+    /// Names the package a store operation rejected. Installation raises its
+    /// catalog failures where the package is known, so a caller does not have
+    /// to re-attach provenance the way it must around an inspection.
+    pub fn addErrorPackage(self: *Machine, package: Value) void {
+        self.unit.pendingFailure().addData(.package, package);
     }
     /// Tags the one absent-only publication conflict that an immutable
     /// package caller may recover after independently confirming the winner.
