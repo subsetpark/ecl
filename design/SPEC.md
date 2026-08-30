@@ -221,7 +221,7 @@ A dying unit also cancels its unawaited tasks (see Concurrency).
 Three quotation-application behaviors exist:
 
 - **Inline**: the quotation runs on the current stack. The inline words
-  are `call`, `dip`, `keep`, `bi`, `tri`, `bi2`, `both`, `if`, `when`,
+  are `call`, `dip`, `keep`, `bi`, `tri`, `bi2`, `tri2`, `both`, `if`, `when`,
   `unless`, `case`, and `times`.
 - **Checkpointed inline guards**: `cond` and `while` test quotations run
   in the current scope against a retained operand-stack checkpoint. A test
@@ -232,7 +232,7 @@ Three quotation-application behaviors exist:
 - **Isolated**: the quotation runs on a fresh substack per application,
   seeded with its declared inputs, and its result count is checked
   against the contract. The isolated words are `each`, `zip-with`, `for`,
-  `fold`, `scan`, `stencil`, `unfold`, `infra`, `@attempt`, `@spawn`,
+  `fold`, `scan`, `update`, `stencil`, `unfold`, `infra`, `@attempt`, `@spawn`,
   `@each`, `@module`, and `@defm`.
 
 Every isolated combinator states the stack effect it requires of its
@@ -481,6 +481,15 @@ descent:
 
 There is a unified-value dividend: an all-numeric quotation *is* a vector,
 so `(1 2 3) 10 *` is simply `[10 20 30]`.
+
+Selection operations use the same recursive shape rule on their selector
+rather than on the collection value. For a list collection, `at`, `put`, and
+`update` descend a nested list selector to integer leaves. `at` preserves the
+selector shape, `put` conforms a replacement value to it with atom extension,
+and `update` applies its unary quotation at each leaf in left-to-right order.
+For a dictionary, the selector is always one atomic whole-value key, even when
+that key is a list. The `dict.at` and `dict.update` adapters supply the distinct
+operation of traversing an outer list of such whole keys.
 
 ## Numbers
 

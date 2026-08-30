@@ -111,6 +111,11 @@
 (|x y p q| x y p call x y q call)
 'bi2 def
 
+### def tri2
+(: "Apply each of three quotations to the same pair of input values in left-to-right order.")
+(|x y p q r| x y p call x y q call x y r call)
+'tri2 def
+
 ### def both
 (: "Apply one quotation independently to each of two input values.")
 (|x y q| x q call y q call)

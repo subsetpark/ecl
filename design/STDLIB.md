@@ -177,8 +177,10 @@ source, as a list of strings.
 
 ### at
 `( collection key -- value )` — Index a list or look up a dict key.
-Pervades over list indices, so an index vector selects:
-`[10 20 30] [2 0] at` is `[30 10]`. A missing dict key is an error.
+Pervades over nested list selectors, preserving their shape, so an index
+vector selects: `[10 20 30] [2 0] at` is `[30 10]`. A dictionary key is
+always one whole value, including when that value is a list. A missing dict
+key is an error.
 
 ### at-or
 `( collection key default -- value )` — The value at a key or index, or
@@ -610,8 +612,12 @@ returning 0. Defined in ecl.
 Equivalent to `1 (*) fold`.
 
 ### put
-`( collection key value -- collection )` — Functional update of a list
-index or dict key, producing a new value.
+`( collection selector value -- collection )` — Functional replacement.
+For a list collection, a nested list selector is pervasive and replacement
+lists conform recursively to its shape; an atomic replacement extends across
+every selected position. Selector leaves are integer indices. Repeated indices
+are processed left to right, so the last replacement wins. For a dictionary,
+the selector is always one whole-value key, including a list key.
 
 ### qualify
 `( 'module-name 'binding-name -- qualified-word )` — Validate a canonical
@@ -765,6 +771,11 @@ nonnegative int. Tail-call optimized.
 `( x p q r -- ... )` — *Inline.* Apply three quotations to the same input
 in order. Equivalent to `((keep) dip keep) dip call`.
 
+### tri2
+`( x y p q r -- ... )` — *Inline.* Binary cleave: apply each of three
+quotations to the same pair of inputs in left-to-right order. Equivalent to
+`(|x y p q r| x y p call x y q call x y r call)`.
+
 ### type
 `( value -- type )` — Return the value's kind as a symbol: one of `'int`,
 `'float`, `'char`, `'symbol`, `'word`, `'list`, `'dict`, or `'task`.
@@ -814,6 +825,15 @@ wrote it. `'type` for anything but a plan. See
 `( name -- )` — Remove a direct binding from the current scope, or do nothing
 when that scope does not bind the name. An exact alias of `undef`; removing a
 local shadow may reveal a parent or core binding.
+
+### update
+`( collection selector quotation -- collection )` — Apply an isolated
+`( value -- value )` quotation at the selected positions. A list collection's
+selector pervades with the same nested shape as `at` and is processed left to
+right, so repeated indices observe earlier updates. A dictionary selector is
+one whole-value key. The entire selector is validated before the quotation is
+first applied; an empty selector returns the list unchanged without applying
+it.
 
 ### when
 `( bool then -- ... )` — *Inline.* Run the quotation when the condition
@@ -929,6 +949,14 @@ parallel key/value lists, association lists, or one shared value for a key
 list. All constructors reject duplicate keys instead of silently choosing a
 winner.
 
+### at
+`( dict keys -- values )` — Look up every whole-value key in the requested
+key list and return the corresponding values in request order. Duplicate keys
+produce duplicate values. An absent key is `'domain`; the operation never
+silently drops a request. A structural list in `keys` is one dictionary key,
+while core `at` remains the scalar operation for looking up a structural list
+key directly.
+
 ### drop
 `( dict keys -- dict )` — Remove entries named by a key list, ignoring absent
 keys and preserving the relative order of every retained entry.
@@ -1007,8 +1035,12 @@ dictionary order in both results.
 keys. Output follows dictionary order, not the requested key-list order.
 
 ### update
-`( dict key quotation -- dict )` — Apply a `( value -- value )` quotation to
-one existing value without moving its key. An absent key is `'domain`.
+`( dict keys quotation -- dict )` — Apply an isolated `( value -- value )`
+quotation to every requested whole-value key without moving entries. Keys are
+processed in request order, so duplicates observe earlier updates. A structural
+list in `keys` is one dictionary key. All keys are validated before the
+quotation is first applied; an absent key is `'domain`, and an empty request
+returns the dictionary unchanged.
 
 ### update-or
 `( dict key default quotation -- dict )` — Update an existing value as
