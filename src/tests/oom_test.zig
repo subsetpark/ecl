@@ -460,6 +460,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-combinators.ecl",
         "[(1) (111) (222)] cond pop " ++
+            "1 (dup 0 =) () (1 -) () linrec pop " ++
             "[1 2 3] (dup 'each-local set each-local *) each pop " ++
             "[1] [2] (pop dup 'zip-with-local set zip-with-local pop) zip-with pop " ++
             "[1] (dup 'for-local set pop) for " ++

@@ -523,6 +523,18 @@ prefix is equal, compare sequence lengths. Defined in ecl.
 calling it pushes the exact captured value as inert data, without
 executing or resolving it. Equivalent to `wrap (first) cons`.
 
+### linrec
+`( predicate base pre post -- ... )` — *Inline.* Explicit linear recursion.
+At each descent, run `predicate` destructively against a retained checkpoint
+of the complete visible operand stack. Its top result must be a 0/1 boolean
+and its complete stack result is discarded. On 1, restore the checkpoint and
+run `base`. On 0, restore it and run `pre`, recurse from `pre`'s resulting
+stack, then run `post`. Environment and IO effects from the predicate survive
+restoration. All four quotations run in the invoking application context and
+communicate through ambient stack state. Non-tail recursion retains one
+explicit continuation per descent rather than using the host stack; its live
+storage is proportional to recursion depth.
+
 ### load
 `( path -- )` — Read and evaluate a source file as one transactional unit
 in the calling session.

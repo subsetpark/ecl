@@ -313,6 +313,204 @@ test "inline times checkpointed guards and case prevalidate and select" {
     });
 }
 
+test "linrec: terminal selection recursive descent and guard restoration are inline" {
+    try support.expectStacks(&.{
+        .{
+            .name = "terminal base skips recursive quotations",
+            .source = "7 (dup 7 =) (pop 99) (missing-pre) (missing-post) linrec",
+            .expected = "99",
+        },
+        .{
+            .name = "factorial has pre and post work",
+            .source = "5 (dup 0 =) (pop 1) (dup 1 -) (*) linrec",
+            .expected = "120",
+        },
+        .{
+            .name = "destructive predicate restores the complete checkpoint",
+            .source = "10 20 (pop 10 =) (30) (missing-pre) (missing-post) linrec",
+            .expected = "10 20 30",
+        },
+        .{
+            .name = "predicate values below the boolean are discarded",
+            .source = "8 (111 1) (1 +) (missing-pre) (missing-post) linrec",
+            .expected = "9",
+        },
+        .{
+            .name = "predicate environment effects survive restoration",
+            .source = "0 (7 'linrec-effect set 1) (pop linrec-effect) () () linrec",
+            .expected = "7",
+        },
+    });
+    try support.expectErrors(&.{
+        .{ .name = "predicate type", .source = "0 1 () () () linrec", .kind = "type", .word = "linrec" },
+        .{ .name = "base type", .source = "0 () 1 () () linrec", .kind = "type", .word = "linrec" },
+        .{ .name = "pre type", .source = "0 () () 1 () linrec", .kind = "type", .word = "linrec" },
+        .{ .name = "post type", .source = "0 () () () 1 linrec", .kind = "type", .word = "linrec" },
+        .{ .name = "missing parameter", .source = "() () () linrec", .kind = "underflow", .word = "linrec" },
+        .{ .name = "predicate leaves no boolean", .source = "0 (pop) () () () linrec", .kind = "underflow", .word = "linrec" },
+        .{ .name = "predicate non-boolean", .source = "0 (pop 2) () () () linrec", .kind = "type", .word = "linrec" },
+    });
+}
+
+test "linrec: predicate IO effects survive checkpoint restoration" {
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try session.Session.initWithHost(runtime_heap.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+    });
+    defer runtime.deinit();
+    try expectStack(
+        &runtime,
+        "0 (\"guard\" io.print 7 'linrec-io-effect set 1) " ++
+            "(pop linrec-io-effect) (missing-pre) (missing-post) linrec",
+        "7",
+    );
+    try std.testing.expectEqualStrings("guard\n", output.written());
+}
+
+test "linrec: quotations keep source scope module home and within authority" {
+    try support.expectStacks(&.{
+        .{
+            .name = "all four escaped quotations stay source sealed",
+            .source = "((dup 0 =) 'terminal? defp (pop 10) 'base-op defp " ++
+                "(dup 1 -) 'pre-op defp (+) 'post-op defp " ++
+                "((terminal?)) 'predicate def ((base-op)) 'base def " ++
+                "((pre-op)) 'pre def ((post-op)) 'post def) 'linrec-quotes @defm " ++
+                "(pop 1) 'terminal? def (pop 999) 'base-op def " ++
+                "(pop 0) 'pre-op def (pop pop 999) 'post-op def " ++
+                "2 linrec-quotes.predicate linrec-quotes.base " ++
+                "linrec-quotes.pre linrec-quotes.post linrec",
+            .expected = "13",
+        },
+        .{
+            .name = "same-home recursive descent retains private within authority",
+            .source = "[2] ((dup 0 =) 'terminal? defp " ++
+                "(((terminal?) (pop 10) (dup 1 -) (+) linrec without) within) " ++
+                "'run def) seed 'linrec-state @defm linrec-state.run",
+            .expected = "13",
+        },
+        .{
+            .name = "cross-module quotations remain inside one caller effect boundary",
+            .source = "(((dup 0 =)) 'predicate def ((pop 10)) 'base def " ++
+                "((dup 1 -)) 'pre def ((+)) 'post def) 'linrec-source @defm " ++
+                "((n -- result) (linrec-source.predicate linrec-source.base " ++
+                "linrec-source.pre linrec-source.post linrec) 'run def) " ++
+                "'linrec-runner @defm 2 linrec-runner.run",
+            .expected = "13",
+        },
+    });
+}
+
+test "linrec: cross-module descent preserves the enclosing effect boundary and trace" {
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+    switch (try runtime.runUnit(
+        "linrec-source.ecl",
+        "(((dup 0 =)) 'predicate def (()) 'base def ((1 -)) 'pre def " ++
+            "((dup)) 'post def) 'linrec-source @defm",
+    )) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    switch (try runtime.runUnit(
+        "linrec-runner.ecl",
+        "((n -- result) (linrec-source.predicate linrec-source.base " ++
+            "linrec-source.pre linrec-source.post linrec) 'run def) " ++
+            "'linrec-runner @defm",
+    )) {
+        .ok => {},
+        .err => |failure| {
+            runtime.release(failure);
+            return error.TestUnexpectedResult;
+        },
+        .incomplete => return error.TestUnexpectedResult,
+    }
+    const failure = switch (try runtime.runUnit("linrec-call.ecl", "1 linrec-runner.run")) {
+        .err => |item| item,
+        .ok, .incomplete => return error.TestUnexpectedResult,
+    };
+    defer runtime.release(failure);
+    try support.expectLanguageError(failure, .{
+        .name = "cross-module post effect",
+        .source = "1 linrec-runner.run",
+        .kind = "contract",
+        .word = "linrec-runner.run",
+        .data = &.{
+            .{ .name = "seeded", .expected = .{ .int = 1 } },
+            .{ .name = "observed", .expected = .{ .int = 2 } },
+        },
+    });
+    var rendered = try runtime.renderValue(failure);
+    defer rendered.deinit();
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered.bytes(),
+        "'trace ['linrec-runner.run]",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        rendered.bytes(),
+        "'source \"linrec-runner.ecl\"",
+    ) != null);
+}
+
+test "linrec: failures in every quotation roll back the enclosing unit" {
+    var runtime_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&runtime_heap);
+    var runtime = try session.Session.init(runtime_heap.allocator(), &.{});
+    defer runtime.deinit();
+    try expectStack(&runtime, "77", "77");
+
+    const cases = [_]support.ErrorCase{
+        .{ .name = "predicate", .source = "1 (missing-predicate) () () () linrec", .kind = "undefined-word", .word = "missing-predicate" },
+        .{ .name = "base", .source = "0 (dup 0 =) (missing-base) () () linrec", .kind = "undefined-word", .word = "missing-base" },
+        .{ .name = "pre", .source = "1 (dup 0 =) () (missing-pre) () linrec", .kind = "undefined-word", .word = "missing-pre" },
+        .{ .name = "post", .source = "1 (dup 0 =) () (1 -) (missing-post) linrec", .kind = "undefined-word", .word = "missing-post" },
+    };
+    for (cases) |case| {
+        const failure = switch (try runtime.runUnit(case.name, case.source)) {
+            .err => |item| item,
+            .ok, .incomplete => return error.TestUnexpectedResult,
+        };
+        defer runtime.release(failure);
+        try support.expectLanguageError(failure, case);
+        var display = try runtime.stackDisplay();
+        defer display.deinit();
+        try std.testing.expectEqualStrings("77", display.bytes());
+    }
+}
+
+test "linrec: deep recursion uses explicit frames and cancellation reaches guard restore" {
+    var depth_heap: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&depth_heap);
+    var depth_runtime = try session.Session.init(depth_heap.allocator(), &.{});
+    defer depth_runtime.deinit();
+    try expectStack(
+        &depth_runtime,
+        "10000 (dup 0 =) () (1 -) () linrec",
+        "0",
+    );
+    try std.testing.expect(depth_runtime.lastMaxFrames() >= 10_000);
+
+    try support.expectStack(
+        "(200 (dup 100 = dup (victim cancel) () if pop dup 0 =) " ++
+            "(pop) (1 -) () linrec) @spawn dup 'victim set await 'err at 'kind at",
+        "'cancelled",
+    );
+}
+
 test "nested in-place applications finish in one unwind" {
     // Each finished application continuation records one accounted native
     // step, and the machine loop consumes one per pass: an inner application

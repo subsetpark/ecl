@@ -1371,10 +1371,18 @@ pub const StackWindow = enum(u32) {
         return depth - start;
     }
 };
-pub const ApplicationStep = struct {
-    quotation: *Header,
-    seeded: u32,
+pub const ApplicationStep = union(enum) {
+    apply: struct {
+        quotation: *Header,
+        seeded: u32,
+        provenance: ApplicationProvenance = .boundary,
+    },
+    /// The callback installed bounded work which will launch a nested inline
+    /// application. Reinsert this exact application continuation beneath that
+    /// work so the child returns to it instead of replacing it.
+    suspend_inline: *const ApplicationSuspension,
 };
+pub const ApplicationSuspension = opaque {};
 /// Opaque, non-dereferenced capability for one live application frame. The
 /// Machine encodes a process-unique nonce with the frame index and validates
 /// both before use; ordinary callers can neither construct nor inspect it.
@@ -3123,6 +3131,14 @@ pub const Machine = struct {
         try self.pollKernel();
         std.debug.assert(self.unit.native == .idle);
         self.unit.native = .yielded;
+    }
+
+    /// Mints the nominal proof that this callback installed the work which
+    /// will launch its nested inline child. The machine validates the proof
+    /// against the still-installed driver before preserving the parent frame.
+    pub fn suspendInlineApplication(self: *Machine) ApplicationStep {
+        const driver = self.unit.workDriver() orelse unreachable;
+        return .{ .suspend_inline = @ptrCast(driver.context) };
     }
     /// Start the ordinary qualified-name loader without executing or importing
     /// an export. The caller supplies an initialized root and drives it through
@@ -8487,18 +8503,55 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                 continuation.deinit_fn(self.releaseDomain(), self.unit.allocator, continuation.context);
                 return err;
             };
-            if (next) |step| {
-                try self.beginApplication(.{
-                    .quotation = step.quotation,
-                    .context = continuation.context,
-                    .resume_fn = continuation.resume_fn,
-                    .deinit_fn = continuation.deinit_fn,
-                    .site = continuation.site,
-                    .seeded = step.seeded,
-                    .provenance = .boundary,
-                }, launch, continuation.traced_word);
-                return true;
-            }
+            if (next) |step| switch (step) {
+                .apply => |application| {
+                    try self.beginApplication(.{
+                        .quotation = application.quotation,
+                        .context = continuation.context,
+                        .resume_fn = continuation.resume_fn,
+                        .deinit_fn = continuation.deinit_fn,
+                        .site = continuation.site,
+                        .seeded = application.seeded,
+                        .provenance = application.provenance,
+                    }, launch, continuation.traced_word);
+                    return true;
+                },
+                .suspend_inline => |suspension| {
+                    const installed = self.unit.workDriver() orelse {
+                        continuation.deinit_fn(
+                            self.releaseDomain(),
+                            self.unit.allocator,
+                            continuation.context,
+                        );
+                        return self.fail(.domain, "application suspension has no installed work");
+                    };
+                    if (launch != .in_place or
+                        @intFromPtr(suspension) != @intFromPtr(installed.context))
+                    {
+                        continuation.deinit_fn(
+                            self.releaseDomain(),
+                            self.unit.allocator,
+                            continuation.context,
+                        );
+                        clearWorkDriver(self.unit);
+                        return self.fail(.domain, "application suspension is stale or foreign");
+                    }
+                    var suspended = OwnedFrame.init(.{ .application = .{
+                        .context = continuation.context,
+                        .resume_fn = continuation.resume_fn,
+                        .deinit_fn = continuation.deinit_fn,
+                        .site = continuation.site,
+                        .mode = .{ .in_place = base },
+                        .traced_word = continuation.traced_word,
+                        .selection = application_selection,
+                        .provenance_nonce = continuation.provenance_nonce,
+                    } });
+                    application_selection = .{};
+                    defer suspended.deinit(self.releaseDomain(), self.unit.allocator);
+                    try self.appendFrame(&suspended);
+                    return true;
+                },
+            };
             continuation.deinit_fn(self.releaseDomain(), self.unit.allocator, continuation.context);
             // Native work installed by an application continuation is the
             // continuation's tail. Do not cross later continuation frames until

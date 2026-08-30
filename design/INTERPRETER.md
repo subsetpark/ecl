@@ -714,7 +714,7 @@ Recorded target-specific results and their current disposition live in
   stack, which is what makes units green: suspension is "stop stepping."
   This identity between the frame machine and the scheduler is the
   load-bearing synergy of the design.
-- **Frames are ≤104-byte uniform records** (code ref, ip, env ref, kind
+- **Frames are ≤112-byte uniform records** (code ref, ip, env ref, kind
   tag, typed payload). The ceiling covers the tagged application mode, the
   immutable continuation driver, trace ownership, and the qualified-load
   return frame's complete replay-or-dispatch continuation. That last state
@@ -723,12 +723,12 @@ Recorded target-specific results and their current disposition live in
   instruction pointer, and ambient load state. Combinator state is indices.
   Isolation and failure rollback save only base indices into the
   unit's one contiguous data stack: isolation is a base-index barrier and
-  attempt-catch is truncate-to-base, O(1). `cond` and `while` are the one
-  distinct observation protocol: a resumable guard cursor retains the visible
-  operands in an immutable generic-spine checkpoint, permits destructive test
-  execution in the same scope, and restores that checkpoint in bounded chunks
-  before selecting an action or body. No frame owns or copies a user-sized
-  stack snapshot.
+  attempt-catch is truncate-to-base, O(1). `cond`, `while`, and `linrec` share
+  the distinct observation protocol: a resumable guard cursor retains the
+  visible operands in an immutable generic-spine checkpoint, permits
+  destructive test execution in the same scope, and restores that checkpoint
+  in bounded chunks before selecting an action or body. No frame owns or copies
+  a user-sized stack snapshot.
 - **Boundary frames** (attempt/module) record saved depths and form an
   intrusive chain with a register to the innermost — unwinding never scans
   or interprets frames (crash-only has no finally); it truncates.
@@ -764,8 +764,27 @@ Recorded target-specific results and their current disposition live in
   Success performs no additional code-header retain/release and failure either
   transfers the selected header or retains the driver-owned original once.
   The existing application frame allocation is reused, and `Frame` remains
-  below the unchanged 104-byte ceiling. Native and builtin checks likewise own
+  below the 112-byte ceiling. Native and builtin checks likewise own
   no source candidate.
+- **Recursive combinator continuation is an application transition, not a
+  host call.** After a false `linrec` predicate, the level applies `pre`,
+  installs the next level's bounded snapshot driver, and returns a nominal
+  suspension minted from that exact installed driver. The machine validates
+  the capability in every build and reinserts the current inline application
+  frame below the driver; the child predicate application is then launched
+  above it. Returning from the child resumes that frame, applies `post`, and
+  continues outward. Each pending post is therefore one truthful machine
+  frame, so live continuation storage is proportional to nonterminal depth and
+  the host stack remains constant. Each level owns retained references to the
+  four quotations. Its operand checkpoint exists only through capture,
+  predicate, and bounded restore and is released before `base` or `pre`,
+  preventing nested checkpoints from turning ordinary linear recursion into
+  quadratic retention. Cancellation polls both checkpoint drivers; failure,
+  cancellation, OOM, and ordinary unit unwind retire the installed driver and
+  every suspended level through their declared field ownership. All quotation
+  applications reuse the captured application site, module home, registration
+  provenance, and selected-source capability, so recursive descent introduces
+  no new scope or module-effect boundary.
 - **Contract locations stay lazy, direct, and code-plane-only.**
   `SpanTable.Entry` stores a quotation's opening span beside its token spans
   and source range. Absorption assigns each reader-built header a session-local
