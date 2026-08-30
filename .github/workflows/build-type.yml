@@ -49,6 +49,12 @@ on:
       run_oom:
         default: false
         type: boolean
+      oom_target:
+        default: test-oom
+        type: string
+      oom_filter:
+        default: ""
+        type: string
       run_performance_smoke:
         default: false
         type: boolean
@@ -63,6 +69,8 @@ jobs:
     timeout-minutes: 300
     env:
       OPTIMIZE: ${{ inputs.optimize }}
+      OOM_TARGET: ${{ inputs.oom_target }}
+      OOM_FILTER: ${{ inputs.oom_filter }}
 
     steps:
       - name: Validate optimization mode
@@ -253,10 +261,23 @@ jobs:
 
       - name: Initialized-Session OOM sweep
         if: inputs.run_oom
-        run: >-
-          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc
-          'cd /build; timeout 30m zig build test-oom
-          -Doptimize="$OPTIMIZE" --summary all --test-timeout 25m < /dev/null'
+        run: |
+          docker exec \
+            --env OPTIMIZE="$OPTIMIZE" \
+            --env OOM_TARGET="$OOM_TARGET" \
+            --env OOM_FILTER="$OOM_FILTER" \
+            ecl-ci sh -euxc '
+              cd /build
+              if [ -n "$OOM_FILTER" ]; then
+                timeout 30m zig build "$OOM_TARGET" \
+                  -Doptimize="$OPTIMIZE" "-Doom-filter=$OOM_FILTER" \
+                  --summary all --test-timeout 25m < /dev/null
+              else
+                timeout 30m zig build "$OOM_TARGET" \
+                  -Doptimize="$OPTIMIZE" \
+                  --summary all --test-timeout 25m < /dev/null
+              fi
+            '
 
       - name: Stop Alpine container
         if: always()

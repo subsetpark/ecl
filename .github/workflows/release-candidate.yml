@@ -1,7 +1,8 @@
 # Tier 3: intentionally manual and exhaustive. This is the union of every
 # pull-request and post-merge test surface plus the release-candidate-only OOM
-# sweep and complete ReleaseFast suite. Each build type keeps its own runner so
-# its dependent checks reuse one Zig cache and emitted artifacts.
+# sweeps and complete ReleaseFast suite. Ordinary tiers keep one runner per
+# build type for cache reuse; independent OOM families use separate runners so
+# a growing feature set does not consume one shared wall-clock budget.
 name: Release candidate
 
 on:
@@ -27,7 +28,7 @@ jobs:
       run_tsan: true
 
   release-safe:
-    name: Complete ReleaseSafe and OOM tiers
+    name: Complete ReleaseSafe tiers
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: ReleaseSafe
@@ -35,8 +36,78 @@ jobs:
       run_repl: true
       run_native_acceptance: true
       run_workers_eight: true
-      run_oom: true
       run_performance_smoke: true
+
+  oom-core:
+    name: Core initialized-Session OOM sweep
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: ReleaseSafe
+      run_oom: true
+      oom_target: test-oom-core
+
+  oom-stdlib:
+    name: Standard-library OOM surfaces
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: ReleaseSafe
+      run_oom: true
+      oom_target: test-oom-surfaces
+      oom_filter: ": stdlib:"
+
+  oom-package:
+    name: Package support OOM surfaces
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: ReleaseSafe
+      run_oom: true
+      oom_target: test-oom-surfaces
+      oom_filter: ": package:"
+
+  oom-sync-1:
+    name: Package sync OOM ordinals 1/4
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: ReleaseSafe
+      run_oom: true
+      oom_target: test-oom-surfaces
+      oom_filter: "sync: operation ordinal shard 1 of 4"
+
+  oom-sync-2:
+    name: Package sync OOM ordinals 2/4
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: ReleaseSafe
+      run_oom: true
+      oom_target: test-oom-surfaces
+      oom_filter: "sync: operation ordinal shard 2 of 4"
+
+  oom-sync-3:
+    name: Package sync OOM ordinals 3/4
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: ReleaseSafe
+      run_oom: true
+      oom_target: test-oom-surfaces
+      oom_filter: "sync: operation ordinal shard 3 of 4"
+
+  oom-sync-4:
+    name: Package sync OOM ordinals 4/4
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: ReleaseSafe
+      run_oom: true
+      oom_target: test-oom-surfaces
+      oom_filter: "sync: operation ordinal shard 4 of 4"
+
+  oom-host:
+    name: Host OOM surfaces
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: ReleaseSafe
+      run_oom: true
+      oom_target: test-oom-surfaces
+      oom_filter: ": host:"
 
   release-fast:
     name: Complete ReleaseFast and CLI tiers

@@ -416,19 +416,34 @@ pub fn build(b: *std.Build) void {
     stdlib_session_oom_mod.addOptions("native_fixture_options", native_fixture_options);
     stdlib_session_oom_mod.addOptions("archive_fixture_options", archive_fixture_options);
     stdlib_session_oom_mod.link_libc = true;
+    const stdlib_oom_filter = b.option(
+        []const u8,
+        "oom-filter",
+        "Run one named standard-library/host OOM surface",
+    ) orelse "oom: standard-library and host:";
     const stdlib_session_oom_tests = b.addTest(.{
         .root_module = stdlib_session_oom_mod,
-        .filters = &.{"oom: standard-library and host surfaces propagate every allocation failure"},
+        .filters = &.{stdlib_oom_filter},
     });
     stdlib_session_oom_tests.linkage = runtime_linkage;
     const run_stdlib_session_oom_tests = b.addRunArtifact(stdlib_session_oom_tests);
 
+    const oom_core_step = b.step(
+        "test-oom-core",
+        "Exhaust core initialized-Session allocation failures (ReleaseSafe)",
+    );
+    oom_core_step.dependOn(&run_full_session_oom_tests.step);
+    const oom_surfaces_step = b.step(
+        "test-oom-surfaces",
+        "Exhaust standard-library and host allocation failures (ReleaseSafe)",
+    );
+    oom_surfaces_step.dependOn(&run_stdlib_session_oom_tests.step);
     const oom_step = b.step(
         "test-oom",
         "Exhaust initialized-session allocation failures in parallel (ReleaseSafe)",
     );
-    oom_step.dependOn(&run_full_session_oom_tests.step);
-    oom_step.dependOn(&run_stdlib_session_oom_tests.step);
+    oom_step.dependOn(oom_core_step);
+    oom_step.dependOn(oom_surfaces_step);
 
     const audit_mod = b.createModule(.{
         .root_source_file = b.path("src/source_audit.zig"),
@@ -515,7 +530,8 @@ pub fn build(b: *std.Build) void {
     for (fuzz_campaign_steps) |campaign_step| campaign_step.dependOn(&run_audit.step);
     repl_step.dependOn(&run_audit.step);
     test_step.dependOn(&run_audit.step);
-    oom_step.dependOn(&run_audit.step);
+    oom_core_step.dependOn(&run_audit.step);
+    oom_surfaces_step.dependOn(&run_audit.step);
 
     const e2e_options = b.addOptions();
     e2e_options.addOptionPath("ecl_exe", exe.getEmittedBin());

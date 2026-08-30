@@ -86,9 +86,12 @@ tier.
   `gh run view <run-id> --log-failed`.
 - **Release candidate: `.github/workflows/release-candidate.yml`.** A manual
   exhaustive superset of the pull-request and post-merge matrices, plus the
-  initialized-Session `zig build test-oom` sweep and complete ReleaseFast
-  suite, run once against a candidate commit. It is the single workflow that
-  exercises every test surface.
+  initialized-Session OOM sweeps and complete ReleaseFast suite, run once
+  against a candidate commit. Core, standard-library, package, and host OOM
+  families use independent runners and wall-clock budgets, and the dominant
+  package-sync operation partitions its allocation ordinals across four more
+  runners. The unified local entry point remains `zig build test-oom`. It is
+  the single workflow that exercises every test surface.
 
 Run a single CI gate locally only when you have a specific reason to expect
 that gate to fail—a scheduler lifetime change wants `test-tsan`, a new
@@ -119,8 +122,12 @@ reason first, not the matrix.
 ## Allocators, OOM, and ownership in tests
 
 - Keep focused allocator failure sweeps in the normal suite. Consolidate exhaustive
-  initialized-Session coverage in `src/tests/oom_test.zig`, run by `zig build test-oom`, so
-  the embedded prelude is not bootstrapped independently for every runtime surface.
+  initialized-Session coverage in `src/tests/oom_test.zig`, run together by
+  `zig build test-oom`. `zig build test-oom-core` and `zig build test-oom-surfaces`
+  are the independently schedulable subsets; `-Doom-filter=<substring>` narrows
+  the latter to one named surface family. Split logical module and host surfaces
+  so unrelated snippets never become prefixes of one another's ordinal replay,
+  but do not bootstrap a Session independently for every word in one module.
 - Choose a test's allocator deliberately; `src/tests/test_heap.zig` is the policy and the
   table of what each one provides. The choice decides which assertions are even possible,
   and the wrong choice does not fail—it passes, having tested less:
