@@ -63,20 +63,6 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
     try support.expectStack("'result ('ok) import [1 2] ok", "{'ok [1 2]}");
 }
 
-test "stdlib: every pkg.store capability is documented and reflectable" {
-    try support.expectStack(
-        "'pkg.store.inspect doc len 0 > " ++
-            "'pkg.store.install doc len 0 > " ++
-            "'pkg.store.present? doc len 0 > " ++
-            "'pkg.store.verify doc len 0 > " ++
-            "'pkg.store.read-seal doc len 0 > " ++
-            "'pkg.store.write-lock doc len 0 > " ++
-            "'pkg.store.write-new doc len 0 > " ++
-            "'pkg.store.gc doc len 0 >",
-        "1 1 1 1 1 1 1 1",
-    );
-}
-
 test "stdlib: qualified reference auto-loads an unregistered module" {
     // No import, no registration, no path: the first mention of the dotted
     // name is what loads the module.

@@ -735,7 +735,9 @@ catalog of the exact direct module construction body. Accepts the same optional
 effect and documentation annotation forms as `def`. Tests may share names with
 words and are absent from application lookup, exports, imports, reflection,
 and module invocation. Top-level, nested-quotation, and child-Unit use is
-`'domain`.
+`'domain`. Application Sessions validate and discard declarations without
+retaining bodies or checking duplicate test names; Test Sessions retain them
+and reject duplicate names.
 
 ### tests
 `( -- descriptors )` — Test-Session-only discovery of current canonical

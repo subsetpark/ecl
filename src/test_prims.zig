@@ -7,6 +7,7 @@ const env = @import("env.zig");
 const intern = @import("intern.zig");
 const machine = @import("machine.zig");
 const modules = @import("modules.zig");
+const poll = @import("poll.zig");
 const scheduler_api = @import("scheduler.zig");
 
 const Value = value.Value;
@@ -53,19 +54,53 @@ const Collected = struct {
     }
 };
 
-fn lessThan(left: Collected, right: Collected) bool {
-    const module_order = std.mem.order(
-        u8,
-        intern.get(intern.moduleId(left.module)),
-        intern.get(intern.moduleId(right.module)),
-    );
-    if (module_order != .eq) return module_order == .lt;
-    return std.mem.lessThan(
-        u8,
-        intern.get(intern.bindingId(left.metadata.name)),
-        intern.get(intern.bindingId(right.metadata.name)),
-    );
-}
+const CollectedComparator = struct {
+    pub const Context = void;
+    pub const Cursor = struct {
+        left_module: []const u8,
+        right_module: []const u8,
+        left_name: []const u8,
+        right_name: []const u8,
+        phase: enum { module, name } = .module,
+        index: usize = 0,
+    };
+
+    pub fn init(_: Context, left: Collected, right: Collected) Cursor {
+        return .{
+            .left_module = intern.get(intern.moduleId(left.module)),
+            .right_module = intern.get(intern.moduleId(right.module)),
+            .left_name = intern.get(intern.bindingId(left.metadata.name)),
+            .right_name = intern.get(intern.bindingId(right.metadata.name)),
+        };
+    }
+
+    pub fn advance(cursor: *Cursor, budget: usize) poll.Progress(std.math.Order) {
+        std.debug.assert(budget != 0);
+        var remaining = budget;
+        while (remaining != 0) {
+            const left = if (cursor.phase == .module) cursor.left_module else cursor.left_name;
+            const right = if (cursor.phase == .module) cursor.right_module else cursor.right_name;
+            const shared = @min(left.len, right.len);
+            if (cursor.index == shared) {
+                if (left.len != right.len)
+                    return .{ .complete = if (left.len < right.len) .lt else .gt };
+                if (cursor.phase == .name) return .{ .complete = .eq };
+                cursor.phase = .name;
+                cursor.index = 0;
+                continue;
+            }
+            const left_byte = left[cursor.index];
+            const right_byte = right[cursor.index];
+            cursor.index += 1;
+            remaining -= 1;
+            if (left_byte != right_byte)
+                return .{ .complete = if (left_byte < right_byte) .lt else .gt };
+        }
+        return .pending;
+    }
+};
+
+const CollectedSortCursor = poll.MergeSortCursor(Collected, CollectedComparator);
 
 fn descriptorValue(
     allocator: std.mem.Allocator,
@@ -103,10 +138,9 @@ const DiscoveryDriver = struct {
     cursor: ?modules.Registry.TestDiscoveryCursor,
     items: std.ArrayList(Collected) = .empty,
     values: ?heap.OwnedValueBuffer = null,
+    sorter: ?CollectedSortCursor = null,
     keys: DescriptorKeys,
     phase: enum { discover, sort, descriptors, finish } = .discover,
-    sort_outer: usize = 1,
-    sort_inner: usize = 1,
     descriptor_index: usize = 0,
 
     pub fn deinit(
@@ -115,6 +149,7 @@ const DiscoveryDriver = struct {
         allocator: std.mem.Allocator,
     ) void {
         if (self.cursor) |*cursor| cursor.deinit();
+        if (self.sorter) |*sorter| sorter.deinit();
         if (self.values) |*values| values.deinit();
         for (self.items.items) |item| item.retire(releases);
         self.items.deinit(allocator);
@@ -143,29 +178,20 @@ const DiscoveryDriver = struct {
                 },
             },
             .sort => {
-                if (self.sort_outer >= self.items.items.len) {
-                    self.values = try heap.OwnedValueBuffer.init(
-                        evaluator.releaseDomain(),
-                        self.items.items.len,
-                    );
-                    self.phase = .descriptors;
-                    continue;
+                if (self.sorter == null)
+                    self.sorter = try .init(evaluator.allocator(), self.items.items, {});
+                switch (self.sorter.?.advance(1)) {
+                    .pending => budget -= 1,
+                    .complete => {
+                        self.sorter.?.deinit();
+                        self.sorter = null;
+                        self.values = try heap.OwnedValueBuffer.init(
+                            evaluator.releaseDomain(),
+                            self.items.items.len,
+                        );
+                        self.phase = .descriptors;
+                    },
                 }
-                if (self.sort_inner != 0 and lessThan(
-                    self.items.items[self.sort_inner],
-                    self.items.items[self.sort_inner - 1],
-                )) {
-                    std.mem.swap(
-                        Collected,
-                        &self.items.items[self.sort_inner],
-                        &self.items.items[self.sort_inner - 1],
-                    );
-                    self.sort_inner -= 1;
-                } else {
-                    self.sort_outer += 1;
-                    self.sort_inner = self.sort_outer;
-                }
-                budget -= 1;
             },
             .descriptors => {
                 if (self.descriptor_index == self.items.items.len) {

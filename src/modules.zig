@@ -29,6 +29,7 @@ const TestCatalog = struct {
         body: *env.Quotation,
         effect: ?env.ValidatedEffect,
         doc: ?*env.DocumentationString,
+        next: ?*Entry = null,
 
         fn retain(self: Entry) void {
             heap.incRef(env.quotationHeader(self.body));
@@ -47,8 +48,25 @@ const TestCatalog = struct {
         }
     };
 
+    const Link = union(enum) {
+        entry: *Entry,
+        branch: *Branch,
+    };
+
+    /// A fixed-depth crit-bit index over nominal 32-bit binding IDs. Branch
+    /// masks strictly decrease on every path, so declaration and lookup each
+    /// take at most 32 resumable steps without resizing or rehashing storage.
+    const Branch = struct {
+        mask: u32,
+        children: [2]?Link,
+        next_all: ?*Branch,
+    };
+
     allocator: std.mem.Allocator,
-    entries: std.ArrayList(Entry) = .empty,
+    root: ?Link = null,
+    entries_head: ?*Entry = null,
+    entries_tail: ?*Entry = null,
+    branches: ?*Branch = null,
     frozen: bool = false,
 
     fn init(allocator: std.mem.Allocator) TestCatalog {
@@ -63,26 +81,115 @@ const TestCatalog = struct {
     const DeclareProgress = poll.Progress(void);
     const DeclareCursor = struct {
         catalog: *TestCatalog,
-        entry: Entry,
-        index: usize = 0,
+        candidate: Entry,
+        state: union(enum) {
+            lookup: ?Link,
+            insertion: struct {
+                link: *?Link,
+                mask: u32,
+            },
+            commit: struct {
+                link: *?Link,
+                mask: ?u32,
+            },
+        },
         complete: bool = false,
 
         fn advance(self: *DeclareCursor) DeclareError!DeclareProgress {
             std.debug.assert(!self.complete);
             if (self.catalog.frozen) return error.Frozen;
-            if (self.index != self.catalog.entries.items.len) {
-                if (self.catalog.entries.items[self.index].name == self.entry.name)
-                    return error.DuplicateTest;
-                self.index += 1;
-                return .pending;
-            }
-            try self.catalog.entries.ensureUnusedCapacity(self.catalog.allocator, 1);
-            self.entry.retain();
-            self.catalog.entries.appendAssumeCapacity(self.entry);
-            self.complete = true;
-            return .complete;
+            return switch (self.state) {
+                .lookup => |maybe_link| result: {
+                    const link = maybe_link orelse {
+                        self.state = .{ .commit = .{
+                            .link = &self.catalog.root,
+                            .mask = null,
+                        } };
+                        break :result .pending;
+                    };
+                    switch (link) {
+                        .branch => |branch| {
+                            self.state = .{ .lookup = branch.children[
+                                direction(
+                                    self.candidate.name,
+                                    branch.mask,
+                                )
+                            ] };
+                            break :result .pending;
+                        },
+                        .entry => |entry| {
+                            if (entry.name == self.candidate.name)
+                                return error.DuplicateTest;
+                            const difference = rawName(entry.name) ^ rawName(self.candidate.name);
+                            self.state = .{ .insertion = .{
+                                .link = &self.catalog.root,
+                                .mask = std.math.floorPowerOfTwo(u32, difference),
+                            } };
+                            break :result .pending;
+                        },
+                    }
+                },
+                .insertion => |insertion| result: {
+                    const link = insertion.link.* orelse unreachable;
+                    if (link == .branch and link.branch.mask > insertion.mask) {
+                        self.state = .{ .insertion = .{
+                            .link = &link.branch.children[
+                                direction(
+                                    self.candidate.name,
+                                    link.branch.mask,
+                                )
+                            ],
+                            .mask = insertion.mask,
+                        } };
+                        break :result .pending;
+                    }
+                    self.state = .{ .commit = .{
+                        .link = insertion.link,
+                        .mask = insertion.mask,
+                    } };
+                    break :result .pending;
+                },
+                .commit => |commit| result: {
+                    const entry = try self.catalog.allocator.create(Entry);
+                    errdefer self.catalog.allocator.destroy(entry);
+                    entry.* = self.candidate;
+                    if (commit.mask) |mask| {
+                        const branch = try self.catalog.allocator.create(Branch);
+                        const existing = commit.link.* orelse unreachable;
+                        const new_direction = direction(entry.name, mask);
+                        branch.* = .{
+                            .mask = mask,
+                            .children = @splat(null),
+                            .next_all = self.catalog.branches,
+                        };
+                        branch.children[new_direction] = .{ .entry = entry };
+                        branch.children[1 - new_direction] = existing;
+                        commit.link.* = .{ .branch = branch };
+                        self.catalog.branches = branch;
+                    } else {
+                        std.debug.assert(commit.link.* == null);
+                        commit.link.* = .{ .entry = entry };
+                    }
+                    entry.retain();
+                    if (self.catalog.entries_tail) |tail|
+                        tail.next = entry
+                    else
+                        self.catalog.entries_head = entry;
+                    self.catalog.entries_tail = entry;
+                    self.complete = true;
+                    break :result .complete;
+                },
+            };
         }
     };
+
+    fn rawName(name: intern.BindingName) u32 {
+        return @intFromEnum(name);
+    }
+
+    fn direction(name: intern.BindingName, mask: u32) usize {
+        return @intFromBool(rawName(name) & mask != 0);
+    }
 
     fn declareCursor(
         self: *TestCatalog,
@@ -91,59 +198,78 @@ const TestCatalog = struct {
         effect: ?env.ValidatedEffect,
         doc: ?*env.DocumentationString,
     ) DeclareCursor {
-        return .{ .catalog = self, .entry = .{
-            .name = name,
-            .body = body,
-            .effect = effect,
-            .doc = doc,
-        } };
+        return .{
+            .catalog = self,
+            .candidate = .{
+                .name = name,
+                .body = body,
+                .effect = effect,
+                .doc = doc,
+            },
+            .state = .{ .lookup = self.root },
+        };
     }
 
     const NameProgress = poll.StreamProgress(ModuleTestMetadata);
     const NameCursor = struct {
-        catalog: *const TestCatalog,
-        index: usize = 0,
+        next: ?*const Entry,
 
         fn advance(self: *NameCursor) NameProgress {
-            if (self.index == self.catalog.entries.items.len) return .complete;
-            const result = self.catalog.entries.items[self.index].metadata();
-            self.index += 1;
-            return .{ .item = result };
+            const entry = self.next orelse return .complete;
+            self.next = entry.next;
+            return .{ .item = entry.metadata() };
         }
     };
 
     const LookupProgress = poll.Progress(?*env.Quotation);
     const LookupCursor = struct {
-        catalog: *const TestCatalog,
+        current: ?Link,
         name: intern.BindingName,
-        index: usize = 0,
 
         fn advance(self: *LookupCursor) LookupProgress {
-            if (self.index == self.catalog.entries.items.len)
-                return .{ .complete = null };
-            const entry = self.catalog.entries.items[self.index];
-            self.index += 1;
-            if (entry.name == self.name) return .{ .complete = entry.body };
-            return .pending;
+            const link = self.current orelse return .{ .complete = null };
+            return switch (link) {
+                .branch => |branch| pending: {
+                    self.current = branch.children[direction(self.name, branch.mask)];
+                    break :pending .pending;
+                },
+                .entry => |entry| .{ .complete = if (entry.name == self.name)
+                    entry.body
+                else
+                    null },
+            };
         }
     };
 
     const TeardownCursor = struct {
         catalog: *TestCatalog,
-        remaining: usize,
+        branches: ?*Branch,
+        entries: ?*Entry,
 
         fn init(catalog: *TestCatalog) TeardownCursor {
-            return .{ .catalog = catalog, .remaining = catalog.entries.items.len };
+            return .{
+                .catalog = catalog,
+                .branches = catalog.branches,
+                .entries = catalog.entries_head,
+            };
         }
 
         fn advance(self: *TeardownCursor, releases: *heap.ReleaseDomain) bool {
-            if (self.remaining != 0) {
-                self.remaining -= 1;
-                self.catalog.entries.items[self.remaining].retire(releases);
+            if (self.branches) |branch| {
+                self.branches = branch.next_all;
+                self.catalog.allocator.destroy(branch);
                 return false;
             }
-            self.catalog.entries.deinit(self.catalog.allocator);
-            self.catalog.entries = .empty;
+            if (self.entries) |entry| {
+                self.entries = entry.next;
+                entry.retire(releases);
+                self.catalog.allocator.destroy(entry);
+                return false;
+            }
+            self.catalog.root = null;
+            self.catalog.entries_head = null;
+            self.catalog.entries_tail = null;
+            self.catalog.branches = null;
             return true;
         }
     };
@@ -152,13 +278,28 @@ const TestCatalog = struct {
 /// Bounded declaration work returned only for the candidate image currently
 /// owned by a module construction boundary.
 pub const TestDeclarationCursor = struct {
-    inner: TestCatalog.DeclareCursor,
+    state: union(enum) {
+        discard,
+        catalog: TestCatalog.DeclareCursor,
+        complete,
+    },
 
     pub const Progress = poll.Progress(void);
     pub const Error = TestCatalog.DeclareError;
 
+    pub fn discard() TestDeclarationCursor {
+        return .{ .state = .discard };
+    }
+
     pub fn advance(self: *TestDeclarationCursor) Error!Progress {
-        return self.inner.advance();
+        return switch (self.state) {
+            .discard => result: {
+                self.state = .complete;
+                break :result .complete;
+            },
+            .catalog => |*cursor| cursor.advance(),
+            .complete => unreachable,
+        };
     }
 };
 
@@ -1479,13 +1620,16 @@ pub const GenerationLease = enum(usize) {
         return self.registration().publicNameCursor();
     }
     fn testNameCursor(self: GenerationLease) TestCatalog.NameCursor {
-        return .{ .catalog = &self.registration().image.tests };
+        return .{ .next = self.registration().image.tests.entries_head };
     }
     fn testLookupCursor(
         self: GenerationLease,
         test_name: intern.BindingName,
     ) TestCatalog.LookupCursor {
-        return .{ .catalog = &self.registration().image.tests, .name = test_name };
+        return .{
+            .current = self.registration().image.tests.root,
+            .name = test_name,
+        };
     }
     pub fn enterExecution(
         self: *GenerationLease,
@@ -1681,7 +1825,12 @@ pub const OwnedImage = enum(usize) {
         effect: ?env.ValidatedEffect,
         doc: ?*env.DocumentationString,
     ) TestDeclarationCursor {
-        return .{ .inner = self.borrow().tests.declareCursor(name, body, effect, doc) };
+        return .{ .state = .{ .catalog = self.borrow().tests.declareCursor(
+            name,
+            body,
+            effect,
+            doc,
+        ) } };
     }
     /// Reserves the construction stack the body left behind. Entries start as
     /// scalars so a partly filled template is always releasable, and the

@@ -94,14 +94,6 @@ test {
     _ = @import("tests/unit_plan_test.zig");
     _ = @import("tests/stdlib_test.zig");
     _ = @import("tests/hostio_test.zig");
-    _ = @import("tests/error_test.zig");
-    _ = @import("tests/dict_module_test.zig");
-    _ = @import("tests/result_test.zig");
-    _ = @import("tests/str_test.zig");
-    _ = @import("tests/csv_test.zig");
-    _ = @import("tests/json_test.zig");
-    _ = @import("tests/table_test.zig");
-    _ = @import("tests/pkg_test.zig");
     _ = @import("tests/pkg_sync_test.zig");
     _ = @import("tests/archive_test.zig");
     _ = @import("tests/http_test.zig");

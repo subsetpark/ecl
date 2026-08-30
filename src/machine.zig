@@ -3030,6 +3030,8 @@ pub const Machine = struct {
         const home = candidate.executionHome(self.unit.module_access);
         if (self.currentHome() != home or self.currentScope() != home.scope(self.unit.module_access))
             return self.fail(.domain, "test is legal only at a direct module construction root");
+        if (self.unit.inherited.test_execution == null)
+            return .discard();
         return candidate.testDeclarationCursor(name, body, effect, doc);
     }
     pub fn applicationSite(self: *const Machine) ApplicationSite {

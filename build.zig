@@ -251,6 +251,15 @@ pub fn build(b: *std.Build) void {
     run_tests.step.dependOn(&fixture_files.step);
     const test_step = b.step("test", "Run the ecl test suite");
     test_step.dependOn(&run_tests.step);
+    const run_ecl_tests = b.addRunArtifact(exe);
+    run_ecl_tests.addArg("test");
+    run_ecl_tests.setCwd(b.path("test/stdlib-tests"));
+    const ecl_test_step = b.step(
+        "test-ecl",
+        "Run the first-class ECL test suite",
+    );
+    ecl_test_step.dependOn(&run_ecl_tests.step);
+    test_step.dependOn(&run_ecl_tests.step);
     const native_runtime_tests = b.addTest(.{
         .root_module = test_mod,
         .filters = &.{ "native:", "concurrency: native shutdown" },
@@ -791,14 +800,6 @@ pub fn build(b: *std.Build) void {
             "tests.module_value_test.",
             "tests.unit_plan_test.",
             "tests.stdlib_test.",
-            "tests.error_test.",
-            "tests.dict_module_test.",
-            "tests.result_test.",
-            "tests.str_test.",
-            "tests.csv_test.",
-            "tests.json_test.",
-            "tests.table_test.",
-            "tests.pkg_test.",
             "tests.archive_test.",
             "tests.random_test.",
             "tests.hostio_test.",

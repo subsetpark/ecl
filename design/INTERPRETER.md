@@ -1619,11 +1619,19 @@ honest source with no public dual representation.
   registration copies the template into its new slot's durable stack rather
   than consuming it, so the same image can seed a second registration; a
   re-registration does not consult it at all.
-- **The test catalog is published and reclaimed with the image.** Its private
-  entries retain stamped quotations and optional annotations; its public
-  metadata projection omits the quotation by type. Declaration is available
-  only through the `OwnedImage` named by the exact construction-root boundary,
-  and sealing freezes definitions and tests in one typestate transition.
+- **The test catalog is test-Session-only retained state.** Every Session
+  validates test placement, annotations, names, and bodies through the same
+  declaration boundary. An application Session then completes a discard
+  cursor: it allocates no catalog node, retains no body or annotation, and
+  performs no duplicate-name lookup, so shipped application images have empty
+  test catalogs. A test Session records entries in a fixed-depth crit-bit tree
+  keyed by nominal 32-bit binding IDs; declaration and lookup take at most 32
+  resumable index steps regardless of suite size. A linked declaration-order
+  list supplies discovery, and separately linked branch and entry allocations
+  make teardown one bounded release per advance. The catalog's public metadata
+  projection omits the quotation by type. Declaration is available only
+  through the `OwnedImage` named by the exact construction-root boundary, and
+  sealing freezes definitions and tests in one typestate transition.
   Registration generations retain the whole image, so reload cannot expose
   code from one generation with tests from another. Image retirement advances
   a bounded catalog teardown cursor before releasing the remaining image
@@ -1632,8 +1640,11 @@ honest source with no public dual representation.
   capabilities.** Only `Session.initTest*` allocates the seal; its projections
   enter inherited Unit context but never a callback or descriptor. Canonical
   discovery owns a directory snapshot plus one generation lease at a time,
-  and sorting, metadata retention/materialization, lookup, and teardown all
-  advance under kernel polling. Execution performs a late catalog lookup,
+  and metadata retention/materialization, lookup, and teardown all advance
+  under kernel polling. Discovery ordering uses bottom-up merge sort rather
+  than insertion sort: O(n log n) comparisons, with lexical comparison itself
+  byte-resumable so long names cannot hide user-sized work. Execution performs
+  a late catalog lookup,
   converts the selected generation through ordinary execution authority, and
   transfers its home and quotation to a fresh scheduler child. `SpawnSite` is
   a tagged choice between an inherited caller site and a module home, so a

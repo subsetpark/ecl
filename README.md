@@ -211,7 +211,9 @@ workflow.
 ### Tests
 
 Tests are module declarations, not exported words. They may call private
-definitions and may use the same name as an ordinary definition:
+definitions and may use the same name as an ordinary definition. Ordinary
+application loading validates and then discards them, so test bodies and test
+catalog indexes are not retained in shipped module images:
 
 ```ecl
 ### module app.math
@@ -346,11 +348,14 @@ zig build precommit < /dev/null
 ```
 
 `zig build check` is the quicker whole-tree compile check. Pull-request CI runs
-the Debug precommit tier and one complete ReleaseSafe suite, including PTY and
-standalone native-extension acceptance. Master and manual CI add the full Debug
-suite, bounded fuzz campaigns, eight-worker concurrency, differential checks,
-TSan, and ReleaseFast snapshots. Each optimization mode runs its tiers in one
-job so Zig can reuse that mode's cache and emitted artifacts. See
+the Debug precommit tier and one complete ReleaseSafe suite. `zig build
+test-ecl` is the single first-class ECL test entrypoint and is owned by the
+complete `zig build test` suite, so pull-request CI invokes it once. That suite
+also includes PTY and standalone native-extension acceptance. Master and manual
+CI add the full Debug suite, bounded fuzz campaigns, eight-worker concurrency,
+differential checks, TSan, and ReleaseFast snapshots. Each optimization mode
+runs its tiers in one job so Zig can reuse that mode's cache and emitted
+artifacts. See
 [`AGENTS.md`](AGENTS.md) for the repository's testing and architectural rules.
 
 ecl is distributed under the [BSD 3-Clause License](LICENSE).

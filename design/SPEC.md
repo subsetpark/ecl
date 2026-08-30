@@ -672,10 +672,14 @@ anonymously, be passed as data, and be registered more than once.
   body of `@module` or `@defm` is executing. A nested quotation, child unit,
   or top-level use is `'domain`. Test names may equal public or private word
   names because catalog entries never enter local lookup, qualified lookup,
-  imports, `words`, reflection, or module invocation. Duplicate test names in
-  one image are `'domain`.
-- A module image freezes its definitions, initial-state template, and test
-  catalog together. Registration publishes that image as one generation:
+  imports, `words`, reflection, or module invocation. Application Sessions
+  still validate placement, annotations, names, and bodies, then discard the
+  declaration without retaining it or checking test-name uniqueness. Test
+  Sessions retain the catalog; duplicate test names in one test image are
+  `'domain`.
+- A test-built module image freezes its definitions, initial-state template,
+  and test catalog together; an application-built image has an empty catalog.
+  Registration publishes that image as one generation:
   reload replaces code and tests atomically while preserving slot state;
   removal removes both; aliases never create another suite; and registering
   one image under two canonical names creates two independently discoverable

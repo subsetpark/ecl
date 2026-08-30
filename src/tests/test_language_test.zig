@@ -95,6 +95,28 @@ test "testing: application sessions reject test discovery and execution" {
     try expectErr(&runtime, "{'module 'm 'name 'x} @test");
 }
 
+test "testing: application sessions validate and discard test declarations" {
+    var application_backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&application_backing);
+    var application = try session.Session.init(application_backing.allocator(), &.{});
+    defer application.deinit();
+
+    // Application construction still validates declaration placement and
+    // shape, but catalog-only uniqueness has no observable application
+    // meaning and incurs no retained entry or name-index work.
+    try expectOk(
+        &application,
+        "((1) 'same test (2) 'same test (42) 'answer def) 'discarded @defm " ++
+            "discarded.answer 42 = {'kind 'user} assert",
+    );
+
+    var test_backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&test_backing);
+    var testing = try session.Session.initTest(test_backing.allocator(), &.{});
+    defer testing.deinit();
+    try expectErr(&testing, "((1) 'same test (2) 'same test) 'duplicate @defm");
+}
+
 test "testing: test execution reaches private definitions and reifies its isolated stack" {
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
