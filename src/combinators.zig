@@ -1032,7 +1032,10 @@ const UpdateApplication = struct {
     }
 
     fn step(self: *UpdateApplication) ApplicationStep {
-        return .{ .quotation = self.state.borrow().quotation.borrow(), .seeded = 1 };
+        return .{ .apply = .{
+            .quotation = self.state.borrow().quotation.borrow(),
+            .seeded = 1,
+        } };
     }
 
     pub fn resumeApplication(
