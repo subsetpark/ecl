@@ -12,6 +12,7 @@ const help =
     \\    ecl fmt <FILE|->           Format source to standard output
     \\    ecl fmt -w <FILE>          Format and atomically rewrite a file
     \\    ecl pkg <SUBCOMMAND>       Manage the current project's packages
+    \\    ecl test [OPTIONS] [-- ARGS...]  Run the root project's tests
     \\
     \\OPTIONS:
     \\    -e, --eval <SOURCE>        Evaluate source text
@@ -57,6 +58,7 @@ fn entry(init: std.process.Init) AppError!u8 {
     }
     if (std.mem.eql(u8, first, "fmt")) return formatCommand(init, cli[1..]);
     if (std.mem.eql(u8, first, "pkg")) return packageCommand(init, cli[1..]);
+    if (std.mem.eql(u8, first, "test")) return testCommand(init, cli[1..]);
     const worker_count = try configuredWorkers(init) orelse return 2;
     if (std.mem.eql(u8, first, "-e") or std.mem.eql(u8, first, "--eval")) {
         if (cli.len < 2) return emitSyntheticError(
@@ -95,6 +97,118 @@ fn entry(init: std.process.Init) AppError!u8 {
         return emitSyntheticError(init, .io, message, null);
     }
     return executeSource(init, "<command>", first, cli[1..], true, .data, worker_count);
+}
+
+const test_help =
+    \\USAGE:
+    \\    ecl test [--runner <qualified-word>] [-- <arguments...>]
+    \\
+    \\OPTIONS:
+    \\    --runner <qualified-word>  Select a public userland runner
+    \\
+;
+
+fn testUsage(init: std.process.Init) AppError!u8 {
+    try writeFile(init.io, .stderr, test_help);
+    return 1;
+}
+
+fn validateRunner(name: []const u8) AppError!bool {
+    const separator = std.mem.lastIndexOfScalar(u8, name, '.') orelse return false;
+    if (separator == 0 or separator + 1 == name.len) return false;
+    _ = ecl.intern.internModuleName(name[0..separator]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidName => return false,
+    };
+    _ = ecl.intern.internNamespace(name[separator + 1 ..]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidName => return false,
+    };
+    return true;
+}
+
+fn testCommand(init: std.process.Init, arguments: []const []const u8) AppError!u8 {
+    var runner: []const u8 = "test.default.run";
+    var trailing: []const []const u8 = &.{};
+    var index: usize = 0;
+    while (index < arguments.len) {
+        const argument = arguments[index];
+        if (std.mem.eql(u8, argument, "--")) {
+            trailing = arguments[index + 1 ..];
+            index = arguments.len;
+            break;
+        }
+        if (std.mem.eql(u8, argument, "--runner")) {
+            if (index + 1 >= arguments.len) return testUsage(init);
+            runner = arguments[index + 1];
+            index += 2;
+            continue;
+        }
+        return testUsage(init);
+    }
+    if (!try validateRunner(runner)) return emitSyntheticError(
+        init,
+        .domain,
+        "ecl test runner must be a qualified public word",
+        null,
+    );
+
+    const worker_count = try configuredWorkers(init) orelse return 2;
+    var output_buffer: [4096]u8 = undefined;
+    var output_writer = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
+    var diagnostic_buffer: [4096]u8 = undefined;
+    var diagnostic_writer = std.Io.File.stderr().writerStreaming(init.io, &diagnostic_buffer);
+    var runtime = try ecl.session.Session.initTestWithHostConfig(
+        init.gpa,
+        trailing,
+        .{
+            .io = init.io,
+            .output = &output_writer.interface,
+            .diagnostics = &diagnostic_writer.interface,
+            .ecl_path = init.environ_map.get("ECL_PATH"),
+            .project_start = ".",
+            .environ = try environSnapshot(init),
+            .standard_input = .data,
+        },
+        .{ .worker_pool = worker_count },
+    );
+    defer runtime.deinit();
+    runtime.setNativeDiagnostics(init.environ_map.get("ECL_NATIVE_DIAGNOSTICS") != null);
+
+    while (true) switch (try runtime.advanceRootPreload()) {
+        .pending => {},
+        .complete => break,
+        .no_project => return emitSyntheticError(
+            init,
+            .io,
+            "ecl test requires a lock-backed root project; run `ecl pkg sync`",
+            null,
+        ),
+        .invalid => |message| return emitSyntheticError(init, .io, message, null),
+        .err => |failure| {
+            defer runtime.release(failure);
+            try printSessionError(init, &runtime, failure);
+            return 1;
+        },
+    };
+    if (runtime.requestedExit()) |status| return status;
+
+    const outcome = try runtime.runUnit("<test-runner>", runner);
+    if (runtime.requestedExit()) |status| return status;
+    return switch (outcome) {
+        .ok => 0,
+        .incomplete => |incomplete| emitSyntheticError(
+            init,
+            .parse,
+            incomplete.message,
+            .{ .source_name = "<test-runner>", .span = incomplete.span },
+        ),
+        .err => |failure| status: {
+            defer runtime.release(failure);
+            try printSessionError(init, &runtime, failure);
+            break :status 1;
+        },
+    };
 }
 
 const package_help =

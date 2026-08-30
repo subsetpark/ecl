@@ -25,6 +25,155 @@ const pkg_runtime_vendor_lock =
     " {\"a\" {}\n" ++
     "  \"root\" {\"a\" {'package \"a\" 'version \"1.0.0\"}}}}\n";
 
+const test_project_lock =
+    "{'format 1 'root \"app\" 'packages {} 'requires {\"app\" {}}}\n";
+
+fn writeTestProject(
+    directory: std.Io.Dir,
+    manifest: []const u8,
+    files: []const struct { path: []const u8, source: []const u8 },
+) !void {
+    try directory.writeFile(io, .{ .sub_path = "ecl.pkg", .data = manifest });
+    try directory.writeFile(io, .{ .sub_path = "ecl.lock", .data = test_project_lock });
+    for (files) |file| try directory.writeFile(io, .{
+        .sub_path = file.path,
+        .data = file.source,
+    });
+}
+
+test "e2e: ecl test runs the default stateful runner" {
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    try writeTestProject(
+        scratch.dir,
+        "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+            "'exports {\"app.suite\" [\"suite.ecl\"]} 'requires {}}\n",
+        &.{.{
+            .path = "suite.ecl",
+            .source = "(0 " ++
+                "((1 + dup without) within dup 1 = {'kind 'user} assert) 'first test " ++
+                "((dup without) within dup 1 = {'kind 'user} assert) 'second test " ++
+                "(missing) 'third-fails test " ++
+                "(1) 'z-after test" ++
+                ") 'app.suite @defm\n",
+        }},
+    );
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var result = try cli.runOptions(.{
+        .argv = &.{ exe, "test" },
+        .cwd = .{ .dir = scratch.dir },
+    });
+    defer result.deinit();
+    try result.expect(.{
+        .exit_code = 1,
+        .stdout_contains = &.{
+            "ok app.suite.first\n",
+            "ok app.suite.second\n",
+            "FAIL {'module 'app.suite 'name 'third-fails}",
+            "ok app.suite.z-after\n",
+        },
+        .stderr = "",
+    });
+}
+
+test "e2e: ecl test accepts a userland runner" {
+    var scratch = std.testing.tmpDir(.{});
+    defer scratch.cleanup();
+    try writeTestProject(
+        scratch.dir,
+        "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+            "'exports {\"app.suite\" [\"suite.ecl\"] " ++
+            "\"app.custom\" [\"custom.ecl\"]} " ++
+            "'requires {}}\n",
+        &.{
+            .{
+                .path = "suite.ecl",
+                .source = "((42) 'answer test) 'app.suite @defm\n",
+            },
+            .{
+                .path = "custom.ecl",
+                .source = "((args [\"chosen\"] match? {'kind 'user} assert " ++
+                    "tests dup len 1 = {'kind 'user} assert " ++
+                    "first @test 'ok dict.has? {'kind 'user} assert " ++
+                    "\"custom\" io.print) 'run def) 'app.custom.runner @defm\n",
+            },
+        },
+    );
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var result = try cli.runOptions(.{
+        .argv = &.{ exe, "test", "--runner", "app.custom.runner.run", "--", "chosen" },
+        .cwd = .{ .dir = scratch.dir },
+    });
+    defer result.deinit();
+    try result.expect(.{ .exit_code = 0, .stdout = "custom\n", .stderr = "" });
+}
+
+test "e2e: ecl test reports project and runner failures" {
+    var empty = std.testing.tmpDir(.{});
+    defer empty.cleanup();
+    const exe = try absoluteExe();
+    defer allocator.free(exe);
+    var absent = try cli.runOptions(.{
+        .argv = &.{ exe, "test" },
+        .cwd = .{ .dir = empty.dir },
+    });
+    defer absent.deinit();
+    try absent.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{"lock-backed root project"},
+    });
+
+    var invalid = std.testing.tmpDir(.{});
+    defer invalid.cleanup();
+    try invalid.dir.writeFile(io, .{
+        .sub_path = "ecl.pkg",
+        .data = "{'format 1 'name \"app\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
+    });
+    try invalid.dir.writeFile(io, .{ .sub_path = "ecl.lock", .data = "not a lock\n" });
+    var invalid_result = try cli.runOptions(.{
+        .argv = &.{ exe, "test" },
+        .cwd = .{ .dir = invalid.dir },
+    });
+    defer invalid_result.deinit();
+    try invalid_result.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{"invalid project lock"},
+    });
+
+    var project = std.testing.tmpDir(.{});
+    defer project.cleanup();
+    try writeTestProject(
+        project.dir,
+        "{'format 1 'name \"app\" 'version \"0.1.0\" " ++
+            "'exports {\"app.suite\" [\"suite.ecl\"]} 'requires {}}\n",
+        &.{.{ .path = "suite.ecl", .source = "((1) 'one test) 'app.suite @defm\n" }},
+    );
+    var unqualified = try cli.runOptions(.{
+        .argv = &.{ exe, "test", "--runner", "run" },
+        .cwd = .{ .dir = project.dir },
+    });
+    defer unqualified.deinit();
+    try unqualified.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{"runner must be a qualified public word"},
+    });
+    var missing = try cli.runOptions(.{
+        .argv = &.{ exe, "test", "--runner", "missing.runner.run" },
+        .cwd = .{ .dir = project.dir },
+    });
+    defer missing.deinit();
+    try missing.expect(.{
+        .exit_code = 1,
+        .stdout = "",
+        .stderr_contains = &.{ "missing.runner", "'kind 'undefined-word" },
+    });
+}
+
 test "e2e: package lock resolves import by name with ECL PATH unset" {
     var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, true);
     defer fixture.deinit();

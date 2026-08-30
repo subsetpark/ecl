@@ -666,6 +666,42 @@ anonymously, be passed as data, and be registered more than once.
   absent from the module's public face, not access-checked. Definitions
   made inside the module body's isolated child units (e.g. inside an
   `@attempt`) are dynamic and are never exported.
+- **Tests are a distinct module-owned namespace.**
+  `annotation? (body) 'name test` accepts the same optional effect and
+  documentation forms as `def`, but only while the exact direct construction
+  body of `@module` or `@defm` is executing. A nested quotation, child unit,
+  or top-level use is `'domain`. Test names may equal public or private word
+  names because catalog entries never enter local lookup, qualified lookup,
+  imports, `words`, reflection, or module invocation. Duplicate test names in
+  one image are `'domain`.
+- A module image freezes its definitions, initial-state template, and test
+  catalog together. Registration publishes that image as one generation:
+  reload replaces code and tests atomically while preserving slot state;
+  removal removes both; aliases never create another suite; and registering
+  one image under two canonical names creates two independently discoverable
+  suites with independent registration state.
+- **Test discovery and execution form a closed Session mode.** Ordinary
+  Sessions reject `tests` and `@test` with `'domain`. A test Session's `tests`
+  returns canonical registrations once each, sorted by module then test name,
+  as dictionaries containing symbol fields `'module` and `'name` plus any
+  declared `'effect` and `'doc`. Descriptors contain no body, private name,
+  generation handle, state handle, or executable capability.
+- `descriptor @test` validates and late-binds the descriptor against the
+  current canonical registration. A present test runs in a fresh isolated
+  Unit under that generation's private home and real durable registration
+  state. It returns exactly `{'ok (values)}` or `{'err error}`; a removed or
+  replaced-away test is a reified missing-test error. The runner's operand
+  stack never seeds the test, state mutations persist between invocations in
+  the Session, and Session teardown destroys that state. External effects are
+  not transactional or rolled back.
+- **`ecl test` delegates framework policy to ECL.** The command requires a
+  valid lock-backed root project, enumerates and loads only modules exported
+  by its root package catalog, then calls the public qualified runner selected
+  by `--runner` (default `test.default.run`). Tokens after `--` are ordinary
+  `args`. Successful completion is status 0; `exit` selects the requested
+  status; project, load, resolve, or runner failures are command failures.
+  The default runner is sequential and deterministic, reports every result,
+  continues after ordinary failures, and exits 1 when any test failed.
 - **Resolution context comes from the registration a call was resolved
   through**, never from anything recorded at definition time. A definition
   records only its own module-local name; qualified lookup supplies the

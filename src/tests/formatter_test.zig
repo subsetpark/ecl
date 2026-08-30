@@ -426,3 +426,17 @@ test "formatter synthesizes and normalizes module navigation headers" {
     try expectParseEquivalent(composed);
     try expectParseEquivalent("((1) 'x def) @module 'stats register\n");
 }
+
+test "formatter: synthesizes and normalizes test navigation headers" {
+    const source = "((1) 'works test) 'suite @defm\n";
+    const expected =
+        "### module suite\n" ++
+        "(\n" ++
+        " ### test works\n" ++
+        " (1) 'works test) 'suite @defm\n";
+    try expectFormat(source, expected);
+    try expectFormat(
+        "### module stale\n(\n ### test stale\n (1) 'works test) 'suite @defm\n",
+        expected,
+    );
+}

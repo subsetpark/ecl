@@ -168,7 +168,7 @@ const FailureSite = union(enum) {
         self.* = undefined;
     }
 };
-pub const UnitConstructor = enum { spawn, each };
+pub const UnitConstructor = enum { spawn, each, @"test" };
 
 const ErrorDataKey = enum {
     needed,
@@ -1252,6 +1252,10 @@ const ModuleBoundary = struct {
     image: modules.OwnedImage,
     registration: ?u32,
     provenance: modules.RegistrationProvenance,
+    /// Exact construction body admitted by `@module`/`@defm`. A declaration
+    /// is module-level only while this is the current activation; quotations
+    /// called by the body may inherit its home but not its declaration site.
+    root_code: *Header,
 
     fn deinit(self: ModuleBoundary) void {
         var owned = self.image;
@@ -1451,6 +1455,7 @@ pub const ExecutionSite = struct {
 
     /// The base case: a unit's root activation, built from nothing.
     pub fn root(unit: *Unit) ExecutionSite {
+        if (unit.root_execution_home) |home| return image(home, unit.module_access);
         const scope = unit.lexicalScope();
         return .{
             .scope = scope,
@@ -1732,6 +1737,8 @@ pub const IdiomFallback = struct {
 /// atomic parent-to-child copy instead of a scheduler-site field checklist.
 pub const InheritedContext = struct {
     registry: ?*modules.Registry = null,
+    test_observation: ?*const modules.TestObservationAccess = null,
+    test_execution: ?*const modules.TestExecutionAccess = null,
     native_loader: ?*native_module.Loader = null,
     native_diagnostics: bool = false,
     diagnostics: ?*std.Io.Writer = null,
@@ -2375,6 +2382,9 @@ pub const Unit = struct {
     /// For a child unit, the `@` word that constructed it.
     constructor: UnitConstructor = .spawn,
     execution_scope: ?*env.Scope = null,
+    /// Protected invocation may start this child at one selected registered
+    /// module generation. The Unit lifetime pins the home before installation.
+    root_execution_home: ?*modules.ModuleHome = null,
     native: NativeContinuation = .idle,
     /// The one state application this unit may own. `within` refuses to
     /// nest, so a single slot is exhaustive, and every parking, publication,
@@ -2454,6 +2464,11 @@ pub const Unit = struct {
 
     pub fn replaceRootScope(self: *Unit, root: env.Scope) void {
         self.lifetime.replaceRoot(root);
+    }
+
+    pub fn executeRootAtModule(self: *Unit, home: *modules.ModuleHome) void {
+        self.root_execution_home = home;
+        self.execution_scope = home.scope(self.module_access);
     }
 
     fn rootScope(self: *Unit) *env.Scope {
@@ -2989,6 +3004,33 @@ pub const Machine = struct {
     }
     pub fn currentHome(self: *const Machine) ?*modules.ModuleHome {
         return self.unit.current.?.home();
+    }
+    /// Begin publishing one first-class test into the candidate owned by the
+    /// immediately enclosing module-construction boundary. Requiring that
+    /// boundary to be the top frame distinguishes the construction body's
+    /// direct root from quotations or child units that merely inherit its
+    /// scope and private home.
+    pub fn testDeclarationCursor(
+        self: *Machine,
+        name: intern.BindingName,
+        body: *env.Quotation,
+        effect: ?env.ValidatedEffect,
+        doc: ?*env.DocumentationString,
+    ) MachineError!modules.TestDeclarationCursor {
+        const boundary_index = self.unit.boundary_index orelse
+            return self.fail(.domain, "test is legal only at a direct module construction root");
+        if (@intFromEnum(boundary_index) + 1 != self.unit.frames.items.len)
+            return self.fail(.domain, "test is legal only at a direct module construction root");
+        const frame = &self.unit.frames.items[@intFromEnum(boundary_index)];
+        if (frame.* != .boundary or frame.boundary.mode != .module)
+            return self.fail(.domain, "test is legal only at a direct module construction root");
+        const candidate = &frame.boundary.mode.module.image;
+        if (self.unit.current.?.code != frame.boundary.mode.module.root_code)
+            return self.fail(.domain, "test is legal only at a direct module construction root");
+        const home = candidate.executionHome(self.unit.module_access);
+        if (self.currentHome() != home or self.currentScope() != home.scope(self.unit.module_access))
+            return self.fail(.domain, "test is legal only at a direct module construction root");
+        return candidate.testDeclarationCursor(name, body, effect, doc);
     }
     pub fn applicationSite(self: *const Machine) ApplicationSite {
         const current = self.unit.current.?;
@@ -5121,6 +5163,10 @@ pub const Machine = struct {
                 .advice = "the child unit's stack holds only its element — " ++
                     "seed it with `list values (q) seed @each` or capture with `partial`",
             },
+            .@"test" => .{
+                .constructor = "@test",
+                .advice = "the test unit's stack is isolated from the runner stack",
+            },
         };
     }
     pub fn popValue(self: *Machine) MachineError!heap.OwnedValue {
@@ -5887,6 +5933,7 @@ pub const Machine = struct {
                 .image = candidate.move(),
                 .registration = registration,
                 .provenance = provenance,
+                .root_code = body_header,
             } },
             @intCast(self.unit.stack.items.len),
             word,

@@ -44,6 +44,7 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         "rand.float",        "pkg.version.less?", "pkg.name.valid?",
         "pkg.data.read-one", "pkg.manifest.read", "pkg.lock.read",
         "pkg.mvs.resolve",   "pkg.sync.run",      "pkg.cli.init",
+        "test.default.run",
     };
     for (stdlib.names(), exports) |name, qualified| {
         var heap: test_heap.SessionHeap = .init;

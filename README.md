@@ -147,6 +147,8 @@ ecl <SOURCE> [ARGS...]     Evaluate source and print the final stack
 ecl fmt <FILE|->           Format source to standard output without evaluating it
 ecl fmt -w <FILE>          Format and atomically rewrite a file
 ecl pkg <SUBCOMMAND>       Manage the current project's packages
+ecl test [--runner <qualified-word>] [-- <ARGS...>]
+                            Run the root project's tests
 ecl -h | --help            Show command help
 ecl -V | --version         Show the version
 ```
@@ -205,6 +207,38 @@ Commit both files. Packages are installed in an immutable shared cache;
 offline use. Use `tree` and `why` to inspect the lock, and `gc` to clean the
 shared cache. See [`examples/pkg-smoke`](examples/pkg-smoke) for a complete
 workflow.
+
+### Tests
+
+Tests are module declarations, not exported words. They may call private
+definitions and may use the same name as an ordinary definition:
+
+```ecl
+### module app.math
+(
+ ### defp double
+ (n -- n : "Double a number.")
+ (2 *) 'double defp
+
+ ### test doubles
+ (: "Exercise the private implementation.")
+ (21 double 42 = {'kind 'user} assert) 'doubles test
+) 'app.math @defm
+```
+
+From a synchronized root project, `ecl test` loads every root-package module
+declared by the lock-backed catalog and runs tests in canonical module/name
+order. Each invocation has an isolated operand stack, while module state is
+shared for the lifetime of that test command. Session teardown discards that
+state; file, network, process, and other external effects are real and are not
+rolled back.
+
+The bundled `test.default.run` runner is deliberately replaceable. Use
+`ecl test --runner app.custom.run -- --filter smoke` to select any public
+qualified runner word and expose the tokens after `--` through `args`.
+Userland runners compose the closed `tests` and `@test` substrate to implement
+filtering, hooks, retries, concurrency, reporting, and exit policy without
+receiving test bodies or private module authority.
 
 ## Modules and the standard library
 

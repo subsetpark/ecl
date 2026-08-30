@@ -12,10 +12,11 @@ const reflection = @import("reflection.zig");
 const formatter = @import("formatter.zig");
 const doc_text = @import("doc.zig");
 const reader_types = @import("reader_types.zig");
+const modules = @import("modules.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
-const Mode = enum { def, defp };
+const Mode = enum { def, defp, test_declaration };
 const Definition = struct { name: []const u8, primitive: env.PrimitiveImpl };
 
 fn bind(comptime mode: Mode) env.PrimitiveImpl {
@@ -30,6 +31,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     const definitions = comptime [_]Definition{
         .{ .name = "def", .primitive = bind(.def) },
         .{ .name = "defp", .primitive = bind(.defp) },
+        .{ .name = "test", .primitive = bind(.test_declaration) },
         .{ .name = "unset", .primitive = unbind },
         .{ .name = "undef", .primitive = unbind },
         .{ .name = "doc", .primitive = doc },
@@ -202,6 +204,7 @@ const DefineDriver = struct {
             source: ?heap.Owned(reader_types.SourceSlice),
             publisher: heap.Owned(env.Environment.BindCursor),
         },
+        publishing_test: modules.TestDeclarationCursor,
 
         pub fn deinit(
             self: *State,
@@ -232,7 +235,7 @@ const DefineDriver = struct {
                     publication.publisher.deinit(releases, allocator);
                     if (publication.source) |*source| source.deinit(releases, allocator);
                 },
-                .validate_name, .source => {},
+                .validate_name, .source, .publishing_test => {},
             }
         }
     };
@@ -408,10 +411,19 @@ const DefineDriver = struct {
                     .complete => |name| {
                         const binding_name = name orelse return evaluator.fail(
                             .domain,
-                            "def/set requires an unqualified, non-reserved name",
+                            if (self.mode == .test_declaration)
+                                "test requires an unqualified, non-reserved name"
+                            else
+                                "def/set requires an unqualified, non-reserved name",
                         );
                         if (self.item.borrow() != .list)
-                            return evaluator.fail(.type, "def expected a list body; use set for values");
+                            return evaluator.fail(
+                                .type,
+                                if (self.mode == .test_declaration)
+                                    "test expected a list body"
+                                else
+                                    "def expected a list body; use set for values",
+                            );
                         self.state.borrowMut().* = .{ .source = .{
                             .binding_name = binding_name,
                             .cursor = evaluator.sourceCursor(self.item.borrow().list),
@@ -432,6 +444,21 @@ const DefineDriver = struct {
                 },
             },
             .prepare_publish => |*publication| {
+                if (self.mode == .test_declaration) {
+                    const cursor = try evaluator.testDeclarationCursor(
+                        publication.binding_name,
+                        env.quotation(self.item.borrow().list) orelse
+                            return evaluator.fail(.domain, "test body has an invalid heap representation"),
+                        self.annotation.borrow().effect,
+                        self.annotation.borrow().doc_value,
+                    );
+                    if (publication.source) |*source| source.deinit(
+                        evaluator.releaseDomain(),
+                        evaluator.allocator(),
+                    );
+                    self.state.borrowMut().* = .{ .publishing_test = cursor };
+                    continue;
+                }
                 const private = self.mode == .defp;
                 const visibility: env.Visibility = if (private) .private else .public;
                 const publisher = try self.scope.publishWordCursor(publication.binding_name, .{
@@ -455,6 +482,19 @@ const DefineDriver = struct {
                     error.Frozen => return evaluator.fail(
                         .domain,
                         "module environments are immutable after registration",
+                    ),
+                }) {
+                    .pending => budget -= 1,
+                    .complete => return .completed,
+                }
+            },
+            .publishing_test => |*cursor| {
+                switch (cursor.advance() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.DuplicateTest => return evaluator.fail(.domain, "duplicate test name in module"),
+                    error.Frozen => return evaluator.fail(
+                        .domain,
+                        "module test catalogs are immutable after registration",
                     ),
                 }) {
                     .pending => budget -= 1,

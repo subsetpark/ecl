@@ -1606,7 +1606,8 @@ honest source with no public dual representation.
   `SlotLease` before it joins the queue and releases it only after unlinking;
   queued and granted work therefore cannot observe recycled storage.
 - **An immutable image and a stateful registration are separate owners.** A
-  `ModuleImage` owns the frozen environment, the module-root scope its
+  `ModuleImage` owns the frozen environment, its separately typed frozen test
+  catalog, the module-root scope its
   definitions were published through, and the construction body's residual
   stack as an initial-state template. It owns no canonical name, registry
   slot, arbiter, generation number, or `SlotLease`. A `Registration` retains
@@ -1618,6 +1619,37 @@ honest source with no public dual representation.
   registration copies the template into its new slot's durable stack rather
   than consuming it, so the same image can seed a second registration; a
   re-registration does not consult it at all.
+- **The test catalog is published and reclaimed with the image.** Its private
+  entries retain stamped quotations and optional annotations; its public
+  metadata projection omits the quotation by type. Declaration is available
+  only through the `OwnedImage` named by the exact construction-root boundary,
+  and sealing freezes definitions and tests in one typestate transition.
+  Registration generations retain the whole image, so reload cannot expose
+  code from one generation with tests from another. Image retirement advances
+  a bounded catalog teardown cursor before releasing the remaining image
+  owners.
+- **Test observation and execution are nominally separate Session
+  capabilities.** Only `Session.initTest*` allocates the seal; its projections
+  enter inherited Unit context but never a callback or descriptor. Canonical
+  discovery owns a directory snapshot plus one generation lease at a time,
+  and sorting, metadata retention/materialization, lookup, and teardown all
+  advance under kernel polling. Execution performs a late catalog lookup,
+  converts the selected generation through ordinary execution authority, and
+  transfers its home and quotation to a fresh scheduler child. `SpawnSite` is
+  a tagged choice between an inherited caller site and a module home, so a
+  test child cannot carry mismatched scope/home fields. Its generation pin
+  remains live through the child, and the standard task outcome transfers the
+  isolated stack or reified failure back to the runner.
+- **Root-project preload uses the existing loader.** `ProjectLock` exposes a
+  one-catalog-entry-per-advance root-package cursor. Session keeps that borrow
+  inside its heap-stable core and loads each yielded nominal module
+  through `Machine.loadModuleOnly`; the CLI neither scans files nor invents a
+  second publication path. One fresh test Session owns catalog authority,
+  registration state, runner arguments, requested exit, and teardown for the
+  complete command. The bundled runner is an embedded ordinary ECL module;
+  host code selects only its public qualified entry point and maps the normal
+  runner outcome to process status. This Session boundary cannot compensate
+  external side effects performed by tests.
 - **Invocation context is supplied by a registration lease, not stored in
   binding metadata.** `BindingOrigin.module_local` records a definition's own
   module-local name and nothing else. A qualified resolution acquires a

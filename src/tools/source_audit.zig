@@ -39,11 +39,12 @@ const source_groups = [_]SourceGroup{
     // The native-continuation union carries park, join, cleanup, and work
     // combinations as exhaustive variants rather than five side-band fields.
     .{ .production = true, .files = &.{
-        "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "root.zig",
+        "machine.zig", "task_join_core.zig", "resolution_core.zig", "spans.zig", "prims.zig", "test_prims.zig", "root.zig",
     }, .sources = &.{
         @embedFile("../machine.zig"),         @embedFile("../task_join_core.zig"),
         @embedFile("../resolution_core.zig"), @embedFile("../spans.zig"),
-        @embedFile("../prims.zig"),           @embedFile("../root.zig"),
+        @embedFile("../prims.zig"),           @embedFile("../test_prims.zig"),
+        @embedFile("../root.zig"),
     } },
     // Snapshot-safe lookup, publication, and reflection now expose explicit
     // cursor state so scheduler suspension is represented instead of hidden
@@ -192,6 +193,7 @@ const test_files = [_][]const u8{
     "tests/module_value_test.zig",
     "tests/unit_plan_test.zig",
     "tests/module_source_test.zig",
+    "tests/test_language_test.zig",
 };
 const repository_verification_files = [_][]const u8{
     "build.zig",
@@ -896,7 +898,7 @@ fn hasForbiddenTokens(
 /// unit. Nothing in the compiler can express that, so the manifest is written
 /// down here and the audit enforces both directions — every listed word is
 /// marked, and nothing else in first-party vocabulary is.
-const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@each", "@module", "@defm" };
+const unit_constructors = [_][]const u8{ "@attempt", "@spawn", "@each", "@module", "@defm", "@test" };
 
 /// Wrapped stars mean one thing in shipped vocabulary: the word returns a
 /// value supplied by dynamic execution context rather than consuming it from
@@ -924,6 +926,7 @@ fn auditUnitConstructorSpelling() bool {
         @embedFile("../prims.zig"),
         @embedFile("../task_prims.zig"),
         @embedFile("../module_prims.zig"),
+        @embedFile("../test_prims.zig"),
     };
     const documentation = @embedFile("../primitive_docs.zig");
     for (unit_constructors) |name| {

@@ -767,6 +767,11 @@ pub fn build(b: *std.Build) void {
             // CI-only miss costs the most.
             "tests.module_test.",
             "tests.module_source_test.",
+            // This whole new source stays in the local gate. Its deliberately
+            // large catalog case pays for proving discovery cancellation
+            // across more than one kernel quantum rather than leaving the
+            // closed test substrate as a CI-only behavior surface.
+            "tests.test_language_test.",
             // Allocation budgets cost this tier about twenty seconds, taking
             // it from roughly eighty to roughly a hundred. That is the largest
             // single entry here and it is deliberate: a fast path that stops

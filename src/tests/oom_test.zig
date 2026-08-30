@@ -808,6 +808,32 @@ fn packageCliSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(&runtime, "oom-pkg-cli.ecl", cli_source);
 }
 
+fn testSessionAllocationProbe(allocator: std.mem.Allocator) !void {
+    var locked_allocator = LockedAllocator{ .child = allocator };
+    const thread_safe_allocator = locked_allocator.allocator();
+    var output_buffer: [1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    var diagnostics_buffer: [1024]u8 = undefined;
+    var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+    var runtime = try session.Session.initTestWithHostConfig(
+        thread_safe_allocator,
+        &.{},
+        .{
+            .io = std.testing.io,
+            .output = &output,
+            .diagnostics = &diagnostics,
+            .standard_input = .program_source,
+        },
+        .cooperative,
+    );
+    defer runtime.deinit();
+    try runOk(
+        &runtime,
+        "oom-tests.ecl",
+        "((1) 'one test) 'oom.tests @defm tests first @test pop",
+    );
+}
+
 const structured_find_source = "[[1]] [1] find pop";
 
 fn structuredFindAllocationCount() !usize {
@@ -853,6 +879,10 @@ test "oom: full-session surfaces propagate every allocation failure" {
     try checkAllAllocationFailuresParallel(
         std.heap.smp_allocator,
         fullSessionAllocationProbe,
+    );
+    try checkAllAllocationFailuresParallel(
+        std.heap.smp_allocator,
+        testSessionAllocationProbe,
     );
 }
 

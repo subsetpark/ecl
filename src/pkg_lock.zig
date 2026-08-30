@@ -105,6 +105,14 @@ pub const ProjectLock = opaque {
         };
     }
 
+    /// Enumerate only modules exported by the root package. The cursor
+    /// processes one catalog entry per advance; callers may poll or cancel
+    /// between entries instead of hiding a project-sized traversal in one
+    /// host operation.
+    pub fn rootModuleCursor(self: *const ProjectLock) RootModuleCursor {
+        return .{ .lock = backingConst(self) };
+    }
+
     pub fn artifactCommitted(
         self: *const ProjectLock,
         artifact: pkg_catalog.ArtifactId,
@@ -185,6 +193,43 @@ pub const ProjectLock = opaque {
             .invalid => |message| allocator.free(message),
         }
         allocator.destroy(owned);
+    }
+};
+
+pub const RootModuleProgress = union(enum) {
+    pending,
+    item: intern.ModuleName,
+    complete,
+    invalid: []const u8,
+};
+
+pub const RootModuleCursor = struct {
+    lock: *const Backing,
+    module_index: usize = 0,
+    complete: bool = false,
+
+    pub fn advance(self: *RootModuleCursor) RootModuleProgress {
+        std.debug.assert(!self.complete);
+        const valid = switch (self.lock.state) {
+            .invalid => |message| {
+                self.complete = true;
+                return .{ .invalid = message };
+            },
+            .valid => |valid| valid,
+        };
+        if (self.module_index == valid.catalog.modules.len) {
+            self.complete = true;
+            return .complete;
+        }
+        const module = valid.catalog.modules[self.module_index];
+        self.module_index += 1;
+        const artifact = valid.catalog.artifact(module.artifact);
+        if (artifact.package != valid.root_id) return .pending;
+        return .{ .item = module.name };
+    }
+
+    pub fn deinit(self: *RootModuleCursor) void {
+        self.* = undefined;
     }
 };
 
