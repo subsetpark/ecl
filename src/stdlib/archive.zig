@@ -305,6 +305,20 @@ const UnpackDriver = struct {
     source: heap.Owned(SourceTarget),
     entries: heap.Owned(EntryList),
     state: State,
+    /// The store parents this install created, if any. An install that never
+    /// publishes has to leave the filesystem as it found it, and the parents
+    /// are created before the staging directory that rollback already
+    /// removes, so they are recorded here rather than in one publication
+    /// state.
+    store_parents: ?CreatedParents = null,
+
+    const CreatedParents = struct {
+        /// The parent path `createDirPath` was asked for.
+        path: []u8,
+        /// The length of the prefix of `path` that already existed. Levels
+        /// below it are the host's and must survive.
+        existing: usize,
+    };
 
     const Staged = struct {
         result: Value,
@@ -1348,6 +1362,7 @@ const UnpackDriver = struct {
             .destination_check => |result| {
                 if (self.operationMode() == .package_install) {
                     const parent = std.fs.path.dirname(archiveDestination(archive)) orelse ".";
+                    try self.recordStoreParents(io, parent);
                     std.Io.Dir.cwd().createDirPath(io, parent) catch |err|
                         return self.failIo(evaluator, "cannot create package store parents", err);
                 }
@@ -1611,13 +1626,19 @@ const UnpackDriver = struct {
     ) void {
         const archive = takeArchive(&active.archive);
         switch (publication.*) {
+            // These three abandon the install before a staging directory
+            // exists, so the levels `.destination_check` created are already
+            // empty. Every other failing arm reaches them through rollback,
+            // which removes the stage root first.
             .destination_check, .stage_path => |result| {
                 releases.releaseValue(result);
+                self.removeCreatedStoreParents();
                 self.state = .{ .cleanup_archive = archive };
             },
             .create_stage => |*staged| {
                 releases.releaseValue(staged.result);
                 staged.path.deinit(releases, allocator);
+                self.removeCreatedStoreParents();
                 self.state = .{ .cleanup_archive = archive };
             },
             .open_stage => |*staged| {
@@ -1695,9 +1716,51 @@ const UnpackDriver = struct {
             },
             .published => |*path| {
                 path.deinit(releases, allocator);
+                self.releaseStoreParents();
                 self.state = .{ .cleanup_archive = archive };
             },
         }
+    }
+
+    /// Record which levels of the store parent path are ours to remove. The
+    /// probe walks up the path once, the way `createDirPath` walks down it.
+    fn recordStoreParents(
+        self: *UnpackDriver,
+        io: std.Io,
+        parent: []const u8,
+    ) error{OutOfMemory}!void {
+        if (self.store_parents != null) return;
+        var existing = parent.len;
+        while (existing != 0) {
+            if (std.Io.Dir.cwd().access(io, parent[0..existing], .{})) |_| break else |_| {}
+            existing = lastSlash(parent[0..existing]) orelse 0;
+        }
+        if (existing == parent.len) return;
+        self.store_parents = .{
+            .path = try self.allocator.dupe(u8, parent),
+            .existing = existing,
+        };
+    }
+
+    /// Remove the recorded levels deepest first. Any level that will not come
+    /// away is one another install has since put something in — the ordinary
+    /// case for a shared store root — and it and everything above it stay.
+    /// That is not a cleanup failure, so it is not reported as one.
+    fn removeCreatedStoreParents(self: *UnpackDriver) void {
+        const created = self.store_parents orelse return;
+        defer self.releaseStoreParents();
+        const io = self.io orelse return;
+        var end = created.path.len;
+        while (end > created.existing) {
+            std.Io.Dir.cwd().deleteDir(io, created.path[0..end]) catch return;
+            end = lastSlash(created.path[0..end]) orelse return;
+        }
+    }
+
+    fn releaseStoreParents(self: *UnpackDriver) void {
+        const created = self.store_parents orelse return;
+        self.allocator.free(created.path);
+        self.store_parents = null;
     }
 
     fn rollbackEntries(self: *UnpackDriver, created_count: usize) RollbackWork {
@@ -1794,6 +1857,9 @@ const UnpackDriver = struct {
                 std.Io.Dir.cwd().deleteDir(self.io.?, rollback.context.path.borrow()) catch |err|
                     observeCleanupError("remove the stage root", err);
                 rollback.context.path.deinit(releases, allocator);
+                // The stage root sat inside them, so this is the first point
+                // at which the created store parents can be empty.
+                self.removeCreatedStoreParents();
                 const archive = takeArchive(&rollback.archive);
                 self.state = .{ .cleanup_archive = archive };
             },
