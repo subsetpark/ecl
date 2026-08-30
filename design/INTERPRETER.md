@@ -1664,9 +1664,12 @@ honest source with no public dual representation.
   Raw stack extraction is reserved for stopped-unit scheduler cleanup, and
   the source audit rejects its use by primitives or kernels.
 - Quotation applications use a validated `StackWindow` and tagged in-place
-  or isolated mode. The continuation frame owns its trace and immutable
-  driver; callbacks return only the next `ApplicationStep`, so they cannot
-  substitute a context or destructor.
+  or isolated mode. The continuation frame owns its trace, immutable driver,
+  and launching registration provenance; each sibling application therefore
+  resumes under the same package authorization context. Callbacks return only
+  the next `ApplicationStep`, so they cannot substitute a context or
+  destructor. This explicit provenance raises the checked machine-frame
+  ceiling from 104 to 112 bytes.
 - `StencilControl` is the single owner of a stencil's input, quotation,
   contract, exact result storage, and current window index across alternating
   bootstrap and application continuations. `UnfoldState` similarly makes the
@@ -1776,7 +1779,10 @@ honest source with no public dual representation.
   one nominal package id per selected package plus the root and gives each id
   exactly itself and its direct lock-edge targets. The execution site carries
   that id through module calls and package source loading. Both cold lookup and
-  hot registry resolution consult the mask before acquisition, so a transitive
+  hot registry resolution consult the mask before acquisition. Qualified call
+  sites therefore bypass the generation lookaside while a project lock is
+  active: the same quotation may execute under several package ids, and every
+  execution must reauthorize before registry acquisition. A transitive
   dependency does not become visible merely because another package loaded it.
 - **Every qualified execution carries its request through auto-load.** Resolution
   acquires the module *before* looking up the export atom, because a first

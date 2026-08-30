@@ -335,6 +335,56 @@ test "loader: direct requires mask both cold and already-loaded transitive modul
     );
 }
 
+test "loader: one quotation rechecks authorization in each package context" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeAuthorizationLock();
+    try fixture.writeStoreArtifact(
+        "alpha",
+        "1.0.0",
+        hash_a,
+        "alpha.ecl",
+        "secret.answer pop ((2 swap times pop pop) 'run def) 'alpha @defm\n",
+        .{},
+    );
+    try fixture.writeStoreArtifact(
+        "beta",
+        "1.0.0",
+        hash_b,
+        "beta.ecl",
+        "((2 swap times pop pop) 'run def) 'beta @defm\n",
+        .{},
+    );
+    try fixture.writeStoreModule("secret", "1.0.0", hash_c, "secret", 42);
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+        .environ = &environ,
+    });
+    defer runtime.deinit();
+
+    try expectOk(
+        &runtime,
+        "(secret.answer) dup alpha.run wrap (beta.run) seed @attempt " ++
+            "'err at 'kind at",
+    );
+    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
+    try std.testing.expectEqualStrings(
+        "undefined-word",
+        intern.get(runtime.stackItems()[0].symbol),
+    );
+}
+
 test "loader: a failing multi-module artifact publishes no usable module" {
     var fixture = try LockFixture.init();
     defer fixture.deinit();
@@ -545,6 +595,7 @@ test "loader: matched package never falls through for a missing module" {
 const sessionHostEntry = @import("../machine.zig").Environ.Entry;
 const hash_a = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const hash_b = "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const hash_c = "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 const LockFixture = struct {
     directory: std.testing.TmpDir,
@@ -638,6 +689,23 @@ const LockFixture = struct {
                 "'requires\n {{\"alpha\" {{\"beta\" {{'package \"beta\" 'version \"1.0.0\"}}}} " ++
                 "\"beta\" {{}} \"root\" {{\"alpha\" {{'package \"alpha\" 'version \"1.0.0\"}}}}}}}}\n",
             .{ hash_a, hash_b },
+        );
+        defer std.testing.allocator.free(text);
+        try self.write("project/ecl.lock", text);
+    }
+
+    fn writeAuthorizationLock(self: *LockFixture) !void {
+        const text = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{'format 1\n 'root \"root\"\n 'packages\n " ++
+                "{{\"alpha\" {{'version \"1.0.0\" 'url \"https://example.invalid/alpha.tgz\" 'hash \"{s}\"}} " ++
+                "\"beta\" {{'version \"1.0.0\" 'url \"https://example.invalid/beta.tgz\" 'hash \"{s}\"}} " ++
+                "\"secret\" {{'version \"1.0.0\" 'url \"https://example.invalid/secret.tgz\" 'hash \"{s}\"}}}}\n " ++
+                "'requires\n {{\"alpha\" {{\"secret\" {{'package \"secret\" 'version \"1.0.0\"}}}} " ++
+                "\"beta\" {{}} \"secret\" {{}} \"root\" " ++
+                "{{\"alpha\" {{'package \"alpha\" 'version \"1.0.0\"}} " ++
+                "\"beta\" {{'package \"beta\" 'version \"1.0.0\"}}}}}}}}\n",
+            .{ hash_a, hash_b, hash_c },
         );
         defer std.testing.allocator.free(text);
         try self.write("project/ecl.lock", text);

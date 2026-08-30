@@ -5,7 +5,6 @@ const heap = @import("heap.zig");
 const list = @import("list.zig");
 const intern = @import("intern.zig");
 const env = @import("env.zig");
-const modules = @import("modules.zig");
 const machine = @import("machine.zig");
 const poll = @import("poll.zig");
 
@@ -74,8 +73,7 @@ fn whileWord(evaluator: *Machine) MachineError!void {
                 .condition = .init(condition.take().list),
                 .body = .init(body.take().list),
             } },
-            .parent = evaluator.currentScope(),
-            .home = evaluator.currentHome(),
+            .site = evaluator.applicationSite(),
             .word = evaluator.activeWordId(),
             .provenance_target = try evaluator.applicationProvenanceTarget(),
         }),
@@ -85,13 +83,12 @@ fn whileWord(evaluator: *Machine) MachineError!void {
 
 const TimesState = struct {
     quotation: heap.Owned(*Header),
-    parent: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: machine.ApplicationSite,
     remaining: usize,
     word: intern.TraceWord,
 
     fn application(self: *TimesState) Application {
-        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, 0);
+        return machine.typedApplication(self, self.quotation.borrow(), self.site, 0);
     }
     fn step(self: *TimesState) ApplicationStep {
         return .{ .quotation = self.quotation.borrow(), .seeded = 0 };
@@ -126,8 +123,7 @@ fn times(evaluator: *Machine) MachineError!void {
     const state = try evaluator.allocator().create(TimesState);
     state.* = .{
         .quotation = .init(quotation.take().list),
-        .parent = evaluator.currentScope(),
-        .home = evaluator.currentHome(),
+        .site = evaluator.applicationSite(),
         .remaining = @intCast(count_value.borrow().int),
         .word = evaluator.activeWordId(),
     };
@@ -148,8 +144,7 @@ pub fn dipForIdiom(evaluator: *Machine) MachineError!void {
     state.* = .{
         .quotation = .init(quotation.take().list),
         .protected = .init(protected.take()),
-        .parent = evaluator.currentScope(),
-        .home = evaluator.currentHome(),
+        .site = evaluator.applicationSite(),
         .word = evaluator.activeWordId(),
     };
     const word = state.word;
@@ -160,12 +155,11 @@ pub fn dipForIdiom(evaluator: *Machine) MachineError!void {
 const DipState = struct {
     quotation: heap.Owned(*Header),
     protected: heap.Owned(Value),
-    parent: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: machine.ApplicationSite,
     word: intern.TraceWord,
 
     fn application(self: *DipState) Application {
-        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, 0);
+        return machine.typedApplication(self, self.quotation.borrow(), self.site, 0);
     }
 
     /// The protected value returns exactly once, after the quotation's own
@@ -271,8 +265,7 @@ const GuardControl = struct {
             body: heap.Owned(*Header),
         },
     },
-    parent: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: machine.ApplicationSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
 
@@ -382,7 +375,7 @@ const GuardPredicateState = struct {
 
     fn application(self: *GuardPredicateState, quotation: *Header) Application {
         const control = self.control.borrow();
-        return machine.typedApplication(self, quotation, control.parent, control.home, 0);
+        return machine.typedApplication(self, quotation, control.site, 0);
     }
     pub fn resumeApplication(
         evaluator: *Machine,
@@ -409,7 +402,7 @@ const GuardActionState = struct {
 
     fn application(self: *GuardActionState, quotation: *Header) Application {
         const control = self.control.borrow();
-        var launched = machine.typedApplication(self, quotation, control.parent, control.home, 0);
+        var launched = machine.typedApplication(self, quotation, control.site, 0);
         launched.provenance = if (control.provenance_target) |target|
             .{ .selected_target = target }
         else
@@ -448,8 +441,7 @@ fn cond(evaluator: *Machine) MachineError!void {
     }
     try evaluator.startDriver(CondDriver{
         .clauses = .init(clauses.take()),
-        .parent = evaluator.currentScope(),
-        .home = evaluator.currentHome(),
+        .site = evaluator.applicationSite(),
         .word = evaluator.activeWordId(),
         .provenance_target = try evaluator.applicationProvenanceTarget(),
     });
@@ -457,8 +449,7 @@ fn cond(evaluator: *Machine) MachineError!void {
 
 const CondDriver = struct {
     clauses: heap.Owned(Value),
-    parent: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: machine.ApplicationSite,
     word: intern.TraceWord,
     provenance_target: ?*const machine.ApplicationProvenanceTarget,
     index: usize = 0,
@@ -481,8 +472,7 @@ const CondDriver = struct {
         const control = GuardControl{
             .checkpoint = .init(checkpoint.take()),
             .selector = .{ .cond = .{ .clauses = .init(self.clauses.take()) } },
-            .parent = self.parent,
-            .home = self.home,
+            .site = self.site,
             .word = self.word,
             .provenance_target = self.provenance_target,
         };
@@ -505,14 +495,13 @@ const IterationState = struct {
     quotation: heap.Owned(*Header),
     expected: ?heap.Owned(Value),
     results: ?heap.Owned(heap.OwnedValueBuffer) = null,
-    parent: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: machine.ApplicationSite,
     index: usize = 0,
     count: usize,
     word: intern.TraceWord,
 
     fn application(self: *IterationState, seeded: u32) Application {
-        return machine.typedApplication(self, self.quotation.borrow(), self.parent, self.home, seeded);
+        return machine.typedApplication(self, self.quotation.borrow(), self.site, seeded);
     }
     fn step(self: *IterationState, seeded: u32) ApplicationStep {
         return .{ .quotation = self.quotation.borrow(), .seeded = seeded };
@@ -691,8 +680,7 @@ const StencilControl = struct {
     quotation: heap.Owned(*Header),
     expected: heap.Owned(Value),
     results: heap.OwnedValueBuffer,
-    parent: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: machine.ApplicationSite,
     index: usize = 0,
     count: usize,
     width: usize,
@@ -772,8 +760,7 @@ const StencilApplication = struct {
         return machine.typedApplication(
             self,
             control.quotation.borrow(),
-            control.parent,
-            control.home,
+            control.site,
             1,
         );
     }
@@ -867,8 +854,7 @@ fn stencil(evaluator: *Machine) MachineError!void {
         .quotation = .init(quotation.take().list),
         .expected = .init(expected.take()),
         .results = results.take(),
-        .parent = evaluator.currentScope(),
-        .home = evaluator.currentHome(),
+        .site = evaluator.applicationSite(),
         .count = count,
         .width = width,
         .word = evaluator.activeWordId(),
@@ -891,8 +877,7 @@ const UnfoldState = struct {
     step_expected: heap.Owned(Value),
     values: heap.Owned(heap.OwnedValueChain),
     items: heap.Owned(UnfoldItems),
-    parent: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: machine.ApplicationSite,
     index: usize = 0,
     word: intern.TraceWord,
 
@@ -900,8 +885,7 @@ const UnfoldState = struct {
         return machine.typedApplication(
             self,
             self.predicate.borrow(),
-            self.parent,
-            self.home,
+            self.site,
             1,
         );
     }
@@ -1076,8 +1060,7 @@ fn unfold(evaluator: *Machine) MachineError!void {
         .step_expected = .init(step_expected.take()),
         .values = .init(values.take()),
         .items = .init(.init(evaluator.allocator())),
-        .parent = evaluator.currentScope(),
-        .home = evaluator.currentHome(),
+        .site = evaluator.applicationSite(),
         .word = evaluator.activeWordId(),
     };
     try evaluator.pushBorrowed(state.current.borrow());
@@ -1344,8 +1327,7 @@ fn createIteration(
         .right = if (right) |item| .init(item.take()) else null,
         .quotation = .init(quotation.take().list),
         .expected = if (expected) |item| .init(item.take()) else null,
-        .parent = evaluator.currentScope(),
-        .home = evaluator.currentHome(),
+        .site = evaluator.applicationSite(),
         .count = count,
         .word = evaluator.activeWordId(),
     };

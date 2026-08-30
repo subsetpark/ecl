@@ -10,7 +10,6 @@ const heap = @import("../heap.zig");
 const list = @import("../list.zig");
 const intern = @import("../intern.zig");
 const env = @import("../env.zig");
-const modules = @import("../modules.zig");
 const machine = @import("../machine.zig");
 const dict_kernels = @import("../kernel_dict_text.zig");
 const dict_storage = @import("../dict.zig");
@@ -526,8 +525,7 @@ fn mergeWith(evaluator: *Machine) MachineError!void {
         .pairs = .init(pairs_buffer),
         .collision_values = .init(collision_values.take()),
         .pair_count = left_count,
-        .parent = evaluator.currentScope(),
-        .home = evaluator.currentHome(),
+        .site = evaluator.applicationSite(),
         .word = evaluator.activeWordId(),
     };
     pairs_locally_owned = false;
@@ -548,8 +546,7 @@ const MergeWithState = struct {
     index: usize = 0,
     collision_index: ?usize = null,
     phase: MergeWithPhase = .copy_left,
-    parent: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: machine.ApplicationSite,
     word: intern.TraceWord,
 };
 
@@ -575,7 +572,7 @@ const MergeWithApplication = struct {
 
     fn application(self: *MergeWithApplication) machine.IsolatedApplication {
         const state = self.state.borrow();
-        return machine.typedApplication(self, state.quotation.borrow(), state.parent, state.home, 3);
+        return machine.typedApplication(self, state.quotation.borrow(), state.site, 3);
     }
 
     pub fn resumeApplication(

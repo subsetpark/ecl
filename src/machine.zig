@@ -1480,20 +1480,23 @@ pub const ExecutionSite = struct {
     /// A quotation resolves where its invoker runs, so both scopes are the one
     /// it was handed.
     pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
-        var site = resumed(scope, invoker.home());
-        site.registration_provenance = invoker.site.registration_provenance;
-        return site;
+        return resumed(scope, invoker.home(), invoker.site.registration_provenance);
     }
 
     /// An application resuming in `scope` under its launch home. The only
     /// construction where the home does not come from a running activation,
     /// because an application's scope is decided when it launches.
-    pub fn resumed(scope: *env.Scope, home: ?*modules.ModuleHome) ExecutionSite {
+    pub fn resumed(
+        scope: *env.Scope,
+        home: ?*modules.ModuleHome,
+        registration_provenance: modules.RegistrationProvenance,
+    ) ExecutionSite {
         return .{
             .scope = scope,
             .resolution_scope = scope,
             .home = home,
             .resolution_scope_id = idOf(scope),
+            .registration_provenance = registration_provenance,
         };
     }
 };
@@ -1502,13 +1505,17 @@ pub const ApplicationProvenance = union(enum) {
     boundary,
     selected_target: *const ApplicationProvenanceTarget,
 };
+pub const ApplicationSite = struct {
+    parent_scope: *env.Scope,
+    home: ?*modules.ModuleHome,
+    registration_provenance: modules.RegistrationProvenance,
+};
 pub const IsolatedApplication = struct {
     quotation: *Header,
     context: *anyopaque,
     resume_fn: *const fn (*Machine, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
-    parent_scope: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: ApplicationSite,
     seeded: u32,
     provenance: ApplicationProvenance,
 };
@@ -1539,8 +1546,7 @@ fn ApplicationAdapters(comptime Driver: type) type {
 pub fn typedApplication(
     driver: anytype,
     quotation: *Header,
-    parent_scope: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: ApplicationSite,
     seeded: u32,
 ) IsolatedApplication {
     const Context = @TypeOf(driver);
@@ -1556,8 +1562,7 @@ pub fn typedApplication(
         .context = @ptrCast(driver),
         .resume_fn = adapters.run,
         .deinit_fn = adapters.deinit,
-        .parent_scope = parent_scope,
-        .home = home,
+        .site = site,
         .seeded = seeded,
         .provenance = .boundary,
     };
@@ -1573,8 +1578,7 @@ const ApplicationFrame = struct {
     context: *anyopaque,
     resume_fn: *const fn (*Machine, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
-    parent_scope: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: ApplicationSite,
     mode: ApplicationMode,
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
@@ -1679,8 +1683,9 @@ comptime {
     // A load-return frame owns the complete qualified-operation continuation
     // across nested source execution. Keeping that tagged state in the frame
     // makes replay-vs-dispatch ownership unrepresentable rather than relying
-    // on correlated Unit fields.
-    if (@sizeOf(Frame) > 104) @compileError("machine frames must remain at most 104 bytes");
+    // on correlated Unit fields. Application frames likewise own the package
+    // provenance every sibling resumption must preserve.
+    if (@sizeOf(Frame) > 112) @compileError("machine frames must remain at most 112 bytes");
 }
 pub const IdiomRequest = union(enum) {
     direct: struct {
@@ -2977,6 +2982,14 @@ pub const Machine = struct {
     pub fn currentHome(self: *const Machine) ?*modules.ModuleHome {
         return self.unit.current.?.home();
     }
+    pub fn applicationSite(self: *const Machine) ApplicationSite {
+        const current = self.unit.current.?;
+        return .{
+            .parent_scope = current.scope(),
+            .home = current.home(),
+            .registration_provenance = current.site.registration_provenance,
+        };
+    }
     fn installDriver(self: *Machine, context: anytype) void {
         const Context = @TypeOf(context);
         const pointer = switch (@typeInfo(Context)) {
@@ -3695,8 +3708,10 @@ pub const Machine = struct {
                     },
                 },
                 .locked_store => |*locked| {
+                    const io = evaluator.unit.inherited.host_io orelse
+                        return evaluator.fail(.io, "filesystem access is unavailable");
                     const info = std.Io.Dir.cwd().statFile(
-                        evaluator.unit.inherited.host_io.?,
+                        io,
                         locked.target.store,
                         .{ .follow_symlinks = false },
                     ) catch |err| switch (err) {
@@ -5654,7 +5669,7 @@ pub const Machine = struct {
         const select_initial = application.provenance != .boundary;
         var child: ?*env.Scope = null;
         if (launch == .isolated) {
-            child = self.acquireApplicationScope(application.parent_scope) catch {
+            child = self.acquireApplicationScope(application.site.parent_scope) catch {
                 application.deinit_fn(self.releaseDomain(), self.unit.allocator, application.context);
                 return error.OutOfMemory;
             };
@@ -5675,8 +5690,7 @@ pub const Machine = struct {
             .context = application.context,
             .resume_fn = application.resume_fn,
             .deinit_fn = application.deinit_fn,
-            .parent_scope = application.parent_scope,
-            .home = application.home,
+            .site = application.site,
             .mode = switch (launch) {
                 .in_place => .{ .in_place = base },
                 .isolated => .{ .isolated = .{
@@ -5700,7 +5714,11 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = application.quotation,
             .ip = 0,
-            .site = .resumed(child orelse application.parent_scope, application.home),
+            .site = .resumed(
+                child orelse application.site.parent_scope,
+                application.site.home,
+                application.site.registration_provenance,
+            ),
             .traced_word = inherited_trace,
             .application_tail = provenance_target orelse application_index,
             .application_selection = if (select_initial) provenance_target else null,
@@ -5838,6 +5856,8 @@ pub const Machine = struct {
         body_header: *Header,
     ) MachineError!void {
         const home = candidate.executionHome(self.unit.module_access);
+        var site = ExecutionSite.image(home, self.unit.module_access);
+        site.registration_provenance = provenance;
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(body_header);
             return error.OutOfMemory;
@@ -5859,7 +5879,7 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = body_header,
             .ip = 0,
-            .site = .image(home, self.unit.module_access),
+            .site = site,
             .traced_word = no_word,
         };
     }
@@ -5933,25 +5953,27 @@ pub const Machine = struct {
             .code = self.unit.current.?.code,
             .index = self.unit.active_index,
         };
-        switch (self.unit.module_call_sites.lookupQualified(
-            self.releaseDomain(),
-            self.unit.module_access,
-            qualified_call_site,
-            word.name,
-        )) {
-            .absent => {},
-            .stale => {
-                if (comptime root_execution_metrics_enabled)
-                    self.unit.root_execution_metrics.qualified_cache_heals += 1;
-            },
-            .hit => |resolution| {
-                if (comptime root_execution_metrics_enabled)
-                    self.unit.root_execution_metrics.qualified_cache_hits += 1;
-                var resolved = resolution;
-                defer resolved.deinit(self.unit.allocator);
-                try executeResolved(self, &resolved);
-                return;
-            },
+        if (self.unit.inherited.project_lock == null) {
+            switch (self.unit.module_call_sites.lookupQualified(
+                self.releaseDomain(),
+                self.unit.module_access,
+                qualified_call_site,
+                word.name,
+            )) {
+                .absent => {},
+                .stale => {
+                    if (comptime root_execution_metrics_enabled)
+                        self.unit.root_execution_metrics.qualified_cache_heals += 1;
+                },
+                .hit => |resolution| {
+                    if (comptime root_execution_metrics_enabled)
+                        self.unit.root_execution_metrics.qualified_cache_hits += 1;
+                    var resolved = resolution;
+                    defer resolved.deinit(self.unit.allocator);
+                    try executeResolved(self, &resolved);
+                    return;
+                },
+            }
         }
         // Acquired only on the `fresh_pin` arm, and handed to the cursor so the
         // pin taken here is the one `scheduleWord` consumes.
@@ -6944,12 +6966,14 @@ const DispatchDriver = struct {
                         if (resolved.takeCallSiteCache()) |candidate_value| {
                             var candidate = candidate_value;
                             if (call_site) |site| {
-                                self_machine.unit.module_call_sites.install(
-                                    self_machine.releaseDomain(),
-                                    site,
-                                    word,
-                                    candidate,
-                                );
+                                if (self_machine.unit.inherited.project_lock == null) {
+                                    self_machine.unit.module_call_sites.install(
+                                        self_machine.releaseDomain(),
+                                        site,
+                                        word,
+                                        candidate,
+                                    );
+                                } else candidate.deinit();
                             } else candidate.deinit();
                         }
                         try executeResolved(self_machine, &resolved);
@@ -8469,8 +8493,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                     .context = continuation.context,
                     .resume_fn = continuation.resume_fn,
                     .deinit_fn = continuation.deinit_fn,
-                    .parent_scope = continuation.parent_scope,
-                    .home = continuation.home,
+                    .site = continuation.site,
                     .seeded = step.seeded,
                     .provenance = .boundary,
                 }, launch, continuation.traced_word);

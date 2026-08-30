@@ -501,7 +501,7 @@ const UnpackDriver = struct {
             staged: Staged,
             dir: std.Io.Dir,
             created_count: usize,
-            catalog: pkg_catalog.Build,
+            catalog: ?pkg_catalog.Build,
             diagnostic: ?[]u8 = null,
         },
         seal: struct {
@@ -1425,11 +1425,7 @@ const UnpackDriver = struct {
                                     .staged = staged,
                                     .dir = dir,
                                     .created_count = created_count,
-                                    // SAFETY: the cursor is written on the next
-                                    // statement, before any step observes it. It
-                                    // is built second because it borrows the
-                                    // diagnostic slot this state owns.
-                                    .catalog = undefined,
+                                    .catalog = null,
                                 },
                             };
                             const validation = &publication.validate_package;
@@ -1477,7 +1473,8 @@ const UnpackDriver = struct {
                 },
             },
             .validate_package => |*validation| {
-                switch (validation.catalog.advance(work_quantum) catch |err| switch (err) {
+                const catalog_cursor = if (validation.catalog) |*catalog| catalog else unreachable;
+                switch (catalog_cursor.advance(work_quantum) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Invalid => {
                         const message = validation.diagnostic;
@@ -1495,7 +1492,7 @@ const UnpackDriver = struct {
                     .pending => return .yielded,
                     .done => {},
                 }
-                var catalog = validation.catalog.take() catch |err| switch (err) {
+                var catalog = catalog_cursor.take() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.Invalid => return evaluator.failFmt(
                         .domain,
@@ -1504,7 +1501,8 @@ const UnpackDriver = struct {
                     ),
                 };
                 catalog.deinit();
-                validation.catalog.deinit();
+                catalog_cursor.deinit();
+                validation.catalog = null;
                 const seal = validation.dir.createFile(
                     io,
                     package_seal_name,
@@ -1673,7 +1671,7 @@ const UnpackDriver = struct {
             .validate_package => |*validation| {
                 // The cursor holds the staged tree's open directory and walk
                 // across steps, so abandoning this state has to release them.
-                validation.catalog.deinit();
+                if (validation.catalog) |*catalog| catalog.deinit();
                 if (validation.diagnostic) |message| self.allocator.free(message);
                 validation.diagnostic = null;
                 releases.releaseValue(validation.staged.result);
