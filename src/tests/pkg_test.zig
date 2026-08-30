@@ -35,8 +35,9 @@ const hash_b = "sha256-abcdef0123456789abcdef0123456789abcdef0123456789abcdef012
 
 /// One canonical manifest, as ecl source that evaluates to its text.
 const manifest_text =
-    "\"{'format 1 'name \\\"my.proj\\\" 'version \\\"0.1.0\\\" 'requires " ++
-    "{\\\"foo\\\" {'version \\\"1.2.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+    "\"{'format 1 'name \\\"my.proj\\\" 'version \\\"0.1.0\\\" 'exports " ++
+    "{\\\"my.proj\\\" [\\\"**/*\\\"]} 'requires " ++
+    "{\\\"foo\\\" {'package \\\"foo\\\" 'version \\\"1.2.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
     "'hash \\\"" ++ hash_a ++ "\\\"}}}\" ";
 
 /// The canonical text of one lock, byte for byte — the artifact contract this
@@ -48,8 +49,8 @@ const canonical_lock =
     " {\"bar\" {'version \"0.3.0\" 'url \"https://e.com/b.tgz\" 'hash \"" ++ hash_b ++ "\"}\n" ++
     "  \"foo\" {'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"" ++ hash_a ++ "\"}}\n" ++
     " 'requires\n" ++
-    " {\"foo\" {\"bar\" \"0.3.0\"}\n" ++
-    "  \"my.proj\" {\"foo\" \"1.2.0\"}}}\n";
+    " {\"foo\" {\"bar\" {'package \"bar\" 'version \"0.3.0\"}}\n" ++
+    "  \"my.proj\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}}}}\n";
 
 /// Escape text into an ecl string literal, so the readable reference above
 /// stays the single source of truth for both the comparison and the layout.
@@ -75,8 +76,8 @@ const canonical_vendor_lock =
     " {\"bar\" {'version \"0.3.0\" 'url \"https://e.com/b.tgz\" 'hash \"" ++ hash_b ++ "\"}\n" ++
     "  \"foo\" {'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"" ++ hash_a ++ "\"}}\n" ++
     " 'requires\n" ++
-    " {\"foo\" {\"bar\" \"0.3.0\"}\n" ++
-    "  \"my.proj\" {\"foo\" \"1.2.0\"}}}\n";
+    " {\"foo\" {\"bar\" {'package \"bar\" 'version \"0.3.0\"}}\n" ++
+    "  \"my.proj\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}}}}\n";
 const canonical_vendor_lock_source = eclLiteral(canonical_vendor_lock) ++ " ";
 
 /// The same lock as ecl source, with its entries deliberately out of order so
@@ -85,14 +86,17 @@ const unsorted_lock_source =
     "{'format 1 'root \"my.proj\" 'packages " ++
     "{\"foo\" {'version \"1.2.0\" 'url \"https://e.com/f.tgz\" 'hash \"" ++ hash_a ++ "\"} " ++
     "\"bar\" {'version \"0.3.0\" 'url \"https://e.com/b.tgz\" 'hash \"" ++ hash_b ++ "\"}} " ++
-    "'requires {\"my.proj\" {\"foo\" \"1.2.0\"} \"foo\" {\"bar\" \"0.3.0\"}}} ";
+    "'requires {\"my.proj\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}} " ++
+    "\"foo\" {\"bar\" {'package \"bar\" 'version \"0.3.0\"}}}} ";
 
 fn requirement(
+    comptime package: []const u8,
     comptime version: []const u8,
     comptime url: []const u8,
     comptime hash: []const u8,
 ) []const u8 {
-    return "{'version \"" ++ version ++ "\" 'url \"" ++ url ++ "\" 'hash \"" ++ hash ++ "\"}";
+    return "{'package \"" ++ package ++ "\" 'version \"" ++ version ++
+        "\" 'url \"" ++ url ++ "\" 'hash \"" ++ hash ++ "\"}";
 }
 
 fn manifest(
@@ -101,12 +105,12 @@ fn manifest(
     comptime requires: []const u8,
 ) []const u8 {
     return "{'format 1 'name \"" ++ name ++ "\" 'version \"" ++ version ++
-        "\" 'requires " ++ requires ++ "}";
+        "\" 'exports {\"" ++ name ++ "\" [\"**/*\"]} 'requires " ++ requires ++ "}";
 }
 
-const requirement_b_100 = requirement("1.0.0", "https://e.com/b.tgz", hash_a);
-const requirement_c_120 = requirement("1.2.0", "https://e.com/c12.tgz", hash_a);
-const requirement_c_150 = requirement("1.5.0", "https://e.com/c15.tgz", hash_b);
+const requirement_b_100 = requirement("b", "1.0.0", "https://e.com/b.tgz", hash_a);
+const requirement_c_120 = requirement("c", "1.2.0", "https://e.com/c12.tgz", hash_a);
+const requirement_c_150 = requirement("c", "1.5.0", "https://e.com/c15.tgz", hash_b);
 const manifest_b_100 = manifest("b", "1.0.0", "{\"c\" " ++ requirement_c_150 ++ "}");
 const manifest_c_120 = manifest("c", "1.2.0", "{}");
 const manifest_c_150 = manifest("c", "1.5.0", "{}");
@@ -120,15 +124,15 @@ const mvs_catalog =
     "{\"b\" {\"1.0.0\" " ++ manifest_b_100 ++ "} " ++
     "\"c\" {\"1.2.0\" " ++ manifest_c_120 ++ " \"1.5.0\" " ++ manifest_c_150 ++ "}} ";
 
-const insertion_z_requirement = requirement("2.0.0", "https://e.com/z.tgz", hash_b);
-const insertion_b_requirement = requirement("1.0.0", "https://e.com/b.tgz", hash_a);
+const insertion_z_requirement = requirement("z", "2.0.0", "https://e.com/z.tgz", hash_b);
+const insertion_b_requirement = requirement("b", "1.0.0", "https://e.com/b.tgz", hash_a);
 const insertion_order_manifest = manifest(
     "a",
     "0.1.0",
     "{\"z\" " ++ insertion_z_requirement ++ " \"b\" " ++ insertion_b_requirement ++ "}",
 );
 const insertion_order_manifest_text =
-    "{'format 1 'name \"a\" 'version \"0.1.0\" 'requires " ++
+    "{'format 1 'name \"a\" 'version \"0.1.0\" 'exports {\"a\" (\"**/*\")} 'requires " ++
     "{\"z\" " ++ insertion_z_requirement ++ " \"b\" " ++ insertion_b_requirement ++ "}}\n";
 const insertion_order_manifest_text_source = eclLiteral(insertion_order_manifest_text);
 
@@ -385,7 +389,7 @@ test "pkg: read-manifest accepts the canonical manifest and rejects undeclared k
             // which is why nothing that rewrites the file can preserve them.
             .name = "comments are permitted",
             .source = "\"# a comment\\n{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
-                "'requires {}}\" pkg.manifest.read 'requires at dict.keys len",
+                "'exports {} 'requires {}}\" pkg.manifest.read 'requires at dict.keys len",
             .expected = "0",
         },
         .{
@@ -423,7 +427,7 @@ test "pkg: read-manifest accepts the canonical manifest and rejects undeclared k
             // tolerant reader would ignore, leaving the requirement unapplied.
             .name = "an undeclared key",
             .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
-                "'requires {} 'require {}}\" pkg.manifest.read",
+                "'exports {} 'requires {} 'require {}}\" pkg.manifest.read",
             .kind = "domain",
             .message_contains = "exactly the keys",
         },
@@ -436,29 +440,50 @@ test "pkg: read-manifest accepts the canonical manifest and rejects undeclared k
         .{
             .name = "an unsupported format",
             .source = "\"{'format 2 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
-                "'requires {}}\" pkg.manifest.read",
+                "'exports {} 'requires {}}\" pkg.manifest.read",
             .kind = "domain",
             .message_contains = "format is 1",
         },
         .{
             .name = "a name that is not a canonical package name",
             .source = "\"{'format 1 'name \\\"My.Proj\\\" 'version \\\"0.1.0\\\" " ++
-                "'requires {}}\" pkg.manifest.read",
+                "'exports {} 'requires {}}\" pkg.manifest.read",
             .kind = "domain",
             .message_contains = "lowercase segments",
         },
         .{
+            .name = "an export namespace outside the package",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
+                "'exports {\\\"foreign\\\" [\\\"**/*\\\"]} 'requires {}}\" pkg.manifest.read",
+            .kind = "domain",
+            .message_contains = "owns every namespace",
+        },
+        .{
+            .name = "an export glob with an empty path segment",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
+                "'exports {\\\"a\\\" [\\\"src//*.ecl\\\"]} 'requires {}}\" pkg.manifest.read",
+            .kind = "domain",
+            .message_contains = "portable glob lists",
+        },
+        .{
+            .name = "a recursive wildcard embedded in a path segment",
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" " ++
+                "'exports {\\\"a\\\" [\\\"src/prefix**/*.ecl\\\"]} 'requires {}}\" pkg.manifest.read",
+            .kind = "domain",
+            .message_contains = "portable glob lists",
+        },
+        .{
             .name = "a requirement url that is not https",
-            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" 'requires " ++
-                "{\\\"foo\\\" {'version \\\"1.0.0\\\" 'url \\\"http://e.com/f.tgz\\\" " ++
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" 'exports {} 'requires " ++
+                "{\\\"foo\\\" {'package \\\"foo\\\" 'version \\\"1.0.0\\\" 'url \\\"http://e.com/f.tgz\\\" " ++
                 "'hash \\\"" ++ hash_a ++ "\\\"}}}\" pkg.manifest.read",
             .kind = "domain",
             .message_contains = "https",
         },
         .{
             .name = "a hash that is not sha256 and 64 lowercase hex digits",
-            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" 'requires " ++
-                "{\\\"foo\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" 'exports {} 'requires " ++
+                "{\\\"foo\\\" {'package \\\"foo\\\" 'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
                 "'hash \\\"sha256-ABC\\\"}}}\" pkg.manifest.read",
             .kind = "domain",
             .message_contains = "lowercase hex",
@@ -467,45 +492,45 @@ test "pkg: read-manifest accepts the canonical manifest and rejects undeclared k
             // Self-requirement and a prefix collision are the same question,
             // so one rule answers both.
             .name = "a package may not require itself",
-            .source = "\"{'format 1 'name \\\"foo\\\" 'version \\\"0.1.0\\\" 'requires " ++
-                "{\\\"foo\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+            .source = "\"{'format 1 'name \\\"foo\\\" 'version \\\"0.1.0\\\" 'exports {} 'requires " ++
+                "{\\\"foo\\\" {'package \\\"foo\\\" 'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
                 "'hash \\\"" ++ hash_a ++ "\\\"}}}\" pkg.manifest.read",
             .kind = "domain",
-            .message_contains = "own another's name",
+            .message_contains = "require itself",
         },
         .{
             .name = "two requirements may not own one another",
-            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" 'requires " ++
-                "{\\\"foo\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+            .source = "\"{'format 1 'name \\\"a\\\" 'version \\\"0.1.0\\\" 'exports {} 'requires " ++
+                "{\\\"foo\\\" {'package \\\"foo\\\" 'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
                 "'hash \\\"" ++ hash_a ++ "\\\"} " ++
-                "\\\"foo.bar\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/g.tgz\\\" " ++
+                "\\\"foo.bar\\\" {'package \\\"foo.bar\\\" 'version \\\"1.0.0\\\" 'url \\\"https://e.com/g.tgz\\\" " ++
                 "'hash \\\"" ++ hash_b ++ "\\\"}}}\" pkg.manifest.read",
             .kind = "domain",
-            .message_contains = "own another's name",
+            .message_contains = "require itself",
         },
         .{
             // Appending the ownership boundary before sorting keeps `p-`
             // outside the contiguous `p.` prefix range.
             .name = "a hyphenated sibling cannot separate an owner from its child",
-            .source = "\"{'format 1 'name \\\"p\\\" 'version \\\"0.1.0\\\" 'requires " ++
-                "{\\\"p-\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+            .source = "\"{'format 1 'name \\\"p\\\" 'version \\\"0.1.0\\\" 'exports {} 'requires " ++
+                "{\\\"p-\\\" {'package \\\"p-\\\" 'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
                 "'hash \\\"" ++ hash_a ++ "\\\"} " ++
-                "\\\"p.a\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/g.tgz\\\" " ++
+                "\\\"p.a\\\" {'package \\\"p.a\\\" 'version \\\"1.0.0\\\" 'url \\\"https://e.com/g.tgz\\\" " ++
                 "'hash \\\"" ++ hash_b ++ "\\\"}}}\" pkg.manifest.read",
             .kind = "domain",
-            .message_contains = "own another's name",
+            .message_contains = "require itself",
         },
         .{
             // Digits sort on the other side of `.`, and must likewise leave
             // the owner adjacent to its dotted child.
             .name = "a numeric sibling cannot separate an owner from its child",
-            .source = "\"{'format 1 'name \\\"p\\\" 'version \\\"0.1.0\\\" 'requires " ++
-                "{\\\"p0\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
+            .source = "\"{'format 1 'name \\\"p\\\" 'version \\\"0.1.0\\\" 'exports {} 'requires " ++
+                "{\\\"p0\\\" {'package \\\"p0\\\" 'version \\\"1.0.0\\\" 'url \\\"https://e.com/f.tgz\\\" " ++
                 "'hash \\\"" ++ hash_a ++ "\\\"} " ++
-                "\\\"p.a\\\" {'version \\\"1.0.0\\\" 'url \\\"https://e.com/g.tgz\\\" " ++
+                "\\\"p.a\\\" {'package \\\"p.a\\\" 'version \\\"1.0.0\\\" 'url \\\"https://e.com/g.tgz\\\" " ++
                 "'hash \\\"" ++ hash_b ++ "\\\"}}}\" pkg.manifest.read",
             .kind = "domain",
-            .message_contains = "own another's name",
+            .message_contains = "require itself",
         },
     });
 }
@@ -658,7 +683,8 @@ test "pkg: why uses the runtime's longest owning package prefix" {
         "{'format 1 'root \"root\" 'packages " ++
         "{\"foo\" {'version \"1.0.0\" 'url \"https://e.com/foo.tgz\" 'hash \"" ++ hash_a ++ "\"} " ++
         "\"foo.bar\" {'version \"1.0.0\" 'url \"https://e.com/foo-bar.tgz\" 'hash \"" ++ hash_b ++ "\"}} " ++
-        "'requires {\"root\" {\"foo.bar\" \"1.0.0\"}}} ";
+        "'requires {\"foo\" {} \"foo.bar\" {} \"root\" " ++
+        "{\"foo.bar\" {'package \"foo.bar\" 'version \"1.0.0\"}}}} ";
     try support.expectStack(
         overlapping_lock ++ "pkg.lock.validate \"foo.bar.worker\" pkg.lock.why",
         "\"foo.bar.worker: root -> foo.bar 1.0.0\\n\"",
@@ -730,14 +756,15 @@ test "pkg: the lock keys requirements by the requiring package" {
             .source = "{'format 1 'root \"a\" 'packages " ++
                 "{\"foo\" {'version \"1.0.0\" 'url \"https://e.com/f.tgz\" " ++
                 "'hash \"" ++ hash_a ++ "\"}} " ++
-                "'requires {\"a\" {\"foo\" \"1.2.0\"}}} pkg.lock.write",
+                "'requires {\"a\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}} " ++
+                "\"foo\" {}}} pkg.lock.write",
             .kind = "domain",
             .message_contains = "never below a minimum",
         },
         .{
             .name = "a required name with no selection",
             .source = "{'format 1 'root \"a\" 'packages {} " ++
-                "'requires {\"a\" {\"foo\" \"1.2.0\"}}} pkg.lock.write",
+                "'requires {\"a\" {\"foo\" {'package \"foo\" 'version \"1.2.0\"}}}} pkg.lock.write",
             .kind = "domain",
             .message_contains = "has a selection",
         },
@@ -760,8 +787,8 @@ test "pkg: resolve selects the maximum of every reachable declared minimum" {
 
 test "pkg: every resolved selection meets every recorded minimum" {
     try support.expectStack(
-        "(entry packages -- bool) (|entry packages| packages entry first 'version pair at-path " ++
-            "entry 1 at pkg.version.less? not) " ++
+        "(entry packages -- bool) (|entry packages| packages entry 1 at 'package at 'version pair at-path " ++
+            "entry 1 at 'version at pkg.version.less? not) " ++
             "'selection-meets? def " ++
             mvs_root ++ " " ++ mvs_catalog ++
             "pkg.mvs.resolve dup 'requires at dict.vals (dict.pairs) each raze " ++
@@ -794,7 +821,7 @@ test "pkg: adding an already satisfied requirement preserves selections" {
             "'compare-augmentation def " ++
             mvs_root_without_c ++ " " ++ mvs_catalog ++ "pkg.mvs.resolve 'packages at " ++
             mvs_root ++ " " ++ mvs_catalog ++ "pkg.mvs.resolve compare-augmentation",
-        "1 \"1.2.0\"",
+        "1 {'package \"c\" 'version \"1.2.0\"}",
     );
 }
 
@@ -803,7 +830,7 @@ test "pkg: resolve reports a hash conflict with both declarations" {
         "app",
         "0.1.0",
         "{\"b\" " ++ requirement_b_100 ++ " \"c\" " ++
-            requirement("1.5.0", "https://mirror.example/c.tgz", hash_a) ++ "}",
+            requirement("c", "1.5.0", "https://mirror.example/c.tgz", hash_a) ++ "}",
     );
     const catalog = comptime "{\"b\" {\"1.0.0\" " ++ manifest_b_100 ++ "} " ++
         "\"c\" {\"1.5.0\" " ++ manifest_c_150 ++ "}} ";
@@ -824,10 +851,10 @@ test "pkg: resolve reports a hash conflict with both declarations" {
 }
 
 test "pkg: resolve reports a prefix collision with both packages" {
-    const requirement_a = comptime requirement("1.0.0", "https://e.com/a.tgz", hash_a);
-    const requirement_b = comptime requirement("1.0.0", "https://e.com/b.tgz", hash_b);
-    const requirement_foo = comptime requirement("1.0.0", "https://e.com/foo.tgz", hash_a);
-    const requirement_foo_bar = comptime requirement("1.0.0", "https://e.com/foo-bar.tgz", hash_b);
+    const requirement_a = comptime requirement("a", "1.0.0", "https://e.com/a.tgz", hash_a);
+    const requirement_b = comptime requirement("b", "1.0.0", "https://e.com/b.tgz", hash_b);
+    const requirement_foo = comptime requirement("foo", "1.0.0", "https://e.com/foo.tgz", hash_a);
+    const requirement_foo_bar = comptime requirement("foo.bar", "1.0.0", "https://e.com/foo-bar.tgz", hash_b);
     const root = comptime manifest(
         "app",
         "0.1.0",
@@ -850,8 +877,8 @@ test "pkg: resolve reports a prefix collision with both packages" {
 }
 
 test "pkg: resolve reports a requirement cycle with every responsible package" {
-    const requirement_a = comptime requirement("1.0.0", "https://e.com/a.tgz", hash_a);
-    const requirement_b = comptime requirement("1.0.0", "https://e.com/b.tgz", hash_b);
+    const requirement_a = comptime requirement("a", "1.0.0", "https://e.com/a.tgz", hash_a);
+    const requirement_b = comptime requirement("b", "1.0.0", "https://e.com/b.tgz", hash_b);
     const root = comptime manifest("app", "0.1.0", "{\"a\" " ++ requirement_a ++ "}");
     const catalog = comptime "{\"a\" {\"1.0.0\" " ++ manifest("a", "1.0.0", "{\"b\" " ++ requirement_b ++ "}") ++
         "} \"b\" {\"1.0.0\" " ++ manifest("b", "1.0.0", "{\"a\" " ++ requirement_a ++ "}") ++ "}} ";
@@ -866,7 +893,7 @@ test "pkg: resolve reports malformed versions and missing manifests with their r
     const malformed = comptime manifest(
         "app",
         "0.1.0",
-        "{\"b\" " ++ requirement("not-a-version", "https://e.com/b.tgz", hash_a) ++ "}",
+        "{\"b\" " ++ requirement("b", "not-a-version", "https://e.com/b.tgz", hash_a) ++ "}",
     );
     const missing = comptime manifest("app", "0.1.0", "{\"b\" " ++ requirement_b_100 ++ "}");
     try support.expectErrors(&.{

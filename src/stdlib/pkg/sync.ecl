@@ -139,8 +139,8 @@
  (|body hash package version url|
   body package inspect-checked pkg.manifest.read
   package version matching-manifest pop
-  version wrap url append hash append
-  (|version url hash| 'version version 'url url 'hash hash)
+  package version url hash 4 pack
+  (|package version url hash| 'package package 'version version 'url url 'hash hash)
   infra
   dict.from-flat
   pkg.manifest.validate-requirement)
@@ -218,7 +218,7 @@
 
  ### defp discover-edge
  (state pair -- state : "Discover one canonically ordered requirement edge.")
- (|state pair| state pair first pair 1 at discover-node)
+ (|state pair| state pair 1 at 'package at pair 1 at discover-node)
  'discover-edge defp
 
  ### defp discover-manifest

@@ -1188,14 +1188,16 @@ version strings. The empty list is `'shape`; a non-list or non-string member is
 ## pkg.manifest
 
 ### validate-requirement
-`( requirement -- requirement )` — Validate and return one exact version, URL,
-and hash declaration.
+`( requirement -- requirement )` — Validate and return one exact target
+package, minimum version, URL, and hash declaration.
 
 ### validate
 `( candidate -- manifest )` — Return a manifest unchanged, or raise. A non-dict
 is `'type`; an undeclared key, unsupported format, malformed name, version,
 hash, or URL, self-requirement, ownership collision, or executable word value
-is `'domain`.
+is `'domain`. Export namespaces are package-owned canonical names whose values
+are nonempty distinct lists of safe portable globs. Requirement keys are local
+aliases and do not rewrite module names.
 
 ### read
 `( text -- manifest )` — Parse one form with `pkg.data.read-one`, validate it,
@@ -1210,7 +1212,8 @@ order.
 
 ### validate
 `( candidate -- lock )` — Return a lock unchanged after checking its grammar,
-root provenance, selected packages, recorded minimums, and satisfaction.
+root provenance, selected packages, alias-to-package minimum edges, and
+satisfaction.
 
 ### read
 `( text -- lock )` — Parse one form without evaluation and validate it.
@@ -1249,15 +1252,16 @@ write, rollback, and output materialization advances through bounded scheduler
 work; no word exposes a host handle or generic filesystem mutation.
 
 ### inspect
-`( bytes package-name -- manifest-text )` — Validate one tgz as a v1
-source-only package owned by `package-name` without creating a filesystem
-destination. Return the sole root `ecl.pkg` as exact UTF-8 text.
+`( bytes package-name -- manifest-text )` — Validate one tgz's hostile-input
+and source-only archive envelope without creating a filesystem destination.
+Return the sole root `ecl.pkg` as exact UTF-8 text.
 
 ### install
-`( bytes package-name destination -- regular-file-paths )` — Repeat complete
-package validation and atomically publish the archive at a previously absent
-destination. Return normalized regular-file paths only after commit; failure
-never exposes a partial destination.
+`( bytes package-name destination -- regular-file-paths )` — Repeat archive
+validation, derive and validate the staged manifest/glob/module catalog, and
+atomically publish at a previously absent destination. Return normalized
+regular-file paths only after commit; failure never exposes a partial
+destination.
 
 ### present?
 `( destination -- bool )` — Return 0 for an absent path and 1 for a real

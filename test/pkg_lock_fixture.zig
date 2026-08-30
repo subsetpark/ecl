@@ -22,11 +22,11 @@ pub const Fixture = struct {
         try directory.dir.createDir(io, "path", .default_dir);
         try directory.dir.writeFile(io, .{
             .sub_path = "project/ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {\"smoke\" {'version \"1.0.0\" 'url \"https://127.0.0.1:1/unreachable.tgz\" 'hash \"" ++ package_hash ++ "\"}}}\n",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires {\"smoke\" {'package \"smoke\" 'version \"1.0.0\" 'url \"https://127.0.0.1:1/unreachable.tgz\" 'hash \"" ++ package_hash ++ "\"}}}\n",
         });
         try directory.dir.writeFile(io, .{
             .sub_path = "project/ecl.lock",
-            .data = "{'format 1\n 'root \"root\"\n 'packages\n {\"smoke\" {'version \"1.0.0\" 'url \"https://127.0.0.1:1/unreachable.tgz\" 'hash \"" ++ package_hash ++ "\"}}\n 'requires\n {\"root\" {\"smoke\" \"1.0.0\"}}}\n",
+            .data = "{'format 1\n 'root \"root\"\n 'packages\n {\"smoke\" {'version \"1.0.0\" 'url \"https://127.0.0.1:1/unreachable.tgz\" 'hash \"" ++ package_hash ++ "\"}}\n 'requires\n {\"root\" {\"smoke\" {'package \"smoke\" 'version \"1.0.0\"}} \"smoke\" {}}}\n",
         });
         if (install) {
             try directory.dir.createDir(
@@ -40,7 +40,7 @@ pub const Fixture = struct {
             });
             try directory.dir.writeFile(io, .{
                 .sub_path = "cache/smoke-1.0.0-" ++ package_hash[7..] ++ "/ecl.pkg",
-                .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'requires {}}\n",
+                .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'exports {\"smoke\" [\"**/*\"]} 'requires {}}\n",
             });
             try directory.dir.writeFile(io, .{
                 .sub_path = "cache/smoke-1.0.0-" ++ package_hash[7..] ++ "/.ecl-package.tgz",

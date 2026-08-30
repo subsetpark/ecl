@@ -20,6 +20,7 @@ const console_api = @import("console.zig");
 const task_join_core = @import("task_join_core.zig");
 const resolution_core = @import("resolution_core.zig");
 const pkg_lock = @import("pkg_lock.zig");
+const pkg_catalog = @import("pkg_catalog.zig");
 pub const Value = value.Value;
 pub const Header = value.ListHandle;
 pub const MachineError = error{ OutOfMemory, Ecl };
@@ -183,6 +184,7 @@ const ErrorDataKey = enum {
     right,
     @"destination-exists",
     scope,
+    package,
 };
 const ErrorData = struct {
     key: ErrorDataKey,
@@ -1447,6 +1449,13 @@ pub const ExecutionSite = struct {
             .resolution_scope = scope,
             .home = null,
             .resolution_scope_id = idOf(scope),
+            .registration_provenance = if (unit.inherited.project_lock) |project_lock|
+                if (project_lock.rootPackage()) |root_package|
+                    .{ .root_package = root_package }
+                else
+                    .ordinary
+            else
+                .ordinary,
         };
     }
 
@@ -1462,6 +1471,7 @@ pub const ExecutionSite = struct {
             .resolution_scope = scope,
             .home = home,
             .resolution_scope_id = idOf(scope),
+            .registration_provenance = home.registrationProvenance(),
         };
     }
 
@@ -1470,20 +1480,23 @@ pub const ExecutionSite = struct {
     /// A quotation resolves where its invoker runs, so both scopes are the one
     /// it was handed.
     pub fn inheriting(invoker: Eval, scope: *env.Scope) ExecutionSite {
-        var site = resumed(scope, invoker.home());
-        site.registration_provenance = invoker.site.registration_provenance;
-        return site;
+        return resumed(scope, invoker.home(), invoker.site.registration_provenance);
     }
 
     /// An application resuming in `scope` under its launch home. The only
     /// construction where the home does not come from a running activation,
     /// because an application's scope is decided when it launches.
-    pub fn resumed(scope: *env.Scope, home: ?*modules.ModuleHome) ExecutionSite {
+    pub fn resumed(
+        scope: *env.Scope,
+        home: ?*modules.ModuleHome,
+        registration_provenance: modules.RegistrationProvenance,
+    ) ExecutionSite {
         return .{
             .scope = scope,
             .resolution_scope = scope,
             .home = home,
             .resolution_scope_id = idOf(scope),
+            .registration_provenance = registration_provenance,
         };
     }
 };
@@ -1492,13 +1505,17 @@ pub const ApplicationProvenance = union(enum) {
     boundary,
     selected_target: *const ApplicationProvenanceTarget,
 };
+pub const ApplicationSite = struct {
+    parent_scope: *env.Scope,
+    home: ?*modules.ModuleHome,
+    registration_provenance: modules.RegistrationProvenance,
+};
 pub const IsolatedApplication = struct {
     quotation: *Header,
     context: *anyopaque,
     resume_fn: *const fn (*Machine, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
-    parent_scope: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: ApplicationSite,
     seeded: u32,
     provenance: ApplicationProvenance,
 };
@@ -1529,8 +1546,7 @@ fn ApplicationAdapters(comptime Driver: type) type {
 pub fn typedApplication(
     driver: anytype,
     quotation: *Header,
-    parent_scope: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: ApplicationSite,
     seeded: u32,
 ) IsolatedApplication {
     const Context = @TypeOf(driver);
@@ -1546,8 +1562,7 @@ pub fn typedApplication(
         .context = @ptrCast(driver),
         .resume_fn = adapters.run,
         .deinit_fn = adapters.deinit,
-        .parent_scope = parent_scope,
-        .home = home,
+        .site = site,
         .seeded = seeded,
         .provenance = .boundary,
     };
@@ -1563,8 +1578,7 @@ const ApplicationFrame = struct {
     context: *anyopaque,
     resume_fn: *const fn (*Machine, *anyopaque, StackWindow, *ApplicationContractSite) MachineError!?ApplicationStep,
     deinit_fn: *const fn (*heap.ReleaseDomain, std.mem.Allocator, *anyopaque) void,
-    parent_scope: *env.Scope,
-    home: ?*modules.ModuleHome,
+    site: ApplicationSite,
     mode: ApplicationMode,
     traced_word: intern.TraceWord,
     selection: ApplicationSelection,
@@ -1598,6 +1612,17 @@ const QualifiedLoadRequest = struct {
     qualified: u32,
     continuation: QualifiedLoadContinuation,
 };
+const ArtifactLoad = enum(u32) {
+    none = std.math.maxInt(u32),
+    _,
+
+    fn init(maybe_artifact: ?pkg_catalog.ArtifactId) ArtifactLoad {
+        return if (maybe_artifact) |id| @enumFromInt(@intFromEnum(id)) else .none;
+    }
+    fn artifact(self: ArtifactLoad) ?pkg_catalog.ArtifactId {
+        return if (self == .none) null else @enumFromInt(@intFromEnum(self));
+    }
+};
 pub const Frame = union(enum(u8)) {
     eval: Eval,
     effect_check: EffectCheck,
@@ -1607,6 +1632,7 @@ pub const Frame = union(enum(u8)) {
         name: intern.ModuleName,
         path: Value,
         request: QualifiedLoadRequest,
+        artifact: ArtifactLoad,
     },
     boundary: Boundary,
     fn deinit(self: Frame, releases: *heap.ReleaseDomain, allocator: std.mem.Allocator) void {
@@ -1657,8 +1683,9 @@ comptime {
     // A load-return frame owns the complete qualified-operation continuation
     // across nested source execution. Keeping that tagged state in the frame
     // makes replay-vs-dispatch ownership unrepresentable rather than relying
-    // on correlated Unit fields.
-    if (@sizeOf(Frame) > 104) @compileError("machine frames must remain at most 104 bytes");
+    // on correlated Unit fields. Application frames likewise own the package
+    // provenance every sibling resumption must preserve.
+    if (@sizeOf(Frame) > 112) @compileError("machine frames must remain at most 112 bytes");
 }
 pub const IdiomRequest = union(enum) {
     direct: struct {
@@ -2881,6 +2908,20 @@ pub const Machine = struct {
     pub fn releaseDomain(self: *const Machine) *heap.ReleaseDomain {
         return self.unit.releases;
     }
+    pub fn beginPackageTreeValidation(
+        self: *const Machine,
+        io: std.Io,
+        package_name: []const u8,
+        root_dir: []const u8,
+        diagnostic: *?[]u8,
+    ) error{OutOfMemory}!pkg_catalog.Build {
+        return self.unit.inherited.registry.?.beginPackageTreeValidation(
+            io,
+            package_name,
+            root_dir,
+            diagnostic,
+        );
+    }
     pub fn beginNativeTiming(self: *const Machine) ?i128 {
         if (!self.unit.inherited.native_diagnostics) return null;
         const io = self.unit.inherited.host_io orelse return null;
@@ -2940,6 +2981,14 @@ pub const Machine = struct {
     }
     pub fn currentHome(self: *const Machine) ?*modules.ModuleHome {
         return self.unit.current.?.home();
+    }
+    pub fn applicationSite(self: *const Machine) ApplicationSite {
+        const current = self.unit.current.?;
+        return .{
+            .parent_scope = current.scope(),
+            .home = current.home(),
+            .registration_provenance = current.site.registration_provenance,
+        };
     }
     fn installDriver(self: *Machine, context: anytype) void {
         const Context = @TypeOf(context);
@@ -3167,6 +3216,13 @@ pub const Machine = struct {
             .state = .init(.{ .begin = registry.beginLoadingCursor(name, .of(self.unit)) }),
         });
     }
+    fn currentPackage(self: *const Machine) ?pkg_catalog.PackageId {
+        const current = self.unit.current orelse return null;
+        return switch (current.site.registration_provenance) {
+            .root_package, .package => |package| package,
+            .ordinary, .standard_library => null,
+        };
+    }
     const AutoLoadDriver = struct {
         const FileKind = enum { source, native };
         const CandidateOrigin = union(enum) {
@@ -3178,6 +3234,8 @@ pub const Machine = struct {
             locked: struct {
                 package: []const u8,
                 store: []const u8,
+                package_id: pkg_catalog.PackageId,
+                artifact_id: pkg_catalog.ArtifactId,
             },
         };
         const FilenameTarget = union(enum) {
@@ -3201,10 +3259,20 @@ pub const Machine = struct {
             separator: bool,
         };
         const Disposition = union(enum) {
-            source,
+            source: struct {
+                provenance: modules.RegistrationProvenance,
+                artifact: ?pkg_catalog.ArtifactId,
+            },
             native,
             embedded: stdlib.Entry,
             fail: []const u8,
+        };
+        const LockedTarget = struct {
+            package: []const u8,
+            store: []const u8,
+            relative_path: []const u8,
+            package_id: pkg_catalog.PackageId,
+            artifact_id: pkg_catalog.ArtifactId,
         };
         const State = union(enum) {
             begin: modules.Registry.BeginLoadingCursor,
@@ -3216,10 +3284,19 @@ pub const Machine = struct {
                 loading: heap.Owned(modules.LoadingLease),
                 cursor: heap.Owned(pkg_lock.LookupCursor),
             },
+            artifact_begin: struct {
+                target: LockedTarget,
+                cursor: modules.Registry.BeginLoadingCursor,
+            },
+            artifact_registered: struct {
+                target: LockedTarget,
+                loading: heap.Owned(modules.LoadingLease),
+                cursor: heap.Owned(modules.Registry.AcquireCursor),
+            },
+            committed: heap.Owned(modules.Registry.AcquireCursor),
             locked_store: struct {
                 loading: heap.Owned(modules.LoadingLease),
-                package: []const u8,
-                store: []const u8,
+                target: LockedTarget,
             },
             filename: FilenameState,
             component_start: struct {
@@ -3265,6 +3342,12 @@ pub const Machine = struct {
                         lookup.cursor.deinit(releases, storage_allocator);
                         lookup.loading.deinit(releases, storage_allocator);
                     },
+                    .artifact_begin => |*begin| begin.cursor.deinit(),
+                    .artifact_registered => |*registered| {
+                        registered.cursor.deinit(releases, storage_allocator);
+                        registered.loading.deinit(releases, storage_allocator);
+                    },
+                    .committed => |*cursor| cursor.deinit(releases, storage_allocator),
                     .locked_store => |*locked| locked.loading.deinit(releases, storage_allocator),
                     .filename => |*filename| {
                         filename.filename.deinit(releases, storage_allocator);
@@ -3394,6 +3477,7 @@ pub const Machine = struct {
             self: *AutoLoadDriver,
             transfer: *@FieldType(State, "transfer"),
             provenance: modules.RegistrationProvenance,
+            artifact: ?pkg_catalog.ArtifactId,
         ) SourceCompletion {
             return .{ .register = .{
                 .loading = transfer.loading.borrowMut().move(),
@@ -3401,6 +3485,7 @@ pub const Machine = struct {
                 .path = transfer.path.take(),
                 .request = self.request,
                 .provenance = provenance,
+                .artifact = artifact,
             } };
         }
         pub fn advance(evaluator: *Machine, self: *AutoLoadDriver) MachineError!WorkProgress {
@@ -3428,10 +3513,22 @@ pub const Machine = struct {
                         },
                         .granted => |lease| {
                             cursor.deinit();
-                            self.state.borrowMut().* = .{ .registered = .{
-                                .loading = .init(lease),
-                                .cursor = .init(evaluator.unit.inherited.registry.?.acquireCursor(self.name)),
-                            } };
+                            if (evaluator.unit.inherited.project_lock != null and
+                                stdlib.find(intern.get(intern.moduleId(self.name))) == null)
+                            {
+                                self.state.borrowMut().* = .{ .lock_lookup = .{
+                                    .loading = .init(lease),
+                                    .cursor = .init(evaluator.unit.inherited.project_lock.?.lookupCursor(
+                                        evaluator.currentPackage(),
+                                        intern.get(intern.moduleId(self.name)),
+                                    )),
+                                } };
+                            } else {
+                                self.state.borrowMut().* = .{ .registered = .{
+                                    .loading = .init(lease),
+                                    .cursor = .init(evaluator.unit.inherited.registry.?.acquireCursor(self.name)),
+                                } };
+                            }
                         },
                     },
                 },
@@ -3462,6 +3559,7 @@ pub const Machine = struct {
                             self.state.borrowMut().* = .{ .lock_lookup = .{
                                 .loading = .init(loading.take()),
                                 .cursor = .init(project_lock.lookupCursor(
+                                    evaluator.currentPackage(),
                                     intern.get(intern.moduleId(self.name)),
                                 )),
                             } };
@@ -3490,68 +3588,165 @@ pub const Machine = struct {
                         switch (outcome) {
                             .invalid => |message| return evaluator.fail(.io, message),
                             .unmatched => {
-                                if (evaluator.unit.inherited.host_io == null or
-                                    evaluator.unit.inherited.ecl_path == null)
-                                {
-                                    return self.notFound(evaluator);
-                                }
-                                const filename = try self.makeFilename(
-                                    evaluator,
-                                    &loading,
-                                    .source,
-                                    .{ .component_start = 0 },
+                                return evaluator.failFmt(
+                                    .undefined_word,
+                                    "module `{s}` is not exported by the active project",
+                                    .{intern.get(intern.moduleId(self.name))},
                                 );
-                                self.state.borrowMut().* = .{ .filename = filename };
+                            },
+                            .hidden => |hidden| {
+                                return evaluator.failFmt(
+                                    .undefined_word,
+                                    "module `{s}` is exported by package `{s}`, but `{s}` does not require it",
+                                    .{
+                                        intern.get(intern.moduleId(self.name)),
+                                        hidden.owner,
+                                        hidden.consumer,
+                                    },
+                                );
                             },
                             .matched => |match| {
-                                if (match.store_dir == null) return evaluator.failFmt(
-                                    .io,
-                                    "locked package `{s}` has no package store; set ECL_CACHE, XDG_CACHE_HOME, or HOME before running `ecl pkg sync`",
-                                    .{match.package},
-                                );
-                                self.state.borrowMut().* = .{ .locked_store = .{
-                                    .loading = .init(loading.take()),
+                                loading.borrowMut().finish();
+                                const target: LockedTarget = .{
                                     .package = match.package,
-                                    .store = match.store_dir.?,
-                                } };
+                                    .store = match.store_dir,
+                                    .relative_path = match.relative_path,
+                                    .package_id = match.package_id,
+                                    .artifact_id = match.artifact_id,
+                                };
+                                if (evaluator.unit.inherited.project_lock.?.artifactCommitted(match.artifact_id)) {
+                                    self.state.borrowMut().* = .{ .committed = .init(
+                                        evaluator.unit.inherited.registry.?.acquireCursor(self.name),
+                                    ) };
+                                } else {
+                                    self.state.borrowMut().* = .{ .artifact_begin = .{
+                                        .target = target,
+                                        .cursor = evaluator.unit.inherited.registry.?.beginArtifactLoadingCursor(
+                                            match.artifact_id,
+                                            .of(evaluator.unit),
+                                        ),
+                                    } };
+                                }
                             },
                         }
                     },
                 },
+                .artifact_begin => |*begin| switch (try begin.cursor.advance()) {
+                    .pending => {},
+                    .complete => |outcome| switch (outcome) {
+                        .cycle => return evaluator.failFmt(
+                            .domain,
+                            "recursive auto-load of package artifact `{s}`",
+                            .{begin.target.relative_path},
+                        ),
+                        .contended => {
+                            const target = begin.target;
+                            begin.cursor.deinit();
+                            self.state.borrowMut().* = .{ .artifact_begin = .{
+                                .target = target,
+                                .cursor = evaluator.unit.inherited.registry.?.beginArtifactLoadingCursor(
+                                    target.artifact_id,
+                                    .of(evaluator.unit),
+                                ),
+                            } };
+                            return .yielded;
+                        },
+                        .granted => |lease| {
+                            const target = begin.target;
+                            begin.cursor.deinit();
+                            self.state.borrowMut().* = .{ .artifact_registered = .{
+                                .target = target,
+                                .loading = .init(lease),
+                                .cursor = .init(evaluator.unit.inherited.registry.?.acquireCursor(self.name)),
+                            } };
+                        },
+                    },
+                },
+                .artifact_registered => |*registered| switch (registered.cursor.borrowMut().advance()) {
+                    .pending => {},
+                    .complete => |maybe_generation| {
+                        var loading = heap.Owned(modules.LoadingLease).init(registered.loading.take());
+                        defer loading.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        registered.cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        if (evaluator.unit.inherited.project_lock.?.artifactCommitted(
+                            registered.target.artifact_id,
+                        )) {
+                            if (maybe_generation) |generation| {
+                                var lease = generation;
+                                lease.deinit();
+                                return self.finishWithoutLoading(evaluator, &loading);
+                            }
+                            return evaluator.failFmt(
+                                .io,
+                                "committed package artifact `{s}` is missing module `{s}`",
+                                .{ registered.target.relative_path, intern.get(intern.moduleId(self.name)) },
+                            );
+                        }
+                        if (maybe_generation) |generation| {
+                            var partial = generation;
+                            partial.deinit();
+                        }
+                        const target = registered.target;
+                        self.state.borrowMut().* = .{ .locked_store = .{
+                            .loading = .init(loading.take()),
+                            .target = target,
+                        } };
+                    },
+                },
+                .committed => |*cursor| switch (cursor.borrowMut().advance()) {
+                    .pending => {},
+                    .complete => |maybe_generation| {
+                        cursor.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        const generation = maybe_generation orelse return evaluator.failFmt(
+                            .io,
+                            "a committed package artifact is missing module `{s}`",
+                            .{intern.get(intern.moduleId(self.name))},
+                        );
+                        var lease = generation;
+                        lease.deinit();
+                        return continueQualifiedRequest(evaluator, self, self.request);
+                    },
+                },
                 .locked_store => |*locked| {
+                    const io = evaluator.unit.inherited.host_io orelse
+                        return evaluator.fail(.io, "filesystem access is unavailable");
                     const info = std.Io.Dir.cwd().statFile(
-                        evaluator.unit.inherited.host_io.?,
-                        locked.store,
+                        io,
+                        locked.target.store,
                         .{ .follow_symlinks = false },
                     ) catch |err| switch (err) {
                         error.FileNotFound => return evaluator.failFmt(
                             .io,
                             "locked package `{s}` is missing from the package store; run `ecl pkg sync`",
-                            .{locked.package},
+                            .{locked.target.package},
                         ),
                         else => return evaluator.failFmt(
                             .io,
                             "cannot inspect locked package `{s}` in the package store: {s}; run `ecl pkg sync`",
-                            .{ locked.package, @errorName(err) },
+                            .{ locked.target.package, @errorName(err) },
                         ),
                     };
                     if (info.kind != .directory) return evaluator.failFmt(
                         .io,
                         "locked package `{s}` is not a real package-store directory; run `ecl pkg sync`",
-                        .{locked.package},
+                        .{locked.target.package},
                     );
                     var loading = heap.Owned(modules.LoadingLease).init(locked.loading.take());
                     defer loading.deinit(evaluator.releaseDomain(), evaluator.allocator());
                     const origin: CandidateOrigin = .{ .locked = .{
-                        .package = locked.package,
-                        .store = locked.store,
+                        .package = locked.target.package,
+                        .store = locked.target.store,
+                        .package_id = locked.target.package_id,
+                        .artifact_id = locked.target.artifact_id,
                     } };
-                    const filename = try self.makeFilename(
-                        evaluator,
-                        &loading,
-                        .source,
-                        .{ .candidate = origin },
-                    );
+                    const filename_bytes = try evaluator.unit.allocator.dupe(u8, locked.target.relative_path);
+                    const filename = FilenameState{
+                        .loading = .init(loading.take()),
+                        .filename = .init(filename_bytes),
+                        .index = filename_bytes.len,
+                        .kind = .source,
+                        .target = .{ .candidate = origin },
+                    };
                     self.state.borrowMut().* = .{ .filename = filename };
                 },
                 .filename => |*filename| {
@@ -3658,7 +3853,13 @@ pub const Machine = struct {
                 },
                 .access => |*access| {
                     var disposition: Disposition = switch (access.kind) {
-                        .source => .source,
+                        .source => .{ .source = switch (access.origin) {
+                            .legacy => .{ .provenance = .ordinary, .artifact = null },
+                            .locked => |locked| .{
+                                .provenance = .{ .package = locked.package_id },
+                                .artifact = locked.artifact_id,
+                            },
+                        } },
                         .native => .native,
                     };
                     std.Io.Dir.cwd().access(
@@ -3742,9 +3943,13 @@ pub const Machine = struct {
                     },
                     .embedded => |entry| return self.transferEmbedded(evaluator, transfer, entry),
                     .native => return self.transferNative(evaluator, transfer),
-                    .source => {
+                    .source => |source| {
                         const candidate = transfer.candidate.take();
-                        const completion = self.sourceCompletion(transfer, .ordinary);
+                        const completion = self.sourceCompletion(
+                            transfer,
+                            source.provenance,
+                            source.artifact,
+                        );
                         evaluator.retireDriver(self);
                         try evaluator.fileSourceOwned(candidate, null, completion);
                         return .detached;
@@ -3770,7 +3975,7 @@ pub const Machine = struct {
                 .builtin => |words| return self.transferBuiltin(evaluator, transfer, words),
             };
             const source_name = transfer.candidate.take();
-            const completion = self.sourceCompletion(transfer, .standard_library);
+            const completion = self.sourceCompletion(transfer, .standard_library, null);
             evaluator.retireDriver(self);
             try evaluator.sourceOwned(source_name, text, completion);
             return .detached;
@@ -4084,6 +4289,7 @@ pub const Machine = struct {
             path: ?Value,
             request: QualifiedLoadRequest,
             provenance: modules.RegistrationProvenance,
+            artifact: ?pkg_catalog.ArtifactId,
         },
 
         pub fn deinit(self: *SourceCompletion, releases: *heap.ReleaseDomain) void {
@@ -4233,6 +4439,7 @@ pub const Machine = struct {
                                 .name = register.name,
                                 .path = register.path.?,
                                 .request = register.request,
+                                .artifact = .init(register.artifact),
                             } });
                             defer continuation.deinit(evaluator.releaseDomain(), evaluator.allocator());
                             register.loading = null;
@@ -4736,6 +4943,12 @@ pub const Machine = struct {
     /// while letting a builtin module attach the one datum it owns.
     pub fn addErrorPath(self: *Machine, path: Value) void {
         self.unit.pendingFailure().addData(.path, path);
+    }
+    /// Names the package a store operation rejected. Installation raises its
+    /// catalog failures where the package is known, so a caller does not have
+    /// to re-attach provenance the way it must around an inspection.
+    pub fn addErrorPackage(self: *Machine, package: Value) void {
+        self.unit.pendingFailure().addData(.package, package);
     }
     /// Tags the one absent-only publication conflict that an immutable
     /// package caller may recover after independently confirming the winner.
@@ -5456,7 +5669,7 @@ pub const Machine = struct {
         const select_initial = application.provenance != .boundary;
         var child: ?*env.Scope = null;
         if (launch == .isolated) {
-            child = self.acquireApplicationScope(application.parent_scope) catch {
+            child = self.acquireApplicationScope(application.site.parent_scope) catch {
                 application.deinit_fn(self.releaseDomain(), self.unit.allocator, application.context);
                 return error.OutOfMemory;
             };
@@ -5477,8 +5690,7 @@ pub const Machine = struct {
             .context = application.context,
             .resume_fn = application.resume_fn,
             .deinit_fn = application.deinit_fn,
-            .parent_scope = application.parent_scope,
-            .home = application.home,
+            .site = application.site,
             .mode = switch (launch) {
                 .in_place => .{ .in_place = base },
                 .isolated => .{ .isolated = .{
@@ -5502,7 +5714,11 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = application.quotation,
             .ip = 0,
-            .site = .resumed(child orelse application.parent_scope, application.home),
+            .site = .resumed(
+                child orelse application.site.parent_scope,
+                application.site.home,
+                application.site.registration_provenance,
+            ),
             .traced_word = inherited_trace,
             .application_tail = provenance_target orelse application_index,
             .application_selection = if (select_initial) provenance_target else null,
@@ -5640,6 +5856,8 @@ pub const Machine = struct {
         body_header: *Header,
     ) MachineError!void {
         const home = candidate.executionHome(self.unit.module_access);
+        var site = ExecutionSite.image(home, self.unit.module_access);
+        site.registration_provenance = provenance;
         _ = self.suspendCurrent() catch {
             self.releaseDomain().releaseHeader(body_header);
             return error.OutOfMemory;
@@ -5661,7 +5879,7 @@ pub const Machine = struct {
         self.unit.current = .{
             .code = body_header,
             .ip = 0,
-            .site = .image(home, self.unit.module_access),
+            .site = site,
             .traced_word = no_word,
         };
     }
@@ -5735,25 +5953,27 @@ pub const Machine = struct {
             .code = self.unit.current.?.code,
             .index = self.unit.active_index,
         };
-        switch (self.unit.module_call_sites.lookupQualified(
-            self.releaseDomain(),
-            self.unit.module_access,
-            qualified_call_site,
-            word.name,
-        )) {
-            .absent => {},
-            .stale => {
-                if (comptime root_execution_metrics_enabled)
-                    self.unit.root_execution_metrics.qualified_cache_heals += 1;
-            },
-            .hit => |resolution| {
-                if (comptime root_execution_metrics_enabled)
-                    self.unit.root_execution_metrics.qualified_cache_hits += 1;
-                var resolved = resolution;
-                defer resolved.deinit(self.unit.allocator);
-                try executeResolved(self, &resolved);
-                return;
-            },
+        if (self.unit.inherited.project_lock == null) {
+            switch (self.unit.module_call_sites.lookupQualified(
+                self.releaseDomain(),
+                self.unit.module_access,
+                qualified_call_site,
+                word.name,
+            )) {
+                .absent => {},
+                .stale => {
+                    if (comptime root_execution_metrics_enabled)
+                        self.unit.root_execution_metrics.qualified_cache_heals += 1;
+                },
+                .hit => |resolution| {
+                    if (comptime root_execution_metrics_enabled)
+                        self.unit.root_execution_metrics.qualified_cache_hits += 1;
+                    var resolved = resolution;
+                    defer resolved.deinit(self.unit.allocator);
+                    try executeResolved(self, &resolved);
+                    return;
+                },
+            }
         }
         // Acquired only on the `fresh_pin` arm, and handed to the cursor so the
         // pin taken here is the one `scheduleWord` consumes.
@@ -6746,12 +6966,14 @@ const DispatchDriver = struct {
                         if (resolved.takeCallSiteCache()) |candidate_value| {
                             var candidate = candidate_value;
                             if (call_site) |site| {
-                                self_machine.unit.module_call_sites.install(
-                                    self_machine.releaseDomain(),
-                                    site,
-                                    word,
-                                    candidate,
-                                );
+                                if (self_machine.unit.inherited.project_lock == null) {
+                                    self_machine.unit.module_call_sites.install(
+                                        self_machine.releaseDomain(),
+                                        site,
+                                        word,
+                                        candidate,
+                                    );
+                                } else candidate.deinit();
                             } else candidate.deinit();
                         }
                         try executeResolved(self_machine, &resolved);
@@ -6996,24 +7218,68 @@ const QualifiedRegistrationDriver = struct {
     path: heap.Owned(Value),
     acquisition: heap.Owned(modules.Registry.AcquireCursor),
     request: QualifiedLoadRequest,
+    loading: ?heap.Owned(modules.LoadingLease) = null,
+    artifact: ?pkg_catalog.ArtifactId = null,
+    module_index: usize = 0,
 
     pub fn advance(evaluator: *Machine, self: *QualifiedRegistrationDriver) MachineError!WorkProgress {
         try evaluator.pollKernel();
         switch (self.acquisition.borrowMut().advance()) {
             .pending => return .yielded,
             .complete => |maybe_generation| {
-                if (maybe_generation) |generation| {
-                    var lease = generation;
-                    lease.deinit();
-                    return continueQualifiedRequest(evaluator, self, self.request);
+                const checked_name = if (self.artifact) |artifact|
+                    evaluator.unit.inherited.project_lock.?.artifactModules(artifact)[self.module_index]
+                else
+                    self.name;
+                const generation = maybe_generation orelse {
+                    const failure = if (self.artifact != null)
+                        evaluator.failFmt(
+                            .io,
+                            "loading package artifact registered nothing under declared module `{s}`",
+                            .{intern.get(intern.moduleId(checked_name))},
+                        )
+                    else
+                        evaluator.failFmt(
+                            .io,
+                            "loading module `{s}` registered nothing under that name",
+                            .{intern.get(intern.moduleId(checked_name))},
+                        );
+                    evaluator.unit.pendingFailure().addData(.path, self.path.borrow());
+                    return failure;
+                };
+                var lease = generation;
+                defer lease.deinit();
+                if (self.artifact) |artifact| {
+                    const expected_package = evaluator.unit.inherited.project_lock.?.artifactPackage(artifact);
+                    const valid_origin = switch (lease.provenance()) {
+                        .package => |package| package == expected_package,
+                        .ordinary, .root_package, .standard_library => false,
+                    };
+                    if (!valid_origin) {
+                        const failure = evaluator.failFmt(
+                            .domain,
+                            "package artifact declared module `{s}` with foreign publication provenance",
+                            .{intern.get(intern.moduleId(checked_name))},
+                        );
+                        evaluator.unit.pendingFailure().addData(.path, self.path.borrow());
+                        return failure;
+                    }
+                    const modules_in_artifact = evaluator.unit.inherited.project_lock.?.artifactModules(artifact);
+                    self.module_index += 1;
+                    if (self.module_index != modules_in_artifact.len) {
+                        self.acquisition.deinit(evaluator.releaseDomain(), evaluator.allocator());
+                        self.acquisition = .init(evaluator.unit.inherited.registry.?.acquireCursor(
+                            modules_in_artifact[self.module_index],
+                        ));
+                        return .yielded;
+                    }
+                    var artifact_lease = self.loading.?.borrowMut();
+                    evaluator.unit.inherited.project_lock.?.commitArtifact(
+                        artifact_lease.artifactCommit(),
+                    );
+                    artifact_lease.finish();
                 }
-                const failure = evaluator.failFmt(
-                    .io,
-                    "loading module `{s}` registered nothing under that name",
-                    .{intern.get(intern.moduleId(self.name))},
-                );
-                evaluator.unit.pendingFailure().addData(.path, self.path.borrow());
-                return failure;
+                return continueQualifiedRequest(evaluator, self, self.request);
             },
         }
     }
@@ -7156,6 +7422,7 @@ fn moduleResolutionOrigin(home: *const modules.ModuleHome) ResolutionOrigin {
     return switch (home.registrationProvenance()) {
         .ordinary => .module,
         .standard_library => .standard_library,
+        .root_package, .package => .module,
     };
 }
 
@@ -7474,6 +7741,7 @@ pub const ResolutionCursor = struct {
         prefix_validate,
         export_name,
         export_validate,
+        package_authorization,
         qualified_acquire,
         qualified_export,
         scope,
@@ -7495,6 +7763,7 @@ pub const ResolutionCursor = struct {
         atom: intern.InternLookupCursor,
         module_validation: intern.ModuleNameCursor,
         binding_validation: intern.NamespaceCursor,
+        catalog: pkg_lock.LookupCursor,
         acquisition: modules.Registry.AcquireCursor,
         direct: env.DirectLookupCursor,
         export_lookup: modules.ModuleResolveCursor,
@@ -7506,6 +7775,7 @@ pub const ResolutionCursor = struct {
                 .acquisition => |*cursor| cursor.deinit(),
                 .direct => |*cursor| cursor.deinit(),
                 .export_lookup => |*cursor| cursor.deinit(),
+                .catalog => |*cursor| cursor.deinit(),
                 .none, .dot, .atom, .module_validation, .binding_validation => {},
             }
             self.* = .none;
@@ -7513,6 +7783,8 @@ pub const ResolutionCursor = struct {
     };
     allocator: std.mem.Allocator,
     registry: ?*modules.Registry,
+    project_lock: ?*const pkg_lock.ProjectLock,
+    package: ?pkg_catalog.PackageId,
     module_access: *const modules.ExecutionAccess,
     core: env.EnvironmentView,
     current_home: ?*modules.ModuleHome,
@@ -7576,6 +7848,8 @@ pub const ResolutionCursor = struct {
             .local_cache_scope = local_cache_scope,
             .allocator = evaluator.unit.allocator,
             .registry = evaluator.unit.inherited.registry,
+            .project_lock = evaluator.unit.inherited.project_lock,
+            .package = evaluator.currentPackage(),
             .module_access = evaluator.unit.module_access,
             .core = evaluator.unit.environment.coreView(),
             .current_home = evaluator.unit.current.?.home(),
@@ -7765,9 +8039,43 @@ pub const ResolutionCursor = struct {
                         self.phase = .complete;
                         break :result .{ .complete = .{ .unresolved = .qualified } };
                     };
-                    self.work = .{ .acquisition = self.registry.?.acquireCursor(self.prefix.?) };
-                    self.phase = .qualified_acquire;
+                    if (self.project_lock) |project_lock| {
+                        if (stdlib.find(intern.get(intern.moduleId(self.prefix.?))) != null) {
+                            self.work = .{ .acquisition = self.registry.?.acquireCursor(self.prefix.?) };
+                            self.phase = .qualified_acquire;
+                        } else {
+                            self.work = .{ .catalog = project_lock.lookupCursor(
+                                self.package,
+                                intern.get(intern.moduleId(self.prefix.?)),
+                            ) };
+                            self.phase = .package_authorization;
+                        }
+                    } else {
+                        self.work = .{ .acquisition = self.registry.?.acquireCursor(self.prefix.?) };
+                        self.phase = .qualified_acquire;
+                    }
                     break :result .pending;
+                },
+            },
+            .package_authorization => switch (self.work.catalog.advance()) {
+                .pending => .pending,
+                .complete => |outcome| result: {
+                    self.work.deinit();
+                    switch (outcome) {
+                        .matched => |match| {
+                            if (self.project_lock.?.artifactCommitted(match.artifact_id)) {
+                                self.work = .{ .acquisition = self.registry.?.acquireCursor(self.prefix.?) };
+                                self.phase = .qualified_acquire;
+                                break :result .pending;
+                            }
+                            self.phase = .complete;
+                            break :result .{ .complete = .{ .unregistered_module = self.prefix.? } };
+                        },
+                        .unmatched, .hidden, .invalid => {
+                            self.phase = .complete;
+                            break :result .{ .complete = .{ .unregistered_module = self.prefix.? } };
+                        },
+                    }
                 },
             },
             .qualified_acquire => switch (self.work.acquisition.advance()) {
@@ -8062,7 +8370,7 @@ fn scheduleWord(
     const registration_provenance = if (resolved_home == null)
         self.unit.current.?.site.registration_provenance
     else
-        modules.RegistrationProvenance.ordinary;
+        resolved_home.?.registrationProvenance();
     // Each binding resolves against the chain it was defined in, with no
     // exception. A module word resolves against its home. Anything else
     // resolves against the scope resolution found it in, which is null for a
@@ -8185,8 +8493,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                     .context = continuation.context,
                     .resume_fn = continuation.resume_fn,
                     .deinit_fn = continuation.deinit_fn,
-                    .parent_scope = continuation.parent_scope,
-                    .home = continuation.home,
+                    .site = continuation.site,
                     .seeded = step.seeded,
                     .provenance = .boundary,
                 }, launch, continuation.traced_word);
@@ -8209,7 +8516,6 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             defer loading.deinit();
             var path = heap.OwnedValue.init(self.releaseDomain(), continuation.path);
             defer path.deinit();
-            loading.finish();
             // Source loading temporarily replaces the caller's evaluation.
             // Replay requests resume at their restored primitive operands;
             // dispatch requests resume the exact stored word without replay.
@@ -8226,11 +8532,19 @@ fn resumeFrames(self: *Machine) MachineError!bool {
             // The registration check bounds the retry and gives every
             // transport the same post-load handoff.
             const registry = self.unit.inherited.registry.?;
+            const artifact = continuation.artifact.artifact();
+            const first_name = if (artifact) |artifact_id|
+                self.unit.inherited.project_lock.?.artifactModules(artifact_id)[0]
+            else
+                continuation.name;
+            if (artifact == null) loading.finish();
             try self.startDriver(QualifiedRegistrationDriver{
                 .name = continuation.name,
                 .path = .init(path.take()),
-                .acquisition = .init(registry.acquireCursor(continuation.name)),
+                .acquisition = .init(registry.acquireCursor(first_name)),
                 .request = continuation.request,
+                .loading = if (artifact != null) .init(loading.move()) else null,
+                .artifact = artifact,
             });
             return true;
         },
@@ -8843,10 +9157,21 @@ const ModuleCompletionDriver = struct {
                         .domain,
                         "@defm requires a valid module name",
                     );
+                    switch (validate.provenance) {
+                        .package => |package| if (!evaluator.unit.inherited.project_lock.?.packageDeclares(
+                            package,
+                            name,
+                        )) return evaluator.fail(
+                            .domain,
+                            "package source may register only modules declared by its catalog",
+                        ),
+                        .ordinary, .root_package, .standard_library => {},
+                    }
+                    const provenance = validate.provenance;
                     const registration = evaluator.unit.inherited.registry.?.registrationCursor(
                         validate.sealed.borrow().ref(),
                         name,
-                        validate.provenance,
+                        provenance,
                         &evaluator.unit.turn_authority,
                     );
                     self.state.borrowMut().* = .{ .publish = .{

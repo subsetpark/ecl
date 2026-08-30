@@ -11,6 +11,8 @@ const dict = @import("dict.zig");
 const storage = @import("kernel_storage.zig");
 const intern = @import("intern.zig");
 const project = @import("project.zig");
+const pkg_catalog = @import("pkg_catalog.zig");
+const modules = @import("modules.zig");
 
 const Value = value.Value;
 const max_lock_bytes = 16 * 1024 * 1024;
@@ -27,17 +29,24 @@ const Entry = struct {
     name: []u8,
     version: []u8,
     store_dir: ?[]u8,
+    requires: []pkg_catalog.PackageId = &.{},
 
     fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.version);
         if (self.store_dir) |path| allocator.free(path);
+        if (self.requires.len != 0) allocator.free(self.requires);
         self.* = undefined;
     }
 };
 
 const State = union(enum) {
-    valid: []Entry,
+    valid: struct {
+        entries: []Entry,
+        catalog: pkg_catalog.Catalog,
+        committed: []std.atomic.Value(bool),
+        root_id: pkg_catalog.PackageId,
+    },
     invalid: []u8,
 };
 
@@ -81,17 +90,97 @@ pub const ProjectLock = opaque {
         };
     }
 
-    pub fn lookupCursor(self: *const ProjectLock, module_name: []const u8) LookupCursor {
-        return .{ .lock = backingConst(self), .module_name = module_name };
+    pub fn lookupCursor(
+        self: *const ProjectLock,
+        consumer: ?pkg_catalog.PackageId,
+        module_name: []const u8,
+    ) LookupCursor {
+        return .{ .lock = backingConst(self), .consumer = consumer, .module_name = module_name };
+    }
+
+    pub fn rootPackage(self: *const ProjectLock) ?pkg_catalog.PackageId {
+        return switch (backingConst(self).state) {
+            .valid => |valid| valid.root_id,
+            .invalid => null,
+        };
+    }
+
+    pub fn artifactCommitted(
+        self: *const ProjectLock,
+        artifact: pkg_catalog.ArtifactId,
+    ) bool {
+        return switch (backingConst(self).state) {
+            .valid => |valid| valid.committed[@intFromEnum(artifact)].load(.acquire),
+            .invalid => false,
+        };
+    }
+
+    /// Publish one artifact's registrations. The commit authority is minted
+    /// only by the loading lease that guarded the artifact's verification, so
+    /// this immutable observation capability cannot be turned into a way to
+    /// make an unverified artifact visible.
+    pub fn commitArtifact(
+        self: *const ProjectLock,
+        commit: modules.ArtifactCommit,
+    ) void {
+        switch (backingConst(self).state) {
+            .valid => |valid| valid.committed[@intFromEnum(commit.artifact())].store(true, .release),
+            .invalid => unreachable,
+        }
+    }
+
+    pub fn artifactModules(
+        self: *const ProjectLock,
+        artifact: pkg_catalog.ArtifactId,
+    ) []const intern.ModuleName {
+        return switch (backingConst(self).state) {
+            .valid => |valid| valid.catalog.artifact(artifact).modules,
+            .invalid => &.{},
+        };
+    }
+
+    pub fn artifactPackage(
+        self: *const ProjectLock,
+        artifact: pkg_catalog.ArtifactId,
+    ) pkg_catalog.PackageId {
+        return switch (backingConst(self).state) {
+            .valid => |valid| valid.catalog.artifact(artifact).package,
+            .invalid => unreachable,
+        };
+    }
+
+    pub fn artifactDeclares(
+        self: *const ProjectLock,
+        artifact: pkg_catalog.ArtifactId,
+        name: intern.ModuleName,
+    ) bool {
+        for (self.artifactModules(artifact)) |declared| if (declared == name) return true;
+        return false;
+    }
+
+    pub fn packageDeclares(
+        self: *const ProjectLock,
+        package: pkg_catalog.PackageId,
+        name: intern.ModuleName,
+    ) bool {
+        return switch (backingConst(self).state) {
+            .valid => |valid| if (valid.catalog.find(intern.get(intern.moduleId(name)))) |module|
+                valid.catalog.artifact(module.artifact).package == package
+            else
+                false,
+            .invalid => false,
+        };
     }
 
     pub fn deinit(self: *ProjectLock) void {
         const owned = backing(self);
         const allocator = owned.host.allocator();
         switch (owned.state) {
-            .valid => |entries| {
-                for (entries) |*entry| entry.deinit(allocator);
-                allocator.free(entries);
+            .valid => |*valid| {
+                for (valid.entries) |*entry| entry.deinit(allocator);
+                allocator.free(valid.entries);
+                valid.catalog.deinit();
+                allocator.free(valid.committed);
             },
             .invalid => |message| allocator.free(message),
         }
@@ -101,12 +190,19 @@ pub const ProjectLock = opaque {
 
 pub const Match = struct {
     package: []const u8,
-    store_dir: ?[]const u8,
+    store_dir: []const u8,
+    relative_path: []const u8,
+    package_id: pkg_catalog.PackageId,
+    artifact_id: pkg_catalog.ArtifactId,
 };
 
 pub const LookupOutcome = union(enum) {
     unmatched,
     matched: Match,
+    hidden: struct {
+        owner: []const u8,
+        consumer: []const u8,
+    },
     invalid: []const u8,
 };
 
@@ -115,60 +211,56 @@ pub const LookupProgress = union(enum) {
     complete: LookupOutcome,
 };
 
-/// Processes at most one package-name byte per advance. AutoLoadDriver owns
-/// this cursor across yields and applies its ordinary kernel poll budget.
+/// Processes at most one catalog entry per advance. AutoLoadDriver owns this
+/// cursor across yields and applies its ordinary kernel poll budget.
 pub const LookupCursor = struct {
     lock: *const Backing,
+    consumer: ?pkg_catalog.PackageId,
     module_name: []const u8,
-    entry_index: usize = 0,
-    byte_index: usize = 0,
-    still_matches: bool = true,
-    best_index: ?usize = null,
+    module_index: usize = 0,
     complete: bool = false,
 
     pub const owned_disposal: heap.OwnedDisposal = .deinit;
 
     pub fn advance(self: *LookupCursor) LookupProgress {
         std.debug.assert(!self.complete);
-        const entries = switch (self.lock.state) {
+        const valid = switch (self.lock.state) {
             .invalid => |message| {
                 self.complete = true;
                 return .{ .complete = .{ .invalid = message } };
             },
-            .valid => |entries| entries,
+            .valid => |valid| valid,
         };
-        if (self.entry_index == entries.len) {
+        if (self.module_index == valid.catalog.modules.len) {
             self.complete = true;
-            return .{ .complete = if (self.best_index) |index|
-                .{ .matched = .{
-                    .package = entries[index].name,
-                    .store_dir = entries[index].store_dir,
-                } }
+            return .{ .complete = .unmatched };
+        }
+        const module = valid.catalog.modules[self.module_index];
+        self.module_index += 1;
+        if (std.mem.eql(u8, intern.get(intern.moduleId(module.name)), self.module_name)) {
+            const artifact = valid.catalog.artifact(module.artifact);
+            const package = valid.entries[@intFromEnum(artifact.package)];
+            self.complete = true;
+            const consumer = if (self.consumer) |consumer_id|
+                &valid.entries[@intFromEnum(consumer_id)]
             else
-                .unmatched };
-        }
-
-        const candidate = entries[self.entry_index].name;
-        if (self.still_matches and self.byte_index < candidate.len) {
-            if (self.byte_index >= self.module_name.len or
-                candidate[self.byte_index] != self.module_name[self.byte_index])
-            {
-                self.still_matches = false;
+                null;
+            var visible = false;
+            if (consumer) |entry| {
+                for (entry.requires) |allowed| visible = visible or allowed == artifact.package;
             }
-            self.byte_index += 1;
-            return .pending;
+            if (!visible) return .{ .complete = .{ .hidden = .{
+                .owner = package.name,
+                .consumer = if (consumer) |entry| entry.name else "intrinsic context",
+            } } };
+            return .{ .complete = .{ .matched = .{
+                .package = package.name,
+                .store_dir = package.store_dir.?,
+                .relative_path = artifact.relative_path,
+                .package_id = artifact.package,
+                .artifact_id = module.artifact,
+            } } };
         }
-
-        if (self.still_matches and
-            self.module_name.len >= candidate.len and
-            (self.module_name.len == candidate.len or self.module_name[candidate.len] == '.'))
-        {
-            if (self.best_index == null or candidate.len > entries[self.best_index.?].name.len)
-                self.best_index = self.entry_index;
-        }
-        self.entry_index += 1;
-        self.byte_index = 0;
-        self.still_matches = true;
         return .pending;
     }
 
@@ -251,7 +343,7 @@ fn discoverLock(
                 "invalid project lock `{s}`: expected exactly one form",
                 .{lock_path},
             );
-            const valid = validateLock(host, parsed.values()[0], project_root, cache) catch |err| switch (err) {
+            const dependencies = validateLock(host, parsed.values()[0], project_root, cache) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.Invalid => break :result try invalidSnapshot(
                     host,
@@ -259,9 +351,128 @@ fn discoverLock(
                     .{lock_path},
                 ),
             };
-            errdefer deinitEntries(allocator, valid);
+            const dependency_count = dependencies.len;
+            const entries = allocator.realloc(dependencies, dependency_count + 1) catch |err| {
+                deinitEntries(allocator, dependencies);
+                return err;
+            };
+            var initialized_entries = dependency_count;
+            errdefer {
+                for (entries[0..initialized_entries]) |*entry| entry.deinit(allocator);
+                allocator.free(entries);
+            }
+            const top = asDict(parsed.values()[0]) catch @panic("validated lock lost its dictionary shape");
+            const root_name = ownedUtf8(
+                allocator,
+                field(top, "root") catch @panic("validated lock lost its root field"),
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Invalid => unreachable,
+            };
+            const root_version = allocator.dupe(u8, "") catch |err| {
+                allocator.free(root_name);
+                return err;
+            };
+            const root_dir = allocator.dupe(u8, project_root) catch |err| {
+                allocator.free(root_version);
+                allocator.free(root_name);
+                return err;
+            };
+            entries[dependency_count] = .{
+                .name = root_name,
+                .version = root_version,
+                .store_dir = root_dir,
+            };
+            initialized_entries += 1;
+            fillVisibility(
+                allocator,
+                parsed.values()[0],
+                entries,
+                dependency_count,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Invalid => {
+                    const failure = try invalidSnapshot(
+                        host,
+                        "invalid project lock `{s}`: requirement visibility validation failed",
+                        .{lock_path},
+                    );
+                    deinitEntries(allocator, entries);
+                    break :result failure;
+                },
+            };
+
+            const package_inputs = try allocator.alloc(pkg_catalog.PackageInput, entries.len);
+            defer allocator.free(package_inputs);
+            for (entries, 0..) |entry, index| {
+                const store_dir = entry.store_dir orelse {
+                    const failure = try invalidSnapshot(
+                        host,
+                        "locked package `{s}` has no package store; set ECL_CACHE, XDG_CACHE_HOME, or HOME before running `ecl pkg sync`",
+                        .{entry.name},
+                    );
+                    deinitEntries(allocator, entries);
+                    break :result failure;
+                };
+                if (index != entries.len - 1) {
+                    const info = std.Io.Dir.cwd().statFile(
+                        io,
+                        store_dir,
+                        .{ .follow_symlinks = false },
+                    ) catch |err| {
+                        const failure = try invalidSnapshot(
+                            host,
+                            "locked package `{s}` is missing from the package store ({s}); run `ecl pkg sync`",
+                            .{ entry.name, @errorName(err) },
+                        );
+                        deinitEntries(allocator, entries);
+                        break :result failure;
+                    };
+                    if (info.kind != .directory) {
+                        const failure = try invalidSnapshot(
+                            host,
+                            "locked package `{s}` is not a real package-store directory; run `ecl pkg sync`",
+                            .{entry.name},
+                        );
+                        deinitEntries(allocator, entries);
+                        break :result failure;
+                    }
+                }
+                package_inputs[index] = .{
+                    .id = @enumFromInt(@as(u32, @intCast(index))),
+                    .name = entry.name,
+                    .version = entry.version,
+                    .root_dir = store_dir,
+                };
+            }
+            var catalog_diagnostic: ?[]u8 = null;
+            const catalog = pkg_catalog.build(host, io, package_inputs, &catalog_diagnostic) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Invalid => {
+                    defer if (catalog_diagnostic) |message| allocator.free(message);
+                    const failure = try invalidSnapshot(
+                        host,
+                        "invalid package catalog: {s}",
+                        .{catalog_diagnostic orelse "validation failed"},
+                    );
+                    deinitEntries(allocator, entries);
+                    break :result failure;
+                },
+            };
+            errdefer {
+                var cleanup = catalog;
+                cleanup.deinit();
+            }
+            const committed = try allocator.alloc(std.atomic.Value(bool), catalog.artifacts.len);
+            errdefer allocator.free(committed);
+            for (committed) |*state| state.* = .init(false);
             const owned = try allocator.create(Backing);
-            owned.* = .{ .host = host, .state = .{ .valid = valid } };
+            owned.* = .{ .host = host, .state = .{ .valid = .{
+                .entries = entries,
+                .catalog = catalog,
+                .committed = committed,
+                .root_id = @enumFromInt(@as(u32, @intCast(entries.len - 1))),
+            } } };
             break :result projectLock(owned);
         },
     };
@@ -270,6 +481,61 @@ fn discoverLock(
 fn deinitEntries(allocator: std.mem.Allocator, entries: []Entry) void {
     for (entries) |*entry| entry.deinit(allocator);
     allocator.free(entries);
+}
+
+fn fillVisibility(
+    allocator: std.mem.Allocator,
+    item: Value,
+    entries: []Entry,
+    root_index: usize,
+) ValidationError!void {
+    const top = try asDict(item);
+    const requires = try asDict(try field(top, "requires"));
+    const root_name = entries[root_index].name;
+    const requirer_count: usize = @intCast(requires.length());
+    for (0..requirer_count) |requirer_index| {
+        const requirer_name = try ownedUtf8(allocator, dict.keyAt(requires, requirer_index));
+        defer allocator.free(requirer_name);
+        const entry_index = if (std.mem.eql(u8, requirer_name, root_name))
+            root_index
+        else
+            findEntryIndex(entries[0..root_index], requirer_name) orelse return error.Invalid;
+        if (entries[entry_index].requires.len != 0) return error.Invalid;
+        const edges = try asDict(dict.valueAt(requires, requirer_index));
+        const edge_count: usize = @intCast(edges.length());
+        const visible = try allocator.alloc(pkg_catalog.PackageId, edge_count + 1);
+        errdefer allocator.free(visible);
+        visible[0] = @enumFromInt(@as(u32, @intCast(entry_index)));
+        var built: usize = 1;
+        for (0..edge_count) |edge_index| {
+            const edge = try exactFields(
+                dict.valueAt(edges, edge_index),
+                &.{ "package", "version" },
+            );
+            const required_name = try ownedUtf8(allocator, try field(edge, "package"));
+            defer allocator.free(required_name);
+            const required_index = findEntryIndex(entries[0..root_index], required_name) orelse
+                return error.Invalid;
+            const required_id: pkg_catalog.PackageId = @enumFromInt(
+                @as(u32, @intCast(required_index)),
+            );
+            for (visible[0..built]) |prior| if (prior == required_id) return error.Invalid;
+            visible[built] = required_id;
+            built += 1;
+        }
+        entries[entry_index].requires = visible;
+    }
+    // A selected package that requires nothing may be omitted from `requires`
+    // entirely: `pkg.lock.validate` accepts such a lock and `pkg.lock.write`
+    // emits one, so rejecting it here would make a canonically written lock
+    // unopenable. Absence is the empty edge set, which leaves the package
+    // visible only to itself.
+    for (entries, 0..) |*entry, index| {
+        if (entry.requires.len != 0) continue;
+        const visible = try allocator.alloc(pkg_catalog.PackageId, 1);
+        visible[0] = @enumFromInt(@as(u32, @intCast(index)));
+        entry.requires = visible;
+    }
 }
 
 fn invalidSnapshot(
@@ -376,10 +642,17 @@ fn validateLock(
         const minimums = try asDict(dict.valueAt(requires, requirer_index));
         const minimum_count: usize = @intCast(minimums.length());
         for (0..minimum_count) |minimum_index| {
-            const required_name = try ownedUtf8(allocator, dict.keyAt(minimums, minimum_index));
+            const alias = try ownedUtf8(allocator, dict.keyAt(minimums, minimum_index));
+            defer allocator.free(alias);
+            if (!validPackageName(alias)) return error.Invalid;
+            const edge = try exactFields(
+                dict.valueAt(minimums, minimum_index),
+                &.{ "package", "version" },
+            );
+            const required_name = try ownedUtf8(allocator, try field(edge, "package"));
             defer allocator.free(required_name);
             if (!validPackageName(required_name)) return error.Invalid;
-            const minimum = try ownedUtf8(allocator, dict.valueAt(minimums, minimum_index));
+            const minimum = try ownedUtf8(allocator, try field(edge, "version"));
             defer allocator.free(minimum);
             if (!validVersion(minimum)) return error.Invalid;
             const selected = findEntry(entries.items, required_name) orelse return error.Invalid;
@@ -458,73 +731,18 @@ fn findEntry(entries: []const Entry, name: []const u8) ?*const Entry {
     return null;
 }
 
-pub fn validPackageName(name: []const u8) bool {
-    if (name.len == 0) return false;
-    var segment_start: usize = 0;
-    for (name, 0..) |byte, index| {
-        if (byte == '.') {
-            if (!validNameSegment(name[segment_start..index])) return false;
-            segment_start = index + 1;
-        }
-    }
-    return validNameSegment(name[segment_start..]);
+fn findEntryIndex(entries: []const Entry, name: []const u8) ?usize {
+    for (entries, 0..) |entry, index| if (std.mem.eql(u8, entry.name, name)) return index;
+    return null;
 }
 
-fn validNameSegment(segment: []const u8) bool {
-    if (segment.len == 0 or segment[0] < 'a' or segment[0] > 'z') return false;
-    for (segment[1..]) |byte| if (!((byte >= 'a' and byte <= 'z') or
-        (byte >= '0' and byte <= '9') or byte == '-')) return false;
-    return true;
-}
-
-fn validHash(hash: []const u8) bool {
-    if (hash.len != 71 or !std.mem.eql(u8, hash[0..7], "sha256-")) return false;
-    for (hash[7..]) |byte| if (!((byte >= '0' and byte <= '9') or
-        (byte >= 'a' and byte <= 'f'))) return false;
-    return true;
-}
-
-fn validUrl(url: []const u8) bool {
-    return url.len > "https://".len and std.mem.startsWith(u8, url, "https://");
-}
-
-pub fn validVersion(version: []const u8) bool {
-    if (version.len == 0 or std.mem.indexOfScalar(u8, version, '+') != null) return false;
-    const hyphen = std.mem.indexOfScalar(u8, version, '-');
-    const core = if (hyphen) |index| version[0..index] else version;
-    var fields = std.mem.splitScalar(u8, core, '.');
-    var count: usize = 0;
-    while (fields.next()) |part| {
-        count += 1;
-        if (!validNumeric(part)) return false;
-    }
-    if (count != 3) return false;
-    if (hyphen) |index| {
-        const prerelease = version[index + 1 ..];
-        var identifiers = std.mem.splitScalar(u8, prerelease, '.');
-        var identifier_count: usize = 0;
-        while (identifiers.next()) |identifier| {
-            identifier_count += 1;
-            if (identifier.len == 0) return false;
-            var numeric = true;
-            for (identifier) |byte| {
-                const digit = byte >= '0' and byte <= '9';
-                numeric = numeric and digit;
-                if (!(digit or (byte >= 'a' and byte <= 'z') or
-                    (byte >= 'A' and byte <= 'Z') or byte == '-')) return false;
-            }
-            if (numeric and identifier.len > 1 and identifier[0] == '0') return false;
-        }
-        if (identifier_count == 0) return false;
-    }
-    return true;
-}
-
-fn validNumeric(field_bytes: []const u8) bool {
-    if (field_bytes.len == 0 or (field_bytes.len > 1 and field_bytes[0] == '0')) return false;
-    for (field_bytes) |byte| if (byte < '0' or byte > '9') return false;
-    return true;
-}
+/// The package-name, version, hash, and URL grammar has one owner: the
+/// catalog builder validates a manifest against it before a package is sealed,
+/// and lock validation applies the same spellings here.
+pub const validPackageName = pkg_catalog.validCanonicalName;
+pub const validHash = pkg_catalog.validHash;
+pub const validUrl = pkg_catalog.validUrl;
+pub const validVersion = pkg_catalog.validVersion;
 
 fn versionLess(left: []const u8, right: []const u8) bool {
     const left_hyphen = std.mem.indexOfScalar(u8, left, '-');

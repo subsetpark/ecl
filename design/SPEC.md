@@ -981,10 +981,11 @@ anonymously, be passed as data, and be registered more than once.
   names may not collide in either direction. `which` shows any name's
   resolution.
 - **Loading**: the first qualified reference (`stats.mean`) to an unregistered
-  module — including the module named by `import` —
-  consults the embedded standard library first, then searches each
-  `ECL_PATH` entry in order, trying `stats.ecl` and then `stats.eclmod`;
-  the first existing candidate is authoritative, including its errors.
+  module — including the module named by `import` — consults the embedded
+  standard library first. A legacy session then searches each `ECL_PATH` entry
+  in order, trying `stats.ecl` and then `stats.eclmod`; a manifested session
+  instead performs exact catalog lookup and never consults `ECL_PATH`.
+  The selected candidate is authoritative, including its errors.
   Embedded names therefore always win: a `csv.ecl` on the search path
   cannot silently replace the stdlib `csv`, and in-session shadowing or
   explicit `@defm` registration remain the way to override one. Every
@@ -996,8 +997,9 @@ anonymously, be passed as data, and be registered more than once.
   Completion loads only the module; it neither executes an export nor imports
   one into session scope. A misspelled dotted word costs one bounded search
   before raising `'undefined-word`. Two units racing the first
-  reference to one module converge on a single published module; only a
-  unit re-entering its own in-progress load is a `'domain` cycle. A loaded
+  reference to one legacy module, or sibling modules from one package
+  artifact, converge on a single committed load; only a unit re-entering its
+  own in-progress load is a `'domain` cycle. A loaded
   `.ecl` file registers a module as an ordinary side effect of running;
   `load` replays any file as one unit in the calling session. Loading succeeds
   only when the requested canonical name is actually registered, whichever
@@ -1415,8 +1417,11 @@ no lock at all.
 {'format 1
  'name "my.proj"
  'version "0.1.0"
+ 'exports
+ {"my.proj" ["src/**/*.ecl"]}
  'requires
- {"foo" {'version "1.2.0"
+ {"statistics" {'package "foo"
+         'version "1.2.0"
          'url "https://example.com/foo-1.2.0.tar.gz"
          'hash "sha256-<64 lowercase hex digits>"}}}
 ```
@@ -1424,15 +1429,18 @@ no lock at all.
 - `'format` is the int 1. An unrecognized value is `'domain` rather than a
   best-effort read: more than one reader consumes these files, so all of them
   must agree on when to stop reading.
-- `'name` is this package's canonical name, `'version` is its own version, and
-  `'requires` maps a required canonical name to a requirement.
-- A requirement is exactly `'version` — the declared *minimum* — plus `'url`
-  and `'hash`. The URL must begin `https://`: a tarball over HTTPS is the only
-  transport, and a git dependency is a codeload tarball URL.
+- `'name` is this package's canonical name and `'version` is its own version.
+  `'exports` maps an owned module namespace to one or more portable source
+  globs. `'requires` maps a consumer-local alias to a requirement.
+- A requirement is exactly the target `'package`, `'version` — the declared
+  *minimum* — `'url`, and `'hash`. Aliases never rewrite ECL module names. The
+  URL must begin `https://`: a tarball over HTTPS is the only transport, and a
+  git dependency is a codeload tarball URL.
 - Every key is declared. An undeclared key at any level is `'domain`, so a
   misspelling is an error rather than an entry that is silently ignored.
-- A requirement may not name the manifest's own `'name`, and no two
-  requirement names may stand in the ownership relation below.
+- A requirement may not target the manifest's own `'name`; a consumer may not
+  target one package through two aliases; and selected package names may not
+  overlap under the ownership relation below.
 - `#` comments are permitted, and nothing that rewrites the file preserves
   them.
 
@@ -1448,11 +1456,20 @@ A canonical package name is one or more segments joined by `.`, each matching
 `[a-z] [a-z0-9-]*`. Every package name is therefore a legal module name by
 construction.
 
-Package `foo` may publish exactly the modules `foo` and `foo.<rest>` and
-nothing else. Ownership continues only across a `.` boundary: `foo` owns
-`foo.bar` and does not own `foobar`. With no registry to police publication,
-prefix ownership is what polices namespaces instead — and it is what keeps a
-lock small enough for prefix matching to be cheap.
+Package `foo` may export namespaces `foo` and `foo.<rest>` and nothing else.
+Ownership continues only across a `.` boundary: `foo` owns `foo.bar` and does
+not own `foobar`. Each exported namespace maps to nonempty, distinct portable
+globs: relative `/`-separated paths with `*`, `?`, and whole-segment `**`, but
+no absolute path, backslash, empty segment, `.` segment, or `..` segment.
+
+The runtime derives an inert catalog from those globs and parsed source forms.
+Every matched `.ecl` artifact must declare one or more top-level modules as a
+literal symbol immediately followed by `@defm`; every declaration must equal
+its export namespace or be its dotted child. A file may declare several
+modules. Different export namespaces may not claim one file, every glob must
+match at least one source artifact, and every full module name maps to exactly
+one artifact across the selected graph. Filename and directory layout carry no
+module-name semantics.
 
 ### Resolution
 
@@ -1532,8 +1549,8 @@ deleting it and resolving again reproduces it.
  {"bar" {'version "0.3.0" 'url "https://…" 'hash "sha256-…"}
   "foo" {'version "1.2.0" 'url "https://…" 'hash "sha256-…"}}
  'requires
- {"foo" {"bar" "0.3.0"}
-  "my.proj" {"foo" "1.2.0"}}}
+ {"foo" {"database" {'package "bar" 'version "0.3.0"}}
+  "my.proj" {"statistics" {'package "foo" 'version "1.2.0"}}}}
 ```
 
 A cache-backed lock has exactly those four keys. A vendored lock adds exactly
@@ -1545,11 +1562,12 @@ filesystem authority or escape the discovered project root.
 - `'packages` is the selection: one entry per canonical name, carrying the
   selected version and the URL and hash it was declared with.
 - `'requires` is keyed by the **requiring** package — the root under its own
-  `'name` — and maps each name that package required to the minimum it
-  declared. Under minimal version selection every one of those maps agrees
-  with `'packages` today. The table is per-package from this first version
-  anyway: it is the retrofit door for admitting two versions of one name later
-  without a format break.
+  `'name` — and maps each local alias to an exact `{'package … 'version …}`
+  edge. Under minimal version selection every edge agrees with `'packages`.
+  Only one selected version of a package is supported in format 1. The root
+  always appears; a selected package that requires nothing may be omitted, and
+  an absent requirer is the empty edge set, so the visibility that `'requires`
+  masks is the package itself alone.
 - The version selected for a name is never below a minimum recorded for that
   name. A lock that violates this is malformed.
 - Entries in `'packages`, in `'requires`, and in each inner requirement map
@@ -1585,26 +1603,26 @@ lock is also remembered rather than reread: embedded modules remain usable,
 and the first non-embedded lookup reports the invalid project lock as a
 structured error before consulting `ECL_PATH`.
 
-Cold module resolution has exactly three tiers:
+Cold module resolution has two modes:
 
-1. the embedded standard-library manifest;
-2. the Session's valid lock, using the longest package name that owns the
-   requested dotted module name;
-3. `ECL_PATH`, only when no locked package owns the name.
+1. With no discovered `ecl.pkg`, the embedded standard-library manifest is
+   followed by legacy filename lookup on `ECL_PATH`.
+2. With a discovered project, the embedded standard library is followed by
+   exact lookup in the Session's derived package catalog. `ECL_PATH` is never
+   consulted for a manifested project.
 
 A locked selection names the immutable `<name>-<version>-<hex>` directory
 below. A cache lock prefixes that key with the environment-selected shared
 cache. A vendored lock prefixes it with the fixed `<project-root>/vendor`
-directory and does not consult `ECL_CACHE`, `XDG_CACHE_HOME`, or `HOME`. The
-source candidate inside that directory is the requested module's **full
-canonical name** plus `.ecl`: package `foo` resolves module `foo.bar` at
-`foo.bar.ecl`, never `bar.ecl`. This is the same root-level layout accepted by
-package inspection and installation.
+directory and does not consult `ECL_CACHE`, `XDG_CACHE_HOME`, or `HOME`.
+The catalog supplies the source candidate's exact relative path. A request for
+`stats.regressions` may therefore load `src/stats/implementation.ecl`, and the
+same artifact may also declare `stats.distributions`.
 
-Package ownership is authoritative. Once a lock prefix matches, a missing
-store directory reports the package and tells the user to run `ecl pkg sync`;
-a present store entry missing the requested source reports both module and
-package. Neither failure falls through to `ECL_PATH`. Runtime resolution never
+Catalog ownership is authoritative. A missing store directory reports the
+package and tells the user to run `ecl pkg sync`; an unexported module or a
+module hidden by the current package's direct-requirement mask is
+`'undefined-word`. No failure falls through to `ECL_PATH`. Runtime resolution never
 calls HTTP or TLS, fetches or installs an artifact, writes the lock, or admits
 an `.eclmod` package candidate. Synchronization remains the only network and
 package-mutation boundary.
@@ -1628,13 +1646,16 @@ is `'undefined-word`. Invalid lock discovery is also `'io` and prefixes its
 owned detail with “invalid project lock `<path>`:”. None falls through to
 `ECL_PATH`.
 
-The lock snapshot is immutable across concurrent Units. `AutoLoadDriver`
-acquires the existing loading lease and rechecks for a racing winner before it
-starts the bounded longest-prefix cursor. Lock scanning, candidate
-construction, and filesystem transfer remain poll-budgeted, and all state
-held across polls carries explicit heap ownership. Thus locked loading keeps
-the existing cycle detection, single-publication, and scheduler arbitration
-protocol rather than adding a parallel loader.
+The lock and catalog snapshot is immutable across concurrent Units. Visibility
+is lexical: root and package code may resolve their own package plus only the
+packages in that consumer's direct lock edges; loading a transitive module into
+the shared registry does not grant access to it. `AutoLoadDriver` coordinates
+by artifact identity, evaluates one source file once, verifies every cataloged
+module registration and its package provenance, and marks the artifact
+committed only after all declarations exist. Qualified resolution ignores all
+registrations from an uncommitted artifact, so failure cannot expose a partial
+multi-module file. Catalog lookup, candidate construction, transfer, and the
+post-load registration walk remain poll-budgeted.
 
 ### Hashes and the store
 
@@ -1701,12 +1722,14 @@ package rules:
   special nodes remain forbidden by the archive contract;
 - a file ending in `.eclmod` anywhere is forbidden because v1 packages are
   source-only;
-- every file ending in `.ecl` is at the archive root, its filename stem is a
-  canonical module name, and `pkg.name.owns?` accepts the manifest package
-  name and that stem.
+- source files may appear anywhere selected by an export glob; after staging,
+  the installer derives the same inert catalog used at Session startup and
+  refuses invalid globs, namespace declarations, duplicates, and parse errors
+  before publication.
 
-Thus package `foo` may contain `foo.ecl` and `foo.bar.ecl`, never `bar.ecl` or
-`nested/foo.ecl`. Installation never evaluates a manifest or package source.
+Thus package `foo` may place a module `foo.bar` in `src/internal/one.ecl`, and
+one source artifact may declare several owned modules. Installation parses but
+never evaluates either the manifest or package source.
 
 `pkg.store.inspect` `( bytes package-name -- manifest-text )` performs the
 complete bounded gzip/tar and package-layout scan without creating a

@@ -17,12 +17,19 @@ const intern = @import("../intern.zig");
 const session = @import("../session.zig");
 const test_heap = @import("test_heap.zig");
 
-test "loader: locked project resolves full module names through the longest package prefix" {
+test "loader: catalog cold-loads multiple full module names from an unrelated artifact name" {
     var fixture = try LockFixture.init();
     defer fixture.deinit();
-    try fixture.writeTwoPackageLock("foo", "1.0.0", hash_a, "foo.bar", "2.0.0", hash_b);
-    try fixture.writeStoreModule("foo", "1.0.0", hash_a, "foo.bar.baz", 1);
-    try fixture.writeStoreModule("foo.bar", "2.0.0", hash_b, "foo.bar.baz", 2);
+    try fixture.writeOnePackageLock("stats", "1.0.0", hash_a);
+    try fixture.writeStoreArtifact(
+        "stats",
+        "1.0.0",
+        hash_a,
+        "unrelated.ecl",
+        "(({d}) 'answer def) 'stats.regressions @defm\n" ++
+            "(({d}) 'answer def) 'stats.distributions @defm\n",
+        .{ 1, 2 },
+    );
 
     var backing: test_heap.SessionHeap = .init;
     defer test_heap.retire(&backing);
@@ -39,11 +46,197 @@ test "loader: locked project resolves full module names through the longest pack
         .environ = &environ,
     });
     defer runtime.deinit();
-    try expectOk(&runtime, "foo.bar.baz.answer");
-    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[0].int);
+    try expectOk(&runtime, "stats.regressions.answer stats.distributions.answer");
+    try std.testing.expectEqual(@as(i64, 1), runtime.stackItems()[0].int);
+    try std.testing.expectEqual(@as(i64, 2), runtime.stackItems()[1].int);
 }
 
-test "loader: embedded modules precede lock and unmatched names continue to ECL PATH" {
+test "loader: the root package exports local source through the same catalog" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.write(
+        "project/ecl.pkg",
+        "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+            "'exports {\"root\" [\"src/**/*\"]} 'requires {}}\n",
+    );
+    try fixture.write(
+        "project/ecl.lock",
+        "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n",
+    );
+    try fixture.directory.dir.createDir(std.testing.io, "project/src", .default_dir);
+    try fixture.write(
+        "project/src/unrelated.ecl",
+        "((17) 'answer def) 'root.local @defm\n",
+    );
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+    });
+    defer runtime.deinit();
+
+    try expectOk(&runtime, "root.local.answer");
+    try std.testing.expectEqual(@as(i64, 17), runtime.stackItems()[0].int);
+}
+
+test "loader: a root-defined module reaches its declared direct dependency" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.write(
+        "project/ecl.pkg",
+        "{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+            "'exports {\"root\" [\"src/**/*\"]} 'requires " ++
+            "{\"dep\" {'package \"dep\" 'version \"1.0.0\" " ++
+            "'url \"https://example.invalid/dep.tgz\" 'hash \"" ++ hash_a ++ "\"}}}\n",
+    );
+    try fixture.writeOnePackageLock("dep", "1.0.0", hash_a);
+    try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 5);
+    try fixture.directory.dir.createDir(std.testing.io, "project/src", .default_dir);
+    try fixture.write(
+        "project/src/unrelated.ecl",
+        "((dep.answer) 'answer def) 'root.local @defm\n",
+    );
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+        .environ = &environ,
+    });
+    defer runtime.deinit();
+
+    try expectOk(&runtime, "root.local.answer");
+    try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
+}
+
+test "loader: catalog discovery holds a manifest to the whole public contract" {
+    // `pkg.store.install` seals a staged package against this boundary rather
+    // than against `pkg.manifest.validate`, so anything the public validator
+    // rejects has to fail here too. Each case below is one such rejection.
+    const cases = [_]struct { requires: []const u8, needle: []const u8 }{
+        .{
+            .requires = "{\"dep\" {'package \"dep\" 'version \"1.0.0\" " ++
+                "'url \"http://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+            .needle = "url is not an https url",
+        },
+        .{
+            .requires = "{\"dep\" {'package \"dep\" 'version \"1.0.0\"}}",
+            .needle = "does not have the exact keys",
+        },
+        .{
+            .requires = "{\"dep\" {'package \"dep\" 'version \"one\" " ++
+                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+            .needle = "has a non-semver version",
+        },
+        .{
+            .requires = "{\"dep\" {'package \"root.sub\" 'version \"1.0.0\" " ++
+                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+            .needle = "one name owns the other",
+        },
+        .{
+            .requires = "{\"one\" {'package \"dep\" 'version \"1.0.0\" " ++
+                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"} " ++
+                "\"two\" {'package \"dep\" 'version \"1.0.0\" " ++
+                "'url \"https://e.com/d.tgz\" 'hash \"" ++ hash_a ++ "\"}}",
+            .needle = "under more than one alias",
+        },
+        .{
+            .requires = "((\"pwned\" \"/tmp/pkg-pwned\" io.spit))",
+            .needle = "requires must be a dict",
+        },
+    };
+    for (cases) |case| {
+        var fixture = try LockFixture.init();
+        defer fixture.deinit();
+        const manifest = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{'format 1 'name \"root\" 'version \"0.1.0\" " ++
+                "'exports {{\"root\" [\"src/**/*\"]}} 'requires {s}}}\n",
+            .{case.requires},
+        );
+        defer std.testing.allocator.free(manifest);
+        try fixture.write("project/ecl.pkg", manifest);
+        try fixture.write(
+            "project/ecl.lock",
+            "{'format 1 'root \"root\" 'packages {} 'requires {\"root\" {}}}\n",
+        );
+        try fixture.directory.dir.createDir(std.testing.io, "project/src", .default_dir);
+        try fixture.write("project/src/a.ecl", "((1) 'answer def) 'root.local @defm\n");
+
+        var backing: test_heap.SessionHeap = .init;
+        defer test_heap.retire(&backing);
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer diagnostics.deinit();
+        var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+            .io = std.testing.io,
+            .output = &output.writer,
+            .diagnostics = &diagnostics.writer,
+            .project_start = fixture.nested,
+        });
+        defer runtime.deinit();
+
+        try expectErrorContains(
+            &runtime,
+            "root.local.answer",
+            &.{ "invalid package catalog", case.needle },
+        );
+    }
+}
+
+test "loader: a lock may omit a requirer entry for a package that requires nothing" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    // `pkg.lock.validate` accepts, and `pkg.lock.write` emits, a lock whose
+    // `requires` names only the requirers that have edges. Opening one must
+    // succeed: a canonically written lock is never unopenable.
+    try fixture.write(
+        "project/ecl.lock",
+        "{'format 1 'root \"root\" 'packages " ++
+            "{\"dep\" {'version \"1.0.0\" 'url \"https://example.invalid/dep.tgz\" " ++
+            "'hash \"" ++ hash_a ++ "\"}} " ++
+            "'requires {\"root\" {\"dep\" {'package \"dep\" 'version \"1.0.0\"}}}}\n",
+    );
+    try fixture.writeStoreModule("dep", "1.0.0", hash_a, "dep", 5);
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+        .environ = &environ,
+    });
+    defer runtime.deinit();
+
+    try expectOk(&runtime, "dep.answer");
+    try std.testing.expectEqual(@as(i64, 5), runtime.stackItems()[0].int);
+}
+
+test "loader: embedded modules precede lock and a manifested project is hermetic" {
     var fixture = try LockFixture.init();
     defer fixture.deinit();
     try fixture.writeTwoPackageLock("result", "1.0.0", hash_a, "foo", "1.0.0", hash_b);
@@ -70,10 +263,14 @@ test "loader: embedded modules precede lock and unmatched names continue to ECL 
         .environ = &environ,
     });
     defer runtime.deinit();
-    try expectOk(&runtime, "[1] result.ok foo.bar site-local.answer");
+    try expectOk(&runtime, "[1] result.ok foo.bar");
     try std.testing.expect(runtime.stackItems()[0] == .dict);
     try std.testing.expectEqual(@as(i64, 42), runtime.stackItems()[1].int);
-    try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[2].int);
+    try expectErrorContains(
+        &runtime,
+        "site-local.answer",
+        &.{ "'kind 'undefined-word", "not exported by the active project" },
+    );
 }
 
 test "loader: absent marker or lock preserves ECL PATH behavior" {
@@ -97,6 +294,133 @@ test "loader: absent marker or lock preserves ECL PATH behavior" {
     defer runtime.deinit();
     try expectOk(&runtime, "legacy.answer");
     try std.testing.expectEqual(@as(i64, 7), runtime.stackItems()[0].int);
+}
+
+test "loader: direct requires mask both cold and already-loaded transitive modules" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeTransitiveLock();
+    try fixture.writeStoreArtifact(
+        "alpha",
+        "1.0.0",
+        hash_a,
+        "implementation.ecl",
+        "((beta.answer) 'through def) 'alpha @defm\n",
+        .{},
+    );
+    try fixture.writeStoreModule("beta", "1.0.0", hash_b, "beta", 22);
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+        .environ = &environ,
+    });
+    defer runtime.deinit();
+
+    try expectOk(&runtime, "alpha.through");
+    try std.testing.expectEqual(@as(i64, 22), runtime.stackItems()[0].int);
+    try expectErrorContains(
+        &runtime,
+        "beta.answer",
+        &.{ "'kind 'undefined-word", "root", "does not require it" },
+    );
+}
+
+test "loader: one quotation rechecks authorization in each package context" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeAuthorizationLock();
+    try fixture.writeStoreArtifact(
+        "alpha",
+        "1.0.0",
+        hash_a,
+        "alpha.ecl",
+        "secret.answer pop ((2 swap times pop pop) 'run def) 'alpha @defm\n",
+        .{},
+    );
+    try fixture.writeStoreArtifact(
+        "beta",
+        "1.0.0",
+        hash_b,
+        "beta.ecl",
+        "((2 swap times pop pop) 'run def) 'beta @defm\n",
+        .{},
+    );
+    try fixture.writeStoreModule("secret", "1.0.0", hash_c, "secret", 42);
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+        .environ = &environ,
+    });
+    defer runtime.deinit();
+
+    try expectOk(
+        &runtime,
+        "(secret.answer) dup alpha.run wrap (beta.run) seed @attempt " ++
+            "'err at 'kind at",
+    );
+    try std.testing.expectEqual(@as(usize, 1), runtime.stackItems().len);
+    try std.testing.expectEqualStrings(
+        "undefined-word",
+        intern.get(runtime.stackItems()[0].symbol),
+    );
+}
+
+test "loader: a failing multi-module artifact publishes no usable module" {
+    var fixture = try LockFixture.init();
+    defer fixture.deinit();
+    try fixture.writeOnePackageLock("broken", "1.0.0", hash_a);
+    try fixture.writeStoreArtifact(
+        "broken",
+        "1.0.0",
+        hash_a,
+        "many.ecl",
+        "((1) 'answer def) 'broken.first @defm\n" ++
+            "missing-during-artifact-load\n" ++
+            "((2) 'answer def) 'broken.second @defm\n",
+        .{},
+    );
+
+    var backing: test_heap.SessionHeap = .init;
+    defer test_heap.retire(&backing);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var diagnostics = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer diagnostics.deinit();
+    const environ = [_]sessionHostEntry{.{ .name = "ECL_CACHE", .value = fixture.cache }};
+    var runtime = try session.Session.initWithHost(backing.allocator(), &.{}, .{
+        .io = std.testing.io,
+        .output = &output.writer,
+        .diagnostics = &diagnostics.writer,
+        .project_start = fixture.nested,
+        .environ = &environ,
+    });
+    defer runtime.deinit();
+
+    try expectErrorContains(&runtime, "broken.first.answer", &.{"missing-during-artifact-load"});
+    // The first @defm ran before the failure, but the artifact commit did not.
+    // A second request must retry and fail at the artifact, not observe that
+    // partial registry generation as a usable module.
+    try expectErrorContains(&runtime, "broken.first.answer", &.{"missing-during-artifact-load"});
 }
 
 test "loader: project discovery walks upward and snapshots one sibling lock" {
@@ -271,6 +595,7 @@ test "loader: matched package never falls through for a missing module" {
 const sessionHostEntry = @import("../machine.zig").Environ.Entry;
 const hash_a = "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const hash_b = "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const hash_c = "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 const LockFixture = struct {
     directory: std.testing.TmpDir,
@@ -299,7 +624,7 @@ const LockFixture = struct {
         try directory.dir.createDir(std.testing.io, "path", .default_dir);
         if (marker) try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "project/ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {}}\n",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
         });
         const nested = try std.fs.path.join(allocator, &.{ root, "project", "nested" });
         errdefer allocator.free(nested);
@@ -330,8 +655,8 @@ const LockFixture = struct {
     ) !void {
         const text = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1\n 'root \"root\"\n 'packages\n {{\"{s}\" {{'version \"{s}\" 'url \"https://example.invalid/{s}.tgz\" 'hash \"{s}\"}}}}\n 'requires\n {{\"root\" {{\"{s}\" \"{s}\"}}}}}}\n",
-            .{ package, version, package, hash, package, version },
+            "{{'format 1\n 'root \"root\"\n 'packages\n {{\"{s}\" {{'version \"{s}\" 'url \"https://example.invalid/{s}.tgz\" 'hash \"{s}\"}}}}\n 'requires\n {{\"{s}\" {{}} \"root\" {{\"{s}\" {{'package \"{s}\" 'version \"{s}\"}}}}}}}}\n",
+            .{ package, version, package, hash, package, package, package, version },
         );
         defer std.testing.allocator.free(text);
         try self.write("project/ecl.lock", text);
@@ -348,8 +673,39 @@ const LockFixture = struct {
     ) !void {
         const text = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{{'format 1\n 'root \"root\"\n 'packages\n {{\"{s}\" {{'version \"{s}\" 'url \"https://example.invalid/{s}.tgz\" 'hash \"{s}\"}} \"{s}\" {{'version \"{s}\" 'url \"https://example.invalid/{s}.tgz\" 'hash \"{s}\"}}}}\n 'requires\n {{\"root\" {{\"{s}\" \"{s}\" \"{s}\" \"{s}\"}}}}}}\n",
-            .{ first, first_version, first, first_hash, second, second_version, second, second_hash, first, first_version, second, second_version },
+            "{{'format 1\n 'root \"root\"\n 'packages\n {{\"{s}\" {{'version \"{s}\" 'url \"https://example.invalid/{s}.tgz\" 'hash \"{s}\"}} \"{s}\" {{'version \"{s}\" 'url \"https://example.invalid/{s}.tgz\" 'hash \"{s}\"}}}}\n 'requires\n {{\"{s}\" {{}} \"{s}\" {{}} \"root\" {{\"{s}\" {{'package \"{s}\" 'version \"{s}\"}} \"{s}\" {{'package \"{s}\" 'version \"{s}\"}}}}}}}}\n",
+            .{ first, first_version, first, first_hash, second, second_version, second, second_hash, first, second, first, first, first_version, second, second, second_version },
+        );
+        defer std.testing.allocator.free(text);
+        try self.write("project/ecl.lock", text);
+    }
+
+    fn writeTransitiveLock(self: *LockFixture) !void {
+        const text = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{'format 1\n 'root \"root\"\n 'packages\n " ++
+                "{{\"alpha\" {{'version \"1.0.0\" 'url \"https://example.invalid/alpha.tgz\" 'hash \"{s}\"}} " ++
+                "\"beta\" {{'version \"1.0.0\" 'url \"https://example.invalid/beta.tgz\" 'hash \"{s}\"}}}}\n " ++
+                "'requires\n {{\"alpha\" {{\"beta\" {{'package \"beta\" 'version \"1.0.0\"}}}} " ++
+                "\"beta\" {{}} \"root\" {{\"alpha\" {{'package \"alpha\" 'version \"1.0.0\"}}}}}}}}\n",
+            .{ hash_a, hash_b },
+        );
+        defer std.testing.allocator.free(text);
+        try self.write("project/ecl.lock", text);
+    }
+
+    fn writeAuthorizationLock(self: *LockFixture) !void {
+        const text = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{'format 1\n 'root \"root\"\n 'packages\n " ++
+                "{{\"alpha\" {{'version \"1.0.0\" 'url \"https://example.invalid/alpha.tgz\" 'hash \"{s}\"}} " ++
+                "\"beta\" {{'version \"1.0.0\" 'url \"https://example.invalid/beta.tgz\" 'hash \"{s}\"}} " ++
+                "\"secret\" {{'version \"1.0.0\" 'url \"https://example.invalid/secret.tgz\" 'hash \"{s}\"}}}}\n " ++
+                "'requires\n {{\"alpha\" {{\"secret\" {{'package \"secret\" 'version \"1.0.0\"}}}} " ++
+                "\"beta\" {{}} \"secret\" {{}} \"root\" " ++
+                "{{\"alpha\" {{'package \"alpha\" 'version \"1.0.0\"}} " ++
+                "\"beta\" {{'package \"beta\" 'version \"1.0.0\"}}}}}}}}\n",
+            .{ hash_a, hash_b, hash_c },
         );
         defer std.testing.allocator.free(text);
         try self.write("project/ecl.lock", text);
@@ -371,6 +727,19 @@ const LockFixture = struct {
             error.PathAlreadyExists => {},
             else => return err,
         };
+        const manifest_path = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{s}/ecl.pkg",
+            .{path},
+        );
+        defer std.testing.allocator.free(manifest_path);
+        const manifest = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'exports {{}} 'requires {{}}}}\n",
+            .{ package, version },
+        );
+        defer std.testing.allocator.free(manifest);
+        try self.write(manifest_path, manifest);
     }
 
     fn writeStoreModule(
@@ -382,6 +751,40 @@ const LockFixture = struct {
         answer: i64,
     ) !void {
         try self.writeStoreWord(package, version, hash, module_name, "answer", answer);
+    }
+
+    fn writeStoreArtifact(
+        self: *LockFixture,
+        package: []const u8,
+        version: []const u8,
+        hash: []const u8,
+        relative_path: []const u8,
+        comptime source_format: []const u8,
+        args: anytype,
+    ) !void {
+        try self.createStore(package, version, hash);
+        const path = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "cache/{s}-{s}-{s}/{s}",
+            .{ package, version, hash[7..], relative_path },
+        );
+        defer std.testing.allocator.free(path);
+        const source = try std.fmt.allocPrint(std.testing.allocator, source_format, args);
+        defer std.testing.allocator.free(source);
+        try self.write(path, source);
+        const manifest_path = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "cache/{s}-{s}-{s}/ecl.pkg",
+            .{ package, version, hash[7..] },
+        );
+        defer std.testing.allocator.free(manifest_path);
+        const manifest = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'exports {{\"{s}\" [\"**/*\"]}} 'requires {{}}}}\n",
+            .{ package, version, package },
+        );
+        defer std.testing.allocator.free(manifest);
+        try self.write(manifest_path, manifest);
     }
 
     fn writeStoreWord(
@@ -407,6 +810,19 @@ const LockFixture = struct {
         );
         defer std.testing.allocator.free(source);
         try self.write(path, source);
+        const manifest_path = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "cache/{s}-{s}-{s}/ecl.pkg",
+            .{ package, version, hash[7..] },
+        );
+        defer std.testing.allocator.free(manifest_path);
+        const manifest = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{{'format 1 'name \"{s}\" 'version \"{s}\" 'exports {{\"{s}\" [\"**/*\"]}} 'requires {{}}}}\n",
+            .{ package, version, package },
+        );
+        defer std.testing.allocator.free(manifest);
+        try self.write(manifest_path, manifest);
     }
 
     fn writePathModule(self: *LockFixture, module_name: []const u8, answer: i64) !void {

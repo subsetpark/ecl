@@ -1424,10 +1424,11 @@ operand shape, and rows that still run boxed say so.
   boundary.** `pkg.store.inspect` and `pkg.store.install` select a package
   policy on the same bounded gzip/tar scanner used by `archive.unpack-tgz`.
   The scanner requires one UTF-8 root `ecl.pkg`, rejects native artifacts and
-  nested source, and accepts a root `.ecl` member only when its canonical
-  module name belongs to the supplied package prefix. Installation repeats
-  that scan independently before staging; no caller can validate an archive
-  and then substitute different bytes at the mutation sink.
+  permits source at any normalized relative path. Installation repeats that
+  scan independently, stages the tree, derives its inert manifest/glob/module
+  catalog, and only then publishes; no caller can validate an archive and then
+  substitute different bytes at the mutation sink, and no invalid catalog can
+  become an immutable store entry.
 - **Package filesystem authority is closed and transactional.** The builtin
   `pkg.store` module exposes only inspection, absent immutable installation,
   no-follow presence checks, seal verification/materialization, lock
@@ -1663,9 +1664,12 @@ honest source with no public dual representation.
   Raw stack extraction is reserved for stopped-unit scheduler cleanup, and
   the source audit rejects its use by primitives or kernels.
 - Quotation applications use a validated `StackWindow` and tagged in-place
-  or isolated mode. The continuation frame owns its trace and immutable
-  driver; callbacks return only the next `ApplicationStep`, so they cannot
-  substitute a context or destructor.
+  or isolated mode. The continuation frame owns its trace, immutable driver,
+  and launching registration provenance; each sibling application therefore
+  resumes under the same package authorization context. Callbacks return only
+  the next `ApplicationStep`, so they cannot substitute a context or
+  destructor. This explicit provenance raises the checked machine-frame
+  ceiling from 104 to 112 bytes.
 - `StencilControl` is the single owner of a stencil's input, quotation,
   contract, exact result storage, and current window index across alternating
   bootstrap and application continuations. `UnfoldState` similarly makes the
@@ -1700,14 +1704,12 @@ honest source with no public dual representation.
   recognizer. The inline idiom fallback was raised to 96 bytes so it owns the
   module pin and retained annotation needed to preserve generic fallback
   semantics while recognition yields.
-- **The manifest and project lock are ordered before `ECL_PATH`.**
-  `AutoLoadDriver` acquires the loading lease, rechecks whether a racing Unit
-  registered the module, consults the embedded manifest, advances the
-  Session's optional project-lock cursor, and only then walks the search path.
-  A stdlib name therefore resolves with no host IO and cannot be shadowed by
-  either a lock or a path. A valid lock uses longest dotted-prefix ownership;
-  only an unmatched name reaches `ECL_PATH`, while a matched missing artifact
-  fails closed instead of silently changing the selected source.
+- **A manifested project is hermetic.** `AutoLoadDriver` consults the embedded
+  manifest, then the Session's exact derived module catalog. `ECL_PATH` remains
+  the filename-based compatibility mechanism only when no `ecl.pkg` was
+  discovered. A stdlib name therefore resolves with no host IO and cannot be
+  shadowed by either a package or a path, while a catalog miss fails closed
+  instead of silently changing the selected source.
 - **Project-root discovery has one nominal result.** `project.Root.discover`
   owns the upward walk to the first regular `ecl.pkg`; both Session startup
   and `ecl pkg` consume that same opaque handle. Its only observation is the
@@ -1735,6 +1737,16 @@ honest source with no public dual representation.
   path while that distinction is live, and retains only the resulting entry
   slice. There is no redundant runtime mode tag for consumers to ignore or
   drift from the already-derived roots.
+- **The inert catalog is the package discovery authority.** The Session parses
+  each selected package's exact manifest and every `.ecl` artifact claimed by
+  an export glob without evaluating package code. Full literal top-level
+  `@defm` declarations map one-to-one to artifacts; filenames have no naming
+  role, one artifact may declare several modules, and declarations remain
+  under the namespace whose glob selected the file. Duplicate module names,
+  overlapping namespace claims, unmatched or unsafe globs, parse failures, and
+  foreign declarations invalidate the whole Session snapshot. The package
+  installer repeats catalog derivation against its staging directory before
+  the absent-destination rename.
 - **The store selection is a closed lock variant.** A four-key lock derives
   entry roots from the captured cache inputs. The only five-key form adds the
   symbol `'store 'vendor`, which derives `<discovered-project-root>/vendor`.
@@ -1743,15 +1755,35 @@ honest source with no public dual representation.
   loader. Both variants still collapse to immutable `Entry.store_dir` values
   owned by the opaque snapshot. Units cannot observe or change the mode, and
   synchronization does not consult this ambient runtime capability.
-- **Lock observation is bounded and read-only.** `LookupCursor` compares at
-  most one package-name byte per advance and returns borrowed immutable match
-  metadata. The driver owns it with `heap.Owned` across scheduler yields,
-  checks the selected store directory, and constructs only the full canonical
-  `<module>.ecl` path within M4's immutable store key. It has no HTTP/TLS,
+- **Catalog observation is bounded and read-only.** `LookupCursor` examines at
+  most one exact module entry per advance and returns borrowed immutable
+  artifact metadata only after applying the current package's direct
+  `requires` mask. The driver owns it with `heap.Owned` across scheduler
+  yields, checks the selected store directory, and constructs the cataloged
+  relative path within the immutable store key. It has no HTTP/TLS,
   lock-write, installation, native-loader, allocator, or reclamation
   capability. Candidate construction and source transfer then reuse the
   existing poll-budgeted loader and publication continuation, preserving the
   loading lease, cycle distinction, racing-winner recheck, and single commit.
+- **Package publication commits at artifact granularity.** Loading nodes use a
+  nominal artifact id, so concurrent requests for two modules declared by one
+  file converge before evaluation. Each `@defm` still uses the ordinary module
+  registry protocol, but catalog-qualified resolution treats those generations
+  as invisible until a post-load cursor has acquired every declared module and
+  verified its package provenance. Only then does one release-store mark make
+  the artifact visible and release its loading lease. Error, cancellation, or
+  a missing or foreign declaration leaves the mark cold; later requests retry
+  the artifact and cannot observe a prefix of its registrations. Package-source
+  `@defm` also refuses any name absent from that package's catalog.
+- **`requires` is a lexical capability mask.** The project snapshot derives
+  one nominal package id per selected package plus the root and gives each id
+  exactly itself and its direct lock-edge targets. The execution site carries
+  that id through module calls and package source loading. Both cold lookup and
+  hot registry resolution consult the mask before acquisition. Qualified call
+  sites therefore bypass the generation lookaside while a project lock is
+  active: the same quotation may execute under several package ids, and every
+  execution must reauthorize before registry acquisition. A transitive
+  dependency does not become visible merely because another package loaded it.
 - **Every qualified execution carries its request through auto-load.** Resolution
   acquires the module *before* looking up the export atom, because a first
   reference is precisely the state in which that atom has never been interned;

@@ -63,11 +63,11 @@ fn packageStoreSource(
     try source.writer.writeAll(" pkg.store.present? pop ");
     try appendQuoted(&source.writer, destination);
     try source.writer.writeAll(
-        " \"a\" \"sha256-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\" pkg.store.verify ",
+        " \"a\" \"sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a\" pkg.store.verify ",
     );
     try appendQuoted(&source.writer, destination);
     try source.writer.writeAll(
-        " \"a\" \"sha256-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\" pkg.store.read-seal pop",
+        " \"a\" \"sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a\" pkg.store.read-seal pop",
     );
     return allocator.dupe(u8, source.written());
 }
@@ -86,9 +86,9 @@ fn packageSyncSource(allocator: std.mem.Allocator, project: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
     try source.writer.writeAll(
-        "{'format 1 'name \"r\" 'version \"0.1.0\" 'requires " ++
-            "{\"a\" {'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
-            "'hash \"sha256-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\"}}} ",
+        "{'format 1 'name \"r\" 'version \"0.1.0\" 'exports {} 'requires " ++
+            "{\"a\" {'package \"a\" 'version \"1.0.0\" 'url \"https://e.com/a.tgz\" " ++
+            "'hash \"sha256-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a\"}}} ",
     );
     try appendQuoted(&source.writer, project);
     try source.writer.writeAll(" pkg.sync.run pop");
@@ -117,11 +117,11 @@ const PackageScratch = struct {
         const lock_probe_hash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.pkg",
-            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {}}\n",
+            .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
         });
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "ecl.lock",
-            .data = "{'format 1 'root \"root\" 'packages {\"lockprobe\" {'version \"1.0.0\" 'url \"https://e.com/p.tgz\" 'hash \"sha256-" ++ lock_probe_hash ++ "\"}} 'requires {\"root\" {\"lockprobe\" \"1.0.0\"}}}\n",
+            .data = "{'format 1 'root \"root\" 'packages {\"lockprobe\" {'version \"1.0.0\" 'url \"https://e.com/p.tgz\" 'hash \"sha256-" ++ lock_probe_hash ++ "\"}} 'requires {\"lockprobe\" {} \"root\" {\"lockprobe\" {'package \"lockprobe\" 'version \"1.0.0\"}}}}\n",
         });
         try directory.dir.createDir(
             std.testing.io,
@@ -131,6 +131,10 @@ const PackageScratch = struct {
         try directory.dir.writeFile(std.testing.io, .{
             .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/lockprobe.ecl",
             .data = "((42) 'answer def) 'lockprobe @defm\n",
+        });
+        try directory.dir.writeFile(std.testing.io, .{
+            .sub_path = "lockprobe-1.0.0-" ++ lock_probe_hash ++ "/ecl.pkg",
+            .data = "{'format 1 'name \"lockprobe\" 'version \"1.0.0\" 'exports {\"lockprobe\" [\"**/*\"]} 'requires {}}\n",
         });
         return .{ .directory = directory, .path = path };
     }
@@ -309,6 +313,10 @@ fn checkAllAllocationFailuresParallel(
     backing_allocator: std.mem.Allocator,
     comptime probe: anytype,
 ) !void {
+    // Process-lifetime intern and native-loader state can make the first
+    // Session take a one-time allocation path. Settle it before measuring the
+    // repeatable Session-owned ordinals that the failure sweep replays.
+    try probe(backing_allocator);
     var baseline = std.testing.FailingAllocator.init(backing_allocator, .{});
     try probe(baseline.allocator());
 
@@ -345,6 +353,7 @@ fn checkAllAllocationFailuresParallel(
         started += 1;
     }
     for (threads) |thread| thread.join();
+    started = 0;
     for (contexts) |context| if (context.result) |err| return err;
 }
 
@@ -657,7 +666,7 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(&runtime, "oom-archive.ecl", archive_source);
     const package_destination = try std.fmt.allocPrint(
         scaffold_allocator,
-        "{s}{c}a-1.0.0-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9",
+        "{s}{c}a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a",
         .{ scratch_path, std.fs.path.sep },
     );
     defer scaffold_allocator.free(package_destination);
@@ -687,7 +696,7 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     try runOk(
         &runtime,
         "oom-pkg-gc.ecl",
-        "[\"a-1.0.0-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9\"] pkg.store.gc pop",
+        "[\"a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a\"] pkg.store.gc pop",
     );
     const host_io_source = try std.fmt.allocPrint(
         scaffold_allocator,
@@ -751,7 +760,7 @@ fn packageSyncSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     // entry skip, canonical rendering, and atomic lock replacement.
     const package_destination = try std.fmt.allocPrint(
         scaffold_allocator,
-        "{s}{c}a-1.0.0-587725eba4f45cf49f6b8b8bc597f830b259d12181e251dcbf2ba581105293e9",
+        "{s}{c}a-1.0.0-1f9aefdfdd91996e4f2f80b7f89f1ac3d8907616b74f1cf55a1a48042556738a",
         .{ scratch.path, std.fs.path.sep },
     );
     defer scaffold_allocator.free(package_destination);

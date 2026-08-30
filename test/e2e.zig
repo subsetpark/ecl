@@ -1,11 +1,11 @@
 const std = @import("std");
 const pkg_lock_fixture = @import("pkg_lock_fixture.zig");
 const pkg_example_hash = "315c772a16778673e205ae556185d25b4109ad40641e60e6b5d96d1f7db99745";
-const pkg_runtime_hash = "3b8bb1fa8f07cbf836cc7a9963261b49b6a01841b94d2e8d9bde6c740fad8227";
+const pkg_runtime_hash = "dc420afa6a08f04f1ddd275285ed2b2056d1569145b39a2a49e7eb63db267975";
 const pkg_runtime_key = "a-1.0.0-" ++ pkg_runtime_hash;
 const pkg_runtime_manifest =
-    "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires " ++
-    "{\"a\" {'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" " ++
+    "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires " ++
+    "{\"a\" {'package \"a\" 'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" " ++
     "'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}}\n";
 const pkg_runtime_lock =
     "{'format 1\n" ++
@@ -14,7 +14,7 @@ const pkg_runtime_lock =
     " {\"a\" {'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
     " 'requires\n" ++
     " {\"a\" {}\n" ++
-    "  \"root\" {\"a\" \"1.0.0\"}}}\n";
+    "  \"root\" {\"a\" {'package \"a\" 'version \"1.0.0\"}}}}\n";
 const pkg_runtime_vendor_lock =
     "{'format 1\n" ++
     " 'root \"root\"\n" ++
@@ -23,7 +23,7 @@ const pkg_runtime_vendor_lock =
     " {\"a\" {'version \"1.0.0\" 'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ pkg_runtime_hash ++ "\"}}\n" ++
     " 'requires\n" ++
     " {\"a\" {}\n" ++
-    "  \"root\" {\"a\" \"1.0.0\"}}}\n";
+    "  \"root\" {\"a\" {'package \"a\" 'version \"1.0.0\"}}}}\n";
 
 test "e2e: package lock resolves import by name with ECL PATH unset" {
     var fixture = try pkg_lock_fixture.Fixture.init(allocator, io, true);
@@ -103,7 +103,7 @@ test "e2e: pkg init derives a canonical root manifest without overwriting" {
     const manifest = try project.readFileAlloc(io, "ecl.pkg", allocator, .unlimited);
     defer allocator.free(manifest);
     try std.testing.expectEqualStrings(
-        "{'format 1 'name \"sample\" 'version \"0.1.0\" 'requires {}}\n",
+        "{'format 1 'name \"sample\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
         manifest,
     );
 
@@ -238,7 +238,7 @@ test "e2e: pkg sync regenerates a corrupt lock from the explicit project" {
     try scratch.dir.createDir(io, "cache", .default_dir);
     try scratch.dir.writeFile(io, .{
         .sub_path = "project/ecl.pkg",
-        .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'requires {}}\n",
+        .data = "{'format 1 'name \"root\" 'version \"0.1.0\" 'exports {} 'requires {}}\n",
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "project/ecl.lock",
@@ -311,7 +311,7 @@ test "e2e: checked-in package consumer executes and remains byte-stable offline"
     try scratch.dir.writeFile(io, .{ .sub_path = "project/main.ecl", .data = build_options.pkg_example_program });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/ecl.pkg",
-        .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'requires {}}\n",
+        .data = "{'format 1 'name \"smoke\" 'version \"1.0.0\" 'exports {\"smoke\" [\"**/*\"]} 'requires {}}\n",
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/smoke-1.0.0-" ++ pkg_example_hash ++ "/smoke.ecl",
@@ -370,7 +370,7 @@ test "e2e: pkg vendor makes locked execution and verification cache-independent"
     try scratch.dir.writeFile(io, .{ .sub_path = "project/ecl.lock", .data = pkg_runtime_lock });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/" ++ pkg_runtime_key ++ "/ecl.pkg",
-        .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'requires {}}\n",
+        .data = "{'format 1 'name \"a\" 'version \"1.0.0\" 'exports {\"a\" [\"**/*\"]} 'requires {}}\n",
     });
     try scratch.dir.writeFile(io, .{
         .sub_path = "cache/" ++ pkg_runtime_key ++ "/a.ecl",
@@ -476,10 +476,10 @@ test "e2e: pkg gc retains the union of named locks and preserves unknown cache n
     const key_e = "e-5.0.0-" ++ hash_e;
     const lock_a = "{'format 1 'root \"one\" 'packages {\"a\" {'version \"1.0.0\" " ++
         "'url \"https://example.invalid/a.tgz\" 'hash \"sha256-" ++ hash_a ++
-        "\"}} 'requires {\"one\" {\"a\" \"1.0.0\"}}}\n";
+        "\"}} 'requires {\"a\" {} \"one\" {\"a\" {'package \"a\" 'version \"1.0.0\"}}}}\n";
     const lock_b = "{'format 1 'root \"two\" 'packages {\"b\" {'version \"2.0.0\" " ++
         "'url \"https://example.invalid/b.tgz\" 'hash \"sha256-" ++ hash_b ++
-        "\"}} 'requires {\"two\" {\"b\" \"2.0.0\"}}}\n";
+        "\"}} 'requires {\"b\" {} \"two\" {\"b\" {'package \"b\" 'version \"2.0.0\"}}}}\n";
 
     var scratch = std.testing.tmpDir(.{});
     defer scratch.cleanup();

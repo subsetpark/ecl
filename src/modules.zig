@@ -11,6 +11,7 @@ const snapshot_api = @import("snapshot.zig");
 const list = @import("list.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const poll_api = @import("poll.zig");
+const pkg_catalog = @import("pkg_catalog.zig");
 
 /// Acquires one reference on a refcounted module owner, but only if a
 /// reference already exists.
@@ -357,11 +358,21 @@ const ModuleImage = struct {
 /// the generation number, and the slot lifetime witness that keeps the durable
 /// state and arbiter reachable while old code can still name them.
 /// Nominal publication provenance. Only the embedded-module loader may pass
-/// `standard_library`; every program-facing registration path is ordinary.
-/// Resolution exposes this distinction without exposing a registry, image, or
-/// mutation capability, so optimizers can trust shipped module definitions
-/// without trusting a later replacement registered under the same name.
-pub const RegistrationProvenance = enum { ordinary, standard_library };
+/// `standard_library`; `register`, `@defm`, dynamic native loading, and
+/// explicit replacement publish `ordinary`. Cataloged package source publishes
+/// `package`, and the root project's own cataloged source publishes
+/// `root_package`; both carry the package id that `requires` masks visibility
+/// against, so a module registered from package source keeps its own package's
+/// direct lock edges wherever it later executes. Resolution exposes these
+/// distinctions without exposing a registry, image, or mutation capability, so
+/// optimizers can trust shipped module definitions without trusting a later
+/// replacement registered under the same name.
+pub const RegistrationProvenance = union(enum) {
+    ordinary,
+    standard_library,
+    root_package: pkg_catalog.PackageId,
+    package: pkg_catalog.PackageId,
+};
 
 const Registration = struct {
     allocator: std.mem.Allocator,
@@ -1238,6 +1249,9 @@ pub const GenerationLease = enum(usize) {
     pub fn name(self: GenerationLease) intern.ModuleName {
         return self.registration().name;
     }
+    pub fn provenance(self: GenerationLease) RegistrationProvenance {
+        return self.registration().provenance;
+    }
     pub fn resolveCursor(self: GenerationLease, id: u32) ModuleResolveCursor {
         return self.registration().resolveCursor(id);
     }
@@ -1567,6 +1581,18 @@ pub const LoadingOwner = enum(usize) {
 };
 const free_loading_owner: usize = 0;
 
+const LoadingKey = union(enum) {
+    module: intern.ModuleName,
+    artifact: pkg_catalog.ArtifactId,
+
+    fn eql(left: LoadingKey, right: LoadingKey) bool {
+        return switch (left) {
+            .module => |name| right == .module and right.module == name,
+            .artifact => |artifact| right == .artifact and right.artifact == artifact,
+        };
+    }
+};
+
 /// What a request for a loading lease produced.
 pub const LoadingOutcome = union(enum) {
     /// The caller owns the load and must release the lease.
@@ -1579,16 +1605,42 @@ pub const LoadingOutcome = union(enum) {
 
 const LoadingNode = struct {
     registry: *Registry,
-    name: intern.ModuleName,
+    key: LoadingKey,
     owner: std.atomic.Value(usize),
     next: ?*LoadingNode,
 };
+/// The authority to make one artifact's registrations visible. Only
+/// `LoadingLease.artifactCommit` mints one, and only from a live lease keyed
+/// to that artifact, so a holder of the project lock cannot publish an
+/// artifact whose declarations nobody verified. An `ArtifactId` names an
+/// artifact; this names the right to publish it.
+pub const ArtifactCommit = enum(u32) {
+    _,
+
+    fn init(published: pkg_catalog.ArtifactId) ArtifactCommit {
+        return @enumFromInt(@intFromEnum(published));
+    }
+    pub fn artifact(self: ArtifactCommit) pkg_catalog.ArtifactId {
+        return @enumFromInt(@intFromEnum(self));
+    }
+};
+
 pub const LoadingLease = enum(usize) {
     finished = 0,
     _,
 
     fn init(loading: *LoadingNode) LoadingLease {
         return @enumFromInt(@intFromPtr(loading));
+    }
+    /// Trade a live artifact lease for the authority to publish that
+    /// artifact. The lease is not released here: publication must become
+    /// visible before the lease frees, or a contender would find the artifact
+    /// uncommitted and reload it. `finish` follows on the same step.
+    pub fn artifactCommit(self: *LoadingLease) ArtifactCommit {
+        return switch (self.node().key) {
+            .artifact => |artifact| .init(artifact),
+            .module => @panic("a module loading lease cannot publish an artifact"),
+        };
     }
     fn node(self: LoadingLease) *LoadingNode {
         std.debug.assert(self != .finished);
@@ -1665,6 +1717,29 @@ pub const Registry = enum(usize) {
 
     fn releaseDomain(self: *const Registry) *heap.ReleaseDomain {
         return heap.hostDomain(self.privateState().host);
+    }
+
+    /// Validate one fully materialized package tree through the same catalog
+    /// derivation used by Session startup. The opaque registry keeps the
+    /// allocator/reclamation capability correlated while exposing only the
+    /// package-boundary operation the installer needs.
+    /// Begin validating one staged package tree. The caller drives the
+    /// returned cursor in bounded steps and deinits it; a package tree holds
+    /// thousands of artifacts, so the walk cannot be one scheduler step.
+    pub fn beginPackageTreeValidation(
+        self: *const Registry,
+        io: std.Io,
+        package_name: []const u8,
+        root_dir: []const u8,
+        diagnostic: *?[]u8,
+    ) error{OutOfMemory}!pkg_catalog.Build {
+        return pkg_catalog.Build.initOwned(
+            self.privateState().host,
+            io,
+            package_name,
+            root_dir,
+            diagnostic,
+        );
     }
 
     pub fn deinit(self: *Registry) void {
@@ -3372,7 +3447,7 @@ pub const Registry = enum(usize) {
     pub const BeginLoadingProgress = poll.Progress(LoadingOutcome);
     pub const BeginLoadingCursor = struct {
         registry: *Registry,
-        name: intern.ModuleName,
+        key: LoadingKey,
         owner: LoadingOwner,
         state: State,
 
@@ -3418,7 +3493,7 @@ pub const Registry = enum(usize) {
             node: *LoadingNode,
             reservation: ?*LoadingNode,
         ) ?BeginLoadingProgress {
-            if (node.name != self.name) return null;
+            if (!node.key.eql(self.key)) return null;
             const held = node.owner.cmpxchgStrong(
                 free_loading_owner,
                 self.owner.token(),
@@ -3479,7 +3554,7 @@ pub const Registry = enum(usize) {
                     const node = commit.reservation;
                     node.* = .{
                         .registry = self.registry,
-                        .name = self.name,
+                        .key = self.key,
                         .owner = .init(self.owner.token()),
                         .next = current,
                     };
@@ -3499,7 +3574,21 @@ pub const Registry = enum(usize) {
         const head = self.privateState().loading.load(.acquire);
         return .{
             .registry = self,
-            .name = name,
+            .key = .{ .module = name },
+            .owner = owner,
+            .state = .{ .scan = .{ .observed_head = head, .cursor = head } },
+        };
+    }
+
+    pub fn beginArtifactLoadingCursor(
+        self: *Registry,
+        artifact: pkg_catalog.ArtifactId,
+        owner: LoadingOwner,
+    ) BeginLoadingCursor {
+        const head = self.privateState().loading.load(.acquire);
+        return .{
+            .registry = self,
+            .key = .{ .artifact = artifact },
             .owner = owner,
             .state = .{ .scan = .{ .observed_head = head, .cursor = head } },
         };
