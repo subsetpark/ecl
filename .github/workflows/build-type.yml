@@ -225,7 +225,7 @@ jobs:
         run: |
           docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
             cd /build
-            for target in reader formatter editor completion history pending scheduler native-descriptor native-call; do
+            for target in render-cursor reader formatter editor completion history pending scheduler native-descriptor native-call; do
               timeout 10m zig build "fuzz-$target" -Doptimize="$OPTIMIZE" --summary all --test-timeout 5m --fuzz=100 < /dev/null
             done
           '

@@ -2244,9 +2244,9 @@ cost, because a gate nobody runs proves nothing. `zig build precommit` is the
 local tier: Zig and ECL formatting, the source-architecture audit, the binary,
 whole-tree semantic analysis, and the fast core of the suite, in about eighty
 seconds after a source change. Pull-request CI pairs that Debug tier with one
-complete ReleaseSafe suite. Master and manual CI own the broader matrix, and
-the release-candidate workflow owns the exhaustive initialized-Session OOM
-sweep and the complete ReleaseFast suite.
+complete ReleaseSafe suite. Master and manual CI own the broader matrix. The
+manual release-candidate workflow is their exhaustive superset and adds the
+initialized-Session OOM sweep and complete ReleaseFast suite.
 
 The local tier separates *analysis* from *execution*, and that separation is
 the load-bearing part. `zig build check` builds every test root — the in-process

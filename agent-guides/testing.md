@@ -84,9 +84,11 @@ tier.
   do not scrape the Actions website or guess run URLs. Start with
   `gh run list --workflow ci.yml --limit <n>` and inspect a selected run with
   `gh run view <run-id> --log-failed`.
-- **Release candidate.** The exhaustive initialized-Session `zig build
-  test-oom` sweep and the complete ReleaseFast suite, run once against a
-  candidate commit.
+- **Release candidate: `.github/workflows/release-candidate.yml`.** A manual
+  exhaustive superset of the pull-request and post-merge matrices, plus the
+  initialized-Session `zig build test-oom` sweep and complete ReleaseFast
+  suite, run once against a candidate commit. It is the single workflow that
+  exercises every test surface.
 
 Run a single CI gate locally only when you have a specific reason to expect
 that gate to fail—a scheduler lifetime change wants `test-tsan`, a new

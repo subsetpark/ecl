@@ -1,5 +1,7 @@
-# Tier 3: intentionally manual and exhaustive. Each build type keeps its own
-# runner so its dependent checks reuse one Zig cache and emitted artifacts.
+# Tier 3: intentionally manual and exhaustive. This is the union of every
+# pull-request and post-merge test surface plus the release-candidate-only OOM
+# sweep and complete ReleaseFast suite. Each build type keeps its own runner so
+# its dependent checks reuse one Zig cache and emitted artifacts.
 name: Release candidate
 
 on:
@@ -9,18 +11,39 @@ permissions:
   contents: read
 
 jobs:
-  release-safe-oom:
-    name: ReleaseSafe OOM
+  debug:
+    name: Complete Debug and detector tiers
+    uses: ./.github/workflows/build-type.yml
+    with:
+      optimize: Debug
+      run_precommit: true
+      run_quality: true
+      run_full_suite: true
+      run_public_ecl_format: true
+      run_native_negative: true
+      run_repl: true
+      run_fuzz: true
+      run_differential: true
+      run_tsan: true
+
+  release-safe:
+    name: Complete ReleaseSafe and OOM tiers
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: ReleaseSafe
+      run_full_suite: true
+      run_repl: true
+      run_native_acceptance: true
+      run_workers_eight: true
       run_oom: true
+      run_performance_smoke: true
 
   release-fast:
-    name: Complete ReleaseFast suite
+    name: Complete ReleaseFast and CLI tiers
     uses: ./.github/workflows/build-type.yml
     with:
       optimize: ReleaseFast
       run_full_suite: true
       run_repl: true
       run_native_acceptance: true
+      run_snapshots: true

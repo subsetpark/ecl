@@ -351,11 +351,13 @@ zig build precommit < /dev/null
 the Debug precommit tier and one complete ReleaseSafe suite. `zig build
 test-ecl` is the single first-class ECL test entrypoint and is owned by the
 complete `zig build test` suite, so pull-request CI invokes it once. That suite
-also includes PTY and standalone native-extension acceptance. Master and manual
-CI add the full Debug suite, bounded fuzz campaigns, eight-worker concurrency,
-differential checks, TSan, and ReleaseFast snapshots. Each optimization mode
-runs its tiers in one job so Zig can reuse that mode's cache and emitted
-artifacts. See
+is accompanied by PTY and standalone native-extension acceptance. Master and
+manual CI add the full Debug suite, bounded fuzz campaigns, eight-worker
+concurrency, differential checks, TSan, and ReleaseFast snapshots. The manual
+release-candidate workflow is the exhaustive superset: it repeats every test
+surface and adds the initialized-Session OOM sweep and complete ReleaseFast
+suite. Each optimization mode runs its tiers in one job so Zig can reuse that
+mode's cache and emitted artifacts. See
 [`AGENTS.md`](AGENTS.md) for the repository's testing and architectural rules.
 
 ecl is distributed under the [BSD 3-Clause License](LICENSE).
