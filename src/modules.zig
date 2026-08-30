@@ -13,6 +13,296 @@ const kernel_storage = @import("kernel_storage.zig");
 const poll_api = @import("poll.zig");
 const pkg_catalog = @import("pkg_catalog.zig");
 
+/// Immutable metadata for one first-class module test. The executable body is
+/// deliberately absent from this public projection: discovery may expose
+/// annotations, but only the protected invocation path can recover the
+/// quotation.
+pub const ModuleTestMetadata = struct {
+    name: intern.BindingName,
+    effect: ?env.ValidatedEffect,
+    doc: ?*env.DocumentationString,
+};
+
+const TestCatalog = struct {
+    const Entry = struct {
+        name: intern.BindingName,
+        body: *env.Quotation,
+        effect: ?env.ValidatedEffect,
+        doc: ?*env.DocumentationString,
+        next: ?*Entry = null,
+
+        fn retain(self: Entry) void {
+            heap.incRef(env.quotationHeader(self.body));
+            if (self.effect) |effect| effect.retain();
+            if (self.doc) |doc| heap.incRef(env.documentationHeader(doc));
+        }
+
+        fn retire(self: Entry, releases: *heap.ReleaseDomain) void {
+            releases.releaseHeader(env.quotationHeader(self.body));
+            if (self.effect) |effect| effect.retire(releases);
+            if (self.doc) |doc| releases.releaseHeader(env.documentationHeader(doc));
+        }
+
+        fn metadata(self: Entry) ModuleTestMetadata {
+            return .{ .name = self.name, .effect = self.effect, .doc = self.doc };
+        }
+    };
+
+    const Link = union(enum) {
+        entry: *Entry,
+        branch: *Branch,
+    };
+
+    /// A fixed-depth crit-bit index over nominal 32-bit binding IDs. Branch
+    /// masks strictly decrease on every path, so declaration and lookup each
+    /// take at most 32 resumable steps without resizing or rehashing storage.
+    const Branch = struct {
+        mask: u32,
+        children: [2]?Link,
+        next_all: ?*Branch,
+    };
+
+    allocator: std.mem.Allocator,
+    root: ?Link = null,
+    entries_head: ?*Entry = null,
+    entries_tail: ?*Entry = null,
+    branches: ?*Branch = null,
+    frozen: bool = false,
+
+    fn init(allocator: std.mem.Allocator) TestCatalog {
+        return .{ .allocator = allocator };
+    }
+
+    fn freeze(self: *TestCatalog) void {
+        self.frozen = true;
+    }
+
+    const DeclareError = error{ OutOfMemory, DuplicateTest, Frozen };
+    const DeclareProgress = poll.Progress(void);
+    const DeclareCursor = struct {
+        catalog: *TestCatalog,
+        candidate: Entry,
+        state: union(enum) {
+            lookup: ?Link,
+            insertion: struct {
+                link: *?Link,
+                mask: u32,
+            },
+            commit: struct {
+                link: *?Link,
+                mask: ?u32,
+            },
+        },
+        complete: bool = false,
+
+        fn advance(self: *DeclareCursor) DeclareError!DeclareProgress {
+            std.debug.assert(!self.complete);
+            if (self.catalog.frozen) return error.Frozen;
+            return switch (self.state) {
+                .lookup => |maybe_link| result: {
+                    const link = maybe_link orelse {
+                        self.state = .{ .commit = .{
+                            .link = &self.catalog.root,
+                            .mask = null,
+                        } };
+                        break :result .pending;
+                    };
+                    switch (link) {
+                        .branch => |branch| {
+                            self.state = .{ .lookup = branch.children[
+                                direction(
+                                    self.candidate.name,
+                                    branch.mask,
+                                )
+                            ] };
+                            break :result .pending;
+                        },
+                        .entry => |entry| {
+                            if (entry.name == self.candidate.name)
+                                return error.DuplicateTest;
+                            const difference = rawName(entry.name) ^ rawName(self.candidate.name);
+                            self.state = .{ .insertion = .{
+                                .link = &self.catalog.root,
+                                .mask = std.math.floorPowerOfTwo(u32, difference),
+                            } };
+                            break :result .pending;
+                        },
+                    }
+                },
+                .insertion => |insertion| result: {
+                    const link = insertion.link.* orelse unreachable;
+                    if (link == .branch and link.branch.mask > insertion.mask) {
+                        self.state = .{ .insertion = .{
+                            .link = &link.branch.children[
+                                direction(
+                                    self.candidate.name,
+                                    link.branch.mask,
+                                )
+                            ],
+                            .mask = insertion.mask,
+                        } };
+                        break :result .pending;
+                    }
+                    self.state = .{ .commit = .{
+                        .link = insertion.link,
+                        .mask = insertion.mask,
+                    } };
+                    break :result .pending;
+                },
+                .commit => |commit| result: {
+                    const entry = try self.catalog.allocator.create(Entry);
+                    errdefer self.catalog.allocator.destroy(entry);
+                    entry.* = self.candidate;
+                    if (commit.mask) |mask| {
+                        const branch = try self.catalog.allocator.create(Branch);
+                        const existing = commit.link.* orelse unreachable;
+                        const new_direction = direction(entry.name, mask);
+                        branch.* = .{
+                            .mask = mask,
+                            .children = @splat(null),
+                            .next_all = self.catalog.branches,
+                        };
+                        branch.children[new_direction] = .{ .entry = entry };
+                        branch.children[1 - new_direction] = existing;
+                        commit.link.* = .{ .branch = branch };
+                        self.catalog.branches = branch;
+                    } else {
+                        std.debug.assert(commit.link.* == null);
+                        commit.link.* = .{ .entry = entry };
+                    }
+                    entry.retain();
+                    if (self.catalog.entries_tail) |tail|
+                        tail.next = entry
+                    else
+                        self.catalog.entries_head = entry;
+                    self.catalog.entries_tail = entry;
+                    self.complete = true;
+                    break :result .complete;
+                },
+            };
+        }
+    };
+
+    fn rawName(name: intern.BindingName) u32 {
+        return @intFromEnum(name);
+    }
+
+    fn direction(name: intern.BindingName, mask: u32) usize {
+        return @intFromBool(rawName(name) & mask != 0);
+    }
+
+    fn declareCursor(
+        self: *TestCatalog,
+        name: intern.BindingName,
+        body: *env.Quotation,
+        effect: ?env.ValidatedEffect,
+        doc: ?*env.DocumentationString,
+    ) DeclareCursor {
+        return .{
+            .catalog = self,
+            .candidate = .{
+                .name = name,
+                .body = body,
+                .effect = effect,
+                .doc = doc,
+            },
+            .state = .{ .lookup = self.root },
+        };
+    }
+
+    const NameProgress = poll.StreamProgress(ModuleTestMetadata);
+    const NameCursor = struct {
+        next: ?*const Entry,
+
+        fn advance(self: *NameCursor) NameProgress {
+            const entry = self.next orelse return .complete;
+            self.next = entry.next;
+            return .{ .item = entry.metadata() };
+        }
+    };
+
+    const LookupProgress = poll.Progress(?*env.Quotation);
+    const LookupCursor = struct {
+        current: ?Link,
+        name: intern.BindingName,
+
+        fn advance(self: *LookupCursor) LookupProgress {
+            const link = self.current orelse return .{ .complete = null };
+            return switch (link) {
+                .branch => |branch| pending: {
+                    self.current = branch.children[direction(self.name, branch.mask)];
+                    break :pending .pending;
+                },
+                .entry => |entry| .{ .complete = if (entry.name == self.name)
+                    entry.body
+                else
+                    null },
+            };
+        }
+    };
+
+    const TeardownCursor = struct {
+        catalog: *TestCatalog,
+        branches: ?*Branch,
+        entries: ?*Entry,
+
+        fn init(catalog: *TestCatalog) TeardownCursor {
+            return .{
+                .catalog = catalog,
+                .branches = catalog.branches,
+                .entries = catalog.entries_head,
+            };
+        }
+
+        fn advance(self: *TeardownCursor, releases: *heap.ReleaseDomain) bool {
+            if (self.branches) |branch| {
+                self.branches = branch.next_all;
+                self.catalog.allocator.destroy(branch);
+                return false;
+            }
+            if (self.entries) |entry| {
+                self.entries = entry.next;
+                entry.retire(releases);
+                self.catalog.allocator.destroy(entry);
+                return false;
+            }
+            self.catalog.root = null;
+            self.catalog.entries_head = null;
+            self.catalog.entries_tail = null;
+            self.catalog.branches = null;
+            return true;
+        }
+    };
+};
+
+/// Bounded declaration work returned only for the candidate image currently
+/// owned by a module construction boundary.
+pub const TestDeclarationCursor = struct {
+    state: union(enum) {
+        discard,
+        catalog: TestCatalog.DeclareCursor,
+        complete,
+    },
+
+    pub const Progress = poll.Progress(void);
+    pub const Error = TestCatalog.DeclareError;
+
+    pub fn discard() TestDeclarationCursor {
+        return .{ .state = .discard };
+    }
+
+    pub fn advance(self: *TestDeclarationCursor) Error!Progress {
+        return switch (self.state) {
+            .discard => result: {
+                self.state = .complete;
+                break :result .complete;
+            },
+            .catalog => |*cursor| cursor.advance(),
+            .complete => unreachable,
+        };
+    }
+};
+
 /// Acquires one reference on a refcounted module owner, but only if a
 /// reference already exists.
 ///
@@ -204,6 +494,7 @@ const ModuleImage = struct {
     refs: std.atomic.Value(u32) = .init(1),
     environment: env.Environment,
     scope: env.Scope,
+    tests: TestCatalog,
     /// The construction body's final operand stack, bottom first. A first
     /// registration copies it into that slot's durable stack and a
     /// re-registration discards it for that slot; entries are scalars until
@@ -225,6 +516,7 @@ const ModuleImage = struct {
     retirement: heap.ReleaseDomain.Retirement = .{},
     retirement_state: union(enum) {
         live,
+        tests: TestCatalog.TeardownCursor,
         template: usize,
         scope: env.Scope.EmbeddedTeardownCursor,
         environment: env.Environment.TeardownCursor,
@@ -250,6 +542,7 @@ const ModuleImage = struct {
         result.minted_cell = false;
         result.environment = env.Environment.init(allocator, releases);
         result.scope = env.Scope.moduleRoot(allocator, &result.environment);
+        result.tests = .init(allocator);
         result.initial_state = &.{};
         result.construction_home = .{ .image = result, .registration = null };
         result.retirement = .{};
@@ -286,10 +579,7 @@ const ModuleImage = struct {
             // a reference, so the anchor must survive the image.
             self.minted_cell = true;
         }
-        self.retirement_state = if (self.initial_state.len == 0)
-            .{ .scope = .init(&self.scope) }
-        else
-            .{ .template = self.initial_state.len };
+        self.retirement_state = .{ .tests = .init(&self.tests) };
         self.environment.releases.retire(self, &self.retirement);
     }
 
@@ -306,6 +596,14 @@ const ModuleImage = struct {
     ) bool {
         return switch (self.retirement_state) {
             .live => unreachable,
+            .tests => |*tests| {
+                if (!tests.advance(releases)) return false;
+                self.retirement_state = if (self.initial_state.len == 0)
+                    .{ .scope = .init(&self.scope) }
+                else
+                    .{ .template = self.initial_state.len };
+                return false;
+            },
             .template => |remaining| {
                 releases.releaseValue(self.initial_state[remaining - 1]);
                 if (remaining != 1) {
@@ -936,6 +1234,64 @@ const DirectoryLease = struct {
 /// callbacks never receive it.
 pub const ExecutionAccess = opaque {};
 
+const TestAuthorityState = struct {
+    // Keep the opaque registry value itself, not the address of the caller's
+    // movable enum wrapper. Session construction moves that wrapper into its
+    // core after minting this seal; the backing identity remains stable.
+    registry: Registry,
+};
+
+/// Session-owned capability seal for the closed test execution domain. A
+/// normal Session never allocates one. The two projections are nominally
+/// distinct so metadata observation cannot be upgraded into execution.
+pub const TestAuthority = enum(usize) {
+    consumed = 0,
+    _,
+
+    fn init(backing: *TestAuthorityState) TestAuthority {
+        return @enumFromInt(@intFromPtr(backing));
+    }
+    fn state(self: TestAuthority) *TestAuthorityState {
+        std.debug.assert(self != .consumed);
+        return @ptrFromInt(@intFromEnum(self));
+    }
+    pub fn observation(self: TestAuthority) *const TestObservationAccess {
+        return @ptrCast(self.state());
+    }
+    pub fn execution(self: TestAuthority) *const TestExecutionAccess {
+        return @ptrCast(self.state());
+    }
+    pub fn deinit(self: *TestAuthority) void {
+        if (self.* == .consumed) return;
+        const owned = self.state();
+        const allocator = owned.registry.allocator();
+        allocator.destroy(owned);
+        self.* = .consumed;
+    }
+};
+
+pub const TestObservationAccess = opaque {
+    fn state(self: *const TestObservationAccess) *TestAuthorityState {
+        return @ptrCast(@alignCast(@constCast(self)));
+    }
+    pub fn discoveryCursor(self: *const TestObservationAccess) Registry.TestDiscoveryCursor {
+        return .init(&self.state().registry);
+    }
+};
+
+pub const TestExecutionAccess = opaque {
+    fn state(self: *const TestExecutionAccess) *TestAuthorityState {
+        return @ptrCast(@alignCast(@constCast(self)));
+    }
+    pub fn lookupCursor(
+        self: *const TestExecutionAccess,
+        module_name: intern.ModuleName,
+        test_name: intern.BindingName,
+    ) Registry.TestLookupCursor {
+        return .init(&self.state().registry, module_name, test_name);
+    }
+};
+
 /// Narrow identity used by executing frames: the image that is running plus
 /// the registration, if any, whose name and durable state it is running
 /// against. Observation leases never expose this pointer; only code holding
@@ -1263,6 +1619,18 @@ pub const GenerationLease = enum(usize) {
     pub fn publicNameCursor(self: GenerationLease) ModulePublicNameCursor {
         return self.registration().publicNameCursor();
     }
+    fn testNameCursor(self: GenerationLease) TestCatalog.NameCursor {
+        return .{ .next = self.registration().image.tests.entries_head };
+    }
+    fn testLookupCursor(
+        self: GenerationLease,
+        test_name: intern.BindingName,
+    ) TestCatalog.LookupCursor {
+        return .{
+            .current = self.registration().image.tests.root,
+            .name = test_name,
+        };
+    }
     pub fn enterExecution(
         self: *GenerationLease,
         _: *const ExecutionAccess,
@@ -1450,6 +1818,20 @@ pub const OwnedImage = enum(usize) {
     ) env.BindError!*env.BindingCell {
         return self.borrow().environment.modulePublisher().publish(name, publication);
     }
+    pub fn testDeclarationCursor(
+        self: *const OwnedImage,
+        name: intern.BindingName,
+        body: *env.Quotation,
+        effect: ?env.ValidatedEffect,
+        doc: ?*env.DocumentationString,
+    ) TestDeclarationCursor {
+        return .{ .state = .{ .catalog = self.borrow().tests.declareCursor(
+            name,
+            body,
+            effect,
+            doc,
+        ) } };
+    }
     /// Reserves the construction stack the body left behind. Entries start as
     /// scalars so a partly filled template is always releasable, and the
     /// capture fills them from the top down.
@@ -1477,6 +1859,7 @@ pub const OwnedImage = enum(usize) {
     pub fn seal(self: *OwnedImage) SealedImage {
         const image = self.borrow();
         image.environment.modulePublisher().freeze();
+        image.tests.freeze();
         self.* = .consumed;
         return .init(image);
     }
@@ -1711,6 +2094,15 @@ pub const Registry = enum(usize) {
         return @enumFromInt(@intFromPtr(backing));
     }
 
+    /// Mint the capability seal owned by a test-mode Session. Its backing
+    /// carries the registry rather than accepting one alongside the access
+    /// token, so cross-Session authority substitution is unrepresentable.
+    pub fn createTestAuthority(self: *Registry) error{OutOfMemory}!TestAuthority {
+        const state = try self.allocator().create(TestAuthorityState);
+        state.* = .{ .registry = self.* };
+        return .init(state);
+    }
+
     fn allocator(self: *const Registry) std.mem.Allocator {
         return self.privateState().host.allocator();
     }
@@ -1859,6 +2251,263 @@ pub const Registry = enum(usize) {
             .aliases = if (directory.directory) |current| current.aliases.rawEntries() else null,
         };
     }
+
+    pub const DiscoveredTest = struct {
+        module: intern.ModuleName,
+        metadata: ModuleTestMetadata,
+    };
+    pub const TestDiscoveryProgress = poll.StreamProgress(DiscoveredTest);
+
+    /// Canonical-only discovery over one directory snapshot. The cursor owns
+    /// both the directory lease and each generation lease for the complete
+    /// time it borrows that generation's catalog.
+    pub const TestDiscoveryCursor = struct {
+        registry: *Registry,
+        directory: DirectoryLease,
+        modules: ?Directory.ModuleMap.RawEntryCursor,
+        current_module: ?intern.ModuleName = null,
+        current_generation: ?GenerationLease = null,
+        names: ?TestCatalog.NameCursor = null,
+        maintenance: ?MaintenanceCursor = null,
+        pending_generation: ?GenerationLease = null,
+        complete: bool = false,
+
+        fn init(registry: *Registry) TestDiscoveryCursor {
+            const directory = registry.acquireDirectory();
+            return .{
+                .registry = registry,
+                .directory = directory,
+                .modules = if (directory.directory) |current| current.modules.rawEntries() else null,
+            };
+        }
+
+        pub fn deinit(self: *TestDiscoveryCursor) void {
+            if (self.current_generation) |*generation| generation.deinit();
+            if (self.pending_generation) |*generation| generation.deinit();
+            self.directory.deinit();
+            self.* = undefined;
+        }
+
+        fn beginGeneration(
+            self: *TestDiscoveryCursor,
+            module_name: intern.ModuleName,
+            generation: GenerationLease,
+        ) void {
+            self.current_module = module_name;
+            self.current_generation = generation;
+            self.names = generation.testNameCursor();
+        }
+
+        pub fn advance(self: *TestDiscoveryCursor) TestDiscoveryProgress {
+            std.debug.assert(!self.complete);
+            if (self.maintenance) |*maintenance| switch (maintenance.advance()) {
+                .pending => return .pending,
+                .complete => {
+                    const generation = self.pending_generation;
+                    self.pending_generation = null;
+                    self.maintenance = null;
+                    if (generation) |owned| self.beginGeneration(self.current_module.?, owned);
+                    return .pending;
+                },
+            };
+            if (self.names) |*names| switch (names.advance()) {
+                .pending => return .pending,
+                .item => |metadata| return .{ .item = .{
+                    .module = self.current_module.?,
+                    .metadata = metadata,
+                } },
+                .complete => {
+                    self.names = null;
+                    self.current_generation.?.deinit();
+                    self.current_generation = null;
+                    self.current_module = null;
+                    return .pending;
+                },
+            };
+            const entries = &(self.modules orelse {
+                self.complete = true;
+                return .complete;
+            });
+            return switch (entries.advance()) {
+                .pending => .pending,
+                .complete => result: {
+                    self.modules = null;
+                    self.complete = true;
+                    break :result .complete;
+                },
+                .item => |entry| result: {
+                    self.current_module = entry.key;
+                    const protected = self.registry.leaseSlot(entry.value);
+                    if (protected.needs_maintenance) {
+                        self.pending_generation = protected.lease;
+                        self.maintenance = self.registry.maintenanceCursor();
+                    } else if (protected.lease) |generation| {
+                        self.beginGeneration(entry.key, generation);
+                    }
+                    break :result .pending;
+                },
+            };
+        }
+    };
+
+    pub const TestInvocation = struct {
+        generation: GenerationLease,
+        body: *env.Quotation,
+
+        pub fn enter(
+            self: *TestInvocation,
+            access: *const ExecutionAccess,
+        ) TestExecutionTarget {
+            const body = self.body;
+            return .{
+                .generation = self.generation.enterExecution(access),
+                .body = body,
+            };
+        }
+        pub fn deinit(self: *TestInvocation) void {
+            self.generation.deinit();
+            self.* = undefined;
+        }
+    };
+
+    pub const TestExecutionTarget = struct {
+        generation: ExecutionGeneration,
+        body: *env.Quotation,
+
+        pub fn quotation(self: *const TestExecutionTarget) *value.ListHandle {
+            return env.quotationHeader(self.body);
+        }
+        pub fn home(
+            self: *const TestExecutionTarget,
+            access: *const ExecutionAccess,
+        ) *ModuleHome {
+            return self.generation.home(access);
+        }
+        pub fn deinit(self: *TestExecutionTarget) void {
+            self.generation.deinit();
+            self.* = undefined;
+        }
+    };
+
+    pub const TestLookupProgress = poll.Progress(?TestInvocation);
+    pub const TestLookupCursor = struct {
+        registry: *Registry,
+        directory: DirectoryLease,
+        module_name: intern.ModuleName,
+        test_name: intern.BindingName,
+        state: State,
+
+        const State = union(enum) {
+            absent,
+            module: Directory.ModuleMap.RawLookupCursor,
+            maintenance: struct {
+                lease: ?GenerationLease,
+                cursor: MaintenanceCursor,
+            },
+            catalog: struct {
+                lease: GenerationLease,
+                cursor: TestCatalog.LookupCursor,
+            },
+            complete,
+        };
+
+        fn init(
+            registry: *Registry,
+            module_name: intern.ModuleName,
+            test_name: intern.BindingName,
+        ) TestLookupCursor {
+            const directory = registry.acquireDirectory();
+            return .{
+                .registry = registry,
+                .directory = directory,
+                .module_name = module_name,
+                .test_name = test_name,
+                .state = if (directory.directory) |current|
+                    .{ .module = current.modules.rawLookup(module_name) }
+                else
+                    .absent,
+            };
+        }
+
+        pub fn deinit(self: *TestLookupCursor) void {
+            switch (self.state) {
+                .maintenance => |*maintenance| if (maintenance.lease) |*lease| lease.deinit(),
+                .catalog => |*catalog| catalog.lease.deinit(),
+                .absent, .module, .complete => {},
+            }
+            self.directory.deinit();
+            self.* = undefined;
+        }
+
+        fn beginCatalog(self: *TestLookupCursor, lease: GenerationLease) void {
+            self.state = .{ .catalog = .{
+                .lease = lease,
+                .cursor = lease.testLookupCursor(self.test_name),
+            } };
+        }
+
+        pub fn advance(self: *TestLookupCursor) TestLookupProgress {
+            return switch (self.state) {
+                .absent => result: {
+                    self.state = .complete;
+                    break :result .{ .complete = null };
+                },
+                .module => |*lookup| switch (lookup.advance()) {
+                    .pending => .pending,
+                    .complete => |slot| result: {
+                        const found = slot orelse {
+                            self.state = .complete;
+                            break :result .{ .complete = null };
+                        };
+                        const protected = self.registry.leaseSlot(found);
+                        if (protected.needs_maintenance) {
+                            self.state = .{ .maintenance = .{
+                                .lease = protected.lease,
+                                .cursor = self.registry.maintenanceCursor(),
+                            } };
+                        } else if (protected.lease) |lease| {
+                            self.beginCatalog(lease);
+                        } else {
+                            self.state = .complete;
+                            break :result .{ .complete = null };
+                        }
+                        break :result .pending;
+                    },
+                },
+                .maintenance => |*maintenance| switch (maintenance.cursor.advance()) {
+                    .pending => .pending,
+                    .complete => result: {
+                        const lease = maintenance.lease;
+                        maintenance.lease = null;
+                        if (lease) |owned| {
+                            self.beginCatalog(owned);
+                        } else {
+                            self.state = .complete;
+                            break :result .{ .complete = null };
+                        }
+                        break :result .pending;
+                    },
+                },
+                .catalog => |*catalog| switch (catalog.cursor.advance()) {
+                    .pending => .pending,
+                    .complete => |body| result: {
+                        if (body) |quotation| {
+                            const lease = catalog.lease;
+                            self.state = .complete;
+                            break :result .{ .complete = .{
+                                .generation = lease,
+                                .body = quotation,
+                            } };
+                        }
+                        catalog.lease.deinit();
+                        self.state = .complete;
+                        break :result .{ .complete = null };
+                    },
+                },
+                .complete => unreachable,
+            };
+        }
+    };
 
     fn detachRetiredDirectories(self: *Registry) ?*Directory {
         if (!self.privateState().directories.quiescent()) return null;

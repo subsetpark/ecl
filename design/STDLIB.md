@@ -138,6 +138,14 @@ seed @module`. See [Modules](SPEC.md#modules).
 self-contained quotation concurrently in a child task. Seed it with
 `values (q) seed @spawn`. See [Concurrency](SPEC.md#concurrency).
 
+### @test
+`( descriptor -- result )` — Test-Session-only protected invocation. Validate
+a pure descriptor returned by `tests`, late-bind its canonical module/name to
+the current catalog, and run the body as a fresh isolated Unit under that
+registration's private home and durable state. Return exactly
+`{'ok (values)}` or `{'err error}`; a missing current test is a reified error.
+Ordinary Sessions receive `'domain`.
+
 ### abs
 `( x -- y )` — **Pervasive.** Absolute value. Defined in ecl; `'abs see`
 renders the definition.
@@ -667,6 +675,14 @@ shape; a zero axis must be final.
 `( list -- list )` — Reverse top-level element order. Defined in ecl as
 an index permutation.
 
+### rolldown
+`( x y z -- y z x )` — Rotate the top three stack values downward.
+Equivalent to `(swap) dip swap`.
+
+### rollup
+`( x y z -- z x y )` — Rotate the top three stack values upward.
+Equivalent to `swap (swap) dip`.
+
 ### rotate
 `( list count -- list )` — Rotate top-level element order left by a
 count, wrapping cyclically; a negative count rotates right, counts
@@ -720,6 +736,23 @@ inside `v` are nested by `literal` and remain captured data.
 `( annotation? value 'name -- )` — Bind a private module constant. Defined in ecl as
 `swap literal swap defp`. A top-level `setp` is an error, raised by the
 `defp` it calls.
+
+### test
+`( annotation? body 'name -- )` — Declare a first-class test in the separate
+catalog of the exact direct module construction body. Accepts the same optional
+effect and documentation annotation forms as `def`. Tests may share names with
+words and are absent from application lookup, exports, imports, reflection,
+and module invocation. Top-level, nested-quotation, and child-Unit use is
+`'domain`. Application Sessions validate and discard declarations without
+retaining bodies or checking duplicate test names; Test Sessions retain them
+and reject duplicate names.
+
+### tests
+`( -- descriptors )` — Test-Session-only discovery of current canonical
+registrations, sorted by module then test name. Each dictionary contains
+symbol fields `'module` and `'name` plus optional declared `'effect` and
+`'doc`; it never contains an executable body or authority handle. Aliases do
+not duplicate entries. Ordinary Sessions receive `'domain`.
 
 ### shape
 `( list -- shape )` — The dimensions of rectangular data; `'shape` error
@@ -1652,3 +1685,13 @@ propagate.
 ### with-column
 `( table name column -- table )` — Replace an existing column or append a new
 one, keeping the row count exact.
+
+## test.default
+
+The bundled runner is ordinary ECL policy over the closed `tests` / `@test`
+substrate. Projects may replace it with any public qualified runner word.
+
+### run
+`( -- )` — Discover canonical tests, invoke them sequentially in deterministic
+module/name order, print one `ok` or `FAIL` line for every result, continue
+after ordinary test failures, and request process status 1 if any failed.

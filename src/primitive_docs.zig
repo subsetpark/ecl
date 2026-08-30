@@ -67,6 +67,7 @@ const entries = [_]Metadata{
 
     .{ .name = "def", .effect = null, .text = "Bind a quotation to a public word, with optional effect and documentation metadata." },
     .{ .name = "defp", .effect = null, .text = "Bind a quotation to a private module word, with optional effect and documentation metadata." },
+    .{ .name = "test", .effect = null, .text = "Declare a module-private executable test at a direct module construction root, with optional effect and documentation metadata." },
     .{ .name = "unset", .effect = "name --", .text = "Remove a binding from the current scope; do nothing when that scope does not bind the name." },
     .{ .name = "undef", .effect = "name --", .text = "Remove a binding from the current scope; an alias of unset." },
     .{ .name = "doc", .effect = "name -- string", .text = "Return the canonical documentation string of a resolved binding." },
@@ -95,6 +96,8 @@ const entries = [_]Metadata{
     .{ .name = "await-any", .effect = "tasks -- index result", .text = "Wait for any task in a nonempty list and return its index and result." },
     .{ .name = "await-for", .effect = "task milliseconds -- result", .text = "Wait up to a nonnegative number of milliseconds for a task result." },
     .{ .name = "@each", .effect = "sequence unit-input -- results", .text = "Apply a quotation or unit plan concurrently in one fresh unit per element and return one result per element in input order." },
+    .{ .name = "tests", .effect = "-- descriptors", .text = "Return deterministic pure descriptors for canonical registered module tests; available only in a test Session." },
+    .{ .name = "@test", .effect = "descriptor -- result", .text = "Invoke a discovered test in a fresh isolated unit with its registered module's private home and durable state; available only in a test Session." },
     .{ .name = "+", .effect = "x y -- z", .text = "Add numeric values or conforming numeric arrays pervasively." },
     .{ .name = "-", .effect = "x y -- z", .text = "Subtract numeric or character values or conforming arrays pervasively." },
     .{ .name = "*", .effect = "x y -- z", .text = "Multiply numeric values or conforming numeric arrays pervasively." },

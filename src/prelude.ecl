@@ -28,6 +28,16 @@
 (swap dup (swap) dip)
 'over def
 
+### def rollup
+(x y z -- z x y : "Rotate the top three stack values from x y z to z x y.")
+(swap (swap) dip)
+'rollup def
+
+### def rolldown
+(x y z -- y z x : "Rotate the top three stack values from x y z to y z x.")
+((swap) dip swap)
+'rolldown def
+
 ### def partial
 (value quotation -- quotation :
  "Return a quotation that pushes an inert captured value before running another quotation.")

@@ -109,6 +109,10 @@ const modules = [_]Module{
         .name = "<stdlib:pkg.cli>",
         .text = @embedFile("stdlib/pkg/cli.ecl"),
     } } },
+    .{ .name = "test.default", .entry = .{ .source = .{
+        .name = "<stdlib:test.default>",
+        .text = @embedFile("stdlib/test/default.ecl"),
+    } } },
 };
 
 comptime {

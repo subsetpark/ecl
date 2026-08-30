@@ -15,6 +15,7 @@ const combinators = @import("combinators.zig");
 const kernels = @import("kernels.zig");
 const kernel_storage = @import("kernel_storage.zig");
 const task_prims = @import("task_prims.zig");
+const test_prims = @import("test_prims.zig");
 const Value = value.Value;
 const Machine = machine.Machine;
 const MachineError = machine.MachineError;
@@ -50,6 +51,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
     try kernels.install(core);
     try module_prims.install(core);
     try task_prims.install(core);
+    try test_prims.install(core);
 }
 /// Head-binder backend: `_ll` loads locals, `_gl` gets one, `_dl` drops them.
 /// The reader lowers `|a b|` into these three, and they are reserved binding

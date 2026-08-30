@@ -356,15 +356,3 @@ test "http: refused connection is an io error" {
         .message = "network access is unavailable",
     }});
 }
-
-test "http: every exported word carries documentation" {
-    for ([_][]const u8{ "get", "get-bytes", "post" }) |name| {
-        const source = try std.fmt.allocPrint(
-            allocator,
-            "'http.{s} doc len 0 >",
-            .{name},
-        );
-        defer allocator.free(source);
-        try support.expectStack(source, "1");
-    }
-}

@@ -218,6 +218,7 @@ const SessionCore = struct {
     host_owner: *heap.HostOwner,
     environment: env.Env,
     registry: modules.Registry,
+    test_authority: ?modules.TestAuthority,
     native_owner: *native_module.Owner,
     stack: std.ArrayList(Value) = .empty,
     archive_owner: spans.SpanArchiveOwner,
@@ -228,6 +229,7 @@ const SessionCore = struct {
     tls_trust: ?machine.TlsTrust,
     ecl_path: ?[]u8,
     project_lock: ?*pkg_lock.ProjectLock,
+    root_preload: RootPreloadState = .idle,
     environ: machine.Environ,
     environ_bytes: ?[]u8,
     standard_input: machine.StandardInput,
@@ -261,6 +263,27 @@ comptime {
     heap.requireSingleHostOwner(SessionCore);
 }
 const OpaqueSessionCore = opaque {};
+const RootPreloadState = union(enum) {
+    idle,
+    cursor: pkg_lock.RootModuleCursor,
+    complete,
+
+    fn deinit(self: *RootPreloadState) void {
+        switch (self.*) {
+            .cursor => |*cursor| cursor.deinit(),
+            .idle, .complete => {},
+        }
+        self.* = .complete;
+    }
+};
+
+pub const RootPreloadProgress = union(enum) {
+    pending,
+    complete,
+    no_project,
+    invalid: []const u8,
+    err: Value,
+};
 
 /// Movable opaque handle for heap-stable runtime state. Mutable environment
 /// and registry authority stays behind this handle so every publication turn
@@ -287,14 +310,14 @@ pub const Session = enum(usize) {
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, null, null, .default);
+        return initFull(allocator, arguments, null, null, .default, .application);
     }
     pub fn initWithConfig(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
         config: Config,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, null, null, config);
+        return initFull(allocator, arguments, null, null, config, .application);
     }
     /// The output writer must outlive the session.
     pub fn initWithOutput(
@@ -302,7 +325,7 @@ pub const Session = enum(usize) {
         arguments: []const []const u8,
         output: *std.Io.Writer,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, output, null, .default);
+        return initFull(allocator, arguments, output, null, .default, .application);
     }
     /// Every writer and slice in `host` must outlive the session; the
     /// environment snapshot is copied.
@@ -311,7 +334,7 @@ pub const Session = enum(usize) {
         arguments: []const []const u8,
         host: Host,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, host.output, host, .default);
+        return initFull(allocator, arguments, host.output, host, .default, .application);
     }
     pub fn initWithHostConfig(
         allocator: std.mem.Allocator,
@@ -319,14 +342,35 @@ pub const Session = enum(usize) {
         host: Host,
         config: Config,
     ) error{OutOfMemory}!Session {
-        return initFull(allocator, arguments, host.output, host, config);
+        return initFull(allocator, arguments, host.output, host, config, .application);
     }
+
+    /// Create the closed execution domain used by `ecl test` and trusted host
+    /// test harnesses. Ordinary constructors never mint test capabilities.
+    pub fn initTestWithHostConfig(
+        allocator: std.mem.Allocator,
+        arguments: []const []const u8,
+        host: Host,
+        config: Config,
+    ) error{OutOfMemory}!Session {
+        return initFull(allocator, arguments, host.output, host, config, .testing);
+    }
+
+    pub fn initTest(
+        allocator: std.mem.Allocator,
+        arguments: []const []const u8,
+    ) error{OutOfMemory}!Session {
+        return initFull(allocator, arguments, null, null, .default, .testing);
+    }
+
+    const ExecutionDomain = enum { application, testing };
     fn initFull(
         allocator: std.mem.Allocator,
         arguments: []const []const u8,
         output: ?*std.Io.Writer,
         host: ?Host,
         config: Config,
+        domain: ExecutionDomain,
     ) error{OutOfMemory}!Session {
         const scheduler_config = config.schedulerConfig();
         scheduler_config.validate() catch return error.OutOfMemory;
@@ -344,6 +388,11 @@ pub const Session = enum(usize) {
         try building.installSeed("seed");
         var registry = try modules.Registry.init(host_owner.cleanup());
         errdefer registry.deinit();
+        var test_authority = if (domain == .testing)
+            @as(?modules.TestAuthority, try registry.createTestAuthority())
+        else
+            null;
+        errdefer if (test_authority) |*authority| authority.deinit();
         const native_owner = try native_module.Owner.init(host_owner.cleanup());
         errdefer native_owner.closeCalls().settle().deinit();
         // A Session builds exactly one archive on its own reclamation root, so
@@ -404,6 +453,7 @@ pub const Session = enum(usize) {
             .host_owner = host_owner,
             .environment = environment,
             .registry = registry,
+            .test_authority = test_authority,
             .native_owner = native_owner,
             .archive_owner = archive_owner,
             .archive = archive,
@@ -427,6 +477,7 @@ pub const Session = enum(usize) {
             .root_tasks = root_tasks,
         };
         core.scheduler.attachRetirement();
+        test_authority = null;
         return @enumFromInt(@intFromPtr(core));
     }
     pub fn deinit(self: *Session) void {
@@ -441,12 +492,14 @@ pub const Session = enum(usize) {
         core.releaseDomain().releaseValue(core.arguments);
         if (core.ecl_path) |path| core.allocator().free(path);
         if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);
+        core.root_preload.deinit();
         if (core.project_lock) |project_lock| project_lock.deinit();
         var snapshot = EnvironSnapshot{
             .entries = @constCast(core.environ.entries),
             .bytes = core.environ_bytes,
         };
         snapshot.deinit(core.allocator());
+        if (core.test_authority) |*authority| authority.deinit();
         core.registry.deinit();
         core.archive_owner.deinit();
         // Registry teardown retires images, and an image clears its Env-owned
@@ -519,6 +572,8 @@ pub const Session = enum(usize) {
         );
         unit.inherited = .{
             .registry = &core.registry,
+            .test_observation = if (core.test_authority) |authority| authority.observation() else null,
+            .test_execution = if (core.test_authority) |authority| authority.execution() else null,
             .native_loader = core.native_owner.loader(),
             .native_diagnostics = core.native_diagnostics,
             .diagnostics = core.diagnostics,
@@ -550,26 +605,20 @@ pub const Session = enum(usize) {
         unit.deinit();
     }
 
-    /// Resolve a module name through the ordinary embedded/lock/ECL_PATH
-    /// loader without importing or executing one of its exports. A missing or
-    /// broken candidate simply offers no completion; invoking or reflecting
-    /// on the same qualified name will surface the loader's full language
-    /// error.
-    fn loadModuleForObservation(
+    /// Resolve one already validated module name through the ordinary loader
+    /// without invoking an export. Errors stay reified so the CLI can report
+    /// the same language diagnostic an ordinary qualified lookup would.
+    pub fn loadModule(
         self: *Session,
-        namespace: []const u8,
-    ) error{OutOfMemory}!bool {
+        name: intern.ModuleName,
+    ) error{OutOfMemory}!UnitOutcome {
         const core = self.coreState();
-        const name = intern.internModuleName(namespace) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.InvalidName => return false,
-        };
         var acquisition = core.registry.acquireCursor(name);
         defer acquisition.deinit();
         if (poll.drive(?modules.GenerationLease, &acquisition, .{})) |generation| {
             var lease = generation;
             lease.deinit();
-            return true;
+            return .ok;
         }
         if (core.root_scope == null)
             core.root_scope = try core.environment.createSessionRoot(core.allocator());
@@ -593,9 +642,7 @@ pub const Session = enum(usize) {
             },
             error.Ecl => {
                 restoreCheckpoint(&unit, checkpoint.values());
-                const failure = unit.takeError().?;
-                core.releaseDomain().releaseValue(failure);
-                return false;
+                return .{ .err = unit.takeError().? };
             },
         };
         core.scheduler.runInitializedRoot(&unit) catch |err| switch (err) {
@@ -605,13 +652,68 @@ pub const Session = enum(usize) {
             },
             error.Ecl => {
                 restoreCheckpoint(&unit, checkpoint.values());
-                const failure = unit.takeError().?;
-                core.releaseDomain().releaseValue(failure);
-                return false;
+                return .{ .err = unit.takeError().? };
             },
         };
         restoreCheckpoint(&unit, checkpoint.values());
-        return true;
+        return .ok;
+    }
+
+    /// Advance root-project preload by at most one catalog observation and one
+    /// ordinary module load. Cursor authority remains inside SessionCore, so a
+    /// host cannot retain a ProjectLock borrow past Session teardown.
+    pub fn advanceRootPreload(self: *Session) error{OutOfMemory}!RootPreloadProgress {
+        const core = self.coreState();
+        if (core.root_preload == .idle) {
+            const project_lock = core.project_lock orelse {
+                core.root_preload = .complete;
+                return .no_project;
+            };
+            core.root_preload = .{ .cursor = project_lock.rootModuleCursor() };
+        }
+        return switch (core.root_preload) {
+            .idle => unreachable,
+            .complete => .complete,
+            .cursor => |*cursor| switch (cursor.advance()) {
+                .pending => .pending,
+                .complete => result: {
+                    cursor.deinit();
+                    core.root_preload = .complete;
+                    break :result .complete;
+                },
+                .invalid => |message| result: {
+                    cursor.deinit();
+                    core.root_preload = .complete;
+                    break :result .{ .invalid = message };
+                },
+                .item => |module_name| switch (try self.loadModule(module_name)) {
+                    .ok => .pending,
+                    .err => |failure| .{ .err = failure },
+                    .incomplete => .{ .invalid = "root project module loader returned incomplete source" },
+                },
+            },
+        };
+    }
+
+    /// Completion intentionally suppresses loader failures, but it still uses
+    /// the same public module-load path so there is one ownership contract for
+    /// the produced error value.
+    fn loadModuleForObservation(
+        self: *Session,
+        namespace: []const u8,
+    ) error{OutOfMemory}!bool {
+        const name = intern.internModuleName(namespace) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidName => return false,
+        };
+        return switch (try self.loadModule(name)) {
+            .ok => true,
+            .incomplete => false,
+            .err => |failure| result: {
+                self.release(failure);
+                break :result false;
+            },
+        };
     }
     pub fn stackDisplay(self: *const Session) error{OutOfMemory}!RenderedText {
         const core = self.coreState();

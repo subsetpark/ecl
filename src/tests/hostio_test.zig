@@ -277,19 +277,7 @@ test "hostio: stdin reads piped data and errors when stdin is the source" {
     // rather than by making this suite depend on the test runner's stdin.
 }
 
-test "hostio: io exports are documented and importable" {
-    const names = [_][]const u8{
-        "pp", "prin", "print", "inspect", "debug", "stack", "stdin", "slurp", "spit", "lines",
-    };
-    for (names) |name| {
-        const source = try std.fmt.allocPrint(
-            allocator,
-            "'io.{s} doc len 0 >",
-            .{name},
-        );
-        defer allocator.free(source);
-        try expectStack(.{ .source = source }, "1");
-    }
+test "hostio: inspect preserves its value" {
     try expectStack(.{ .source = "7 io.inspect" }, "7");
 }
 

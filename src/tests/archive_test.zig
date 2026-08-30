@@ -182,61 +182,6 @@ fn expectIoError(source: []const u8, expected: support.ErrorCase) !void {
     try support.expectLanguageError(failure, expected);
 }
 
-test "archive: sha256 matches known-answer vectors and preserves high bytes" {
-    try support.expectStacks(&.{
-        .{
-            .name = "empty vector",
-            .source = "[] archive.sha256",
-            .expected = "\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"",
-        },
-        .{
-            .name = "ASCII vector",
-            .source = "[97 98 99] archive.sha256",
-            .expected = "\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"",
-        },
-        .{
-            .name = "multi-block vector",
-            .source = "[97 98 99 100 98 99 100 101 99 100 101 102 100 101 102 103 " ++
-                "101 102 103 104 102 103 104 105 103 104 105 106 104 105 106 107 " ++
-                "105 106 107 108 106 107 108 109 107 108 109 110 108 109 110 111 " ++
-                "109 110 111 112 110 111 112 113] archive.sha256",
-            .expected = "\"248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1\"",
-        },
-        .{
-            .name = "unsigned high bytes",
-            .source = "[0 127 128 255] archive.sha256",
-            .expected = "\"89273d2f70b93285bb7ddb4bcee86a5347ca7159352e3cbdd20c23e9d1e507d3\"",
-        },
-    });
-}
-
-test "archive: byte inputs reject wrong containers and invalid items" {
-    try support.expectErrors(&.{
-        .{ .name = "non-list byte input", .source = "42 archive.sha256", .kind = "type", .word = "archive.sha256" },
-        .{
-            .name = "negative byte",
-            .source = "[0 -1] archive.sha256",
-            .kind = "domain",
-            .word = "archive.sha256",
-            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
-        },
-        .{
-            .name = "byte above 255",
-            .source = "[255 256] archive.sha256",
-            .kind = "domain",
-            .word = "archive.sha256",
-            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
-        },
-        .{
-            .name = "non-integer list item",
-            .source = "[0 1.5] archive.sha256",
-            .kind = "domain",
-            .word = "archive.sha256",
-            .data = &.{.{ .name = "index", .expected = .{ .int = 1 } }},
-        },
-    });
-}
-
 test "archive: unpack-tgz atomically extracts regular files and returns paths" {
     var scratch = try Scratch.init();
     defer scratch.deinit();
@@ -486,7 +431,6 @@ test "archive: allocation and filesystem failures never publish a destination" {
     try scratch.expectEntryCount(0);
 }
 
-test "archive: every export is documented and cold-loads through the builtin manifest" {
-    try support.expectStack("'archive.sha256 doc len 0 > 'archive.unpack-tgz doc len 0 >", "1 1");
+test "archive: cold-loads through the builtin manifest" {
     try support.expectStack("[97] archive.sha256 len", "64");
 }

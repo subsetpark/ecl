@@ -555,6 +555,7 @@ test "module sources: formatter and standard modules use @defm" {
         "rand.float",        "pkg.version.less?", "pkg.name.valid?",
         "pkg.data.read-one", "pkg.manifest.read", "pkg.lock.read",
         "pkg.mvs.resolve",   "pkg.sync.run",      "pkg.cli.init",
+        "test.default.run",
     };
     for (stdlib.names(), exports) |name, qualified| {
         const source = try std.fmt.allocPrint(

@@ -41,8 +41,10 @@ fn spawnTask(
 ) MachineError!Value {
     return scheduler(evaluator).spawn(scope(evaluator), .{
         .parent_unit = evaluator.unit,
-        .parent_scope = evaluator.currentScope(),
-        .parent_home = evaluator.currentHome(),
+        .site = .{ .inherited = .{
+            .scope = evaluator.currentScope(),
+            .home = evaluator.currentHome(),
+        } },
         .quotation = quotation,
         .initial_stack = initial_stack,
         .constructor = constructor,

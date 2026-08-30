@@ -44,6 +44,7 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         "rand.float",        "pkg.version.less?", "pkg.name.valid?",
         "pkg.data.read-one", "pkg.manifest.read", "pkg.lock.read",
         "pkg.mvs.resolve",   "pkg.sync.run",      "pkg.cli.init",
+        "test.default.run",
     };
     for (stdlib.names(), exports) |name, qualified| {
         var heap: test_heap.SessionHeap = .init;
@@ -60,20 +61,6 @@ test "stdlib: embedded module resolves via import with no ECL_PATH" {
         try expectOk(&runtime, source);
     }
     try support.expectStack("'result ('ok) import [1 2] ok", "{'ok [1 2]}");
-}
-
-test "stdlib: every pkg.store capability is documented and reflectable" {
-    try support.expectStack(
-        "'pkg.store.inspect doc len 0 > " ++
-            "'pkg.store.install doc len 0 > " ++
-            "'pkg.store.present? doc len 0 > " ++
-            "'pkg.store.verify doc len 0 > " ++
-            "'pkg.store.read-seal doc len 0 > " ++
-            "'pkg.store.write-lock doc len 0 > " ++
-            "'pkg.store.write-new doc len 0 > " ++
-            "'pkg.store.gc doc len 0 >",
-        "1 1 1 1 1 1 1 1",
-    );
 }
 
 test "stdlib: qualified reference auto-loads an unregistered module" {

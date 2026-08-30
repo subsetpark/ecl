@@ -1,0 +1,21 @@
+{'format 1 'name "stdlib.test" 'version "0.1.0"
+ 'exports
+ {"stdlib.test.support" ["support.ecl"]
+  "stdlib.test.result" ["result.ecl"]
+  "stdlib.test.error" ["error.ecl"]
+  "stdlib.test.str" ["str.ecl"]
+  "stdlib.test.dict" ["dict.ecl"]
+  "stdlib.test.table" ["table.ecl"]
+  "stdlib.test.csv" ["csv.ecl"]
+  "stdlib.test.json" ["json.ecl"]
+  "stdlib.test.random" ["random.ecl"]
+  "stdlib.test.archive" ["archive.ecl"]
+  "stdlib.test.pkg-version" ["pkg-version.ecl"]
+  "stdlib.test.pkg-name" ["pkg-name.ecl"]
+  "stdlib.test.pkg-manifest" ["pkg-manifest.ecl"]
+  "stdlib.test.pkg-lock" ["pkg-lock.ecl"]
+  "stdlib.test.pkg-mvs" ["pkg-mvs.ecl"]
+  "stdlib.test.pkg-docs" ["pkg-docs.ecl"]
+  "stdlib.test.pkg-shadow" ["pkg-shadow.ecl"]
+  "stdlib.test.host-surfaces" ["host-surfaces.ecl"]}
+ 'requires {}}

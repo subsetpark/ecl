@@ -34,6 +34,7 @@ pub const session = @import("session.zig");
 pub const console = @import("console.zig");
 pub const scheduler = @import("scheduler.zig");
 pub const task_prims = @import("task_prims.zig");
+pub const test_prims = @import("test_prims.zig");
 test {
     _ = value;
     _ = poll;
@@ -68,11 +69,13 @@ test {
     _ = console;
     _ = scheduler;
     _ = task_prims;
+    _ = test_prims;
     _ = @import("tests/value_test.zig");
     _ = @import("tests/reader_test.zig");
     _ = @import("tests/machine_test.zig");
     _ = @import("tests/module_test.zig");
     _ = @import("tests/module_source_test.zig");
+    _ = @import("tests/test_language_test.zig");
     _ = @import("tests/allocation_budget_test.zig");
     _ = @import("tests/kernel_numeric_test.zig");
     _ = @import("tests/kernel_sequence_test.zig");
@@ -91,14 +94,6 @@ test {
     _ = @import("tests/unit_plan_test.zig");
     _ = @import("tests/stdlib_test.zig");
     _ = @import("tests/hostio_test.zig");
-    _ = @import("tests/error_test.zig");
-    _ = @import("tests/dict_module_test.zig");
-    _ = @import("tests/result_test.zig");
-    _ = @import("tests/str_test.zig");
-    _ = @import("tests/csv_test.zig");
-    _ = @import("tests/json_test.zig");
-    _ = @import("tests/table_test.zig");
-    _ = @import("tests/pkg_test.zig");
     _ = @import("tests/pkg_sync_test.zig");
     _ = @import("tests/archive_test.zig");
     _ = @import("tests/http_test.zig");

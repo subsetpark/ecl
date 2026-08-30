@@ -70,13 +70,19 @@ The following rules are enforced for checked-in first-party source:
 - Every prelude definition begins with the exact `### def <name>` navigation
   header, and the name matches its terminal quoted definition name. Standard
   modules use `### def <name>` for `def`/`set` and `### defp <name>` for
-  `defp`/`setp`.
+  `defp`/`setp`. A first-class test uses `### test <name>` and the name
+  matches its terminal quoted `test` declaration.
 - Every `def`/`defp` definition has a meaningful nonempty annotation
   docstring. State a fixed successful stack effect when one can be expressed.
   `set`/`setp` accept the same annotation-before-value position; an
   intentionally undocumented literal constant instead puts its concise
   explanatory comment immediately beneath the navigation header.
 - The annotation, not the navigation comment, is reflective documentation.
+
+Keep tests at the direct module construction root, beside definitions. Use a
+meaningful annotation docstring for checked-in tests; the body may call private
+module words without exporting a test-only facade. A test declaration is not a
+definition and does not become callable application vocabulary.
 
 Pass the definition body directly to `def` or `defp`. A body that only calls
 another quotation adds no behavior:

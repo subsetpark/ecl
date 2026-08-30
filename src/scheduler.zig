@@ -981,10 +981,17 @@ const CancellationCursor = struct {
     }
 };
 
+pub const SpawnSite = union(enum) {
+    inherited: struct {
+        scope: *env.Scope,
+        home: ?*modules.ModuleHome,
+    },
+    module: *modules.ModuleHome,
+};
+
 pub const SpawnRequest = struct {
     parent_unit: *machine.Unit,
-    parent_scope: *env.Scope,
-    parent_home: ?*modules.ModuleHome,
+    site: SpawnSite,
     quotation: *ListHandle,
     initial_stack: machine.InitialStack = .empty,
     /// Which constructor made this child, so an underflow against its floor
@@ -1134,13 +1141,23 @@ pub const WorkerScheduler = enum(usize) {
         ) };
         const unit = &execution.unit;
         errdefer unit.deinit();
-        unit.replaceRootScope(env.Scope.lazy(self.allocator(), request.parent_scope));
+        const parent_scope = switch (request.site) {
+            .inherited => |site| site.scope,
+            .module => |home| home.scope(request.parent_unit.module_access),
+        };
+        unit.replaceRootScope(env.Scope.lazy(self.allocator(), parent_scope));
         unit.inherited = request.parent_unit.inherited;
         unit.scheduler = self;
         unit.task_scope = &cell.scope;
         unit.is_root_unit = false;
         unit.constructor = request.constructor;
-        if (request.parent_home) |generation| try unit.pinGeneration(generation);
+        switch (request.site) {
+            .inherited => |site| if (site.home) |generation| try unit.pinGeneration(generation),
+            .module => |generation| {
+                try unit.pinGeneration(generation);
+                unit.executeRootAtModule(generation);
+            },
+        }
         try machine.initialize(unit, request.quotation, request.initial_stack);
         const identity = state_.next_identity.fetchAdd(1, .monotonic);
         const header = try heap.createTask(TaskCell, self.allocator(), identity, cell);

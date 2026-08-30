@@ -432,7 +432,11 @@ const Formatter = struct {
                                 continue;
                             }
                             if (have_content) try self.rootBreak(&output, &line, 2);
-                            try line.append(self.allocator(), try self.definitionHeader(header.name, header.private));
+                            try line.append(self.allocator(), try self.definitionHeader(
+                                header.name,
+                                header.private,
+                                header.test_declaration,
+                            ));
                             have_content = true;
                             previous_comment = true;
                             pending_definition = header.part;
@@ -454,7 +458,11 @@ const Formatter = struct {
                                 try line.append(self.allocator(), if (header.module)
                                     try self.moduleHeader(header.name)
                                 else
-                                    try self.definitionHeader(header.name, header.private));
+                                    try self.definitionHeader(
+                                        header.name,
+                                        header.private,
+                                        header.test_declaration,
+                                    ));
                                 have_content = true;
                                 previous_comment = true;
                                 pending_definition = header.part;
@@ -489,7 +497,11 @@ const Formatter = struct {
                     if (name orelse module_name) |header_name| {
                         if (have_content) try self.rootBreak(&output, &line, 2);
                         try line.append(self.allocator(), if (name != null)
-                            try self.definitionHeader(header_name, definitionPrivate(sequence, part_index))
+                            try self.definitionHeader(
+                                header_name,
+                                definitionPrivate(sequence, part_index),
+                                definitionTest(sequence, part_index),
+                            )
                         else
                             try self.moduleHeader(header_name));
                         try self.rootBreak(&output, &line, 1);
@@ -563,9 +575,19 @@ const Formatter = struct {
             .delimited => form_item.layout.?,
         };
     }
-    fn definitionHeader(self: *Formatter, name: []const u8, private: bool) Error!*const Doc {
+    fn definitionHeader(
+        self: *Formatter,
+        name: []const u8,
+        private: bool,
+        test_declaration: bool,
+    ) Error!*const Doc {
         return self.docs.concat(&.{
-            try self.docs.text(if (private) "### defp " else "### def "),
+            try self.docs.text(if (test_declaration)
+                "### test "
+            else if (private)
+                "### defp "
+            else
+                "### def "),
             try self.docs.text(name),
         });
     }
@@ -664,7 +686,11 @@ const Formatter = struct {
                         }
                         force_break = true;
                         try self.appendHardlines(&output, if (have_content) 2 else 1);
-                        try output.append(self.allocator(), try self.definitionHeader(header.name, header.private));
+                        try output.append(self.allocator(), try self.definitionHeader(
+                            header.name,
+                            header.private,
+                            header.test_declaration,
+                        ));
                         have_content = true;
                         previous_comment = true;
                         pending_definition = header.part;
@@ -675,7 +701,11 @@ const Formatter = struct {
                         force_break = true;
                         if (pending_definition != header.part) {
                             try self.appendHardlines(&output, if (have_content) 2 else 1);
-                            try output.append(self.allocator(), try self.definitionHeader(header.name, header.private));
+                            try output.append(self.allocator(), try self.definitionHeader(
+                                header.name,
+                                header.private,
+                                header.test_declaration,
+                            ));
                             have_content = true;
                             previous_comment = true;
                             pending_definition = header.part;
@@ -701,7 +731,11 @@ const Formatter = struct {
                     if (!have_content) try self.appendHardlines(&output, 1) else try self.appendHardlines(&output, 2);
                     try output.append(
                         self.allocator(),
-                        try self.definitionHeader(definition_name, definitionPrivate(sequence, part_index)),
+                        try self.definitionHeader(
+                            definition_name,
+                            definitionPrivate(sequence, part_index),
+                            definitionTest(sequence, part_index),
+                        ),
                     );
                     try output.append(self.allocator(), try self.docs.hardline());
                 } else if (have_content) {
@@ -974,13 +1008,18 @@ fn definitionFollows(sequence: Sequence, current: usize) bool {
                 stage = 1;
             } else return std.mem.eql(u8, bytes, "def") or
                 std.mem.eql(u8, bytes, "defp") or
+                std.mem.eql(u8, bytes, "test") or
                 std.mem.eql(u8, bytes, "set") or
                 std.mem.eql(u8, bytes, "setp");
         },
     };
     return false;
 }
-const DefinitionInfo = struct { name: []const u8, private: bool };
+const DefinitionInfo = struct {
+    name: []const u8,
+    private: bool,
+    test_declaration: bool,
+};
 fn definitionInfo(sequence: Sequence, start: usize) ?DefinitionInfo {
     const first = sequence.parts[start].form;
     if (!isAnnotationCandidate(first)) {
@@ -1005,6 +1044,7 @@ fn definitionInfo(sequence: Sequence, start: usize) ?DefinitionInfo {
     return .{
         .name = quoted[1..],
         .private = std.mem.eql(u8, terminator, "defp") or std.mem.eql(u8, terminator, "setp"),
+        .test_declaration = std.mem.eql(u8, terminator, "test"),
     };
 }
 fn definitionName(sequence: Sequence, start: usize) ?[]const u8 {
@@ -1012,6 +1052,9 @@ fn definitionName(sequence: Sequence, start: usize) ?[]const u8 {
 }
 fn definitionPrivate(sequence: Sequence, start: usize) bool {
     return (definitionInfo(sequence, start) orelse return false).private;
+}
+fn definitionTest(sequence: Sequence, start: usize) bool {
+    return (definitionInfo(sequence, start) orelse return false).test_declaration;
 }
 fn isLiteralValueForm(form_item: *const Form) bool {
     return switch (form_item.kind) {
@@ -1127,12 +1170,16 @@ const HeaderTarget = struct {
     name: []const u8,
     module: bool = false,
     private: bool = false,
+    test_declaration: bool = false,
 };
 fn existingDefinitionHeader(sequence: Sequence, index: usize, bytes: []const u8) ?HeaderTarget {
-    if (!std.mem.startsWith(u8, bytes, "# def ") and
-        !std.mem.startsWith(u8, bytes, "### def ") and
-        !std.mem.startsWith(u8, bytes, "# defp ") and
-        !std.mem.startsWith(u8, bytes, "### defp ")) return null;
+    const definition_prefix = std.mem.startsWith(u8, bytes, "# def ") or
+        std.mem.startsWith(u8, bytes, "### def ") or
+        std.mem.startsWith(u8, bytes, "# defp ") or
+        std.mem.startsWith(u8, bytes, "### defp ");
+    const test_prefix = std.mem.startsWith(u8, bytes, "# test ") or
+        std.mem.startsWith(u8, bytes, "### test ");
+    if (!definition_prefix and !test_prefix) return null;
     const next = nextFormPart(sequence, index) orelse return null;
     const part = if (definitionInfo(sequence, next) != null)
         next
@@ -1143,10 +1190,13 @@ fn existingDefinitionHeader(sequence: Sequence, index: usize, bytes: []const u8)
             return null
     else
         return null;
+    const test_declaration = definitionTest(sequence, part);
+    if (test_prefix and !test_declaration) return null;
     return .{
         .part = part,
         .name = definitionName(sequence, part) orelse return null,
         .private = definitionPrivate(sequence, part),
+        .test_declaration = test_declaration,
     };
 }
 fn existingModuleHeader(sequence: Sequence, index: usize, bytes: []const u8) ?HeaderTarget {
@@ -1183,6 +1233,7 @@ fn attachedDefinitionAfterComment(sequence: Sequence, index: usize) ?HeaderTarge
                     .part = part_index,
                     .name = name,
                     .private = definitionPrivate(sequence, part_index),
+                    .test_declaration = definitionTest(sequence, part_index),
                 };
             }
             const name = moduleRegistrationName(sequence, part_index) orelse return null;
