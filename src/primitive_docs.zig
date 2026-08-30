@@ -53,6 +53,7 @@ const entries = [_]Metadata{
     .{ .name = "call", .effect = "quotation -- ...", .text = "Run a quotation on the current stack." },
     .{ .name = "if", .effect = "bool then else -- ...", .text = "Run one of two quotations according to a 0/1 boolean condition." },
     .{ .name = "while", .effect = "cond body -- ...", .text = "Run a body while a destructively inspected, checkpointed stack condition has boolean 1 on top." },
+    .{ .name = "linrec", .effect = "predicate base pre post -- ...", .text = "Run explicit linear recursion with checkpointed predicates and inline pre/post work." },
     .{ .name = "times", .effect = "n quotation -- ...", .text = "Run a quotation the requested nonnegative number of times." },
     .{ .name = "cond", .effect = "clauses -- ...", .text = "Run the first action whose checkpointed stack test has boolean 1 on top, or the final else quotation." },
     .{ .name = "each", .effect = "list quotation -- list", .text = "Apply a one-input, one-output quotation independently to each list element." },

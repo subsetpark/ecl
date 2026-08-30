@@ -22,6 +22,7 @@ pub fn install(core: *env.BuildingEnv) error{OutOfMemory}!void {
         .{ .name = "call", .primitive = call },
         .{ .name = "if", .primitive = ifWord },
         .{ .name = "while", .primitive = whileWord },
+        .{ .name = "linrec", .primitive = linrec },
         .{ .name = "times", .primitive = times },
         .{ .name = "cond", .primitive = cond },
         .{ .name = "each", .primitive = each },
@@ -91,7 +92,7 @@ const TimesState = struct {
         return machine.typedApplication(self, self.quotation.borrow(), self.site, 0);
     }
     fn step(self: *TimesState) ApplicationStep {
-        return .{ .quotation = self.quotation.borrow(), .seeded = 0 };
+        return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = 0 } };
     }
 
     pub fn resumeApplication(
@@ -429,6 +430,260 @@ const GuardActionState = struct {
     pub const ownership: heap.DriverOwnership = .fields;
 };
 
+const LinrecQuotations = struct {
+    predicate: heap.Owned(*Header),
+    base: heap.Owned(*Header),
+    pre: heap.Owned(*Header),
+    post: heap.Owned(*Header),
+
+    fn retained(self: *const LinrecQuotations) LinrecQuotations {
+        const predicate = self.predicate.borrow();
+        const base = self.base.borrow();
+        const pre = self.pre.borrow();
+        const post = self.post.borrow();
+        heap.incRef(predicate);
+        heap.incRef(base);
+        heap.incRef(pre);
+        heap.incRef(post);
+        return .{
+            .predicate = .init(predicate),
+            .base = .init(base),
+            .pre = .init(pre),
+            .post = .init(post),
+        };
+    }
+
+    pub fn retire(
+        self: *LinrecQuotations,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.predicate.deinit(releases, allocator);
+        self.base.deinit(releases, allocator);
+        self.pre.deinit(releases, allocator);
+        self.post.deinit(releases, allocator);
+    }
+};
+
+const LinrecLevel = struct {
+    quotations: heap.Owned(LinrecQuotations),
+    checkpoint: ?heap.Owned(GuardCheckpoint),
+    site: machine.ApplicationSite,
+    word: intern.TraceWord,
+    provenance_target: ?*const machine.ApplicationProvenanceTarget,
+
+    fn application(
+        self: *const LinrecLevel,
+        state: *LinrecApplicationState,
+        quotation: *Header,
+    ) Application {
+        var launched = machine.typedApplication(state, quotation, self.site, 0);
+        launched.provenance = if (self.provenance_target) |target|
+            .{ .selected_target = target }
+        else
+            .boundary;
+        return launched;
+    }
+
+    fn child(self: *const LinrecLevel, checkpoint: GuardCheckpoint) LinrecLevel {
+        return .{
+            .quotations = .init(self.quotations.borrow().retained()),
+            .checkpoint = .init(checkpoint),
+            .site = self.site,
+            .word = self.word,
+            .provenance_target = self.provenance_target,
+        };
+    }
+
+    fn releaseCheckpoint(
+        self: *LinrecLevel,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        if (self.checkpoint) |*checkpoint| checkpoint.deinit(releases, allocator);
+        self.checkpoint = null;
+    }
+
+    pub fn retire(
+        self: *LinrecLevel,
+        releases: *heap.ReleaseDomain,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.releaseCheckpoint(releases, allocator);
+        self.quotations.deinit(releases, allocator);
+    }
+};
+
+const LinrecBranch = enum { base, recurse };
+
+const LinrecSnapshotDriver = struct {
+    level: heap.Owned(LinrecLevel),
+
+    pub fn advance(evaluator: *Machine, self: *LinrecSnapshotDriver) MachineError!machine.WorkProgress {
+        evaluator.setActiveWord(self.level.borrow().word);
+        try evaluator.pollKernel();
+        const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
+        if (!checkpoint.advanceCapture(evaluator, machine.kernel_poll_quantum)) return .yielded;
+        var level = heap.Owned(LinrecLevel).init(self.level.take());
+        defer level.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        evaluator.retireDriver(self);
+        const state = try evaluator.allocator().create(LinrecPredicateState);
+        state.* = .{ .level = .init(level.take()) };
+        try evaluator.beginInlineApplication(state.application());
+        return .detached;
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+const LinrecRestoreDriver = struct {
+    level: heap.Owned(LinrecLevel),
+    branch: LinrecBranch,
+
+    pub fn advance(evaluator: *Machine, self: *LinrecRestoreDriver) MachineError!machine.WorkProgress {
+        evaluator.setActiveWord(self.level.borrow().word);
+        try evaluator.pollKernel();
+        const checkpoint = self.level.borrowMut().checkpoint.?.borrowMut();
+        if (!try checkpoint.advanceRestore(
+            evaluator,
+            machine.kernel_poll_quantum,
+        )) return .yielded;
+        var level = heap.Owned(LinrecLevel).init(self.level.take());
+        defer level.deinit(evaluator.releaseDomain(), evaluator.allocator());
+        const branch = self.branch;
+        evaluator.retireDriver(self);
+        level.borrowMut().releaseCheckpoint(evaluator.releaseDomain(), evaluator.allocator());
+        const state = try evaluator.allocator().create(LinrecApplicationState);
+        state.* = .{
+            .level = .init(level.take()),
+            .phase = if (branch == .base) .base else .pre,
+        };
+        try evaluator.beginInlineApplication(state.application());
+        return .detached;
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+const LinrecPredicateState = struct {
+    level: heap.Owned(LinrecLevel),
+
+    fn application(self: *LinrecPredicateState) Application {
+        const level = self.level.borrow();
+        return machine.typedApplication(
+            self,
+            level.quotations.borrow().predicate.borrow(),
+            level.site,
+            0,
+        );
+    }
+
+    pub fn resumeApplication(
+        evaluator: *Machine,
+        self: *LinrecPredicateState,
+        _: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
+        evaluator.setActiveWord(self.level.borrow().word);
+        var predicate = try evaluator.popValue();
+        defer predicate.deinit();
+        const branch: LinrecBranch = if (try boolValue(evaluator, &predicate)) .base else .recurse;
+        self.level.borrowMut().checkpoint.?.borrowMut().beginRestore();
+        try evaluator.startDriver(LinrecRestoreDriver{
+            .level = .init(self.level.take()),
+            .branch = branch,
+        });
+        return null;
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+const LinrecPhase = enum { base, pre, after_child, post };
+
+const LinrecApplicationState = struct {
+    level: heap.Owned(LinrecLevel),
+    phase: LinrecPhase,
+
+    fn quotation(self: *const LinrecApplicationState) *Header {
+        const quotations = self.level.borrow().quotations.borrow();
+        return switch (self.phase) {
+            .base => quotations.base.borrow(),
+            .pre => quotations.pre.borrow(),
+            .post => quotations.post.borrow(),
+            .after_child => unreachable,
+        };
+    }
+
+    fn application(self: *LinrecApplicationState) Application {
+        return self.level.borrow().application(self, self.quotation());
+    }
+
+    pub fn resumeApplication(
+        evaluator: *Machine,
+        self: *LinrecApplicationState,
+        _: StackWindow,
+        _: *machine.ApplicationContractSite,
+    ) MachineError!?ApplicationStep {
+        evaluator.setActiveWord(self.level.borrow().word);
+        try evaluator.yieldNativeStep();
+        switch (self.phase) {
+            .base, .post => return null,
+            .pre => {
+                var checkpoint = try GuardCheckpoint.init(evaluator);
+                const child = self.level.borrow().child(checkpoint.take());
+                self.phase = .after_child;
+                try evaluator.startDriver(LinrecSnapshotDriver{ .level = .init(child) });
+                return evaluator.suspendInlineApplication();
+            },
+            .after_child => {
+                self.phase = .post;
+                return .{ .apply = .{
+                    .quotation = self.quotation(),
+                    .seeded = 0,
+                    .provenance = if (self.level.borrow().provenance_target) |target|
+                        .{ .selected_target = target }
+                    else
+                        .boundary,
+                } };
+            },
+        }
+    }
+
+    pub const ownership: heap.DriverOwnership = .fields;
+};
+
+fn linrec(evaluator: *Machine) MachineError!void {
+    try evaluator.require(4);
+    var post = try evaluator.popValue();
+    defer post.deinit();
+    var pre = try evaluator.popValue();
+    defer pre.deinit();
+    var base = try evaluator.popValue();
+    defer base.deinit();
+    var predicate = try evaluator.popValue();
+    defer predicate.deinit();
+    if (predicate.borrow() != .list or base.borrow() != .list or
+        pre.borrow() != .list or post.borrow() != .list)
+    {
+        return evaluator.typeError("four quotations/lists");
+    }
+    const provenance_target = try evaluator.applicationProvenanceTarget();
+    var checkpoint = try GuardCheckpoint.init(evaluator);
+    try evaluator.startDriver(LinrecSnapshotDriver{ .level = .init(.{
+        .quotations = .init(.{
+            .predicate = .init(predicate.take().list),
+            .base = .init(base.take().list),
+            .pre = .init(pre.take().list),
+            .post = .init(post.take().list),
+        }),
+        .checkpoint = .init(checkpoint.take()),
+        .site = evaluator.applicationSite(),
+        .word = evaluator.activeWordId(),
+        .provenance_target = provenance_target,
+    }) });
+}
+
 fn cond(evaluator: *Machine) MachineError!void {
     var clauses = try evaluator.popValue();
     defer clauses.deinit();
@@ -504,7 +759,7 @@ const IterationState = struct {
         return machine.typedApplication(self, self.quotation.borrow(), self.site, seeded);
     }
     fn step(self: *IterationState, seeded: u32) ApplicationStep {
-        return .{ .quotation = self.quotation.borrow(), .seeded = seeded };
+        return .{ .apply = .{ .quotation = self.quotation.borrow(), .seeded = seeded } };
     }
 
     pub fn resumeApplication(
@@ -890,13 +1145,13 @@ const UnfoldState = struct {
         );
     }
     fn nextStep(self: *UnfoldState) ApplicationStep {
-        return .{
+        return .{ .apply = .{
             .quotation = switch (self.phase) {
                 .predicate => self.predicate.borrow(),
                 .step => self.step_quotation.borrow(),
             },
             .seeded = 1,
-        };
+        } };
     }
 
     pub fn resumeApplication(

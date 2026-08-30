@@ -223,7 +223,7 @@ Three quotation-application behaviors exist:
 - **Inline**: the quotation runs on the current stack. The inline words
   are `call`, `dip`, `keep`, `bi`, `tri`, `bi2`, `both`, `if`, `when`,
   `unless`, `case`, and `times`.
-- **Checkpointed inline guards**: `cond` and `while` test quotations run
+- **Checkpointed inline guards**: `cond`, `while`, and `linrec` test quotations run
   in the current scope against a retained operand-stack checkpoint. A test
   may consume, rearrange, or add values; its top value must be a 0/1 boolean,
   and its complete operand result is discarded before control continues from
@@ -239,6 +239,37 @@ Every isolated combinator states the stack effect it requires of its
 quotation argument (given per word in the reference). The contract is
 checked dynamically at each application; a violation is an immediate
 `'contract` error naming the element and the observed effect.
+
+### Explicit linear recursion
+
+`linrec` has the ambient-row effect
+`( predicate base pre post -- ... )`; all four parameters must be quotations.
+It applies them inline on the current operand stack, using this recursion
+scheme:
+
+```text
+predicate true  -> base
+predicate false -> pre; linrec; post
+```
+
+At every descent, `predicate` uses the checkpointed inline-guard protocol
+above. The predicate runs destructively in the invoking scope, its top result
+must be exactly 0 or 1, and the complete operand checkpoint is restored before
+either branch begins. On 1, `base` runs from that restored state. On 0, `pre`
+runs from it, the recursive descent begins from `pre`'s resulting stack, and
+`post` runs after that descent returns. Consequently the four applications
+share ambient stack state intentionally; none has an isolated quotation
+contract. Fewer than four operands is `'underflow`, a non-quotation parameter
+is `'type`, and a missing or non-boolean predicate result follows the ordinary
+guard `'underflow`/`'type` behavior.
+
+Each nonterminal descent leaves one explicit `post` continuation in the frame
+machine. General `linrec` therefore uses live continuation storage
+proportional to recursion depth; it does not recurse on the host stack and it
+does not promise constant space when `post` is empty. Predicate snapshot and
+restore, recursive setup, cancellation, failure unwind, and value retirement
+remain bounded scheduler work. Existing `while` and `unfold` are the
+constant-continuation choices for iterative and tail-recursive shapes.
 
 #### The `@` spelling convention
 
