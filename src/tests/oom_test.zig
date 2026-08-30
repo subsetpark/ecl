@@ -21,10 +21,12 @@
 //! Keep additions short and reaching, not exhaustive — one line through a
 //! path is coverage; a hundred lines through it is the same coverage, slower.
 //! Snippets must leave the stack clean (`pop` what they push) and propagate
-//! errors, or the sweep silently stops testing what follows. Each coarse probe
-//! partitions those ordinals between two workers, preserving exhaustive
-//! failure injection while bounding release-candidate wall time on four-core
-//! runners.
+//! errors, or the sweep silently stops testing what follows. The core and
+//! project probes exhaust their distinct Session initialization paths once;
+//! the standard-library and host probes begin their failure windows after
+//! initialization instead of repeating those same ordinals. Each probe
+//! partitions its ordinals between four workers, matching the release-candidate
+//! runner while preserving exhaustive failure injection.
 const std = @import("std");
 const session = @import("../session.zig");
 const native_fixture = @import("native_fixture_options");
@@ -268,7 +270,7 @@ fn runOk(runtime: *session.Session, name: []const u8, source: []const u8) !void 
     }
 }
 
-const allocation_failure_shard_count = 2;
+const allocation_failure_shard_count = 4;
 
 fn checkAllocationFailureShard(
     backing_allocator: std.mem.Allocator,
@@ -347,6 +349,101 @@ fn checkAllAllocationFailuresParallel(
         context.* = .{
             .backing_allocator = backing_allocator,
             .needed_alloc_count = baseline.alloc_index,
+            .shard_index = shard_index,
+        };
+        threads[shard_index] = try std.Thread.spawn(.{}, Context.run, .{context});
+        started += 1;
+    }
+    for (threads) |thread| thread.join();
+    started = 0;
+    for (contexts) |context| if (context.result) |err| return err;
+}
+
+fn checkPostInitAllocationFailureShard(
+    backing_allocator: std.mem.Allocator,
+    comptime probe: anytype,
+    needed_alloc_count: usize,
+    shard_index: usize,
+) !void {
+    var failure_offset = shard_index;
+    while (failure_offset < needed_alloc_count) : (failure_offset += allocation_failure_shard_count) {
+        var failing = std.testing.FailingAllocator.init(backing_allocator, .{});
+
+        if (probe(&failing, failure_offset)) |_| {
+            if (failing.has_induced_failure) {
+                return error.SwallowedOutOfMemoryError;
+            }
+            return error.NondeterministicMemoryUsage;
+        } else |err| switch (err) {
+            error.OutOfMemory => {
+                if (!failing.has_induced_failure) return error.UnexpectedOutOfMemory;
+                if (failing.allocated_bytes != failing.freed_bytes) {
+                    std.debug.print(
+                        "\nfailure offset: {d}/{d}\nallocated bytes: {d}\nfreed bytes: {d}\nallocations: {d}\ndeallocations: {d}\n",
+                        .{
+                            failure_offset,
+                            needed_alloc_count,
+                            failing.allocated_bytes,
+                            failing.freed_bytes,
+                            failing.allocations,
+                            failing.deallocations,
+                        },
+                    );
+                    return error.MemoryLeakDetected;
+                }
+            },
+            else => |unexpected| return unexpected,
+        }
+    }
+}
+
+/// Exhausts only allocations after a probe has initialized its Session.
+///
+/// `probe` returns the allocator ordinal where its distinct surface begins and
+/// sets `fail_index` to that ordinal plus `failure_offset` when the offset is
+/// non-null. Session initialization itself is already exhausted by the core
+/// and project-session probes; replaying those same ordinals for every
+/// standard-library, package, and host bundle multiplied the slow gate without
+/// adding coverage.
+fn checkAllPostInitAllocationFailuresParallel(
+    backing_allocator: std.mem.Allocator,
+    comptime probe: anytype,
+) !void {
+    var warm = std.testing.FailingAllocator.init(backing_allocator, .{});
+    _ = try probe(&warm, null);
+
+    var baseline = std.testing.FailingAllocator.init(backing_allocator, .{});
+    const first_failure_index = try probe(&baseline, null);
+    const needed_alloc_count = baseline.alloc_index - first_failure_index;
+    if (needed_alloc_count == 0) return error.MissingAllocationCoverage;
+
+    const Context = struct {
+        backing_allocator: std.mem.Allocator,
+        needed_alloc_count: usize,
+        shard_index: usize,
+        result: ?anyerror = null,
+
+        fn run(context: *@This()) void {
+            checkPostInitAllocationFailureShard(
+                context.backing_allocator,
+                probe,
+                context.needed_alloc_count,
+                context.shard_index,
+            ) catch |err| {
+                context.result = err;
+            };
+        }
+    };
+
+    var contexts: [allocation_failure_shard_count]Context = undefined;
+    var threads: [allocation_failure_shard_count]std.Thread = undefined;
+    var started: usize = 0;
+    errdefer for (threads[0..started]) |thread| thread.join();
+
+    for (&contexts, 0..) |*context, shard_index| {
+        context.* = .{
+            .backing_allocator = backing_allocator,
+            .needed_alloc_count = needed_alloc_count,
             .shard_index = shard_index,
         };
         threads[shard_index] = try std.Thread.spawn(.{}, Context.run, .{context});
@@ -576,7 +673,42 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     }
 }
 
-fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
+/// Exhausts the project-lock discovery branch of Session initialization once.
+/// Every standard-library and package probe below uses the same host shape, so
+/// their post-init windows do not need to replay these ordinals independently.
+fn projectSessionInitializationProbe(allocator: std.mem.Allocator) !void {
+    var locked_allocator = LockedAllocator{ .child = allocator };
+    const thread_safe_allocator = locked_allocator.allocator();
+    var scratch = try PackageScratch.init();
+    defer scratch.deinit();
+    var output_buffer: [1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&output_buffer);
+    var diagnostics_buffer: [1024]u8 = undefined;
+    var diagnostics = std.Io.Writer.fixed(&diagnostics_buffer);
+    var runtime = try session.Session.initWithHostConfig(
+        thread_safe_allocator,
+        &.{"argument"},
+        .{
+            .io = std.testing.io,
+            .output = &output,
+            .diagnostics = &diagnostics,
+            .project_start = scratch.path,
+            .environ = &.{
+                .{ .name = "ECL_OOM_PROBE", .value = "probe" },
+                .{ .name = "ECL_CACHE", .value = scratch.path },
+            },
+            .standard_input = .program_source,
+        },
+        .cooperative,
+    );
+    runtime.deinit();
+}
+
+fn stdlibSessionAllocationProbe(
+    failing: *std.testing.FailingAllocator,
+    failure_offset: ?usize,
+) !usize {
+    const allocator = failing.allocator();
     var locked_allocator = LockedAllocator{ .child = allocator };
     const thread_safe_allocator = locked_allocator.allocator();
     var scratch = try PackageScratch.init();
@@ -607,6 +739,9 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         .cooperative,
     );
     defer runtime.deinit();
+
+    const first_failure_index = failing.alloc_index;
+    if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
 
     // The smallest locked program reaches one-time project discovery,
     // independent format-1 validation, bounded prefix lookup, candidate
@@ -728,9 +863,14 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         "(\"http://127.0.0.1:1/x\" {} http.get) @attempt pop " ++
             "(\"http://127.0.0.1:1/x\" {} http.get-bytes) @attempt pop",
     );
+    return first_failure_index;
 }
 
-fn packageSyncSessionAllocationProbe(allocator: std.mem.Allocator) !void {
+fn packageSyncSessionAllocationProbe(
+    failing: *std.testing.FailingAllocator,
+    failure_offset: ?usize,
+) !usize {
+    const allocator = failing.allocator();
     var locked_allocator = LockedAllocator{ .child = allocator };
     const thread_safe_allocator = locked_allocator.allocator();
     var scratch = try PackageScratch.init();
@@ -757,6 +897,9 @@ fn packageSyncSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         .cooperative,
     );
     defer runtime.deinit();
+
+    const first_failure_index = failing.alloc_index;
+    if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
 
     // The installed one-package fixture keeps synchronization offline while
     // the injected run still crosses discovery, pkg.mvs.resolve, the selected
@@ -773,9 +916,14 @@ fn packageSyncSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     const sync_source = try packageSyncSource(scaffold_allocator, scratch.path);
     defer scaffold_allocator.free(sync_source);
     try runOk(&runtime, "oom-pkg-sync.ecl", sync_source);
+    return first_failure_index;
 }
 
-fn packageCliSessionAllocationProbe(allocator: std.mem.Allocator) !void {
+fn packageCliSessionAllocationProbe(
+    failing: *std.testing.FailingAllocator,
+    failure_offset: ?usize,
+) !usize {
+    const allocator = failing.allocator();
     var locked_allocator = LockedAllocator{ .child = allocator };
     const thread_safe_allocator = locked_allocator.allocator();
     var scratch = try PackageScratch.init();
@@ -803,9 +951,13 @@ fn packageCliSessionAllocationProbe(allocator: std.mem.Allocator) !void {
     );
     defer runtime.deinit();
 
+    const first_failure_index = failing.alloc_index;
+    if (failure_offset) |offset| failing.fail_index = first_failure_index + offset;
+
     const cli_source = try packageCliSource(scaffold_allocator, scratch.path);
     defer scaffold_allocator.free(cli_source);
     try runOk(&runtime, "oom-pkg-cli.ecl", cli_source);
+    return first_failure_index;
 }
 
 fn testSessionAllocationProbe(allocator: std.mem.Allocator) !void {
@@ -972,13 +1124,17 @@ test "oom: batch import propagates every allocation failure" {
 test "oom: standard-library and host surfaces propagate every allocation failure" {
     try checkAllAllocationFailuresParallel(
         std.heap.smp_allocator,
+        projectSessionInitializationProbe,
+    );
+    try checkAllPostInitAllocationFailuresParallel(
+        std.heap.smp_allocator,
         stdlibSessionAllocationProbe,
     );
-    try checkAllAllocationFailuresParallel(
+    try checkAllPostInitAllocationFailuresParallel(
         std.heap.smp_allocator,
         packageSyncSessionAllocationProbe,
     );
-    try checkAllAllocationFailuresParallel(
+    try checkAllPostInitAllocationFailuresParallel(
         std.heap.smp_allocator,
         packageCliSessionAllocationProbe,
     );
