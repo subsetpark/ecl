@@ -675,6 +675,14 @@ shape; a zero axis must be final.
 `( list -- list )` — Reverse top-level element order. Defined in ecl as
 an index permutation.
 
+### rolldown
+`( x y z -- y z x )` — Rotate the top three stack values downward.
+Equivalent to `(swap) dip swap`.
+
+### rollup
+`( x y z -- z x y )` — Rotate the top three stack values upward.
+Equivalent to `swap (swap) dip`.
+
 ### rotate
 `( list count -- list )` — Rotate top-level element order left by a
 count, wrapping cyclically; a negative count rotates right, counts
