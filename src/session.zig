@@ -267,6 +267,14 @@ const RootPreloadState = union(enum) {
     idle,
     cursor: pkg_lock.RootModuleCursor,
     complete,
+
+    fn deinit(self: *RootPreloadState) void {
+        switch (self.*) {
+            .cursor => |*cursor| cursor.deinit(),
+            .idle, .complete => {},
+        }
+        self.* = .complete;
+    }
 };
 
 pub const RootPreloadProgress = union(enum) {
@@ -484,6 +492,7 @@ pub const Session = enum(usize) {
         core.releaseDomain().releaseValue(core.arguments);
         if (core.ecl_path) |path| core.allocator().free(path);
         if (core.tls_trust) |trust| core.allocator().free(trust.ca_file);
+        core.root_preload.deinit();
         if (core.project_lock) |project_lock| project_lock.deinit();
         var snapshot = EnvironSnapshot{
             .entries = @constCast(core.environ.entries),

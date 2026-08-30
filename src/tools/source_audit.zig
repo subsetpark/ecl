@@ -910,6 +910,7 @@ const first_party_definition_sources = [_][:0]const u8{
     @embedFile("../stdlib/pkg/lock.ecl"),
     @embedFile("../stdlib/pkg/mvs.ecl"),
     @embedFile("../stdlib/pkg/sync.ecl"),
+    @embedFile("../stdlib/test/default.ecl"),
 };
 
 fn auditUnitConstructorSpelling() bool {

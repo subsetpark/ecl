@@ -1654,13 +1654,14 @@ honest source with no public dual representation.
 - **Root-project preload uses the existing loader.** `ProjectLock` exposes a
   one-catalog-entry-per-advance root-package cursor. Session keeps that borrow
   inside its heap-stable core and loads each yielded nominal module
-  through `Machine.loadModuleOnly`; the CLI neither scans files nor invents a
-  second publication path. One fresh test Session owns catalog authority,
-  registration state, runner arguments, requested exit, and teardown for the
-  complete command. The bundled runner is an embedded ordinary ECL module;
-  host code selects only its public qualified entry point and maps the normal
-  runner outcome to process status. This Session boundary cannot compensate
-  external side effects performed by tests.
+  through `Machine.loadModuleOnly`; teardown closes a still-pending cursor
+  before destroying the `ProjectLock` it borrows. The CLI neither scans files
+  nor invents a second publication path. One fresh test Session owns catalog
+  authority, registration state, runner arguments, requested exit, and
+  teardown for the complete command. The bundled runner is an embedded
+  ordinary ECL module; host code selects only its public qualified entry point
+  and maps the normal runner outcome to process status. This Session boundary
+  cannot compensate external side effects performed by tests.
 - **Invocation context is supplied by a registration lease, not stored in
   binding metadata.** `BindingOrigin.module_local` records a definition's own
   module-local name and nothing else. A qualified resolution acquires a

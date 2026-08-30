@@ -1173,12 +1173,13 @@ const HeaderTarget = struct {
     test_declaration: bool = false,
 };
 fn existingDefinitionHeader(sequence: Sequence, index: usize, bytes: []const u8) ?HeaderTarget {
-    if (!std.mem.startsWith(u8, bytes, "# def ") and
-        !std.mem.startsWith(u8, bytes, "### def ") and
-        !std.mem.startsWith(u8, bytes, "# defp ") and
-        !std.mem.startsWith(u8, bytes, "### defp ") and
-        !std.mem.startsWith(u8, bytes, "# test ") and
-        !std.mem.startsWith(u8, bytes, "### test ")) return null;
+    const definition_prefix = std.mem.startsWith(u8, bytes, "# def ") or
+        std.mem.startsWith(u8, bytes, "### def ") or
+        std.mem.startsWith(u8, bytes, "# defp ") or
+        std.mem.startsWith(u8, bytes, "### defp ");
+    const test_prefix = std.mem.startsWith(u8, bytes, "# test ") or
+        std.mem.startsWith(u8, bytes, "### test ");
+    if (!definition_prefix and !test_prefix) return null;
     const next = nextFormPart(sequence, index) orelse return null;
     const part = if (definitionInfo(sequence, next) != null)
         next
@@ -1189,11 +1190,13 @@ fn existingDefinitionHeader(sequence: Sequence, index: usize, bytes: []const u8)
             return null
     else
         return null;
+    const test_declaration = definitionTest(sequence, part);
+    if (test_prefix and !test_declaration) return null;
     return .{
         .part = part,
         .name = definitionName(sequence, part) orelse return null,
         .private = definitionPrivate(sequence, part),
-        .test_declaration = definitionTest(sequence, part),
+        .test_declaration = test_declaration,
     };
 }
 fn existingModuleHeader(sequence: Sequence, index: usize, bytes: []const u8) ?HeaderTarget {

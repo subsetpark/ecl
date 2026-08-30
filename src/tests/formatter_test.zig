@@ -439,4 +439,19 @@ test "formatter: synthesizes and normalizes test navigation headers" {
         "### module stale\n(\n ### test stale\n (1) 'works test) 'suite @defm\n",
         expected,
     );
+    try expectFormat(
+        "# test stale\n(1) 'works test\n",
+        "### test works\n(1) 'works test\n",
+    );
+    // A test-looking comment is navigation only for a test declaration. For
+    // an ordinary definition it remains user text and the real definition
+    // receives its own synthesized header.
+    try expectFormat(
+        "### test stale\n(1) 'value def\n",
+        "### test stale\n\n### def value\n(1) 'value def\n",
+    );
+    try expectFormat(
+        "(# test stale\n (1) 'value def) 'ordinary @defm\n",
+        "### module ordinary\n(\n ### def value\n # test stale\n (1) 'value def) 'ordinary @defm\n",
+    );
 }
