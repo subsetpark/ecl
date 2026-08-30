@@ -8533,6 +8533,7 @@ fn resumeFrames(self: *Machine) MachineError!bool {
                             self.unit.allocator,
                             continuation.context,
                         );
+                        clearWorkDriver(self.unit);
                         return self.fail(.domain, "application suspension is stale or foreign");
                     }
                     var suspended = OwnedFrame.init(.{ .application = .{
