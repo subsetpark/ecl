@@ -26,16 +26,79 @@ test "dict module: has is whole-value key membership" {
     });
 }
 
-test "dict module: update transforms one existing value without reordering" {
+test "dict module: at confirms and gathers requested whole-value keys" {
+    try support.expectStacks(&.{
+        .{
+            .name = "requested order and duplicates",
+            .source = "{'a 1 'b 2 'c 3} ['c 'a 'c] dict.at",
+            .expected = "[3 1 3]",
+        },
+        .{
+            .name = "structural keys remain atomic",
+            .source = "{[1 2] 9 'a 1} [[1 2] 'a] dict.at",
+            .expected = "[9 1]",
+        },
+        .{
+            .name = "empty request",
+            .source = "{'a 1} [] dict.at",
+            .expected = "()",
+        },
+        .{
+            .name = "core at still accepts one structural key",
+            .source = "{[1 2] 9} [1 2] at",
+            .expected = "9",
+        },
+    });
+    try support.expectErrors(&.{
+        .{
+            .name = "missing requested key",
+            .source = "{'a 1} ['a 'missing] dict.at",
+            .kind = "domain",
+            .message_contains = "could not find the dict key",
+            .word = "at",
+        },
+        .{
+            .name = "keys must be a list",
+            .source = "{'a 1} 'a dict.at",
+            .kind = "type",
+            .word = "dict.at",
+        },
+        .{
+            .name = "source must be a dictionary",
+            .source = "[] [] dict.at",
+            .kind = "type",
+            .word = "dict.at",
+        },
+    });
+}
+
+test "dict module: update transforms requested whole-value keys without reordering" {
     try support.expectStack(
-        "{'a 1 'b 2 'c 3} 'b (10 *) dict.update",
-        "{'a 1 'b 20 'c 3}",
+        "{'a 1 'b 2 'c 3} ['b 'a] (10 *) dict.update " ++
+            "{[1 2] 9 'a 1} [[1 2] 'a] (1 +) dict.update " ++
+            "{'a 1} ['a 'a] (1 +) dict.update " ++
+            "{'a 1} [] (missing) dict.update",
+        "{'a 10 'b 20 'c 3} {[1 2] 10 'a 2} {'a 3} {'a 1}",
     );
-    try support.expectError(.{
-        .name = "missing update key",
-        .source = "{'a 1} 'b (10 *) dict.update",
-        .kind = "domain",
-        .word = "at",
+    try support.expectErrors(&.{
+        .{
+            .name = "missing update key",
+            .source = "{'a 1} ['a 'b] (10 *) dict.update",
+            .kind = "domain",
+            .word = "dict.update",
+        },
+        .{
+            .name = "update keys must be a list",
+            .source = "{'a 1} 'a (10 *) dict.update",
+            .kind = "type",
+            .word = "dict.update",
+        },
+        .{
+            .name = "update quotation must return one value",
+            .source = "{'a 1} ['a] (dup) dict.update",
+            .kind = "contract",
+            .word = "dict.update",
+        },
     });
 }
 
@@ -160,7 +223,7 @@ test "dict module: merge operations preserve stable order and resolve collisions
 
 test "dict module: every public operation carries reflective documentation" {
     try support.expectStack(
-        "['dict.keys 'dict.size 'dict.vals 'dict.pairs 'dict.has? 'dict.merge 'dict.from-flat " ++
+        "['dict.keys 'dict.size 'dict.vals 'dict.pairs 'dict.has? 'dict.at 'dict.merge 'dict.from-flat " ++
             "'dict.from-lists 'dict.from-pairs 'dict.from-keys 'dict.keys-exactly? " ++
             "'dict.update 'dict.update-or 'dict.map " ++
             "'dict.map-values 'dict.filter 'dict.reject 'dict.take 'dict.drop 'dict.split " ++

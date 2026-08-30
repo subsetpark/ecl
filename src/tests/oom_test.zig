@@ -413,6 +413,7 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "[1 2] reverse pop [1 2] [0 1] at pop [3 1] 2 4 rand.ints pop pop " ++
             // Scalar and flat-list needles reach both typed membership drivers.
             "1 [1 2] in? pop [1 3] [1 2] in? pop [1 2] dup 0 9 put pop pop " ++
+            "[1 2] [0 1] [3 4] put pop [1 2] [0 1] (1 +) update pop " ++
             "[1 2] [3] reshape pop " ++
             "{'rows ([10 20] [30 40])} ['rows 1 0] at-path pop",
     );
@@ -441,7 +442,8 @@ fn fullSessionAllocationProbe(allocator: std.mem.Allocator) !void {
             "1 'oom-unset set 'oom-unset unset 2 'oom-unset set 'oom-unset undef " ++
             "(1 0 /) @attempt pop (5 6 +) @attempt pop " ++
             "({'kind 'custom 'data {'detail 7}} raise) @attempt pop " ++
-            "[3 4] (+) with call pop [5 6] (+) seed @attempt pop " ++
+            "[3 4] (+) with call pop 2 3 (+) (*) (-) tri2 pop pop pop " ++
+            "[5 6] (+) seed @attempt pop " ++
             "[7 8] (+) seed @spawn await pop " ++
             "[1] (2) seed unseed seed @attempt pop " ++
             // This admitted reader body reaches ConstructionDriver allocation
@@ -632,8 +634,8 @@ fn stdlibSessionAllocationProbe(allocator: std.mem.Allocator) !void {
         &runtime,
         "oom-stdlib.ecl",
         "[['a 1] ['b 2]] dict.from-pairs dup dict.keys pop dup dict.vals pop " ++
-            "dup 'a dict.has? pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
-            "dup ['a 'b] dict.keys-exactly? pop dup 'a (1 +) dict.update " ++
+            "dup 'a dict.has? pop dup ['b 'a] dict.at pop dup {} dict.merge dup dict.pairs dict.from-pairs pop " ++
+            "dup ['a 'b] dict.keys-exactly? pop dup ['a] (1 +) dict.update " ++
             "dup 'c 0 (1 +) dict.update-or dup (nip) dict.map dup (1 +) dict.map-values " ++
             "dup (pop pop 1) dict.filter dup (pop pop 0) dict.reject dup ['a] dict.take " ++
             "dup ['a] dict.drop dup ['a] dict.split pop pop " ++

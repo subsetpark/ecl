@@ -2332,6 +2332,20 @@ pub const OwnedValueBuffer = union(enum) {
         self.appendOwned(item);
     }
 
+    /// Replaces one initialized slot, consuming the replacement and retiring
+    /// the buffer's former value through its own reclamation domain.
+    pub fn replaceOwned(self: *OwnedValueBuffer, index: usize, item: Value) void {
+        switch (self.*) {
+            .building => |*building| {
+                std.debug.assert(index < building.builder.len());
+                const previous = building.builder.items()[index];
+                building.builder.items()[index] = item;
+                building.domain.releaseValue(previous);
+            },
+            .moved => unreachable,
+        }
+    }
+
     pub fn takeList(self: *OwnedValueBuffer) Value {
         return switch (self.*) {
             .building => |*building| result: {
