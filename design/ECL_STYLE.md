@@ -54,6 +54,7 @@ or imply re-exports.
 ```ecl
 ### module example
 # Small collection helpers.
+[]
 (
  ### def singleton
  (value -- list : "Return a one-element list containing the value.")

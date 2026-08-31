@@ -7,8 +7,8 @@
 
  ### test observations
  (-- : "Observe dictionary entries in insertion order and by whole-value key.")
- ({'a 1 'b 2} dict.keys ['a 'b] equal
-  {'a 1 'b 2} len 2 equal
+ ({'a 1 'b 2} dict.size 2 equal
+  {'a 1 'b 2} dict.keys ['a 'b] equal
   {'a 1 'b 2} dict.vals [1 2] equal
   {'a 1 'b 2} dict.pairs (('a 1) ('b 2)) equal
   {'a 1} 'a dict.has? 1 equal
@@ -21,7 +21,8 @@
   {{'a 1} 9} {'a 1} dict.has? 1 equal
   {1 9} 1.0 dict.has? 1 equal
   {"ab" 9} "a" dict.has? 0 equal
-  ((dict.size) first execute) 'undefined-word 'dict.size raises-word
+  ({'a 1} len) 'type 'len raises-word
+  ([] dict.size) 'type 'dict.size raises-word
   ([] 'a dict.has?) 'type 'dict.has? raises-word)
  'observations test
 
@@ -102,7 +103,7 @@
 
  ### test documentation
  (-- : "Expose documentation for every dict module export.")
- (['dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.at
+ (['dict.size 'dict.keys 'dict.vals 'dict.pairs 'dict.has? 'dict.at
    'dict.merge 'dict.from-flat 'dict.from-lists 'dict.from-pairs
    'dict.from-keys 'dict.keys-exactly? 'dict.update 'dict.update-or
    'dict.map 'dict.filter 'dict.reject 'dict.take

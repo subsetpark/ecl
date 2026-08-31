@@ -22,6 +22,11 @@ const MachineError = machine.MachineError;
 
 pub const words = [_]env.BuiltinWord{
     .{
+        .name = "size",
+        .doc = "( dict -- count ) Return a dictionary's entry count.",
+        .primitive = dict_kernels.sizeForModule,
+    },
+    .{
         .name = "keys",
         .doc = "( dict -- keys ) Return a dictionary's keys in insertion order.",
         .primitive = dict_kernels.keysForModule,

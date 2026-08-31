@@ -22,7 +22,7 @@
  (candidate -- table : "Validate and return a table candidate.")
  (dup type 'dict match?
   'type error.new "a table must be a dict of columns" error.with-message assert
-  dup dict.keys len 0 >
+  dup dict.size 0 >
   'shape error.new "a table must have at least one column" error.with-message assert
   dup dict.keys (string?) all?
   'type error.new "table column names must be strings" error.with-message assert
@@ -553,7 +553,7 @@
  (|left right pairs fill extra|
   extra fill (swap dict.has?) partial all?
   'domain error.new "a fill must cover every appended right column" error.with-message assert
-  extra len fill dict.keys len =
+  extra len fill dict.size =
   'domain error.new "a fill must cover exactly the appended right columns" error.with-message assert
   left right pairs extra
   extra fill (swap at) partial each

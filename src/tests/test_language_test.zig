@@ -181,7 +181,7 @@ test "testing: test discovery exposes metadata but not executable bodies" {
             "dup 'effect dict.has? {'kind 'user} assert " ++
             "dup 'doc dict.has? {'kind 'user} assert " ++
             "dup 'body dict.has? not {'kind 'user} assert " ++
-            "dict.keys len 4 = {'kind 'user} assert",
+            "dict.size 4 = {'kind 'user} assert",
     );
 }
 

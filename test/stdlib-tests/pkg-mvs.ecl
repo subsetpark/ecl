@@ -81,7 +81,7 @@
  ### test resolution
  (-- : "Select every reachable maximum and record all declared minimums.")
  (root catalog pkg.mvs.resolve
-  dup 'packages at dup dict.keys len 2 equal
+  dup 'packages at dup dict.size 2 equal
   ["c" 'version] at-path "1.5.0" equal
   root catalog pkg.mvs.resolve
   dup 'requires at dict.vals (dict.pairs) each raze

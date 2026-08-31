@@ -38,8 +38,8 @@ def archive(source: bytes) -> bytes:
 
 def main() -> None:
     fixtures = {
-        "valid.tgz.hex": archive(b"(() 'noop def) 'a @defm\n"),
-        "runtime-valid.tgz.hex": archive(b"((42) 'answer def) 'a @defm\n"),
+        "valid.tgz.hex": archive(b"[] (() 'noop def) 'a @defm\n"),
+        "runtime-valid.tgz.hex": archive(b"[] ((42) 'answer def) 'a @defm\n"),
     }
     for name, payload in fixtures.items():
         (ROOT / name).write_text(payload.hex() + "\n", encoding="ascii")

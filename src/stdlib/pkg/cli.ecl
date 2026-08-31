@@ -71,7 +71,7 @@
   root manifest-path io.slurp pkg.manifest.read
   root
   operation call
-  'packages at len
+  'packages at dict.size
   wrap "synced {} packages" str.format io.print)
  'sync-result defp
 
@@ -150,7 +150,7 @@
    for
    lock pkg.lock.vendor
    dup pkg.lock.write root lock-path pkg.store.write-lock
-   'packages at len
+   'packages at dict.size
    wrap "vendored {} packages" str.format io.print)
   with call)
  'vendor def

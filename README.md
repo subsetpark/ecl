@@ -128,7 +128,7 @@ constructs a module and registers it globally, namespacing its exposed
 definitions and (optionally) encapsulating private state.
 
 ```sh
-ecl> (((1 +) within) 'inc def
+ecl> [] (((1 +) within) 'inc def
 ..    ((1 -) within) 'dec def
 ..    ((dup without) within) 'get def 0) 'counter @defm
 ecl> counter.get
@@ -217,6 +217,7 @@ catalog indexes are not retained in shipped module images:
 
 ```ecl
 ### module app.math
+[]
 (
  ### defp double
  (n -- n : "Double a number.")
@@ -289,6 +290,7 @@ can then be looked up for any ECL file in `ECL_PATH`. For example, save this as
 ```ecl
 ### module stats
 # Small statistical helpers.
+[]
 (
  ### def twice
  (value -- doubled : "Double a number.")

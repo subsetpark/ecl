@@ -23,7 +23,8 @@ BindingName.
 > subjects. Begin and complete actions expose semantic concurrency boundaries;
 > they are not ECL words. Contexts, including `WithinCommit`, grant formal
 > write authority and do not denote runtime values or additional language
-> state.
+> state. An `InvocationContext` is either the top-level evaluator or identifies
+> the exact active call performing a registry mutation.
 >
 > A qualified call resolves a registry name and public binding and pins the
 > slot's current generation in one atomic action. Resolution before replacement
@@ -97,6 +98,7 @@ Image.
 Definition.
 Transaction.
 WordOccurrence.
+InvocationContext.
 
 {Calls} call-active? call: Call => Bool.
 {Calls} call-created? call: Call => Bool.
@@ -108,10 +110,11 @@ WordOccurrence.
 {Calls, WithinCommit} ambient-depth call: Call => Nat0.
 {Calls, WithinCommit} ambient-value call: Call, position: Nat => Value.
 
-invoked-image invocation: Call => Image.
-
 occurrence-name occurrence: WordOccurrence => BindingName.
 occurrence-image occurrence: WordOccurrence => Image.
+
+call-invocation? invoker: InvocationContext => Bool.
+invocation-call invoker: InvocationContext => Call.
 
 {Images} constructed? image: Image => Bool.
 {Images} value-held? image: Image => Bool.
@@ -253,6 +256,10 @@ initially all call: Call |
 initially all transaction: Transaction |
   ~transaction-created? transaction and ~transaction-active? transaction.
 
+some invoker: InvocationContext | ~call-invocation? invoker.
+
+initially some invoker: InvocationContext | ~call-invocation? invoker.
+
 where
 
 > `Construct image` allocates a fresh image identity and establishes its first
@@ -298,20 +305,22 @@ where
 > generation and retires the previous current generation, even when both
 > generations contain the same image. It cannot interleave with an active
 > transaction on the selected slot or be performed by a call that owns an
-> active transaction.
-Registry ~> Register @ image: Image,
+> active transaction. The supplied invocation context is the top-level
+> evaluator or the exact call performing the mutation.
+Registry ~> Register @ invoker: InvocationContext,
+                       image: Image,
                        module-name: RegistryName,
                        constructed? image,
                        value-held? image,
                        ~alias? module-name.
 ---
-some caller: Call,
-     call-active? caller,
-     #(each transaction: Transaction,
-            transaction-active? transaction and
-            transaction-call transaction = caller |
-         transaction) = 0,
-     slot: Slot,
+(~call-invocation? invoker or
+  (call-active? (invocation-call invoker) and
+   #(each transaction: Transaction,
+          transaction-active? transaction and
+          transaction-call transaction = invocation-call invoker |
+       transaction) = 0)) and
+(some slot: Slot,
      (canonical? module-name and slot = slot-of module-name) or
        (~canonical? module-name and ~slot-created? slot),
      #(each transaction: Transaction,
@@ -363,7 +372,7 @@ some caller: Call,
     durable-depth' other-slot = durable-depth other-slot and
     (all position: Nat |
       durable-value' other-slot position =
-        durable-value other-slot position)).
+        durable-value other-slot position))).
 
 where
 
@@ -372,19 +381,21 @@ where
 > shares the slot's current generation, durable stack, serialization, and
 > lifetime. Canonical and alias names form one disjoint namespace, and an
 > occupied name cannot be repointed. Registry mutation is unavailable to a
-> call that owns an active transaction.
-Registry ~> Add alias @ alias-name: RegistryName,
+> call that owns an active transaction. The supplied invocation context is the
+> top-level evaluator or the exact call performing the mutation.
+Registry ~> Add alias @ invoker: InvocationContext,
+                        alias-name: RegistryName,
                         target-name: RegistryName,
                         ~canonical? alias-name,
                         ~alias? alias-name,
                         canonical? target-name or alias? target-name.
 ---
-some caller: Call,
-     call-active? caller,
-     #(each transaction: Transaction,
-            transaction-active? transaction and
-            transaction-call transaction = caller |
-         transaction) = 0 |
+(~call-invocation? invoker or
+  (call-active? (invocation-call invoker) and
+   #(each transaction: Transaction,
+          transaction-active? transaction and
+          transaction-call transaction = invocation-call invoker |
+       transaction) = 0)) and
   ~canonical?' alias-name and
   alias?' alias-name and
   slot-of' alias-name = slot-of target-name and
@@ -415,17 +426,20 @@ where
 > already active calls, whose pins remain valid, but those calls cannot start a
 > new transaction after closure. A later registration of the same spelling
 > must allocate a fresh slot. Removal cannot interleave with a transaction on
-> the slot or be performed by a call that owns an active transaction.
-Registry ~> Remove @ module-name: RegistryName,
+> the slot or be performed by a call that owns an active transaction. The
+> supplied invocation context is the top-level evaluator or the exact call
+> performing the mutation.
+Registry ~> Remove @ invoker: InvocationContext,
+                     module-name: RegistryName,
                      canonical? module-name or alias? module-name.
 ---
-some caller: Call,
-     call-active? caller,
-     #(each transaction: Transaction,
-            transaction-active? transaction and
-            transaction-call transaction = caller |
-         transaction) = 0,
-     slot: Slot,
+(~call-invocation? invoker or
+  (call-active? (invocation-call invoker) and
+   #(each transaction: Transaction,
+          transaction-active? transaction and
+          transaction-call transaction = invocation-call invoker |
+       transaction) = 0)) and
+(some slot: Slot,
      slot = slot-of module-name,
      #(each transaction: Transaction,
             transaction-active? transaction and
@@ -459,7 +473,7 @@ some caller: Call,
       (generation-retired? generation or
        generation = current-generation slot) and
     generation-slot' generation = generation-slot generation and
-    generation-image' generation = generation-image generation).
+    generation-image' generation = generation-image generation)).
 
 where
 
@@ -467,14 +481,13 @@ where
 > invocation pins the image directly and has no registration, slot, or
 > generation context. The image must still have a module-value owner when the
 > call begins.
-Calls ~> Begin image call @ binding-name: BindingName.
+Calls ~> Begin image call @ image: Image,
+                            binding-name: BindingName,
+                            constructed? image,
+                            value-held? image.
 ---
 some callee: Call,
      ~call-created? callee,
-     image: Image,
-     image = invoked-image callee,
-     constructed? image,
-     value-held? image,
      binding-present? image binding-name,
      definition: Definition,
      definition = definition-at image binding-name,
@@ -510,13 +523,13 @@ where
 > and generation; other scoped dispatch has no registration context. Private
 > definitions are therefore available to same-image scoped resolution without
 > becoming publicly invocable.
-Calls ~> Begin scoped call @ binding-name: BindingName.
+Calls ~> Begin scoped call @ caller: Call,
+                             occurrence: WordOccurrence,
+                             binding-name: BindingName,
+                             call-active? caller,
+                             occurrence-name occurrence = binding-name.
 ---
-some caller: Call,
-     call-active? caller,
-     occurrence: WordOccurrence,
-     occurrence-name occurrence = binding-name,
-     image: Image,
+some image: Image,
      image = occurrence-image occurrence,
      constructed? image,
      value-held? image or

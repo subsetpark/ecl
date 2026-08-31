@@ -622,8 +622,7 @@ the value on top of the quotation's results. Equivalent to
 Equivalent to `dup len 1 - at`.
 
 ### len
-`( collection -- count )` — Top-level list element count or dictionary entry
-count. Lists may be ragged.
+`( list -- count )` — Top-level list element count. Lists may be ragged.
 
 ### lex-cmp
 `( left right -- order )` — Lexicographically compare two sequences using
@@ -1328,6 +1327,9 @@ every entry, replacing values while preserving keys and insertion order.
 {'a 1 'b 2} (swap pop 10 *) dict.map
 # => {'a 10 'b 20}
 ```
+
+### size
+`( dict -- count )` — Return the dictionary's entry count.
 
 ### merge
 `( left right -- dict )` — Merge two dictionaries; right-hand values win.

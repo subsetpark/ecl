@@ -212,7 +212,7 @@ fn runShellScenario(encoded: u16) !void {
                 if (index != 0) try source_buffer.writer.writeByte(' ');
                 try source_buffer.writer.print("{d}", .{index % 3});
             }
-            try source_buffer.writer.writeAll("] dup group dict.keys len swap 1 pack \"{}\" str.format pop");
+            try source_buffer.writer.writeAll("] dup group dict.size swap 1 pack \"{}\" str.format pop");
             try expected_buffer.writer.print("{d}\n", .{@min(scenario.width, 3)});
         },
     }

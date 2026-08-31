@@ -132,7 +132,7 @@ const entries = [_]Metadata{
     .{ .name = "drop", .effect = "list count -- list", .text = "Drop a signed number of elements from a list." },
     .{ .name = "range", .effect = "bound -- list", .text = "Return the integers from zero through one less than a nonnegative bound." },
     .{ .name = "shape", .effect = "list -- shape", .text = "Return the dimensions of a rectangular list." },
-    .{ .name = "len", .effect = "collection -- count", .text = "Return a list's top-level element count or a dictionary's entry count." },
+    .{ .name = "len", .effect = "list -- count", .text = "Return a list's top-level element count." },
     .{ .name = "flip", .effect = "list -- list", .text = "Transpose a rectangular list." },
     .{ .name = "reshape", .effect = "list shape -- list", .text = "Cycle list data into the requested rectangular shape." },
 

@@ -14,7 +14,7 @@
  (dup type 'dict match?
   'type error.new "a result must be a dict tagged {'ok values} or {'err error}" error.with-message
   assert
-  dup dict.keys len 1 =
+  dup dict.size 1 =
   'type error.new "a result must carry exactly one of 'ok or 'err" error.with-message assert
   dup 'ok dict.has?
   (dup 'ok at type 'list match?
