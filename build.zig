@@ -856,6 +856,53 @@ pub fn build(b: *std.Build) void {
     );
     ecl_source_step.dependOn(&run_ecl_source.step);
 
+    // SPEC.md is a checked-in rendering assembled by ECL. The build graph
+    // supplies paths and generated fragments; language-level ordering and
+    // inclusion remain ordinary ECL behavior in assemble.ecl.
+    const render_module_spec = b.addSystemCommand(&.{ "pant", "--markdown" });
+    render_module_spec.addFileArg(b.path("design/formal/modules.pant"));
+    const rendered_module_spec = render_module_spec.captureStdOut(.{
+        .basename = "modules.md",
+    });
+
+    const assemble_spec = b.addRunArtifact(exe);
+    assemble_spec.addFileArg(b.path("design/spec/assemble.ecl"));
+    const assembled_spec = assemble_spec.addOutputFileArg("SPEC.md");
+    assemble_spec.addFileArg(b.path("design/SPEC.src.md"));
+    assemble_spec.addArg("generated-preamble");
+    assemble_spec.addFileArg(b.path("design/spec/generated-preamble.md"));
+    assemble_spec.addArg("module-model");
+    assemble_spec.addFileArg(rendered_module_spec);
+    const update_spec = b.addUpdateSourceFiles();
+    update_spec.addCopyFileToSource(assembled_spec, "design/SPEC.md");
+    const spec_step = b.step("spec", "Assemble design/SPEC.md from its authored sources");
+    spec_step.dependOn(&update_spec.step);
+
+    const check_spec_run = b.addRunArtifact(exe);
+    check_spec_run.addFileArg(b.path("design/spec/assemble.ecl"));
+    check_spec_run.addArg("--check");
+    check_spec_run.addFileArg(b.path("design/SPEC.md"));
+    check_spec_run.addFileArg(b.path("design/SPEC.src.md"));
+    check_spec_run.addArg("generated-preamble");
+    check_spec_run.addFileArg(b.path("design/spec/generated-preamble.md"));
+    check_spec_run.addArg("module-model");
+    check_spec_run.addFileArg(rendered_module_spec);
+    const check_spec_step = b.step(
+        "check-spec",
+        "Check that design/SPEC.md matches its authored sources",
+    );
+    check_spec_step.dependOn(&check_spec_run.step);
+
+    const check_formal_run = b.addSystemCommand(&.{
+        "pant", "--check", "--bound", "2", "--steps", "2", "--timeout", "8",
+    });
+    check_formal_run.addFileArg(b.path("design/formal/modules.pant"));
+    const check_formal_step = b.step(
+        "check-formal",
+        "Check the bounded Pantagruel language models (needs pant and z3)",
+    );
+    check_formal_step.dependOn(&check_formal_run.step);
+
     // zlint is a downloaded binary rather than a Zig dependency, so it is
     // optional here and blocking in CI. It is wired in when it is on PATH
     // because a lint failure is otherwise only discoverable after a push, which
@@ -884,6 +931,8 @@ pub fn build(b: *std.Build) void {
     precommit_step.dependOn(&check_zig_fmt.step);
     precommit_step.dependOn(&run_audit.step);
     precommit_step.dependOn(&run_ecl_source.step);
+    precommit_step.dependOn(&check_spec_run.step);
+    precommit_step.dependOn(&check_formal_run.step);
     precommit_step.dependOn(b.getInstallStep());
     precommit_step.dependOn(analysis_step);
     precommit_step.dependOn(&run_precommit_tests.step);
