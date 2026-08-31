@@ -381,63 +381,54 @@ pub fn build(b: *std.Build) void {
         fuzz_campaign_steps[index] = campaign_step;
     }
 
-    const full_session_oom_mod = b.createModule(.{
+    const oom_mod = b.createModule(.{
         .root_source_file = b.path("src/oom_root.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
     });
-    full_session_oom_mod.addOptions("session_options", test_options);
-    full_session_oom_mod.addImport("native-abi", native_abi);
-    full_session_oom_mod.addImport("ecl-native", native_sdk);
-    full_session_oom_mod.addOptions("native_fixture_options", native_fixture_options);
-    full_session_oom_mod.addOptions("archive_fixture_options", archive_fixture_options);
-    full_session_oom_mod.link_libc = true;
-    const full_session_oom_tests = b.addTest(.{
-        .root_module = full_session_oom_mod,
-        .filters = &.{
-            "oom: recognized structured find propagates every allocation failure",
-            "oom: full-session surfaces propagate every allocation failure",
-            "oom: admitted construction driver allocation failure transfers its cursor once",
-            "oom: batch import propagates every allocation failure",
-        },
+    oom_mod.addOptions("session_options", test_options);
+    oom_mod.addImport("native-abi", native_abi);
+    oom_mod.addImport("ecl-native", native_sdk);
+    oom_mod.addOptions("native_fixture_options", native_fixture_options);
+    oom_mod.addOptions("archive_fixture_options", archive_fixture_options);
+    oom_mod.link_libc = true;
+    const oom_tests = b.addTest(.{
+        .root_module = oom_mod,
+        // Compile one stable artifact for every OOM family. Runtime selection
+        // below keeps family and ordinal shards independent without changing
+        // the compiler command or its cache key.
+        .filters = &.{"oom:"},
     });
-    full_session_oom_tests.linkage = runtime_linkage;
-    const run_full_session_oom_tests = b.addRunArtifact(full_session_oom_tests);
-    run_full_session_oom_tests.step.dependOn(&fixture_files.step);
-
-    const stdlib_session_oom_mod = b.createModule(.{
-        .root_source_file = b.path("src/oom_root.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-    });
-    stdlib_session_oom_mod.addOptions("session_options", test_options);
-    stdlib_session_oom_mod.addImport("native-abi", native_abi);
-    stdlib_session_oom_mod.addImport("ecl-native", native_sdk);
-    stdlib_session_oom_mod.addOptions("native_fixture_options", native_fixture_options);
-    stdlib_session_oom_mod.addOptions("archive_fixture_options", archive_fixture_options);
-    stdlib_session_oom_mod.link_libc = true;
-    const stdlib_oom_filter = b.option(
+    oom_tests.linkage = runtime_linkage;
+    const oom_surface_filter = b.option(
         []const u8,
         "oom-filter",
-        "Run one named standard-library/host OOM surface",
+        "Run OOM tests whose names contain this substring",
     ) orelse "oom: standard-library and host:";
-    const stdlib_session_oom_tests = b.addTest(.{
-        .root_module = stdlib_session_oom_mod,
-        .filters = &.{stdlib_oom_filter},
-    });
-    stdlib_session_oom_tests.linkage = runtime_linkage;
-    const run_stdlib_session_oom_tests = b.addRunArtifact(stdlib_session_oom_tests);
+    const run_core_oom_tests = b.addRunArtifact(oom_tests);
+    run_core_oom_tests.setEnvironmentVariable("ECL_OOM_FILTER", "oom: core:");
+    run_core_oom_tests.step.dependOn(&fixture_files.step);
+    const run_surface_oom_tests = b.addRunArtifact(oom_tests);
+    run_surface_oom_tests.setEnvironmentVariable("ECL_OOM_FILTER", oom_surface_filter);
+    run_surface_oom_tests.step.dependOn(&fixture_files.step);
+
+    const oom_compile_step = b.step(
+        "test-oom-compile",
+        "Compile the shared initialized-Session OOM test artifact (ReleaseSafe)",
+    );
+    oom_compile_step.dependOn(&oom_tests.step);
+    oom_compile_step.dependOn(&fixture_files.step);
 
     const oom_core_step = b.step(
         "test-oom-core",
         "Exhaust core initialized-Session allocation failures (ReleaseSafe)",
     );
-    oom_core_step.dependOn(&run_full_session_oom_tests.step);
+    oom_core_step.dependOn(&run_core_oom_tests.step);
     const oom_surfaces_step = b.step(
         "test-oom-surfaces",
         "Exhaust standard-library and host allocation failures (ReleaseSafe)",
     );
-    oom_surfaces_step.dependOn(&run_stdlib_session_oom_tests.step);
+    oom_surfaces_step.dependOn(&run_surface_oom_tests.step);
     const oom_step = b.step(
         "test-oom",
         "Exhaust initialized-session allocation failures in parallel (ReleaseSafe)",
@@ -747,7 +738,7 @@ pub fn build(b: *std.Build) void {
         native_acceptance_mod,
         differential_mod,
         reference_mod,
-        full_session_oom_mod,
+        oom_mod,
     };
     const analysis_step = b.step(
         "check",

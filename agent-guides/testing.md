@@ -77,7 +77,12 @@ tier.
   master and manual runs add the full Debug suite, bounded fuzz campaigns,
   eight-worker concurrency, differential, TSan, and ReleaseFast snapshots.
   Each optimization mode owns one long-lived job so its later tiers reuse its
-  Zig cache and emitted artifacts. Do not run this locally. `zig build test`
+  Zig cache and emitted artifacts. The reusable build-type workflow also
+  persists host-mounted Zig local and global caches under a key containing the
+  runner OS, architecture, Zig and Pantagruel versions, optimization mode,
+  cooperating-job scope, and commit; a new commit may restore the previous
+  mode-specific prefix and let Zig validate its content-addressed entries. Do
+  not run this locally. `zig build test`
   alone is a five-minute round trip after a one-line change, and re-running
   the matrix by hand replaces CI's evidence with a slower copy of it.
   Use the authenticated GitHub CLI to list, inspect, and manage workflow runs;
@@ -90,8 +95,13 @@ tier.
   against a candidate commit. Core, standard-library, package, and host OOM
   families use independent runners and wall-clock budgets, and the dominant
   package-sync operation partitions its allocation ordinals across four more
-  runners. The unified local entry point remains `zig build test-oom`. It is
-  the single workflow that exercises every test surface.
+  runners. A compile-only producer publishes their one shared ReleaseSafe Zig
+  cache before those runners start. Its separate `oom` namespace prevents a
+  parallel general job from claiming the immutable cache key first while still
+  allowing the producer to restore a general ReleaseSafe cache as a fallback.
+  The unified local entry point remains
+  `zig build test-oom`. It is the single workflow that exercises every test
+  surface.
 
 Run a single CI gate locally only when you have a specific reason to expect
 that gate to fail—a scheduler lifetime change wants `test-tsan`, a new
@@ -125,9 +135,12 @@ reason first, not the matrix.
   initialized-Session coverage in `src/tests/oom_test.zig`, run together by
   `zig build test-oom`. `zig build test-oom-core` and `zig build test-oom-surfaces`
   are the independently schedulable subsets; `-Doom-filter=<substring>` narrows
-  the latter to one named surface family. Split logical module and host surfaces
-  so unrelated snippets never become prefixes of one another's ordinal replay,
-  but do not bootstrap a Session independently for every word in one module.
+  the latter to one named surface family at runtime. Every subset uses the same
+  binary compiled with the stable `oom:` prefix; do not turn a family selector
+  back into a compile-time filter, because that defeats artifact reuse across
+  runners. Split logical module and host surfaces so unrelated snippets never
+  become prefixes of one another's ordinal replay, but do not bootstrap a
+  Session independently for every word in one module.
 - Choose a test's allocator deliberately; `src/tests/test_heap.zig` is the policy and the
   table of what each one provides. The choice decides which assertions are even possible,
   and the wrong choice does not fail—it passes, having tested less:

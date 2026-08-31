@@ -33,6 +33,15 @@ const session = @import("../session.zig");
 const native_fixture = @import("native_fixture_options");
 const archive_fixtures = @import("archive_fixture_options");
 
+/// Keep every OOM test in one compiled artifact while letting build and CI
+/// runners select independent families at execution time. `@src().fn_name`
+/// contains the declared test name, so a substring filter does not have to be
+/// duplicated beside the declaration it selects.
+fn requireSelectedOomTest(source: std.builtin.SourceLocation) !void {
+    const filter = std.testing.environ.getPosix("ECL_OOM_FILTER") orelse return;
+    if (std.mem.indexOf(u8, source.fn_name, filter) == null) return error.SkipZigTest;
+}
+
 fn archiveSource(allocator: std.mem.Allocator, destination: []const u8) ![]u8 {
     var source = std.Io.Writer.Allocating.init(allocator);
     defer source.deinit();
@@ -1037,7 +1046,8 @@ fn structuredFindAllocationCount() !usize {
     return failing.alloc_index - before;
 }
 
-test "oom: recognized structured find propagates every allocation failure" {
+test "oom: core: recognized structured find propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     const allocation_count = try structuredFindAllocationCount();
     try std.testing.expect(allocation_count != 0);
 
@@ -1059,7 +1069,8 @@ test "oom: recognized structured find propagates every allocation failure" {
     }
 }
 
-test "oom: full-session surfaces propagate every allocation failure" {
+test "oom: core: full-session surfaces propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkAllAllocationFailuresParallel(
         std.heap.smp_allocator,
         fullSessionAllocationProbe,
@@ -1089,7 +1100,8 @@ fn admittedConstructionAllocationCount() !usize {
     return failing.alloc_index - before;
 }
 
-test "oom: admitted construction driver allocation failure transfers its cursor once" {
+test "oom: core: admitted construction driver allocation failure transfers its cursor once" {
+    try requireSelectedOomTest(@src());
     const allocation_count = try admittedConstructionAllocationCount();
     try std.testing.expect(allocation_count != 0);
 
@@ -1132,7 +1144,8 @@ fn batchImportAllocationCount() !usize {
     return failing.alloc_index - before;
 }
 
-test "oom: batch import propagates every allocation failure" {
+test "oom: core: batch import propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     const allocation_count = try batchImportAllocationCount();
     try std.testing.expect(allocation_count != 0);
 
@@ -1154,6 +1167,7 @@ test "oom: batch import propagates every allocation failure" {
 }
 
 test "oom: standard-library and host: host: project initialization propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkAllAllocationFailuresParallel(
         std.heap.smp_allocator,
         projectSessionInitializationProbe,
@@ -1181,89 +1195,111 @@ fn checkStdlibSurfaceOrdinalShard(
 }
 
 test "oom: standard-library and host: package: locked project module propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.locked_project_module);
 }
 
 test "oom: standard-library and host: stdlib: random propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.random);
 }
 
 test "oom: standard-library and host: stdlib: dict propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.dict);
 }
 
 test "oom: standard-library and host: stdlib: error values propagate every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.error_value);
 }
 
 test "oom: standard-library and host: stdlib: result propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.result);
 }
 
 test "oom: standard-library and host: stdlib: string propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.string);
 }
 
 test "oom: standard-library and host: stdlib: CSV propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.csv);
 }
 
 test "oom: standard-library and host: stdlib: JSON propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.json);
 }
 
 test "oom: standard-library and host: stdlib: table propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.table);
 }
 
 test "oom: standard-library and host: stdlib: archive hash propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.archive_hash);
 }
 
 test "oom: standard-library and host: stdlib: archive unpack propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.archive_unpack);
 }
 
 test "oom: standard-library and host: package: store propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.package_store);
 }
 
 test "oom: standard-library and host: package: store GC propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.package_store_gc);
 }
 
 test "oom: standard-library and host: host: IO propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.host_io);
 }
 
 test "oom: standard-library and host: host: HTTP propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.http);
 }
 
 test "oom: standard-library and host: package: sync module propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.package_sync_module);
 }
 
 test "oom: standard-library and host: sync: operation ordinal shard 1 of 4" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurfaceOrdinalShard(.package_sync, 0, 4);
 }
 
 test "oom: standard-library and host: sync: operation ordinal shard 2 of 4" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurfaceOrdinalShard(.package_sync, 1, 4);
 }
 
 test "oom: standard-library and host: sync: operation ordinal shard 3 of 4" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurfaceOrdinalShard(.package_sync, 2, 4);
 }
 
 test "oom: standard-library and host: sync: operation ordinal shard 4 of 4" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurfaceOrdinalShard(.package_sync, 3, 4);
 }
 
 test "oom: standard-library and host: package: CLI module propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.package_cli_module);
 }
 
 test "oom: standard-library and host: package: CLI operation propagates every allocation failure" {
+    try requireSelectedOomTest(@src());
     try checkStdlibSurface(.package_cli);
 }

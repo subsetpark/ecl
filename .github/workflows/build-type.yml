@@ -1,6 +1,6 @@
-# A reusable, single-runner build-type lane. Except for TSan's required glibc
-# environment, every tier for one optimization mode runs in the same Alpine
-# container so Zig reuses its local and global caches.
+# A reusable build-type lane. Host-mounted local and global Zig caches survive
+# its Alpine container, its separate glibc TSan container, and later workflow
+# jobs. Tiers in one invocation also keep one long-lived Alpine container.
 name: Build type
 
 on:
@@ -9,6 +9,10 @@ on:
       optimize:
         description: Zig optimization mode
         required: true
+        type: string
+      cache_scope:
+        description: Compilation-cache namespace for cooperating jobs
+        default: build
         type: string
       run_precommit:
         default: false
@@ -71,6 +75,10 @@ jobs:
       OPTIMIZE: ${{ inputs.optimize }}
       OOM_TARGET: ${{ inputs.oom_target }}
       OOM_FILTER: ${{ inputs.oom_filter }}
+      PANT_VERSION: 0.24.0
+      ZIG_VERSION: 0.16.0
+      ZIG_GLOBAL_CACHE_HOST: /tmp/ecl-zig-cache/global
+      ZIG_LOCAL_CACHE_HOST: /tmp/ecl-zig-cache/local
 
     steps:
       - name: Validate optimization mode
@@ -88,18 +96,36 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Restore Zig compilation artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.ZIG_GLOBAL_CACHE_HOST }}
+            ${{ env.ZIG_LOCAL_CACHE_HOST }}
+          key: ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ inputs.cache_scope }}-${{ github.sha }}
+          restore-keys: |
+            ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-${{ inputs.cache_scope }}-
+            ecl-zig-${{ runner.os }}-x86_64-${{ env.ZIG_VERSION }}-pant-${{ env.PANT_VERSION }}-${{ inputs.optimize }}-
+
       - name: Set up Alpine and Zig
         run: |
+          mkdir -p "$ZIG_GLOBAL_CACHE_HOST/tmp" "$ZIG_LOCAL_CACHE_HOST"
           docker run --detach --name ecl-ci --platform linux/amd64 \
             --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --volume "$ZIG_GLOBAL_CACHE_HOST:/root/.cache/zig" \
+            --volume "$ZIG_LOCAL_CACHE_HOST:/build/.zig-cache" \
             alpine:latest tail -f /dev/null
-          docker exec --env OPTIMIZE="$OPTIMIZE" ecl-ci sh -euxc '
-            apk add --no-cache curl xz linux-headers expect python3 git
+          docker exec --env OPTIMIZE="$OPTIMIZE" --env PANT_VERSION="$PANT_VERSION" ecl-ci sh -euxc '
+            apk add --no-cache curl xz linux-headers expect python3 git gcompat z3
             curl -fsSLo /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
             echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
             mkdir -p /opt/zig /build /root/.cache/zig/tmp
             tar -C /opt/zig --strip-components=1 -xf /tmp/zig.tar.xz
             ln -s /opt/zig/zig /usr/local/bin/zig
+            curl -fsSLo /tmp/pant.tar.gz https://github.com/subsetpark/pantagruel/releases/download/v$PANT_VERSION/pant-linux-x86_64.tar.gz
+            echo "2ef13d67a597fd62f165a332e0dea37fe9ae206ec43f248af8c24501a0167221  /tmp/pant.tar.gz" | sha256sum -c -
+            tar -C /usr/local/bin -xzf /tmp/pant.tar.gz
+            pant --version
             cp -a /work/. /build/
             git config --global --add safe.directory /build
           '
@@ -113,6 +139,8 @@ jobs:
           timeout 25m docker run --rm --platform linux/amd64 \
             --env OPTIMIZE="$OPTIMIZE" \
             --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --volume "$ZIG_GLOBAL_CACHE_HOST:/root/.cache/zig" \
+            --volume "$ZIG_LOCAL_CACHE_HOST:/build/.zig-cache" \
             ubuntu:24.04 bash -euxo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update
